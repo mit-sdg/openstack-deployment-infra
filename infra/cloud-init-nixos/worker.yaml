@@ -1,0 +1,55 @@
+#cloud-config
+hostname: __WORKER_NAME__
+ssh_pwauth: false
+disable_root: true
+write_files:
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem
+    owner: root:root
+    permissions: "0644"
+    encoding: b64
+    content: __INTERNAL_CA_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-worker.pem
+    owner: root:root
+    permissions: "0644"
+    encoding: b64
+    content: __NOMAD_WORKER_CERT_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-worker-key.pem
+    owner: root:root
+    permissions: "0600"
+    encoding: b64
+    content: __NOMAD_WORKER_KEY_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/docker-auth.json
+    owner: root:root
+    permissions: "0600"
+    encoding: b64
+    content: __DOCKER_AUTH_B64__
+  - path: /etc/nomad.d/90-runtime.hcl
+    owner: root:root
+    permissions: "0600"
+    content: |
+      name = "__WORKER_NAME__"
+      advertise {
+        http = "__WORKER_IP__:4646"
+        rpc  = "__WORKER_IP__:4647"
+        serf = "__WORKER_IP__:4648"
+      }
+      client {
+        enabled = true
+        servers = ["__ADMIN_IP__:4647"]
+        node_class = "__PLATFORM_NAMESPACE__-app"
+        network_interface = "ens3"
+        cni_path = "/etc/cni/bin"
+        max_kill_timeout = "30s"
+        meta {
+          application_id = "__APPLICATION_ID__"
+          application_slug = "__APPLICATION_SLUG__"
+          managed_by = "__PLATFORM_NAMESPACE__-platform"
+        }
+      }
+  - path: /etc/__PLATFORM_NAMESPACE__/worker-site.env
+    owner: root:root
+    permissions: "0644"
+    content: |
+      STORAGE_IP=__STORAGE_IP__
+      DATACENTER=__DATACENTER__
+final_message: "__PLATFORM_NAMESPACE__ NixOS Nomad worker provisioning data installed"

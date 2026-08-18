@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openstack-platform-cli"
+version = "0.1.0"
+description = "Staff control surface for an OpenStack application platform"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "bcrypt==5.0.0",
+  "boto3==1.42.54",
+  "psycopg[binary]==3.3.3",
+  "pymongo==4.16.0",
+  "PyYAML==6.0.3",
+]
+
+[project.scripts]
+openstack-platform = "platform_cli.cli:main"
+openstack-platform-helper = "platform_cli.helper.main:main"
+openstack-platform-restore = "platform_cli.restore:main"
+
+[dependency-groups]
+dev = [
+  "mypy==1.19.1",
+  "ruff==0.15.4",
+  "types-PyYAML==6.0.12.20250915",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["platform_cli"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+explicit_package_bases = true
+files = ["platform_cli", "deploy", "infra"]
+mypy_path = ["infra"]
+exclude = ["deploy/platform-cli/tests/fixtures"]
+
+# Frozen foundation signatures deliberately accept generic SSL contexts and
+# streams. Keep the rest of the package strict while those concrete runtime
+# checks remain covered by tests.
+[[tool.mypy.overrides]]
+module = "platform_cli.runtime"
+disable_error_code = ["arg-type", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = "platform_cli.validation"
+disable_error_code = ["no-untyped-call"]
+
+[[tool.mypy.overrides]]
+module = "platform_cli.remote"
+disable_error_code = ["misc"]
+
+# Boto does not publish complete type information. Maintained infrastructure
+# code remains strict at our boundary while provider objects are dynamic.
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+# Keep syntax parseable by the host Python 3.12 so development tests remain
+# useful; release metadata and installers still require exactly Python 3.14.
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "SIM102", "SIM105", "SIM117", "UP022"]
+
+[tool.ruff.format]
+quote-style = "double"

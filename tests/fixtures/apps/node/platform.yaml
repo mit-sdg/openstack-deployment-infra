@@ -1,0 +1,10 @@
+version: 1
+runtime: node
+packages:
+  - .
+scripts:
+  build: null
+  start: serve
+port: 8080
+health:
+  path: /ready

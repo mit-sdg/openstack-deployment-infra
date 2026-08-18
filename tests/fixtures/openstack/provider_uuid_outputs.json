@@ -1,0 +1,12 @@
+{
+  "project_id": "7a3c91d24b8e42f09c156de0f28a15b3",
+  "project_uuid": "7a3c91d2-4b8e-42f0-9c15-6de0f28a15b3",
+  "server_id": "55555555555545558555555555555555",
+  "glance_image_id": "11111111111141118111111111111111",
+  "server_image_id": "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa",
+  "port_id": "77777777777747778777777777777777",
+  "volume_ids": [
+    "bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb",
+    "cccccccccccc4ccc8ccccccccccccccc"
+  ]
+}

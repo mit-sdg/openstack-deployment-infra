@@ -1,0 +1,435 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Build and publish deployment images from the selected commit
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 4 * * 6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.2"
+          enable-cache: true
+
+      - name: Install locked Python environment
+        run: uv sync --frozen
+
+      - name: Check Python formatting, lint, and types
+        run: |
+          uv lock --check
+          uv run ruff format --check platform_cli deploy/platform-cli infra tests
+          uv run ruff check platform_cli deploy/platform-cli infra tests
+          uv run mypy
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+
+      - name: Validate JSON and SVG
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          for path in Path("config").rglob("*.example.json"):
+              json.loads(path.read_text())
+              print(f"valid JSON: {path}")
+          ET.parse("docs/architecture-overview.svg")
+          print("valid SVG: docs/architecture-overview.svg")
+          PY
+          PLATFORM_CONFIG=config/platform.example.json \
+            uv run python infra/lib/platform_config.py validate
+
+      - name: Compile Python
+        run: uv run python -m compileall -q platform_cli deploy infra tests
+
+      - name: Smoke integrated entrypoints
+        run: |
+          if [[ -f platform_cli/cli.py && -f platform_cli/helper/actions-v1.txt ]]; then
+            uv run python deploy/platform-cli/release_smoke.py \
+              helper --source "$PWD"
+            uv run openstack-platform --help >/dev/null
+          elif [[ -e platform_cli/cli.py || -e platform_cli/helper/actions-v1.txt ]]; then
+            echo "CLI composition and helper action manifest must land together" >&2
+            exit 1
+          else
+            echo "Integrated entrypoints are not present on this feature branch"
+          fi
+
+      - name: Run unit and packaging tests
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Check shell syntax
+        run: |
+          find deploy infra tests -type f \( -name '*.sh' -o -path 'infra/control/bin/*' \) \
+            -exec bash -n {} +
+
+      - name: Run ShellCheck
+        run: |
+          find deploy infra tests -type f \( -name '*.sh' -o -path 'infra/control/bin/*' \) -print0 \
+            | xargs -0 shellcheck -e SC1090,SC1091,SC2016
+
+  generated-recipes:
+    name: Build, start, and health-check generated Bun and Node recipes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.2"
+          enable-cache: true
+
+      - name: Install locked application recipe test environment
+        run: uv sync --frozen --no-dev
+
+      - name: Install rootless OCI runner tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fuse-overlayfs podman slirp4netns uidmap
+
+      - name: Generate, build, start, and health-check both runtime recipes
+        run: tests/smoke_generated_recipes.sh
+
+  nix-eval:
+    name: Nix evaluation and formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check flake
+        run: nix flake check --no-build --print-build-logs
+
+      - name: Check Nix formatting
+        run: |
+          nix fmt -- .
+          git diff --exit-code -- '*.nix'
+
+  package-tests:
+    name: Test packaged binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: nix build --print-build-logs .#checks.x86_64-linux.package-smoke
+
+  role-vm-tests:
+    name: Test ${{ matrix.role }} VM
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        role:
+          - admin
+          - ingress
+          - storage
+          - worker
+          - builder
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Enable KVM when available
+        run: |
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+      - run: nix build --print-build-logs ".#checks.x86_64-linux.vm-${{ matrix.role }}"
+
+  publication-context:
+    name: Detect publishable image changes
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.context.outputs.commit_sha }}
+      publish: ${{ steps.context.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Record publication context
+        id: context
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          COMMIT_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          publish=false
+          publish_paths=(flake.nix flake.lock nix infra)
+          if [[ $EVENT_NAME == workflow_dispatch && $MANUAL_PUBLISH == true ]]; then
+            publish=true
+          elif [[ $BEFORE_SHA =~ ^0+$ ]]; then
+            if git ls-tree -r --name-only "$COMMIT_SHA" -- "${publish_paths[@]}" | grep -q .; then
+              publish=true
+            fi
+          elif ! git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+            echo "Previous push commit is unavailable; automatic publication is disabled for this run"
+          elif ! git diff --quiet "$BEFORE_SHA" "$COMMIT_SHA" -- "${publish_paths[@]}"; then
+            publish=true
+          fi
+          printf 'publish=%s\ncommit_sha=%s\n' "$publish" "$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+
+  build-images:
+    name: Build ${{ matrix.role }} image
+    needs: publication-context
+    if: >-
+      always() &&
+      (needs.publication-context.outputs.publish != 'true' ||
+       vars.OPENSTACK_PUBLISH_ENABLED != 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        role:
+          - admin
+          - ingress
+          - storage
+          - worker
+          - builder
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install QEMU smoke-test tools
+        run: |
+          tests/install_ci_apt_packages.sh genisoimage qemu-system-x86 qemu-utils
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+
+      - name: Build role image
+        run: |
+          nix build --print-build-logs \
+            --out-link "result-${{ matrix.role }}" \
+            ".#${{ matrix.role }}-image"
+
+      - name: Locate and boot role image
+        run: |
+          qcow=$(find -L "result-${{ matrix.role }}" -type f -name '*.qcow2' -print -quit)
+          test -n "$qcow"
+          tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"
+
+  build-and-publish-images:
+    name: Build ${{ matrix.role }} image
+    needs:
+      - static
+      - generated-recipes
+      - nix-eval
+      - package-tests
+      - role-vm-tests
+      - publication-context
+    if: >-
+      needs.publication-context.outputs.publish == 'true' &&
+      vars.OPENSTACK_PUBLISH_ENABLED == 'true'
+    environment: openstack-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        role:
+          - admin
+          - ingress
+          - storage
+          - worker
+          - builder
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.publication-context.outputs.commit_sha }}
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install publication and smoke-test tools
+        run: |
+          tests/install_ci_apt_packages.sh \
+            genisoimage \
+            python3-openstackclient \
+            qemu-system-x86 \
+            qemu-utils
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+
+      - name: Install private deployment configuration
+        env:
+          COMMIT_SHA: ${{ needs.publication-context.outputs.commit_sha }}
+          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
+          PLATFORM_CONFIG_JSON: ${{ secrets.PLATFORM_CONFIG_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$OS_PROJECT_ID"
+          test -n "$PLATFORM_CONFIG_JSON"
+          umask 077
+          printf '%s\n' "$PLATFORM_CONFIG_JSON" > config/platform.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from uuid import UUID
+
+          path = Path("config/platform.json")
+          document = json.loads(path.read_text())
+          commit = os.environ["COMMIT_SHA"]
+          if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+              raise SystemExit("invalid publication commit")
+          try:
+              project_id = str(UUID(os.environ["OS_PROJECT_ID"]))
+          except ValueError as error:
+              raise SystemExit("invalid publication project ID") from error
+          document["projectId"] = project_id
+          image_suffix = commit[:8]
+          document["images"] = {
+              role: f"{name}-{image_suffix}"
+              for role, name in document["images"].items()
+          }
+          path.write_text(json.dumps(document, indent=2) + "\n")
+          PY
+          # Fail here, in seconds, if the stored inventory has drifted from the
+          # schema this commit expects. Without this the first symptom is an
+          # opaque Nix evaluation error an hour into the publish matrix.
+          python3 infra/lib/platform_config.py validate
+          project=$(python3 infra/lib/platform_config.py get project)
+          printf 'OS_PROJECT_NAME=%s\n' "$project" >> "$GITHUB_ENV"
+
+      - name: Build role image
+        env:
+          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
+        run: |
+          nix build --impure --print-build-logs \
+            --out-link "result-${{ matrix.role }}" \
+            ".#${{ matrix.role }}-image"
+
+      - name: Locate role image
+        id: artifact
+        run: |
+          set -euo pipefail
+          qcow=$(find -L "result-${{ matrix.role }}" -type f -name '*.qcow2' -print -quit)
+          test -n "$qcow"
+          sha256sum "$qcow"
+          printf 'qcow=%s\n' "$qcow" >> "$GITHUB_OUTPUT"
+
+      - name: Boot role image with config drive
+        run: tests/smoke_openstack_image.sh "${{ matrix.role }}" "${{ steps.artifact.outputs.qcow }}"
+
+      - name: Check configured image
+        id: image
+        env:
+          COMMIT_SHA: ${{ needs.publication-context.outputs.commit_sha }}
+          OS_AUTH_TYPE: password
+          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+          OS_IDENTITY_API_VERSION: "3"
+          OS_INTERFACE: public
+          OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
+          OS_PROJECT_DOMAIN_NAME: Default
+          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
+          OS_USER_DOMAIN_NAME: Default
+          OS_USERNAME: ${{ secrets.OS_USERNAME }}
+        run: |
+          set -euo pipefail
+          test -n "$OS_AUTH_URL"
+          test -n "$OS_PASSWORD"
+          test -n "$OS_PROJECT_ID"
+          test -n "$OS_USERNAME"
+          token_project_id=$(openstack token issue -f value -c project_id)
+          test "$token_project_id" = "$OS_PROJECT_ID"
+          image_name=$(python3 infra/lib/platform_config.py get "images.${{ matrix.role }}")
+          existing=$(openstack image list --name "$image_name" -f value -c Name)
+          if grep -Fxq "$image_name" <<<"$existing"; then
+            namespace=$(python3 infra/lib/platform_config.py get namespace)
+            source_property="${namespace//-/_}_source_commit"
+            properties=$(openstack image show "$image_name" -f json -c properties)
+            existing_commit=$(
+              PROPERTIES="$properties" SOURCE_PROPERTY="$source_property" python3 - <<'PY'
+          import json
+          import os
+
+          properties = json.loads(os.environ["PROPERTIES"]).get("properties", {})
+          print(properties.get(os.environ["SOURCE_PROPERTY"], ""))
+          PY
+            )
+            if [[ $existing_commit != "$COMMIT_SHA" ]]; then
+              echo "Image-name collision: $image_name does not identify $COMMIT_SHA" >&2
+              exit 1
+            fi
+            echo "Configured image already exists for commit: $image_name"
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          else
+            echo "Configured image is new: $image_name"
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish role image
+        if: steps.image.outputs.publish == 'true'
+        env:
+          OS_AUTH_TYPE: password
+          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+          OS_IDENTITY_API_VERSION: "3"
+          OS_INTERFACE: public
+          OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
+          OS_PROJECT_DOMAIN_NAME: Default
+          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
+          OS_USER_DOMAIN_NAME: Default
+          OS_USERNAME: ${{ secrets.OS_USERNAME }}
+          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
+          SOURCE_COMMIT: ${{ needs.publication-context.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          infra/openstack/publish_nixos_image.sh \
+            "${{ matrix.role }}" \
+            "${{ steps.artifact.outputs.qcow }}"
+
+      - name: Remove private deployment configuration
+        if: always()
+        run: rm -f config/platform.json

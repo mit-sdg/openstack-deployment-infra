@@ -1,0 +1,17 @@
+{
+  "standard": {
+    "workerFlavor": "example.1c2g",
+    "cpuMHz": 1000,
+    "memoryMiB": 2048,
+    "postgresConnections": 10,
+    "postgresMeasuredBytes": 2147483648,
+    "mongoMeasuredBytes": 2147483648,
+    "s3Bytes": 5368709120,
+    "s3Objects": 100000
+  },
+  "runtimeImages": {
+    "bun": "registry.example/platform/bun@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "node": "registry.example/platform/node@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "backupAgeRecipient": "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+}

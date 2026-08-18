@@ -1,0 +1,57 @@
+#cloud-config
+hostname: __ADMIN_HOST__
+ssh_pwauth: false
+disable_root: true
+users:
+  - default
+  - name: agentops
+    lock_passwd: true
+    shell: /run/current-system/sw/bin/bash
+    ssh_authorized_keys:
+      - __AGENTOPS_PUBLIC_KEY__
+write_files:
+  - path: /etc/__PLATFORM_NAMESPACE__/secrets/admin-bootstrap.env
+    owner: root:nomad
+    permissions: "0640"
+    content: |
+      NOMAD_GOSSIP_KEY=__NOMAD_GOSSIP_KEY__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem
+    owner: root:root
+    permissions: "0644"
+    encoding: b64
+    content: __INTERNAL_CA_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-cli-ca.pem
+    owner: agentops:agentops
+    permissions: "0644"
+    encoding: b64
+    content: __INTERNAL_CA_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-server.pem
+    owner: root:nomad
+    permissions: "0640"
+    encoding: b64
+    content: __NOMAD_SERVER_CERT_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-server-key.pem
+    owner: root:nomad
+    permissions: "0640"
+    encoding: b64
+    content: __NOMAD_SERVER_KEY_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-cli.pem
+    owner: agentops:agentops
+    permissions: "0644"
+    encoding: b64
+    content: __NOMAD_CLI_CERT_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-cli-key.pem
+    owner: agentops:agentops
+    permissions: "0600"
+    encoding: b64
+    content: __NOMAD_CLI_KEY_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/attached-volumes.env
+    owner: root:root
+    permissions: "0644"
+    content: |
+      ADMIN_VOLUME_ID=__ADMIN_VOLUME_ID__
+      BACKUP_VOLUME_ID=__BACKUP_VOLUME_ID__
+      ADMIN_IP=__ADMIN_IP__
+      REGION=__REGION__
+      DATACENTER=__DATACENTER__
+final_message: "__PLATFORM_NAMESPACE__ NixOS admin provisioning data installed"

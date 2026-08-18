@@ -1,0 +1,103 @@
+{
+  "project": "example-project",
+  "projectId": "00000000-0000-4000-8000-000000000000",
+  "displayName": "Example Platform",
+  "organization": "Example Organization",
+  "prefix": "example",
+  "namespace": "app-platform",
+  "domain": "apps.example.com",
+  "recoveryDomains": [
+    "projects.example.net",
+    "compute.example.net"
+  ],
+  "staticIngressRoutes": {
+    "one-off": {
+      "hostname": "one-off.apps.example.com",
+      "origin": "http://192.0.2.14:4444"
+    }
+  },
+  "datacenter": "example-datacenter",
+  "region": "global",
+  "network": "example-network",
+  "internalNames": {
+    "storage": "storage.example.internal",
+    "objectStorage": "s3.example.internal"
+  },
+  "pki": {
+    "internalCaFile": "internal-ca.pem"
+  },
+  "managementCidr": "192.0.2.10/32",
+  "metadataAddress": "169.254.169.254",
+  "addresses": {
+    "admin": "192.0.2.11",
+    "ingress": "192.0.2.12",
+    "storage": "192.0.2.13"
+  },
+  "hosts": {
+    "admin": "example-admin-01",
+    "ingress": "example-ingress-01",
+    "storage": "example-storage-01"
+  },
+  "ports": {
+    "admin": "example-admin-public-v4",
+    "ingress": "example-ingress-public-v4",
+    "storage": "example-storage-service-v4"
+  },
+  "volumes": {
+    "adminState": {
+      "name": "example-admin-state",
+      "label": "example-state",
+      "sizeGiB": 32,
+      "type": "production"
+    },
+    "backup": {
+      "name": "example-backups",
+      "label": "example-backups",
+      "sizeGiB": 100,
+      "type": "production"
+    },
+    "data": {
+      "name": "example-data",
+      "label": "example-data",
+      "sizeGiB": 200,
+      "type": "production"
+    }
+  },
+  "images": {
+    "admin": "example-nixos-admin",
+    "ingress": "example-nixos-ingress",
+    "storage": "example-nixos-storage",
+    "worker": "example-nixos-worker",
+    "builder": "example-nixos-builder"
+  },
+  "flavors": {
+    "admin": "example.2c4g",
+    "ingress": "example.2c2g",
+    "storage": "example.4c8g",
+    "worker": "example.1c2g",
+    "builder": "example.4c8g"
+  },
+  "versions": {
+    "nomad": "2.0.5",
+    "traefik": "3.7.10",
+    "buildkit": "0.32.2"
+  },
+  "checksums": {
+    "nomadLinuxAmd64Zip": "6425e43967bb0b2b4979b0d06da9b06772848b658dae372f1256d51ddcfe53c3",
+    "traefikLinuxAmd64TarGz": "01811bb12d44f17280550f425f5e3128d6c325f2665c09e67a651ca535f490ce",
+    "buildkitLinuxAmd64TarGz": "2975d0f651ad96ba8b80b9992ae1f9a964f4408569af5b6dc36544165c3926af"
+  },
+  "containers": {
+    "postgres": "docker.io/library/postgres@sha256:84560e3b9c6874893fc4e2854f5dc3e7c1a37bc9d1dfd7a8c641310ae22ba5ad",
+    "mongodb": "docker.io/library/mongo@sha256:de267922bc1153d923f5c9dc429f21c11faf18299080c1ce04d6d6007097fb06",
+    "garage": "docker.io/dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690",
+    "registry": "docker.io/library/registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373",
+    "cloudflared": "docker.io/cloudflare/cloudflared@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38"
+  },
+  "paths": {
+    "root": "/srv/app-platform",
+    "adminState": "/srv/app-platform-state",
+    "backups": "/srv/app-platform-backups",
+    "data": "/srv/app-platform-data"
+  }
+}

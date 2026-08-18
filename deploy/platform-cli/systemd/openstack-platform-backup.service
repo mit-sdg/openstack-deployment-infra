@@ -1,0 +1,12 @@
+[Unit]
+Description=Back up M1 platform CLI SQLite state
+ConditionPathExists=/srv/openstack-platform/state/platform.sqlite3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/srv/openstack-platform/bin/openstack-platform --platform-config /srv/openstack-platform/config/platform.json --state-directory /srv/openstack-platform/state --policy /srv/openstack-platform/state/policy.json backup
+UMask=0077
+Environment=PLATFORM_CONFIG=/srv/openstack-platform/config/platform.json
+NoNewPrivileges=true

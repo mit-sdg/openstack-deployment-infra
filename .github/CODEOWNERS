@@ -1,0 +1,8 @@
+# Image build and publication security boundary
+/.github/CODEOWNERS @BarishNamazov
+/.github/workflows/ci.yml @BarishNamazov
+/flake.nix @BarishNamazov
+/flake.lock @BarishNamazov
+/nix/ @BarishNamazov
+/infra/ @BarishNamazov
+/docs/IMAGE_PUBLISHING.md @BarishNamazov

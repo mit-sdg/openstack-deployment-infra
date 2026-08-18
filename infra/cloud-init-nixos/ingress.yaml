@@ -1,0 +1,43 @@
+#cloud-config
+hostname: __INGRESS_HOST__
+ssh_pwauth: false
+disable_root: true
+users:
+  - default
+  - name: agentops
+    lock_passwd: true
+    shell: /run/current-system/sw/bin/bash
+    ssh_authorized_keys:
+      - __AGENTOPS_PUBLIC_KEY__
+write_files:
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem
+    owner: root:root
+    permissions: "0644"
+    encoding: b64
+    content: __INTERNAL_CA_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-ingress.pem
+    owner: root:traefik
+    permissions: "0640"
+    encoding: b64
+    content: __NOMAD_INGRESS_CERT_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-ingress-key.pem
+    owner: root:traefik
+    permissions: "0640"
+    encoding: b64
+    content: __NOMAD_INGRESS_KEY_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/secrets/traefik.env
+    owner: root:traefik
+    permissions: "0640"
+    content: |
+      TRAEFIK_PROVIDERS_NOMAD_ENDPOINT_TOKEN=__NOMAD_TRAEFIK_TOKEN__
+      NOMAD_TOKEN=__NOMAD_TRAEFIK_TOKEN__
+__CLOUDFLARED_WRITE_FILE__
+  - path: /etc/__PLATFORM_NAMESPACE__/ingress-site.env
+    owner: root:root
+    permissions: "0644"
+    content: |
+      ADMIN_IP=__ADMIN_IP__
+      PLATFORM_DOMAIN=__PLATFORM_DOMAIN__
+      RECOVERY_DOMAIN_1=__RECOVERY_DOMAIN_1__
+      RECOVERY_DOMAIN_2=__RECOVERY_DOMAIN_2__
+final_message: "__PLATFORM_NAMESPACE__ NixOS ingress provisioning data installed"

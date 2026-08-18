@@ -1,0 +1,29 @@
+#cloud-config
+hostname: __BUILDER_NAME__
+ssh_pwauth: false
+disable_root: true
+users:
+  - default
+  - name: agentops
+    lock_passwd: true
+    shell: /run/current-system/sw/bin/bash
+    ssh_authorized_keys:
+      - __BUILDER_OPERATOR_PUBLIC_KEY__
+write_files:
+  - path: /usr/local/share/ca-certificates/__PLATFORM_NAMESPACE__-internal-ca.crt
+    owner: root:root
+    permissions: "0644"
+    encoding: b64
+    content: __INTERNAL_CA_B64__
+  - path: /home/agentops/.docker/config.json
+    owner: agentops:agentops
+    permissions: "0600"
+    encoding: b64
+    content: __DOCKER_AUTH_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/storage-ip
+    owner: root:root
+    permissions: "0644"
+    content: __STORAGE_IP__
+runcmd:
+  - [sh, -c, 'for attempt in $(seq 1 60); do if runuser -u agentops -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active --quiet buildkit.service && test -S /run/user/1000/buildkit/buildkitd.sock && test -x /run/current-system/sw/bin/mount.fuse3; then echo "__PLATFORM_NAMESPACE__ NixOS rootless builder ready"; exit 0; fi; sleep 2; done; echo "rootless BuildKit or mount.fuse3 did not become ready" >&2; exit 1']
+final_message: "__PLATFORM_NAMESPACE__ NixOS rootless builder provisioning data installed"

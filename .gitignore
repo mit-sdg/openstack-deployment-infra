@@ -1,0 +1,32 @@
+# Private deployment inventory. Commit only sanitized examples.
+config/*
+!config/*.example.json
+!config/projects/
+config/projects/*
+!config/projects/*.example.json
+
+# Local credentials
+.secrets/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+.venv/
+
+# JavaScript/Bun build artifacts
+node_modules/
+.next/
+*.tsbuildinfo
+
+# Local environment and operational output
+.env
+.env.*
+!.env.example
+*.log
+*.status
+
+# Nix build/development artifacts
+result
+result-*
+.direnv/
+.tmp/

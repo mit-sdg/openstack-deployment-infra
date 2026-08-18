@@ -1,0 +1,87 @@
+#cloud-config
+hostname: __STORAGE_HOST__
+ssh_pwauth: false
+disable_root: true
+users:
+  - default
+  - name: agentops
+    lock_passwd: true
+    shell: /run/current-system/sw/bin/bash
+    ssh_authorized_keys:
+      - __AGENTOPS_PUBLIC_KEY__
+write_files:
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem
+    owner: root:root
+    permissions: "0644"
+    encoding: b64
+    content: __INTERNAL_CA_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/storage.pem
+    owner: root:root
+    permissions: "0644"
+    encoding: b64
+    content: __STORAGE_CERT_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/storage-key.pem
+    owner: root:storage-service
+    permissions: "0640"
+    encoding: b64
+    content: __STORAGE_KEY_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/pki/mongodb-combined.pem
+    owner: storage-service:storage-service
+    permissions: "0600"
+    encoding: b64
+    content: __MONGODB_COMBINED_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/postgres.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      POSTGRES_USER=platform_admin
+      POSTGRES_PASSWORD=__POSTGRES_PASSWORD__
+      POSTGRES_DB=platform
+      POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+  - path: /etc/__PLATFORM_NAMESPACE__/mongodb.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      MONGO_INITDB_ROOT_USERNAME=platform_admin
+      MONGO_INITDB_ROOT_PASSWORD=__MONGO_PASSWORD__
+  - path: /etc/__PLATFORM_NAMESPACE__/garage.toml
+    owner: root:root
+    permissions: "0600"
+    content: |
+      metadata_dir = "/var/lib/garage/meta"
+      data_dir = "/var/lib/garage/data"
+      db_engine = "sqlite"
+      replication_factor = 1
+      rpc_bind_addr = "[::]:3901"
+      rpc_public_addr = "127.0.0.1:3901"
+      rpc_secret = "__GARAGE_RPC_SECRET__"
+      [s3_api]
+      s3_region = "garage"
+      api_bind_addr = "[::]:3900"
+      root_domain = ".__OBJECT_STORAGE_INTERNAL_NAME__"
+      [admin]
+      api_bind_addr = "[::]:3903"
+      admin_token = "__GARAGE_ADMIN_TOKEN__"
+      metrics_token = "__GARAGE_METRICS_TOKEN__"
+  - path: /etc/__PLATFORM_NAMESPACE__/registry.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      REGISTRY_HTTP_SECRET=__REGISTRY_HTTP_SECRET__
+      REGISTRY_STORAGE_DELETE_ENABLED=true
+      REGISTRY_AUTH=htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM=__PLATFORM_DISPLAY_NAME__ Registry
+      REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd
+      REGISTRY_HTTP_TLS_CERTIFICATE=/pki/storage.pem
+      REGISTRY_HTTP_TLS_KEY=/pki/storage-key.pem
+  - path: /etc/__PLATFORM_NAMESPACE__/registry.htpasswd
+    owner: root:root
+    permissions: "0600"
+    encoding: b64
+    content: __REGISTRY_HTPASSWD_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/attached-volume.env
+    owner: root:root
+    permissions: "0644"
+    content: |
+      DATA_VOLUME_ID=__DATA_VOLUME_ID__
+final_message: "__PLATFORM_NAMESPACE__ NixOS storage provisioning data installed"
