@@ -8,6 +8,11 @@ A deployment is created from scratch. Reconciliation may preserve safety evidenc
 
 ## Current capability
 
+"Implemented" below means the code and its tests exist. It does not mean the
+path has been run end to end against a live cloud. If you are standing this up
+for the first time, follow [the tutorial](TUTORIAL.md) and treat the first run
+of each command as the real test.
+
 | Capability | State |
 | --- | --- |
 | OpenStack/NixOS role definitions | Implemented; CI runs package, VM, config-drive, and image checks |

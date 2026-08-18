@@ -12,7 +12,6 @@ from pathlib import Path
 from unittest import mock
 
 from platform_cli import remote as runtime_remote
-from platform_cli.validation import ValidationError
 from platform_cli import runtime
 from platform_cli.helper.main import (
     HelperActionError,
@@ -40,6 +39,7 @@ from platform_cli.runtime import (
     run,
     write_private_stack_diagnostic,
 )
+from platform_cli.validation import ValidationError
 
 
 class RuntimeTests(unittest.TestCase):
