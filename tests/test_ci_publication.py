@@ -27,7 +27,10 @@ class PublicationTriggerTests(unittest.TestCase):
     def test_embedded_infra_is_a_publication_input(self) -> None:
         workflow = WORKFLOW.read_text()
 
-        self.assertIn("publish_paths=(flake.nix flake.lock nix infra)", workflow)
+        self.assertIn(
+            "publish_paths=(flake.nix flake.lock nix infra ':(exclude)*.md')",
+            workflow,
+        )
         self.assertIn(
             'git ls-tree -r --name-only "$COMMIT_SHA" -- "${publish_paths[@]}"',
             workflow,
@@ -36,6 +39,13 @@ class PublicationTriggerTests(unittest.TestCase):
             'git diff --quiet "$BEFORE_SHA" "$COMMIT_SHA" -- "${publish_paths[@]}"',
             workflow,
         )
+
+    def test_documentation_under_an_image_input_does_not_publish(self) -> None:
+        # nix/README.md lives inside an image-input directory but changes no
+        # image. Without the exclusion a README edit rebuilds and republishes
+        # every role image.
+        workflow = WORKFLOW.read_text()
+        self.assertIn("':(exclude)*.md'", workflow)
 
     def test_publication_inventory_uses_the_authenticated_project_uuid(self) -> None:
         workflow = WORKFLOW.read_text()

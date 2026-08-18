@@ -2323,6 +2323,12 @@ def _pin_admin_host_key(
         raise OpenStackError("admin host-key verification and pinning failed") from error
 
 
+# Console output is a bounded ring buffer. Read enough of it to usually still
+# contain a boot readiness marker, while staying well inside the command output
+# limits enforced for provider evidence.
+_CONSOLE_READINESS_LINES = 2000
+
+
 @_command_deadline("remaining_seconds")
 def check_role_health(
     platform: PlatformConfig,
@@ -2349,7 +2355,7 @@ def check_role_health(
         raise ValidationError("role health check identity or deadline is malformed")
     per_check = min(30.0, remaining_seconds / 3)
     result = _run(
-        ("console", "log", "show", "--lines", "400", host.server_id),
+        ("console", "log", "show", "--lines", str(_CONSOLE_READINESS_LINES), host.server_id),
         timeout_seconds=per_check,
         command_runner=provider_runner,
         executable=executable,
@@ -2357,8 +2363,16 @@ def check_role_health(
     text = result.stdout.decode("utf-8", errors="replace")
     ready = f"{platform.namespace} NixOS {role} services ready"
     failed = f"{platform.namespace} NixOS {role} readiness failed"
-    if text.rfind(ready) < 0 or text.rfind(failed) > text.rfind(ready):
-        raise OpenStackError(f"{role} guest failed-unit readiness is not current")
+    if text.rfind(failed) > text.rfind(ready):
+        raise OpenStackError(f"{role} guest reported failed units after its last readiness run")
+    # A missing marker is not a failed marker. The console is a bounded ring
+    # buffer, so a host that has been up long enough scrolls its boot readiness
+    # line out of the window entirely; ingress does so fastest because the
+    # proxy logs every request there. Treating that absence as failure made a
+    # healthy long-running role impossible to verify, which in turn made the
+    # replacement rollback path report a false failure about a host that was
+    # serving correctly. An explicit failure marker still fails hard above, and
+    # the concrete per-role checks below are the stronger, current evidence.
 
     root = Path(_inventory_text(platform, "paths.root"))
     command: tuple[str, ...]

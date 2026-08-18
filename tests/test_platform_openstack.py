@@ -1555,6 +1555,76 @@ else:
         self.assertEqual(recovered.active_server_id, REPLACEMENT)
         self.assertEqual(recovered.cleanup_state, "confirmed")
 
+    def _health_host(self, role: str) -> openstack.PersistentHost:
+        return openstack.PersistentHost(
+            role,
+            self.platform.get(f"hosts.{role}"),
+            SERVER,
+            "ACTIVE",
+            OLD_IMAGE,
+            FLAVOR,
+            "example.2c2g",
+            (),
+        )
+
+    def test_scrolled_out_readiness_marker_is_not_treated_as_failure(self) -> None:
+        # A long-running host scrolls its boot marker out of the bounded console
+        # window. That is absence of evidence, not evidence of failure, and the
+        # concrete per-role checks still have to run and pass.
+        http_calls: list[str] = []
+
+        def http_get(url: str, **bounds: object) -> HttpResult:
+            http_calls.append(url)
+            return HttpResult(200, {}, b"OK")
+
+        cloud = FakeCloud(self.platform, role="ingress")
+        cloud.ready_markers[SERVER] = 0  # marker aged out of the window
+        cloud.failed_markers[SERVER] = 0
+
+        openstack.check_role_health(
+            self.platform,
+            "ingress",
+            self._health_host("ingress"),
+            30,
+            provider_runner=cloud,
+            service_runner=lambda argv, **k: result(argv),
+            http_get=http_get,
+        )
+        self.assertEqual(len(http_calls), 2)
+
+    def test_explicit_failure_marker_still_fails_hard(self) -> None:
+        cloud = FakeCloud(self.platform, role="ingress")
+        cloud.ready_markers[SERVER] = 0
+        cloud.failed_markers[SERVER] = 1
+
+        with self.assertRaisesRegex(openstack.OpenStackError, "reported failed units"):
+            openstack.check_role_health(
+                self.platform,
+                "ingress",
+                self._health_host("ingress"),
+                30,
+                provider_runner=cloud,
+                service_runner=lambda argv, **k: result(argv),
+                http_get=lambda url, **k: HttpResult(200, {}, b"OK"),
+            )
+
+    def test_failure_after_ready_fails_but_ready_after_failure_passes(self) -> None:
+        # Ordering, not mere presence, decides: the newest marker wins.
+        cloud = FakeCloud(self.platform, role="ingress")
+        cloud.ready_markers[SERVER] = 1
+        cloud.failed_markers[SERVER] = 1  # emitted after ready in the fake output
+
+        with self.assertRaisesRegex(openstack.OpenStackError, "reported failed units"):
+            openstack.check_role_health(
+                self.platform,
+                "ingress",
+                self._health_host("ingress"),
+                30,
+                provider_runner=cloud,
+                service_runner=lambda argv, **k: result(argv),
+                http_get=lambda url, **k: HttpResult(200, {}, b"OK"),
+            )
+
     def test_concrete_role_health_checks_use_bounded_authenticated_paths(self) -> None:
         service_calls: list[tuple[str, ...]] = []
         http_calls: list[str] = []
