@@ -19,7 +19,10 @@ You need:
 - OpenStack credentials kept in a private mode-`0600` environment file and protected wrapper;
 - an operator-controlled age identity for offline restore;
 - a Cloudflare token and DNS/TLS account, or another provider meeting [the ingress contract](PUBLIC_INGRESS.md); and
-- a management SSH key whose public half can be installed on the admin role.
+- a management SSH key whose public half can be installed on the admin role; and
+- a public GitHub repository for each application you intend to deploy.
+  Source is fetched over HTTPS with no credentials, so private repositories
+  cannot be deployed.
 
 The example inventory uses 32 GiB admin state, 200 GiB managed data, and 100 GiB backups. These are examples, not established minimums. Review the private policy for worker and managed-storage settings.
 

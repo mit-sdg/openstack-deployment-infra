@@ -53,6 +53,10 @@ provide a health path. The current scheduler configuration runs one application
 instance per project. Periodic managed-storage usage collection is not
 implemented.
 
+Source must come from a **public** GitHub repository. Deployments fetch the
+exact commit over HTTPS with no credentials, so a private repository cannot be
+deployed; the [roadmap](docs/ROADMAP.md) tracks GitHub App support.
+
 Every command acts only on the resources your configuration names, so unrelated
 servers and volumes in the same OpenStack project are left alone.
 

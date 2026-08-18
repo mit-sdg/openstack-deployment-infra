@@ -20,7 +20,9 @@ You need:
 - Nix/QEMU for image evaluation and tests;
 - a management host with the unprivileged `/srv/openstack-platform` owner;
 - a public DNS/TLS/forwarding service that preserves `Host`; and
-- custody for the backup and managed-data age identities.
+- custody for the backup and managed-data age identities; and
+- a public GitHub repository holding the application you will deploy, with a
+  `platform.yaml` at its root. Private repositories cannot be fetched.
 
 Cloudflare Tunnel is the reference provider, but its token and DNS account are
 external inputs. See [PUBLIC_INGRESS.md](PUBLIC_INGRESS.md).
