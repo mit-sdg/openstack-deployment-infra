@@ -23,20 +23,26 @@ A deployment is created from scratch. Reconciliation may preserve safety evidenc
 
 ## Now — staff control surface
 
-What works today:
+An operator with the CLI installed can:
 
-- empty-state SQLite records for images, applications, deployments, managed resources, environment ownership, and operations;
-- infrastructure and per-application serialization with phase-specific recovery;
-- fixed JSON protocol over pinned SSH to the constrained admin helper;
-- exact-commit Bun/Node deployment, immutable digests, health-gated acceptance, and disposable cleanup;
-- per-type managed-storage create, verify, rotate, and remove without credential transfer;
-- encrypted management-database backup and managed-data restore evidence; and
-- unprivileged release installation for management and helper entrypoints.
+- deploy an application from an exact Git commit, and get either a working
+  HTTPS URL or a clear reason it was rejected;
+- replace admin, ingress, or storage with a new image, keeping the old server
+  until the new one proves healthy;
+- create, verify, rotate, and remove a PostgreSQL, MongoDB, or S3 resource for
+  an application without ever handling its credentials;
+- set and remove application environment variables without those values
+  reaching the database or command output;
+- back up the management database, and check that a managed-data backup
+  actually restores; and
+- install a new release of the tooling without root.
 
-Support for importing state from an earlier system was removed. The command
-tree no longer has an import command, there are no legacy compatibility
-branches, reconciliation never writes external rows into the database, and
-every provider operation is scoped to the configured platform.
+Operations are resumable. If a command is interrupted, running it again picks
+up from the last recorded checkpoint instead of starting over or applying the
+same change twice.
+
+There is no way to import state from another system, and nothing reads or
+writes resources the inventory does not name.
 
 ## 1. Identity, roster, and GitHub App
 

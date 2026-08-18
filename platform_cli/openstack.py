@@ -2492,6 +2492,41 @@ def _volume_attached(
     )
 
 
+def _restore_stopped_host_power(
+    role: str,
+    configured_name: str,
+    server_id: str,
+    *,
+    timeout_seconds: float,
+    command_runner: Runner,
+    executable: str,
+) -> None:
+    """Best-effort return of a host to ACTIVE after a failed stop phase.
+
+    Reporting a failure is not a reason to leave a persistent role powered off.
+    Any error here is deliberately swallowed so it cannot mask the failure that
+    triggered the restore; the caller still raises.
+    """
+    try:
+        observed = _show_host(
+            role,
+            configured_name,
+            server_id,
+            timeout_seconds=timeout_seconds,
+            command_runner=command_runner,
+            executable=executable,
+        )
+        if observed.status == "SHUTOFF":
+            _run(
+                ("server", "start", server_id),
+                timeout_seconds=timeout_seconds,
+                command_runner=command_runner,
+                executable=executable,
+            )
+    except Exception:
+        return
+
+
 def _mutate_and_verify(
     arguments: Sequence[str],
     verified: Callable[[], bool],
@@ -2879,10 +2914,13 @@ def _replace_host(
     if old.status == "ACTIVE":
         old_server_id = old.server_id
         assert old_server_id is not None
-        try:
-            _mutate_and_verify(
-                ("server", "stop", old_server_id),
-                lambda: (
+
+        def _observed_shutoff() -> bool:
+            # Powering a server off is asynchronous. Reading the status once,
+            # immediately after issuing the command, nearly always observes the
+            # server still running and would report a working stop as ambiguous.
+            while True:
+                if (
                     _show_host(
                         role,
                         old.configured_name,
@@ -2892,26 +2930,39 @@ def _replace_host(
                         executable=executable,
                     ).status
                     == "SHUTOFF"
-                ),
+                ):
+                    return True
+                try:
+                    remaining = _deadline_remaining(deadline, operation="old-server stop")
+                except OpenStackError:
+                    return False
+                sleep(min(poll_interval_seconds, remaining))
+
+        try:
+            _mutate_and_verify(
+                ("server", "stop", old_server_id),
+                _observed_shutoff,
                 message="old-server stop result is ambiguous",
                 refs=base_refs,
                 timeout_seconds=timeout_seconds,
                 command_runner=command_runner,
                 executable=executable,
             )
-            _wait_host_status(
-                old,
-                "SHUTOFF",
-                deadline=deadline,
-                poll_interval_seconds=poll_interval_seconds,
+        except (RecoveryRequired, OpenStackError) as error:
+            # Nothing has been replaced yet, so there is no rollback to run and
+            # the role would otherwise stay powered off with its public route
+            # dead until an operator noticed. Put it back the way it was found
+            # before reporting, without hiding the original failure.
+            _restore_stopped_host_power(
+                role,
+                old.configured_name,
+                old_server_id,
                 timeout_seconds=timeout_seconds,
                 command_runner=command_runner,
                 executable=executable,
-                sleep=sleep,
             )
-        except RecoveryRequired:
-            raise
-        except OpenStackError as error:
+            if isinstance(error, RecoveryRequired):
+                raise
             raise RecoveryRequired(
                 "old-server stop completion could not be verified", refs=base_refs
             ) from error

@@ -82,6 +82,12 @@ class FakeCloud:
         self.failed_markers: dict[str, int] = {}
         self.ambiguous_create = False
         self.retain_old_delete = False
+        # Real power-off is asynchronous: the command returns before the server
+        # reaches SHUTOFF. 0 keeps the historical synchronous behaviour.
+        self.stop_settle_reads = 0
+        self.stop_never_settles = False
+        self._pending_stop_reads = 0
+        self.start_calls: list[str] = []
         self.volume_attachments = (
             [
                 {
@@ -171,6 +177,15 @@ class FakeCloud:
             return result(argv, rows)
         if args[:2] == ("server", "show"):
             server_id = args[2]
+            if (
+                self._pending_stop_reads
+                and self.server is not None
+                and self.server["id"] == server_id
+            ):
+                # Report the server as still running until it has settled.
+                self._pending_stop_reads -= 1
+                if self._pending_stop_reads == 0:
+                    self.server["status"] = "SHUTOFF"
             for server in (self.server, self.replacement):
                 if server is not None and server["id"] == server_id:
                     return result(argv, server)
@@ -208,9 +223,15 @@ class FakeCloud:
             ]
             return result(argv, rows)
         if args[:2] == ("server", "stop"):
-            self.server["status"] = "SHUTOFF"
+            if self.stop_never_settles:
+                return result(argv)
+            if self.stop_settle_reads:
+                self._pending_stop_reads = self.stop_settle_reads
+            else:
+                self.server["status"] = "SHUTOFF"
             return result(argv)
         if args[:2] == ("server", "start"):
+            self.start_calls.append(args[2])
             self.server["status"] = "ACTIVE"
             self.ready_markers[args[2]] = self.ready_markers.get(args[2], 0) + 1
             return result(argv)
@@ -1224,6 +1245,63 @@ else:
         self.assertFalse(replaced.accepted)
         self.assertEqual(replaced.active_server_id, SERVER)
         self.assertEqual(health_checked, [SERVER])
+
+    def test_an_asynchronous_power_off_is_not_reported_as_ambiguous(self) -> None:
+        # The provider returns from "server stop" before the server is off.
+        # Reading the status once, immediately, observes it still running.
+        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        cloud.stop_settle_reads = 3
+
+        with protected_user_data() as user_data_path:
+            replaced = openstack.replace_host(
+                self.platform,
+                "ingress",
+                selected_image_id=IMAGE_1,
+                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
+                operation_id=OPERATION,
+                user_data_path=user_data_path,
+                checkpoint=lambda *_: None,
+                health_check=lambda *_: None,
+                command_runner=cloud,
+                sleep=lambda _seconds: None,
+            )
+
+        self.assertTrue(replaced.accepted)
+        self.assertEqual(replaced.active_server_id, REPLACEMENT)
+
+    def test_a_failed_stop_phase_powers_the_role_back_on(self) -> None:
+        # A stop that applied but could not be confirmed used to leave the role
+        # powered off with no rollback to restore it, taking its public route
+        # down until an operator noticed.
+        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        cloud.server["status"] = "SHUTOFF"
+
+        openstack._restore_stopped_host_power(
+            "ingress",
+            cloud.server["name"],
+            cloud.server["id"],
+            timeout_seconds=30,
+            command_runner=cloud,
+            executable="openstack",
+        )
+
+        self.assertEqual(cloud.start_calls, [cloud.server["id"]])
+        self.assertEqual(cloud.server["status"], "ACTIVE")
+
+    def test_power_restore_leaves_a_running_role_alone(self) -> None:
+        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        self.assertEqual(cloud.server["status"], "ACTIVE")
+
+        openstack._restore_stopped_host_power(
+            "ingress",
+            cloud.server["name"],
+            cloud.server["id"],
+            timeout_seconds=30,
+            command_runner=cloud,
+            executable="openstack",
+        )
+
+        self.assertEqual(cloud.start_calls, [])
 
     def test_replacement_rejects_unprotected_user_data_before_provider_calls(self) -> None:
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
