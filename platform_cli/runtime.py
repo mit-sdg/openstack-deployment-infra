@@ -481,6 +481,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+HTTP_USER_AGENT = "openstack-platform-health/1"
+
+
 def bounded_http(
     url: str,
     *,
@@ -495,7 +498,15 @@ def bounded_http(
     """Perform one HTTP phase with bounded response data and no redirects by default."""
     if timeout_seconds <= 0 or response_limit < 0:
         raise ValueError("HTTP timeout and response limit must be bounded")
-    request = urllib.request.Request(url, data=data, method=method, headers=dict(headers or {}))
+    # Identify the client. Public routes commonly sit behind a bot filter that
+    # rejects the language default agent outright: the platform's own public
+    # ingress health check received 403 from the edge for every probe while the
+    # same URL answered 200 to any named agent, which made a healthy ingress
+    # impossible to verify through its public route. Callers may override it.
+    sent_headers = dict(headers or {})
+    if not any(key.lower() == "user-agent" for key in sent_headers):
+        sent_headers["User-Agent"] = HTTP_USER_AGENT
+    request = urllib.request.Request(url, data=data, method=method, headers=sent_headers)
     handlers: list[object] = [] if allow_redirects else [_NoRedirect()]
     if ssl_context is not None:
         handlers.append(urllib.request.HTTPSHandler(context=ssl_context))

@@ -16,6 +16,7 @@ from platform_cli.helper.main import (
     accept_staged_backup,
     serve_once,
 )
+from platform_cli import runtime
 from platform_cli.remote import (
     DependencyUnavailable,
     ProtocolError,
@@ -491,6 +492,47 @@ class BackupAcceptanceTests(unittest.TestCase):
                 )
             self.assertTrue(source.exists())
             self.assertFalse((root / name).exists())
+
+
+class BoundedHttpAgentTests(unittest.TestCase):
+    def _captured_request(self, **kwargs: object) -> object:
+        captured: list[object] = []
+
+        class _Response:
+            status = 200
+            headers: dict[str, str] = {}
+
+            def read(self, _limit: int) -> bytes:
+                return b"ok"
+
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+        class _Opener:
+            def open(self, request: object, timeout: float) -> object:
+                captured.append(request)
+                return _Response()
+
+        with mock.patch.object(runtime.urllib.request, "build_opener", return_value=_Opener()):
+            runtime.bounded_http("https://example.test/healthz", **kwargs)  # type: ignore[arg-type]
+        return captured[0]
+
+    def test_a_named_agent_is_sent_by_default(self) -> None:
+        # Public routes often sit behind a bot filter that rejects the language
+        # default agent with 403, which would make a healthy route unverifiable.
+        request = self._captured_request()
+        self.assertEqual(
+            request.get_header("User-agent"),  # type: ignore[attr-defined]
+            runtime.HTTP_USER_AGENT,
+        )
+        self.assertNotIn("python-urllib", runtime.HTTP_USER_AGENT.lower())
+
+    def test_an_explicit_agent_is_preserved(self) -> None:
+        request = self._captured_request(headers={"User-Agent": "caller/9"})
+        self.assertEqual(request.get_header("User-agent"), "caller/9")  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":
