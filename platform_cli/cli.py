@@ -347,6 +347,7 @@ def _helper(
         request_limit=config.policy.limits.helper_request_bytes,
         response_limit=config.policy.limits.helper_response_bytes,
         stderr_limit=config.policy.limits.stderr_bytes,
+        helper_command=remote.helper_command_path(config.platform.get("paths.root")),
     )
 
 
@@ -2466,6 +2467,7 @@ def _backup(
                 request_limit=config.policy.limits.helper_request_bytes,
                 response_limit=config.policy.limits.helper_response_bytes,
                 stderr_limit=config.policy.limits.stderr_bytes,
+                helper_command=remote.helper_command_path(config.platform.get("paths.root")),
             )
             if result.get("sha256") != digest:
                 raise CliError("backup helper returned mismatched acceptance evidence")

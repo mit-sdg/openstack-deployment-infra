@@ -53,8 +53,8 @@ provide a health path. The current scheduler configuration runs one application
 instance per project. Periodic managed-storage usage collection is not
 implemented.
 
-Every command acts only on the resources named in your platform configuration,
-so unrelated servers and volumes in the same OpenStack project are left alone.
+Every command acts only on the resources your configuration names, so unrelated
+servers and volumes in the same OpenStack project are left alone.
 
 ## Set up your own deployment
 

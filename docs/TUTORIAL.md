@@ -2,8 +2,7 @@
 
 This tutorial takes a new operator from a private checkout to one verified
 HTTPS application and one verified PostgreSQL resource, then removes them. It
-It starts from a fresh SQLite database and freshly configured OpenStack
-resources, and touches only the resources your inventory names.
+starts from an empty database and freshly configured OpenStack resources.
 
 For the complete file formats, transfer paths, host contexts, and recovery
 rules, keep [OPERATIONS.md](OPERATIONS.md) open beside this tutorial. Commands

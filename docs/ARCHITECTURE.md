@@ -1,6 +1,6 @@
 # Platform architecture
 
-The platform hosts small HTTP applications in one OpenStack project. Persistent control and data services are isolated from replaceable workers and single-use builders. The control database starts empty and accepts only state created by this deployment. Every command in this repository acts only on the resources named in your platform configuration. Unrelated servers, volumes, and images that share the same OpenStack project are never inspected, changed, or deleted.
+The platform hosts small HTTP applications in one OpenStack project. Persistent control and data services are isolated from replaceable workers and single-use builders. The control database starts empty and accepts only state created by this deployment.
 
 In this documentation, an **OpenStack project** is the cloud tenant that owns infrastructure. An **application project** is one hosted application, its worker, deployments, and managed data.
 
@@ -20,7 +20,7 @@ All role images use one private `config/platform.json`, which provides the deplo
 
 ## Fresh deployment flow
 
-The operator first reconciles only the configured foundation, boots and verifies the three persistent roles, then installs matching management/helper releases. The first `openstack-platform status` invocation creates the empty SQLite schema and binds its marker to the deployment project UUID, namespace, and stable inventory identity. There is no import phase. Provider reconciliation can verify configured platform identities and accepted image candidates, but it does not copy an ambiguous replacement row into SQLite and does not inspect unrelated VMs. A copied database or restore from another deployment is rejected; normal image, flavor, version, checksum, and container upgrades do not change the marker.
+The operator first reconciles only the configured foundation, boots and verifies the three persistent roles, then installs matching management/helper releases. The first `openstack-platform status` invocation creates the empty SQLite schema and binds its marker to the deployment project UUID, namespace, and stable inventory identity. There is no import phase. Reconciliation reads the configured resources and accepted image candidates to confirm what exists; it never writes a record it did not create. A copied database or restore from another deployment is rejected; normal image, flavor, version, checksum, and container upgrades do not change the marker.
 
 For an application deployment, the control surface:
 

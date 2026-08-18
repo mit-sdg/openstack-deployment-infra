@@ -4,7 +4,7 @@ This procedure installs one committed Python 3.14 management release under
 `/srv/openstack-platform` and the matching helper release in admin persistent state. It is for
 release maintainers. It does not describe platform commands or feature behavior.
 
-Initialize a fresh database; do not copy a database or external declarations from another deployment. Every command in this repository acts only on the resources named in your platform configuration. Unrelated servers, volumes, and images that share the same OpenStack project are never inspected, changed, or deleted.
+Initialize a fresh database; do not copy a database or external declarations from another deployment.
 
 ## Prerequisites
 

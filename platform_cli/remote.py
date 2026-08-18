@@ -9,7 +9,7 @@ import shlex
 import uuid as uuid_module
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import PROTOCOL_VERSION
@@ -20,14 +20,31 @@ DEFAULT_REQUEST_LIMIT = 1_048_576
 DEFAULT_RESPONSE_LIMIT = 1_048_576
 DEFAULT_SSH_CONFIG = Path("/srv/openstack-platform/.secrets/ssh/config")
 SSH_TARGET = "platform-admin"
+HELPER_COMMAND_NAME = "openstack-platform-helper"
 SSH_COMMAND = (
     "ssh",
     "-F",
     str(DEFAULT_SSH_CONFIG),
     SSH_TARGET,
     "--",
-    "openstack-platform-helper",
+    HELPER_COMMAND_NAME,
 )
+
+
+def helper_command_path(deployment_root: str) -> str:
+    """Absolute path of the helper launcher inside the admin deployment root.
+
+    The launcher is linked into ``<paths.root>/bin`` by the role image and by
+    the helper release installer, but nothing puts that directory on the remote
+    login PATH. Addressing it by name therefore fails to resolve, so callers
+    pass the configured root and the helper is invoked by absolute path.
+    """
+    root = PurePosixPath(deployment_root)
+    if not root.is_absolute():
+        raise ValidationError("deployment root must be an absolute path")
+    return str(root / "bin" / HELPER_COMMAND_NAME)
+
+
 _ACTION = re.compile(r"[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+")
 _ENVIRONMENT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _REQUEST_KEYS = {"version", "requestId", "action", "args"}
@@ -132,7 +149,9 @@ def pinned_admin_scp(
 
 
 def helper_ssh_command(
-    *, ssh_config_path: str | os.PathLike[str] = DEFAULT_SSH_CONFIG
+    *,
+    ssh_config_path: str | os.PathLike[str] = DEFAULT_SSH_CONFIG,
+    helper_command: str = HELPER_COMMAND_NAME,
 ) -> tuple[str, ...]:
     return (
         "ssh",
@@ -140,7 +159,7 @@ def helper_ssh_command(
         _ssh_config_path(ssh_config_path),
         SSH_TARGET,
         "--",
-        "openstack-platform-helper",
+        helper_command,
     )
 
 
@@ -336,6 +355,7 @@ def call_helper(
     request_id: str | None = None,
     command_runner: Callable[..., Any] = run,
     ssh_config_path: str | os.PathLike[str] = DEFAULT_SSH_CONFIG,
+    helper_command: str = HELPER_COMMAND_NAME,
 ) -> Mapping[str, Any]:
     """Invoke exactly the pinned helper SSH command and return a non-secret result.
 
@@ -351,7 +371,7 @@ def call_helper(
     )
     try:
         completed = command_runner(
-            helper_ssh_command(ssh_config_path=ssh_config_path),
+            helper_ssh_command(ssh_config_path=ssh_config_path, helper_command=helper_command),
             timeout_seconds=timeout_seconds,
             stdin=payload,
             stdout_limit=response_limit + 1,

@@ -11,6 +11,8 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
+from platform_cli import remote as runtime_remote
+from platform_cli.validation import ValidationError
 from platform_cli import runtime
 from platform_cli.helper.main import (
     HelperActionError,
@@ -492,6 +494,31 @@ class BackupAcceptanceTests(unittest.TestCase):
                 )
             self.assertTrue(source.exists())
             self.assertFalse((root / name).exists())
+
+
+class HelperCommandPathTests(unittest.TestCase):
+    def test_the_helper_is_addressed_by_absolute_path(self) -> None:
+        # Nothing puts <paths.root>/bin on the remote login PATH, so invoking
+        # the launcher by bare name never resolves and every helper-backed
+        # command fails as an unavailable dependency.
+        self.assertEqual(
+            runtime_remote.helper_command_path("/srv/app-platform"),
+            "/srv/app-platform/bin/openstack-platform-helper",
+        )
+
+    def test_a_relative_root_is_refused(self) -> None:
+        with self.assertRaises(ValidationError):
+            runtime_remote.helper_command_path("srv/app-platform")
+
+    def test_the_ssh_command_carries_the_absolute_helper_path(self) -> None:
+        command = runtime_remote.helper_ssh_command(
+            helper_command="/srv/app-platform/bin/openstack-platform-helper"
+        )
+        self.assertEqual(command[-1], "/srv/app-platform/bin/openstack-platform-helper")
+        self.assertEqual(command[-3], "platform-admin")
+
+    def test_the_bare_name_remains_the_default(self) -> None:
+        self.assertEqual(runtime_remote.helper_ssh_command()[-1], "openstack-platform-helper")
 
 
 class BoundedHttpAgentTests(unittest.TestCase):
