@@ -11,12 +11,12 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
+from platform_cli import runtime
 from platform_cli.helper.main import (
     HelperActionError,
     accept_staged_backup,
     serve_once,
 )
-from platform_cli import runtime
 from platform_cli.remote import (
     DependencyUnavailable,
     ProtocolError,
@@ -505,7 +505,7 @@ class BoundedHttpAgentTests(unittest.TestCase):
             def read(self, _limit: int) -> bytes:
                 return b"ok"
 
-            def __enter__(self) -> "_Response":
+            def __enter__(self) -> _Response:
                 return self
 
             def __exit__(self, *_: object) -> None:
