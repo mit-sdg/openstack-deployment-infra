@@ -16,33 +16,29 @@ A deployment is created from scratch. Reconciliation may preserve safety evidenc
 | Generated Bun and Node recipes | Implemented and exercised by generated-recipe smoke tests |
 | Scheduler job rendering | Implemented as a constrained helper action |
 | Managed-service lifecycle | Implemented per type; credentials stay out of SQLite |
-| Backup and monitoring | M1 SQLite backup and managed-data backup/restore checks exist; usage collection does not |
+| Backup and monitoring | management-database backup and managed-data backup/restore checks exist; usage collection does not |
 | Production controller/API and authentication | Not implemented |
 | End-user portal and GitHub App | Not implemented |
 | Restart-safe reconciliation | Implemented for supported CLI mutations; no multi-user controller exists |
 
-## M1 — fresh staff control surface
+## Now — staff control surface
 
-Implemented scope:
+What works today:
 
 - empty-state SQLite records for images, applications, deployments, managed resources, environment ownership, and operations;
 - infrastructure and per-application serialization with phase-specific recovery;
 - fixed JSON protocol over pinned SSH to the constrained admin helper;
 - exact-commit Bun/Node deployment, immutable digests, health-gated acceptance, and disposable cleanup;
 - per-type managed-storage create, verify, rotate, and remove without credential transfer;
-- encrypted M1 SQLite backup and managed-data restore evidence; and
+- encrypted management-database backup and managed-data restore evidence; and
 - unprivileged release installation for management and helper entrypoints.
 
-Greenfield integration must complete these removals before release:
+Support for importing state from an earlier system was removed. The command
+tree no longer has an import command, there are no legacy compatibility
+branches, reconciliation never writes external rows into the database, and
+every provider operation is scoped to the configured platform.
 
-- [x] remove the historical import command and importer from the executable command tree;
-- [x] remove legacy image/deployment compatibility branches and legacy state names;
-- [x] reconcile provider resources without importing external rows;
-- [x] initialize a fresh database and verify that no external rows are present;
-- [x] preserve application recreation and recovery safeguards; and
-- [x] demonstrate that every provider operation is scoped to the configured platform.
-
-## M2 — identity, roster, and GitHub App
+## 1. Identity, roster, and GitHub App
 
 - institution-supported authentication;
 - student, staff, team, and project authorization;
@@ -52,7 +48,7 @@ Greenfield integration must complete these removals before release:
 
 Exit criteria: an authorized user can connect only an allowed repository/project; each delivery is idempotent per commit; revoked access blocks new work without deleting retained project state.
 
-## M3 — end-to-end orchestration
+## 2. End-to-end orchestration
 
 - allowlisted deployment-file validation;
 - exact source acquisition and immutable publication;
@@ -61,7 +57,7 @@ Exit criteria: an authorized user can connect only an allowed repository/project
 
 Exit criteria: a reviewed exact commit reaches a healthy HTTPS endpoint without operator intervention; failure leaves disposable compute deleted and diagnosable state; restart during any phase converges to a defined result.
 
-## M4 — managed services
+## 3. Managed services
 
 - controller operations for provision, attach, rotate, detach, and delete;
 - encrypted scoped credentials;
@@ -69,7 +65,7 @@ Exit criteria: a reviewed exact commit reaches a healthy HTTPS endpoint without 
 - partial-failure journals; and
 - backup catalogs linked to managed resources.
 
-## M5 — production portal
+## 4. Production portal
 
 - project/team dashboard;
 - repository connection and deployment progress;
@@ -77,7 +73,7 @@ Exit criteria: a reviewed exact commit reaches a healthy HTTPS endpoint without 
 - managed-service status, usage, rotation, and deletion; and
 - accessible asynchronous recovery states.
 
-## M6 — reliability and security
+## 5. Reliability and security
 
 - threat-model and privilege-boundary review;
 - secret-redaction, builder isolation, and workload isolation tests;
@@ -85,7 +81,7 @@ Exit criteria: a reviewed exact commit reaches a healthy HTTPS endpoint without 
 - provider/dependency fault injection; and
 - backup restoration and persistent-role recovery drills.
 
-## M7 — rollout
+## 6. Rollout
 
 1. validate a private reference application end to end;
 2. run a staff-only pilot;
@@ -94,4 +90,4 @@ Exit criteria: a reviewed exact commit reaches a healthy HTTPS endpoint without 
 5. publish student-facing documentation; and
 6. expand only after rollback and restore drills pass.
 
-The [acceptance checklist](ACCEPTANCE_CHECKLIST.md) is the evidence boundary for the fresh M1 deployment.
+The [acceptance checklist](ACCEPTANCE_CHECKLIST.md) is the evidence boundary for a fresh deployment.

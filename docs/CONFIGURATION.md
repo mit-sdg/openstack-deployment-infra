@@ -5,7 +5,7 @@ state; it is not a state-import format. No external rows are copied into the
 database, and only the resources named here are ever touched.
 
 `config/platform.json` in the operator's private repository is the deployment
-inventory used by role-image builds and repository tools. The installed M1
+inventory used by role-image builds and repository tools. The installed
 command reads its persistent copy at `/srv/openstack-platform/config/platform.json`, outside
 immutable release archives. This file contains deployment names and other
 non-secret settings. Start from
@@ -47,7 +47,7 @@ This prevents a checkout or management-host config from being used on a guest.
 | Field | Meaning |
 | --- | --- |
 | `project` | OpenStack project name. Lifecycle scripts refuse to run when `OS_PROJECT_NAME` differs. |
-| `projectId` | Stable canonical lowercase OpenStack project UUID. M1 mutations require it to match the authenticated token; provider helpers normalize compact provider output before comparison. |
+| `projectId` | Stable canonical lowercase OpenStack project UUID. Mutations require it to match the authenticated token; provider helpers normalize compact provider output before comparison. |
 | `displayName` | Human-readable platform name used in service descriptions, registry authentication, and the internal CA name. |
 | `organization` | Organization written to internal CA and leaf-certificate subjects. |
 | `prefix` | Prefix for OpenStack servers, ports, images, volumes, security groups, and related provider resources. |
@@ -71,31 +71,31 @@ This prevents a checkout or management-host config from being used on a guest.
 | `versions` | Nomad, Traefik, and BuildKit versions packaged in role images. |
 | `checksums` | SHA-256 checksums for downloaded Nomad, Traefik, and BuildKit archives; these are separate from the provider checksum verified when publishing a QCOW2. |
 | `containers` | Digest-pinned container images used by storage and ingress. |
-| `paths` | Persistent and runtime paths mounted or used by role services. The configured `backups` path is also the M1 SQLite backup root. |
+| `paths` | Persistent and runtime paths mounted or used by role services. The configured `backups` path is also the management-database backup root. |
 
-The management database is deployment-bound. Its greenfield marker hashes the
+The management database is deployment-bound. Its deployment marker hashes the
 project UUID, namespace, and a stable inventory projection containing resource
 names, network/address identity, volumes, paths, and PKI naming. Image, flavor,
 version, checksum, and container selections are intentionally excluded so
 normal image/release upgrades do not strand state. A copied database or restore
 candidate with a different stable identity is rejected before it can be used;
-changing those identity fields requires a new greenfield state, not a database
-copy.
+changing those identity fields means starting from a new database, not copying
+an existing one.
 
 The loader currently checks most top-level groups, the display and organization
 names, `namespace`, and the internal CA filename, but not every nested field.
 Keep the structure shown in the example, and run the checks at the end of this
 page after every change.
 
-## Private M1 policy
+## Private operator policy
 
 `config/platform-policy.json` is installed separately from the inventory and
 must be a direct current-user-owned mode-`0600` file. It contains:
 
 - `standard`, including worker flavor and managed-service targets;
 - `runtimeImages.bun` and `runtimeImages.node`, each pinned by OCI digest; and
-- `backupAgeRecipient`, a public `age1...` recipient used only to encrypt M1
-  SQLite backups.
+- `backupAgeRecipient`, a public `age1...` recipient used only to encrypt
+  management database backups.
 
 The recipient is not an age identity. Keep the matching
 `AGE-SECRET-KEY-...` file in operator custody outside Git and outside the
@@ -138,7 +138,7 @@ The namespace is used in:
 - readiness markers.
 
 Every image and control-plane component in a deployment must use the same
-namespace. In a greenfield deployment, changing it selects a new resource and
+namespace. Changing it selects a new resource and
 state namespace; it does not copy state from another namespace.
 
 ### Application slugs
@@ -259,7 +259,7 @@ by the images. Changing a path does not move existing data.
 Backup placement is derived from `paths.backups`, not from a hard-coded host
 path:
 
-- M1 CLI uploads stage at `<paths.backups>/m1/.staging/` and accepted encrypted
+- The CLI stages uploads at `<paths.backups>/m1/.staging/` and accepted encrypted
   SQLite files and their `.sha256`/`.manifest` evidence live at
   `<paths.backups>/m1/`. The manifest is the commit marker: ciphertext and
   checksum are durable before its final rename, and retention counts only
@@ -268,7 +268,7 @@ path:
 - The admin managed-data scripts write timestamped directories at
   `<paths.backups>/<namespace>/`.
 
-The M1 policy's `backupAgeRecipient` encrypts SQLite on the management host.
+The policy's `backupAgeRecipient` encrypts SQLite on the management host.
 The matching private age identity is not configuration and must remain in
 operator custody. The admin managed-data scripts use the packaged
 `<paths.root>/bin/age` and `<paths.root>/bin/age-keygen` with their separate

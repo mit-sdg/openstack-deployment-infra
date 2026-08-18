@@ -144,9 +144,9 @@ observable result passed, not merely that a command exited zero.
 
 ## Backups, restore, upgrade, and cleanup
 
-- [ ] **BACKUP-01** `openstack-platform backup` produces an age-v1 M1 SQLite
-  ciphertext accepted under `<paths.backups>/m1`, with checksum and manifest
-  evidence. The manifest is the commit marker and retention counts only
+- [ ] **BACKUP-01** `openstack-platform backup` produces an age-v1 encrypted
+  management database accepted under `<paths.backups>/m1`, with checksum and
+  manifest evidence. The manifest is the commit marker and retention counts only
   complete ciphertext/checksum/manifest trios. Evidence includes the output
   name/SHA-256 and private file metadata, not database content. Verify
   `/srv/openstack-platform/bin/age --version` and the configured staging path
@@ -163,7 +163,7 @@ observable result passed, not merely that a command exited zero.
     "$PLATFORM_ROOT/infra/backup/verify_latest_restore.sh"
   ```
 
-- [ ] **BACKUP-03** M1 offline restore is rehearsed with the operator age
+- [ ] **BACKUP-03** Offline restore is rehearsed with the operator age
   identity and `--yes` through the installed fixed-destination
   `openstack-platform-restore` launcher. Evidence:
   `restore=verified schema-version=... integrity=ok`, destination mode `0600`,

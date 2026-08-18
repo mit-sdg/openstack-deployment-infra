@@ -1,4 +1,4 @@
-# Frozen M1 foundation interfaces
+# Frozen foundation interfaces
 
 Status: frozen branch-point contract for infrastructure, application, storage,
 read/status, packaging, and CLI integration owners.
@@ -46,7 +46,7 @@ The accepted runtime locations remain:
   complete paths match the management inventory before upload and installation.
 
 `/srv/openstack-platform/config/platform.json` must contain the real stable `projectId` before
-an installed M1 command uses it. Install it from the operator's private
+an installed command uses it. Install it from the operator's private
 repository, never from the immutable Git archive. Do not substitute the example
 UUID or infer it from the project name.
 
@@ -73,7 +73,7 @@ config.platform_config_identity(platform: config.PlatformConfig) -> str
 `Config`, `PlatformConfig`, `StandardProfile`, `RuntimeImages`, `Limits`, and
 `Policy` are the frozen, immutable records returned by these calls. Callers use
 snake-case attributes, not the source JSON spelling. `platform_config_identity`
-hashes the stable deployment inventory used to bind M1 state; image/flavor,
+hashes the stable deployment inventory used to bind management state; image/flavor,
 version, checksum, and container selections are excluded. Inventory
 escape-hatch lookups use `PlatformConfig.get(dotted_name: str) -> Any`.
 

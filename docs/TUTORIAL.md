@@ -21,7 +21,7 @@ You need:
 - Nix/QEMU for image evaluation and tests;
 - a management host with the unprivileged `/srv/openstack-platform` owner;
 - a public DNS/TLS/forwarding service that preserves `Host`; and
-- custody for the M1 and admin managed-data age identities.
+- custody for the backup and managed-data age identities.
 
 Cloudflare Tunnel is the reference provider, but its token and DNS account are
 external inputs. See [PUBLIC_INGRESS.md](PUBLIC_INGRESS.md).
@@ -54,7 +54,7 @@ export AGE_STORE="$(nix build --no-link --print-out-paths .#age)"
 
 Replace all example identities, UUIDs, addresses, paths, image digests, and
 age recipient in the private JSON files. Generate the operator keys, exact
-admin/storage secret files, M1 age identity, and internal PKI as shown in
+admin/storage secret files, backup age identity, and internal PKI as shown in
 [OPERATIONS.md](OPERATIONS.md#generate-operator-keys-age-identity-and-bootstrap-files).
 Derive configuration-dependent values only after saving those edits, and
 create the protected OpenStack environment/wrapper from
@@ -177,7 +177,7 @@ test "$(tail -n1 <<<"$helper_output")" = "helper-release=$commit:verified"
 ```
 
 The helper deployment and CLI must use the generated `platform-admin` bridge. The
-first status invocation creates the empty M1 schema. This is the first verified
+first status invocation creates the empty management schema. This is the first verified
 control-plane result:
 
 ```bash
@@ -239,7 +239,7 @@ values are targets, not collected usage.
 
 ## 6. Back up, restore-check, and clean up
 
-M1 SQLite backup runs on management and uses the policy recipient; managed-data
+The management-database backup runs on the management host and uses the policy recipient; managed-data
 backup and restore verification run on admin. Do not run the latter scripts
 from the checkout:
 
@@ -272,12 +272,12 @@ grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' <<<"$
 ```
 
 The expected managed-data result is `latest platform restore=verified` and a
-mode-`0600` `RESTORE-MANIFEST`. M1 accepted files are under
+mode-`0600` `RESTORE-MANIFEST`. Accepted backup files are under
 `<paths.backups>/m1`; managed-data directories are under
 `<paths.backups>/<namespace>`. The two backup classes use different custody
 paths and must not be confused.
 
-To test M1 recovery, stop the management timer, copy an accepted encrypted
+To test recovery, stop the management timer, copy an accepted encrypted
 file to a direct mode-`0600` private path, and run the offline tool:
 
 ```bash
@@ -285,7 +285,7 @@ systemctl --user stop openstack-platform-backup.timer openstack-platform-backup.
 restore_output="$(
   /srv/openstack-platform/bin/openstack-platform-restore \
     /private/path/platform-YYYYMMDDTHHMMSSZ.sqlite3.age \
-    --age-identity /private/path/m1-age-identity.txt --yes
+    --age-identity /private/path/backup-age-identity.txt --yes
 )"
 printf '%s\n' "$restore_output"
 grep -Eq '^restore=verified schema-version=[0-9]+ integrity=ok$' <<<"$restore_output"

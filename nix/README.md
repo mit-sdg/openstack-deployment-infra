@@ -204,7 +204,7 @@ run one replacement at a time from the management host:
 
 Use `admin`, `ingress`, or `storage` as the role. Before replacing storage,
 complete a fresh managed-data restore check; before replacing admin, complete a
-fresh M1 backup. The command retains the old server, fixed port, and volumes
+fresh management-database backup. The command retains the old server, fixed port, and volumes
 until readiness passes, then removes only the retained old host. If readiness
 fails it restores the prior host. An ambiguous provider result is
 `recovery-required`; rerun the same CLI operation after restoring its named

@@ -16,7 +16,7 @@ In this documentation, an **OpenStack project** is the cloud tenant that owns in
 | `worker` | replaceable | Runs one application's allocation | None |
 | `builder` | single use | Builds one source snapshot with rootless BuildKit | None |
 
-All role images use one private `config/platform.json`, which provides the deployment identity, resource names, addresses, versions, image names, volume labels, and paths. The private M1 policy supplies the standard worker and managed-storage profile and runtime image digests.
+All role images use one private `config/platform.json`, which provides the deployment identity, resource names, addresses, versions, image names, volume labels, and paths. The private operator policy supplies the standard worker and managed-storage profile and runtime image digests.
 
 ## Fresh deployment flow
 
@@ -46,7 +46,13 @@ Workers have no SSH service, deny metadata access, and accept application traffi
 
 The admin state volume holds Nomad, helper, and control-plane state. The storage volume holds managed services and registry data. The backup volume holds encrypted logical backups. Managed-service credentials are scoped per application and synchronized through owner-specific Nomad Variable keys; credential values never enter management SQLite.
 
-M1 SQLite backup is separate from PostgreSQL, MongoDB, and Garage logical backups. The M1 backup is encrypted to the policy age recipient and accepted under the configured backup root. Its manifest is the commit marker: ciphertext and checksum are fsynced before the final manifest rename, and retention counts only complete evidence trios; retries reconcile pre-commit interruption without treating partial files as accepted. It can be verified/replaced only by the offline restore tool. Offline restore contacts no provider: it validates a private temporary candidate, refuses a deployment-identity mismatch, corrupt/future/non-M1 or unfinished state, then atomically replaces the SQLite file and requires post-restore live reconciliation. The managed-data restore check runs on admin in temporary containers and writes evidence only after checksum and content checks pass. Registry blobs are rebuilt from source rather than included in the logical backup.
+The management database is backed up separately from PostgreSQL, MongoDB, and Garage. Each backup is encrypted to the policy's age recipient and written under the configured backup root.
+
+A backup counts as accepted only once its manifest exists. The ciphertext and checksum are fsynced before the manifest is renamed into place, so an interrupted run leaves partial files that the next run cleans up rather than mistaking for a real backup. Retention only ever deletes complete sets.
+
+Restoring is deliberately offline and contacts no provider. It unpacks the backup into a private temporary file and checks it before touching anything: a backup from a different deployment is refused, as is one that is corrupt, unfinished, or written by a newer version. Only then does it replace the database, atomically. Live state must be reconciled afterwards.
+
+Managed data is checked separately. That check runs on admin in throwaway containers and records evidence only after the restored contents match their checksums. Registry blobs are not backed up at all; they are rebuilt from source.
 
 ## Public ingress
 
@@ -54,7 +60,7 @@ A public service supplies DNS and HTTPS, forwards to ingress port 80, preserves 
 
 ## Capacity and application policy
 
-M1 supports one allocation per application. Applications use Bun or Node, one HTTP port, and one health path. Generated recipes select digest-pinned runtime images and set `NODE_ENV=production`. One private standard profile supplies worker flavor, 1,000 scheduler CPU MHz, memory, PostgreSQL connections, monitored database targets, and S3 quotas. PostgreSQL and MongoDB measured-byte values are targets rather than hard quotas, and no periodic usage measurement is installed.
+The platform runs one allocation per application. Applications use Bun or Node, one HTTP port, and one health path. Generated recipes select digest-pinned runtime images and set `NODE_ENV=production`. One private standard profile supplies worker flavor, 1,000 scheduler CPU MHz, memory, PostgreSQL connections, monitored database targets, and S3 quotas. PostgreSQL and MongoDB measured-byte values are targets rather than hard quotas, and no periodic usage measurement is installed.
 
 ## Failure and recovery boundaries
 

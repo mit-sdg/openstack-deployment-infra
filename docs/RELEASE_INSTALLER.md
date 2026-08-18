@@ -58,7 +58,7 @@ The bootstrap script downloads the exact x86-64 uv 0.12.2 archive, verifies its
 checked-in SHA-256, and asks that pinned uv to install exact CPython 3.14.7 under
 `/srv/openstack-platform/runtime`. It also validates a system-managed age executable, or the
 Nix `.#age` output when `PLATFORM_AGE_COMMAND` is supplied, and atomically
-links the verified executable as `/srv/openstack-platform/bin/age`. The M1 CLI searches that
+links the verified executable as `/srv/openstack-platform/bin/age`. The CLI searches that
 link before `/usr/bin/age` and `/bin/age`. It refuses an age executable that is
 not a root/current-user-owned, non-writable regular file. It refuses root and
 sudo. Subsequent releases reuse these stable paths and do not require access
@@ -134,7 +134,7 @@ test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- \
 The generated alias pins user `agentops`, the configured admin address,
 ED25519 host keys, strict host-key checking, no password or agent forwarding,
 and bounded connection attempts. The management CLI, helper deployment, and
-M1 backup transfer all use this alias and path.
+and management-database backup transfer all use this alias and path.
 
 ## Install the management release
 
@@ -178,7 +178,7 @@ and verifies both files before each invocation. It also verifies and explicitly
 selects the protected `/srv/openstack-platform/bin/platform-openstack` wrapper; it never assumes an
 `openstack` command is on `PATH`, and it does not export credentials. Private
 state and logs are under `/srv/openstack-platform/state` with mode `0700`.
-The installed inventory binds the SQLite greenfield marker to the deployment's
+The installed inventory binds the database's deployment marker to the
 project, namespace, stable resource inventory, and state paths, so an offline
 restore from another deployment is refused before replacement.
 
@@ -206,7 +206,7 @@ command against the private repository:
 
 The timer explicitly supplies `/srv/openstack-platform/config/platform.json`, the stable state
 directory, and the private policy path to the ordinary `platform backup`
-command. That command derives the remote M1 staging path from
+command. That command derives the remote staging path from
 `paths.backups` as `<paths.backups>/m1/.staging/<name>`; the helper accepts it
 into `<paths.backups>/m1/<name>` and writes checksum/manifest evidence. It does
 not copy a live WAL file and does not replace the existing PostgreSQL,
@@ -330,4 +330,4 @@ Do not select a directory without a matching `.complete` file.
   mode `0600`; do not relax the launcher check.
 - **The user timer cannot connect to systemd**: verify the management account's
   user manager and linger state, then rerun with `--enable-backup-timer`. Do not
-  install this M1 timer as root merely to bypass a missing user session.
+  install this timer as root merely to bypass a missing user session.

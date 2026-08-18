@@ -259,7 +259,7 @@ candidate cleanup is bounded recovery, not a manual job-history rollback.
 
 ## Backups and restore
 
-**Symptom:** M1 `backup` cannot stage or accept a file.
+**Symptom:** `backup` cannot stage or accept a file.
 
 **Evidence:** Check the configured root and metadata without listing content:
 
@@ -314,7 +314,7 @@ storage service. Rerun those exact admin commands, keeping their path
 overrides. Keep failed archives; never overwrite live databases with an
 unverified archive.
 
-**Symptom:** offline M1 restore refuses the backup.
+**Symptom:** offline restore refuses the backup.
 
 **Evidence:** The error names a private file mode/owner, age identity, schema,
 integrity, WAL/SHM sidecar, unfinished operation, deployment identity, lock,
@@ -330,7 +330,7 @@ the managed destination and reports a verified schema/integrity result:
 restore_output="$(
   /srv/openstack-platform/bin/openstack-platform-restore \
     /private/path/accepted.sqlite3.age \
-    --age-identity /private/path/m1-age-identity.txt --yes
+    --age-identity /private/path/backup-age-identity.txt --yes
 )"
 printf '%s\n' "$restore_output"
 grep -Eq '^restore=verified schema-version=[0-9]+ integrity=ok$' <<<"$restore_output"

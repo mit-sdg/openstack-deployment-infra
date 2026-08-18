@@ -65,7 +65,7 @@ openstack-platform infra replace admin|ingress|storage --yes
 openstack-platform infra logs admin|ingress|storage [--lines COUNT]
 ```
 
-Image selection resolves a provider image and records its UUID, full source commit, and compatibility hash. A greenfield deployment must select complete accepted images; incomplete metadata is rejected.
+Image selection resolves a provider image and records its UUID, full source commit, and compatibility hash. Selection requires complete, accepted images; incomplete metadata is rejected.
 
 Image pruning is plan-first. The plan protects selected images, images named by
 unfinished operations, images referenced by servers, and the newest bounded
@@ -133,7 +133,7 @@ Create generates scoped credentials in the helper, verifies access and applicati
 
 Do not create credential JSON, synchronize whole Nomad Variables, or use provider administrator credentials as a substitute for these commands.
 
-## Back up and restore M1 state
+## Back up and restore management state
 
 ```text
 openstack-platform backup
@@ -152,7 +152,7 @@ fsynced after each rename. Readers and retention count only complete evidence
 trios. A retry reconciles a ciphertext/evidence move interrupted before the
 manifest appeared; a malformed set that already has a manifest is refused,
 not silently repaired. `paths.backups` is read from the installed inventory and
-is not a fixed management or checkout path. M1 backup does not include managed
+is not a fixed management or checkout path. This backup does not include managed
 data.
 
 `restore` is an offline operation. Global options must precede `restore`:
@@ -160,7 +160,7 @@ data.
 ```text
 openstack-platform --state-directory /srv/openstack-platform/state \
   restore /private/path/platform-YYYYMMDDTHHMMSSZ.sqlite3.age \
-  --age-identity /private/path/m1-age-identity.txt --yes
+  --age-identity /private/path/backup-age-identity.txt --yes
 ```
 
 An installed management release also provides the preferred fixed-destination
@@ -169,18 +169,19 @@ launcher:
 ```text
 /srv/openstack-platform/bin/openstack-platform-restore \
   /private/path/platform-YYYYMMDDTHHMMSSZ.sqlite3.age \
-  --age-identity /private/path/m1-age-identity.txt --yes
+  --age-identity /private/path/backup-age-identity.txt --yes
 ```
 
 It always targets `/srv/openstack-platform/state/platform.sqlite3`; do not pass
 `--destination` to this launcher. It contacts no provider, helper, SSH, Nomad,
 or network service. It requires private direct mode-`0600` source/identity files
 and a private mode-`0700` destination directory, decrypts/validates a temporary
-candidate, checks the current deployment-bound M1 marker, known schema, SQLite
+candidate, checks the current deployment-bound marker, known schema, SQLite
 integrity, foreign keys, and unfinished operations, and then atomically replaces
 the destination. A backup from a different project, namespace, stable resource
 inventory, or state-path identity is refused; the existing database is left
-unchanged. Corrupt, future, non-M1, unsafe, busy, or unfinished state is also
+unchanged. Corrupt, future, unrecognized, unsafe, busy, or unfinished state
+is also
 refused. It does not restore provider resources or import external rows; run
 `status` and the read commands afterward to reconcile live observations. The
 fixed launcher supplies the installed inventory and destination, so do not

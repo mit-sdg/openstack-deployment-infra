@@ -25,7 +25,7 @@ A deployment starts from an empty management database; the tooling creates its o
 ## Understand the design
 
 - [Architecture](ARCHITECTURE.md) — roles, state ownership, isolation, and failure boundaries.
-- [Roadmap](ROADMAP.md) — implemented M1 scope, greenfield reset, and later work.
+- [Roadmap](ROADMAP.md) — what is implemented today and what comes next.
 
 ## Verify acceptance
 

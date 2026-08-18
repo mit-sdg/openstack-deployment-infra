@@ -1,6 +1,6 @@
 # Provision, operate, back up, restore, and remove a fresh deployment
 
-This is the end-to-end M1 procedure for a new OpenStack project. It assumes the
+This is the end-to-end procedure for a new OpenStack project. It assumes the
 repository is at the reviewed commit, an empty management state directory, and
 no records to migrate. It is intentionally explicit about where commands run:
 
@@ -26,7 +26,7 @@ The following inputs cannot be supplied by this repository:
 | --- | --- | --- |
 | OpenStack authentication (`OS_AUTH_URL`, account/credential, domain, and the configured project) | foundation, image publication, and host lifecycle | Keep in a mode-`0600` environment file and a protected wrapper. Verify only the token project ID and project name; never print the credential. |
 | Cloudflare Tunnel token, when `ENABLE_CLOUDFLARED=true` | ingress config-drive payload | Keep in a direct mode-`0600` one-token file. Verify the public hostname and HTTPS health route, never the token. An external ingress provider may be used with `false`. |
-| M1 age identity | decrypting an offline management SQLite backup | Keep the `AGE-SECRET-KEY-...` file outside Git and outside SQLite, in an offline/escrowed operator record. Verify file ownership and mode only. |
+| Backup age identity | decrypting an offline management SQLite backup | Keep the `AGE-SECRET-KEY-...` file outside Git and outside SQLite, in an offline/escrowed operator record. Verify file ownership and mode only. |
 | Admin managed-data age identity | encrypting and verifying PostgreSQL, MongoDB, and Garage backups | Keep `/paths.root/persistent/secrets/backup-age-key.txt` on admin and escrow a protected copy before relying on the backups. Verify its mode without reading it. |
 
 `<PUBLIC_EXAMPLE>` means a value that must be replaced with a real, non-secret
@@ -65,7 +65,7 @@ export PLATFORM_POLICY="$PWD/config/platform-policy.json"
 Edit both private JSON files. Replace every example project, UUID, network,
 address, host, resource name, flavor, domain, path, runtime digest, and age
 recipient. `platform.json` contains deployment identity and paths, not
-credentials. `platform-policy.json` contains the public M1 age recipient and
+credentials. `platform-policy.json` contains the public backup age recipient and
 runtime image digests, not the private age identity or service credentials.
 The project name and UUID must identify the same authenticated OpenStack
 project. See [CONFIGURATION.md](CONFIGURATION.md) for the field contract.
@@ -98,16 +98,16 @@ private half must later be installed as
 `/home/agentops/.ssh/id_ed25519` on admin, mode `0600`, unless an equivalent
 admin-local SSH identity is already configured.
 
-Generate the M1 identity with the packaged Nix age derivation before installing
-management. The identity file is private; only its recipient belongs in the
-policy:
+Generate the backup age identity with the packaged Nix age derivation before
+installing management. The identity file is private; only its recipient
+belongs in the policy:
 
 ```bash
 AGE_STORE="$(nix build --no-link --print-out-paths .#age)"
-export M1_AGE_IDENTITY="$PRIVATE_BOOTSTRAP/m1-age-identity.txt"
-"$AGE_STORE/bin/age-keygen" -o "$M1_AGE_IDENTITY" >/dev/null
-chmod 0600 "$M1_AGE_IDENTITY"
-export M1_AGE_RECIPIENT="$(awk '$1 == "#" && $2 == "public" && $3 == "key:" { print $4; exit }' "$M1_AGE_IDENTITY")"
+export BACKUP_AGE_IDENTITY="$PRIVATE_BOOTSTRAP/backup-age-identity.txt"
+"$AGE_STORE/bin/age-keygen" -o "$BACKUP_AGE_IDENTITY" >/dev/null
+chmod 0600 "$BACKUP_AGE_IDENTITY"
+export M1_AGE_RECIPIENT="$(awk '$1 == "#" && $2 == "public" && $3 == "key:" { print $4; exit }' "$BACKUP_AGE_IDENTITY")"
 case "$M1_AGE_RECIPIENT" in age1*) ;; *) exit 1 ;; esac
 ```
 
@@ -606,7 +606,7 @@ A live admin `/etc/<namespace>/platform.json` may be the NixOS symlink to a root
 non-writable regular file under `/nix/store`; never replace it with the
 management copy.
 
-The first CLI invocation creates the fresh greenfield SQLite schema. Verify it
+The first CLI invocation creates the empty schema. Verify it
 before selecting images or creating an application:
 
 ```bash
@@ -712,11 +712,11 @@ the same control surface:
 ```
 
 PostgreSQL and MongoDB measured-byte values are configured targets, not usage
-observations; M1 installs no periodic usage collector.
+observations; no periodic usage collector is installed.
 
 ## 7. Back up, restore, and reconcile
 
-### M1 SQLite backup placement
+### Where management-database backups go
 
 Run this on the **management host** as the unprivileged `/srv/openstack-platform` owner:
 
@@ -752,12 +752,12 @@ counted by retention. The accepted paths are:
 `<paths.backups>` comes only from the installed inventory; it is not a fixed
 `/srv/openstack-platform` or checkout path. The output contains the backup name and
 ciphertext checksum, not database or credential content. The management user
-timer runs this M1 operation daily at 02:45 UTC with a 30-minute randomized
+The timer runs this operation daily at 02:45 UTC with a 30-minute randomized
 delay. Verify the timer and the accepted evidence with private file metadata;
 do not list or print credentials.
 
-M1 backups contain M1 SQLite only. They do not contain PostgreSQL, MongoDB,
-Garage objects, registry blobs, or an age identity. Registry blobs are rebuilt
+These backups contain the management database only. They do not contain
+PostgreSQL, MongoDB, Garage objects, registry blobs, or an age identity. Registry blobs are rebuilt
 from source.
 
 ### Managed-data backup and restore check on admin
@@ -832,16 +832,16 @@ The first command creates encrypted `postgres.age`, `mongodb.age`, and
 and `SHA256SUMS`. The admin role also has its own
 `<namespace>-platform-backup.timer` for this managed-data job (03:15 UTC with a
 30-minute randomized delay); the management `openstack-platform-backup.timer` is
-M1 SQLite only. It decrypts each archive only into the temporary restore
+the management database only. It decrypts each archive only into the temporary restore
 check. The second command starts temporary PostgreSQL and MongoDB containers,
 checks the Garage catalog/payload archive, removes the temporary containers on
 success or failure, and atomically writes mode-`0600` `RESTORE-MANIFEST` only
 when all checks pass. It never overwrites live services. The expected final
 line is `latest platform restore=verified .../RESTORE-MANIFEST`.
 
-### Offline M1 SQLite restore
+### Offline management-database restore
 
-The stable CLI has an offline restore operation. Copy an accepted M1 ciphertext
+The stable CLI has an offline restore operation. Copy an accepted ciphertext
 from admin to a private mode-`0600` file on the management host; do not use the
 staging file while an upload is in progress:
 
@@ -866,7 +866,7 @@ systemctl --user stop openstack-platform-backup.timer openstack-platform-backup.
 restore_output="$(
   /srv/openstack-platform/bin/openstack-platform-restore \
     "$BACKUP_COPY" \
-    --age-identity "$M1_AGE_IDENTITY" \
+    --age-identity "$BACKUP_AGE_IDENTITY" \
     --yes
 )"
 printf '%s\n' "$restore_output"
@@ -877,7 +877,7 @@ The operation is offline: it contacts no OpenStack, SSH helper, Nomad,
 provider, or network service. It accepts an age-v1 ciphertext (or a private,
 mode-`0600` SQLite file for controlled offline testing), decrypts to a private
 temporary file, checks that its deployment-bound marker matches the installed
-project/namespace/stable inventory identity, migrates only known older M1
+project/namespace/stable inventory identity, migrates only known older
 schemas, checks schema shape, SQLite integrity, foreign keys, and unfinished
 operations, then uses `os.replace` and a directory `fsync` for the destination.
 A copied backup from another deployment or an older unbound backup is refused
@@ -887,7 +887,7 @@ change the marker, but changing
 stable resource names, paths, namespace, or project identity does.
 
 It refuses a missing/unsafe identity, symlink or wrong-owner/mode source,
-future/unknown/corrupt/non-M1 SQLite, a deployment-identity mismatch, an
+future, unknown, or corrupt state, a deployment-identity mismatch, an
 unfinished operation in either source or current database, a busy database
 lock, source equal to destination, unsafe state directory, or a file over the
 configured 1 GiB limit. It also refuses unsafe WAL/SHM sidecars. Do not bypass
@@ -919,7 +919,7 @@ install -d -m 0700 /private/path/offline-state
 /srv/openstack-platform/bin/openstack-platform \
   --state-directory /private/path/offline-state \
   restore "$BACKUP_COPY" \
-  --age-identity "$M1_AGE_IDENTITY" \
+  --age-identity "$BACKUP_AGE_IDENTITY" \
   --yes
 ```
 
@@ -949,7 +949,7 @@ readiness failure it restores the prior host. An ambiguous provider result is
 `recovery-required`: inspect the recorded operation and rerun the same command.
 Never delete the old persistent server first, detach a volume by name, or create
 a replacement manually. Run a fresh managed-data restore check before
-replacing storage and a fresh M1 backup before replacing admin.
+replacing storage and a fresh management-database backup before replacing admin.
 
 Upgrade management/helper releases with the installer from a clean full commit.
 It atomically selects only a complete release; retain the previous complete
@@ -1021,7 +1021,7 @@ payloads, and age identities out of tracked evidence.
 - Public health failure: test the exact DNS name, trusted certificate,
   preserved `Host`, ingress route, Nomad allocation, and application health
   path separately.
-- M1 backup failure: inspect only safe file metadata and the fixed staging/
+- Management-database backup failure: inspect only safe file metadata and the fixed staging/
   accepted paths; verify `/srv/openstack-platform/bin/age`, the policy recipient, bridge, and
   backup volume, then emit a new backup. Do not copy a live WAL file.
 - Managed restore failure: run the check again on admin, not management; keep

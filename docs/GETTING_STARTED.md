@@ -17,7 +17,7 @@ You need:
 - Nix with flakes enabled and an `x86_64-linux` builder;
 - Python 3.14 with the OpenStack SDK for foundation reconciliation, plus uv 0.12.2 for the locked repository environment;
 - OpenStack credentials kept in a private mode-`0600` environment file and protected wrapper;
-- an operator-controlled age identity for M1 offline restore;
+- an operator-controlled age identity for offline restore;
 - a Cloudflare token and DNS/TLS account, or another provider meeting [the ingress contract](PUBLIC_INGRESS.md); and
 - a management SSH key whose public half can be installed on the admin role.
 
