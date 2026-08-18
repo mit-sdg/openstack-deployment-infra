@@ -1738,7 +1738,7 @@ def _console_marker_counts(
 ) -> tuple[int, int]:
     assert host.server_id is not None
     result = _run(
-        ("console", "log", "show", "--lines", "2000", host.server_id),
+        ("console", "log", "show", "--lines", str(_CONSOLE_READINESS_LINES), host.server_id),
         timeout_seconds=timeout_seconds,
         command_runner=command_runner,
         executable=executable,
@@ -2271,7 +2271,7 @@ def _wait_console_ready(
     while True:
         remaining = _deadline_remaining(deadline, operation=f"{host.role} console readiness")
         result = _run(
-            ("console", "log", "show", "--lines", "400", host.server_id),
+            ("console", "log", "show", "--lines", str(_CONSOLE_READINESS_LINES), host.server_id),
             timeout_seconds=min(timeout_seconds, remaining),
             command_runner=command_runner,
             executable=executable,
@@ -2304,7 +2304,7 @@ def _pin_admin_host_key(
     assert host.server_id is not None
     remaining = _deadline_remaining(deadline, operation="admin host-key verification")
     console = _run(
-        ("console", "log", "show", "--lines", "400", host.server_id),
+        ("console", "log", "show", "--lines", str(_CONSOLE_READINESS_LINES), host.server_id),
         timeout_seconds=min(timeout_seconds, remaining),
         command_runner=command_runner,
         executable=executable,
@@ -2649,52 +2649,59 @@ def _rollback_replacement(
             refs={**full_refs, "replacement_server_id": replacement_id},
         )
     if resources.host.status == "ACTIVE":
-        baseline_ready, baseline_failed = _console_marker_counts(
-            platform,
-            restored.host,
-            timeout_seconds=timeout_seconds,
-            command_runner=command_runner,
-            executable=executable,
-        )
         try:
-            _run(
-                ("server", "start", old_id),
-                timeout_seconds=timeout_seconds,
-                command_runner=command_runner,
-                executable=executable,
-            )
-            old_host = _wait_host_status(
-                PersistentHost(
-                    resources.host.role,
-                    old_name,
-                    old_id,
-                    None,
-                    resources.host.image_id,
-                    resources.host.flavor_id,
-                    resources.host.flavor_name,
-                    (),
-                ),
-                "ACTIVE",
-                deadline=deadline,
-                poll_interval_seconds=poll_interval_seconds,
-                timeout_seconds=timeout_seconds,
-                command_runner=command_runner,
-                executable=executable,
-                sleep=sleep,
-            )
+            if restored.host.status == "ACTIVE":
+                # Rollback left the prior host running, so it never rebooted and
+                # will never emit another readiness marker. Waiting for one would
+                # only burn the deadline and then report a healthy host as
+                # unverified. Its current health is proven below instead.
+                old_host = restored.host
+            else:
+                baseline_ready, baseline_failed = _console_marker_counts(
+                    platform,
+                    restored.host,
+                    timeout_seconds=timeout_seconds,
+                    command_runner=command_runner,
+                    executable=executable,
+                )
+                _run(
+                    ("server", "start", old_id),
+                    timeout_seconds=timeout_seconds,
+                    command_runner=command_runner,
+                    executable=executable,
+                )
+                old_host = _wait_host_status(
+                    PersistentHost(
+                        resources.host.role,
+                        old_name,
+                        old_id,
+                        None,
+                        resources.host.image_id,
+                        resources.host.flavor_id,
+                        resources.host.flavor_name,
+                        (),
+                    ),
+                    "ACTIVE",
+                    deadline=deadline,
+                    poll_interval_seconds=poll_interval_seconds,
+                    timeout_seconds=timeout_seconds,
+                    command_runner=command_runner,
+                    executable=executable,
+                    sleep=sleep,
+                )
+                _wait_console_ready(
+                    platform,
+                    old_host,
+                    minimum_ready_markers=baseline_ready + 1,
+                    minimum_failure_markers=baseline_failed + 1,
+                    deadline=deadline,
+                    poll_interval_seconds=poll_interval_seconds,
+                    timeout_seconds=timeout_seconds,
+                    command_runner=command_runner,
+                    executable=executable,
+                    sleep=sleep,
+                )
             remaining = _deadline_remaining(deadline, operation="rollback health")
-            _wait_console_ready(
-                platform,
-                old_host,
-                minimum_ready_markers=baseline_ready + 1,
-                minimum_failure_markers=baseline_failed + 1,
-                deadline=deadline,
-                poll_interval_seconds=poll_interval_seconds,
-                timeout_seconds=timeout_seconds,
-                command_runner=command_runner,
-                executable=executable,
-                sleep=sleep,
-            )
             _pin_admin_host_key(
                 platform,
                 old_host,

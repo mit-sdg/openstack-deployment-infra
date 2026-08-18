@@ -1192,6 +1192,39 @@ else:
             all(self.platform.namespace.encode() in item for item in pinned_console_outputs)
         )
 
+    def test_rollback_of_a_still_running_host_does_not_await_a_new_boot_marker(self) -> None:
+        # The prior host stays ACTIVE through rollback, so it never reboots and
+        # emits no further readiness marker. Requiring one made rollback report
+        # a healthy, serving host as unverified once its original marker had
+        # scrolled out of the bounded console window.
+        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        cloud.ready_markers[SERVER] = 0  # original marker already aged out
+        health_checked: list[str] = []
+
+        def health(_role: str, host: openstack.PersistentHost, _remaining: float) -> None:
+            if host.server_id == REPLACEMENT:
+                raise openstack.OpenStackError("fixed safe readiness failure")
+            health_checked.append(str(host.server_id))
+
+        with protected_user_data() as user_data_path:
+            replaced = openstack.replace_host(
+                self.platform,
+                "ingress",
+                selected_image_id=IMAGE_1,
+                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
+                operation_id=OPERATION,
+                user_data_path=user_data_path,
+                checkpoint=lambda *_: None,
+                health_check=health,
+                command_runner=cloud,
+            )
+
+        # Rollback completes and the prior host is verified by its concrete
+        # health check rather than by waiting for a marker that cannot appear.
+        self.assertFalse(replaced.accepted)
+        self.assertEqual(replaced.active_server_id, SERVER)
+        self.assertEqual(health_checked, [SERVER])
+
     def test_replacement_rejects_unprotected_user_data_before_provider_calls(self) -> None:
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
         with tempfile.TemporaryDirectory() as directory:
