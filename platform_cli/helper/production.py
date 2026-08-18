@@ -285,6 +285,8 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
         )
         recipe = application.generate_recipe(manifest, images)
         result = application.build_with_disposable_builder(
+            builder_command=application.provider_command(platform, "builder"),
+            pin_command=application.provider_command(platform, "pin-builder-host-key"),
             build_id=build_id,
             source_directory=source,
             recipe=recipe,
@@ -333,6 +335,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
         builder = application.delete_builder(
             args["buildId"],
             prefix=platform.prefix,
+            builder_command=application.provider_command(platform, "builder"),
             timeout_seconds=120,
             project_name=platform.project_name,
             project_id=platform.project_id,
@@ -350,9 +353,10 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 args["applicationId"],
                 args["slug"],
                 prefix=platform.prefix,
+                worker_command=application.provider_command(platform, "worker"),
                 selected_image_id=args["workerImageId"],
                 standard_flavor=args["standardFlavor"],
-                nomad_command=str(runtime.root / "bin/app-platform-nomad"),
+                nomad_command=application.provider_command(platform, "nomad")[0],
                 timeout_seconds=900,
                 project_name=platform.project_name,
                 project_id=platform.project_id,
@@ -362,6 +366,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 args["applicationId"],
                 args["slug"],
                 prefix=platform.prefix,
+                worker_command=application.provider_command(platform, "worker"),
                 timeout_seconds=900,
                 project_name=platform.project_name,
                 project_id=platform.project_id,
@@ -371,8 +376,9 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 args["applicationId"],
                 args["slug"],
                 prefix=platform.prefix,
+                worker_command=application.provider_command(platform, "worker"),
                 timeout_seconds=120,
-                nomad_command=str(runtime.root / "bin/app-platform-nomad"),
+                nomad_command=application.provider_command(platform, "nomad")[0],
                 project_name=platform.project_name,
                 project_id=platform.project_id,
             )
@@ -573,7 +579,7 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
                     f"https://{host}:3903/v2", secrets["GARAGE_ADMIN_TOKEN"], context
                 )
 
-        nomad_command = (str(runtime.root / "bin/app-platform-nomad"),)
+        nomad_command = (application.provider_command(platform, "nomad")[0],)
 
         def observe_evidence(
             _application_id: str,
@@ -667,7 +673,7 @@ def _lazy_app(action: str) -> Handler:
             return _provider_app(action, args)
         runtime = helper_runtime()
         platform = runtime.platform
-        nomad_command = (str(runtime.root / "bin/app-platform-nomad"),)
+        nomad_command = (application.provider_command(platform, "nomad")[0],)
         return app_actions.handlers(
             _nomad_client(runtime),
             nomad_command=nomad_command,

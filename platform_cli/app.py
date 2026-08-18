@@ -23,7 +23,7 @@ import uuid as uuid_module
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import db
@@ -76,6 +76,22 @@ _PROVIDER_INHERIT_ENV = (
     "STORAGE_SECRETS_FILE",
     "BUILDER_OPERATOR_PUBLIC_KEY",
 )
+
+
+def provider_command(platform: PlatformConfig, tool: str) -> tuple[str, ...]:
+    """Absolute path of a namespace-scoped admin CLI.
+
+    The role image links these into ``<paths.root>/bin`` as
+    ``<namespace>-<tool>``. The module constants below name one particular
+    deployment, so any deployment whose namespace or root differs could not run
+    a build or touch a worker at all.
+    """
+    root = PurePosixPath(str(platform.get("paths.root")))
+    if not root.is_absolute():
+        raise ValidationError("deployment root must be an absolute path")
+    return (str(root / "bin" / f"{platform.namespace}-{tool}"),)
+
+
 DEFAULT_BUILDER_COMMAND = ("/srv/app-platform/bin/app-platform-builder",)
 DEFAULT_BUILDER_PIN_COMMAND = ("/srv/app-platform/bin/app-platform-pin-builder-host-key",)
 DEFAULT_BUILDER_SSH_COMMAND = ("ssh",)

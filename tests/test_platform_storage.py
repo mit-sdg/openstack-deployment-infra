@@ -1434,7 +1434,11 @@ class HelperStorageTests(unittest.TestCase):
 
     def test_production_create_observer_requires_fresh_scheduler_and_public_health(self) -> None:
         platform = mock.Mock(prefix="example")
-        platform.get.return_value = "storage.internal"
+        # Key-aware: a blanket return value gave paths.root a hostname, which is
+        # not a usable deployment root.
+        platform.get.side_effect = lambda key, *rest: (
+            "/srv/app-platform" if key == "paths.root" else "storage.internal"
+        )
         events: list[str] = []
         garage = Garage(events)
         nomad = MemoryNomad({"PORT": "3000"})
@@ -1511,7 +1515,11 @@ class HelperStorageTests(unittest.TestCase):
 
     def test_production_initializes_only_required_backend_and_closes_partial_client(self) -> None:
         platform = mock.Mock(prefix="example")
-        platform.get.return_value = "storage.internal"
+        # Key-aware: a blanket return value gave paths.root a hostname, which is
+        # not a usable deployment root.
+        platform.get.side_effect = lambda key, *rest: (
+            "/srv/app-platform" if key == "paths.root" else "storage.internal"
+        )
         postgres = mock.Mock()
         psycopg = mock.Mock()
         with (

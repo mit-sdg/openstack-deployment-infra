@@ -496,6 +496,34 @@ class BackupAcceptanceTests(unittest.TestCase):
             self.assertFalse((root / name).exists())
 
 
+class ProviderCommandTests(unittest.TestCase):
+    def _platform(self, root: str, namespace: str = "app-platform") -> object:
+        platform = mock.Mock()
+        platform.get.side_effect = lambda key, *rest: root if key == "paths.root" else None
+        platform.namespace = namespace
+        return platform
+
+    def test_the_command_follows_the_configured_root_and_namespace(self) -> None:
+        # These were fixed strings naming one deployment, so any deployment with
+        # a different namespace or root could not build or touch a worker.
+        from platform_cli import app as application
+
+        self.assertEqual(
+            application.provider_command(self._platform("/srv/61040", "61040"), "builder"),
+            ("/srv/61040/bin/61040-builder",),
+        )
+        self.assertEqual(
+            application.provider_command(self._platform("/srv/other", "other"), "nomad"),
+            ("/srv/other/bin/other-nomad",),
+        )
+
+    def test_a_relative_root_is_refused(self) -> None:
+        from platform_cli import app as application
+
+        with self.assertRaises(ValidationError):
+            application.provider_command(self._platform("srv/61040", "61040"), "builder")
+
+
 class ChildEnvironmentPathTests(unittest.TestCase):
     def test_the_default_path_can_find_commands_on_a_nixos_guest(self) -> None:
         # Role images are NixOS. With only the FHS directories, git could not be
