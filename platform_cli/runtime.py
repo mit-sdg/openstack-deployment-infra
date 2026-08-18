@@ -301,6 +301,14 @@ def lock(
             os.close(descriptor)
 
 
+# The role images are NixOS, where system commands live in the activated system
+# profile and /usr/bin holds almost nothing. A child environment that offered
+# only the FHS directories could not start git at all, so source acquisition
+# failed before it began. Both layouts are listed so the same default works on
+# a NixOS guest and on an FHS management host.
+DEFAULT_CHILD_PATH = "/run/current-system/sw/bin:/usr/bin:/bin"
+
+
 def child_environment(
     *,
     inherit: Sequence[str] = (),
@@ -308,7 +316,7 @@ def child_environment(
 ) -> dict[str, str]:
     """Build a child environment only from explicitly allowlisted names."""
     environment = {name: os.environ[name] for name in inherit if name in os.environ}
-    environment.setdefault("PATH", "/usr/bin:/bin")
+    environment.setdefault("PATH", DEFAULT_CHILD_PATH)
     environment.setdefault("LANG", "C.UTF-8")
     for name, value in (overrides or {}).items():
         if not name or "=" in name or "\x00" in name or "\x00" in value:

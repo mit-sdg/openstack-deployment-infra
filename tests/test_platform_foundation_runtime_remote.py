@@ -496,6 +496,23 @@ class BackupAcceptanceTests(unittest.TestCase):
             self.assertFalse((root / name).exists())
 
 
+class ChildEnvironmentPathTests(unittest.TestCase):
+    def test_the_default_path_can_find_commands_on_a_nixos_guest(self) -> None:
+        # Role images are NixOS. With only the FHS directories, git could not be
+        # started and source acquisition failed before it began.
+        environment = runtime.child_environment()
+        self.assertIn("/run/current-system/sw/bin", environment["PATH"].split(":"))
+
+    def test_the_default_path_still_covers_an_fhs_host(self) -> None:
+        parts = runtime.child_environment()["PATH"].split(":")
+        self.assertIn("/usr/bin", parts)
+        self.assertIn("/bin", parts)
+
+    def test_an_explicit_path_override_still_wins(self) -> None:
+        environment = runtime.child_environment(overrides={"PATH": "/only/here"})
+        self.assertEqual(environment["PATH"], "/only/here")
+
+
 class HelperCommandPathTests(unittest.TestCase):
     def test_the_helper_is_addressed_by_absolute_path(self) -> None:
         # Nothing puts <paths.root>/bin on the remote login PATH, so invoking
