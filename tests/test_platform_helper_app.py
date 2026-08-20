@@ -365,12 +365,12 @@ class ApplicationHelperTests(unittest.TestCase):
         self.assertEqual(result["allocations"], 2)
 
         self.nomad.allocations.pop()
-        self.nomad.status["Version"] = 8
+        self.nomad.inspection["Version"] = 8
         stale = self.actions["app.health"](args)
         self.assertFalse(stale["healthy"])
         self.assertTrue(stale["terminal"])
 
-        self.nomad.status["Version"] = 7
+        self.nomad.inspection["Version"] = 7
         self.nomad.inspection["Meta"]["m1_candidate_job_sha256"] = "c" * 64
         drifted = self.actions["app.health"](args)
         self.assertFalse(drifted["healthy"])

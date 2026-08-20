@@ -70,34 +70,6 @@ def _parse_json(payload: bytes, *, field: str) -> Any:
         ) from error
 
 
-def _status(
-    application_slug: str,
-    *,
-    command_runner: Callable[..., Any],
-    nomad_command: tuple[str, ...],
-    timeout_seconds: float,
-    response_limit: int,
-) -> Mapping[str, Any]:
-    completed = command_runner(
-        (*nomad_command, "job", "status", "-json", application_slug),
-        timeout_seconds=timeout_seconds,
-        stdout_limit=response_limit,
-        stderr_limit=65_536,
-        check=True,
-    )
-    value = _parse_json(completed.stdout, field="job status")
-    if isinstance(value, dict) and value.get("ID") == application_slug:
-        return value
-    if (
-        isinstance(value, list)
-        and len(value) == 1
-        and isinstance(value[0], dict)
-        and {"Allocations", "Evaluations", "LatestDeployment", "Summary"} <= value[0].keys()
-    ):
-        return value[0]
-    raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
-
-
 def _exact_absence(stderr: object, application_slug: str) -> bool:
     """Accept only Nomad's bounded, slug-specific absence diagnostics.
 
@@ -355,13 +327,6 @@ def _health_handler(
             raise ValidationError("Nomad version must be a non-negative integer")
         expected_identity = sha256_hex(args["candidateJobSha256"], field="candidate job SHA-256")
         expected_image = oci_digest_pin(args["candidateImage"], field="candidate image")
-        status = _status(
-            application_slug,
-            command_runner=command_runner,
-            nomad_command=nomad_command,
-            timeout_seconds=timeout_seconds,
-            response_limit=response_limit,
-        )
         current = _inspected_candidate(
             application_slug,
             command_runner=command_runner,
@@ -369,9 +334,7 @@ def _health_handler(
             timeout_seconds=timeout_seconds,
             response_limit=response_limit,
         )
-        current_version = status.get("Version")
-        if current_version is None and current is not None:
-            current_version = current[0]
+        current_version = current[0] if current is not None else None
         candidate_matches = current == (version, expected_identity, expected_image)
         version_matches = (
             isinstance(current_version, int)
@@ -405,7 +368,6 @@ def _health_handler(
         terminal = (
             not version_matches
             or not candidate_matches
-            or status.get("Status") == "dead"
             or len(selected) > 1
             or any(item.get("ClientStatus") in {"failed", "lost"} for item in selected)
         )
@@ -689,15 +651,15 @@ def _restart_and_observe_environment(
         check=True,
     )
     for attempt in range(attempts):
-        status = _status(
+        current_job = _inspected_candidate(
             application_slug,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
             response_limit=response_limit,
         )
-        version = status.get("Version")
-        if isinstance(version, int) and not isinstance(version, bool) and version >= 0:
+        if current_job is not None:
+            version = current_job[0]
             allocations = _allocations(
                 application_slug,
                 command_runner=command_runner,
