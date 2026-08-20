@@ -154,6 +154,7 @@ class CliIntegrationTests(unittest.TestCase):
             ("infra", "reboot", "ingress", "--yes"),
             ("infra", "replace", "admin", "--yes"),
             ("infra", "logs", "admin"),
+            ("app", "create", "demo-app"),
             ("app", "deploy", "demo-app", "--repo", "https://github.com/o/r", "--commit", "a" * 40),
             ("app", "remove", "demo-app", "--confirm", "demo-app"),
             ("app", "list"),
@@ -297,6 +298,39 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(db.get_operation(connection, operation_id).status, "succeeded")  # type: ignore[union-attr]
         finally:
             connection.close()
+
+    def test_created_application_is_inert_and_lets_storage_precede_deployment(self) -> None:
+        """An application that reads a database at startup needs one first.
+
+        Only a deployment used to create an application row, and managed
+        storage needs that row to exist, so such an application could never
+        pass the health check its first deployment demanded.
+        """
+        output = StringIO()
+        cli.dispatch(
+            cli.build_parser().parse_args(self.argv("app", "create", "demo-app")), stdout=output
+        )
+        self.assertIn("slug=demo-app", output.getvalue())
+
+        connection = db.connect(self.state / "platform.sqlite3")
+        try:
+            application = db.get_application(connection, "demo-app")
+            self.assertIsNotNone(application)
+            assert application is not None
+            # Declared, not running: nothing is deployed yet, so the platform
+            # must not report the application as unavailable.
+            self.assertFalse(application.desired_running)
+            self.assertIsNone(application.repository_url)
+            self.assertIsNone(application.worker_server_id)
+            self.assertEqual(application.url, "https://demo-app.apps.example.com")
+        finally:
+            connection.close()
+
+        # The slug now resolves, which is all managed storage and staff
+        # environment values require.
+        duplicate = cli.build_parser().parse_args(self.argv("app", "create", "demo-app"))
+        with self.assertRaisesRegex(ValidationError, "already exists"):
+            cli.dispatch(duplicate, stdout=StringIO())
 
     def test_environment_value_never_enters_output_or_sqlite(self) -> None:
         args = cli.build_parser().parse_args(self.argv("app", "env", "set", "demo-app", "MODE"))

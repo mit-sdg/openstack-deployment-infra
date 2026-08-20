@@ -215,6 +215,10 @@ relevant package directory contains `package-lock.json`; for Bun it contains
 `bun.lock` or `bun.lockb`. Script values are package-script names, not shell
 commands.
 
+`demo` starts without a database, so a deployment can create it. An
+application that reads its database at startup needs `openstack-platform app
+create demo` first, then its storage, then one deployment.
+
 ```bash
 /srv/openstack-platform/bin/openstack-platform app deploy demo \
   --repo https://github.com/OWNER/REPOSITORY \
