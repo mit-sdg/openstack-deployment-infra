@@ -11,7 +11,8 @@ let
   systemdEscapePath =
     path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   infra = pkgs.runCommand "${namespace}-infra" { } ''
-    cp -R ${../../infra} "$out"
+    mkdir -p "$out"
+    cp -R ${../../infra}/. "$out/"
     chmod -R u+w "$out"
     patchShebangs "$out"
   '';
