@@ -335,32 +335,18 @@ def _project_identity(openstack: Path, environment: Mapping[str, str]) -> Projec
         project_id = str(UUID(raw_id))
     except (ValueError, AttributeError) as error:
         raise SetupError("authenticated OpenStack project UUID is unavailable") from error
-    project = _json_command(
-        (
-            openstack,
-            "project",
-            "show",
-            project_id,
-            "-f",
-            "json",
-            "-c",
-            "id",
-            "-c",
-            "name",
-        ),
-        environment=environment,
-    )
-    if not isinstance(project, dict):
-        _fail("OpenStack project projection is malformed")
-    project_name = project.get("name") or project.get("Name")
-    observed_id = project.get("id") or project.get("ID")
-    try:
-        canonical_observed = str(UUID(str(observed_id)))
-    except (ValueError, AttributeError) as error:
-        raise SetupError("OpenStack project lookup UUID is malformed") from error
-    if canonical_observed != project_id or project_name != environment.get("OS_PROJECT_NAME"):
-        _fail("authenticated OpenStack project does not match OS_PROJECT_NAME")
-    return ProjectIdentity(project_id, str(project_name))
+    configured_id = environment.get("OS_PROJECT_ID") or environment.get("OS_TENANT_ID")
+    if configured_id:
+        try:
+            canonical_configured = str(UUID(configured_id))
+        except (ValueError, AttributeError) as error:
+            raise SetupError("configured OpenStack project UUID is malformed") from error
+        if canonical_configured != project_id:
+            _fail("authenticated OpenStack project does not match the configured project UUID")
+    project_name = environment.get("OS_PROJECT_NAME")
+    if not project_name:
+        _fail("authenticated OpenStack project name is unavailable")
+    return ProjectIdentity(project_id, project_name)
 
 
 def _prompt(

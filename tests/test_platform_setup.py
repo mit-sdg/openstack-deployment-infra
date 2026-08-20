@@ -53,6 +53,27 @@ PLATFORM_DOMAIN='apps.example.test'
         with self.assertRaisesRegex(setup.SetupError, "duplicate"):
             setup.load_environment_file(path)
 
+    def test_project_identity_uses_scoped_token_without_project_list_permission(self) -> None:
+        project_id = "00000000-0000-4000-8000-000000000001"
+        environment = {"OS_PROJECT_NAME": "demo", "OS_PROJECT_ID": project_id}
+        with mock.patch.object(setup, "_command", return_value=project_id) as command:
+            identity = setup._project_identity(Path("/nix/store/openstack"), environment)
+
+        self.assertEqual(identity, setup.ProjectIdentity(project_id, "demo"))
+        self.assertEqual(command.call_args.args[0][1:3], ("token", "issue"))
+
+    def test_project_identity_rejects_a_conflicting_configured_uuid(self) -> None:
+        token_project = "00000000-0000-4000-8000-000000000001"
+        environment = {
+            "OS_PROJECT_NAME": "demo",
+            "OS_PROJECT_ID": "00000000-0000-4000-8000-000000000002",
+        }
+        with (
+            mock.patch.object(setup, "_command", return_value=token_project),
+            self.assertRaisesRegex(setup.SetupError, "does not match"),
+        ):
+            setup._project_identity(Path("/nix/store/openstack"), environment)
+
     def test_plan_is_non_mutating_and_names_every_major_phase(self) -> None:
         path = self.environment("OS_PROJECT_NAME=demo\n")
         output = io.StringIO()
