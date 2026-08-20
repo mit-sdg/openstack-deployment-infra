@@ -46,13 +46,13 @@
   "volumes": {
     "adminState": {
       "name": "example-admin-state",
-      "label": "example-state",
+      "label": "example-st",
       "sizeGiB": 32,
       "type": "production"
     },
     "backup": {
       "name": "example-backups",
-      "label": "example-backups",
+      "label": "example-bak",
       "sizeGiB": 200,
       "type": "production"
     },

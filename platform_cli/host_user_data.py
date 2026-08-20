@@ -365,9 +365,9 @@ def _replacement_values(
         return {
             "__AGENTOPS_PUBLIC_KEY__": key,
             "__ADMIN_VOLUME_ID__": _volume_id(platform, volume_ids, "volumes.adminState.name"),
-            "__ADMIN_VOLUME_LABEL__": _text(platform, "volumes.adminState.label", maximum=16),
+            "__ADMIN_VOLUME_LABEL__": _text(platform, "volumes.adminState.label", maximum=12),
             "__BACKUP_VOLUME_ID__": _volume_id(platform, volume_ids, "volumes.backup.name"),
-            "__BACKUP_VOLUME_LABEL__": _text(platform, "volumes.backup.label", maximum=16),
+            "__BACKUP_VOLUME_LABEL__": _text(platform, "volumes.backup.label", maximum=12),
             "__NOMAD_GOSSIP_KEY__": secrets["NOMAD_GOSSIP_KEY"],
             "__INTERNAL_CA_B64__": ca,
             "__NOMAD_SERVER_CERT_B64__": _encoded(_pki(inputs, "nomad-server.pem")),
@@ -424,7 +424,7 @@ def _replacement_values(
     return {
         "__AGENTOPS_PUBLIC_KEY__": key,
         "__DATA_VOLUME_ID__": _volume_id(platform, volume_ids, "volumes.data.name"),
-        "__DATA_VOLUME_LABEL__": _text(platform, "volumes.data.label", maximum=16),
+        "__DATA_VOLUME_LABEL__": _text(platform, "volumes.data.label", maximum=12),
         "__POSTGRES_PASSWORD__": secrets["POSTGRES_PASSWORD"],
         "__MONGO_PASSWORD__": secrets["MONGO_PASSWORD"],
         "__GARAGE_RPC_SECRET__": secrets["GARAGE_RPC_SECRET"],

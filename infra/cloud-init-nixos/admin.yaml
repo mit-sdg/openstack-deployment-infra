@@ -24,7 +24,7 @@ bootcmd:
         observed=$(blkid -p -s LABEL -o value "$device" 2>/dev/null || true)
         [ "$observed" = "$label" ] || { echo "unexpected retained volume label on $device" >&2; exit 1; }
       else
-        mkfs.ext4 -F -L "$label" "$device"
+        mkfs.xfs -f -L "$label" "$device"
       fi
     done
 write_files:

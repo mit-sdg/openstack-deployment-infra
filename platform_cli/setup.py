@@ -442,10 +442,10 @@ def _volume_type_default(openstack: Path, environment: Mapping[str, str]) -> str
 
 def _filesystem_label(namespace: str, suffix: str) -> str:
     candidate = f"{namespace}-{suffix}"
-    if len(candidate.encode()) <= 16:
+    if len(candidate.encode()) <= 12:
         return candidate
     digest = hashlib.sha256(namespace.encode()).hexdigest()[:4]
-    budget = 16 - len(suffix) - len(digest) - 2
+    budget = 12 - len(suffix) - len(digest) - 2
     stem = namespace[:budget].rstrip("-")
     return f"{stem}-{suffix}-{digest}"
 
