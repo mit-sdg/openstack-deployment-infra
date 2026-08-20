@@ -1219,6 +1219,7 @@ def run_setup(
     paths = _paths(repository, workspace)
     for directory in (
         paths.workspace / "config",
+        paths.bootstrap.parent,
         paths.bootstrap,
         paths.ssh_directory,
     ):
