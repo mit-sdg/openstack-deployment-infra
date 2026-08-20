@@ -548,7 +548,7 @@ def _platform_document(
         "admin": (2, 4096),
         "ingress": (2, 2048),
         "storage": (4, 8192),
-        "worker": (2, 4096),
+        "worker": (1, 2048),
         "builder": (4, 8192),
     }
     selected_flavors: dict[str, str] = {}

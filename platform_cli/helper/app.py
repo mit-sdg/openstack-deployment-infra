@@ -86,9 +86,16 @@ def _status(
         check=True,
     )
     value = _parse_json(completed.stdout, field="job status")
-    if not isinstance(value, dict) or value.get("ID") != application_slug:
-        raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
-    return value
+    if isinstance(value, dict) and value.get("ID") == application_slug:
+        return value
+    if (
+        isinstance(value, list)
+        and len(value) == 1
+        and isinstance(value[0], dict)
+        and {"Allocations", "Evaluations", "LatestDeployment", "Summary"} <= value[0].keys()
+    ):
+        return value[0]
+    raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
 
 
 def _exact_absence(stderr: object, application_slug: str) -> bool:
@@ -355,7 +362,6 @@ def _health_handler(
             timeout_seconds=timeout_seconds,
             response_limit=response_limit,
         )
-        current_version = status.get("Version")
         current = _inspected_candidate(
             application_slug,
             command_runner=command_runner,
@@ -363,6 +369,9 @@ def _health_handler(
             timeout_seconds=timeout_seconds,
             response_limit=response_limit,
         )
+        current_version = status.get("Version")
+        if current_version is None and current is not None:
+            current_version = current[0]
         candidate_matches = current == (version, expected_identity, expected_image)
         version_matches = (
             isinstance(current_version, int)

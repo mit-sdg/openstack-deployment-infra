@@ -326,6 +326,27 @@ class ApplicationHelperTests(unittest.TestCase):
         self.assertFalse(failed["healthy"])
         self.assertTrue(failed["terminal"])
 
+    def test_health_accepts_nomad_two_status_projection_with_inspected_version(self) -> None:
+        self.nomad.status = [
+            {
+                "Allocations": [],
+                "Evaluations": [],
+                "LatestDeployment": None,
+                "Summary": {},
+            }
+        ]
+        result = self.actions["app.health"](
+            {
+                "slug": "demo-app",
+                "version": 7,
+                "candidateJobSha256": CANDIDATE_SHA,
+                "candidateImage": CANDIDATE_IMAGE,
+            }
+        )
+
+        self.assertTrue(result["healthy"])
+        self.assertEqual(result["currentVersion"], 7)
+
     def test_health_rejects_stale_version_duplicate_allocations_and_candidate_metadata_drift(
         self,
     ) -> None:
