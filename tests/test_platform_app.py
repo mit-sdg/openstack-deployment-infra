@@ -1004,6 +1004,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn('{{ $value := index . "STORAGE__MONGO__DEFAULT__URI" }}', job)
         self.assertIn("MONGODB_URI={{ $value | toJSON }}", job)
         self.assertNotIn("hasPrefix", job)
+        self.assertNotIn(r"\n{{ end }}", job)
 
     def test_job_has_only_application_placement_and_explicit_standard_resources(self) -> None:
         job = render_nomad_job(

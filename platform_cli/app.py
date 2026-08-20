@@ -1888,7 +1888,7 @@ def render_nomad_job(
         comparisons = " ".join(f'(ne $key "{key}")' for key in storage_keys)
         predicate = comparisons if len(storage_keys) == 1 else f"and {comparisons}"
         runtime_item = (
-            f"{{{{ if {predicate} }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}\\n{{{{ end }}}}"
+            f"{{{{ if {predicate} }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}\n{{{{ end }}}}"
         )
     job = f'''job "{app_slug}" {{
   region      = "{platform.region}"
