@@ -82,11 +82,8 @@ _STANDARD_KEYS = {
 }
 _LIMIT_NAMES = {
     "sourceBytes": (52_428_800, 1_048_576, 1_073_741_824),
-    "yamlBytes": (65_536, 1_024, 1_048_576),
     "dotenvBytes": (262_144, 1_024, 4_194_304),
     "environmentValueBytes": (65_536, 1, 1_048_576),
-    "environmentKeys": (128, 1, 2_048),
-    "stdoutBytes": (1_048_576, 1_024, 16_777_216),
     "stderrBytes": (262_144, 1_024, 4_194_304),
     "buildLogBytes": (10_485_760, 1_024, 104_857_600),
     "helperRequestBytes": (1_048_576, 1_024, 8_388_608),
@@ -144,11 +141,8 @@ class RuntimeImages:
 @dataclass(frozen=True, slots=True)
 class Limits:
     source_bytes: int
-    yaml_bytes: int
     dotenv_bytes: int
     environment_value_bytes: int
-    environment_keys: int
-    stdout_bytes: int
     stderr_bytes: int
     build_log_bytes: int
     helper_request_bytes: int
@@ -394,11 +388,8 @@ def load_policy(path: str | Path, *, require_private: bool = True) -> Policy:
         )
     limits = Limits(
         source_bytes=limit_values["sourceBytes"],
-        yaml_bytes=limit_values["yamlBytes"],
         dotenv_bytes=limit_values["dotenvBytes"],
         environment_value_bytes=limit_values["environmentValueBytes"],
-        environment_keys=limit_values["environmentKeys"],
-        stdout_bytes=limit_values["stdoutBytes"],
         stderr_bytes=limit_values["stderrBytes"],
         build_log_bytes=limit_values["buildLogBytes"],
         helper_request_bytes=limit_values["helperRequestBytes"],

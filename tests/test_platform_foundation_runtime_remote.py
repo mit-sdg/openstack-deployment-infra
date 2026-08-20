@@ -33,7 +33,6 @@ from platform_cli.runtime import (
     CommandFailure,
     CommandTimedOut,
     LockBusy,
-    append_private_log,
     child_environment,
     lock,
     run,
@@ -118,13 +117,6 @@ class RuntimeTests(unittest.TestCase):
         assert caught.exception.result is not None
         self.assertNotIn(sentinel, repr(caught.exception.result))
         self.assertEqual(caught.exception.result.argv[-1], "[REDACTED]")
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "operations.log"
-            append_private_log(
-                path, f"password={sentinel}", maximum_bytes=1024, secrets=(sentinel,)
-            )
-            self.assertNotIn(sentinel, path.read_text())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_private_stack_diagnostic_contains_locations_without_exception_data(self) -> None:
         sentinel = "provider-payload-and-local-secret"
@@ -508,7 +500,7 @@ class BackupAcceptanceTests(unittest.TestCase):
 class ProviderCommandTests(unittest.TestCase):
     def _platform(self, root: str, namespace: str = "app-platform") -> object:
         platform = mock.Mock()
-        platform.get.side_effect = lambda key, *rest: root if key == "paths.root" else None
+        platform.get.side_effect = lambda key, *_rest: root if key == "paths.root" else None
         platform.namespace = namespace
         return platform
 

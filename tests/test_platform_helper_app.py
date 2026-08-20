@@ -551,7 +551,7 @@ class ApplicationHelperTests(unittest.TestCase):
         ).encode()
 
         def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            return CommandResult(argv, 0, payload, b"", False, False, 0.1)
+            return CommandResult(argv, 0, payload, b"", False, False)
 
         self.assertEqual(
             _status_or_absent(
@@ -583,7 +583,6 @@ class ApplicationHelperTests(unittest.TestCase):
             stderr=b"",
             stdout_truncated=False,
             stderr_truncated=False,
-            elapsed_seconds=12,
         )
 
         def timed_runner(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:

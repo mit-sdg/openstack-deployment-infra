@@ -25,6 +25,7 @@ dev = [
   "mypy==1.19.1",
   "ruff==0.15.4",
   "types-PyYAML==6.0.12.20250915",
+  "vulture==2.15.0",
 ]
 
 [tool.hatch.build.targets.wheel]

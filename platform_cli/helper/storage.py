@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Any, NoReturn, cast
 
 from ..storage_contract import (
-    ENVIRONMENT_KEYS,
     canonical_secret_keys,
     canonicalize_environment,
     provider_environment,
@@ -35,10 +34,6 @@ from .nomad import (
     variable_path,
 )
 
-POSTGRES_KEYS = ENVIRONMENT_KEYS["postgres"]
-MONGO_KEYS = ENVIRONMENT_KEYS["mongo"]
-S3_KEYS = ENVIRONMENT_KEYS["s3"]
-RESOURCE_KEYS = ENVIRONMENT_KEYS
 _RESOURCE_CONTEXT: ContextVar[tuple[str, str]] = ContextVar(
     "storage_resource", default=("mongo", "default")
 )

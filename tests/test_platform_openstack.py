@@ -53,7 +53,7 @@ def result(argv: tuple[str, ...], value: object = None, *, returncode: int = 0) 
         output = b""
     else:
         output = json.dumps(value).encode()
-    return CommandResult(argv, returncode, output, b"", False, False, 0.01)
+    return CommandResult(argv, returncode, output, b"", False, False)
 
 
 class FakeCloud:
@@ -871,10 +871,10 @@ else:
 
     def test_flavor_observation_enforces_one_vcpu(self) -> None:
         cloud = FakeCloud(self.platform)
-        flavor = openstack.observe_flavor(
+        flavor_name = openstack.observe_flavor(
             self.platform, "example.1c2g", require_one_vcpu=True, command_runner=cloud
         )
-        self.assertEqual((flavor.vcpus, flavor.ram_mib), (1, 2048))
+        self.assertEqual(flavor_name, "example.1c2g")
 
     def test_power_uses_selected_server_uuid_and_requires_health(self) -> None:
         cloud = FakeCloud(self.platform)
@@ -896,7 +896,7 @@ else:
             health_check=self.role_health,
             command_runner=cloud,
         )
-        self.assertIn("guest:ingress-services-ready", started.checks)
+        self.assertEqual(started.status, "ACTIVE")
 
     def test_admin_reboot_readiness_is_independent_of_admin_helper(self) -> None:
         cloud = FakeCloud(self.platform, role="admin")
@@ -907,7 +907,7 @@ else:
             health_check=self.role_health,
             command_runner=cloud,
         )
-        self.assertIn("guest:admin-services-ready", powered.checks)
+        self.assertEqual(powered.status, "ACTIVE")
         self.assertEqual(
             [call for call in cloud.calls if call[1:3] == ("server", "reboot")],
             [("openstack", "server", "reboot", SERVER)],
@@ -947,7 +947,6 @@ else:
             command_runner=cloud,
         )
         self.assertEqual(recovered.status, "ACTIVE")
-        self.assertIn("guest:ingress-services-ready", recovered.checks)
         self.assertEqual(
             [call for call in cloud.calls if call[1:3] == ("server", "reboot")],
             [("openstack", "server", "reboot", SERVER)],
@@ -1418,7 +1417,6 @@ else:
             command_runner=cloud,
         )
         self.assertEqual(recovered.active_server_id, SERVER)
-        self.assertEqual(recovered.replacement_server_id, REPLACEMENT)
         self.assertIsNone(cloud.replacement)
         self.assertEqual(cloud.port_device, SERVER)
 
@@ -1468,7 +1466,7 @@ else:
             command_runner=cloud,
         )
         self.assertEqual(inspected.deleted_image_ids, (IMAGE_2,))
-        self.assertEqual(inspected.pending_image_ids, (IMAGE_3,))
+        self.assertIn(IMAGE_3, cloud.images)
 
         cloud.images[REVIEW_IMAGE] = canonical_image(
             self.platform, REVIEW_IMAGE, created="2025-12-01T00:00:00Z"
@@ -1494,7 +1492,7 @@ else:
             command_runner=cloud,
         )
         self.assertEqual(recovered.deleted_image_ids, (IMAGE_2, IMAGE_3))
-        self.assertEqual(recovered.pending_image_ids, ())
+        self.assertNotIn(IMAGE_3, cloud.images)
 
     def test_prune_records_operation_protection_and_rejects_apply_reference_drift(self) -> None:
         cloud = FakeCloud(
@@ -1563,19 +1561,22 @@ else:
                 assert durable is not None
                 expected_phase = "observed" if crash_phase == "old_stopped" else "old_stopped"
                 self.assertEqual(durable[0], expected_phase)
-                inspected = openstack.inspect_host_replacement(
+                inspected = openstack.recover_host_replacement(
                     self.platform,
                     "ingress",
                     phase=expected_phase,
                     refs=durable[1],
+                    action="inspect",
+                    checkpoint=lambda *_: None,
                     command_runner=cloud,
                 )
                 self.assertEqual(inspected.cleanup_state, "rollback_required")
-                recovered = openstack.rollback_host_replacement(
+                recovered = openstack.recover_host_replacement(
                     self.platform,
                     "ingress",
                     phase=expected_phase,
                     refs=durable[1],
+                    action="rollback",
                     checkpoint=lambda *_: None,
                     health_check=self.role_health,
                     command_runner=cloud,
@@ -1612,11 +1613,12 @@ else:
                     command_runner=cloud,
                 )
         assert created_refs is not None
-        recovered = openstack.continue_host_replacement(
+        recovered = openstack.recover_host_replacement(
             self.platform,
             "ingress",
             phase="replacement_created",
             refs=created_refs,
+            action="continue",
             checkpoint=lambda *_: None,
             health_check=self.role_health,
             command_runner=cloud,
@@ -1654,11 +1656,12 @@ else:
                 )
         assert accepted_refs is not None
         self.assertIsNone(cloud.server)
-        recovered = openstack.continue_host_replacement(
+        recovered = openstack.recover_host_replacement(
             self.platform,
             "ingress",
             phase="accepted",
             refs=accepted_refs,
+            action="continue",
             checkpoint=lambda *_: None,
             health_check=self.role_health,
             command_runner=cloud,
@@ -1698,7 +1701,7 @@ else:
             self._health_host("ingress"),
             30,
             provider_runner=cloud,
-            service_runner=lambda argv, **k: result(argv),
+            service_runner=lambda argv, **_kwargs: result(argv),
             http_get=http_get,
         )
         self.assertEqual(len(http_calls), 2)
@@ -1715,8 +1718,8 @@ else:
                 self._health_host("ingress"),
                 30,
                 provider_runner=cloud,
-                service_runner=lambda argv, **k: result(argv),
-                http_get=lambda url, **k: HttpResult(200, {}, b"OK"),
+                service_runner=lambda argv, **_kwargs: result(argv),
+                http_get=lambda url, **_kwargs: HttpResult(200, {}, b"OK"),
             )
 
     def test_failure_after_ready_fails_but_ready_after_failure_passes(self) -> None:
@@ -1732,8 +1735,8 @@ else:
                 self._health_host("ingress"),
                 30,
                 provider_runner=cloud,
-                service_runner=lambda argv, **k: result(argv),
-                http_get=lambda url, **k: HttpResult(200, {}, b"OK"),
+                service_runner=lambda argv, **_kwargs: result(argv),
+                http_get=lambda url, **_kwargs: HttpResult(200, {}, b"OK"),
             )
 
     def test_concrete_role_health_checks_use_bounded_authenticated_paths(self) -> None:

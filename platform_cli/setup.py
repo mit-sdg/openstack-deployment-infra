@@ -57,15 +57,6 @@ class SetupPaths:
     ssh_directory: Path
 
 
-@dataclass(frozen=True, slots=True)
-class SetupResult:
-    project: ProjectIdentity
-    platform: Path
-    policy: Path
-    image_ids: Mapping[str, str]
-    cloudflare_pending: bool
-
-
 def _fail(message: str) -> NoReturn:
     raise SetupError(message)
 
@@ -1205,7 +1196,7 @@ def run_setup(
     input_reader: Callable[[str], str] = input,
     secret_reader: Callable[[str], str] = getpass.getpass,
     output: TextIO,
-) -> SetupResult | None:
+) -> None:
     if os.geteuid() == 0 or os.environ.get("SUDO_USER"):
         _fail("run setup as the unprivileged management owner")
     if not apply:
@@ -1296,4 +1287,3 @@ def run_setup(
         print("public-ingress=pending external provider configuration", file=output)
     else:
         print("public-ingress=cloudflare-configured", file=output)
-    return SetupResult(project, paths.platform, paths.policy, image_ids, pending)

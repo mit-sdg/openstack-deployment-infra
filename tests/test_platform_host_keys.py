@@ -46,7 +46,6 @@ class ConfigAndKeyscanRunner:
                 b"",
                 False,
                 False,
-                0.01,
             )
         raise AssertionError("unexpected host-key command")
 

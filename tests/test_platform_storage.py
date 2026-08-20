@@ -16,7 +16,6 @@ from platform_cli.helper import production
 from platform_cli.helper.main import HelperActionError
 from platform_cli.helper.nomad import SecretItems, VariableSnapshot
 from platform_cli.helper.storage import (
-    S3_KEYS,
     ProviderCredential,
     RotationEvidence,
     handlers,
@@ -344,7 +343,7 @@ class ManagementStorageTests(unittest.TestCase):
         self.assertEqual(remove_calls, [False, False, True, True])
         self.assertEqual(db.list_managed_resources(self.connection, application_id=APP_ID), [])
 
-    def test_rotation_calls_only_selected_type_and_reports_rejected_evidence(self) -> None:
+    def test_rotation_calls_only_selected_type_and_rejects_bad_evidence(self) -> None:
         self.add_resource("postgres")
         self.add_resource("mongo")
         actions: list[str] = []
@@ -361,12 +360,13 @@ class ManagementStorageTests(unittest.TestCase):
                 "rolledBack": True,
             }
 
-        result = rotate(self.connection, self.config, APP_ID, ["mongo"], helper_caller=caller)
+        with self.assertRaisesRegex(StorageOperationError, "evidence was rejected"):
+            rotate(self.connection, self.config, APP_ID, ["mongo"], helper_caller=caller)
         self.assertEqual(actions, ["storage.mongo.rotate"])
-        self.assertEqual(result.completed, ())
-        self.assertEqual(result.evidence_rejected, ("mongo",))
-        operation = db.get_operation(self.connection, result.operation_id)  # type: ignore[arg-type]
-        self.assertEqual(operation.status, "failed")  # type: ignore[union-attr]
+        operation = self.connection.execute(
+            "SELECT status FROM operations WHERE kind = 'storage.rotate'"
+        ).fetchone()
+        self.assertEqual(operation["status"], "failed")
 
     def test_removal_refuses_before_mutation_and_retains_keys_without_absence(self) -> None:
         self.add_resource("postgres")
@@ -449,13 +449,14 @@ class ManagementStorageTests(unittest.TestCase):
                 "rolledBack": True,
             }
 
-        rotate(
-            self.connection,
-            self.config,
-            APP_ID,
-            ["postgres"],
-            helper_caller=rejected_rotation,
-        )
+        with self.assertRaises(StorageOperationError):
+            rotate(
+                self.connection,
+                self.config,
+                APP_ID,
+                ["postgres"],
+                helper_caller=rejected_rotation,
+            )
         resource = _resource(self.connection, "postgres")
         self.assertEqual(seen_connections, [10])
         self.assertEqual(resource.postgres_connections, 10)
@@ -662,14 +663,13 @@ class ManagementStorageTests(unittest.TestCase):
             calls.append((args["recover"], bounds["timeout_seconds"]))
             return {"verified": True, "modifyIndex": 42}
 
-        result = verify(
+        verify(
             self.connection,
             self.config,
             APP_ID,
             ["postgres"],
             helper_caller=caller,
         )
-        self.assertEqual(result.operation_id, operation_id)
         self.assertEqual(calls[0][0], True)
         self.assertGreater(calls[0][1], 0)
         self.assertLessEqual(calls[0][1], self.config.policy.limits.helper_seconds)
@@ -938,14 +938,6 @@ class HelperStorageTests(unittest.TestCase):
             "STAFF_SENTINEL": "preserve-me",
             **canonicalize_environment("s3", "default", environment),
         }
-
-    def test_storage_key_contract_is_canonical_across_management_and_helper(self) -> None:
-        from platform_cli import storage as management_storage
-        from platform_cli.helper import storage as helper_storage
-
-        self.assertIs(management_storage.ENVIRONMENT_KEYS, ENVIRONMENT_KEYS)
-        self.assertIs(helper_storage.RESOURCE_KEYS, ENVIRONMENT_KEYS)
-        self.assertEqual(helper_storage.S3_KEYS, ENVIRONMENT_KEYS["s3"])
 
     def test_verify_and_observe_reject_untrusted_storage_endpoints_before_credentials(self) -> None:
         database = "p_11111111111141118111"
@@ -1398,7 +1390,10 @@ class HelperStorageTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(Exception, "confirmation"):
             s3_remove_handler(
-                args, admin=garage, scoped_client=lambda a, s: S3Client(events), nomad=nomad
+                args,
+                admin=garage,
+                scoped_client=lambda _access, _secret: S3Client(events),
+                nomad=nomad,
             )
         self.assertEqual(events, [])
         self.assertEqual(len(nomad.writes), 0)
@@ -1407,14 +1402,14 @@ class HelperStorageTests(unittest.TestCase):
         result = s3_remove_handler(
             args,
             admin=garage,
-            scoped_client=lambda a, s: S3Client(events),
+            scoped_client=lambda _access, _secret: S3Client(events),
             nomad=nomad,
         )
         self.assertTrue(result["confirmedAbsent"])
         self.assertTrue(result["environmentRemoved"])
         self.assertEqual(nomad.items["PORT"], "3000")
         self.assertEqual(nomad.items["STAFF_SENTINEL"], "preserve-me")
-        for key in S3_KEYS:
+        for key in ENVIRONMENT_KEYS["s3"]:
             self.assertNotIn(key, nomad.items)
         self.assertLess(events.index("/GetBucketInfo"), len(events))
         self.assertEqual(len(nomad.writes), 1)
@@ -1444,7 +1439,7 @@ class HelperStorageTests(unittest.TestCase):
         self.assertTrue(result["confirmedAbsent"])
         self.assertEqual(garage.deleted, ["old-key"])
         self.assertNotIn("old-key", repr(result))
-        for key in S3_KEYS:
+        for key in ENVIRONMENT_KEYS["s3"]:
             self.assertNotIn(key, nomad.items)
 
     def test_scoped_verification_failures_cleanup_every_fixture(self) -> None:
@@ -1551,7 +1546,7 @@ class HelperStorageTests(unittest.TestCase):
         platform = mock.Mock(prefix="example")
         # Key-aware: a blanket return value gave paths.root a hostname, which is
         # not a usable deployment root.
-        platform.get.side_effect = lambda key, *rest: (
+        platform.get.side_effect = lambda key, *_rest: (
             "/srv/app-platform" if key == "paths.root" else "storage.internal"
         )
         events: list[str] = []
@@ -1642,7 +1637,7 @@ class HelperStorageTests(unittest.TestCase):
         platform = mock.Mock(prefix="example")
         # Key-aware: a blanket return value gave paths.root a hostname, which is
         # not a usable deployment root.
-        platform.get.side_effect = lambda key, *rest: (
+        platform.get.side_effect = lambda key, *_rest: (
             "/srv/app-platform" if key == "paths.root" else "storage.internal"
         )
         postgres = mock.Mock()

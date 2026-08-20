@@ -28,7 +28,13 @@ class CasConflict(NomadError):
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(
-        self, req: object, fp: object, code: int, msg: str, headers: object, newurl: str
+        self,
+        _req: object,
+        _fp: object,
+        _code: int,
+        _msg: str,
+        _headers: object,
+        _newurl: str,
     ) -> None:
         return None
 

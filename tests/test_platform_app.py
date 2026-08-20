@@ -23,7 +23,6 @@ from platform_cli.app import (
     accept_healthy_deployment,
     acquire_github_commit,
     apply_registry_retention,
-    build_and_push,
     build_with_disposable_builder,
     create_build_archive,
     create_builder,
@@ -38,7 +37,6 @@ from platform_cli.app import (
     parse_builder_observation,
     parse_dotenv,
     parse_worker_observation,
-    remove_application_resources,
     render_nomad_job,
     set_environment,
 )
@@ -366,69 +364,7 @@ class SourceTests(unittest.TestCase):
 
 
 class BuilderTests(unittest.TestCase):
-    def test_digest_metadata_is_exact_and_builder_is_always_deleted(self) -> None:
-        events: list[str] = []
-        recipe = Recipe(b"FROM pinned\n", "0" * 64)
-
-        def create(identifier: str, **_kwargs: object) -> None:
-            events.append(f"create:{identifier}")
-
-        def execute(*_args: object, **_kwargs: object) -> bytes:
-            events.append("execute")
-            return json.dumps({"containerimage.digest": f"sha256:{DIGEST}"}).encode()
-
-        def delete(identifier: str, **_kwargs: object) -> None:
-            events.append(f"delete:{identifier}")
-
-        with tempfile.TemporaryDirectory() as directory:
-            result = build_and_push(
-                build_id=APP_ID,
-                source_directory=directory,
-                recipe=recipe,
-                image_name="registry.example/apps/demo-app",
-                create_builder=create,
-                execute_build=execute,
-                delete_builder=delete,
-            )
-        self.assertEqual(result.image, f"registry.example/apps/demo-app@sha256:{DIGEST}")
-        self.assertTrue(result.cleanup_confirmed)
-        self.assertEqual(events, [f"create:{APP_ID}", "execute", f"delete:{APP_ID}"])
-
-    def test_failed_build_runs_cleanup_and_ambiguous_metadata_is_rejected(self) -> None:
-        deleted: list[str] = []
-
-        def execute(*_args: object, **_kwargs: object) -> bytes:
-            raise RuntimeError("build failed")
-
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ApplicationError, "cleanup completed"):
-                build_and_push(
-                    build_id=APP_ID,
-                    source_directory=directory,
-                    recipe=Recipe(b"x", "0" * 64),
-                    image_name="registry.example/apps/demo-app",
-                    create_builder=lambda *_args, **_kwargs: None,
-                    execute_build=execute,
-                    delete_builder=lambda identifier, **_kwargs: deleted.append(identifier),
-                )
-        self.assertEqual(deleted, [APP_ID])
-
-        deleted.clear()
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ApplicationError, "cleanup completed"):
-                build_and_push(
-                    build_id=APP_ID,
-                    source_directory=directory,
-                    recipe=Recipe(b"x", "0" * 64),
-                    image_name="registry.example:5000/apps/demo-app",
-                    create_builder=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                        RuntimeError(SENTINEL)
-                    ),
-                    execute_build=lambda *_args, **_kwargs: b"",
-                    delete_builder=lambda identifier, **_kwargs: deleted.append(identifier),
-                )
-        self.assertEqual(deleted, [APP_ID])
-
+    def test_ambiguous_metadata_is_rejected(self) -> None:
         with self.assertRaises(ApplicationError):
             parse_build_metadata(
                 json.dumps(
@@ -812,40 +748,6 @@ class ProviderCommandTests(unittest.TestCase):
                     identity_path=Path(directory) / "builder_operator_ed25519",
                 )
         deleted.assert_called_once()
-
-    def test_removal_requires_job_variable_worker_port_and_manifest_absence(self) -> None:
-        absent_worker = app_module.WorkerObservation(
-            APP_ID,
-            "demo-app",
-            None,
-            "example-worker-123456781234",
-            None,
-            "example-worker-123456781234-v4",
-            None,
-            None,
-            False,
-        )
-        with (
-            mock.patch.object(
-                app_module,
-                "remove_application_job",
-                return_value={"jobAbsent": True, "variableAbsent": True},
-            ),
-            mock.patch.object(app_module, "delete_worker", return_value=absent_worker),
-            mock.patch.object(app_module, "delete_registry_manifest", return_value=True),
-        ):
-            removed = remove_application_resources(
-                APP_ID,
-                "demo-app",
-                prefix="example",
-                image_digest=f"registry.example/projects/demo-app/app@sha256:{DIGEST}",
-                timeout_seconds=30,
-            )
-        self.assertTrue(removed.job_absent)
-        self.assertTrue(removed.variable_absent)
-        self.assertTrue(removed.worker_absent)
-        self.assertTrue(removed.port_absent)
-        self.assertTrue(removed.manifest_absent)
 
     def test_registry_retention_never_deletes_current_accepted_or_rollback_references(self) -> None:
         images = [

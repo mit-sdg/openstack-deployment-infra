@@ -236,7 +236,6 @@ def _inspected_candidate(
     nomad_command: tuple[str, ...],
     timeout_seconds: float,
     response_limit: int,
-    reject_invalid: bool = True,
 ) -> tuple[int, str, str] | None:
     """Inspect one job, returning ``None`` only for exact absence.
 
@@ -258,9 +257,6 @@ def _inspected_candidate(
     value = _parse_json(completed.stdout, field="job inspection")
     if not isinstance(value, dict) or value.get("ID") != application_slug:
         raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
-    # Keep the historical keyword for callers outside this module, but never
-    # downgrade malformed identity to absence.  Ambiguity is destructive-path
-    # blocking evidence regardless of the flag's value.
     return inspected_job_identity(value, application_slug)
 
 
@@ -290,7 +286,6 @@ def _deploy_handler(
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
             response_limit=response_limit,
-            reject_invalid=True,
         )
         if current is not None and current[1:] == candidate:
             return {
@@ -314,7 +309,6 @@ def _deploy_handler(
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
             response_limit=response_limit,
-            reject_invalid=True,
         )
         if observed is None or observed[1:] != candidate:
             raise HelperActionError(

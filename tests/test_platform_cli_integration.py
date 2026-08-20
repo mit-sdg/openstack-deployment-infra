@@ -85,7 +85,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.observe_flavor = mock.patch.object(
             cli.openstack,
             "observe_flavor",
-            return_value=openstack.Flavor(IMAGE_ID, "one-vcpu", 1, 2048),
+            return_value="one-vcpu",
         )
         self.observe_flavor_mock = self.observe_flavor.start()
         self.addCleanup(self.observe_flavor.stop)
@@ -331,9 +331,7 @@ class CliIntegrationTests(unittest.TestCase):
                 refs=refs,
             )
             db.mark_recovery_required(connection, operation_id, "injected interruption")
-        recovered = openstack.PruneRecoveryResult(
-            "continue", (IMAGE_ID,), (IMAGE_ID,), (), "d" * 64
-        )
+        recovered = openstack.PruneResult((IMAGE_ID,), "d" * 64)
         with mock.patch.object(
             cli.openstack, "recover_image_prune", return_value=recovered
         ) as recover:
@@ -653,7 +651,7 @@ class CliIntegrationTests(unittest.TestCase):
         actions: list[str] = []
         call_values: dict[str, list[object]] = {}
         self.observe_flavor_mock.side_effect = lambda *_args, **_kwargs: (
-            actions.append("flavor.verify") or openstack.Flavor(IMAGE_ID, "one-vcpu", 1, 2048)
+            actions.append("flavor.verify") or "one-vcpu"
         )
         fail_build = [True]
         fail_worker_remove = [True]
@@ -1047,9 +1045,7 @@ class CliIntegrationTests(unittest.TestCase):
         powered = openstack.PowerResult(
             "admin",
             "00000000-0000-4000-8000-000000000006",
-            "start",
             "ACTIVE",
-            ("guest:admin-services-ready",),
         )
         with mock.patch.object(cli.openstack, "power_host", return_value=powered) as power:
             cli.dispatch(power_args, stdout=StringIO())
@@ -1074,9 +1070,7 @@ class CliIntegrationTests(unittest.TestCase):
             True,
             "00000000-0000-4000-8000-000000000008",
             "00000000-0000-4000-8000-000000000007",
-            "00000000-0000-4000-8000-000000000009",
             "confirmed",
-            ("guest:ingress-services-ready",),
         )
 
         def replace(*_args: object, **kwargs: object) -> openstack.ReplacementResult:
@@ -1115,9 +1109,7 @@ class CliIntegrationTests(unittest.TestCase):
         recovered = openstack.PowerResult(
             "ingress",
             server_id,
-            "reboot",
             "ACTIVE",
-            ("nova:active", "guest:ingress-services-ready"),
         )
         with (
             mock.patch.object(cli.openstack, "power_host") as replay,

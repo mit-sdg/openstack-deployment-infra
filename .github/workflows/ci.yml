@@ -44,6 +44,7 @@ jobs:
           uv run ruff format --check platform_cli deploy/platform-cli infra tests
           uv run ruff check platform_cli deploy/platform-cli infra tests
           uv run mypy
+          uv run vulture platform_cli deploy infra tests --min-confidence 80 --sort-by-size
 
       - name: Install ShellCheck
         run: |

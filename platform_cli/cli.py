@@ -74,10 +74,6 @@ class DependencyUnavailable(CliError):
     pass
 
 
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 def _deadline(config: Config) -> str:
     return (
         (datetime.now(UTC) + timedelta(seconds=config.policy.limits.process_seconds))
@@ -1659,13 +1655,13 @@ def _prepare_deployment_worker(
                 refs=refs,
                 candidate_digest=candidate,
             )
-        flavor = openstack.observe_flavor(
+        observed_flavor_name = openstack.observe_flavor(
             config.platform,
             worker_flavor,
             require_one_vcpu=True,
             timeout_seconds=_remaining(deadline, config.policy.limits.process_seconds),
         )
-        if flavor.name != worker_flavor:
+        if observed_flavor_name != worker_flavor:
             raise openstack.OpenStackError("configured worker flavor resolved to a different name")
         worker = _helper(
             config,

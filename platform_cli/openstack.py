@@ -63,46 +63,6 @@ _R = TypeVar("_R")
 Checkpoint = Callable[[str, Mapping[str, Any]], None]
 HealthCheck = Callable[[str, "PersistentHost", float], None]
 
-__all__ = [
-    "DriftError",
-    "Flavor",
-    "HostResources",
-    "Image",
-    "ImageSelection",
-    "OpenStackError",
-    "PersistentHost",
-    "PowerResult",
-    "ProjectIdentity",
-    "PrunePlan",
-    "PruneRecoveryResult",
-    "PruneResult",
-    "RecoveryRequired",
-    "RecoveryResult",
-    "ReplacementResult",
-    "VolumeAttachment",
-    "apply_image_prune",
-    "check_role_health",
-    "continue_host_replacement",
-    "image_compatibility_hash",
-    "host_logs",
-    "list_images",
-    "list_persistent_hosts",
-    "observe_flavor",
-    "observe_host_resources",
-    "inspect_host_replacement",
-    "plan_image_prune",
-    "power_host",
-    "publisher_metadata",
-    "recover_host_replacement",
-    "recover_image_prune",
-    "recover_power_host",
-    "replace_host",
-    "rollback_host_replacement",
-    "select_image",
-    "select_images",
-    "verify_project",
-]
-
 
 class OpenStackError(RuntimeError):
     """A bounded, operator-safe OpenStack failure."""
@@ -200,28 +160,8 @@ class PrunePlan:
 
 @dataclass(frozen=True, slots=True)
 class PruneResult:
-    planned_image_ids: tuple[str, ...]
     deleted_image_ids: tuple[str, ...]
     drift_hash: str
-    protected_image_ids: tuple[str, ...]
-    review_image_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class PruneRecoveryResult:
-    action: str
-    planned_image_ids: tuple[str, ...]
-    deleted_image_ids: tuple[str, ...]
-    pending_image_ids: tuple[str, ...]
-    drift_hash: str
-
-
-@dataclass(frozen=True, slots=True)
-class Flavor:
-    flavor_id: str
-    name: str
-    vcpus: int
-    ram_mib: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +181,6 @@ class VolumeAttachment:
     volume_id: str
     name: str
     device: str
-    delete_on_termination: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,9 +209,7 @@ class HostResources:
 class PowerResult:
     role: str
     server_id: str
-    action: str
     status: str
-    checks: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,19 +218,14 @@ class ReplacementResult:
     accepted: bool
     active_server_id: str
     selected_image_id: str
-    old_server_id: str
     cleanup_state: str
-    checks: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryResult:
     role: str
-    phase: str
     action: str
     active_server_id: str
-    old_server_id: str
-    replacement_server_id: str | None
     cleanup_state: str
 
 
@@ -1368,13 +1300,7 @@ def apply_image_prune(
         command_runner=command_runner,
         executable=executable,
     )
-    return PruneResult(
-        plan.image_ids,
-        tuple(deleted),
-        plan.drift_hash,
-        plan.protected_image_ids,
-        plan.review_image_ids,
-    )
+    return PruneResult(tuple(deleted), plan.drift_hash)
 
 
 def _reconciled_prune_deletions(
@@ -1459,7 +1385,7 @@ def recover_image_prune(
     timeout_seconds: float = 30,
     command_runner: Runner = runtime.run,
     executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
-) -> PruneRecoveryResult:
+) -> PruneResult:
     """Inspect or continue one exact interrupted provider-side prune."""
     if action not in ("inspect", "continue"):
         raise ValidationError("image prune recovery action must be inspect or continue")
@@ -1483,10 +1409,7 @@ def recover_image_prune(
             command_runner=command_runner,
             executable=executable,
         )
-    pending = plan.image_ids[len(deleted) :]
-    return PruneRecoveryResult(
-        action, plan.image_ids, tuple(deleted), tuple(pending), plan.drift_hash
-    )
+    return PruneResult(tuple(deleted), plan.drift_hash)
 
 
 @_command_deadline("timeout_seconds")
@@ -1498,7 +1421,7 @@ def observe_flavor(
     timeout_seconds: float = 30,
     command_runner: Runner = runtime.run,
     executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
-) -> Flavor:
+) -> str:
     """Observe a flavor, optionally enforcing M1's worker 1-vCPU policy."""
     verify_project(
         platform,
@@ -1526,7 +1449,7 @@ def observe_flavor(
     )
     if not isinstance(shown, Mapping):
         raise OpenStackError("OpenStack flavor projection was not an object")
-    flavor_id = _provider_uuid(_field(shown, "id"), field="flavor UUID")
+    _provider_uuid(_field(shown, "id"), field="flavor UUID")
     name = _field(shown, "name")
     vcpus = _field(shown, "vcpus")
     ram = _field(shown, "ram")
@@ -1534,7 +1457,7 @@ def observe_flavor(
         raise OpenStackError("OpenStack flavor projection was malformed")
     if require_one_vcpu and vcpus != 1:
         raise OpenStackError("configured worker flavor must have exactly one vCPU")
-    return Flavor(flavor_id, name, vcpus, ram)
+    return name
 
 
 def _resource_id(value: Any, *, field: str) -> str | None:
@@ -1812,7 +1735,6 @@ def _finish_power_observation(
         executable=executable,
         sleep=sleep,
     )
-    checks = [f"nova:{wanted.lower()}", "resources:exact"]
     if action != "stop":
         _wait_console_ready(
             platform,
@@ -1838,7 +1760,6 @@ def _finish_power_observation(
                 "configured host changed while observing its power action",
                 refs={"role": host.role, "server_id": host.server_id, "action": action},
             )
-        checks.append(f"guest:{host.role}-services-ready")
         remaining = _deadline_remaining(deadline, operation=f"{host.role} role health checks")
         required_health_check = _required_role_health_check(
             platform,
@@ -1847,8 +1768,7 @@ def _finish_power_observation(
             executable=executable,
         )
         required_health_check(host.role, exact.host, remaining)
-        checks.append("role:failed-units-and-authenticated-endpoints-healthy")
-    return PowerResult(host.role, host.server_id, action, wanted, tuple(checks))
+    return PowerResult(host.role, host.server_id, wanted)
 
 
 @_command_deadline("wait_seconds")
@@ -2198,24 +2118,22 @@ def _observe_host_resources_verified(
         if row is None:
             raise OpenStackError(f"configured {role} volume is not attached to its server UUID")
         delete_value = delete_by_id.get(volume_id)
-        if delete_value is False or (
-            isinstance(delete_value, str) and delete_value.lower() == "false"
-        ):
-            delete_flag = False
-        elif delete_value is True or (
+        if delete_value is True or (
             isinstance(delete_value, str) and delete_value.lower() == "true"
         ):
             raise OpenStackError(
                 "persistent volume has delete_on_termination enabled; replacement refused"
             )
-        else:
+        if delete_value is not False and not (
+            isinstance(delete_value, str) and delete_value.lower() == "false"
+        ):
             raise OpenStackError(
                 "persistent volume delete_on_termination state is missing or ambiguous"
             )
         device = _field(row, "device")
         if not isinstance(device, str) or not device.startswith("/dev/"):
             raise OpenStackError("persistent volume attachment device is malformed")
-        volumes.append(VolumeAttachment(volume_id, volume_name, device, delete_flag))
+        volumes.append(VolumeAttachment(volume_id, volume_name, device))
     expected_volume_ids = {volume.volume_id for volume in volumes}
     if (
         set(by_id) != expected_volume_ids
@@ -2764,9 +2682,7 @@ def _rollback_replacement(
         False,
         old_id,
         selected_image_id,
-        old_id,
         "confirmed",
-        ("resources:restored", f"guest:{resources.host.role}-services-ready"),
     )
 
 
@@ -3210,16 +3126,12 @@ def _replace_host(
             "cleanup_state": cleanup_state,
         },
     )
-    checks = ["nova:active", "resources:exact", f"guest:{role}-services-ready"]
-    checks.append("role:failed-units-and-authenticated-endpoints-healthy")
     return ReplacementResult(
         role,
         True,
         replacement_id,
         selected_image_id,
-        old_server_id,
         cleanup_state,
-        tuple(checks),
     )
 
 
@@ -3528,7 +3440,7 @@ def _recovery_resources(
                 "configured persistent-volume identity drifted during replacement",
                 refs={"role": role, "old_server_id": old_id, "volume_id": volume_id},
             )
-        volumes.append(VolumeAttachment(volume_id, volume_name, device, False))
+        volumes.append(VolumeAttachment(volume_id, volume_name, device))
     if len({volume.volume_id for volume in volumes}) != len(volumes) or len(
         {volume.device for volume in volumes}
     ) != len(volumes):
@@ -3621,7 +3533,7 @@ def _recover_host_replacement(
             _provider_uuid(_field(rows[0], "id"), field="server UUID") if len(rows) == 1 else old_id
         )
         state = "continue_required" if phase in ("accepted", "complete") else "rollback_required"
-        return RecoveryResult(role, phase, action, active_id, old_id, replacement_id, state)
+        return RecoveryResult(role, action, active_id, state)
     selected_image_id = uuid(refs.get("selected_image_id"), field="selected image UUID")
     if replacement_id is not None and phase == "replacement_deleted":
         if not _resource_exists(
@@ -3663,15 +3575,7 @@ def _recover_host_replacement(
             sleep=sleep,
             checkpoint=checkpoint,
         )
-        return RecoveryResult(
-            role,
-            phase,
-            action,
-            result.active_server_id,
-            old_id,
-            replacement_id,
-            result.cleanup_state,
-        )
+        return RecoveryResult(role, action, result.active_server_id, result.cleanup_state)
     if replacement_id is None:
         raise RecoveryRequired(
             "accepted replacement server UUID is unavailable; refusing old-server cleanup",
@@ -3755,7 +3659,7 @@ def _recover_host_replacement(
         "complete",
         {**refs, "replacement_server_id": replacement_id, "cleanup_state": "confirmed"},
     )
-    return RecoveryResult(role, phase, action, replacement_id, old_id, replacement_id, "confirmed")
+    return RecoveryResult(role, action, replacement_id, "confirmed")
 
 
 @_command_deadline("wait_seconds")
@@ -3776,7 +3680,7 @@ def recover_host_replacement(
     host_key_runner: Runner = runtime.run,
     sleep: Callable[[float], None] = time.sleep,
 ) -> RecoveryResult:
-    """Compatibility dispatcher for exact replacement recovery actions."""
+    """Dispatch exact replacement recovery actions."""
     try:
         return _recover_host_replacement(
             platform,
@@ -3798,103 +3702,6 @@ def recover_host_replacement(
         full_refs = dict(refs)
         full_refs.update(error.refs)
         raise RecoveryRequired(str(error), refs=full_refs) from None
-
-
-@_command_deadline("timeout_seconds")
-def inspect_host_replacement(
-    platform: PlatformConfig,
-    role: str,
-    *,
-    phase: str,
-    refs: Mapping[str, Any],
-    timeout_seconds: float = 60,
-    command_runner: Runner = runtime.run,
-    executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
-) -> RecoveryResult:
-    """Inspect one recorded replacement without mutating provider resources."""
-    return recover_host_replacement(
-        platform,
-        role,
-        phase=phase,
-        refs=refs,
-        action="inspect",
-        checkpoint=lambda _phase, _refs: None,
-        timeout_seconds=timeout_seconds,
-        command_runner=command_runner,
-        executable=executable,
-    )
-
-
-@_command_deadline("wait_seconds")
-def rollback_host_replacement(
-    platform: PlatformConfig,
-    role: str,
-    *,
-    phase: str,
-    refs: Mapping[str, Any],
-    checkpoint: Checkpoint,
-    health_check: HealthCheck | None = None,
-    wait_seconds: float = 900,
-    poll_interval_seconds: float = 2,
-    timeout_seconds: float = 60,
-    command_runner: Runner = runtime.run,
-    executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
-    host_key_runner: Runner = runtime.run,
-    sleep: Callable[[float], None] = time.sleep,
-) -> RecoveryResult:
-    """Rollback an exact pre-acceptance replacement to the retained host."""
-    return recover_host_replacement(
-        platform,
-        role,
-        phase=phase,
-        refs=refs,
-        action="rollback",
-        checkpoint=checkpoint,
-        health_check=health_check,
-        wait_seconds=wait_seconds,
-        poll_interval_seconds=poll_interval_seconds,
-        timeout_seconds=timeout_seconds,
-        command_runner=command_runner,
-        executable=executable,
-        host_key_runner=host_key_runner,
-        sleep=sleep,
-    )
-
-
-@_command_deadline("wait_seconds")
-def continue_host_replacement(
-    platform: PlatformConfig,
-    role: str,
-    *,
-    phase: str,
-    refs: Mapping[str, Any],
-    checkpoint: Checkpoint,
-    health_check: HealthCheck | None = None,
-    wait_seconds: float = 900,
-    poll_interval_seconds: float = 2,
-    timeout_seconds: float = 60,
-    command_runner: Runner = runtime.run,
-    executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
-    host_key_runner: Runner = runtime.run,
-    sleep: Callable[[float], None] = time.sleep,
-) -> RecoveryResult:
-    """Continue an exact created/accepted replacement through acceptance and cleanup."""
-    return recover_host_replacement(
-        platform,
-        role,
-        phase=phase,
-        refs=refs,
-        action="continue",
-        checkpoint=checkpoint,
-        health_check=health_check,
-        wait_seconds=wait_seconds,
-        poll_interval_seconds=poll_interval_seconds,
-        timeout_seconds=timeout_seconds,
-        command_runner=command_runner,
-        executable=executable,
-        host_key_runner=host_key_runner,
-        sleep=sleep,
-    )
 
 
 def _metadata_main(argv: Sequence[str] | None = None) -> int:

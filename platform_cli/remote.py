@@ -21,14 +21,6 @@ DEFAULT_RESPONSE_LIMIT = 1_048_576
 DEFAULT_SSH_CONFIG = Path("/srv/openstack-platform/.secrets/ssh/config")
 SSH_TARGET = "platform-admin"
 HELPER_COMMAND_NAME = "openstack-platform-helper"
-SSH_COMMAND = (
-    "ssh",
-    "-F",
-    str(DEFAULT_SSH_CONFIG),
-    SSH_TARGET,
-    "--",
-    HELPER_COMMAND_NAME,
-)
 
 
 def helper_command_path(deployment_root: str) -> str:

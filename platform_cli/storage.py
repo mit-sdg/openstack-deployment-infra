@@ -39,11 +39,8 @@ class StorageOperationError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class StorageResult:
-    operation_id: str | None
     requested: tuple[str, ...]
     completed: tuple[str, ...]
-    evidence_rejected: tuple[str, ...] = ()
-    retirement_pending: tuple[str, ...] = ()
 
 
 def _now() -> str:
@@ -467,7 +464,7 @@ def _complete_operation(
         merge_refs=True,
     )
     db.mark_succeeded(connection, operation.operation_id)
-    return StorageResult(operation.operation_id, selected, tuple(completed))
+    return StorageResult(selected, tuple(completed))
 
 
 def create(
@@ -808,8 +805,6 @@ def rotate(
         process_deadline=process_deadline,
     )
     completed = list(_refs_list(operation.refs, "completed"))
-    rejected: list[str] = []
-    pending: list[str] = []
     for resource_type in selected:
         if resource_type in completed:
             continue
@@ -873,7 +868,6 @@ def rotate(
                     provider_name=resource.provider_name,
                     message=f"{resource_type} rotation rollback was not confirmed",
                 )
-            rejected.append(resource_type)
             _put_resource(
                 connection,
                 config,
@@ -891,11 +885,8 @@ def rotate(
                 "rotation health evidence was rejected",
                 cleanup_state="confirmed",
             )
-            return StorageResult(
-                operation.operation_id, selected, tuple(completed), tuple(rejected), tuple(pending)
-            )
+            raise StorageOperationError(f"{resource_type} rotation health evidence was rejected")
         if result.get("retired") is not True:
-            pending.append(resource_type)
             _mark_ambiguous(
                 connection,
                 config,

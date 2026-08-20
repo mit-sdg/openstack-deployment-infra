@@ -5,7 +5,7 @@ The public functions in this module are the read-side integration interface:
 ``status_show(connection, *, observe_infrastructure=None,
 observe_application=None, observe_storage=None)``
     Return an aggregate platform summary.
-``infra_list`` / ``infra_show``
+``infra_list``
     Return accepted role-image selections plus a small live health projection.
 ``app_list`` / ``app_show``
     Return accepted application state plus a small scheduler/route projection.
@@ -541,18 +541,6 @@ def infra_list(
     return result
 
 
-def infra_show(
-    connection: sqlite3.Connection,
-    role: str,
-    *,
-    observe: InfrastructureObserver | None = None,
-) -> dict[str, object] | None:
-    """Show one fixed infrastructure role, or ``None`` for an unknown role."""
-    if role not in ROLES:
-        return None
-    return next(item for item in infra_list(connection, observe=observe) if item["role"] == role)
-
-
 def _application_model(
     connection: sqlite3.Connection,
     application: db.Application,
@@ -777,27 +765,3 @@ def status_show_live(
         observe_application=observers.application,
         observe_storage=observers.storage,
     )
-
-
-__all__ = [
-    "ApplicationObservation",
-    "ApplicationObserver",
-    "InfrastructureObservation",
-    "InfrastructureObserver",
-    "LiveObservers",
-    "StorageObservation",
-    "StorageObserver",
-    "app_list",
-    "app_show",
-    "incomplete_operations",
-    "infra_list",
-    "infra_show",
-    "infrastructure_observer",
-    "application_observer",
-    "live_observers",
-    "status_show",
-    "status_show_live",
-    "storage_observer",
-    "storage_list",
-    "storage_show",
-]

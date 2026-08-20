@@ -7,5 +7,3 @@ directly.  The package does not define provider or repository abstractions.
 from __future__ import annotations
 
 PROTOCOL_VERSION = 1
-
-__all__ = ["PROTOCOL_VERSION"]

@@ -1590,13 +1590,6 @@ def list_environment_keys(
     ]
 
 
-def delete_application(connection: sqlite3.Connection, application_id: str) -> None:
-    """Delete accepted app state after feature code has confirmed owned resources absent."""
-    uuid(application_id, field="application_id")
-    with transaction(connection):
-        connection.execute("DELETE FROM applications WHERE application_id = ?", (application_id,))
-
-
 def complete_application_removal(
     connection: sqlite3.Connection,
     *,

@@ -36,13 +36,6 @@ class CommandResult:
     stderr: bytes = field(repr=False)
     stdout_truncated: bool
     stderr_truncated: bool
-    elapsed_seconds: float
-
-    def stdout_text(self) -> str:
-        return self.stdout.decode("utf-8", errors="replace")
-
-    def stderr_text(self) -> str:
-        return self.stderr.decode("utf-8", errors="replace")
 
 
 class CommandFailure(RuntimeFailure):
@@ -388,7 +381,6 @@ def run(
     ):
         raise ValueError("command requires a non-empty NUL-free argv and positive timeout")
     diagnostic = safe_argv(arguments, secrets=secrets)
-    started = time.monotonic()
     try:
         process = subprocess.Popen(
             arguments,
@@ -473,7 +465,6 @@ def run(
         stderr=stderr.value(),
         stdout_truncated=stdout.truncated,
         stderr_truncated=stderr.truncated,
-        elapsed_seconds=time.monotonic() - started,
     )
     if timed_out:
         raise CommandTimedOut(
@@ -546,29 +537,3 @@ def bounded_http(
         raise RuntimeFailure(f"HTTP request failed with status {error.code}") from None
     except (urllib.error.URLError, TimeoutError) as error:
         raise RuntimeFailure(f"HTTP request failed: {error.__class__.__name__}") from None
-
-
-def append_private_log(
-    path: str | Path,
-    text: object,
-    *,
-    maximum_bytes: int,
-    secrets: Sequence[str | bytes] = (),
-) -> int:
-    """Append redacted text to a mode-0600 log without exceeding its fixed cap."""
-    if maximum_bytes < 0:
-        raise ValueError("log size limit must not be negative")
-    log_path = Path(path)
-    ensure_private_directory(log_path.parent)
-    descriptor = _private_file(log_path, create=True)
-    try:
-        current = os.fstat(descriptor).st_size
-        remaining = max(0, maximum_bytes - current)
-        encoded = (redact_text(text, secrets=secrets) + "\n").encode("utf-8")[:remaining]
-        os.lseek(descriptor, 0, os.SEEK_END)
-        if encoded:
-            os.write(descriptor, encoded)
-            os.fsync(descriptor)
-        return len(encoded)
-    finally:
-        os.close(descriptor)
