@@ -2190,6 +2190,12 @@ def execute_deployment_workflow(
                 unfinished.refs.get(key) != value for key, value in base_refs.items()
             ):
                 raise db.UnfinishedOperationError(scope, unfinished.operation_id, unfinished.kind)
+            # This attempt has its own deadline. Record it before recovering,
+            # so the helper is not handed the spent deadline of the attempt
+            # that stranded this operation.
+            unfinished = db.renew_operation_deadline(
+                connection, unfinished.operation_id, deadline_at
+            )
             unfinished = recover(unfinished)
             if unfinished is None:
                 return None
