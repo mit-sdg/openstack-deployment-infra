@@ -255,7 +255,16 @@ def _build_nix_output(
     if platform is not None:
         child["PLATFORM_CONFIG"] = str(platform)
     output = _command(
-        (nix, "build", "--impure", "--no-link", "--print-out-paths", f".#{attribute}"),
+        (
+            nix,
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "build",
+            "--impure",
+            "--no-link",
+            "--print-out-paths",
+            f".#{attribute}",
+        ),
         environment=child,
         cwd=repository,
         capture=True,
