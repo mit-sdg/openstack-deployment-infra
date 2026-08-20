@@ -28,6 +28,7 @@ DEFAULT_KNOWN_HOSTS = Path("/srv/openstack-platform/.secrets/ssh/known_hosts")
 DEFAULT_PROVIDER_COMMAND = Path("/srv/openstack-platform/bin/platform-openstack")
 _MAX_CONFIG_BYTES = 1_048_576
 _MAX_COMMAND_OUTPUT = 65_536
+_MAX_CONSOLE_OUTPUT = 2_097_152
 _FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}=?")
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _NIX_STORE = Path("/nix/store")
@@ -225,7 +226,13 @@ def _verify_executable(path: Path, *, label: str) -> None:
         _fail(f"{label} must be a direct current-user-owned executable with mode 0500 or 0700")
 
 
-def _command(argv: Sequence[str], *, stdin: bytes | None = None, timeout: float = 30) -> bytes:
+def _command(
+    argv: Sequence[str],
+    *,
+    stdin: bytes | None = None,
+    timeout: float = 30,
+    maximum_output: int = _MAX_COMMAND_OUTPUT,
+) -> bytes:
     try:
         completed = subprocess.run(
             list(argv),
@@ -239,7 +246,7 @@ def _command(argv: Sequence[str], *, stdin: bytes | None = None, timeout: float 
         )
     except (OSError, subprocess.TimeoutExpired):
         _fail("bridge dependency command was unavailable or timed out")
-    if len(completed.stdout) > _MAX_COMMAND_OUTPUT:
+    if len(completed.stdout) > maximum_output:
         _fail("bridge dependency command output exceeded its size limit")
     if completed.returncode != 0:
         _fail("bridge dependency command failed")
@@ -397,6 +404,7 @@ def configure(args: argparse.Namespace) -> None:
         _command(
             (str(args.provider_command), "console", "log", "show", "--lines", "2000", server_name),
             timeout=45,
+            maximum_output=_MAX_CONSOLE_OUTPUT,
         )
     )
     known_host, observed = _scan_host_key(address)
