@@ -17,8 +17,14 @@ ca_cert="$OUTPUT_DIR/$PLATFORM_INTERNAL_CA_FILE"
 ca_key="$OUTPUT_DIR/${PLATFORM_INTERNAL_CA_FILE%.pem}-key.pem"
 if [[ ! -f $ca_key || ! -f $ca_cert ]]; then
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$ca_key"
+  # Without an explicit keyUsage a verifier applying RFC 5280 strictly refuses
+  # this certificate, and Python has enabled that strictness by default since
+  # 3.13. The leaf certificates below already declare their own key usage.
   openssl req -x509 -new -sha256 -days "$CA_DAYS" \
     -key "$ca_key" -out "$ca_cert" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -addext "subjectKeyIdentifier=hash" \
     -subj "/CN=${PLATFORM_DISPLAY_NAME} Platform Internal CA/O=${PLATFORM_ORGANIZATION}"
   echo "created internal CA"
 else
