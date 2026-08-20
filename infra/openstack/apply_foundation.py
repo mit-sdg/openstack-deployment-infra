@@ -244,11 +244,12 @@ def _project_field(project: Any, field: str) -> object:
 def verify_authenticated_project(conn: Any) -> tuple[str, str]:
     """Require both authenticated project identity fields before any mutation."""
     configured_id = _canonical_provider_uuid(PROJECT_ID, field="UUID configuration")
-    current_id = _canonical_provider_uuid(getattr(conn, "current_project_id", None), field="UUID")
+    provider_id = getattr(conn, "current_project_id", None)
+    current_id = _canonical_provider_uuid(provider_id, field="UUID")
     if current_id != configured_id:
         raise RuntimeError("authenticated OpenStack project UUID does not match configuration")
 
-    project = conn.identity.get_project(configured_id)
+    project = conn.identity.get_project(provider_id)
     observed_id = _canonical_provider_uuid(_project_field(project, "id"), field="UUID")
     observed_name = _project_field(project, "name")
     if (
