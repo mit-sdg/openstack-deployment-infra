@@ -107,6 +107,9 @@ class HostUserDataTests(unittest.TestCase):
         self.assertIn("NOMAD_GOSSIP_KEY=sentinel-admin-gossip", admin)
         self.assertIn(f"ADMIN_VOLUME_ID={ADMIN_VOLUME}", admin)
         self.assertIn(f"BACKUP_VOLUME_ID={BACKUP_VOLUME}", admin)
+        self.assertIn(f"/dev/vdb:{self.platform.get('volumes.adminState.label')}", admin)
+        self.assertIn(f"/dev/vdc:{self.platform.get('volumes.backup.label')}", admin)
+        self.assertIn('mkfs.ext4 -F -L "$label" "$device"', admin)
         self.assertEqual(admin.count(base64.b64encode(b"public-internal-ca.pem\n").decode()), 2)
 
         _, ingress = self.render(
@@ -149,6 +152,8 @@ class HostUserDataTests(unittest.TestCase):
         self.assertIn("POSTGRES_PASSWORD=sentinel-postgres", storage)
         self.assertIn("MONGO_INITDB_ROOT_PASSWORD=sentinel-mongo", storage)
         self.assertIn(f"DATA_VOLUME_ID={DATA_VOLUME}", storage)
+        self.assertIn(f"label={self.platform.get('volumes.data.label')}", storage)
+        self.assertIn('mkfs.ext4 -F -L "$label" "$device"', storage)
         self.assertNotIn("sentinel-builder-password", storage)
         self.assertNotIn("sentinel-runtime-password", storage)
         encoded_htpasswd = next(

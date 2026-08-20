@@ -9,6 +9,22 @@ users:
     shell: /run/current-system/sw/bin/bash
     ssh_authorized_keys:
       - __AGENTOPS_PUBLIC_KEY__
+bootcmd:
+  - |
+    set -eu
+    device=/dev/vdb
+    label=__DATA_VOLUME_LABEL__
+    for attempt in $(seq 1 60); do
+      [ -b "$device" ] && break
+      sleep 1
+    done
+    [ -b "$device" ] || { echo "missing retained volume device: $device" >&2; exit 1; }
+    if blkid -p -s TYPE -o value "$device" >/dev/null 2>&1; then
+      observed=$(blkid -p -s LABEL -o value "$device" 2>/dev/null || true)
+      [ "$observed" = "$label" ] || { echo "unexpected retained volume label on $device" >&2; exit 1; }
+    else
+      mkfs.ext4 -F -L "$label" "$device"
+    fi
 write_files:
   - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem
     owner: root:root

@@ -146,6 +146,9 @@ class SetupInventoryTests(unittest.TestCase):
         self.assertEqual(document["volumes"]["data"]["sizeGiB"], 500)
         self.assertEqual(document["volumes"]["backup"]["sizeGiB"], 200)
         self.assertEqual(document["volumes"]["adminState"]["sizeGiB"], 32)
+        labels = {volume["label"] for volume in document["volumes"].values()}
+        self.assertEqual(len(labels), 3)
+        self.assertTrue(all(len(label.encode()) <= 16 for label in labels))
         self.assertEqual(document["addresses"]["ingress"], "192.0.2.12")
         self.assertEqual(document["images"]["worker"], "demo-nixos-worker-aaaaaaaa")
         self.assertEqual(document["staticIngressRoutes"], {})

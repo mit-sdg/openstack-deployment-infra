@@ -9,6 +9,7 @@ role-specific scripts instead of introducing a second lifecycle implementation.
 from __future__ import annotations
 
 import getpass
+import hashlib
 import ipaddress
 import json
 import os
@@ -439,6 +440,16 @@ def _volume_type_default(openstack: Path, environment: Mapping[str, str]) -> str
     return names[0] if len(names) == 1 else None
 
 
+def _filesystem_label(namespace: str, suffix: str) -> str:
+    candidate = f"{namespace}-{suffix}"
+    if len(candidate.encode()) <= 16:
+        return candidate
+    digest = hashlib.sha256(namespace.encode()).hexdigest()[:4]
+    budget = 16 - len(suffix) - len(digest) - 2
+    stem = namespace[:budget].rstrip("-")
+    return f"{stem}-{suffix}-{digest}"
+
+
 def _positive_integer(value: str, *, field: str) -> int:
     try:
         parsed = int(value)
@@ -611,19 +622,19 @@ def _platform_document(
             "volumes": {
                 "adminState": {
                     "name": f"{prefix}-admin-state",
-                    "label": f"{namespace}-state",
+                    "label": _filesystem_label(namespace, "state"),
                     "sizeGiB": admin_gib,
                     "type": volume_type,
                 },
                 "backup": {
                     "name": f"{prefix}-backups",
-                    "label": f"{namespace}-bak",
+                    "label": _filesystem_label(namespace, "bak"),
                     "sizeGiB": backup_gib,
                     "type": volume_type,
                 },
                 "data": {
                     "name": f"{prefix}-data",
-                    "label": f"{namespace}-data",
+                    "label": _filesystem_label(namespace, "data"),
                     "sizeGiB": data_gib,
                     "type": volume_type,
                 },
