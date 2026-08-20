@@ -619,15 +619,15 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
                 stderr_limit=65_536,
             )
             for attempt in range(60):
-                status = app_actions._status(
+                current_job = app_actions._inspected_candidate(
                     application_slug,
                     command_runner=run,
                     nomad_command=nomad_command,
                     timeout_seconds=20,
                     response_limit=1_048_576,
                 )
-                version = status.get("Version")
-                if isinstance(version, int) and not isinstance(version, bool):
+                if current_job is not None:
+                    version = current_job[0]
                     allocations = app_actions._allocations(
                         application_slug,
                         command_runner=run,

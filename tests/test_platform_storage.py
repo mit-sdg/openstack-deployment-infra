@@ -1544,7 +1544,11 @@ class HelperStorageTests(unittest.TestCase):
                 "_status_or_absent",
                 return_value={"Version": 7, "Status": "running"},
             ),
-            mock.patch.object(production.app_actions, "_status", return_value={"Version": 7}),
+            mock.patch.object(
+                production.app_actions,
+                "_inspected_candidate",
+                return_value=(7, "a" * 64, "registry.example/app@sha256:" + "b" * 64),
+            ),
             mock.patch.object(
                 production.app_actions, "_public_health_from_job", return_value=True
             ) as public_health,
