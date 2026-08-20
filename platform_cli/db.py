@@ -793,6 +793,20 @@ def get_operation(connection: sqlite3.Connection, operation_id: str) -> Operatio
     )
 
 
+def list_application_deploy_operations(
+    connection: sqlite3.Connection, application_id: str
+) -> tuple[Operation, ...]:
+    rows = connection.execute(
+        """
+        SELECT * FROM operations
+         WHERE scope = ? AND kind = 'app.deploy'
+         ORDER BY started_at DESC, operation_id DESC
+        """,
+        (f"app-{application_id}",),
+    ).fetchall()
+    return tuple(operation for row in rows if (operation := _operation(row)) is not None)
+
+
 def get_unfinished_operation(connection: sqlite3.Connection, scope: str) -> Operation | None:
     return _operation(
         connection.execute(

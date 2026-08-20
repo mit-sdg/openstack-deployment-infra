@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 from . import db
 from .config import Config, PlatformConfig, RuntimeImages
@@ -973,6 +973,7 @@ def _provider_result(
     env: Mapping[str, str] | None = None,
     inherit_env: Sequence[str] = _PROVIDER_INHERIT_ENV,
     allow_stderr_truncation: bool = False,
+    stderr_sink: BinaryIO | None = None,
 ) -> Any:
     try:
         result = command_runner(
@@ -984,6 +985,7 @@ def _provider_result(
             inherit_env=tuple(inherit_env),
             env=env,
             check=True,
+            stderr_sink=stderr_sink,
         )
     except BaseException as error:
         if isinstance(error, (KeyboardInterrupt, SystemExit)):
@@ -1382,6 +1384,7 @@ def execute_builder_build(
     deadline_at: str | None = None,
     command_runner: Callable[..., Any] = run,
     ssh_command: Sequence[str] = DEFAULT_BUILDER_SSH_COMMAND,
+    build_log_sink: BinaryIO | None = None,
 ) -> BuildExecution:
     if not observation.ready or observation.address is None:
         raise ApplicationError("builder is not ready")
@@ -1462,6 +1465,7 @@ def execute_builder_build(
         stderr_limit=build_log_limit,
         inherit_env=("HOME", "USER", "SSH_AUTH_SOCK"),
         allow_stderr_truncation=True,
+        stderr_sink=build_log_sink,
     )
     parse_build_metadata(result.stdout)
     return BuildExecution(
@@ -1494,6 +1498,7 @@ def build_with_disposable_builder(
     builder_command: Sequence[str] = DEFAULT_BUILDER_COMMAND,
     pin_command: Sequence[str] = DEFAULT_BUILDER_PIN_COMMAND,
     ssh_command: Sequence[str] = DEFAULT_BUILDER_SSH_COMMAND,
+    build_log_sink: BinaryIO | None = None,
 ) -> BuildResult:
     """Run the complete selected-image, pinned-host, single-use builder path."""
     identifier = uuid(build_id, field="build ID")
@@ -1543,6 +1548,7 @@ def build_with_disposable_builder(
             connect_timeout_seconds=connect_timeout_seconds,
             command_runner=command_runner,
             ssh_command=ssh_command,
+            build_log_sink=build_log_sink,
         )
         digest = parse_build_metadata(execution.metadata)
         build_log = execution.log

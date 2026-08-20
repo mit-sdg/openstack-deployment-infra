@@ -2816,42 +2816,6 @@ def s3_rotate_handler(
     return _rotation_result(candidate, update, evidence=True, retired=True, rolled_back=False)
 
 
-def migrate_default_handler(
-    args: Mapping[str, Any], *, nomad: VariableClient, resource_type: str
-) -> Mapping[str, Any]:
-    """Atomically rename one pre-named default Variable key set.
-
-    This release migration is deliberately isolated from normal lifecycle
-    handlers; those handlers only understand canonical named keys.
-    """
-    _exact(args, {"applicationId", "applicationSlug"}, f"storage.{resource_type}.migrate")
-    _, application_slug = _common(args, resource_type)
-    if _RESOURCE_CONTEXT.get()[1] != "default":
-        raise HelperActionError("INVALID_ARGS", "only the default resource can be migrated")
-    snapshot = nomad.read_variable(variable_path(application_slug))
-    old_keys = ENVIRONMENT_KEYS[resource_type]
-    new_keys = canonical_secret_keys(resource_type, "default")
-    old_present = [key for key in old_keys if key in snapshot.items]
-    new_present = [key for key in new_keys if key in snapshot.items]
-    if not old_present and len(new_present) == len(new_keys):
-        return {"migrated": True, "keyNames": list(new_keys), "modifyIndex": snapshot.modify_index}
-    if len(old_present) != len(old_keys) or new_present:
-        raise HelperActionError(
-            "VARIABLE_INCOMPLETE", "default storage migration key state is ambiguous"
-        )
-    environment = {key: snapshot.items[key] for key in old_keys}
-    owner = storage_owner(resource_type, "default")
-    update = update_owned_items(
-        nomad,
-        variable_path(application_slug),
-        {key: owner for key in (*old_keys, *new_keys)},
-        owner=owner,
-        updates=canonicalize_environment(resource_type, "default", environment),
-        removals=old_keys,
-    )
-    return {"migrated": True, "keyNames": list(new_keys), "modifyIndex": update.modify_index}
-
-
 def _remove_result(resource_type: str, update: Any) -> dict[str, Any]:
     return {
         "confirmedAbsent": True,
@@ -3074,17 +3038,8 @@ def handlers(
     prefix: str,
     observe_evidence: EvidenceObserver,
 ) -> dict[str, Handler]:
-    """Bind trusted clients into the fifteen fixed storage protocol actions."""
+    """Bind trusted clients into the fixed named-storage protocol actions."""
     return {
-        "storage.postgres.migrate": lambda args: migrate_default_handler(
-            args, nomad=nomad, resource_type="postgres"
-        ),
-        "storage.mongo.migrate": lambda args: migrate_default_handler(
-            args, nomad=nomad, resource_type="mongo"
-        ),
-        "storage.s3.migrate": lambda args: migrate_default_handler(
-            args, nomad=nomad, resource_type="s3"
-        ),
         "storage.postgres.create": lambda args: postgres_create_handler(
             args,
             admin=postgres_admin,

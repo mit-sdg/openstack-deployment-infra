@@ -86,7 +86,10 @@ test "$(curl --fail --show-error --silent --output /dev/null \
 Use bounded logs when a deployment does not reach acceptance:
 
 ```bash
+$PLATFORM_CLI app logs "$APP_SLUG" --build --list
 $PLATFORM_CLI app logs "$APP_SLUG" --build --lines 200
+# The build header supplies an ID for an exact historical lookup:
+$PLATFORM_CLI app logs "$APP_SLUG" --build --id BUILD_UUID --lines 200
 $PLATFORM_CLI app logs "$APP_SLUG" --runtime --lines 200
 ```
 

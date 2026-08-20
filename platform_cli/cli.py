@@ -33,9 +33,7 @@ from .storage_contract import (
     RESERVED_ENVIRONMENT_PREFIX,
     RESOURCE_TYPES,
     canonical_secret_key,
-    canonical_secret_keys,
     platform_environment_values,
-    storage_owner,
 )
 from .validation import (
     ValidationError,
@@ -208,6 +206,8 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--runtime", action="store_true")
     app_logs.add_argument("--follow", action="store_true")
     app_logs.add_argument("--lines", type=_lines, default=200)
+    app_logs.add_argument("--id", dest="build_id")
+    app_logs.add_argument("--list", dest="list_builds", action="store_true")
     environment = app_commands.add_parser("env")
     env_commands = environment.add_subparsers(dest="env_command", required=True)
     env_set = env_commands.add_parser("set")
@@ -238,9 +238,6 @@ def build_parser() -> argparse.ArgumentParser:
     storage_verify.add_argument("slug")
     storage_verify.add_argument("type", nargs="?", choices=RESOURCE_TYPES)
     storage_verify.add_argument("--name", default="default")
-    storage_migrate = storage_commands.add_parser("migrate-default")
-    storage_migrate.add_argument("slug")
-    storage_migrate.add_argument("type", choices=RESOURCE_TYPES)
     storage_rotate = storage_commands.add_parser("rotate")
     storage_rotate.add_argument("slug")
     storage_rotate.add_argument("type", choices=RESOURCE_TYPES)
@@ -2419,9 +2416,9 @@ def _app_remove(
 def _app_logs(
     args: argparse.Namespace, connection: sqlite3.Connection, config: Config, *, output: Any
 ) -> None:
-    if args.follow and args.build:
-        raise ValidationError("follow mode is available only for runtime logs")
     application = _application(connection, args.slug)
+    if args.runtime and (args.build_id is not None or args.list_builds):
+        raise ValidationError("--id and --list are available only for build logs")
     if args.runtime:
         result = app.application_logs(
             application.slug,
@@ -2432,13 +2429,100 @@ def _app_logs(
         )
         print(result.get("text", ""), end="", file=output)
         return
-    deployment = db.get_deployment(connection, application.application_id)
-    if deployment is None:
-        raise ValidationError("application has no accepted build log")
-    path = (args.state_directory / deployment.build_log_path).resolve(strict=True)
+    operations = db.list_application_deploy_operations(connection, application.application_id)
+    if not operations:
+        raise ValidationError("application has no build attempts")
+    if args.list_builds:
+        if args.build_id is not None or args.follow:
+            raise ValidationError("--list cannot be combined with --id or --follow")
+        _table(
+            ("BUILD", "STATUS", "PHASE", "STARTED", "COMMIT"),
+            tuple(
+                (
+                    item.operation_id,
+                    item.status,
+                    item.phase,
+                    item.started_at,
+                    item.refs.get("source_commit"),
+                )
+                for item in operations
+            ),
+            output=output,
+        )
+        return
+    if args.build_id is None:
+        operation = operations[0]
+    else:
+        build_id = uuid(args.build_id, field="build ID")
+        matched = next((item for item in operations if item.operation_id == build_id), None)
+        if matched is None:
+            raise ValidationError("build ID does not belong to the application")
+        operation = matched
+    print(
+        f"build={operation.operation_id} status={operation.status} phase={operation.phase}",
+        file=output,
+    )
+    result = _helper(
+        config,
+        "app.build.logs",
+        {
+            "slug": application.slug,
+            "buildId": operation.operation_id,
+            "lines": args.lines,
+            "offset": None,
+        },
+    )
+    if result.get("exists") is True:
+        text = result.get("text")
+        size = result.get("size")
+        next_offset = result.get("nextOffset")
+        state = result.get("state")
+        if (
+            not isinstance(text, str)
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or isinstance(next_offset, bool)
+            or not isinstance(next_offset, int)
+            or state not in {"running", "complete", "failed", "unknown"}
+        ):
+            raise app.ApplicationError("helper returned invalid build log evidence")
+        print(text, end="", file=output, flush=True)
+        while args.follow and state == "running":
+            time.sleep(1)
+            result = _helper(
+                config,
+                "app.build.logs",
+                {
+                    "slug": application.slug,
+                    "buildId": operation.operation_id,
+                    "lines": args.lines,
+                    "offset": next_offset,
+                },
+            )
+            text = result.get("text")
+            state = result.get("state")
+            candidate_offset = result.get("nextOffset")
+            if (
+                result.get("exists") is not True
+                or not isinstance(text, str)
+                or state not in {"running", "complete", "failed", "unknown"}
+                or isinstance(candidate_offset, bool)
+                or not isinstance(candidate_offset, int)
+                or candidate_offset < next_offset
+            ):
+                raise app.ApplicationError("helper returned invalid build log evidence")
+            print(text, end="", file=output, flush=True)
+            next_offset = candidate_offset
+        return
+    if args.follow:
+        raise ValidationError("live build log is unavailable for this historical attempt")
+    stored = operation.refs.get("build_log_path")
+    if not isinstance(stored, str):
+        raise ValidationError("build attempt has no captured output")
+    path = (args.state_directory / stored).resolve(strict=True)
     root = args.state_directory.resolve(strict=True)
     if not path.is_relative_to(root) or not path.is_file():
-        raise ValidationError("accepted build log path is invalid")
+        raise ValidationError("build log path is invalid")
     lines = _tail_file_lines(
         path,
         lines=args.lines,
@@ -2504,41 +2588,6 @@ def _storage_mutation(
         _verify_mutation_project(config, deadline=deadline)
         application = _application(connection, args.slug)
         selected = None if args.storage_command == "verify" and args.type is None else [args.type]
-        if args.storage_command == "migrate-default":
-            resource = next(
-                (
-                    item
-                    for item in db.list_managed_resources(
-                        connection, application_id=application.application_id
-                    )
-                    if item.resource_type == args.type and item.resource_name == "default"
-                ),
-                None,
-            )
-            if resource is None:
-                raise ValidationError("default managed storage does not exist")
-            migrated = _helper(
-                config,
-                f"storage.{args.type}.migrate",
-                {
-                    "applicationId": application.application_id,
-                    "applicationSlug": application.slug,
-                    "resourceName": "default",
-                },
-                deadline=deadline,
-            )
-            if migrated.get("migrated") is not True or migrated.get("keyNames") != list(
-                canonical_secret_keys(args.type, "default")
-            ):
-                raise app.ApplicationError("default storage key migration was not confirmed")
-            db.set_environment_keys(
-                connection,
-                application_id=application.application_id,
-                owner=storage_owner(args.type, "default"),
-                keys=canonical_secret_keys(args.type, "default"),
-            )
-            print(f"type={args.type} name=default migrated=true", file=output)
-            return
         if args.storage_command == "create":
             result = storage.create(
                 connection,

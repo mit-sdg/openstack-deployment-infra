@@ -695,11 +695,13 @@ contain the exact commit, recipe identity, and immutable image digest. The
 whole command is bounded by the policy process deadline: lock waits, source
 acquisition, helper calls, builder create/build/cleanup, and health probes each
 receive only the remaining time. The builder records the same wall-clock
-deadline and passes it to the admin-side source receiver and BuildKit. Use
-bounded logs only when diagnosing:
+deadline and passes it to the admin-side source receiver and BuildKit. Use bounded logs only when diagnosing. Build logs select the newest attempt by default, including an active attempt. The header reports its build UUID; select any retained attempt with `--id`, or follow the active build as it is persisted on the admin state volume:
 
 ```bash
+/srv/openstack-platform/bin/openstack-platform app logs demo --build --list
 /srv/openstack-platform/bin/openstack-platform app logs demo --build --lines 200
+/srv/openstack-platform/bin/openstack-platform app logs demo --build --follow --lines 200
+/srv/openstack-platform/bin/openstack-platform app logs demo --build --id BUILD_UUID --lines 200
 /srv/openstack-platform/bin/openstack-platform app logs demo --runtime --lines 200
 ```
 
@@ -723,54 +725,6 @@ the same control surface:
 
 PostgreSQL and MongoDB measured-byte values are configured targets, not usage
 observations; no periodic usage collector is installed.
-
-### Migrate a pre-named default resource
-
-This procedure applies only when upgrading schema version 4 to version 5. It preserves the provider database, users, data, and accepted provider identity; it renames only the app Variable keys and records the resource name as `default`. Take and verify both management-state and managed-data backups first. Do not create or rotate storage during the procedure.
-
-1. Add the exact default binding to the application's `platform.yaml` at the commit that will be deployed. For the current Commons Mongo resource:
-
-   ```yaml
-   storage:
-     bindings:
-       default:
-         type: mongo
-         environment:
-           uri: MONGODB_URI
-   ```
-
-2. Install the new release. Run a read command and verify that migration 5 projected the accepted row without changing its provider identity:
-
-   ```bash
-   /srv/openstack-platform/bin/openstack-platform storage show commons mongo --name default
-   ```
-
-3. Stop the current job before renaming its Variable key. This avoids restarting the old template without `MONGODB_URI`:
-
-   ```bash
-   namespace="$(/srv/openstack-platform/runtime/python3.14 -c \
-     'import json; print(json.load(open("/srv/openstack-platform/config/platform.json"))["namespace"])')"
-   /srv/openstack-platform/bin/${namespace}-nomad job stop -detach commons
-   ```
-
-   Do not use `-purge`; the accepted deployment and app Variable must remain.
-
-4. Atomically rename the secret inside the helper boundary. The command is idempotent and returns no credential value:
-
-   ```bash
-   /srv/openstack-platform/bin/openstack-platform storage migrate-default commons mongo
-   ```
-
-5. Deploy the exact commit containing the binding, then verify the selected instance and public application health:
-
-   ```bash
-   /srv/openstack-platform/bin/openstack-platform app deploy commons \
-     --repo https://github.com/OWNER/REPOSITORY --commit COMMIT
-   /srv/openstack-platform/bin/openstack-platform storage verify commons mongo --name default
-   /srv/openstack-platform/bin/openstack-platform app show commons
-   ```
-
-After step 4, an old release cannot read the renamed key. If deployment fails, keep the job stopped, correct the binding or deployment failure, and rerun the same deploy; do not copy credentials into a shell or edit the Nomad Variable manually. Roll back the application source only to a commit that contains the same binding. Restore the pre-upgrade management and managed-data backups only as a coordinated offline recovery.
 
 ## 7. Back up, restore, and reconcile
 

@@ -160,7 +160,7 @@ openstack-platform app deploy SLUG \
   --repo https://github.com/OWNER/REPOSITORY \
   --commit COMMIT \
   [--config platform.yaml]
-openstack-platform app logs SLUG --build [--lines COUNT]
+openstack-platform app logs SLUG --build [--list | --id BUILD_UUID] [--lines COUNT] [--follow]
 openstack-platform app logs SLUG --runtime [--lines COUNT] [--follow]
 ```
 

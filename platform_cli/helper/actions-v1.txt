@@ -1,4 +1,5 @@
 app.build
+app.build.logs
 app.builder.delete
 app.deploy
 app.env.list
@@ -14,19 +15,16 @@ app.worker.delete
 app.worker.observe
 backup.accept
 storage.mongo.create
-storage.mongo.migrate
 storage.mongo.observe
 storage.mongo.remove
 storage.mongo.rotate
 storage.mongo.verify
 storage.postgres.create
-storage.postgres.migrate
 storage.postgres.observe
 storage.postgres.remove
 storage.postgres.rotate
 storage.postgres.verify
 storage.s3.create
-storage.s3.migrate
 storage.s3.observe
 storage.s3.remove
 storage.s3.rotate

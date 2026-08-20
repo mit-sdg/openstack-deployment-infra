@@ -177,7 +177,6 @@ class CliIntegrationTests(unittest.TestCase):
             ("storage", "show", "demo-app", "postgres", "--name", "analytics"),
             ("storage", "create", "demo-app", "postgres", "--name", "default"),
             ("storage", "verify", "demo-app", "mongo", "--name", "analytics"),
-            ("storage", "migrate-default", "demo-app", "mongo"),
             ("storage", "rotate", "demo-app", "mongo", "--name", "analytics"),
             ("storage", "remove", "demo-app", "s3", "--name", "default", "--confirm", "default"),
         )
@@ -185,6 +184,43 @@ class CliIntegrationTests(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 parser.parse_args(self.argv(*command))
+
+    def test_build_logs_default_to_latest_attempt_and_accept_exact_id(self) -> None:
+        build_id = "00000000-0000-4000-8000-000000000099"
+        relative = f"build-logs/{APP_ID}/{build_id}.log"
+        path = self.state / relative
+        path.parent.mkdir(parents=True)
+        self.state.chmod(0o700)
+        path.write_text("historical output\n", encoding="utf-8")
+        with cli._database(cli.build_parser().parse_args(self.argv("status"))) as connection:
+            db.put_application(
+                connection,
+                application_id=APP_ID,
+                application_slug="demo-app",
+                worker_flavor="one-vcpu",
+                scheduler_cpu_mhz=1000,
+                scheduler_memory_mib=2048,
+            )
+            db.begin_operation(
+                connection,
+                operation_id=build_id,
+                kind="app.deploy",
+                scope=f"app-{APP_ID}",
+                phase="image_pushed",
+                deadline_at="2026-08-18T01:00:00Z",
+                refs={"build_log_path": relative},
+            )
+            db.mark_failed(connection, build_id, RuntimeError("failed"), cleanup_state="confirmed")
+        output = StringIO()
+        with mock.patch.object(cli, "_helper", return_value={"exists": False}):
+            cli.dispatch(
+                cli.build_parser().parse_args(
+                    self.argv("app", "logs", "demo-app", "--build", "--id", build_id)
+                ),
+                stdout=output,
+            )
+        self.assertIn(f"build={build_id} status=failed", output.getvalue())
+        self.assertIn("historical output", output.getvalue())
 
     def test_status_initializes_private_database_and_renders_table(self) -> None:
         output = StringIO()

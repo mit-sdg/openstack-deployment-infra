@@ -89,6 +89,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(result.stderr), 80)
         self.assertTrue(result.stdout_truncated)
         self.assertTrue(result.stderr_truncated)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "live.log"
+            with path.open("wb") as sink:
+                streamed = run(
+                    [sys.executable, "-c", "import sys;sys.stderr.write('live output\\n')"],
+                    timeout_seconds=5,
+                    stderr_sink=sink,
+                )
+            self.assertEqual(path.read_bytes(), streamed.stderr)
         started = time.monotonic()
         with self.assertRaises(CommandTimedOut):
             run(

@@ -20,7 +20,6 @@ from platform_cli.helper.storage import (
     ProviderCredential,
     RotationEvidence,
     handlers,
-    migrate_default_handler,
     mongo_create,
     mongo_environment,
     mongo_observe_handler,
@@ -848,17 +847,6 @@ class Garage:
 
 
 class HelperStorageTests(unittest.TestCase):
-    def test_default_key_migration_is_atomic_and_idempotent(self) -> None:
-        old = dict(mongo_environment("storage", "p_11111111111141118111", "user", "secret"))
-        nomad = MemoryNomad(old)
-        args = {"applicationId": APP_ID, "applicationSlug": "demo-app", "resourceName": "default"}
-        first = migrate_default_handler(args, nomad=nomad, resource_type="mongo")
-        self.assertTrue(first["migrated"])
-        self.assertEqual(set(nomad.items), {"STORAGE__MONGO__DEFAULT__URI"})
-        second = migrate_default_handler(args, nomad=nomad, resource_type="mongo")
-        self.assertTrue(second["migrated"])
-        self.assertEqual(len(nomad.writes), 1)
-
     def test_mongo_create_rejects_existing_database_and_remove_requires_owner_marker(self) -> None:
         database = "p_11111111111141118111"
 
@@ -1707,7 +1695,7 @@ class HelperStorageTests(unittest.TestCase):
             {
                 f"storage.{resource_type}.{operation}"
                 for resource_type in ("postgres", "mongo", "s3")
-                for operation in ("create", "migrate", "observe", "verify", "rotate", "remove")
+                for operation in ("create", "observe", "verify", "rotate", "remove")
             },
         )
 

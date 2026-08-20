@@ -326,13 +326,15 @@ def child_environment(
 
 
 class _Collector:
-    def __init__(self, maximum: int) -> None:
+    def __init__(self, maximum: int, *, sink: BinaryIO | None = None) -> None:
         if maximum < 0:
             raise ValueError("output limit must not be negative")
         self.maximum = maximum
+        self.sink = sink
         self.parts: list[bytes] = []
         self.size = 0
         self.truncated = False
+        self.sink_error: OSError | None = None
 
     def read(self, stream: BinaryIO) -> None:
         while True:
@@ -344,6 +346,13 @@ class _Collector:
                 kept = chunk[:remaining]
                 self.parts.append(kept)
                 self.size += len(kept)
+                if self.sink is not None:
+                    try:
+                        self.sink.write(kept)
+                        self.sink.flush()
+                    except OSError as error:
+                        self.sink_error = error
+                        self.sink = None
             if len(chunk) > max(remaining, 0):
                 self.truncated = True
 
@@ -363,6 +372,7 @@ def run(
     cwd: str | Path | None = None,
     secrets: Sequence[str | bytes] = (),
     check: bool = True,
+    stderr_sink: BinaryIO | None = None,
 ) -> CommandResult:
     """Run an argument vector with a deadline and continuously bounded output.
 
@@ -397,7 +407,7 @@ def run(
 
     assert process.stdout is not None and process.stderr is not None
     stdout = _Collector(stdout_limit)
-    stderr = _Collector(stderr_limit)
+    stderr = _Collector(stderr_limit, sink=stderr_sink)
     readers = [
         threading.Thread(target=stdout.read, args=(process.stdout,), daemon=True),
         threading.Thread(target=stderr.read, args=(process.stderr,), daemon=True),
@@ -453,6 +463,8 @@ def run(
 
     if interrupted is not None:
         raise interrupted
+    if stderr.sink_error is not None:
+        raise CommandFailure("could not persist command diagnostic output") from stderr.sink_error
 
     result = CommandResult(
         argv=diagnostic,

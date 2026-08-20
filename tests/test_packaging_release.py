@@ -190,6 +190,36 @@ class HelperRuntimePathTests(unittest.TestCase):
             self.assertNotIn("/srv/app-platform", source)
             self.assertNotIn("/etc/app-platform", source)
 
+    def test_active_build_log_is_private_tail_readable_and_offset_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = mock.Mock(admin_state=Path(temporary))
+            log_path, state_path = production._build_log_paths(
+                runtime, "demo-app", "00000000-0000-4000-8000-000000000099"
+            )
+            log_path.write_text("first\nsecond\nthird\n", encoding="utf-8")
+            log_path.chmod(0o600)
+            production._write_build_log_state(state_path, "running")
+            with mock.patch.object(production, "helper_runtime", return_value=runtime):
+                tail = production._read_build_log(
+                    {
+                        "buildId": "00000000-0000-4000-8000-000000000099",
+                        "slug": "demo-app",
+                        "lines": 2,
+                        "offset": None,
+                    }
+                )
+                following = production._read_build_log(
+                    {
+                        "buildId": "00000000-0000-4000-8000-000000000099",
+                        "slug": "demo-app",
+                        "lines": 2,
+                        "offset": 6,
+                    }
+                )
+        self.assertEqual(tail["text"], "second\nthird\n")
+        self.assertEqual(tail["state"], "running")
+        self.assertEqual(following["text"], "second\nthird\n")
+
     def test_helper_release_smoke_uses_only_sanitized_inventory(self) -> None:
         environment = os.environ.copy()
         environment["PLATFORM_CONFIG"] = "/private/inventory/must-not-be-read.json"

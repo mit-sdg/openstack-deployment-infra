@@ -22,7 +22,7 @@ from typing import Any
 
 from .. import app as application
 from ..config import PlatformConfig, RuntimeImages, load_platform
-from ..runtime import bounded_http, run
+from ..runtime import bounded_http, ensure_private_directory, run
 from ..validation import (
     ValidationError,
     bounded_text,
@@ -37,6 +37,7 @@ from .nomad import NomadClient
 
 APP_ACTIONS = (
     "app.build",
+    "app.build.logs",
     "app.builder.delete",
     "app.deploy",
     "app.env.list",
@@ -54,6 +55,7 @@ APP_ACTIONS = (
 _PROVIDER_APP_ACTIONS = frozenset(
     {
         "app.build",
+        "app.build.logs",
         "app.builder.delete",
         "app.manifest.delete",
         "app.manifest.retain",
@@ -65,7 +67,7 @@ _PROVIDER_APP_ACTIONS = frozenset(
 _PER_RESOURCE_STORAGE_ACTIONS = tuple(
     f"storage.{resource_type}.{operation}"
     for resource_type in ("mongo", "postgres", "s3")
-    for operation in ("create", "migrate", "observe", "remove", "rotate", "verify")
+    for operation in ("create", "observe", "remove", "rotate", "verify")
 )
 STORAGE_ACTIONS = _PER_RESOURCE_STORAGE_ACTIONS
 ACTION_MANIFEST = tuple(sorted(("backup.accept", *APP_ACTIONS, *STORAGE_ACTIONS)))
@@ -233,6 +235,76 @@ def _worker_result(observed: application.WorkerObservation) -> Mapping[str, Any]
     }
 
 
+def _build_log_paths(runtime: HelperRuntime, app_slug: str, build_id: str) -> tuple[Path, Path]:
+    controller = ensure_private_directory(runtime.admin_state / "controller", create=True)
+    root = ensure_private_directory(controller / "build-logs", create=True)
+    directory = ensure_private_directory(root / slug(app_slug), create=True)
+    identifier = uuid(build_id, field="build ID")
+    return directory / f"{identifier}.log", directory / f"{identifier}.state"
+
+
+def _write_build_log_state(path: Path, state: str) -> None:
+    if state not in {"running", "complete", "failed"}:
+        raise ValueError("build log state is invalid")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with temporary.open("x", encoding="ascii") as stream:
+            os.chmod(temporary, 0o600)
+            stream.write(state + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_build_log(args: Mapping[str, Any]) -> Mapping[str, Any]:
+    _exact_args(args, {"buildId", "slug", "lines", "offset"}, "app.build.logs")
+    build_id = uuid(args["buildId"], field="build ID")
+    app_slug = slug(args["slug"])
+    lines = _positive_int(args["lines"], field="line count", maximum=2000)
+    offset = args["offset"]
+    if offset is not None and (
+        isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
+    ):
+        raise HelperActionError("INVALID_ARGS", "build log offset is invalid")
+    log_path, state_path = _build_log_paths(helper_runtime(), app_slug, build_id)
+    try:
+        metadata = log_path.lstat()
+    except FileNotFoundError:
+        return {"buildId": build_id, "exists": False, "state": "unknown", "text": "", "size": 0}
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise HelperActionError("INVALID_STATE", "build log path is not a private direct file")
+    size = metadata.st_size
+    if offset is None:
+        payload = log_path.read_bytes()[-524_288:]
+        text = "\n".join(payload.decode("utf-8", errors="replace").splitlines()[-lines:])
+        if text:
+            text += "\n"
+    else:
+        with log_path.open("rb") as stream:
+            stream.seek(min(offset, size))
+            payload = stream.read(524_288)
+        text = payload.decode("utf-8", errors="replace")
+    try:
+        state_metadata = state_path.lstat()
+        if not stat.S_ISREG(state_metadata.st_mode) or stat.S_IMODE(state_metadata.st_mode) & 0o077:
+            raise HelperActionError("INVALID_STATE", "build log state is not a private direct file")
+        state = state_path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        state = "unknown"
+    if state not in {"running", "complete", "failed"}:
+        state = "unknown"
+    return {
+        "buildId": build_id,
+        "exists": True,
+        "state": state,
+        "text": text,
+        "size": size,
+        "nextOffset": (size if offset is None else min(offset, size) + len(payload)),
+    }
+
+
 def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
     action = "app.build"
     _exact_args(
@@ -268,43 +340,62 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
     )
     connect_seconds = _positive_int(args["connectSeconds"], field="connect timeout", maximum=120)
     deadline_at, operation_deadline = _operation_deadline(args["deadlineAt"])
-    platform = helper_runtime().platform
-    with tempfile.TemporaryDirectory(prefix="m1-source-") as directory:
-        source = Path(directory) / "source"
-        application.acquire_github_commit(
-            args["repository"],
-            args["commit"],
-            source,
-            maximum_bytes=source_limit,
-            timeout_seconds=300,
-            deadline=operation_deadline,
-        )
-        manifest = application.load_platform_yaml(
-            source / config_path,
-            source_root=source,
-        )
-        recipe = application.generate_recipe(manifest, images)
-        result = application.build_with_disposable_builder(
-            builder_command=application.provider_command(platform, "builder"),
-            pin_command=application.provider_command(platform, "pin-builder-host-key"),
-            build_id=build_id,
-            source_directory=source,
-            recipe=recipe,
-            image_name=f"{platform.get('addresses.storage')}:5000/projects/{app_slug}/app",
-            prefix=platform.prefix,
-            selected_builder_image_id=args["builderImageId"],
-            builder_flavor=platform.get("flavors.builder"),
-            known_hosts_directory=Path(directory) / "known-hosts",
-            identity_path=application.builder_identity_path(platform),
-            source_limit=source_limit,
-            build_log_limit=build_log_limit,
-            timeout_seconds=900,
-            deadline=operation_deadline,
-            deadline_at=deadline_at,
-            connect_timeout_seconds=connect_seconds,
-            project_name=platform.project_name,
-            project_id=platform.project_id,
-        )
+    runtime = helper_runtime()
+    platform = runtime.platform
+    log_path, state_path = _build_log_paths(runtime, app_slug, build_id)
+    if log_path.exists():
+        metadata = log_path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise HelperActionError("INVALID_STATE", "build log path is not a private direct file")
+    _write_build_log_state(state_path, "running")
+    try:
+        with log_path.open("wb") as build_log:
+            os.chmod(log_path, 0o600)
+            marker = f"--- build {build_id} started ---\n".encode()
+            build_log.write(marker[:build_log_limit])
+            build_log.flush()
+            streamed_log_limit = max(0, build_log_limit - build_log.tell())
+            with tempfile.TemporaryDirectory(prefix="m1-source-") as directory:
+                source = Path(directory) / "source"
+                application.acquire_github_commit(
+                    args["repository"],
+                    args["commit"],
+                    source,
+                    maximum_bytes=source_limit,
+                    timeout_seconds=300,
+                    deadline=operation_deadline,
+                )
+                manifest = application.load_platform_yaml(
+                    source / config_path,
+                    source_root=source,
+                )
+                recipe = application.generate_recipe(manifest, images)
+                result = application.build_with_disposable_builder(
+                    builder_command=application.provider_command(platform, "builder"),
+                    pin_command=application.provider_command(platform, "pin-builder-host-key"),
+                    build_id=build_id,
+                    source_directory=source,
+                    recipe=recipe,
+                    image_name=f"{platform.get('addresses.storage')}:5000/projects/{app_slug}/app",
+                    prefix=platform.prefix,
+                    selected_builder_image_id=args["builderImageId"],
+                    builder_flavor=platform.get("flavors.builder"),
+                    known_hosts_directory=Path(directory) / "known-hosts",
+                    identity_path=application.builder_identity_path(platform),
+                    source_limit=source_limit,
+                    build_log_limit=streamed_log_limit,
+                    timeout_seconds=900,
+                    deadline=operation_deadline,
+                    deadline_at=deadline_at,
+                    connect_timeout_seconds=connect_seconds,
+                    project_name=platform.project_name,
+                    project_id=platform.project_id,
+                    build_log_sink=build_log,
+                )
+    except BaseException:
+        _write_build_log_state(state_path, "failed")
+        raise
+    _write_build_log_state(state_path, "complete")
     # Protocol v1 is bounded to 1 MiB. Preserve a useful staff-only tail while
     # keeping source/build output out of errors and operation records.
     log = result.build_log[-524_288:]
@@ -337,6 +428,8 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
 def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
     if action == "app.build":
         return _build_application(args)
+    if action == "app.build.logs":
+        return _read_build_log(args)
     runtime = helper_runtime()
     platform = runtime.platform
     if action == "app.builder.delete":
