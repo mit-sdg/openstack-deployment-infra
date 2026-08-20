@@ -117,19 +117,24 @@ def _status_or_absent(
         # Nomad 2 emits the allocation status projection as a JSON array for
         # stopped jobs. Environment mutation needs only the running/dead
         # distinction, but every row must still belong to the exact job.
-        if (
-            isinstance(value, list)
-            and value
-            and all(
-                isinstance(item, dict) and item.get("JobID") == application_slug for item in value
-            )
-        ):
-            running = any(
-                item.get("ClientStatus") in {"pending", "running"}
-                and item.get("DesiredStatus") == "run"
-                for item in value
-            )
-            return {"ID": application_slug, "Status": "running" if running else "dead"}
+        if isinstance(value, list) and value:
+            allocations: object = value
+            if len(value) == 1 and isinstance(value[0], dict):
+                allocations = value[0].get("Allocations")
+            if (
+                isinstance(allocations, list)
+                and allocations
+                and all(
+                    isinstance(item, dict) and item.get("JobID") == application_slug
+                    for item in allocations
+                )
+            ):
+                running = any(
+                    item.get("ClientStatus") in {"pending", "running"}
+                    and item.get("DesiredStatus") == "run"
+                    for item in allocations
+                )
+                return {"ID": application_slug, "Status": "running" if running else "dead"}
         raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
     if completed.returncode != 1 or not _exact_absence(completed.stderr, application_slug):
         raise HelperActionError("NOMAD_UNAVAILABLE", "Nomad job state was unavailable")

@@ -563,6 +563,17 @@ class ApplicationHelperTests(unittest.TestCase):
             ),
             {"ID": "demo-app", "Status": "dead"},
         )
+        payload = json.dumps([{"Allocations": json.loads(payload)}]).encode()
+        self.assertEqual(
+            _status_or_absent(
+                "demo-app",
+                command_runner=runner,
+                nomad_command=("fixed-nomad-wrapper",),
+                timeout_seconds=20,
+                response_limit=65_536,
+            ),
+            {"ID": "demo-app", "Status": "dead"},
+        )
 
     def test_follow_logs_preserves_partial_output_at_deadline(self) -> None:
         partial = CommandResult(
