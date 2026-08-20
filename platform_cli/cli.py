@@ -1535,6 +1535,15 @@ def _record_platform_environment_ownership(
     )
 
 
+def _environment_update_accepted(result: Mapping[str, Any], *, allow_stopped: bool) -> bool:
+    evidence = (
+        result.get("restarted"),
+        result.get("schedulerHealthy"),
+        result.get("publicHealthy"),
+    )
+    return evidence == (True, True, True) or (allow_stopped and evidence == (False, False, False))
+
+
 def _prepare_platform_environment(
     connection: sqlite3.Connection,
     config: Config,
@@ -1597,11 +1606,7 @@ def _prepare_platform_environment(
     if not set(platform_values).issubset(names):
         raise app.ApplicationError("platform environment keys were not all recorded")
     previous = db.get_deployment(connection, application_id)
-    if previous is not None and (
-        result.get("restarted") is not True
-        or result.get("schedulerHealthy") is not True
-        or result.get("publicHealthy") is not True
-    ):
+    if previous is not None and not _environment_update_accepted(result, allow_stopped=True):
         raise app.ApplicationError("platform environment restart and health were not confirmed")
     _record_platform_environment_ownership(
         connection,
@@ -1957,11 +1962,7 @@ def _recover_app_deployment(
         if present_platform != set(prior_values):
             raise app.ApplicationError("prior platform environment key set was not restored")
         previous = db.get_deployment(connection, application_id)
-        if previous is not None and (
-            restored.get("restarted") is not True
-            or restored.get("schedulerHealthy") is not True
-            or restored.get("publicHealthy") is not True
-        ):
+        if previous is not None and not _environment_update_accepted(restored, allow_stopped=True):
             raise app.ApplicationError("prior platform environment health was not restored")
         _record_platform_environment_ownership(
             connection,
