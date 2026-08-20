@@ -156,7 +156,7 @@ def _allocations(
     response_limit: int,
 ) -> list[Mapping[str, Any]]:
     completed = command_runner(
-        (*nomad_command, "job", "allocations", "-json", application_slug),
+        (*nomad_command, "job", "allocs", "-json", application_slug),
         timeout_seconds=timeout_seconds,
         stdout_limit=response_limit,
         stderr_limit=65_536,

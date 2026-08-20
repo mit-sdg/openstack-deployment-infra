@@ -84,7 +84,7 @@ class FakeNomad:
         elif "restart" in argv:
             self.allocations[0]["ModifyIndex"] = self.allocations[0].get("ModifyIndex", 0) + 1
             output = b""
-        elif "allocations" in argv:
+        elif "allocs" in argv:
             output = json.dumps(self.allocations).encode()
         elif "inspect" in argv:
             output = json.dumps(self.inspection).encode()
