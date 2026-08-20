@@ -80,7 +80,7 @@ class CliIntegrationTests(unittest.TestCase):
             "verify_project",
             return_value=openstack.ProjectIdentity(APP_ID, "example-project"),
         )
-        self.verify_project_mock = self.verify_project.start()
+        self.verify_project.start()
         self.addCleanup(self.verify_project.stop)
         self.observe_flavor = mock.patch.object(
             cli.openstack,

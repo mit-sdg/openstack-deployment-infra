@@ -74,7 +74,6 @@ class FakeCloud:
         }
         self.replacement: dict | None = None
         self.port_device = SERVER
-        self.fail_replacement_health = False
         self.user_data_seen = False
         self.user_data_payload = b""
         self.user_data_path: Path | None = None
