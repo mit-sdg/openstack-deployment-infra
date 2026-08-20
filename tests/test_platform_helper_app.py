@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from platform_cli.app import Manifest, nomad_candidate_identity, render_nomad_job
 from platform_cli.config import PlatformConfig
-from platform_cli.helper.app import _public_health_from_job, handlers
+from platform_cli.helper.app import _public_health_from_job, _status_or_absent, handlers
 from platform_cli.helper.main import HelperActionError
 from platform_cli.helper.nomad import SecretItems, VariableSnapshot
 from platform_cli.runtime import CommandResult, CommandTimedOut
@@ -537,6 +537,31 @@ class ApplicationHelperTests(unittest.TestCase):
                     "nomad/jobs/demo-app",
                 ),
             ],
+        )
+
+    def test_nomad_two_stopped_allocation_status_is_dead(self) -> None:
+        payload = json.dumps(
+            [
+                {
+                    "JobID": "demo-app",
+                    "ClientStatus": "complete",
+                    "DesiredStatus": "stop",
+                }
+            ]
+        ).encode()
+
+        def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            return CommandResult(argv, 0, payload, b"", False, False, 0.1)
+
+        self.assertEqual(
+            _status_or_absent(
+                "demo-app",
+                command_runner=runner,
+                nomad_command=("fixed-nomad-wrapper",),
+                timeout_seconds=20,
+                response_limit=65_536,
+            ),
+            {"ID": "demo-app", "Status": "dead"},
         )
 
     def test_follow_logs_preserves_partial_output_at_deadline(self) -> None:
