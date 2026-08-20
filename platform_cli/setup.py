@@ -1215,9 +1215,7 @@ def run_setup(
     openstack = python_store / "bin/openstack"
     project = _project_identity(openstack, provider_environment)
     provider_environment = dict(provider_environment)
-    provider_environment["OS_PROJECT_ID"] = project.project_id
     provider_environment["OS_PROJECT_NAME"] = project.project_name
-    values["OS_PROJECT_ID"] = project.project_id
     values["OS_PROJECT_NAME"] = project.project_name
     document = _platform_document(
         repository,
