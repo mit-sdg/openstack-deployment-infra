@@ -248,7 +248,7 @@ def verify_authenticated_project(conn: Any) -> tuple[str, str]:
     if current_id != configured_id:
         raise RuntimeError("authenticated OpenStack project UUID does not match configuration")
 
-    project = conn.identity.find_project(configured_id, ignore_missing=False)
+    project = conn.identity.get_project(configured_id)
     observed_id = _canonical_provider_uuid(_project_field(project, "id"), field="UUID")
     observed_name = _project_field(project, "name")
     if (
