@@ -119,8 +119,8 @@ def _status_or_absent(
         # distinction, but every row must still belong to the exact job.
         if isinstance(value, list) and value:
             allocations: object = value
-            if len(value) == 1 and isinstance(value[0], dict):
-                allocations = value[0].get("Allocations")
+            if len(value) == 1 and isinstance(value[0], dict) and "Allocations" in value[0]:
+                allocations = value[0]["Allocations"]
             if (
                 isinstance(allocations, list)
                 and allocations
