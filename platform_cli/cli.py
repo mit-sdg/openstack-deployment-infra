@@ -172,6 +172,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     application = commands.add_parser("app", help="deploy and operate applications")
     app_commands = application.add_subparsers(dest="app_command", required=True)
+    create = app_commands.add_parser("create")
+    create.add_argument("slug")
     deploy = app_commands.add_parser("deploy")
     deploy.add_argument("slug")
     deploy.add_argument("--repo", required=True)
@@ -2034,6 +2036,43 @@ def _recover_app_deployment(
     return operation
 
 
+def _app_create(
+    args: argparse.Namespace,
+    connection: sqlite3.Connection,
+    config: Config,
+    *,
+    output: Any,
+) -> None:
+    """Declare an application before its first deployment.
+
+    Managed storage and staff environment values are addressed by slug, so both
+    need an application to exist. Only ``app deploy`` used to create one, which
+    left no way to have a database ready for the first deployment: an
+    application that reads its database at startup could not pass the health
+    check that ``app deploy`` requires before it will record anything. Creating
+    the application separately breaks that cycle.
+
+    The declaration is inert. It is not running, has no deployment, no worker,
+    and no source, until a deployment accepts one.
+    """
+    application_slug = slug(args.slug)
+    if db.get_application(connection, application_slug) is not None:
+        raise ValidationError("application already exists")
+    standard = config.policy.standard
+    db.put_application(
+        connection,
+        application_id=str(uuid_module.uuid4()),
+        application_slug=application_slug,
+        worker_flavor=standard.worker_flavor,
+        scheduler_cpu_mhz=standard.cpu_mhz,
+        scheduler_memory_mib=standard.memory_mib,
+        desired_running=False,
+        url=f"https://{application_slug}.{config.platform.domain}",
+    )
+    application = _application(connection, application_slug)
+    print(f"slug={application.slug} application={application.application_id}", file=output)
+
+
 def _app_deploy(
     args: argparse.Namespace,
     connection: sqlite3.Connection,
@@ -2569,6 +2608,8 @@ def dispatch(
                     _environment_mutation(args, connection, config, stdin=stdin, output=stdout)
             elif args.app_command == "logs":
                 _app_logs(args, connection, config, output=stdout)
+            elif args.app_command == "create":
+                _app_create(args, connection, config, output=stdout)
             elif args.app_command == "deploy":
                 _app_deploy(args, connection, config, output=stdout)
             else:

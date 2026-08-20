@@ -397,6 +397,17 @@ def postgres_create(
             admin,
             f"CREATE DATABASE {_quote_identifier(database)} OWNER {_quote_identifier(owner)} CONNECTION LIMIT {connections}",
         )
+        # A new database inherits template1's ACL, which grants CONNECT to
+        # PUBLIC. Every other application role could then open this database
+        # and read its catalogues: schema, table, and column names. Table data
+        # stays unreadable without a grant, but the shape of one project should
+        # not be visible to the rest. The owner keeps its own CONNECT, and the
+        # application role holds the owner role, so this revoke costs the
+        # application nothing.
+        _pg_execute(
+            admin,
+            f"REVOKE CONNECT ON DATABASE {_quote_identifier(database)} FROM PUBLIC",
+        )
         size_row = _pg_execute(admin, "SELECT pg_database_size(%s)", (database,)).fetchone()
         if size_row is None or len(size_row) < 1 or isinstance(size_row[0], bool):
             raise _recovery_required(

@@ -73,6 +73,7 @@ in
         "${data}/postgres:/var/lib/postgresql/data"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
         "/etc/${namespace}/pg_hba.conf:/run/${namespace}-pg_hba.conf:ro"
+        "/etc/${namespace}/postgres-init:/docker-entrypoint-initdb.d:ro"
       ];
       ports = [ "5432:5432" ];
       cmd = [
@@ -266,6 +267,21 @@ in
       Persistent = true;
     };
   };
+
+  # pg_hba lets any authenticated role reach any database, and a fresh database
+  # inherits CONNECT for PUBLIC from template1. Together those let one project
+  # open another project's database and read its catalogues. Close it at
+  # initialisation so a new deployment is right from the start; the per-database
+  # revoke in the storage helper covers databases created later.
+  environment.etc."${namespace}/postgres-init/00-restrict-connect.sql".text = ''
+    REVOKE CONNECT ON DATABASE template1 FROM PUBLIC;
+    REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
+    DO $$
+    BEGIN
+      EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', current_database());
+    END
+    $$;
+  '';
 
   environment.etc."${namespace}/pg_hba.conf".text = ''
     local   all   all                              trust

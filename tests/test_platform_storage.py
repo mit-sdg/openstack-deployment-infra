@@ -1121,6 +1121,50 @@ class HelperStorageTests(unittest.TestCase):
             any(statement.startswith("DROP ") for statement in postgres_admin.statements)
         )
 
+    def test_postgres_creation_closes_public_connect_on_the_new_database(self) -> None:
+        """A new database must not stay reachable by every other project."""
+
+        class RecordingPostgres:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+
+            def execute(self, statement, parameters=()):
+                self.statements.append(statement)
+                return self
+
+            def fetchone(self):
+                last = self.statements[-1]
+                if last.startswith("SELECT 1 FROM"):
+                    return None
+                if last.startswith("SELECT pg_database_size"):
+                    return (0,)
+                return None
+
+        admin = RecordingPostgres()
+        credential = postgres_create(
+            admin,
+            application_id=APP_ID,
+            host="storage.internal",
+            connections=1,
+            measured_target_bytes=1,
+            generation="abcdef12",
+            operation_id="00000000-0000-4000-8000-0000000000aa",
+        )
+        self.assertTrue(credential.provider_name)
+        created = next(
+            index
+            for index, statement in enumerate(admin.statements)
+            if statement.startswith("CREATE DATABASE ")
+        )
+        revoked = next(
+            index
+            for index, statement in enumerate(admin.statements)
+            if statement.startswith("REVOKE CONNECT ON DATABASE ")
+        )
+        self.assertGreater(revoked, created)
+        self.assertIn("FROM PUBLIC", admin.statements[revoked])
+        self.assertIn(credential.provider_name, admin.statements[revoked])
+
     def test_status_observation_is_read_only_while_verify_probe_cleans_up(self) -> None:
         events: list[str] = []
         garage = Garage(events)
