@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -48,6 +49,26 @@ class ManagementBridgeTests(unittest.TestCase):
             linked.symlink_to(outside)
             with self.assertRaisesRegex(bridge.BridgeError, "Nix-store"):
                 bridge._verify_executable(linked, label="wrapper")
+
+    def test_provider_identity_uses_the_scoped_token_without_project_list_access(self) -> None:
+        project_id = "00000000-0000-4000-8000-000000000001"
+        with (
+            mock.patch.object(bridge, "_verify_executable"),
+            mock.patch.object(bridge, "_command", return_value=project_id.encode()) as command,
+        ):
+            bridge._verify_provider_wrapper(Path("/protected/openstack"), project_id=project_id)
+
+        command.assert_called_once_with(
+            (
+                "/protected/openstack",
+                "token",
+                "issue",
+                "-f",
+                "value",
+                "-c",
+                "project_id",
+            )
+        )
 
     def test_preflight_automates_local_bridge_prerequisites_without_provider_calls(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

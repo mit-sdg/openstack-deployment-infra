@@ -12,6 +12,7 @@ users:
 bootcmd:
   - |
     set -eu
+    initialized=0
     for specification in '/dev/vdb:__ADMIN_VOLUME_LABEL__' '/dev/vdc:__BACKUP_VOLUME_LABEL__'; do
       device=${specification%%:*}
       label=${specification#*:}
@@ -25,8 +26,14 @@ bootcmd:
         [ "$observed" = "$label" ] || { echo "unexpected retained volume label on $device" >&2; exit 1; }
       else
         mkfs.xfs -f -L "$label" "$device"
+        initialized=1
       fi
     done
+    if [ "$initialized" = 1 ]; then
+      echo "fresh retained volumes initialized; rebooting once"
+      sync
+      systemctl reboot
+    fi
 write_files:
   - path: /etc/__PLATFORM_NAMESPACE__/secrets/admin-bootstrap.env
     owner: root:nomad

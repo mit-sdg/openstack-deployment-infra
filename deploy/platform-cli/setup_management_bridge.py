@@ -246,7 +246,7 @@ def _command(argv: Sequence[str], *, stdin: bytes | None = None, timeout: float 
     return completed.stdout
 
 
-def _verify_provider_wrapper(wrapper: Path, *, project_name: str, project_id: str) -> None:
+def _verify_provider_wrapper(wrapper: Path, *, project_id: str) -> None:
     _verify_executable(wrapper, label="protected OpenStack wrapper")
     token = _command((str(wrapper), "token", "issue", "-f", "value", "-c", "project_id"))
     try:
@@ -255,30 +255,6 @@ def _verify_provider_wrapper(wrapper: Path, *, project_name: str, project_id: st
         _fail("protected OpenStack wrapper returned malformed project identity")
     if _canonical_uuid(token_id, label="authenticated project UUID") != project_id:
         _fail("protected OpenStack wrapper is scoped to a different project")
-
-    shown = _command(
-        (
-            str(wrapper),
-            "project",
-            "show",
-            project_id,
-            "-f",
-            "json",
-            "-c",
-            "id",
-            "-c",
-            "name",
-        )
-    )
-    try:
-        document = json.loads(shown, object_pairs_hook=_duplicates)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        _fail("protected OpenStack wrapper returned malformed project data")
-    if not isinstance(document, Mapping) or set(document) != {"id", "name"}:
-        _fail("protected OpenStack wrapper returned malformed project data")
-    observed_id = _canonical_uuid(document.get("id"), label="observed project UUID")
-    if observed_id != project_id or document.get("name") != project_name:
-        _fail("protected OpenStack wrapper project identity does not match configuration")
 
 
 def _console_fingerprint(output: bytes) -> str:
@@ -414,13 +390,9 @@ def configure(args: argparse.Namespace) -> None:
     ):
         _safe_path(path, label=label)
     _verify_local_dependencies()
-    project_name, project_id, server_name, address = _platform_identity(args.platform_config)
+    _project_name, project_id, server_name, address = _platform_identity(args.platform_config)
     _private_file(args.ssh_identity, label="SSH identity", maximum_bytes=65_536)
-    _verify_provider_wrapper(
-        args.provider_command,
-        project_name=project_name,
-        project_id=project_id,
-    )
+    _verify_provider_wrapper(args.provider_command, project_id=project_id)
     trusted = _console_fingerprint(
         _command(
             (str(args.provider_command), "console", "log", "show", "--lines", "2000", server_name),

@@ -12,6 +12,7 @@ users:
 bootcmd:
   - |
     set -eu
+    initialized=0
     device=/dev/vdb
     label=__DATA_VOLUME_LABEL__
     for attempt in $(seq 1 60); do
@@ -24,6 +25,12 @@ bootcmd:
       [ "$observed" = "$label" ] || { echo "unexpected retained volume label on $device" >&2; exit 1; }
     else
       mkfs.xfs -f -L "$label" "$device"
+      initialized=1
+    fi
+    if [ "$initialized" = 1 ]; then
+      echo "fresh retained volume initialized; rebooting once"
+      sync
+      systemctl reboot
     fi
 write_files:
   - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem

@@ -110,6 +110,7 @@ class HostUserDataTests(unittest.TestCase):
         self.assertIn(f"/dev/vdb:{self.platform.get('volumes.adminState.label')}", admin)
         self.assertIn(f"/dev/vdc:{self.platform.get('volumes.backup.label')}", admin)
         self.assertIn('mkfs.xfs -f -L "$label" "$device"', admin)
+        self.assertIn("systemctl reboot", admin)
         self.assertEqual(admin.count(base64.b64encode(b"public-internal-ca.pem\n").decode()), 2)
 
         _, ingress = self.render(
@@ -154,6 +155,7 @@ class HostUserDataTests(unittest.TestCase):
         self.assertIn(f"DATA_VOLUME_ID={DATA_VOLUME}", storage)
         self.assertIn(f"label={self.platform.get('volumes.data.label')}", storage)
         self.assertIn('mkfs.xfs -f -L "$label" "$device"', storage)
+        self.assertIn("systemctl reboot", storage)
         self.assertNotIn("sentinel-builder-password", storage)
         self.assertNotIn("sentinel-runtime-password", storage)
         encoded_htpasswd = next(
