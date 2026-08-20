@@ -728,12 +728,16 @@ class ProviderCommandTests(unittest.TestCase):
             known_hosts = root / "known_hosts"
             known_hosts.write_text("192.0.2.40 ssh-ed25519 AAAA\n")
             known_hosts.chmod(0o600)
+            identity = root / "builder_operator_ed25519"
+            identity.write_text("PRIVATE KEY\n")
+            identity.chmod(0o600)
             execution = execute_builder_build(
                 observation,
                 root,
                 Recipe(b"FROM pinned\n", "0" * 64),
                 "registry.example/projects/demo-app/app",
                 known_hosts,
+                identity,
                 source_limit=1_048_576,
                 build_log_limit=4096,
                 timeout_seconds=30,
@@ -746,6 +750,11 @@ class ProviderCommandTests(unittest.TestCase):
         receive_argv, receive_kwargs = calls[0]
         self.assertEqual(receive_argv[0], "fixed-ssh")
         self.assertIn("StrictHostKeyChecking=yes", receive_argv)
+        # Both hops must offer the configured key rather than whichever default
+        # identity happens to exist in the admin's home directory.
+        for argv in (receive_argv, calls[1][0]):
+            self.assertIn("IdentitiesOnly=yes", argv)
+            self.assertEqual(argv[argv.index("-i") + 1], str(identity))
         self.assertEqual(receive_argv[-4], "receive")
         self.assertIsInstance(receive_kwargs["stdin"], bytes)
         self.assertLess(
@@ -775,6 +784,7 @@ class ProviderCommandTests(unittest.TestCase):
                     selected_builder_image_id=self.IMAGE_ID,
                     builder_flavor="builder-standard",
                     known_hosts_directory=Path(directory) / "known-hosts",
+                    identity_path=Path(directory) / "builder_operator_ed25519",
                 )
         deleted.assert_called_once()
 

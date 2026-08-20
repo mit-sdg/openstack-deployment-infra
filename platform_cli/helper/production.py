@@ -295,6 +295,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
             selected_builder_image_id=args["builderImageId"],
             builder_flavor=platform.get("flavors.builder"),
             known_hosts_directory=Path(directory) / "known-hosts",
+            identity_path=application.builder_identity_path(platform),
             source_limit=source_limit,
             build_log_limit=build_log_limit,
             timeout_seconds=900,
