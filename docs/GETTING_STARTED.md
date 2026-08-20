@@ -1,12 +1,18 @@
 # Prepare a fresh deployment
 
-This page covers the local preparation stage: validate that the platform fits, create private inventory and policy, and evaluate/build a role image. It does not provision OpenStack resources. Continue with the [operator journey](OPERATIONS.md) for foundation creation and first deployment.
+Prepare a new deployment locally: check that the platform fits, create the
+private inventory and policy, then evaluate and build a role image. This page
+does not provision OpenStack resources. Continue with the [operator
+journey](OPERATIONS.md) to create the foundation and first deployment.
 
 ## Applicability and safety
 
-Use a new OpenStack project and a new management state directory, and initialize the database empty rather than copying rows from another deployment. Every command in this repository acts only on the resources named in your platform configuration. Unrelated servers, volumes, and images that share the same OpenStack project are never inspected, changed, or deleted.
+Use a new OpenStack project and a new management state directory, and initialize the database empty rather than copying rows from another deployment. Every command in this repository creates, changes, and deletes only the resources named in your platform configuration. Some commands do list servers and images project-wide to work out what they are allowed to touch — image pruning, for instance, has to know which images are still referenced. Nothing outside your inventory is modified.
 
-The platform fits when applications can run as one OCI container, serve HTTP on one port, and expose a health path; one OpenStack project can host the five roles and one replaceable worker per active application; and an operator can manage keys, secrets, backups, and recovery.
+Use this platform when applications can run as one OCI container, serve HTTP
+on one port, and expose a health path. The OpenStack project must be able to
+host the five roles and one replaceable worker per active application. An
+operator must manage keys, secrets, backups, and recovery.
 
 ## Prerequisites
 
@@ -18,7 +24,7 @@ You need:
 - Python 3.14 with the OpenStack SDK for foundation reconciliation, plus uv 0.12.2 for the locked repository environment;
 - OpenStack credentials kept in a private mode-`0600` environment file and protected wrapper;
 - an operator-controlled age identity for offline restore;
-- a Cloudflare token and DNS/TLS account, or another provider meeting [the ingress contract](PUBLIC_INGRESS.md); and
+- a Cloudflare token and DNS/TLS account, or another provider meeting [the ingress contract](PUBLIC_INGRESS.md);
 - a management SSH key whose public half can be installed on the admin role; and
 - a public GitHub repository for each application you intend to deploy.
   Source is fetched over HTTPS with no credentials, so private repositories
@@ -35,7 +41,11 @@ cp -n config/platform.example.json config/platform.json
 cp -n config/platform-policy.example.json config/platform-policy.json
 ```
 
-Edit both JSON files. Replace every example project, UUID, network, address, hostname, resource name, flavor, domain, path, runtime digest, and age recipient. Keep credentials, private keys, and the real policy outside version control. The management installer accepts only the current inventory and private policy; it creates no project declaration directory.
+Edit both JSON files and replace every example project, UUID, network, address,
+hostname, resource name, flavor, domain, path, runtime digest, and age
+recipient. Keep credentials, private keys, and the real policy outside version
+control. The management installer accepts only the current inventory and
+private policy; it creates no project declaration directory.
 
 Set the local inventory explicitly:
 
@@ -51,10 +61,9 @@ Check the result before building anything:
 uv run python infra/lib/platform_config.py validate
 ```
 
-This reports every missing or malformed field at once. Run it again after any
-later edit: a configuration that is merely valid JSON can still be missing a
-nested field, and the next symptom would otherwise be an image build failing
-partway through.
+This reports missing or malformed fields together. Run it after every later
+edit. Valid JSON can still be missing a nested field, which may otherwise make
+an image build fail partway through.
 
 ## Evaluate the image definitions
 
@@ -80,7 +89,11 @@ The `result` link contains a QCOW2 candidate. Follow [the image reference](../ni
 
 ## Continue
 
-Follow [OPERATIONS.md](OPERATIONS.md) in order. It covers foundation reconciliation, PKI and secrets, role bootstrap, public ingress, release installation, fresh database initialization, first deployment, storage, backup/restore, upgrades, cleanup, and recovery. Use [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) to record evidence.
+Follow [OPERATIONS.md](OPERATIONS.md) in order for foundation reconciliation,
+PKI and secrets, role bootstrap, public ingress, release installation, fresh
+database initialization, first deployment, storage, backup and restore,
+upgrades, cleanup, and recovery. Record evidence with
+[ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md).
 
 To have CI build and publish role images for you instead of publishing them by
 hand, set up the GitHub environment, secrets, and variable described in

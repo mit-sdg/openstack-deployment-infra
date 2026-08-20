@@ -1,11 +1,11 @@
 # Troubleshoot a platform checkpoint
 
-Use this page when an observable checkpoint in
-[OPERATIONS.md](OPERATIONS.md) fails. Commands are diagnostic or repeat the
-owning recovery operation. Run repository commands from the checkout and run
-managed backup/restore scripts on admin through the pinned `platform-admin` alias.
-Do not clear SQLite rows, bypass the helper, detach resources manually, print a
-secret, or touch a resource the inventory does not name.
+Use this page when a checkpoint in [OPERATIONS.md](OPERATIONS.md) fails. The
+commands either diagnose the failure or repeat its recovery operation. Run
+repository commands from the checkout. Run managed backup and restore scripts
+on admin through the pinned `platform-admin` alias. Do not clear SQLite rows,
+bypass the helper, detach resources manually, print a secret, or touch a
+resource the inventory does not name.
 
 When a command below uses variables, initialize them on the management host
 from the private inventory without printing it:
@@ -56,9 +56,9 @@ done
 ```
 
 **Correction:** Regenerate the exact direct mode-`0600` file. Admin requires
-only `NOMAD_GOSSIP_KEY`; storage requires the eight keys in
-[OPERATIONS.md](OPERATIONS.md#generate-operator-keys-age-identity-and-bootstrap-files);
-ingress requires both Nomad token keys. Do not add quotes, `export`, or
+only `NOMAD_GOSSIP_KEY`. Storage requires the eight keys in
+[OPERATIONS.md](OPERATIONS.md#generate-operator-keys-age-identity-and-bootstrap-files),
+and ingress requires both Nomad token keys. Do not add quotes, `export`, or
 unrelated keys.
 
 **Symptom:** Nix evaluation fails.
@@ -133,10 +133,10 @@ test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- id 
 test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- id -u)" -gt 0
 ```
 
-**Correction:** Run as the unprivileged management owner; make the wrapper a
-direct owner-only mode-`0500`/`0700` executable; ensure the wrapper token is
-scoped to the configured project; and rerun the automation. A console
-ED25519 fingerprint/keyscan mismatch is a stop condition, not a reason to edit
+**Correction:** Run as the unprivileged management owner. Make the wrapper a
+direct owner-only mode-`0500`/`0700` executable, check that its token is scoped
+to the configured project, and rerun the automation. A console ED25519
+fingerprint/keyscan mismatch is a stop condition, not a reason to edit
 `known_hosts`.
 
 **Symptom:** ACL bootstrap succeeds but ingress rejects its token file.
@@ -161,8 +161,8 @@ pre-control-surface rebuild. Do not invent or paste a Nomad token.
 <paths.root>/secrets/openstack.env                 mode 0600
 <paths.root>/secrets/storage-bootstrap.env         mode 0600
 <paths.root>/secrets/builder_operator_ed25519.pub  direct readable file
+<paths.root>/secrets/builder_operator_ed25519      mode 0600
 <paths.root>/persistent/secrets/provisioning-pki/  mode 0700
-/home/agentops/.ssh/id_ed25519                     mode 0600, if used by builder SSH
 ```
 
 **Correction:** Transfer the exact files described in
@@ -385,6 +385,6 @@ operation record names a record not created by this deployment.
 Escalate the bounded evidence. Do not delete rows, adopt an external resource,
 or inspect a resource the inventory does not name.
 
-For any unresolved failure, report only the safe correlation/operation ID,
+For an unresolved failure, report only the safe correlation or operation ID,
 phase, exact identity arguments, and bounded evidence. Do not report
 credentials, unrestricted provider output, or age identity contents.

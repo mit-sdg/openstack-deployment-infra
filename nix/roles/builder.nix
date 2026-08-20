@@ -9,11 +9,18 @@ let
   namespace = platform.namespace;
   builderRoot = "/srv/${namespace}-build";
   caPath = "/usr/local/share/ca-certificates/${namespace}-internal-ca.crt";
+  builderExecuteSource = builtins.readFile ../../infra/openstack/builder_execute.py;
+  builderRootPlaceholder = "__PLATFORM_BUILD_ROOT__";
   builderExecute = pkgs.writeTextFile {
     name = "app-platform-builder-execute";
     destination = "/bin/app-platform-builder-execute";
     executable = true;
-    text = builtins.readFile ../../infra/openstack/builder_execute.py;
+    # The fixed builder program takes no host path as an argument, so the
+    # deployment build root is bound here. Fail the image build rather than
+    # ship a program that writes outside builderRoot.
+    text =
+      assert lib.hasInfix builderRootPlaceholder builderExecuteSource;
+      lib.replaceStrings [ builderRootPlaceholder ] [ builderRoot ] builderExecuteSource;
   };
   prepareCaBundle = pkgs.writeShellScript "${namespace}-builder-ca-bundle" ''
     set -euo pipefail

@@ -1,13 +1,12 @@
 # Fresh deployment acceptance checklist
 
-Run the procedures in [OPERATIONS.md](OPERATIONS.md) in order. Record command
-output paths, timestamps, image UUID/checksums, readiness markers, public
-health results, `RESTORE-MANIFEST`, and reviewer initials in a private evidence
-system. Do not put credentials, provider payloads, or age identities in this
-checklist.
+Follow [OPERATIONS.md](OPERATIONS.md) in order. In a private evidence system,
+record command output paths, timestamps, image UUIDs and checksums, readiness
+markers, public health results, `RESTORE-MANIFEST`, and reviewer initials. Do
+not put credentials, provider payloads, or age identities in this checklist.
 
-The command names below are the evidence boundary. A checked box means the
-observable result passed, not merely that a command exited zero.
+The command names below define the evidence boundary. Check a box only when the
+observable result passed, not when a command merely exited zero.
 
 ## Reset and scope
 
@@ -16,9 +15,9 @@ observable result passed, not merely that a command exited zero.
   approval in your operations system.
 - [ ] **RESET-02** Resources in the OpenStack project that this deployment does
   not own are explicitly out of scope and untouched. Evidence: the private
-  scope-record entry in the deployment evidence index, which preserves the
-  exact exclusion list without copying UUIDs into Git. A missing private scope
-  record is a live evidence gap.
+  scope-record entry in the deployment evidence index. It preserves the exact
+  exclusion list without copying UUIDs into Git. A missing private scope record
+  is a live evidence gap.
 - [ ] **RESET-03** Only the configured OpenStack project/prefix was reconciled;
   no external row was imported. Evidence: `apply_foundation.py` plan/apply,
   token project/name comparison, and scoped provider evidence.

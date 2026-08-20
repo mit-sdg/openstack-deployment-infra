@@ -1,8 +1,13 @@
 # `openstack-platform` command reference
 
-`openstack-platform` is the unprivileged staff control surface for one deployment. It owns accepted non-secret records and operation checkpoints in `/srv/openstack-platform/state`, then invokes the constrained admin helper through the pinned `platform-admin` SSH alias.
+`openstack-platform` is the unprivileged staff control surface for one
+deployment. It stores accepted non-secret records and operation checkpoints in
+`/srv/openstack-platform/state`. It invokes the constrained admin helper through
+the pinned `platform-admin` SSH alias.
 
-The database starts empty and is initialized on first invocation. Reconciliation does not import external rows, and the command's resource set is limited to the names in your platform configuration.
+The database starts empty and is initialized on first invocation.
+Reconciliation does not import external rows. Commands are limited to the
+resource names in your platform configuration.
 
 ## Preconditions
 
@@ -32,12 +37,13 @@ openstack-platform storage list [SLUG]
 openstack-platform storage show SLUG postgres|mongo|s3
 ```
 
-The first invocation creates/migrates the fresh SQLite schema. Its version-zero
-marker is bound to the deployment project UUID, namespace, and stable inventory
-identity (including resource names and state paths). A database copied from another deployment, or an older unbound database, is
-rejected before SQLite WAL sidecars are enabled; changing
-images, flavors, versions, checksums, or container pins does not change this
-state identity. Read commands combine accepted records with bounded live
+The first invocation creates or migrates the fresh SQLite schema. Its
+version-zero marker is bound to the deployment project UUID, namespace, and
+stable inventory identity, including resource names and state paths. The CLI
+rejects a database copied from another deployment, or an older unbound
+database, before enabling SQLite WAL sidecars. Changing images, flavors,
+versions, checksums, or container pins does not change this state identity.
+Read commands combine accepted records with bounded live
 observations. Unavailable observations do not erase accepted records; `status`
 reports degraded state when observations are unavailable or unhealthy.
 
@@ -65,7 +71,9 @@ openstack-platform infra replace admin|ingress|storage --yes
 openstack-platform infra logs admin|ingress|storage [--lines COUNT]
 ```
 
-Image selection resolves a provider image and records its UUID, full source commit, and compatibility hash. Selection requires complete, accepted images; incomplete metadata is rejected.
+Image selection resolves a provider image and records its UUID, full source
+commit, and compatibility hash. The image must be complete and accepted;
+selection rejects incomplete metadata.
 
 Image pruning is plan-first. The plan protects selected images, images named by
 unfinished operations, images referenced by servers, and the newest bounded
@@ -87,7 +95,10 @@ delete the old server first or detach volumes manually.
 
 ## Deploy an application
 
-The repository must be public credential-free GitHub HTTPS. `COMMIT` is a full lowercase 40-character commit. The selected builder and worker images must be accepted current images. The repository must contain a supported `platform.yaml` and lockfile.
+The repository must be public, credential-free GitHub HTTPS. `COMMIT` is a full
+lowercase 40-character commit. The selected builder and worker images must be
+accepted current images. The repository must contain a supported
+`platform.yaml` and lockfile.
 
 ```text
 openstack-platform app deploy SLUG \
@@ -105,7 +116,8 @@ The operation acquires the exact commit, creates a single-use builder, generates
 
 ## Manage application environment
 
-Values enter a hidden prompt, bounded stdin, or strict dotenv file. Values remain in Nomad Variables and never enter SQLite or command output.
+Supply values through a hidden prompt, bounded stdin, or strict dotenv file.
+They remain in Nomad Variables and never enter SQLite or command output.
 
 ```text
 openstack-platform app env set SLUG KEY
@@ -180,9 +192,9 @@ candidate, checks the current deployment-bound marker, known schema, SQLite
 integrity, foreign keys, and unfinished operations, and then atomically replaces
 the destination. A backup from a different project, namespace, stable resource
 inventory, or state-path identity is refused; the existing database is left
-unchanged. Corrupt, future, unrecognized, unsafe, busy, or unfinished state
-is also
-refused. It does not restore provider resources or import external rows; run
+unchanged. Corrupt, future, unrecognized, unsafe, busy, or unfinished state is also
+refused. Restore does not recreate provider resources or import external rows;
+run
 `status` and the read commands afterward to reconcile live observations. The
 fixed launcher supplies the installed inventory and destination, so do not
 bypass it with a release-internal restore path.

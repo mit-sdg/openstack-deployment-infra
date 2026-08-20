@@ -1,6 +1,9 @@
 # Platform architecture
 
-The platform hosts small HTTP applications in one OpenStack project. Persistent control and data services are isolated from replaceable workers and single-use builders. The control database starts empty and accepts only state created by this deployment.
+The platform hosts small HTTP applications in one OpenStack project. It keeps
+persistent control and data services separate from replaceable workers and
+single-use builders. The control database starts empty and accepts only state
+created by this deployment.
 
 In this documentation, an **OpenStack project** is the cloud tenant that owns infrastructure. An **application project** is one hosted application, its worker, deployments, and managed data.
 
@@ -20,7 +23,15 @@ All role images use one private `config/platform.json`, which provides the deplo
 
 ## Fresh deployment flow
 
-The operator first reconciles only the configured foundation, boots and verifies the three persistent roles, then installs matching management/helper releases. The first `openstack-platform status` invocation creates the empty SQLite schema and binds its marker to the deployment project UUID, namespace, and stable inventory identity. There is no import phase. Reconciliation reads the configured resources and accepted image candidates to confirm what exists; it never writes a record it did not create. A copied database or restore from another deployment is rejected; normal image, flavor, version, checksum, and container upgrades do not change the marker.
+The operator reconciles the configured foundation, boots and verifies the
+three persistent roles, then installs matching management and helper releases.
+The first `openstack-platform status` invocation creates the empty SQLite
+schema. Its marker is bound to the deployment project UUID, namespace, and
+stable inventory identity. There is no import phase. Reconciliation reads the
+configured resources and accepted image candidates to confirm what exists; it
+never writes a record it did not create. The platform rejects a copied database
+or restore from another deployment. Normal image, flavor, version, checksum,
+and container upgrades do not change the marker.
 
 For an application deployment, the control surface:
 
@@ -50,7 +61,11 @@ The management database is backed up separately from PostgreSQL, MongoDB, and Ga
 
 A backup counts as accepted only once its manifest exists. The ciphertext and checksum are fsynced before the manifest is renamed into place, so an interrupted run leaves partial files that the next run cleans up rather than mistaking for a real backup. Retention only ever deletes complete sets.
 
-Restoring is deliberately offline and contacts no provider. It unpacks the backup into a private temporary file and checks it before touching anything: a backup from a different deployment is refused, as is one that is corrupt, unfinished, or written by a newer version. Only then does it replace the database, atomically. Live state must be reconciled afterwards.
+Restore is offline and contacts no provider. It unpacks the backup into a
+private temporary file and checks it before touching the database. It refuses a
+backup from another deployment, a corrupt or unfinished backup, or one written
+by a newer version. Only then does it atomically replace the database. Live
+state must be reconciled afterward.
 
 Managed data is checked separately. That check runs on admin in throwaway containers and records evidence only after the restored contents match their checksums. Registry blobs are not backed up at all; they are rebuilt from source.
 
@@ -71,6 +86,5 @@ The platform runs one allocation per application. Applications use Bun or Node, 
 - Persistent-role replacement retains the prior host and volumes until readiness passes, and accepts a replacement only after exact image UUID, retained flavor UUID, configured name, and operation provenance are re-read from the provider.
 - Destructive storage/application cleanup requires explicit confirmation and absence evidence.
 - Management and helper releases are selected atomically; keep a complete prior release for executable recovery, not as a database or provider migration source.
-- Persistent-role replacement is performed only by `openstack-platform infra replace`; retain the old host and volumes until readiness passes.
 
 Use [OPERATIONS.md](OPERATIONS.md) for actions and [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md) for exact command behavior.

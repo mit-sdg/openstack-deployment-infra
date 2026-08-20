@@ -1,8 +1,9 @@
 # Install a platform CLI release without privileges
 
 This procedure installs one committed Python 3.14 management release under
-`/srv/openstack-platform` and the matching helper release in admin persistent state. It is for
-release maintainers. It does not describe platform commands or feature behavior.
+`/srv/openstack-platform` and the matching helper release in admin persistent
+state. It is for release maintainers; it does not describe platform commands or
+feature behavior.
 
 Initialize a fresh database; do not copy a database or external declarations from another deployment.
 
@@ -31,16 +32,16 @@ map. The installer captures the handlers used by the production helper
 entrypoint and requires an exact match, including backup, application, and
 storage action families. It does not package the foundation-only default map.
 
-The release path performs the state and provider preflights; do not recreate
-those checks by hand or upload a release first. Runtime bootstrap validates the
-protected local executables, SSH identity, and bridge directories. The
-management installer then requires the direct private inventory/policy and
-protected OpenStack wrapper before archive extraction. Finally,
-`deploy_helper_release.sh` reads the installed inventory, validates the live
-admin identity and configured paths (including the accepted immutable Nix
-store configuration link) before upload, and confirms the remote alias selects
-an unprivileged account before invoking the helper installer. These checks do
-not copy management configuration into `/etc`.
+The release path runs the state and provider preflights. Do not recreate them
+by hand or upload a release first. Runtime bootstrap validates the protected
+local executables, SSH identity, and bridge directories. Before archive
+extraction, the management installer requires the direct private inventory and
+policy plus the protected OpenStack wrapper. Before upload,
+`deploy_helper_release.sh` reads the installed inventory and validates the live
+admin identity and configured paths, including the accepted immutable Nix store
+configuration link. It also confirms that the remote alias selects an
+unprivileged account before invoking the helper installer. These checks do not
+copy management configuration into `/etc`.
 
 ## Bootstrap the management runtime once
 
@@ -134,7 +135,7 @@ test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- \
 The generated alias pins user `agentops`, the configured admin address,
 ED25519 host keys, strict host-key checking, no password or agent forwarding,
 and bounded connection attempts. The management CLI, helper deployment, and
-and management-database backup transfer all use this alias and path.
+management-database backup transfer all use this alias and path.
 
 ## Install the management release
 
@@ -156,11 +157,11 @@ commit=$(git rev-parse HEAD)
 The installer refuses a non-HEAD commit, tracked changes, an archive without
 Git's canonical global pax commit comment, a runtime other than Python 3.14, a
 stale `uv.lock`, an entrypoint smoke failure, or missing persistent
-configuration. It parses the archive marker with the Python standard library;
-installing an archive directly also requires its trusted lowercase SHA-256 via
-`--archive-sha256`. The inventory and policy must be direct files owned by the current user with
-mode `0600`; both configuration directories must be direct, owned, and mode
-`0700`. It uses `uv sync --frozen --no-dev` to create the release-local
+configuration. It parses the archive marker with the Python standard library.
+Installing an archive directly also requires its trusted lowercase SHA-256 via
+`--archive-sha256`. The inventory and policy must be direct files owned by the
+current user with mode `0600`; both configuration directories must be direct,
+owned, and mode `0700`. It uses `uv sync --frozen --no-dev` to create the release-local
 environment. Before writing `.complete`, it invokes the candidate's installed
 command with sanitized temporary inventory and policy files and requires that
 the command load them successfully. It then atomically replaces
@@ -249,10 +250,10 @@ fixed wrapper to set it before importing its script.
 After preflight, the script creates the configured admin release, private
 incoming, releases, and `root/bin` directories through the pinned alias. It
 then creates the exact Git archive, computes its SHA-256 locally, and extracts
-the installer itself from that same commit. It uploads the archive and
+the installer from the same commit. The script uploads the archive and
 installer with `scp`, passes the trusted checksum separately, and invokes
 `/run/current-system/sw/bin/python3.14` directly. The installer verifies the
-full archive digest and then strictly requires Git's canonical
+full archive digest and then requires Git's canonical
 40-lowercase-hex global pax commit comment to equal the requested commit before
 extraction. No remote `git`, checksum utility, sudo command, preinstalled
 installer, helper launcher, or image replacement is required.
