@@ -1,14 +1,14 @@
 # Deployment configuration reference
 
-This reference defines a new deployment inventory. Use it with an empty management
-state; it is not a state-import format. No external rows are copied into the
-database, and only the resources named here are ever touched.
+This reference defines the inventory for a new deployment. Use it with empty
+management state; it is not a state-import format. No external rows are copied
+into the database, and only the resources named here are ever touched.
 
-`config/platform.json` in the operator's private repository is the deployment
-inventory used by role-image builds and repository tools. The installed
-command reads its persistent copy at `/srv/openstack-platform/config/platform.json`, outside
-immutable release archives. This file contains deployment names and other
-non-secret settings. Start from
+Role-image builds and repository tools use `config/platform.json` from the
+operator's private repository. The installed command reads its persistent copy
+at `/srv/openstack-platform/config/platform.json`, outside immutable release
+archives. The file contains deployment names and other non-secret settings.
+Start from
 [`config/platform.example.json`](../config/platform.example.json); do not add
 credentials or private keys.
 
@@ -82,10 +82,10 @@ candidate with a different stable identity is rejected before it can be used;
 changing those identity fields means starting from a new database, not copying
 an existing one.
 
-The loader currently checks most top-level groups, the display and organization
-names, `namespace`, and the internal CA filename, but not every nested field.
-Keep the structure shown in the example, and run the checks at the end of this
-page after every change.
+The loader checks most top-level groups, the display and organization names,
+`namespace`, and the internal CA filename, but not every nested field. Keep the
+structure shown in the example. Run the checks at the end of this page after
+every change.
 
 ## Private operator policy
 
@@ -98,11 +98,12 @@ must be a direct current-user-owned mode-`0600` file. It contains:
   management database backups.
 
 The recipient is not an age identity. Keep the matching
-`AGE-SECRET-KEY-...` file in operator custody outside Git and outside the
-management database. The management runtime bootstrap validates and exposes a
-protected age executable at `/srv/openstack-platform/bin/age`; the admin NixOS role separately
-provides `<paths.root>/bin/age` and `<paths.root>/bin/age-keygen` for managed
-data backups. Neither backup process prints or transfers an age identity.
+`AGE-SECRET-KEY-...` file in operator custody, outside Git and the management
+database. The management runtime bootstrap validates and exposes a protected
+age executable at `/srv/openstack-platform/bin/age`. The admin NixOS role
+separately provides `<paths.root>/bin/age` and
+`<paths.root>/bin/age-keygen` for managed-data backups. Neither backup process
+prints or transfers an age identity.
 
 ## Naming
 
@@ -138,8 +139,8 @@ The namespace is used in:
 - readiness markers.
 
 Every image and control-plane component in a deployment must use the same
-namespace. Changing it selects a new resource and
-state namespace; it does not copy state from another namespace.
+namespace. Changing it selects a new resource and state namespace; it does not
+copy state from another namespace.
 
 ### Application slugs
 
@@ -315,8 +316,9 @@ uv run python -m unittest discover -s tests -v
 ```
 
 The Python command checks that the file loads. The flake command evaluates all
-five role configurations. Neither command tests a live role. For an authenticated
-provider check from the repository root, source the protected wrapper and use
+five role configurations. Neither command tests a live role. For an
+authenticated provider check from the repository root, source the protected
+wrapper and use
 `verify_openstack_project` from `infra/lib/platform-config.sh`; do not compare
 compact and canonical UUID strings literally. Follow
 [`../nix/README.md`](../nix/README.md) before publishing or selecting an image.

@@ -92,6 +92,20 @@ def provider_command(platform: PlatformConfig, tool: str) -> tuple[str, ...]:
     return (str(root / "bin" / f"{platform.namespace}-{tool}"),)
 
 
+def builder_identity_path(platform: PlatformConfig) -> str:
+    """Absolute path of the private key that reaches a disposable builder.
+
+    ``<paths.root>/secrets`` is a symlink onto the admin state volume, so the
+    key survives an admin replacement. A default identity under the admin's
+    home directory does not, and its absence surfaces only as an opaque SSH
+    authentication failure part-way through a deployment.
+    """
+    root = PurePosixPath(str(platform.get("paths.root")))
+    if not root.is_absolute():
+        raise ValidationError("deployment root must be an absolute path")
+    return str(root / "secrets" / "builder_operator_ed25519")
+
+
 DEFAULT_BUILDER_COMMAND = ("/srv/app-platform/bin/app-platform-builder",)
 DEFAULT_BUILDER_PIN_COMMAND = ("/srv/app-platform/bin/app-platform-pin-builder-host-key",)
 DEFAULT_BUILDER_SSH_COMMAND = ("ssh",)
@@ -718,6 +732,8 @@ def parse_build_metadata(payload: bytes | str) -> str:
         "containerimage.digest",
         "containerimage.config.digest",
         "containerimage.descriptor",
+        # The image exporter always reports the reference it pushed.
+        "image.name",
         "buildkit/trace",
     }
     if any(not isinstance(key, str) or key not in allowed for key in value):
@@ -1210,12 +1226,29 @@ def create_build_archive(
     return payload, hashlib.sha256(payload).hexdigest()
 
 
+def _builder_identity(identity_path: str | Path) -> Path:
+    """Require a direct, private regular file before offering it to SSH."""
+    identity = Path(identity_path)
+    if not identity.is_absolute():
+        raise ValidationError("builder identity must be an absolute path")
+    try:
+        metadata = identity.lstat()
+    except OSError:
+        raise ValidationError("builder identity is unavailable") from None
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValidationError("builder identity must be a direct regular file")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ValidationError("builder identity must not be group or world accessible")
+    return identity
+
+
 def _builder_ssh_argv(
     command: Sequence[str],
     address: str,
     known_hosts: Path,
     connect_timeout_seconds: int,
     remote_args: Sequence[str],
+    identity_file: Path,
 ) -> tuple[str, ...]:
     if not 1 <= connect_timeout_seconds <= 120:
         raise ValueError("builder SSH connect timeout is invalid")
@@ -1231,6 +1264,10 @@ def _builder_ssh_argv(
         "StrictHostKeyChecking=yes",
         "-o",
         f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-i",
+        str(identity_file),
         "--",
         f"agentops@{host}",
         *remote_args,
@@ -1275,6 +1312,7 @@ def execute_builder_build(
     recipe: Recipe,
     image_name: str,
     known_hosts_path: str | Path,
+    identity_path: str | Path,
     *,
     source_limit: int,
     build_log_limit: int,
@@ -1287,6 +1325,7 @@ def execute_builder_build(
 ) -> BuildExecution:
     if not observation.ready or observation.address is None:
         raise ApplicationError("builder is not ready")
+    identity = _builder_identity(identity_path)
     if not _IMAGE_NAME.fullmatch(image_name):
         raise ValidationError("image name must be a lowercase registry repository without a tag")
     if isinstance(connect_timeout_seconds, bool) or not 1 <= connect_timeout_seconds <= 120:
@@ -1324,6 +1363,7 @@ def execute_builder_build(
             archive_sha,
             str(len(archive)),
         ),
+        identity,
     )
     received = _provider_result(
         command_runner,
@@ -1352,6 +1392,7 @@ def execute_builder_build(
             observation.build_id,
             image_name,
         ),
+        identity,
     )
     result = _provider_result(
         command_runner,
@@ -1380,6 +1421,7 @@ def build_with_disposable_builder(
     selected_builder_image_id: str,
     builder_flavor: str,
     known_hosts_directory: str | Path,
+    identity_path: str | Path,
     source_limit: int = 52_428_800,
     build_log_limit: int = 10_485_760,
     timeout_seconds: float = 900,
@@ -1432,6 +1474,7 @@ def build_with_disposable_builder(
             recipe,
             image_name,
             known_hosts,
+            identity_path,
             source_limit=source_limit,
             build_log_limit=build_log_limit,
             timeout_seconds=timeout_seconds,

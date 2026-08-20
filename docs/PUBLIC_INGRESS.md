@@ -3,8 +3,8 @@
 Each deployed application needs a public hostname with HTTPS. You may use any
 DNS or TLS provider that meets the forwarding contract below.
 
-The reference deployment uses Cloudflare Tunnel. You can instead use an
-institutional ingress service, such as one that assigns a hostname like
+The reference deployment uses Cloudflare Tunnel. You can use an institutional
+ingress service instead, including one that assigns a hostname such as
 `apps.example.edu`, if it provides the same behavior.
 
 ## Required behavior
@@ -26,9 +26,9 @@ The job renderer assigns each application a hostname in this form:
 For example, the domain `apps.example.edu` and slug `demo` produce
 `demo.apps.example.edu`.
 
-A provider can use a wildcard DNS record and certificate or provision each
+A provider can use a wildcard DNS record and certificate, or provision each
 hostname separately. Per-application provisioning must finish before the
-deployment is reported healthy.
+platform reports the deployment healthy.
 
 ## Request path
 
@@ -60,9 +60,9 @@ directly to port 443 unless you add and test a separate TLS configuration.
 ## Use Cloudflare Tunnel
 
 Cloudflare Tunnel is enabled by default when you create the ingress host.
-The Cloudflare account and token are unavoidable external inputs. Create a
-direct current-user-owned mode-`0600` file containing exactly one non-whitespace
-token line, then set its **path**:
+The Cloudflare account and token are external inputs. Create a direct,
+current-user-owned mode-`0600` file containing exactly one non-whitespace token
+line, then set its **path**:
 
 ```bash
 umask 077

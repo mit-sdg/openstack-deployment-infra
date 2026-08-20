@@ -22,7 +22,10 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-ROOT = Path("/srv/app-platform-build")
+# The role image substitutes the deployment build root, which
+# nix/roles/builder.nix provisions as /srv/<namespace>-build. This literal is
+# never a usable path outside that image.
+ROOT = Path("__PLATFORM_BUILD_ROOT__")
 SOCKET = "unix:///run/user/1000/buildkit/buildkitd.sock"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 SHA = re.compile(r"[0-9a-f]{64}")
