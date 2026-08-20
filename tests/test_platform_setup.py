@@ -53,6 +53,17 @@ PLATFORM_DOMAIN='apps.example.test'
         with self.assertRaisesRegex(setup.SetupError, "duplicate"):
             setup.load_environment_file(path)
 
+    def test_nova_bootstrap_key_is_rsa_and_private(self) -> None:
+        private_key = self.root / "admin_nova_rsa"
+
+        setup._ensure_key(private_key, key_type="rsa")
+
+        self.assertEqual(private_key.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(private_key.with_suffix(".pub").stat().st_mode & 0o777, 0o644)
+        self.assertTrue(
+            private_key.with_suffix(".pub").read_text(encoding="utf-8").startswith("ssh-rsa ")
+        )
+
     def test_project_identity_uses_scoped_token_without_project_list_permission(self) -> None:
         project_id = "00000000-0000-4000-8000-000000000001"
         environment = {"OS_PROJECT_NAME": "demo", "OS_PROJECT_ID": project_id}

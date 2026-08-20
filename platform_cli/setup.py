@@ -641,7 +641,9 @@ def _platform_document(
     return base
 
 
-def _ensure_key(path: Path) -> None:
+def _ensure_key(path: Path, *, key_type: str = "ed25519") -> None:
+    if key_type not in {"ed25519", "rsa"}:
+        _fail("generated SSH key type is unsupported")
     if path.exists():
         _direct_private_file(path, field="generated SSH private key")
         if not path.with_suffix(path.suffix + ".pub").is_file():
@@ -651,10 +653,10 @@ def _ensure_key(path: Path) -> None:
     if ssh_keygen is None:
         _fail("ssh-keygen is required")
     _private_directory(path.parent)
-    _command(
-        (ssh_keygen, "-q", "-t", "ed25519", "-N", "", "-f", path),
-        environment=os.environ,
-    )
+    arguments: tuple[str | Path, ...] = (ssh_keygen, "-q", "-t", key_type)
+    if key_type == "rsa":
+        arguments += ("-b", "4096")
+    _command(arguments + ("-N", "", "-f", path), environment=os.environ)
     path.chmod(0o600)
     path.with_suffix(path.suffix + ".pub").chmod(0o644)
 
@@ -903,11 +905,12 @@ def _bootstrap_roles(
     image_ids: Mapping[str, str],
 ) -> bool:
     management_key = paths.ssh_directory / "id_ed25519"
+    nova_key = paths.bootstrap / "admin_nova_rsa"
     builder_key = paths.bootstrap / "builder_operator_ed25519"
     child = _script_environment(environment, paths, python_store)
     child.update(
         {
-            "ADMIN_PUBLIC_KEY": str(management_key.with_suffix(".pub")),
+            "ADMIN_PUBLIC_KEY": str(nova_key.with_suffix(".pub")),
             "AGENTOPS_PUBLIC_KEY": str(management_key.with_suffix(".pub")),
             "ADMIN_SECRETS_FILE": str(paths.bootstrap / "admin-bootstrap.env"),
             "STORAGE_SECRETS_FILE": str(paths.bootstrap / "storage-bootstrap.env"),
@@ -1239,6 +1242,7 @@ def run_setup(
         _atomic_private_write(paths.platform, json.dumps(document, indent=2) + "\n")
     load_platform(paths.platform)
     _ensure_key(paths.ssh_directory / "id_ed25519")
+    _ensure_key(paths.bootstrap / "admin_nova_rsa", key_type="rsa")
     _ensure_key(paths.bootstrap / "builder_operator_ed25519")
     _ensure_secret_files(paths)
     recipient = _ensure_age_identity(age_store, paths.bootstrap / "backup-age-identity.txt")
