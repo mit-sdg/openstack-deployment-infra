@@ -782,6 +782,39 @@ def begin_operation(
     return result
 
 
+def renew_operation_deadline(
+    connection: sqlite3.Connection,
+    operation_id: str,
+    deadline_at: str,
+    *,
+    now: str | None = None,
+) -> Operation:
+    """Give a resumed operation the deadline of the attempt that resumes it.
+
+    The whole-operation deadline bounds one attempt, so that a build cannot
+    outlive the record it is written against. A resumed operation kept the
+    deadline of the attempt that stranded it, which is normally already spent:
+    every recovery then failed immediately, and the scope stayed locked with no
+    command able to release it. Recovery is a new attempt and takes a new
+    deadline, still recorded before any work so the durable record and the
+    helper continue to agree.
+    """
+    uuid(operation_id, field="operation_id")
+    if not isinstance(deadline_at, str) or len(deadline_at) > 64:
+        raise ValidationError("operation deadline is malformed")
+    with transaction(connection):
+        cursor = connection.execute(
+            "UPDATE operations SET deadline_at = ?, updated_at = ? "
+            "WHERE operation_id = ? AND status IN ('running','recovery_required')",
+            (deadline_at, now or utc_now(), operation_id),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("operation is missing or already terminal")
+    result = get_operation(connection, operation_id)
+    assert result is not None
+    return result
+
+
 def checkpoint_operation(
     connection: sqlite3.Connection,
     operation_id: str,

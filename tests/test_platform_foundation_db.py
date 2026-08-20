@@ -226,6 +226,37 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(second.status, "running")
 
+    def test_resumed_operation_takes_the_deadline_of_the_attempt_resuming_it(self) -> None:
+        """A stranded operation must not stay stranded.
+
+        The whole-operation deadline bounds one attempt. Keeping the spent
+        deadline of the attempt that stranded an operation made every recovery
+        fail on sight, and nothing else could release the scope.
+        """
+        self.migrate()
+        operation_id = str(uuid.uuid4())
+        db.begin_operation(
+            self.connection,
+            operation_id=operation_id,
+            kind="app.deploy",
+            scope=f"app-{APP_ID}",
+            phase="validated",
+            deadline_at="2026-01-01T00:15:00Z",
+            refs={"builder_id": IMAGE_ID},
+            now="2026-01-01T00:00:00Z",
+        )
+        db.mark_recovery_required(self.connection, operation_id, error="stranded")
+        renewed = db.renew_operation_deadline(
+            self.connection, operation_id, "2026-01-01T09:15:00Z", now="2026-01-01T09:00:00Z"
+        )
+        self.assertEqual(renewed.deadline_at, "2026-01-01T09:15:00Z")
+        self.assertEqual(renewed.status, "recovery_required")
+        self.assertFalse(self.connection.in_transaction)
+        # The record the helper is checked against moves with it.
+        stored = db.get_unfinished_operation(self.connection, f"app-{APP_ID}")
+        assert stored is not None
+        self.assertEqual(stored.deadline_at, "2026-01-01T09:15:00Z")
+
     def test_operation_refs_and_errors_exclude_obvious_secrets(self) -> None:
         self.migrate()
         with self.assertRaisesRegex(ValidationError, "secret material"):
