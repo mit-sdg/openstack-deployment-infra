@@ -1058,6 +1058,36 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(result.nomad_version, 4)
         self.assertEqual(calls, ["app.deploy", "app.health"])
 
+    def test_pending_zero_allocation_observation_is_polled_without_cleanup(self) -> None:
+        job, candidate = self.candidate_job()
+        observations = 0
+        calls: list[str] = []
+
+        def helper(action: str, _args: object, **_kwargs: object) -> dict[str, object]:
+            nonlocal observations
+            calls.append(action)
+            if action == "app.deploy":
+                return {
+                    "nomadVersion": 4,
+                    "candidateJobSha256": candidate[0],
+                    "candidateImage": candidate[1],
+                }
+            observations += 1
+            if observations == 1:
+                return self.health(4, candidate, healthy=False, terminal=False) | {"allocations": 0}
+            return self.health(4, candidate, healthy=True, terminal=False)
+
+        result = deploy_and_cleanup(
+            "demo-app",
+            job,
+            attempts=2,
+            helper_caller=helper,
+            sleep=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.observations, 2)
+        self.assertEqual(calls, ["app.deploy", "app.health", "app.health"])
+
     def test_public_health_must_pass_after_scheduler_health(self) -> None:
         public = iter((False, True))
         job, candidate = self.candidate_job()

@@ -2067,7 +2067,7 @@ def deploy_and_cleanup(
             and observation.get("candidateImage") == observed_candidate[1]
             and isinstance(allocations, int)
             and not isinstance(allocations, bool)
-            and allocations == 1
+            and 0 <= allocations <= 128
         )
 
     failure: BaseException | None = None
