@@ -34,6 +34,7 @@ S3_KEYS = ENVIRONMENT_KEYS["s3"]
 RESOURCE_KEYS = ENVIRONMENT_KEYS
 _OWNER = {"postgres": "postgres", "mongo": "mongo", "s3": "s3"}
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{1,62}")
+APPLICATION_CA_PATH = "/platform-ca/internal-ca.crt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,7 +180,7 @@ def postgres_environment(
     username: str,
     password: str,
     *,
-    ca_path: str = "/secrets/internal-ca.crt",
+    ca_path: str = APPLICATION_CA_PATH,
 ) -> SecretItems:
     user = urllib.parse.quote(username, safe="")
     secret = urllib.parse.quote(password, safe="")
@@ -614,7 +615,7 @@ def mongo_environment(
     username: str,
     password: str,
     *,
-    ca_path: str = "/secrets/internal-ca.crt",
+    ca_path: str = APPLICATION_CA_PATH,
 ) -> SecretItems:
     user = urllib.parse.quote(username, safe="")
     secret = urllib.parse.quote(password, safe="")
@@ -735,6 +736,8 @@ def _mongo_remove_created(
         raise _recovery_required(
             "mongo", "create", "inspect operation-owned database data before cleanup"
         )
+    username = _credential_name(identifier, generation)
+    database_client.command("dropUser", username)
     admin.drop_database(database)
     if not mongo_absent(admin, application_id=identifier):
         raise _recovery_required("mongo", "create", "confirm operation-owned database absence")
@@ -841,7 +844,7 @@ def _require_mongo_identity(
         query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         if query.get("authSource") != [expected_database] or query.get("tls") != ["true"]:
             raise ValueError
-        if query.get("tlsCAFile") != ["/secrets/internal-ca.crt"]:
+        if query.get("tlsCAFile") != [APPLICATION_CA_PATH]:
             raise ValueError
     except (KeyError, TypeError, ValueError):
         raise HelperActionError(
@@ -972,7 +975,12 @@ def mongo_absent(admin: Any, *, application_id: str) -> bool:
         raise HelperActionError(
             "PROVIDER_RESPONSE_INVALID", "MongoDB database inventory is invalid"
         )
-    return database not in names
+    database_client = admin[database]
+    return (
+        database not in names
+        and not _mongo_users(database_client)
+        and not _mongo_collections(database_client)
+    )
 
 
 def s3_environment(endpoint: str, bucket: str, access_key: str, secret_key: str) -> SecretItems:
@@ -982,7 +990,7 @@ def s3_environment(endpoint: str, bucket: str, access_key: str, secret_key: str)
             "AWS_REGION": "garage",
             "AWS_ACCESS_KEY_ID": access_key,
             "AWS_SECRET_ACCESS_KEY": secret_key,
-            "AWS_CA_BUNDLE": "/secrets/internal-ca.crt",
+            "AWS_CA_BUNDLE": APPLICATION_CA_PATH,
             "S3_ENDPOINT": endpoint,
             "S3_BUCKET": bucket,
             "S3_FORCE_PATH_STYLE": "true",
@@ -1153,7 +1161,7 @@ def s3_verify(
         or values.get("AWS_ACCESS_KEY_ID") != credential.credential_name
         or values.get("AWS_REGION") != "garage"
         or values.get("S3_FORCE_PATH_STYLE") != "true"
-        or values.get("AWS_CA_BUNDLE") != "/secrets/internal-ca.crt"
+        or values.get("AWS_CA_BUNDLE") != APPLICATION_CA_PATH
     ):
         raise HelperActionError("IDENTITY_MISMATCH", "S3 credential identity does not match")
     client = scoped_client(values["AWS_ACCESS_KEY_ID"], values["AWS_SECRET_ACCESS_KEY"])

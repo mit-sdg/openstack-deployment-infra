@@ -26,7 +26,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, mkstemp
 from typing import Any, cast
 
-from . import app, db, openstack, remote, restore, runtime, status, storage
+from . import app, db, openstack, remote, restore, runtime, setup, status, storage
 from .config import Config, load, load_platform
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
@@ -135,6 +135,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_global_options(parser)
     commands = parser.add_subparsers(dest="command", required=True)
+
+    setup_command = commands.add_parser(
+        "setup", help="create a complete greenfield deployment from a protected environment file"
+    )
+    setup_command.add_argument("--env-file", type=Path, required=True)
+    setup_command.add_argument(
+        "--workspace", type=Path, default=Path("/srv/openstack-platform/setup")
+    )
+    setup_command.add_argument("--cloudflare-token-file", type=Path)
+    setup_command.add_argument(
+        "--apply", action="store_true", help="build images and create the deployment"
+    )
 
     commands.add_parser("status", help="show accepted state and bounded live availability")
     commands.add_parser("backup", help="back up and encrypt M1 SQLite state")
@@ -1113,6 +1125,9 @@ def _environment_mutation(
             observed = app.list_environment(
                 application.slug,
                 timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
+                helper_caller=lambda action, values, **_bounds: _helper(
+                    config, action, values, deadline=deadline
+                ),
             )
             names = observed.get("keys")
             if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
@@ -1198,6 +1213,9 @@ def _environment_mutation(
                     removals,
                     ownership,
                     timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
+                    helper_caller=lambda action, values, **_bounds: _helper(
+                        config, action, values, deadline=deadline
+                    ),
                 )
             else:
                 result = app.set_environment(
@@ -1205,6 +1223,9 @@ def _environment_mutation(
                     updates,
                     ownership,
                     timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
+                    helper_caller=lambda action, values, **_bounds: _helper(
+                        config, action, values, deadline=deadline
+                    ),
                 )
             names = result.get("keys")
             if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
@@ -2301,6 +2322,7 @@ def _app_logs(
             lines=args.lines,
             follow=args.follow,
             timeout_seconds=config.policy.limits.helper_seconds,
+            helper_caller=lambda action, values, **_bounds: _helper(config, action, values),
         )
         print(result.get("text", ""), end="", file=output)
         return
@@ -2551,6 +2573,24 @@ def dispatch(
     if args.command == "restore":
         _restore(args, output=stdout)
         return
+    if args.command == "setup":
+
+        def setup_input(prompt: str) -> str:
+            print(prompt, end="", file=stdout, flush=True)
+            value = stdin.readline()
+            if not isinstance(value, str) or value == "":
+                raise setup.SetupError("setup input ended before all required values were supplied")
+            return value.rstrip("\n")
+
+        setup.run_setup(
+            env_file=args.env_file,
+            workspace=args.workspace,
+            cloudflare_token=args.cloudflare_token_file,
+            apply=args.apply,
+            input_reader=setup_input,
+            output=stdout,
+        )
+        return
     command_started = time.monotonic()
     config = _load_config(args)
     deadline = command_started + config.policy.limits.process_seconds
@@ -2599,7 +2639,11 @@ def dispatch(
                 if args.env_command == "list":
                     application = _application(connection, args.slug)
                     result = app.list_environment(
-                        application.slug, timeout_seconds=config.policy.limits.helper_seconds
+                        application.slug,
+                        timeout_seconds=config.policy.limits.helper_seconds,
+                        helper_caller=lambda action, values, **_bounds: _helper(
+                            config, action, values
+                        ),
                     )
                     _table(
                         ("KEY",), tuple((item,) for item in result.get("keys", [])), output=stdout
@@ -2645,6 +2689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         app.ApplicationError,
         openstack.OpenStackError,
         storage.StorageOperationError,
+        setup.SetupError,
         remote.HelperError,
         remote.ProtocolError,
         runtime.RuntimeFailure,

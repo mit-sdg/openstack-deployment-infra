@@ -1875,6 +1875,12 @@ def render_nomad_job(
       }}
     }}
 
+    volume "internal-ca" {{
+      type      = "host"
+      source    = "{platform.namespace}-internal-ca"
+      read_only = true
+    }}
+
     task "app" {{
       driver = "docker"
       config {{
@@ -1886,6 +1892,11 @@ def render_nomad_job(
         cap_drop        = ["all"]
         cap_add         = ["net_bind_service"]
         pids_limit      = 256
+      }}
+      volume_mount {{
+        volume      = "internal-ca"
+        destination = "/platform-ca"
+        read_only   = true
       }}
       env {{
         HOST = "0.0.0.0"

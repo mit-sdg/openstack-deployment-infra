@@ -274,7 +274,7 @@ def _deploy_handler(
         job = bounded_text(args["job"], field="Nomad job", maximum=262_144)
         candidate = nomad_candidate_identity(job)
         command_runner(
-            (*nomad_command, "job", "validate", "-json", "-"),
+            (*nomad_command, "job", "validate", "-"),
             timeout_seconds=timeout_seconds,
             stdin=job.encode(),
             stdout_limit=response_limit,
@@ -739,6 +739,8 @@ def _cas_environment(
             maximum_keys=maximum_keys,
             maximum_value_bytes=maximum_value_bytes,
         )
+        if not previous.items and not merged:
+            return previous, previous.modify_index, ()
         try:
             index = client.compare_and_set(path, previous.modify_index, merged)
         except CasConflict:

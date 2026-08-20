@@ -17,15 +17,16 @@ restore checks, and health monitoring.
 
 ## Current status
 
-The infrastructure and operator tools are implemented. The self-service portal,
-production API, and turnkey installer are not. Operators currently run the
-deployment tools directly, which is why the setup path below is explicit rather
-than a single install command.
+The infrastructure, operator tools, and greenfield setup command are
+implemented. A protected environment file plus interactive answers for any
+missing deployment choices can create the keys, images, network foundation,
+VMs, volumes, management bridge, releases, and backup configuration.
+Cloudflare or another public-ingress account remains an external input.
 
-This repository is useful today if you want an operator-managed platform or a
-base for your own control plane. It is not yet a ready-made service where end
-users sign in and deploy applications themselves. The
-[roadmap](docs/ROADMAP.md) tracks that work.
+The self-service portal and production API are not implemented. This repository
+is useful today for an operator-managed platform or as a base for another
+control plane; it is not yet a service where end users sign in and deploy
+applications themselves. The [roadmap](docs/ROADMAP.md) tracks that work.
 
 ## What it provides
 
@@ -61,21 +62,19 @@ servers and volumes in the same OpenStack project are left alone.
 The platform is not specific to any one institution or course. To run it on
 your own OpenStack project:
 
-1. [Getting started](docs/GETTING_STARTED.md) — check that the platform fits,
-   create your private inventory and policy from the tracked examples, and
-   build a role image.
-2. [Image publication](docs/IMAGE_PUBLISHING.md) — publish role images locally,
-   or configure the GitHub environment, secrets, and variable that let CI build
-   and publish them for you.
-3. [Tutorial](docs/TUTORIAL.md) — one complete pass from an empty project to a
-   verified HTTPS application and a managed database, then cleanup.
-4. [Operations](docs/OPERATIONS.md) — the ordered procedures for running the
-   platform after that first deployment.
+1. [Automated setup](docs/SETUP.md) — create a protected environment file,
+   review the plan, then generate and verify the complete platform.
+2. [Tutorial](docs/TUTORIAL.md) — deploy a verified HTTPS application and a
+   managed database, then clean them up.
+3. [Operations](docs/OPERATIONS.md) — back up, restore, upgrade, troubleshoot,
+   or execute an individual setup checkpoint manually.
+4. [Image publication](docs/IMAGE_PUBLISHING.md) — understand the image
+   acceptance contract or configure protected CI publication.
 
-Your deployment inventory lives in `config/platform.json`, which is private and
-untracked. `config/platform.example.json` is the tracked template that
-documents every field; the [configuration reference](docs/CONFIGURATION.md)
-explains what each one means.
+Automated setup writes the private source inventory below its protected
+workspace and installs it at `/srv/openstack-platform/config/platform.json`.
+`config/platform.example.json` remains the tracked template documenting every
+field; the [configuration reference](docs/CONFIGURATION.md) explains each one.
 
 ## Designed to be extended
 
@@ -108,9 +107,10 @@ failure boundaries.
 
 ## Documentation
 
-- [Getting started](docs/GETTING_STARTED.md) — requirements, configuration, and
-  the first image build
-- [Tutorial](docs/TUTORIAL.md) — one complete deployment, start to finish
+- [Automated setup](docs/SETUP.md) — create a complete greenfield deployment
+  from one protected environment file
+- [Getting started](docs/GETTING_STARTED.md) — applicability and management-host prerequisites
+- [Tutorial](docs/TUTORIAL.md) — deploy the first application and managed service
 - [Operations](docs/OPERATIONS.md) — deployment, backup, restore, and cleanup
   procedures
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — symptom, evidence, correction

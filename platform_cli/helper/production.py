@@ -588,6 +588,22 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
             _resource_type: str,
             modify_index: int,
         ) -> storage_actions.RotationEvidence:
+            status = app_actions._status_or_absent(
+                application_slug,
+                command_runner=run,
+                nomad_command=nomad_command,
+                timeout_seconds=20,
+                response_limit=1_048_576,
+            )
+            if status is None:
+                # Storage must be provisionable after `app create`, before the
+                # first deploy. With no consumers to restart, an exact Variable
+                # read is the complete bootstrap acceptance evidence.
+                current = nomad.read_variable(f"nomad/jobs/{application_slug}")
+                observed = current.modify_index == modify_index
+                return storage_actions.RotationEvidence(
+                    observed, current.modify_index, public_healthy=observed
+                )
             baseline = app_actions._allocations(
                 application_slug,
                 command_runner=run,

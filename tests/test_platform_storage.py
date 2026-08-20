@@ -170,6 +170,10 @@ class ManagementStorageTests(unittest.TestCase):
         def caller(action, args, **bounds):
             actions.append(action)
             self.assertNotIn("class", args)
+            self.assertEqual(
+                bounds["helper_command"],
+                "/srv/app-platform/bin/openstack-platform-helper",
+            )
             if action == "storage.postgres.create":
                 self.assertEqual(args["postgresConnections"], 10)
                 return {
@@ -1534,6 +1538,11 @@ class HelperStorageTests(unittest.TestCase):
                 production.app_actions,
                 "_allocations",
                 side_effect=[[allocation("old")], [allocation("new")]],
+            ),
+            mock.patch.object(
+                production.app_actions,
+                "_status_or_absent",
+                return_value={"Version": 7, "Status": "running"},
             ),
             mock.patch.object(production.app_actions, "_status", return_value={"Version": 7}),
             mock.patch.object(

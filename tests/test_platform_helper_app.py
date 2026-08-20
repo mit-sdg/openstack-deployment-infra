@@ -212,9 +212,11 @@ class ApplicationHelperTests(unittest.TestCase):
         assert candidate is not None
         submitted = 0
         current: dict[str, object] | None = None
+        calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
 
         def runner(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
             nonlocal submitted, current
+            calls.append((argv, kwargs))
             returncode = 0
             output = b""
             if "inspect" in argv:
@@ -261,6 +263,15 @@ class ApplicationHelperTests(unittest.TestCase):
         self.assertEqual(recovered["candidateImage"], candidate[1])
         self.assertEqual(recovered["nomadVersion"], 8)
         self.assertEqual(submitted, 1)
+        validation_calls = [call for call in calls if "validate" in call[0]]
+        self.assertEqual(len(validation_calls), 2)
+        self.assertTrue(
+            all(
+                call[0] == ("fixed-nomad-wrapper", "job", "validate", "-")
+                for call in validation_calls
+            )
+        )
+        self.assertTrue(all(call[1]["stdin"] == job.encode() for call in validation_calls))
 
     def test_public_health_rejects_a_nomad_route_outside_the_trusted_domain(self) -> None:
         inspection = {
@@ -440,6 +451,23 @@ class ApplicationHelperTests(unittest.TestCase):
             ("fixed-nomad-wrapper", "job", "restart", "-yes", "demo-app"),
             [argv for argv, _kwargs in self.nomad.calls],
         )
+
+    def test_removing_absent_keys_from_absent_variable_is_a_noop(self) -> None:
+        self.variables.index = 0
+        self.variables.items = SecretItems({})
+        self.variables.written = None
+        self.nomad.job_absent = True
+
+        result = self.actions["app.env.remove"](
+            {"slug": "demo-app", "keys": ["NODE_ENV"], "ownership": {"NODE_ENV": "staff"}}
+        )
+
+        self.assertEqual(result["modifyIndex"], 0)
+        self.assertEqual(result["keys"], [])
+        self.assertIsNone(self.variables.written)
+        self.assertFalse(result["restarted"])
+        self.assertFalse(result["schedulerHealthy"])
+        self.assertFalse(result["publicHealthy"])
 
     def test_environment_cannot_change_storage_owned_key(self) -> None:
         with self.assertRaisesRegex(ValidationError, "owned by postgres"):

@@ -8,6 +8,11 @@ write_files:
     permissions: "0644"
     encoding: b64
     content: __INTERNAL_CA_B64__
+  - path: /etc/__PLATFORM_NAMESPACE__/app-ca/internal-ca.crt
+    owner: root:root
+    permissions: "0644"
+    encoding: b64
+    content: __INTERNAL_CA_B64__
   - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-worker.pem
     owner: root:root
     permissions: "0644"
@@ -40,6 +45,10 @@ write_files:
         network_interface = "ens3"
         cni_path = "/etc/cni/bin"
         max_kill_timeout = "30s"
+        host_volume "__PLATFORM_NAMESPACE__-internal-ca" {
+          path = "/etc/__PLATFORM_NAMESPACE__/app-ca"
+          read_only = true
+        }
         meta {
           application_id = "__APPLICATION_ID__"
           application_slug = "__APPLICATION_SLUG__"

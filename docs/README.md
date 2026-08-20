@@ -1,7 +1,8 @@
 # Documentation
 
-This repository contains OpenStack/NixOS infrastructure and an unprivileged
-staff control surface. It is not a self-service portal or turnkey installer.
+This repository contains OpenStack/NixOS infrastructure, an automated
+OpenStack setup command, and an unprivileged staff control surface. It is not a
+self-service portal.
 
 A deployment starts with an empty management database. The tooling creates its
 own state instead of importing records from another system. Every command in
@@ -11,11 +12,12 @@ decide what they may touch, but nothing outside your inventory is modified.
 
 ## Learn by doing
 
-- [Tutorial: deploy the first application](TUTORIAL.md) — configure a new deployment, publish images, bootstrap the roles, install the CLI, deploy one app, verify it, and clean up.
+- [Tutorial: deploy the first application](TUTORIAL.md) — deploy one app on a setup-created platform, verify managed storage and backups, and clean up.
 
 ## Complete a task
 
-- [Operator journey](OPERATIONS.md) — exact prerequisites, secret-file formats, foundation/ACL/role bootstrap, first app/storage, backups, offline restore, upgrades, cleanup, and recovery.
+- [Automated greenfield setup](SETUP.md) — turn one protected environment file into generated keys, images, VMs, volumes, releases, and backup configuration.
+- [Operator journey](OPERATIONS.md) — exact manual checkpoints, secret-file formats, foundation/ACL/role bootstrap, backups, offline restore, upgrades, cleanup, and recovery.
 - [Troubleshooting](TROUBLESHOOTING.md) — diagnostic chains for common observable failures.
 - [Public ingress](PUBLIC_INGRESS.md) — configure DNS, TLS, forwarding, and host preservation.
 - [Release installation](RELEASE_INSTALLER.md) — install the committed management and helper releases.

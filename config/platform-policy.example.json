@@ -10,8 +10,8 @@
     "s3Objects": 100000
   },
   "runtimeImages": {
-    "bun": "registry.example/platform/bun@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    "node": "registry.example/platform/node@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    "bun": "docker.io/oven/bun@sha256:621f249399228db47cf34611ee662585e77e015250ed29d5d0932b2d3282f0b0",
+    "node": "docker.io/library/node@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848"
   },
   "backupAgeRecipient": "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
 }

@@ -53,13 +53,13 @@
     "backup": {
       "name": "example-backups",
       "label": "example-backups",
-      "sizeGiB": 100,
+      "sizeGiB": 200,
       "type": "production"
     },
     "data": {
       "name": "example-data",
       "label": "example-data",
-      "sizeGiB": 200,
+      "sizeGiB": 500,
       "type": "production"
     }
   },

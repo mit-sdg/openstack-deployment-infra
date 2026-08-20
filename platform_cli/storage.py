@@ -184,6 +184,7 @@ def _call(
         request_limit=config.policy.limits.helper_request_bytes,
         response_limit=config.policy.limits.helper_response_bytes,
         stderr_limit=config.policy.limits.stderr_bytes,
+        helper_command=remote.helper_command_path(config.platform.get("paths.root")),
     )
 
 

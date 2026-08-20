@@ -9,6 +9,43 @@ The database starts empty and is initialized on first invocation.
 Reconciliation does not import external rows. Commands are limited to the
 resource names in your platform configuration.
 
+## Create a greenfield deployment
+
+```text
+openstack-platform setup --env-file PATH [--workspace PATH]
+openstack-platform setup --env-file PATH [--workspace PATH]
+  [--cloudflare-token-file PATH] --apply
+```
+
+`setup` is the only command that runs before an installed inventory, policy, or
+management database exists. The default invocation validates the private input
+file and prints a non-mutating summary. `--apply` authenticates to the named
+OpenStack project, generates private deployment material, reserves the fixed
+ports, builds and QEMU-tests five role images, creates the VMs and persistent
+volumes, then installs and verifies the management/helper releases and backups.
+
+The environment file must be a direct current-user-owned mode-`0600` file.
+Literal dotenv and OpenRC assignments are parsed without executing the file.
+Standard `OS_*` credentials select the project. `PLATFORM_*` assignments supply
+stable names, domain, network, fixed addresses, management CIDR, flavors,
+volume type, and optional size overrides. Missing non-secret choices prompt
+with a discovered or documented default when one exists; a non-interactive run
+must provide choices that cannot be inferred. Missing password authentication
+prompts through a hidden terminal input.
+
+Fresh volume defaults are 32 GiB for admin state, 500 GiB for managed data, and
+200 GiB for backups. Image names include the first eight characters of the
+clean source commit. Setup reuses its generated secret material and verifies
+named resources on retry; it refuses a different generated inventory in the
+same workspace. The default workspace is
+`/srv/openstack-platform/setup`.
+
+Cloudflare account, tunnel, DNS, and certificate creation are external. A
+direct mode-`0600` token file enables `cloudflared` during ingress first boot.
+Without it, setup completes the OpenStack deployment and reports public ingress
+as pending. See [SETUP.md](SETUP.md) for the complete environment contract,
+ordered mutations, verification, and retry boundary.
+
 ## Preconditions
 
 Install matching management/helper releases as described in [RELEASE_INSTALLER.md](RELEASE_INSTALLER.md). Install:
@@ -17,7 +54,9 @@ Install matching management/helper releases as described in [RELEASE_INSTALLER.m
 - a mode-`0600` policy at `/srv/openstack-platform/state/policy.json` with reviewed runtime digests and age recipient;
 - `platform-admin` with strict host-key checking and the fixed remote helper command.
 
-Persistent roles, Nomad ACLs, registry, internal PKI, and public ingress must be healthy. Run as the unprivileged `/srv/openstack-platform` owner. Optional global paths are:
+For commands other than `setup`, persistent roles, Nomad ACLs, registry,
+internal PKI, and public ingress must be healthy. Run as the unprivileged
+`/srv/openstack-platform` owner. Optional global paths are:
 
 ```text
 openstack-platform [--platform-config PATH] [--state-directory PATH] [--policy PATH] COMMAND

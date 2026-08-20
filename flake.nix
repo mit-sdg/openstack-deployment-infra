@@ -72,6 +72,7 @@
           platformCliPython
           platformCliInstaller
           platformCliHelperLauncher
+          imageSmoke
           ;
         default = configurations.admin.config.system.build.openstackImage;
       };

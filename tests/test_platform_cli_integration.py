@@ -142,6 +142,15 @@ class CliIntegrationTests(unittest.TestCase):
 
     def test_complete_command_tree_parses(self) -> None:
         commands = (
+            ("setup", "--env-file", str(self.root / "setup.env")),
+            (
+                "setup",
+                "--env-file",
+                str(self.root / "setup.env"),
+                "--cloudflare-token-file",
+                str(self.root / "cloudflare.token"),
+                "--apply",
+            ),
             ("status",),
             ("backup",),
             ("infra", "list"),

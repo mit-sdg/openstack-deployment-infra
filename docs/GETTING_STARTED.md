@@ -1,102 +1,81 @@
-# Prepare a fresh deployment
+# Prepare to create a fresh deployment
 
-Prepare a new deployment locally: check that the platform fits, create the
-private inventory and policy, then evaluate and build a role image. This page
-does not provision OpenStack resources. Continue with the [operator
-journey](OPERATIONS.md) to create the foundation and first deployment.
+Use this page to decide whether the platform fits and prepare the management host for [`openstack-platform setup`](SETUP.md). Setup creates the OpenStack resources and private deployment material; this page does not mutate the cloud.
 
-## Applicability and safety
+## Check that the platform fits
 
-Use a new OpenStack project and a new management state directory, and initialize the database empty rather than copying rows from another deployment. Every command in this repository creates, changes, and deletes only the resources named in your platform configuration. Some commands do list servers and images project-wide to work out what they are allowed to touch — image pruning, for instance, has to know which images are still referenced. Nothing outside your inventory is modified.
+Use a new OpenStack project and empty management state. The platform currently supports applications that:
 
-Use this platform when applications can run as one OCI container, serve HTTP
-on one port, and expose a health path. The OpenStack project must be able to
-host the five roles and one replaceable worker per active application. An
-operator must manage keys, secrets, backups, and recovery.
+- come from a public, credential-free GitHub repository;
+- build with the supported Node or Bun manifest and lockfile;
+- run as one OCI container;
+- serve HTTP on one port and expose a health path; and
+- fit one dedicated worker using the configured standard flavor.
 
-## Prerequisites
+The project needs quota for three persistent roles, disposable builders, one worker per active application, five private Glance images, three fixed Neutron ports, and three Cinder volumes. Fresh setup defaults to 32 GiB of admin state, 500 GiB of managed data, and 200 GiB of encrypted backups.
+
+The self-service portal is not implemented. An operator runs the installed command surface and retains the OpenStack, SSH, scheduler, storage-administrator, and backup credentials.
+
+## Prepare the management host
+
+Use an `x86_64-linux` host with:
+
+- Nix and flakes;
+- `git`, `ssh`, `ssh-keygen`, `openssl`, `curl`, and a user systemd manager;
+- network access to OpenStack, GitHub, the Nix cache, OCI registries, and the persistent role addresses; and
+- an unprivileged operator account that owns mode-`0700` `/srv/openstack-platform`.
+
+Setup refuses root and `sudo`. Creating that management directory and installing Nix are host-administration prerequisites, not OpenStack operations.
+
+From a clean full-commit checkout, verify the source before supplying credentials:
+
+```bash
+cd /path/to/openstack-deployment-infra
+uv --version                         # locked development version: 0.12.2
+uv sync --frozen
+uv run python --version              # Python 3.14.x
+uv run python -m unittest discover -s tests -v
+nix flake check --no-build --print-build-logs
+```
+
+Setup later builds its own pinned OpenStack/Python, age, QEMU, and config-drive tooling through the flake. A failed source check is a stop condition.
+
+## Obtain the external inputs
 
 You need:
 
-- an OpenStack project authorized to create servers, Neutron ports and security groups, Cinder volumes, and Glance images;
-- quota for three persistent roles, disposable builders, and one worker per active application;
-- Nix with flakes enabled and an `x86_64-linux` builder;
-- Python 3.14 with the OpenStack SDK for foundation reconciliation, plus uv 0.12.2 for the locked repository environment;
-- OpenStack credentials kept in a private mode-`0600` environment file and protected wrapper;
-- an operator-controlled age identity for offline restore;
-- a Cloudflare token and DNS/TLS account, or another provider meeting [the ingress contract](PUBLIC_INGRESS.md);
-- a management SSH key whose public half can be installed on the admin role; and
-- a public GitHub repository for each application you intend to deploy.
-  Source is fetched over HTTPS with no credentials, so private repositories
-  cannot be deployed.
+1. A protected OpenStack environment containing password or application-credential authentication for the target project.
+2. Stable fixed IPv4 addresses for admin, ingress, and storage on the selected network. If the public ingress address must remain unchanged, put that exact address in `PLATFORM_INGRESS_ADDRESS`.
+3. A public base domain and a management source CIDR.
+4. A Cloudflare Tunnel token, or another provider satisfying [the public ingress contract](PUBLIC_INGRESS.md).
 
-The example inventory uses 32 GiB admin state, 200 GiB managed data, and 100 GiB backups. These are examples, not established minimums. Review the private policy for worker and managed-storage settings.
+Cloudflare account, tunnel, DNS, and certificate creation are external. Setup can inject an existing token but does not administer the Cloudflare account.
 
-## Create private inputs
+Do not create SSH keys, age identities, service passwords, PKI, Glance images, keypairs, VMs, or volumes manually. Setup generates or provisions them.
 
-From the repository root:
+## Review and run setup
+
+Create the direct mode-`0600` environment file described in [Create a platform from one environment file](SETUP.md#create-the-protected-environment-file). Then review the non-mutating operation summary:
 
 ```bash
-cp -n config/platform.example.json config/platform.json
-cp -n config/platform-policy.example.json config/platform-policy.json
+uv run openstack-platform setup --env-file /private/path/setup.env
 ```
 
-Edit both JSON files and replace every example project, UUID, network, address,
-hostname, resource name, flavor, domain, path, runtime digest, and age
-recipient. Keep credentials, private keys, and the real policy outside version
-control. The management installer accepts only the current inventory and
-private policy; it creates no project declaration directory.
-
-Set the local inventory explicitly:
+Create the deployment only after checking the target project, fixed addresses, flavor choices, and volume sizes:
 
 ```bash
-export PLATFORM_CONFIG="$PWD/config/platform.json"
+uv run openstack-platform setup \
+  --env-file /private/path/setup.env \
+  --cloudflare-token-file /private/path/cloudflare-tunnel-token \
+  --apply
 ```
 
-Read [CONFIGURATION.md](CONFIGURATION.md) before changing names or paths. The OpenStack project name and UUID must identify the same target.
+Setup prompts for omitted choices that cannot be discovered safely. A non-interactive run must supply them in the environment file. It does not guess fixed addresses.
 
-Check the result before building anything:
+Success requires healthy persistent roles, five accepted image selections, an enabled management backup timer, and—when a Cloudflare token is supplied—an `OK` response from the public platform health route.
 
-```bash
-uv run python infra/lib/platform_config.py validate
-```
+## Continue with an application
 
-This reports missing or malformed fields together. Run it after every later
-edit. Valid JSON can still be missing a nested field, which may otherwise make
-an image build fail partway through.
+After setup reports completion, follow the [tutorial](TUTORIAL.md) to declare or deploy an application, create managed storage, verify its HTTPS route, and clean it up.
 
-## Evaluate the image definitions
-
-```bash
-uv sync --frozen
-uv run python -m unittest discover -s tests -v
-nix flake check --impure --no-build --print-build-logs
-```
-
-A successful check evaluates all five role configurations. The locked Python
-check and flake evaluation do not contact OpenStack or prove first-boot
-readiness.
-
-## Build and test a candidate
-
-Build one role, for example the disposable builder:
-
-```bash
-nix build --impure --print-build-logs .#builder-image
-```
-
-The `result` link contains a QCOW2 candidate. Follow [the image reference](../nix/README.md) to run static, VM, config-drive, and disposable live checks before publication. A successful Nix build is not image acceptance.
-
-## Continue
-
-Follow [OPERATIONS.md](OPERATIONS.md) in order for foundation reconciliation,
-PKI and secrets, role bootstrap, public ingress, release installation, fresh
-database initialization, first deployment, storage, backup and restore,
-upgrades, cleanup, and recovery. Record evidence with
-[ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md).
-
-To have CI build and publish role images for you instead of publishing them by
-hand, set up the GitHub environment, secrets, and variable described in
-[IMAGE_PUBLISHING.md](IMAGE_PUBLISHING.md). That is the only place this
-repository expects deployment-specific values to be stored; your inventory and
-policy stay untracked.
+Use the expanded [operations guide](OPERATIONS.md) for backup, restore, upgrades, individual setup checkpoints, and recovery. Use the [configuration reference](CONFIGURATION.md) to look up the generated inventory and policy fields.

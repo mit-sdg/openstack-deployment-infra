@@ -113,6 +113,17 @@ let
     fi
     exec "$launcher" "$@"
   '';
+
+  imageSmoke = pkgs.writeShellApplication {
+    name = "openstack-platform-image-smoke";
+    runtimeInputs = [
+      pkgs.cdrkit
+      pkgs.qemu
+    ];
+    text = ''
+      exec ${../../tests/smoke_openstack_image.sh} "$@"
+    '';
+  };
 in
 {
   inherit
@@ -124,5 +135,6 @@ in
     platformCliPython
     platformCliInstaller
     platformCliHelperLauncher
+    imageSmoke
     ;
 }

@@ -159,7 +159,14 @@ class ConfigTests(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "config/platform-policy.example.json"
         policy = load_policy(path, require_private=False)
         self.assertEqual(policy.standard.cpu_mhz, 1000)
-        self.assertTrue(policy.runtime_images.bun.endswith("0" * 64))
+        self.assertEqual(
+            policy.runtime_images.bun,
+            "docker.io/oven/bun@sha256:621f249399228db47cf34611ee662585e77e015250ed29d5d0932b2d3282f0b0",
+        )
+        self.assertEqual(
+            policy.runtime_images.node,
+            "docker.io/library/node@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848",
+        )
 
     def write_json(self, directory: Path, name: str, value: object, *, mode: int = 0o600) -> Path:
         path = directory / name

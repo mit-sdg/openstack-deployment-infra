@@ -1,259 +1,148 @@
-# Deploy one application on a fresh platform
+# Deploy the first application
 
-This tutorial takes a new operator from a private checkout to one verified
-HTTPS application and one verified PostgreSQL resource, then removes them. It
-starts from an empty database and freshly configured OpenStack resources.
+This tutorial starts after `openstack-platform setup` has created a healthy platform. It deploys one public application, creates one managed PostgreSQL database, verifies backups, and removes the application again.
 
-Keep [OPERATIONS.md](OPERATIONS.md) open for complete file formats, transfer
-paths, host contexts, and recovery rules. `<PUBLIC_EXAMPLE>` marks a safe
-placeholder. Never paste a value marked `<SECRET>` into tracked documentation.
+For an application that requires its database during startup, the order changes slightly: declare the application, create storage, then deploy.
 
 ## What you need
 
 You need:
 
-- an empty OpenStack project with quota for the three persistent roles,
-  disposable builders, and application workers;
-- OpenStack credentials and an OpenStack SDK in an approved Python 3.14
-  environment;
-- Nix/QEMU for image evaluation and tests;
-- a management host with the unprivileged `/srv/openstack-platform` owner;
-- a public DNS/TLS/forwarding service that preserves `Host`;
-- custody for the backup and managed-data age identities; and
-- a public GitHub repository holding the application you will deploy, with a
-  `platform.yaml` at its root. Private repositories cannot be fetched.
+- a setup result reporting `setup=complete` and healthy platform status;
+- working DNS and HTTPS for `<slug>.<platform-domain>`;
+- a public, credential-free GitHub repository;
+- a full lowercase 40-character source commit; and
+- `platform.yaml` plus the supported Node or Bun lockfile at that commit.
 
-Cloudflare Tunnel is the reference provider, but its token and DNS account are
-external inputs. See [PUBLIC_INGRESS.md](PUBLIC_INGRESS.md).
+Private repositories are not supported. The build fetches the exact commit over HTTPS without credentials.
 
-## 1. Verify the checkout and target before mutation
-
-From the repository root, use the locked Python environment for project tests:
+Set convenient non-secret values on the management host:
 
 ```bash
-cd /path/to/checkout                 # replace this path
-uv --version                         # uv 0.12.2
-uv sync --frozen
-uv run python --version              # Python 3.14.x
-uv run python -m unittest discover -s tests -v
+export PLATFORM_CLI=/srv/openstack-platform/bin/openstack-platform
+export PLATFORM_CONFIG=/srv/openstack-platform/config/platform.json
+export PLATFORM_DOMAIN="$(${PLATFORM_CLI%/bin/openstack-platform}/runtime/python3.14 \
+  -c 'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["domain"])')"
 ```
 
-Create private inventory and policy copies, set the project target, then verify
-that the authenticated token belongs to that project. These checks do not
-mutate OpenStack:
+Or read the domain from your private setup inventory and export it directly.
+
+## 1. Verify the empty platform
 
 ```bash
-cp -n config/platform.example.json config/platform.json
-cp -n config/platform-policy.example.json config/platform-policy.json
-chmod 0600 config/platform.json config/platform-policy.json
-export PLATFORM_CONFIG="$PWD/config/platform.json"
-export PLATFORM_POLICY="$PWD/config/platform-policy.json"
-export PRIVATE_BOOTSTRAP=/private/path/platform-bootstrap
-export AGE_STORE="$(nix build --no-link --print-out-paths .#age)"
+$PLATFORM_CLI status
+$PLATFORM_CLI infra list
+$PLATFORM_CLI app list
+$PLATFORM_CLI storage list
 ```
 
-Replace all example identities, UUIDs, addresses, paths, image digests, and
-age recipient in the private JSON files. Generate the operator keys, exact
-admin/storage secret files, backup age identity, and internal PKI as shown in
-[OPERATIONS.md](OPERATIONS.md#generate-operator-keys-age-identity-and-bootstrap-files).
-Derive configuration-dependent values only after saving those edits, and
-create the protected OpenStack environment/wrapper from
-[OPERATIONS.md](OPERATIONS.md#2-scope-and-reconcile-the-openstack-foundation):
+`status` must report `healthy`. `infra list` must show accepted admin, ingress, storage, worker, and builder images. Stop if applications or managed resources exist that this deployment did not create; setup and restore are not state-import mechanisms.
 
-```bash
-export PLATFORM_NAMESPACE="$(uv run python infra/lib/platform_config.py get namespace)"
-export PLATFORM_ROOT="$(uv run python infra/lib/platform_config.py get paths.root)"
-export PLATFORM_DOMAIN="$(uv run python infra/lib/platform_config.py get domain)"
-# Load the private OS_AUTH_URL/account/password environment without printing it.
-set -a
-. "/srv/openstack-platform/.secrets/openstack.env"
-set +a
-source infra/lib/platform-config.sh
-load_platform_config
-export OS_PROJECT_NAME="$PLATFORM_PROJECT"
-export OS_PROJECT_ID="$PLATFORM_PROJECT_ID"
-export OSC=/srv/openstack-platform/bin/platform-openstack
-verify_openstack_project "$OSC"
-```
-Do not put OpenStack passwords, private keys, Nomad tokens, storage passwords,
-Cloudflare tokens, or age identities in JSON or Git.
+## 2. Check the application manifest
 
-## 2. Build, live-test, and publish all five role images
+A minimal Node application manifest is:
 
-Evaluate the private role configuration, then build every role from the same
-checkout commit:
-
-```bash
-nix flake check --impure --no-build --print-build-logs
-for role in admin ingress storage worker builder; do
-  nix build --impure --print-build-logs \
-    --out-link "result-$role" ".#${role}-image"
-done
+```yaml
+version: 1
+runtime: node
+packages: [.]
+scripts:
+  build: build
+  start: start
+port: 8080
+health:
+  path: /health
 ```
 
-Run the package, VM, config-drive, and role-specific live checks in
-[nix/README.md](../nix/README.md). A build or Glance upload is only a candidate;
-do not select it before the disposable checks pass.
+`packages` are contained repository paths. Script values are package-script names, not shell commands. The relevant package directory must contain `package-lock.json` for Node or `bun.lock`/`bun.lockb` for Bun.
 
-For a local publication, each configured image name must be a new/versioned
-name. The publisher refuses overwrite and requires the full source commit:
+The platform generates its own recipe. Repository Dockerfiles, build arguments, build-time environment, and repository-controlled runtime environment are not accepted inputs.
+
+## 3. Deploy an application that starts without storage
+
+Choose a slug, repository, and immutable commit:
 
 ```bash
-SOURCE_COMMIT="$(git rev-parse HEAD)"
-export SOURCE_COMMIT
-export OSC=/srv/openstack-platform/bin/platform-openstack
-for role in admin ingress storage worker builder; do
-  qcow="$(find -L "result-$role" -type f -name '*.qcow2' -print -quit)"
-  test -f "$qcow" && test ! -L "$qcow" && test -r "$qcow"
-  sha256sum "$qcow"
-  PATH="$PWD/.venv/bin:$PATH" \
-    SOURCE_COMMIT="$SOURCE_COMMIT" OSC="$OSC" \
-    infra/openstack/publish_nixos_image.sh "$role" "$qcow"
-done
+export APP_SLUG=demo
+export APP_REPOSITORY=https://github.com/OWNER/REPOSITORY
+export APP_COMMIT=FULL_LOWERCASE_40_CHARACTER_COMMIT
+
+$PLATFORM_CLI app deploy "$APP_SLUG" \
+  --repo "$APP_REPOSITORY" \
+  --commit "$APP_COMMIT"
+$PLATFORM_CLI app show "$APP_SLUG"
 ```
 
-Each successful line reports an image UUID, `status=active`, the provider
-checksum, and the full `source_commit`. The publisher computes the local
-OpenStack-compatible MD5 checksum and rejects the upload unless Glance reports
-the same value. Record it and the separately printed local SHA-256 artifact
-checksum with the owner project and live-test evidence. See
-[IMAGE_PUBLISHING.md](IMAGE_PUBLISHING.md) for the protected CI route and its
-full `SOURCE_COMMIT` metadata behavior.
+Acceptance means the single-use builder and its port were removed, the dedicated worker reached readiness, Nomad accepted the constrained job, the application health path passed, and the public route passed. `app show` records the exact commit and immutable image digest.
 
-## 3. Bootstrap the persistent roles
-
-Follow [OPERATIONS.md](OPERATIONS.md#2-scope-and-reconcile-the-openstack-foundation)
-in order:
-
-1. review and apply the non-deleting foundation plan;
-2. generate PKI and the exact mode-`0600` admin/storage files;
-3. boot admin and wait for its readiness marker;
-4. bootstrap the management runtime and local bridge prerequisites before
-   generating the bridge:
+Verify HTTPS independently:
 
 ```bash
-PLATFORM_AGE_COMMAND="$AGE_STORE/bin/age" \
-deploy/platform-cli/bootstrap_management_runtime.sh
-test "$(/srv/openstack-platform/runtime/python3.14 --version)" = 'Python 3.14.7'
-test "$(/srv/openstack-platform/bin/uv --version)" = 'uv 0.12.2 (x86_64-unknown-linux-gnu)'
-/srv/openstack-platform/bin/age --version >/dev/null
-```
-
-5. run `setup_management_bridge.py` as the management owner and verify the
-   pinned alias with `ssh ... -- id -un` returning `agentops`;
-6. run `bootstrap_acl.sh` on admin and transfer only the generated
-   `nomad-tokens.env` copy needed for ingress;
-7. transfer admin-local OpenStack/storage/provisioning inputs and the builder
-   key using the exact paths in the operations procedure;
-8. boot storage and wait for its readiness marker; and
-9. boot ingress, configure external DNS/TLS/forwarding, and verify:
-
-```bash
-test "$(curl --fail --show-error --silent "https://$PLATFORM_DOMAIN/healthz")" = OK
-```
-
-`ACTIVE` without the exact readiness marker is a failed checkpoint. Do not
-continue to the next role or print config-drive payloads.
-
-## 4. Install the control surface and see the first verified result
-
-On the management host, the exact Python 3.14.7/uv 0.12.2 runtime and
-packaged age executable were bootstrapped before bridge generation. Install the
-private inventory/policy, then install the matching management release and
-helper release:
-
-```bash
-/srv/openstack-platform/runtime/python3.14 deploy/platform-cli/install_management_config.py \
-  --platform "$PLATFORM_CONFIG" --policy "$PLATFORM_POLICY"
-commit="$(git rev-parse HEAD)"
-/srv/openstack-platform/runtime/python3.14 deploy/platform-cli/install_release.py \
-  --mode management --source "$PWD" --commit "$commit" \
-  --python /srv/openstack-platform/runtime/python3.14 --uv /srv/openstack-platform/bin/uv \
-  --install-user-units --enable-backup-timer
-test -x "$(readlink -e /srv/openstack-platform/bin/openstack-platform-restore)"
-helper_output="$(deploy/platform-cli/deploy_helper_release.sh "$commit")"
-printf '%s\n' "$helper_output"
-test "$(tail -n1 <<<"$helper_output")" = "helper-release=$commit:verified"
-```
-
-The helper deployment and CLI must use the generated `platform-admin` bridge.
-The first status invocation creates the empty management schema and gives the
-first verified control-plane result:
-
-```bash
-status_output="$(/srv/openstack-platform/bin/openstack-platform status)"
-printf '%s\n' "$status_output"
-grep -Eq '^degraded +0 +0 +0 +0 +3 +0$' <<<"$status_output"
-app_output="$(/srv/openstack-platform/bin/openstack-platform app list)"
-storage_output="$(/srv/openstack-platform/bin/openstack-platform storage list)"
-grep -Eq '^SLUG +RUNNING +COMMIT +DIGEST +CPU +MEMORY +LIVE$' <<<"$app_output"
-grep -Eq '^SLUG +TYPE +PROVIDER_ID +PROVIDER_NAME +STATE +QUOTA +VERIFIED +HEALTH$' <<<"$storage_output"
-```
-
-Record zero accepted applications and zero managed resources. A fresh state
-reports three unavailable observations for the persistent admin, ingress, and
-storage hosts; builder observation is conditional on an unfinished build, and
-worker observations begin with an accepted application. If rows exist that
-this deployment did not create, stop; there is no import or adoption step.
-
-Select the five accepted UUIDs recorded during image publication:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform infra image set admin ADMIN_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra image set ingress INGRESS_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra image set storage STORAGE_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra image set builder BUILDER_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra image set worker WORKER_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra list
-```
-
-## 5. Deploy the application and storage
-
-The public source must contain a supported `platform.yaml` at the selected full
-lowercase 40-character commit, plus the matching lockfile. For Node, the
-relevant package directory contains `package-lock.json`; for Bun it contains
-`bun.lock` or `bun.lockb`. Script values are package-script names, not shell
-commands.
-
-`demo` starts without a database, so a deployment can create it. An
-application that reads its database at startup needs `openstack-platform app
-create demo` first, then its storage, then one deployment.
-
-```bash
-/srv/openstack-platform/bin/openstack-platform app deploy demo \
-  --repo https://github.com/OWNER/REPOSITORY \
-  --commit FULL_LOWERCASE_40_CHARACTER_COMMIT
-/srv/openstack-platform/bin/openstack-platform app show demo
 test "$(curl --fail --show-error --silent --output /dev/null \
-  --write-out '%{http_code}' "https://demo.$PLATFORM_DOMAIN/HEALTH_PATH")" = 200
+  --write-out '%{http_code}' \
+  "https://${APP_SLUG}.${PLATFORM_DOMAIN}/health")" = 200
 ```
 
-Success means builder cleanup, worker readiness, scheduler health, public
-health, and an immutable digest are all recorded by `app show`. Only then
-create managed storage:
+Use bounded logs when a deployment does not reach acceptance:
 
 ```bash
-/srv/openstack-platform/bin/openstack-platform storage create demo postgres
-/srv/openstack-platform/bin/openstack-platform storage verify demo postgres
-/srv/openstack-platform/bin/openstack-platform storage show demo postgres
+$PLATFORM_CLI app logs "$APP_SLUG" --build --lines 200
+$PLATFORM_CLI app logs "$APP_SLUG" --runtime --lines 200
 ```
 
-The output contains non-secret provider identity and limits only. Credentials
-stay in Nomad Variables and the helper. PostgreSQL/MongoDB measured-byte
-values are targets, not collected usage.
+Correct the named dependency and rerun the same deploy command. Do not delete its builder, worker, port, Nomad job, or operation row manually.
 
-## 6. Back up, restore-check, and clean up
+## 4. Create and verify managed storage
 
-The management-database backup runs on the management host and uses the policy
-recipient. Managed-data backup and restore verification run on admin; do not
-run those scripts from the checkout:
+Create PostgreSQL only after the first deployment has been accepted:
 
 ```bash
-m1_backup_output="$(/srv/openstack-platform/bin/openstack-platform backup)"
-printf '%s\n' "$m1_backup_output"
-grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$' <<<"$m1_backup_output"
-managed_backup_output="$(
-  ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- env \
+$PLATFORM_CLI storage create "$APP_SLUG" postgres
+$PLATFORM_CLI storage verify "$APP_SLUG" postgres
+$PLATFORM_CLI storage show "$APP_SLUG" postgres
+```
+
+The output contains non-secret provider identity and configured limits. Credentials remain in the owner-specific Nomad Variable and never enter command output or management SQLite.
+
+Use `mongo` or `s3` instead of `postgres` when required.
+
+### When the application needs storage at startup
+
+Declare the inert application first, create storage, then deploy:
+
+```bash
+$PLATFORM_CLI app create "$APP_SLUG"
+$PLATFORM_CLI storage create "$APP_SLUG" mongo
+$PLATFORM_CLI storage verify "$APP_SLUG" mongo
+$PLATFORM_CLI app deploy "$APP_SLUG" \
+  --repo "$APP_REPOSITORY" \
+  --commit "$APP_COMMIT"
+```
+
+`app create` reserves the slug and policy sizing but creates no worker or running job. Storage creation can therefore install credentials before the first application process starts.
+
+## 5. Back up and restore-check
+
+Create an encrypted management-state backup from the manager:
+
+```bash
+management_backup="$($PLATFORM_CLI backup)"
+printf '%s\n' "$management_backup"
+grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$' \
+  <<<"$management_backup"
+```
+
+Managed data is backed up from admin using the packaged scripts and separate managed-data age identity. Derive the generated namespace and remote root from the installed private inventory, then run:
+
+```bash
+export PLATFORM_NAMESPACE="$(/srv/openstack-platform/runtime/python3.14 -c \
+  'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["namespace"])')"
+export PLATFORM_ROOT="$(/srv/openstack-platform/runtime/python3.14 -c \
+  'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["paths"]["root"])')"
+export SSH_CONFIG=/srv/openstack-platform/.secrets/ssh/config
+
+managed_backup="$(
+  ssh -F "$SSH_CONFIG" platform-admin -- env \
     PLATFORM_CONFIG="/etc/$PLATFORM_NAMESPACE/platform.json" \
     AGE="$PLATFORM_ROOT/bin/age" \
     AGE_KEYGEN="$PLATFORM_ROOT/bin/age-keygen" \
@@ -263,63 +152,35 @@ managed_backup_output="$(
     GARAGE_EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_garage_backup.py" \
     "$PLATFORM_ROOT/infra/backup/run_platform_backup.sh"
 )"
-printf '%s\n' "$managed_backup_output"
-grep -Eq '^platform backup complete: .+$' <<<"$managed_backup_output"
-restore_output="$(
-  ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- env \
+printf '%s\n' "$managed_backup"
+
+restore_check="$(
+  ssh -F "$SSH_CONFIG" platform-admin -- env \
     PLATFORM_CONFIG="/etc/$PLATFORM_NAMESPACE/platform.json" \
     AGE="$PLATFORM_ROOT/bin/age" \
     AGE_KEY="$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt" \
     "$PLATFORM_ROOT/infra/backup/verify_latest_restore.sh"
 )"
-printf '%s\n' "$restore_output"
-grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' <<<"$restore_output"
+printf '%s\n' "$restore_check"
+grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' \
+  <<<"$restore_check"
 ```
 
-The expected managed-data result is `latest platform restore=verified` and a
-mode-`0600` `RESTORE-MANIFEST`. Accepted backup files are under
-`<paths.backups>/m1`; managed-data directories are under
-`<paths.backups>/<namespace>`. The two backup classes use different custody
-paths and must not be confused.
+The restore check uses temporary containers and never overwrites live services. Preserve both backup classes and their distinct age identities outside the deployment before any teardown.
 
-To test recovery, stop the management timer, copy an accepted encrypted
-file to a direct mode-`0600` private path, and run the offline tool:
+## 6. Remove the tutorial resources
+
+Remove managed storage before removing its application:
 
 ```bash
-systemctl --user stop openstack-platform-backup.timer openstack-platform-backup.service
-restore_output="$(
-  /srv/openstack-platform/bin/openstack-platform-restore \
-    /private/path/platform-YYYYMMDDTHHMMSSZ.sqlite3.age \
-    --age-identity /private/path/backup-age-identity.txt --yes
-)"
-printf '%s\n' "$restore_output"
-grep -Eq '^restore=verified schema-version=[0-9]+ integrity=ok$' <<<"$restore_output"
-systemctl --user start openstack-platform-backup.timer
-/srv/openstack-platform/bin/openstack-platform status
+$PLATFORM_CLI storage remove "$APP_SLUG" postgres --confirm "$APP_SLUG"
+$PLATFORM_CLI app remove "$APP_SLUG" --confirm "$APP_SLUG"
+$PLATFORM_CLI app list
+$PLATFORM_CLI storage list
 ```
 
-The installed `openstack-platform-restore` launcher fixes the managed
-destination at `/srv/openstack-platform/state/platform.sqlite3`; it does not
-accept a separate destination. Restore checks age, SQLite, schema, integrity,
-foreign keys, the deployment-bound project/namespace/inventory marker, and
-unfinished operations in a temporary file. It then atomically replaces the
-destination. A backup from another deployment or an older unbound backup is
-refused, leaving the current database untouched. Restore contacts no provider
-and does not restore workers, Nomad Variables, or managed data. Compare live
-observations afterward and use checkpointed CLI recovery, never manual
-SQLite/provider edits.
+For a Mongo example, replace `postgres` with `mongo`. S3 removal additionally requires `--purge-s3` when the bucket is non-empty.
 
-Remove storage before the application and preserve encrypted evidence and age
-identity custody until the retention decision is recorded:
+Application removal succeeds only after its Nomad job and Variables, worker and fixed port, and tracked registry manifests are absent. It does not remove shared persistent roles or unrelated OpenStack resources.
 
-```bash
-/srv/openstack-platform/bin/openstack-platform storage remove demo postgres --confirm demo
-/srv/openstack-platform/bin/openstack-platform app remove demo --confirm demo
-/srv/openstack-platform/bin/openstack-platform app list
-/srv/openstack-platform/bin/openstack-platform storage list
-```
-
-For the full lifecycle, persistent-role upgrades, image pruning, and teardown,
-continue with [OPERATIONS.md](OPERATIONS.md). Record each checkpoint in the
-[acceptance checklist](ACCEPTANCE_CHECKLIST.md); do not put credentials,
-provider payloads, or age identities in it.
+Continue with [Operations](OPERATIONS.md) for offline management restore, upgrades, image pruning, recovery, and whole-deployment teardown. Record production evidence with the [acceptance checklist](ACCEPTANCE_CHECKLIST.md).

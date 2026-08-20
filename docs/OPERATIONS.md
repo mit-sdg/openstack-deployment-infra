@@ -1,8 +1,10 @@
 # Provision, operate, back up, restore, and remove a fresh deployment
 
-Use this procedure to set up a new OpenStack project from end to end. It
-assumes a checkout at the reviewed commit, an empty management state directory,
-and no records to migrate. Commands run in three places:
+For ordinary greenfield creation, use the automated [setup command](SETUP.md).
+Use this expanded procedure to audit or recover an individual setup checkpoint,
+or to operate a deployment after setup. When followed manually, it provisions a
+new OpenStack project from end to end. It assumes a checkout at the reviewed
+commit, an empty management state directory, and no records to migrate. Commands run in three places:
 
 - **Management host / repository root** is the unprivileged owner of `/srv/openstack-platform`.
   It holds the checkout, private inventory, policy, OpenStack wrapper, and
