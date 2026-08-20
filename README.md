@@ -11,8 +11,11 @@ A hackathon or research group can host many small applications in one OpenStack
 project. In both cases, organizers keep the infrastructure credentials, and
 databases survive worker replacement.
 
-Applications can use managed PostgreSQL, MongoDB, and S3-compatible object
-storage. The platform also runs a private image registry, encrypted backups,
+Applications can use multiple named PostgreSQL, MongoDB, and S3-compatible
+resources. A narrow `platform.yaml` binding maps selected outputs from an
+existing named resource to runtime environment keys; repositories cannot
+provision resources or supply arbitrary platform-controlled environment. The
+platform also runs a private image registry, encrypted backups,
 restore checks, and health monitoring.
 
 ## Current status

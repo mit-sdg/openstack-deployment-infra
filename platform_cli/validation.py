@@ -14,6 +14,7 @@ class ValidationError(ValueError):
 
 
 _SLUG = re.compile(r"[a-z][a-z0-9-]{1,38}[a-z0-9]")
+_RESOURCE_NAME = re.compile(r"[a-z][a-z0-9-]{0,38}[a-z0-9]|[a-z]")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
 _SCRIPT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}")
@@ -31,6 +32,17 @@ def slug(value: object) -> str:
         raise ValidationError("slug must be 3-40 lowercase letters, numbers, or interior hyphens")
     if "--" in value:
         raise ValidationError("slug must not contain consecutive hyphens")
+    return value
+
+
+def resource_name(value: object = "default") -> str:
+    """Return a canonical managed-resource name (1-40 safe characters)."""
+    if not isinstance(value, str) or not _RESOURCE_NAME.fullmatch(value):
+        raise ValidationError(
+            "resource name must be 1-40 lowercase letters, numbers, or interior hyphens"
+        )
+    if "--" in value:
+        raise ValidationError("resource name must not contain consecutive hyphens")
     return value
 
 

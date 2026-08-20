@@ -65,7 +65,7 @@ _PROVIDER_APP_ACTIONS = frozenset(
 _PER_RESOURCE_STORAGE_ACTIONS = tuple(
     f"storage.{resource_type}.{operation}"
     for resource_type in ("mongo", "postgres", "s3")
-    for operation in ("create", "observe", "remove", "rotate", "verify")
+    for operation in ("create", "migrate", "observe", "remove", "rotate", "verify")
 )
 STORAGE_ACTIONS = _PER_RESOURCE_STORAGE_ACTIONS
 ACTION_MANIFEST = tuple(sorted(("backup.accept", *APP_ACTIONS, *STORAGE_ACTIONS)))
@@ -319,6 +319,14 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
             "startScript": manifest.start_script,
             "port": manifest.port,
             "healthPath": manifest.health_path,
+            "storageBindings": [
+                {
+                    "name": binding.name,
+                    "type": binding.resource_type,
+                    "environment": dict(binding.environment),
+                }
+                for binding in manifest.storage_bindings
+            ],
         },
         "log": log.decode("utf-8", errors="replace"),
         "logTruncated": result.build_log_truncated or len(log) != len(result.build_log),

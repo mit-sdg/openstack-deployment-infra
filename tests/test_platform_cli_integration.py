@@ -174,11 +174,12 @@ class CliIntegrationTests(unittest.TestCase):
             ("app", "env", "import", "demo-app", "--file", "-"),
             ("app", "env", "list", "demo-app"),
             ("storage", "list"),
-            ("storage", "show", "demo-app", "postgres"),
-            ("storage", "create", "demo-app", "postgres", "s3"),
-            ("storage", "verify", "demo-app"),
-            ("storage", "rotate", "demo-app", "mongo"),
-            ("storage", "remove", "demo-app", "s3", "--confirm", "demo-app"),
+            ("storage", "show", "demo-app", "postgres", "--name", "analytics"),
+            ("storage", "create", "demo-app", "postgres", "--name", "default"),
+            ("storage", "verify", "demo-app", "mongo", "--name", "analytics"),
+            ("storage", "migrate-default", "demo-app", "mongo"),
+            ("storage", "rotate", "demo-app", "mongo", "--name", "analytics"),
+            ("storage", "remove", "demo-app", "s3", "--name", "default", "--confirm", "default"),
         )
         parser = cli.build_parser()
         for command in commands:
@@ -193,7 +194,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(database.stat().st_mode & 0o777, 0o600)
         connection = db.connect(database)
         try:
-            self.assertEqual(db.schema_version(connection), 4)
+            self.assertEqual(db.schema_version(connection), 5)
         finally:
             connection.close()
 

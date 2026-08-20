@@ -19,6 +19,7 @@ from platform_cli.app import (
     DeploymentFailed,
     Manifest,
     Recipe,
+    StorageBinding,
     accept_healthy_deployment,
     acquire_github_commit,
     apply_registry_retention,
@@ -80,6 +81,30 @@ class ManifestAndRecipeTests(unittest.TestCase):
                 "version: 1\nruntime: node\nscripts: {start: serve}\nport: 8080\nhealth: {path: /ready}\n"
             )
             self.assertEqual(load_platform_yaml(root / "platform.yaml").packages, (".",))
+
+    def test_named_storage_bindings_are_typed_and_targets_are_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "package-lock.json").write_text("{}")
+            path = root / "platform.yaml"
+            path.write_text(
+                "version: 1\nruntime: node\nscripts: {start: serve}\nport: 8080\n"
+                "health: {path: /ready}\nstorage:\n  bindings:\n    primary:\n"
+                "      type: mongo\n      environment: {uri: MONGODB_URI}\n"
+            )
+            manifest = load_platform_yaml(path)
+            self.assertEqual(
+                manifest.storage_bindings,
+                (StorageBinding("primary", "mongo", (("uri", "MONGODB_URI"),)),),
+            )
+            path.write_text(
+                "version: 1\nruntime: node\nscripts: {start: serve}\nport: 8080\n"
+                "health: {path: /ready}\nstorage:\n  bindings:\n"
+                "    primary: {type: mongo, environment: {uri: DATABASE_URL}}\n"
+                "    replica: {type: mongo, environment: {uri: DATABASE_URL}}\n"
+            )
+            with self.assertRaisesRegex(ValidationError, "conflicts"):
+                load_platform_yaml(path)
 
     def test_unknown_duplicate_and_command_shaped_values_are_rejected(self) -> None:
         documents = (

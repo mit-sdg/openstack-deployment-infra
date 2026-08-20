@@ -13,11 +13,18 @@ import re
 import secrets
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, cast
 
-from ..storage_contract import ENVIRONMENT_KEYS
-from ..validation import ValidationError, slug, uuid
+from ..storage_contract import (
+    ENVIRONMENT_KEYS,
+    canonical_secret_keys,
+    canonicalize_environment,
+    provider_environment,
+    storage_owner,
+)
+from ..validation import ValidationError, resource_name, slug, uuid
 from .main import Handler, HelperActionError
 from .nomad import (
     SecretItems,
@@ -32,7 +39,9 @@ POSTGRES_KEYS = ENVIRONMENT_KEYS["postgres"]
 MONGO_KEYS = ENVIRONMENT_KEYS["mongo"]
 S3_KEYS = ENVIRONMENT_KEYS["s3"]
 RESOURCE_KEYS = ENVIRONMENT_KEYS
-_OWNER = {"postgres": "postgres", "mongo": "mongo", "s3": "s3"}
+_RESOURCE_CONTEXT: ContextVar[tuple[str, str]] = ContextVar(
+    "storage_resource", default=("mongo", "default")
+)
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{1,62}")
 APPLICATION_CA_PATH = "/platform-ca/internal-ca.crt"
 
@@ -77,8 +86,9 @@ def _operation_args(
     accepted by the M1 helper.
     """
     operation_keys = {"operationId", "recover"}
-    if args.keys() != expected | operation_keys:
+    if args.keys() != expected | operation_keys | {"resourceName"}:
         raise HelperActionError("INVALID_ARGS", f"{action} arguments are invalid")
+    resource_name(args.get("resourceName", "default"))
     operation_id = uuid(args["operationId"], field="operationId")
     recovering = args["recover"]
     if not isinstance(recovering, bool):
@@ -88,7 +98,12 @@ def _operation_args(
 
 def _identity(application_id: object) -> tuple[str, str, str]:
     identifier = uuid(application_id, field="applicationId")
-    base = identifier.replace("-", "")[:20]
+    resource_type, name = _RESOURCE_CONTEXT.get()
+    base = (
+        identifier.replace("-", "")[:20]
+        if name == "default"
+        else hashlib.sha256(f"{identifier}:{resource_type}:{name}".encode()).hexdigest()[:20]
+    )
     return identifier, f"p_{base}", f"o_{base}"
 
 
@@ -106,11 +121,14 @@ def _positive(value: object, field_name: str) -> int:
 
 
 def _exact(args: Mapping[str, Any], expected: set[str], action: str) -> None:
-    if args.keys() != expected:
+    if args.keys() != expected | {"resourceName"}:
         raise HelperActionError("INVALID_ARGS", f"{action} arguments are invalid")
+    resource_name(args.get("resourceName", "default"))
 
 
-def _common(args: Mapping[str, Any]) -> tuple[str, str]:
+def _common(args: Mapping[str, Any], resource_type: str) -> tuple[str, str]:
+    name = resource_name(args.get("resourceName", "default"))
+    _RESOURCE_CONTEXT.set((resource_type, name))
     return uuid(args["applicationId"], field="applicationId"), slug(args["applicationSlug"])
 
 
@@ -1001,11 +1019,17 @@ def s3_environment(endpoint: str, bucket: str, access_key: str, secret_key: str)
 def _s3_bucket_name(application_id: str, application_slug: str, prefix: str) -> str:
     identifier = uuid(application_id, field="applicationId")
     checked_slug = slug(application_slug)
-    suffix = identifier.replace("-", "")[:8]
-    slug_limit = 63 - len(prefix) - len(suffix) - 2
-    if slug_limit < 3:
+    resource_type, name = _RESOURCE_CONTEXT.get()
+    suffix = (
+        identifier.replace("-", "")[:8]
+        if name == "default"
+        else hashlib.sha256(f"{identifier}:{resource_type}:{name}".encode()).hexdigest()[:10]
+    )
+    visible = checked_slug if name == "default" else f"{checked_slug}-{name}"
+    visible_limit = 63 - len(prefix) - len(suffix) - 2
+    if visible_limit < 3:
         raise ValidationError("platform prefix is too long for an S3 bucket name")
-    return f"{prefix}-{checked_slug[:slug_limit].rstrip('-')}-{suffix}"
+    return f"{prefix}-{visible[:visible_limit].rstrip('-')}-{suffix}"
 
 
 def _retire_owned_s3_key(admin: Any, *, key_id: str, expected_name: str) -> None:
@@ -1050,7 +1074,7 @@ def s3_create(
             )
         if not re.fullmatch(r"[a-f0-9]{8}", generation):
             raise ValidationError("credential generation is malformed")
-        key_name = f"application-{application_slug}-{generation}"
+        key_name = f"application-{bucket}-{generation}"
         if _s3_key_by_name(admin, key_name) is not None:
             raise HelperActionError("RESOURCE_EXISTS", "Garage operation key already exists")
         key_info = admin.request("/CreateKey", {"name": key_name, "neverExpires": True})
@@ -1562,7 +1586,7 @@ def _s3_key_record(admin: Any, key_id: str) -> Mapping[str, Any] | None:
 
 
 def _require_s3_orphan_key_identity(
-    admin: Any, *, key_id: str, application_slug: str, provider_name: str
+    admin: Any, *, key_id: str, application_slug: str | None, provider_name: str
 ) -> None:
     record = _s3_key_record(admin, key_id)
     if record is None:
@@ -1571,7 +1595,7 @@ def _require_s3_orphan_key_identity(
     if (
         not isinstance(name, str)
         or not (
-            name.startswith(f"application-{application_slug}-")
+            (application_slug is not None and name.startswith(f"application-{application_slug}-"))
             or name.startswith(f"application-{provider_name}-")
         )
         or re.fullmatch(r"application-[A-Za-z0-9._-]+-[a-f0-9]{8}", name) is None
@@ -1627,7 +1651,7 @@ def _s3_rotation_keys(
 
 
 def _ensure_owned_absent(nomad: VariableClient, application_slug: str, resource_type: str) -> None:
-    keys = RESOURCE_KEYS[resource_type]
+    keys = canonical_secret_keys(resource_type, _RESOURCE_CONTEXT.get()[1])
     snapshot = nomad.read_variable(variable_path(application_slug))
     if any(key in snapshot.items for key in keys):
         raise HelperActionError(
@@ -1638,27 +1662,32 @@ def _ensure_owned_absent(nomad: VariableClient, application_slug: str, resource_
 def _owned_environment(
     nomad: VariableClient, application_slug: str, resource_type: str
 ) -> SecretItems:
-    keys = RESOURCE_KEYS[resource_type]
+    name = _RESOURCE_CONTEXT.get()[1]
+    keys = canonical_secret_keys(resource_type, name)
     snapshot = nomad.read_variable(variable_path(application_slug))
     missing = [key for key in keys if key not in snapshot.items]
     if missing:
         raise HelperActionError(
             "VARIABLE_INCOMPLETE", f"{resource_type} environment keys are incomplete"
         )
-    return SecretItems({key: snapshot.items[key] for key in keys})
+    values = {key: snapshot.items[key] for key in keys}
+    return SecretItems(provider_environment(resource_type, name, values))
 
 
 def _owned_observation(
     nomad: VariableClient, application_slug: str, resource_type: str
 ) -> tuple[VariableSnapshot, str, SecretItems | None]:
     """Observe key completeness and ModifyIndex without returning any value."""
+    name = _RESOURCE_CONTEXT.get()[1]
+    keys = canonical_secret_keys(resource_type, name)
     snapshot = nomad.read_variable(variable_path(application_slug))
-    present = [key for key in RESOURCE_KEYS[resource_type] if key in snapshot.items]
+    present = [key for key in keys if key in snapshot.items]
     if not present:
         return snapshot, "absent", None
-    if len(present) != len(RESOURCE_KEYS[resource_type]):
+    if len(present) != len(keys):
         return snapshot, "partial", None
-    environment = SecretItems({key: snapshot.items[key] for key in RESOURCE_KEYS[resource_type]})
+    values = {key: snapshot.items[key] for key in keys}
+    environment = SecretItems(provider_environment(resource_type, name, values))
     return snapshot, "complete", environment
 
 
@@ -1683,25 +1712,29 @@ def _publish(
     resource_type: str,
     environment: Mapping[str, str],
 ) -> VariableUpdate:
-    keys = RESOURCE_KEYS[resource_type]
+    name = _RESOURCE_CONTEXT.get()[1]
+    keys = canonical_secret_keys(resource_type, name)
+    owner = storage_owner(resource_type, name)
     return update_owned_items(
         nomad,
         variable_path(application_slug),
-        {key: _OWNER[resource_type] for key in keys},
-        owner=_OWNER[resource_type],
-        updates=environment,
+        {key: owner for key in keys},
+        owner=owner,
+        updates=canonicalize_environment(resource_type, name, environment),
     )
 
 
 def _remove_environment(
     nomad: VariableClient, application_slug: str, resource_type: str
 ) -> VariableUpdate:
-    keys = RESOURCE_KEYS[resource_type]
+    name = _RESOURCE_CONTEXT.get()[1]
+    keys = canonical_secret_keys(resource_type, name)
+    owner = storage_owner(resource_type, name)
     return update_owned_items(
         nomad,
         variable_path(application_slug),
-        {key: _OWNER[resource_type] for key in keys},
-        owner=_OWNER[resource_type],
+        {key: owner for key in keys},
+        owner=owner,
         removals=keys,
     )
 
@@ -1817,7 +1850,7 @@ def postgres_create_handler(
         {"applicationId", "applicationSlug", "postgresConnections", "measuredTargetBytes"},
         "storage.postgres.create",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "postgres")
     database = _identity(application_id)[1]
     if recovering:
         snapshot, key_state, environment = _owned_observation(nomad, application_slug, "postgres")
@@ -1949,7 +1982,7 @@ def mongo_create_handler(
         {"applicationId", "applicationSlug", "measuredTargetBytes"},
         "storage.mongo.create",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "mongo")
     if recovering:
         snapshot, key_state, environment = _owned_observation(nomad, application_slug, "mongo")
         candidate_name = _credential_name(application_id, generation)
@@ -2081,12 +2114,14 @@ def s3_create_handler(
         {"applicationId", "applicationSlug", "s3Bytes", "s3Objects"},
         "storage.s3.create",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "s3")
+    expected_provider_name = _s3_bucket_name(application_id, application_slug, prefix)
+    expected_key_name = f"application-{expected_provider_name}-{generation}"
     if recovering:
         snapshot, key_state, environment = _owned_observation(nomad, application_slug, "s3")
         if key_state == "complete" and environment is not None:
             provider_name = environment["S3_BUCKET"]
-            if provider_name.endswith(application_id.replace("-", "")[:8]):
+            if provider_name == expected_provider_name:
                 provider_id = _s3_bucket_id(admin, provider_name)
                 if provider_id is not None:
                     credential = _credential_from_environment(
@@ -2124,7 +2159,7 @@ def s3_create_handler(
                                 admin,
                                 scoped_client,
                                 credential=credential,
-                                expected_key_name=f"application-{application_slug}-{generation}",
+                                expected_key_name=expected_key_name,
                                 expected_endpoint=endpoint,
                             ),
                             provider_absent=lambda: (
@@ -2139,7 +2174,7 @@ def s3_create_handler(
         if key_state != "absent":
             raise _recovery_required("s3", "create", "repair the partial Nomad owned-key set")
         bucket_id = _s3_expected_bucket_id(admin, application_id, application_slug, prefix)
-        candidate_key = _s3_key_by_name(admin, f"application-{application_slug}-{generation}")
+        candidate_key = _s3_key_by_name(admin, expected_key_name)
         if candidate_key is not None or bucket_id is not None:
             # A retry has no durable CreateBucket/CreateKey response.  A
             # deterministic alias or name is not ownership evidence: it may
@@ -2181,7 +2216,7 @@ def s3_create_handler(
                 admin,
                 scoped_client,
                 credential=credential,
-                expected_key_name=f"application-{application_slug}-{generation}",
+                expected_key_name=expected_key_name,
                 expected_endpoint=endpoint,
             ),
             provider_absent=lambda: (
@@ -2216,7 +2251,7 @@ def postgres_observe_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName"},
         "storage.postgres.observe",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "postgres")
     _require_fixed_provider(args, application_id, "PostgreSQL")
     snapshot, key_state, environment = _owned_observation(nomad, application_slug, "postgres")
     if key_state != "complete" or environment is None:
@@ -2241,7 +2276,11 @@ def postgres_observe_handler(
             raise RuntimeError("PostgreSQL safe observation failed")
     finally:
         connection.close()
-    return {"observed": True, "keyNames": list(POSTGRES_KEYS), "modifyIndex": snapshot.modify_index}
+    return {
+        "observed": True,
+        "keyNames": list(canonical_secret_keys("postgres", _RESOURCE_CONTEXT.get()[1])),
+        "modifyIndex": snapshot.modify_index,
+    }
 
 
 def mongo_observe_handler(
@@ -2256,7 +2295,7 @@ def mongo_observe_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName"},
         "storage.mongo.observe",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "mongo")
     provider_name = _require_fixed_provider(args, application_id, "MongoDB")
     snapshot, key_state, environment = _owned_observation(nomad, application_slug, "mongo")
     if key_state != "complete" or environment is None:
@@ -2270,7 +2309,11 @@ def mongo_observe_handler(
             raise RuntimeError("MongoDB safe observation failed")
     finally:
         client.close()
-    return {"observed": True, "keyNames": list(MONGO_KEYS), "modifyIndex": snapshot.modify_index}
+    return {
+        "observed": True,
+        "keyNames": list(canonical_secret_keys("mongo", _RESOURCE_CONTEXT.get()[1])),
+        "modifyIndex": snapshot.modify_index,
+    }
 
 
 def s3_observe_handler(
@@ -2286,7 +2329,7 @@ def s3_observe_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName"},
         "storage.s3.observe",
     )
-    _, application_slug = _common(args)
+    _, application_slug = _common(args, "s3")
     snapshot, key_state, environment = _owned_observation(nomad, application_slug, "s3")
     if key_state != "complete" or environment is None:
         raise HelperActionError("VARIABLE_INCOMPLETE", "s3 environment keys are incomplete")
@@ -2305,7 +2348,11 @@ def s3_observe_handler(
         close = getattr(client, "close", None)
         if callable(close):
             close()
-    return {"observed": True, "keyNames": list(S3_KEYS), "modifyIndex": snapshot.modify_index}
+    return {
+        "observed": True,
+        "keyNames": list(canonical_secret_keys("s3", _RESOURCE_CONTEXT.get()[1])),
+        "modifyIndex": snapshot.modify_index,
+    }
 
 
 def postgres_verify_handler(
@@ -2320,7 +2367,7 @@ def postgres_verify_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName"},
         "storage.postgres.verify",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "postgres")
     _require_fixed_provider(args, application_id, "PostgreSQL")
     snapshot, key_state, environment = _owned_observation(nomad, application_slug, "postgres")
     if key_state != "complete" or environment is None:
@@ -2333,7 +2380,7 @@ def postgres_verify_handler(
     postgres_verify(scoped_connect, credential, host=host)
     return {
         "verified": True,
-        "keyNames": list(POSTGRES_KEYS),
+        "keyNames": list(canonical_secret_keys("postgres", _RESOURCE_CONTEXT.get()[1])),
         "modifyIndex": snapshot.modify_index,
     }
 
@@ -2350,7 +2397,7 @@ def mongo_verify_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName"},
         "storage.mongo.verify",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "mongo")
     _require_fixed_provider(args, application_id, "MongoDB")
     snapshot, key_state, environment = _owned_observation(nomad, application_slug, "mongo")
     if key_state != "complete" or environment is None:
@@ -2361,7 +2408,7 @@ def mongo_verify_handler(
     mongo_verify(scoped_connect, credential, host=host)
     return {
         "verified": True,
-        "keyNames": list(MONGO_KEYS),
+        "keyNames": list(canonical_secret_keys("mongo", _RESOURCE_CONTEXT.get()[1])),
         "modifyIndex": snapshot.modify_index,
     }
 
@@ -2379,7 +2426,7 @@ def s3_verify_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName"},
         "storage.s3.verify",
     )
-    _, application_slug = _common(args)
+    _, application_slug = _common(args, "s3")
     snapshot, key_state, environment = _owned_observation(nomad, application_slug, "s3")
     if key_state != "complete" or environment is None:
         raise HelperActionError("VARIABLE_INCOMPLETE", "s3 environment keys are incomplete")
@@ -2397,7 +2444,7 @@ def s3_verify_handler(
     s3_verify(scoped_client, credential, endpoint=endpoint)
     return {
         "verified": True,
-        "keyNames": list(S3_KEYS),
+        "keyNames": list(canonical_secret_keys("s3", _RESOURCE_CONTEXT.get()[1])),
         "modifyIndex": snapshot.modify_index,
     }
 
@@ -2417,7 +2464,7 @@ def postgres_rotate_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName", "postgresConnections"},
         "storage.postgres.rotate",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "postgres")
     provider_name = _require_fixed_provider(args, application_id, "PostgreSQL")
     old = _owned_environment(nomad, application_slug, "postgres")
     candidate_name = _credential_name(application_id, generation)
@@ -2518,7 +2565,7 @@ def mongo_rotate_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName"},
         "storage.mongo.rotate",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "mongo")
     provider_name = _require_fixed_provider(args, application_id, "MongoDB")
     old = _owned_environment(nomad, application_slug, "mongo")
     candidate_name = _credential_name(application_id, generation)
@@ -2648,7 +2695,7 @@ def s3_rotate_handler(
         {"applicationId", "applicationSlug", "providerId", "providerName"},
         "storage.s3.rotate",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "s3")
     old = _owned_environment(nomad, application_slug, "s3")
     provider_id, provider_name = _require_s3_provider(args, old)
     _require_s3_live_identity(
@@ -2660,7 +2707,10 @@ def s3_rotate_handler(
     candidate_display_name = f"application-{provider_name}-{generation}"
     if recovering:
         candidate_key_id, old_key_ids = _s3_rotation_keys(
-            admin, provider_name, candidate_display_name, application_slug
+            admin,
+            provider_name,
+            candidate_display_name,
+            application_slug if _RESOURCE_CONTEXT.get()[1] == "default" else None,
         )
         if candidate_key_id == _environment_credential_name("s3", old):
             _require_s3_live_identity(
@@ -2766,11 +2816,47 @@ def s3_rotate_handler(
     return _rotation_result(candidate, update, evidence=True, retired=True, rolled_back=False)
 
 
+def migrate_default_handler(
+    args: Mapping[str, Any], *, nomad: VariableClient, resource_type: str
+) -> Mapping[str, Any]:
+    """Atomically rename one pre-named default Variable key set.
+
+    This release migration is deliberately isolated from normal lifecycle
+    handlers; those handlers only understand canonical named keys.
+    """
+    _exact(args, {"applicationId", "applicationSlug"}, f"storage.{resource_type}.migrate")
+    _, application_slug = _common(args, resource_type)
+    if _RESOURCE_CONTEXT.get()[1] != "default":
+        raise HelperActionError("INVALID_ARGS", "only the default resource can be migrated")
+    snapshot = nomad.read_variable(variable_path(application_slug))
+    old_keys = ENVIRONMENT_KEYS[resource_type]
+    new_keys = canonical_secret_keys(resource_type, "default")
+    old_present = [key for key in old_keys if key in snapshot.items]
+    new_present = [key for key in new_keys if key in snapshot.items]
+    if not old_present and len(new_present) == len(new_keys):
+        return {"migrated": True, "keyNames": list(new_keys), "modifyIndex": snapshot.modify_index}
+    if len(old_present) != len(old_keys) or new_present:
+        raise HelperActionError(
+            "VARIABLE_INCOMPLETE", "default storage migration key state is ambiguous"
+        )
+    environment = {key: snapshot.items[key] for key in old_keys}
+    owner = storage_owner(resource_type, "default")
+    update = update_owned_items(
+        nomad,
+        variable_path(application_slug),
+        {key: owner for key in (*old_keys, *new_keys)},
+        owner=owner,
+        updates=canonicalize_environment(resource_type, "default", environment),
+        removals=old_keys,
+    )
+    return {"migrated": True, "keyNames": list(new_keys), "modifyIndex": update.modify_index}
+
+
 def _remove_result(resource_type: str, update: Any) -> dict[str, Any]:
     return {
         "confirmedAbsent": True,
         "environmentRemoved": True,
-        "removedKeyNames": list(RESOURCE_KEYS[resource_type]),
+        "removedKeyNames": list(canonical_secret_keys(resource_type, _RESOURCE_CONTEXT.get()[1])),
         "remainingKeyNames": list(update.key_names),
         "modifyIndex": update.modify_index,
     }
@@ -2786,14 +2872,16 @@ def postgres_remove_handler(
             "applicationSlug",
             "providerId",
             "providerName",
-            "confirmSlug",
+            "confirmName",
             "preflight",
         },
         "storage.postgres.remove",
     )
-    application_id, application_slug = _common(args)
-    if args["confirmSlug"] != application_slug or not isinstance(args["preflight"], bool):
-        raise HelperActionError("CONFIRMATION_REQUIRED", "PostgreSQL deletion slug does not match")
+    application_id, application_slug = _common(args, "postgres")
+    if args["confirmName"] != _RESOURCE_CONTEXT.get()[1] or not isinstance(args["preflight"], bool):
+        raise HelperActionError(
+            "CONFIRMATION_REQUIRED", "PostgreSQL deletion resource name does not match"
+        )
     try:
         _require_fixed_provider(args, application_id, "PostgreSQL")
     except HelperActionError:
@@ -2830,14 +2918,16 @@ def mongo_remove_handler(
             "applicationSlug",
             "providerId",
             "providerName",
-            "confirmSlug",
+            "confirmName",
             "preflight",
         },
         "storage.mongo.remove",
     )
-    application_id, application_slug = _common(args)
-    if args["confirmSlug"] != application_slug or not isinstance(args["preflight"], bool):
-        raise HelperActionError("CONFIRMATION_REQUIRED", "MongoDB deletion slug does not match")
+    application_id, application_slug = _common(args, "mongo")
+    if args["confirmName"] != _RESOURCE_CONTEXT.get()[1] or not isinstance(args["preflight"], bool):
+        raise HelperActionError(
+            "CONFIRMATION_REQUIRED", "MongoDB deletion resource name does not match"
+        )
     try:
         _require_fixed_provider(args, application_id, "MongoDB")
     except HelperActionError:
@@ -2881,15 +2971,15 @@ def s3_remove_handler(
             "applicationSlug",
             "providerId",
             "providerName",
-            "confirmSlug",
+            "confirmName",
             "purge",
             "preflight",
         },
         "storage.s3.remove",
     )
-    application_id, application_slug = _common(args)
+    application_id, application_slug = _common(args, "s3")
     if (
-        args["confirmSlug"] != application_slug
+        args["confirmName"] != _RESOURCE_CONTEXT.get()[1]
         or not isinstance(args["purge"], bool)
         or not isinstance(args["preflight"], bool)
     ):
@@ -2915,7 +3005,9 @@ def s3_remove_handler(
                 _require_s3_orphan_key_identity(
                     admin,
                     key_id=environment["AWS_ACCESS_KEY_ID"],
-                    application_slug=application_slug,
+                    application_slug=(
+                        application_slug if _RESOURCE_CONTEXT.get()[1] == "default" else None
+                    ),
                     provider_name=provider_name,
                 )
         except HelperActionError:
@@ -2984,6 +3076,15 @@ def handlers(
 ) -> dict[str, Handler]:
     """Bind trusted clients into the fifteen fixed storage protocol actions."""
     return {
+        "storage.postgres.migrate": lambda args: migrate_default_handler(
+            args, nomad=nomad, resource_type="postgres"
+        ),
+        "storage.mongo.migrate": lambda args: migrate_default_handler(
+            args, nomad=nomad, resource_type="mongo"
+        ),
+        "storage.s3.migrate": lambda args: migrate_default_handler(
+            args, nomad=nomad, resource_type="s3"
+        ),
         "storage.postgres.create": lambda args: postgres_create_handler(
             args,
             admin=postgres_admin,

@@ -57,7 +57,7 @@ class DatabaseTests(unittest.TestCase):
             {"schema_migrations", "image_selections", "applications"},
         )
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 4)
+        self.assertEqual(db.schema_version(self.connection), 5)
         tables = {
             row[0]
             for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -86,6 +86,25 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(self.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
+    def test_named_resource_migration_preserves_default_provider_identity(self) -> None:
+        db.migrate(self.connection, target_version=4)
+        self.add_application()
+        self.connection.execute(
+            "INSERT INTO managed_resources VALUES (?, 'mongo', ?, ?, 'active', NULL, 1024, NULL, NULL, NULL, ?, ?)",
+            (APP_ID, "provider-id", "p_existing", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        self.connection.execute(
+            "INSERT INTO environment_keys VALUES (?, 'MONGODB_URI', 'mongo')", (APP_ID,)
+        )
+        db.migrate(self.connection)
+        resource = db.list_managed_resources(self.connection, application_id=APP_ID)[0]
+        self.assertEqual((resource.resource_type, resource.resource_name), ("mongo", "default"))
+        self.assertEqual(
+            (resource.provider_id, resource.provider_name), ("provider-id", "p_existing")
+        )
+        key = db.list_environment_keys(self.connection, application_id=APP_ID)[0]
+        self.assertEqual((key.key_name, key.owner), ("MONGODB_URI", "storage.mongo.default"))
+
     def test_external_schema_is_rejected_before_greenfield_migration(self) -> None:
         self.connection.close()
         raw = sqlite3.connect(self.path)
@@ -100,7 +119,7 @@ class DatabaseTests(unittest.TestCase):
         db.migrate(self.connection, target_version=1)
         self.assertEqual(db.schema_version(self.connection), 1)
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 4)
+        self.assertEqual(db.schema_version(self.connection), 5)
         self.assertEqual(
             self.connection.execute(
                 "SELECT checksum FROM schema_migrations WHERE version = 0"
@@ -124,7 +143,7 @@ class DatabaseTests(unittest.TestCase):
 
         same_deployment = db.connect(self.path, identity=identity)
         db.migrate(same_deployment, identity=identity)
-        self.assertEqual(db.schema_version(same_deployment), 4)
+        self.assertEqual(db.schema_version(same_deployment), 5)
         same_deployment.close()
 
         wrong_project = db.deployment_identity(replace(platform, project_id=IMAGE_ID))

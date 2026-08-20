@@ -97,9 +97,9 @@ Correct the named dependency and rerun the same deploy command. Do not delete it
 Create PostgreSQL only after the first deployment has been accepted:
 
 ```bash
-$PLATFORM_CLI storage create "$APP_SLUG" postgres
-$PLATFORM_CLI storage verify "$APP_SLUG" postgres
-$PLATFORM_CLI storage show "$APP_SLUG" postgres
+$PLATFORM_CLI storage create "$APP_SLUG" postgres --name default
+$PLATFORM_CLI storage verify "$APP_SLUG" postgres --name default
+$PLATFORM_CLI storage show "$APP_SLUG" postgres --name default
 ```
 
 The output contains non-secret provider identity and configured limits. Credentials remain in the owner-specific Nomad Variable and never enter command output or management SQLite.
@@ -112,8 +112,24 @@ Declare the inert application first, create storage, then deploy:
 
 ```bash
 $PLATFORM_CLI app create "$APP_SLUG"
-$PLATFORM_CLI storage create "$APP_SLUG" mongo
-$PLATFORM_CLI storage verify "$APP_SLUG" mongo
+$PLATFORM_CLI storage create "$APP_SLUG" mongo --name primary
+$PLATFORM_CLI storage verify "$APP_SLUG" mongo --name primary
+```
+
+At the selected commit, bind that existing resource in `platform.yaml`:
+
+```yaml
+storage:
+  bindings:
+    primary:
+      type: mongo
+      environment:
+        uri: MONGODB_URI
+```
+
+The binding maps one typed output to the application's runtime key. It does not provision storage and cannot define arbitrary platform environment. Commit the manifest change, set `APP_COMMIT` to that exact commit, then deploy:
+
+```bash
 $PLATFORM_CLI app deploy "$APP_SLUG" \
   --repo "$APP_REPOSITORY" \
   --commit "$APP_COMMIT"
@@ -173,7 +189,7 @@ The restore check uses temporary containers and never overwrites live services. 
 Remove managed storage before removing its application:
 
 ```bash
-$PLATFORM_CLI storage remove "$APP_SLUG" postgres --confirm "$APP_SLUG"
+$PLATFORM_CLI storage remove "$APP_SLUG" postgres --name default --confirm default
 $PLATFORM_CLI app remove "$APP_SLUG" --confirm "$APP_SLUG"
 $PLATFORM_CLI app list
 $PLATFORM_CLI storage list

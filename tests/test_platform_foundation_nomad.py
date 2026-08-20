@@ -27,12 +27,12 @@ class OwnedKeyMergeTests(unittest.TestCase):
         ownership = {
             "PORT": "platform",
             "STAFF_SETTING": "staff",
-            "DATABASE_URL": "postgres",
+            "DATABASE_URL": "storage.postgres.default",
         }
         merged = merge_owned_items(
             current,
             ownership,
-            owner="postgres",
+            owner="storage.postgres.default",
             updates={"DATABASE_URL": SENTINEL},
         )
         self.assertEqual(merged["PORT"], "3000")
@@ -123,7 +123,7 @@ class CasTests(unittest.TestCase):
             client,
             "nomad/jobs/demo-app",
             {"PORT": "platform", "STAFF_SETTING": "staff"},
-            owner="postgres",
+            owner="storage.postgres.default",
             updates={"DATABASE_URL": SENTINEL},
             attempts=3,
         )

@@ -38,10 +38,8 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("`NODE_ENV=production`", contract)
         self.assertIn("Staff `set`, `import`, and `unset` refuse", contract)
         self.assertIn("ModifyIndex compare-and-set", contract)
-        self.assertIn(
-            "schema still accepts no\nrepository-controlled environment or build arguments",
-            contract,
-        )
+        self.assertIn("or provisioning requests", contract)
+        self.assertIn("Bindings neither create nor remove storage", contract)
         self.assertIn("helper-diagnostics/<correlation-id>.trace", contract)
         self.assertIn("source file/line locations", contract)
         self.assertIn("controller/helper-diagnostics 0700 agentops agentops", admin_role)

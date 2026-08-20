@@ -20,6 +20,7 @@ from platform_cli.helper.storage import (
     ProviderCredential,
     RotationEvidence,
     handlers,
+    migrate_default_handler,
     mongo_create,
     mongo_environment,
     mongo_observe_handler,
@@ -52,7 +53,10 @@ from platform_cli.storage_contract import (
     ENVIRONMENT_KEYS,
     FIXED_PLATFORM_ENVIRONMENT,
     PLATFORM_ENVIRONMENT_KEYS,
+    canonical_secret_keys,
+    canonicalize_environment,
     platform_environment_values,
+    storage_owner,
 )
 from platform_cli.validation import ValidationError
 
@@ -158,11 +162,48 @@ class ManagementStorageTests(unittest.TestCase):
         db.set_environment_keys(
             self.connection,
             application_id=APP_ID,
-            owner=resource_type,
-            keys={"postgres": ["DATABASE_URL"], "mongo": ["MONGODB_URI"], "s3": ["S3_BUCKET"]}[
-                resource_type
-            ],
+            owner=storage_owner(resource_type),
+            keys=canonical_secret_keys(resource_type, "default"),
         )
+
+    def test_same_type_named_instances_have_independent_identity_and_secret_keys(self) -> None:
+        names: list[str] = []
+
+        def caller(action, args, **bounds):
+            name = args["resourceName"]
+            names.append(name)
+            provider = (
+                "p_11111111111141118111"
+                if name == "default"
+                else "p_" + hashlib.sha256(f"{APP_ID}:mongo:{name}".encode()).hexdigest()[:20]
+            )
+            return {
+                "providerId": provider,
+                "providerName": provider,
+                "verified": True,
+                "evidenceAccepted": True,
+            }
+
+        create(self.connection, self.config, APP_ID, ["mongo"], helper_caller=caller)
+        create(
+            self.connection,
+            self.config,
+            APP_ID,
+            ["mongo"],
+            resource_name="analytics",
+            helper_caller=caller,
+        )
+        resources = db.list_managed_resources(self.connection, application_id=APP_ID)
+        self.assertEqual(
+            [(item.resource_type, item.resource_name) for item in resources],
+            [("mongo", "analytics"), ("mongo", "default")],
+        )
+        owned = db.list_environment_keys(self.connection, application_id=APP_ID)
+        self.assertEqual(
+            {item.key_name for item in owned},
+            {"STORAGE__MONGO__DEFAULT__URI", "STORAGE__MONGO__ANALYTICS__URI"},
+        )
+        self.assertEqual(names, ["default", "analytics"])
 
     def test_create_partial_failure_records_truth_without_secret_material(self) -> None:
         actions: list[str] = []
@@ -203,7 +244,7 @@ class ManagementStorageTests(unittest.TestCase):
             (item.key_name, item.owner)
             for item in db.list_environment_keys(self.connection, application_id=APP_ID)
         }
-        self.assertIn(("PGPASSWORD", "postgres"), owners)
+        self.assertIn(("STORAGE__POSTGRES__DEFAULT__PASSWORD", "storage.postgres.default"), owners)
         operation = db.get_unfinished_operation(self.connection, f"app-{APP_ID}")
         self.assertEqual(operation.status, "recovery_required")  # type: ignore[union-attr]
 
@@ -287,7 +328,7 @@ class ManagementStorageTests(unittest.TestCase):
                 self.config,
                 APP_ID,
                 ["postgres"],
-                confirm_slug="demo-app",
+                confirm_name="default",
                 confirm_destructive=True,
                 helper_caller=remove_caller,
             )
@@ -296,7 +337,7 @@ class ManagementStorageTests(unittest.TestCase):
             self.config,
             APP_ID,
             ["postgres"],
-            confirm_slug="demo-app",
+            confirm_name="default",
             confirm_destructive=True,
             helper_caller=remove_caller,
         )
@@ -358,7 +399,7 @@ class ManagementStorageTests(unittest.TestCase):
                 self.config,
                 APP_ID,
                 ["postgres"],
-                confirm_slug="demo-app",
+                confirm_name="default",
                 confirm_destructive=True,
                 helper_caller=caller,
             )
@@ -368,7 +409,11 @@ class ManagementStorageTests(unittest.TestCase):
         )
         keys = db.list_environment_keys(self.connection, application_id=APP_ID)
         self.assertEqual(
-            [(item.key_name, item.owner) for item in keys], [("DATABASE_URL", "postgres")]
+            [(item.key_name, item.owner) for item in keys],
+            [
+                (key, "storage.postgres.default")
+                for key in sorted(canonical_secret_keys("postgres", "default"))
+            ],
         )
 
     def test_policy_quotas_survive_verify_rotation_and_failure(self) -> None:
@@ -427,7 +472,7 @@ class ManagementStorageTests(unittest.TestCase):
             return {
                 "observed": True,
                 "modifyIndex": 8,
-                "keyNames": list(ENVIRONMENT_KEYS["s3"]),
+                "keyNames": list(canonical_secret_keys("s3", "default")),
             }
 
         observed = status.storage_observer(
@@ -449,7 +494,7 @@ class ManagementStorageTests(unittest.TestCase):
             return {
                 "observed": True,
                 "modifyIndex": 8,
-                "keyNames": list(ENVIRONMENT_KEYS["s3"]),
+                "keyNames": list(canonical_secret_keys("s3", "default")),
                 "credential": SENTINEL,
             }
 
@@ -484,7 +529,7 @@ class ManagementStorageTests(unittest.TestCase):
             self.config,
             APP_ID,
             ["postgres", "mongo"],
-            confirm_slug="demo-app",
+            confirm_name="default",
             confirm_destructive=True,
             helper_caller=caller,
         )
@@ -525,7 +570,7 @@ class ManagementStorageTests(unittest.TestCase):
                 self.config,
                 APP_ID,
                 ["postgres", "mongo", "s3"],
-                confirm_slug="demo-app",
+                confirm_name="default",
                 confirm_destructive=True,
                 helper_caller=caller,
             )
@@ -545,7 +590,7 @@ class ManagementStorageTests(unittest.TestCase):
                 self.config,
                 APP_ID,
                 ["postgres", "mongo", "s3"],
-                confirm_slug="demo-app",
+                confirm_name="default",
                 confirm_destructive=True,
                 helper_caller=caller,
             )
@@ -609,6 +654,7 @@ class ManagementStorageTests(unittest.TestCase):
                 "completed": [],
                 "current": "postgres",
                 "original_modify_index": 41,
+                "resource_name": "default",
             },
         )
         calls: list[tuple[bool, float]] = []
@@ -680,7 +726,7 @@ class ManagementStorageTests(unittest.TestCase):
             )
         self.assertEqual(result.completed, ("s3",))
         self.assertEqual(_resource(self.connection, "s3").lifecycle_state, "active")
-        self.assertIn("AWS_ACCESS_KEY_ID", nomad.items)
+        self.assertIn("STORAGE__S3__DEFAULT__ACCESS_KEY_ID", nomad.items)
 
 
 def _resource(connection, resource_type):
@@ -802,6 +848,17 @@ class Garage:
 
 
 class HelperStorageTests(unittest.TestCase):
+    def test_default_key_migration_is_atomic_and_idempotent(self) -> None:
+        old = dict(mongo_environment("storage", "p_11111111111141118111", "user", "secret"))
+        nomad = MemoryNomad(old)
+        args = {"applicationId": APP_ID, "applicationSlug": "demo-app", "resourceName": "default"}
+        first = migrate_default_handler(args, nomad=nomad, resource_type="mongo")
+        self.assertTrue(first["migrated"])
+        self.assertEqual(set(nomad.items), {"STORAGE__MONGO__DEFAULT__URI"})
+        second = migrate_default_handler(args, nomad=nomad, resource_type="mongo")
+        self.assertTrue(second["migrated"])
+        self.assertEqual(len(nomad.writes), 1)
+
     def test_mongo_create_rejects_existing_database_and_remove_requires_owner_marker(self) -> None:
         database = "p_11111111111141118111"
 
@@ -888,7 +945,11 @@ class HelperStorageTests(unittest.TestCase):
         environment = dict(
             s3_environment("https://storage:9000", "demo-bucket", "old-key", "old-secret")
         )
-        return {"PORT": "3000", "STAFF_SENTINEL": "preserve-me", **environment}
+        return {
+            "PORT": "3000",
+            "STAFF_SENTINEL": "preserve-me",
+            **canonicalize_environment("s3", "default", environment),
+        }
 
     def test_storage_key_contract_is_canonical_across_management_and_helper(self) -> None:
         from platform_cli import storage as management_storage
@@ -901,12 +962,16 @@ class HelperStorageTests(unittest.TestCase):
     def test_verify_and_observe_reject_untrusted_storage_endpoints_before_credentials(self) -> None:
         database = "p_11111111111141118111"
         postgres_user = "u_11111111111141118111_abcdef12"
+        postgres_environment_values = dict(
+            postgres_environment("attacker.storage", database, postgres_user, SENTINEL)
+        )
         postgres_nomad = MemoryNomad(
-            dict(postgres_environment("attacker.storage", database, postgres_user, SENTINEL))
+            canonicalize_environment("postgres", "default", postgres_environment_values)
         )
         postgres_args = {
             "applicationId": APP_ID,
             "applicationSlug": "demo-app",
+            "resourceName": "default",
             "providerId": database,
             "providerName": database,
         }
@@ -931,8 +996,11 @@ class HelperStorageTests(unittest.TestCase):
             )
         self.assertEqual(postgres_calls, [])
 
+        mongo_environment_values = dict(
+            mongo_environment("attacker.storage", database, postgres_user, SENTINEL)
+        )
         mongo_nomad = MemoryNomad(
-            dict(mongo_environment("attacker.storage", database, postgres_user, SENTINEL))
+            canonicalize_environment("mongo", "default", mongo_environment_values)
         )
         mongo_args = {**postgres_args}
         mongo_calls: list[object] = []
@@ -960,6 +1028,7 @@ class HelperStorageTests(unittest.TestCase):
         s3_args = {
             "applicationId": APP_ID,
             "applicationSlug": "demo-app",
+            "resourceName": "default",
             "providerId": "bucket-id",
             "providerName": "demo-bucket",
         }
@@ -1002,6 +1071,7 @@ class HelperStorageTests(unittest.TestCase):
                 {
                     "applicationId": APP_ID,
                     "applicationSlug": "demo-app",
+                    "resourceName": "default",
                     "s3Bytes": 1000,
                     "s3Objects": 100,
                     "operationId": "44444444-4444-4444-8444-444444444444",
@@ -1035,6 +1105,7 @@ class HelperStorageTests(unittest.TestCase):
                 {
                     "applicationId": APP_ID,
                     "applicationSlug": "demo-app",
+                    "resourceName": "default",
                     "s3Bytes": 1000,
                     "s3Objects": 100,
                     "operationId": operation_id,
@@ -1177,6 +1248,7 @@ class HelperStorageTests(unittest.TestCase):
             {
                 "applicationId": APP_ID,
                 "applicationSlug": "demo-app",
+                "resourceName": "default",
                 "providerId": "bucket-id",
                 "providerName": "demo-bucket",
             },
@@ -1191,6 +1263,7 @@ class HelperStorageTests(unittest.TestCase):
             {
                 "applicationId": APP_ID,
                 "applicationSlug": "demo-app",
+                "resourceName": "default",
                 "providerId": "bucket-id",
                 "providerName": "demo-bucket",
                 "operationId": "44444444-4444-4444-8444-444444444444",
@@ -1214,9 +1287,10 @@ class HelperStorageTests(unittest.TestCase):
                 {
                     "applicationId": APP_ID,
                     "applicationSlug": "demo-app",
+                    "resourceName": "default",
                     "providerId": "bucket-id",
                     "providerName": "demo-bucket",
-                    "confirmSlug": "demo-app",
+                    "confirmName": "default",
                     "purge": False,
                     "preflight": True,
                     "operationId": "44444444-4444-4444-8444-444444444444",
@@ -1239,6 +1313,7 @@ class HelperStorageTests(unittest.TestCase):
             {
                 "applicationId": APP_ID,
                 "applicationSlug": "demo-app",
+                "resourceName": "default",
                 "providerId": "bucket-id",
                 "providerName": "demo-bucket",
                 "operationId": "44444444-4444-4444-8444-444444444444",
@@ -1252,7 +1327,7 @@ class HelperStorageTests(unittest.TestCase):
         )
         self.assertFalse(result["evidenceAccepted"])
         self.assertTrue(result["rolledBack"])
-        self.assertEqual(nomad.items["AWS_ACCESS_KEY_ID"], "old-key")
+        self.assertEqual(nomad.items["STORAGE__S3__DEFAULT__ACCESS_KEY_ID"], "old-key")
         self.assertEqual(nomad.items["STAFF_SENTINEL"], "preserve-me")
         self.assertEqual(garage.deleted, ["new-key"])
         self.assertNotIn(SENTINEL, repr(result))
@@ -1269,6 +1344,7 @@ class HelperStorageTests(unittest.TestCase):
                 {
                     "applicationId": APP_ID,
                     "applicationSlug": "demo-app",
+                    "resourceName": "default",
                     "providerId": "bucket-id",
                     "providerName": "demo-bucket",
                     "operationId": "22222222-2222-4222-8222-222222222222",
@@ -1298,6 +1374,7 @@ class HelperStorageTests(unittest.TestCase):
             {
                 "applicationId": APP_ID,
                 "applicationSlug": "demo-app",
+                "resourceName": "default",
                 "providerId": "bucket-id",
                 "providerName": "demo-bucket",
                 "operationId": "44444444-4444-4444-8444-444444444444",
@@ -1312,7 +1389,7 @@ class HelperStorageTests(unittest.TestCase):
         self.assertTrue(result["evidenceAccepted"])
         self.assertTrue(result["retired"])
         self.assertEqual(garage.deleted, ["old-key"])
-        self.assertEqual(nomad.items["AWS_ACCESS_KEY_ID"], "new-key")
+        self.assertEqual(nomad.items["STORAGE__S3__DEFAULT__ACCESS_KEY_ID"], "new-key")
         self.assertLess(events.index("healthy-evidence"), events.index("/DeleteKey"))
 
     def test_s3_remove_checks_confirmation_and_absence_before_owned_key_removal(self) -> None:
@@ -1322,9 +1399,10 @@ class HelperStorageTests(unittest.TestCase):
         args = {
             "applicationId": APP_ID,
             "applicationSlug": "demo-app",
+            "resourceName": "default",
             "providerId": "bucket-id",
             "providerName": "demo-bucket",
-            "confirmSlug": "wrong-app",
+            "confirmName": "wrong-name",
             "purge": False,
             "preflight": False,
             "operationId": "44444444-4444-4444-8444-444444444444",
@@ -1337,7 +1415,7 @@ class HelperStorageTests(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(len(nomad.writes), 0)
 
-        args["confirmSlug"] = "demo-app"
+        args["confirmName"] = "default"
         result = s3_remove_handler(
             args,
             admin=garage,
@@ -1362,9 +1440,10 @@ class HelperStorageTests(unittest.TestCase):
             {
                 "applicationId": APP_ID,
                 "applicationSlug": "demo-app",
+                "resourceName": "default",
                 "providerId": "bucket-id",
                 "providerName": "demo-bucket",
-                "confirmSlug": "demo-app",
+                "confirmName": "default",
                 "purge": False,
                 "preflight": False,
                 "operationId": "33333333-3333-4333-8333-333333333333",
@@ -1559,6 +1638,7 @@ class HelperStorageTests(unittest.TestCase):
                 {
                     "applicationId": APP_ID,
                     "applicationSlug": "demo-app",
+                    "resourceName": "default",
                     "s3Bytes": 1000,
                     "s3Objects": 100,
                     "operationId": "55555555-5555-4555-8555-555555555555",
@@ -1627,7 +1707,7 @@ class HelperStorageTests(unittest.TestCase):
             {
                 f"storage.{resource_type}.{operation}"
                 for resource_type in ("postgres", "mongo", "s3")
-                for operation in ("create", "observe", "verify", "rotate", "remove")
+                for operation in ("create", "migrate", "observe", "verify", "rotate", "remove")
             },
         )
 

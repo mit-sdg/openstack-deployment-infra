@@ -73,7 +73,7 @@ openstack-platform infra image list
 openstack-platform app list
 openstack-platform app show SLUG
 openstack-platform storage list [SLUG]
-openstack-platform storage show SLUG postgres|mongo|s3
+openstack-platform storage show SLUG postgres|mongo|s3 [--name NAME]
 ```
 
 The first invocation creates or migrates the fresh SQLite schema. Its
@@ -93,7 +93,7 @@ build operation is unfinished, and worker observations require an accepted
 application.
 
 Storage reads show `providerId` and `providerName` alongside configured limits.
-The table output columns are `SLUG TYPE PROVIDER_ID PROVIDER_NAME STATE QUOTA
+The table output columns are `SLUG TYPE NAME PROVIDER_ID PROVIDER_NAME STATE QUOTA
 VERIFIED HEALTH`. PostgreSQL and MongoDB measured-byte fields are targets, not
 observations; no periodic usage collector is supported.
 
@@ -164,8 +164,20 @@ openstack-platform app logs SLUG --build [--lines COUNT]
 openstack-platform app logs SLUG --runtime [--lines COUNT] [--follow]
 ```
 
-`platform.yaml` accepts runtime `bun` or `node`, contained package paths, package-script names for build/start, an application port, and a health path. It does not accept Dockerfile instructions, command text, build arguments, build-time environment, or resource settings. Repository `Dockerfile*` files may coexist as inert source files; the platform generates `recipe/Dockerfile` separately. The schema still accepts no
-repository-controlled environment or build arguments.
+`platform.yaml` accepts runtime `bun` or `node`, contained package paths, package-script names for build/start, an application port, a health path, and the typed `storage.bindings` mapping below. It does not accept Dockerfile instructions, command text, build arguments, build-time environment, resource settings, or provisioning requests. Repository `Dockerfile*` files may coexist as inert source files; the platform generates `recipe/Dockerfile` separately.
+
+```yaml
+storage:
+  bindings:
+    primary:                 # exact managed-resource name
+      type: mongo
+      environment:
+        uri: MONGODB_URI     # typed output: runtime target
+```
+
+Binding names are 1–40 lowercase letters, numbers, or interior hyphens. Types are `postgres`, `mongo`, and `s3`. Output names are type-specific: PostgreSQL has `url`, `host`, `port`, `database`, `user`, `password`, `sslmode`, and `sslrootcert`; MongoDB has `uri`; S3 has `endpoint`, `region`, `access_key_id`, `secret_access_key`, `ca_bundle`, `bucket`, and `force_path_style`. Targets must be unique environment names and cannot be platform-reserved or start with `STORAGE__`.
+
+Deployment requires every referenced `(application, type, name)` row to be active and every selected canonical output to exist in the application's Nomad Variable. It fails before job submission when a resource or output is missing, or when a target conflicts with an existing runtime key. Bindings neither create nor remove storage.
 
 The operation acquires the exact commit, creates a single-use builder, generates a recipe with a policy-pinned runtime image, pushes one immutable digest, deletes the builder and fixed port, creates/verifies the dedicated worker, submits a constrained Nomad job, and accepts only after scheduler and public health pass. A failed candidate is removed and its manifest cleanup is confirmed. The command has one policy-bounded whole-operation deadline: lock waits, source acquisition, builder creation/build/cleanup, helper calls, and health probes receive only the remaining time. The helper and BuildKit receive the same durable wall-clock deadline, so a build cannot outlive its recorded operation. There is no manual job-history rollback command for an already accepted deployment.
 
@@ -186,17 +198,19 @@ Each mutation requires restart, scheduler health, and public health. Generated r
 
 ## Manage storage
 
-A declared or deployed application must exist before creation. Types are `postgres`, `mongo`, and `s3`.
+A declared or deployed application must exist before creation. Every identity is `(application_id, type, name)`; `--name` defaults to `default`.
 
 ```text
-openstack-platform storage create SLUG postgres|mongo|s3 [TYPE ...]
-openstack-platform storage verify SLUG [TYPE ...]
-openstack-platform storage rotate SLUG postgres|mongo|s3 [TYPE ...]
-openstack-platform storage remove SLUG postgres|mongo|s3 [TYPE ...] \
-  --confirm SLUG [--purge-s3]
+openstack-platform storage list [SLUG]
+openstack-platform storage show SLUG postgres|mongo|s3 [--name NAME]
+openstack-platform storage create SLUG postgres|mongo|s3 [--name NAME]
+openstack-platform storage verify SLUG [postgres|mongo|s3] [--name NAME]
+openstack-platform storage rotate SLUG postgres|mongo|s3 [--name NAME]
+openstack-platform storage remove SLUG postgres|mongo|s3 [--name NAME] \
+  --confirm NAME [--purge-s3]
 ```
 
-Create generates scoped credentials in the helper, verifies access and application health, updates only the owning Nomad Variable keys with compare-and-set, and records only non-secret provider identity and limits. Rotate does the same for new credentials and reports no values. Remove performs a preflight before each irreversible deletion; an S3 resource requires `--purge-s3` when non-empty. Provider absence and environment-key removal are confirmed before accepted records are deleted.
+Each mutation selects one exact instance. Its durable operation records the type and name, so a retry must repeat both. Create generates a provider identity, database/user or bucket/key scoped to that instance, verifies access and application health, writes collision-free `STORAGE__TYPE__NAME__OUTPUT` keys to the app Nomad Variable with compare-and-set, and records only non-secret identity and limits. Rotate and remove affect only that key set and provider instance. Remove requires the exact resource name in `--confirm`, performs preflight before irreversible deletion, and requires `--purge-s3` for a non-empty bucket. Provider absence and canonical-key removal are confirmed before accepted records are deleted.
 
 Do not create credential JSON, synchronize whole Nomad Variables, or use provider administrator credentials as a substitute for these commands.
 

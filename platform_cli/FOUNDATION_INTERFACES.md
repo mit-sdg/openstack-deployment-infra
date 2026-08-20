@@ -247,6 +247,7 @@ db.put_managed_resource(
     *,
     application_id: str,
     resource_type: str,
+    resource_name: str = "default",
     provider_name: str,
     lifecycle_state: str,
     provider_id: str | None = None,
@@ -261,7 +262,8 @@ db.list_managed_resources(
     connection, *, application_id: str | None = None
 ) -> list[db.ManagedResource]
 db.delete_managed_resource(
-    connection, *, application_id: str, resource_type: str
+    connection, *, application_id: str, resource_type: str,
+    resource_name: str = "default"
 ) -> None
 
 db.set_environment_keys(
@@ -275,6 +277,8 @@ db.list_environment_keys(
 Every write helper above opens and closes its own short transaction. SQL rows
 leave `db.py` only as frozen `Operation`, `ImageSelection`, `Application`,
 `Deployment`, `ManagedResource`, or `EnvironmentKey` records.
+
+Managed resource rows are keyed by `(application_id, resource_type, resource_name)`. Storage environment owners use `storage.TYPE.NAME`, and canonical secret keys use `STORAGE__TYPE__NAME__OUTPUT`; provider values remain inside the helper and app Nomad Variable.
 
 Operation `refs` are compact, command-owned, non-secret recovery identities.
 Never pass credentials, environment values, provider responses, source content,

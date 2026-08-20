@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -13,7 +14,8 @@ from typing import Any, Protocol
 
 from ..validation import ValidationError, env_key, slug
 
-OWNERS = frozenset({"platform", "staff", "postgres", "mongo", "s3"})
+OWNERS = frozenset({"platform", "staff"})
+_STORAGE_OWNER = re.compile(r"storage\.(?:postgres|mongo|s3)\.[a-z][a-z0-9-]{0,39}")
 
 
 class NomadError(RuntimeError):
@@ -81,7 +83,7 @@ def variable_path(application_slug: str) -> str:
 
 
 def _validate_owner(owner: str) -> str:
-    if owner not in OWNERS:
+    if owner not in OWNERS and _STORAGE_OWNER.fullmatch(owner) is None:
         raise ValidationError(f"unknown environment key owner {owner!r}")
     return owner
 

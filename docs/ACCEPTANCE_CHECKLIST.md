@@ -131,9 +131,9 @@ observable result passed, not when a command merely exited zero.
   provider access/application health verification:
 
   ```bash
-  /srv/openstack-platform/bin/openstack-platform storage create SLUG postgres
-  /srv/openstack-platform/bin/openstack-platform storage verify SLUG postgres
-  /srv/openstack-platform/bin/openstack-platform storage show SLUG postgres
+  /srv/openstack-platform/bin/openstack-platform storage create SLUG postgres --name default
+  /srv/openstack-platform/bin/openstack-platform storage verify SLUG postgres --name default
+  /srv/openstack-platform/bin/openstack-platform storage show SLUG postgres --name default
   ```
 
 - [ ] **DATA-02** Storage credentials are absent from SQLite, command output,

@@ -33,7 +33,8 @@ from .nomad import (
     variable_path,
 )
 
-_OWNERS = {"platform", "staff", "postgres", "mongo", "s3"}
+_OWNERS = {"platform", "staff"}
+_STORAGE_OWNER = re.compile(r"storage\.(?:postgres|mongo|s3)\.[a-z][a-z0-9-]{0,39}")
 
 
 def _exact_args(args: Mapping[str, Any], expected: set[str], action: str) -> None:
@@ -146,7 +147,9 @@ def _validated_ownership(value: object) -> dict[str, str]:
     result: dict[str, str] = {}
     for key, owner in value.items():
         key = env_key(key)
-        if owner not in _OWNERS:
+        if owner not in _OWNERS and (
+            not isinstance(owner, str) or _STORAGE_OWNER.fullmatch(owner) is None
+        ):
             raise ValidationError("environment ownership contains an unknown owner")
         result[key] = owner
     return result

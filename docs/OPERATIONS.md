@@ -706,9 +706,9 @@ bounded logs only when diagnosing:
 Only after the application is accepted, create and verify managed storage:
 
 ```bash
-/srv/openstack-platform/bin/openstack-platform storage create demo postgres
-/srv/openstack-platform/bin/openstack-platform storage verify demo postgres
-/srv/openstack-platform/bin/openstack-platform storage show demo postgres
+/srv/openstack-platform/bin/openstack-platform storage create demo postgres --name default
+/srv/openstack-platform/bin/openstack-platform storage verify demo postgres --name default
+/srv/openstack-platform/bin/openstack-platform storage show demo postgres --name default
 ```
 
 Use `mongo` or `s3` instead/as well when required. SQLite stores only the
@@ -717,12 +717,60 @@ remain in the helper and owner-specific Nomad Variables. Rotate only through
 the same control surface:
 
 ```bash
-/srv/openstack-platform/bin/openstack-platform storage rotate demo postgres
-/srv/openstack-platform/bin/openstack-platform storage verify demo postgres
+/srv/openstack-platform/bin/openstack-platform storage rotate demo postgres --name default
+/srv/openstack-platform/bin/openstack-platform storage verify demo postgres --name default
 ```
 
 PostgreSQL and MongoDB measured-byte values are configured targets, not usage
 observations; no periodic usage collector is installed.
+
+### Migrate a pre-named default resource
+
+This procedure applies only when upgrading schema version 4 to version 5. It preserves the provider database, users, data, and accepted provider identity; it renames only the app Variable keys and records the resource name as `default`. Take and verify both management-state and managed-data backups first. Do not create or rotate storage during the procedure.
+
+1. Add the exact default binding to the application's `platform.yaml` at the commit that will be deployed. For the current Commons Mongo resource:
+
+   ```yaml
+   storage:
+     bindings:
+       default:
+         type: mongo
+         environment:
+           uri: MONGODB_URI
+   ```
+
+2. Install the new release. Run a read command and verify that migration 5 projected the accepted row without changing its provider identity:
+
+   ```bash
+   /srv/openstack-platform/bin/openstack-platform storage show commons mongo --name default
+   ```
+
+3. Stop the current job before renaming its Variable key. This avoids restarting the old template without `MONGODB_URI`:
+
+   ```bash
+   namespace="$(/srv/openstack-platform/runtime/python3.14 -c \
+     'import json; print(json.load(open("/srv/openstack-platform/config/platform.json"))["namespace"])')"
+   /srv/openstack-platform/bin/${namespace}-nomad job stop -detach commons
+   ```
+
+   Do not use `-purge`; the accepted deployment and app Variable must remain.
+
+4. Atomically rename the secret inside the helper boundary. The command is idempotent and returns no credential value:
+
+   ```bash
+   /srv/openstack-platform/bin/openstack-platform storage migrate-default commons mongo
+   ```
+
+5. Deploy the exact commit containing the binding, then verify the selected instance and public application health:
+
+   ```bash
+   /srv/openstack-platform/bin/openstack-platform app deploy commons \
+     --repo https://github.com/OWNER/REPOSITORY --commit COMMIT
+   /srv/openstack-platform/bin/openstack-platform storage verify commons mongo --name default
+   /srv/openstack-platform/bin/openstack-platform app show commons
+   ```
+
+After step 4, an old release cannot read the renamed key. If deployment fails, keep the job stopped, correct the binding or deployment failure, and rerun the same deploy; do not copy credentials into a shell or edit the Nomad Variable manually. Roll back the application source only to a commit that contains the same binding. Restore the pre-upgrade management and managed-data backups only as a coordinated offline recovery.
 
 ## 7. Back up, restore, and reconcile
 
@@ -973,7 +1021,7 @@ Remove managed storage before its application, using exact-slug confirmation.
 S3 removal additionally requires explicit `--purge-s3` when non-empty:
 
 ```bash
-/srv/openstack-platform/bin/openstack-platform storage remove demo postgres --confirm demo
+/srv/openstack-platform/bin/openstack-platform storage remove demo postgres --name default --confirm default
 /srv/openstack-platform/bin/openstack-platform app remove demo --confirm demo
 /srv/openstack-platform/bin/openstack-platform app list
 /srv/openstack-platform/bin/openstack-platform storage list

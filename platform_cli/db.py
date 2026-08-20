@@ -30,13 +30,18 @@ from .validation import (
 from .validation import (
     health_path as validate_health_path,
 )
+from .validation import (
+    resource_name as validate_resource_name,
+)
 
 BUSY_TIMEOUT_MS = 5_000
 _MAX_REFS_BYTES = 16_384
 _OPERATION_TOKEN = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _CLEANUP_STATE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _NOMAD_JOB_SHA: re.Pattern[str] = re.compile(r'm1_candidate_job_sha256\s*=\s*"([0-9a-f]{64})"')
-_ENVIRONMENT_OWNERS = {"platform", "staff", "postgres", "mongo", "s3"}
+_ENVIRONMENT_OWNER = re.compile(
+    r"(?:platform|staff|storage\.(?:postgres|mongo|s3)\.[a-z][a-z0-9-]{0,39})"
+)
 _SECRET_KEY = re.compile(
     r"(?:^|_)(?:password|passwd|secret|token|credential|private_key|user_data|cloud_init|env_value|source_contents?)(?:$|_)",
     re.IGNORECASE,
@@ -146,6 +151,7 @@ class Deployment:
 class ManagedResource:
     application_id: str
     resource_type: str
+    resource_name: str
     provider_id: str | None
     provider_name: str
     lifecycle_state: str
@@ -281,6 +287,66 @@ MIGRATIONS: tuple[Migration, ...] = (
             WHERE status IN ('running','recovery_required')
             """,
             "CREATE INDEX operations_updated_at ON operations(updated_at)",
+        ),
+    ),
+    Migration(
+        5,
+        (
+            """
+            ALTER TABLE managed_resources RENAME TO managed_resources_unnamed
+            """,
+            """
+            CREATE TABLE managed_resources (
+                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
+                resource_type TEXT NOT NULL CHECK (resource_type IN ('postgres','mongo','s3')),
+                resource_name TEXT NOT NULL CHECK (
+                    length(resource_name) BETWEEN 1 AND 40
+                    AND resource_name GLOB '[a-z]*'
+                    AND resource_name NOT GLOB '*[^a-z0-9-]*'
+                    AND resource_name NOT GLOB '*--*'
+                    AND (length(resource_name) = 1 OR substr(resource_name, -1) GLOB '[a-z0-9]')
+                ),
+                provider_id TEXT,
+                provider_name TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('creating','active','removing','recovery_required')),
+                postgres_connections INTEGER CHECK (postgres_connections > 0),
+                measured_target_bytes INTEGER CHECK (measured_target_bytes > 0),
+                s3_bytes INTEGER CHECK (s3_bytes > 0),
+                s3_objects INTEGER CHECK (s3_objects > 0),
+                last_verified_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (application_id, resource_type, resource_name),
+                CHECK (resource_type = 'postgres' OR postgres_connections IS NULL),
+                CHECK (resource_type IN ('postgres','mongo') OR measured_target_bytes IS NULL),
+                CHECK (resource_type = 's3' OR (s3_bytes IS NULL AND s3_objects IS NULL))
+            ) STRICT
+            """,
+            """
+            INSERT INTO managed_resources
+            SELECT application_id, resource_type, 'default', provider_id, provider_name,
+                   lifecycle_state, postgres_connections, measured_target_bytes,
+                   s3_bytes, s3_objects, last_verified_at, created_at, updated_at
+              FROM managed_resources_unnamed
+            """,
+            "DROP TABLE managed_resources_unnamed",
+            "ALTER TABLE environment_keys RENAME TO environment_keys_unnamed",
+            """
+            CREATE TABLE environment_keys (
+                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
+                key_name TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                PRIMARY KEY (application_id, key_name)
+            ) STRICT
+            """,
+            """
+            INSERT INTO environment_keys
+            SELECT application_id, key_name,
+                   CASE WHEN owner IN ('postgres','mongo','s3')
+                        THEN 'storage.' || owner || '.default' ELSE owner END
+              FROM environment_keys_unnamed
+            """,
+            "DROP TABLE environment_keys_unnamed",
         ),
     ),
 )
@@ -1369,6 +1435,7 @@ def put_managed_resource(
     *,
     application_id: str,
     resource_type: str,
+    resource_name: str = "default",
     provider_name: str,
     lifecycle_state: str,
     provider_id: str | None = None,
@@ -1380,12 +1447,13 @@ def put_managed_resource(
     now: str | None = None,
 ) -> None:
     application_id = uuid(application_id, field="application_id")
+    checked_resource_name = validate_resource_name(resource_name)
     timestamp = now or utc_now()
     with transaction(connection):
         connection.execute(
             """
-            INSERT INTO managed_resources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(application_id, resource_type) DO UPDATE SET
+            INSERT INTO managed_resources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(application_id, resource_type, resource_name) DO UPDATE SET
               provider_id=excluded.provider_id, provider_name=excluded.provider_name,
               lifecycle_state=excluded.lifecycle_state,
               postgres_connections=excluded.postgres_connections,
@@ -1396,6 +1464,7 @@ def put_managed_resource(
             (
                 application_id,
                 resource_type,
+                checked_resource_name,
                 provider_id,
                 provider_name,
                 lifecycle_state,
@@ -1417,17 +1486,18 @@ def list_managed_resources(
 ) -> list[ManagedResource]:
     if application_id is None:
         rows = connection.execute(
-            "SELECT * FROM managed_resources ORDER BY application_id, resource_type"
+            "SELECT * FROM managed_resources ORDER BY application_id, resource_type, resource_name"
         )
     else:
         rows = connection.execute(
-            "SELECT * FROM managed_resources WHERE application_id = ? ORDER BY resource_type",
+            "SELECT * FROM managed_resources WHERE application_id = ? ORDER BY resource_type, resource_name",
             (application_id,),
         )
     return [
         ManagedResource(
             application_id=row["application_id"],
             resource_type=row["resource_type"],
+            resource_name=row["resource_name"],
             provider_id=row["provider_id"],
             provider_name=row["provider_name"],
             lifecycle_state=row["lifecycle_state"],
@@ -1448,12 +1518,14 @@ def delete_managed_resource(
     *,
     application_id: str,
     resource_type: str,
+    resource_name: str = "default",
 ) -> None:
     uuid(application_id, field="application_id")
+    checked_name = validate_resource_name(resource_name)
     with transaction(connection):
         connection.execute(
-            "DELETE FROM managed_resources WHERE application_id = ? AND resource_type = ?",
-            (application_id, resource_type),
+            "DELETE FROM managed_resources WHERE application_id = ? AND resource_type = ? AND resource_name = ?",
+            (application_id, resource_type, checked_name),
         )
 
 
@@ -1466,7 +1538,7 @@ def set_environment_keys(
 ) -> None:
     """Replace names for one owner without touching another owner's names."""
     application_id = uuid(application_id, field="application_id")
-    if owner not in _ENVIRONMENT_OWNERS:
+    if not isinstance(owner, str) or not _ENVIRONMENT_OWNER.fullmatch(owner):
         raise ValidationError(f"unknown environment key owner {owner!r}")
     validated = sorted({env_key(key) for key in keys})
     with transaction(connection):

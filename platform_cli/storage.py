@@ -8,6 +8,7 @@ path.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 import uuid as uuid_module
@@ -18,8 +19,16 @@ from typing import Any
 
 from . import db, remote
 from .config import Config
-from .storage_contract import ENVIRONMENT_KEYS, RESOURCE_TYPES
+from .storage_contract import (
+    ENVIRONMENT_KEYS as ENVIRONMENT_KEYS,
+)
+from .storage_contract import (
+    RESOURCE_TYPES,
+    canonical_secret_keys,
+    storage_owner,
+)
 from .validation import ValidationError, slug, uuid
+from .validation import resource_name as validate_resource_name
 
 HelperCaller = Callable[..., Mapping[str, Any]]
 
@@ -104,21 +113,29 @@ def _application(connection: sqlite3.Connection, identifier: str) -> db.Applicat
 
 def _resources(
     connection: sqlite3.Connection, application_id: str
-) -> dict[str, db.ManagedResource]:
+) -> dict[tuple[str, str], db.ManagedResource]:
     return {
-        item.resource_type: item
+        (item.resource_type, item.resource_name): item
         for item in db.list_managed_resources(connection, application_id=application_id)
     }
 
 
-def _provider_name(config: Config, application: db.Application, resource_type: str) -> str:
-    base = application.application_id.replace("-", "")[:20]
+def _provider_name(
+    config: Config, application: db.Application, resource_type: str, name: str
+) -> str:
+    digest = hashlib.sha256(
+        f"{application.application_id}:{resource_type}:{name}".encode()
+    ).hexdigest()
     if resource_type in {"postgres", "mongo"}:
+        base = (
+            application.application_id.replace("-", "")[:20] if name == "default" else digest[:20]
+        )
         return f"p_{base}"
     prefix = config.platform.prefix
-    suffix = application.application_id.replace("-", "")[:8]
-    slug_limit = 63 - len(prefix) - len(suffix) - 2
-    return f"{prefix}-{application.slug[:slug_limit].rstrip('-')}-{suffix}"
+    suffix = application.application_id.replace("-", "")[:8] if name == "default" else digest[:10]
+    visible = application.slug if name == "default" else f"{application.slug}-{name}"
+    visible_limit = 63 - len(prefix) - len(suffix) - 2
+    return f"{prefix}-{visible[:visible_limit].rstrip('-')}-{suffix}"
 
 
 def _standard_storage_args(config: Config, resource_type: str) -> dict[str, int]:
@@ -188,8 +205,12 @@ def _call(
     )
 
 
-def _common(application: db.Application) -> dict[str, str]:
-    return {"applicationId": application.application_id, "applicationSlug": application.slug}
+def _common(application: db.Application, resource_name: str) -> dict[str, str]:
+    return {
+        "applicationId": application.application_id,
+        "applicationSlug": application.slug,
+        "resourceName": resource_name,
+    }
 
 
 def _identity_result(result: Mapping[str, Any]) -> tuple[str, str]:
@@ -233,6 +254,7 @@ def _put_resource(
     config: Config,
     application: db.Application,
     resource_type: str,
+    resource_name: str,
     *,
     lifecycle_state: str,
     provider_id: str | None,
@@ -248,6 +270,7 @@ def _put_resource(
         connection,
         application_id=application.application_id,
         resource_type=resource_type,
+        resource_name=resource_name,
         provider_id=provider_id,
         provider_name=provider_name,
         lifecycle_state=lifecycle_state,
@@ -346,9 +369,10 @@ def _recovery_action(
     operation: db.Operation,
 ) -> str:
     command = kind.removeprefix("storage.")
-    arguments = f"{application.slug} {resource_type}"
+    name = validate_resource_name(operation.refs.get("resource_name", "default"))
+    arguments = f"{application.slug} {resource_type} --name {name}"
     if kind == "storage.remove":
-        arguments += f" --confirm {application.slug}"
+        arguments += f" --confirm {name}"
         if operation.refs.get("purge_s3") is True:
             arguments += " --purge-s3"
     return (
@@ -370,12 +394,16 @@ def _mark_ambiguous(
     provider_name: str,
     message: str,
 ) -> None:
-    existing = _resources(connection, application.application_id).get(resource_type)
+    resource_name = validate_resource_name(operation.refs.get("resource_name", "default"))
+    existing = _resources(connection, application.application_id).get(
+        (resource_type, resource_name)
+    )
     _put_resource(
         connection,
         config,
         application,
         resource_type,
+        resource_name,
         lifecycle_state="recovery_required",
         provider_id=provider_id,
         provider_name=provider_name,
@@ -448,6 +476,7 @@ def create(
     application_id: str,
     resource_types: Iterable[str],
     *,
+    resource_name: str = "default",
     helper_caller: HelperCaller = remote.call_helper,
     operation_id: str | None = None,
     deadline_at: str | None = None,
@@ -455,14 +484,19 @@ def create(
 ) -> StorageResult:
     """Create missing resources or reconcile the same interrupted create."""
     application = _application(connection, application_id)
+    checked_name = validate_resource_name(resource_name)
     selected = _selected(resource_types)
     operation = _existing_operation(
-        connection, application, kind="storage.create", selected=selected
+        connection,
+        application,
+        kind="storage.create",
+        selected=selected,
+        extra_refs={"resource_name": checked_name},
     )
     recovering = operation is not None
     resources = _resources(connection, application.application_id)
     if operation is None:
-        duplicates = [item for item in selected if item in resources]
+        duplicates = [item for item in selected if (item, checked_name) in resources]
         if duplicates:
             raise ValidationError(f"storage already exists: {', '.join(duplicates)}")
         operation = _begin(
@@ -474,6 +508,7 @@ def create(
             phase="validated",
             operation_id=operation_id,
             deadline_at=(deadline_at or _deadline(config, process_deadline=process_deadline)),
+            extra_refs={"resource_name": checked_name},
         )
     attempt_deadline_at = _attempt_deadline(
         config,
@@ -485,14 +520,15 @@ def create(
     for resource_type in selected:
         if resource_type in completed:
             continue
-        anticipated_name = _provider_name(config, application, resource_type)
-        current = resources.get(resource_type)
+        anticipated_name = _provider_name(config, application, resource_type, checked_name)
+        current = resources.get((resource_type, checked_name))
         if not recovering or current is None:
             _put_resource(
                 connection,
                 config,
                 application,
                 resource_type,
+                checked_name,
                 lifecycle_state="creating",
                 provider_id=None,
                 provider_name=anticipated_name,
@@ -511,7 +547,7 @@ def create(
                 config,
                 f"storage.{resource_type}.create",
                 {
-                    **_common(application),
+                    **_common(application, checked_name),
                     **_standard_storage_args(config, resource_type),
                     **_mutation_args(operation, recovering=recovering),
                 },
@@ -540,6 +576,7 @@ def create(
                     connection,
                     application_id=application.application_id,
                     resource_type=resource_type,
+                    resource_name=checked_name,
                 )
                 db.mark_failed(
                     connection,
@@ -562,12 +599,15 @@ def create(
                 provider_name=anticipated_name,
                 message=f"{resource_type} creation was not confirmed",
             )
-        accepted = _resources(connection, application.application_id).get(resource_type)
+        accepted = _resources(connection, application.application_id).get(
+            (resource_type, checked_name)
+        )
         _put_resource(
             connection,
             config,
             application,
             resource_type,
+            checked_name,
             lifecycle_state="active",
             provider_id=provider_id,
             provider_name=provider_name,
@@ -577,8 +617,8 @@ def create(
         db.set_environment_keys(
             connection,
             application_id=application.application_id,
-            owner=resource_type,
-            keys=ENVIRONMENT_KEYS[resource_type],
+            owner=storage_owner(resource_type, checked_name),
+            keys=canonical_secret_keys(resource_type, checked_name),
         )
         completed.append(resource_type)
         recovering = False
@@ -599,6 +639,7 @@ def verify(
     application_id: str,
     resource_types: Iterable[str] | None = None,
     *,
+    resource_name: str = "default",
     helper_caller: HelperCaller = remote.call_helper,
     operation_id: str | None = None,
     deadline_at: str | None = None,
@@ -606,19 +647,24 @@ def verify(
 ) -> StorageResult:
     """Verify credentials, retrying an interrupted verification without reading secrets."""
     application = _application(connection, application_id)
+    checked_name = validate_resource_name(resource_name)
     resources = _resources(connection, application.application_id)
     selected = (
         _selected(resource_types)
         if resource_types is not None
-        else tuple(item for item in RESOURCE_TYPES if item in resources)
+        else tuple(item for item in RESOURCE_TYPES if (item, checked_name) in resources)
     )
     if not selected:
         raise ValidationError("application has no managed storage")
     operation = _existing_operation(
-        connection, application, kind="storage.verify", selected=selected
+        connection,
+        application,
+        kind="storage.verify",
+        selected=selected,
+        extra_refs={"resource_name": checked_name},
     )
     recovering = operation is not None
-    missing = [item for item in selected if item not in resources]
+    missing = [item for item in selected if (item, checked_name) not in resources]
     if missing:
         if operation is not None:
             raise StorageOperationError("unfinished storage verification metadata is inconsistent")
@@ -633,6 +679,7 @@ def verify(
             phase="validated",
             operation_id=operation_id,
             deadline_at=(deadline_at or _deadline(config, process_deadline=process_deadline)),
+            extra_refs={"resource_name": checked_name},
         )
     attempt_deadline_at = _attempt_deadline(
         config,
@@ -644,7 +691,7 @@ def verify(
     for resource_type in selected:
         if resource_type in completed:
             continue
-        resource = resources[resource_type]
+        resource = resources[(resource_type, checked_name)]
         db.checkpoint_operation(
             connection,
             operation.operation_id,
@@ -658,7 +705,7 @@ def verify(
                 config,
                 f"storage.{resource_type}.verify",
                 {
-                    **_common(application),
+                    **_common(application, checked_name),
                     "providerId": resource.provider_id,
                     "providerName": resource.provider_name,
                     **_mutation_args(operation, recovering=recovering),
@@ -693,6 +740,7 @@ def verify(
             config,
             application,
             resource_type,
+            checked_name,
             lifecycle_state="active",
             provider_id=resource.provider_id,
             provider_name=resource.provider_name,
@@ -717,6 +765,7 @@ def rotate(
     application_id: str,
     resource_types: Iterable[str],
     *,
+    resource_name: str = "default",
     helper_caller: HelperCaller = remote.call_helper,
     operation_id: str | None = None,
     deadline_at: str | None = None,
@@ -724,13 +773,18 @@ def rotate(
 ) -> StorageResult:
     """Rotate selected credentials or reconcile the same interrupted rotation."""
     application = _application(connection, application_id)
+    checked_name = validate_resource_name(resource_name)
     selected = _selected(resource_types)
     operation = _existing_operation(
-        connection, application, kind="storage.rotate", selected=selected
+        connection,
+        application,
+        kind="storage.rotate",
+        selected=selected,
+        extra_refs={"resource_name": checked_name},
     )
     recovering = operation is not None
     resources = _resources(connection, application.application_id)
-    missing = [item for item in selected if item not in resources]
+    missing = [item for item in selected if (item, checked_name) not in resources]
     if missing:
         if operation is not None:
             raise StorageOperationError("unfinished storage rotation metadata is inconsistent")
@@ -745,6 +799,7 @@ def rotate(
             phase="validated",
             operation_id=operation_id,
             deadline_at=(deadline_at or _deadline(config, process_deadline=process_deadline)),
+            extra_refs={"resource_name": checked_name},
         )
     attempt_deadline_at = _attempt_deadline(
         config,
@@ -758,7 +813,7 @@ def rotate(
     for resource_type in selected:
         if resource_type in completed:
             continue
-        resource = resources[resource_type]
+        resource = resources[(resource_type, checked_name)]
         db.checkpoint_operation(
             connection,
             operation.operation_id,
@@ -767,7 +822,7 @@ def rotate(
             merge_refs=True,
         )
         args: dict[str, Any] = {
-            **_common(application),
+            **_common(application, checked_name),
             "providerId": resource.provider_id,
             "providerName": resource.provider_name,
             **_mutation_args(operation, recovering=recovering),
@@ -824,6 +879,7 @@ def rotate(
                 config,
                 application,
                 resource_type,
+                checked_name,
                 lifecycle_state="active",
                 provider_id=resource.provider_id,
                 provider_name=resource.provider_name,
@@ -857,6 +913,7 @@ def rotate(
             config,
             application,
             resource_type,
+            checked_name,
             lifecycle_state="active",
             provider_id=resource.provider_id,
             provider_name=resource.provider_name,
@@ -881,7 +938,9 @@ def remove(
     application_id: str,
     resource_types: Iterable[str],
     *,
-    confirm_slug: str,
+    resource_name: str = "default",
+    confirm_name: str | None = None,
+    confirm_slug: str | None = None,
     confirm_destructive: bool,
     purge_s3: bool = False,
     helper_caller: HelperCaller = remote.call_helper,
@@ -891,9 +950,12 @@ def remove(
 ) -> StorageResult:
     """Remove resources, reconciling absence before deleting accepted metadata."""
     application = _application(connection, application_id)
+    checked_name = validate_resource_name(resource_name)
     selected = _selected(resource_types)
-    if confirm_destructive is not True or slug(confirm_slug) != application.slug:
-        raise ValidationError("destructive storage removal requires the exact application slug")
+    if confirm_destructive is not True or confirm_name != checked_name:
+        raise ValidationError("destructive storage removal requires the exact resource name")
+    if confirm_slug is not None and slug(confirm_slug) != application.slug:
+        raise ValidationError("destructive storage removal application confirmation is invalid")
     if not isinstance(purge_s3, bool):
         raise ValidationError("purge_s3 must be boolean")
     operation = _existing_operation(
@@ -901,14 +963,16 @@ def remove(
         application,
         kind="storage.remove",
         selected=selected,
-        extra_refs={"purge_s3": purge_s3},
+        extra_refs={"purge_s3": purge_s3, "resource_name": checked_name},
     )
     recovering = operation is not None
     resources = _resources(connection, application.application_id)
     completed = list(_refs_list(operation.refs, "completed")) if operation is not None else []
     if any(item not in selected for item in completed):
         raise StorageOperationError("unfinished storage removal metadata is inconsistent")
-    missing = [item for item in selected if item not in resources and item not in completed]
+    missing = [
+        item for item in selected if (item, checked_name) not in resources and item not in completed
+    ]
     if missing:
         if operation is not None:
             raise StorageOperationError("unfinished storage removal metadata is inconsistent")
@@ -923,7 +987,7 @@ def remove(
             phase="confirmed",
             operation_id=operation_id,
             deadline_at=(deadline_at or _deadline(config, process_deadline=process_deadline)),
-            extra_refs={"purge_s3": purge_s3},
+            extra_refs={"purge_s3": purge_s3, "resource_name": checked_name},
         )
     attempt_deadline_at = _attempt_deadline(
         config,
@@ -943,16 +1007,16 @@ def remove(
         pending = tuple(item for item in selected if item not in completed)
         try:
             for pending_type in pending:
-                pending_resource = resources.get(pending_type)
+                pending_resource = resources.get((pending_type, checked_name))
                 if pending_resource is None:
                     raise StorageOperationError(
                         "unfinished storage removal metadata is inconsistent"
                     )
                 preflight_args: dict[str, Any] = {
-                    **_common(application),
+                    **_common(application, checked_name),
                     "providerId": pending_resource.provider_id,
                     "providerName": pending_resource.provider_name,
-                    "confirmSlug": application.slug,
+                    "confirmName": checked_name,
                     "preflight": True,
                     **_mutation_args(operation, recovering=recovering),
                 }
@@ -1017,13 +1081,14 @@ def remove(
             merge_refs=True,
         )
 
-        resource = resources[resource_type]
+        resource = resources[(resource_type, checked_name)]
         if not recovering:
             _put_resource(
                 connection,
                 config,
                 application,
                 resource_type,
+                checked_name,
                 lifecycle_state="removing",
                 provider_id=resource.provider_id,
                 provider_name=resource.provider_name,
@@ -1038,10 +1103,10 @@ def remove(
             merge_refs=True,
         )
         args: dict[str, Any] = {
-            **_common(application),
+            **_common(application, checked_name),
             "providerId": resource.provider_id,
             "providerName": resource.provider_name,
-            "confirmSlug": application.slug,
+            "confirmName": checked_name,
             "preflight": False,
             **_mutation_args(operation, recovering=recovering),
         }
@@ -1084,13 +1149,14 @@ def remove(
         db.set_environment_keys(
             connection,
             application_id=application.application_id,
-            owner=resource_type,
+            owner=storage_owner(resource_type, checked_name),
             keys=(),
         )
         db.delete_managed_resource(
             connection,
             application_id=application.application_id,
             resource_type=resource_type,
+            resource_name=checked_name,
         )
         completed.append(resource_type)
         recovering = False
@@ -1111,5 +1177,5 @@ def remove(
         operation,
         selected,
         completed,
-        extra_refs={"purge_s3": purge_s3},
+        extra_refs={"purge_s3": purge_s3, "resource_name": checked_name},
     )

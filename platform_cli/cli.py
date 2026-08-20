@@ -30,8 +30,12 @@ from . import app, db, openstack, remote, restore, runtime, setup, status, stora
 from .config import Config, load, load_platform
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
+    RESERVED_ENVIRONMENT_PREFIX,
     RESOURCE_TYPES,
+    canonical_secret_key,
+    canonical_secret_keys,
     platform_environment_values,
+    storage_owner,
 )
 from .validation import (
     ValidationError,
@@ -225,18 +229,26 @@ def build_parser() -> argparse.ArgumentParser:
     storage_show = storage_commands.add_parser("show")
     storage_show.add_argument("slug")
     storage_show.add_argument("type", choices=RESOURCE_TYPES)
+    storage_show.add_argument("--name", default="default")
     storage_create = storage_commands.add_parser("create")
     storage_create.add_argument("slug")
-    storage_create.add_argument("types", nargs="+", choices=RESOURCE_TYPES)
+    storage_create.add_argument("type", choices=RESOURCE_TYPES)
+    storage_create.add_argument("--name", default="default")
     storage_verify = storage_commands.add_parser("verify")
     storage_verify.add_argument("slug")
-    storage_verify.add_argument("types", nargs="*", choices=RESOURCE_TYPES)
+    storage_verify.add_argument("type", nargs="?", choices=RESOURCE_TYPES)
+    storage_verify.add_argument("--name", default="default")
+    storage_migrate = storage_commands.add_parser("migrate-default")
+    storage_migrate.add_argument("slug")
+    storage_migrate.add_argument("type", choices=RESOURCE_TYPES)
     storage_rotate = storage_commands.add_parser("rotate")
     storage_rotate.add_argument("slug")
-    storage_rotate.add_argument("types", nargs="+", choices=RESOURCE_TYPES)
+    storage_rotate.add_argument("type", choices=RESOURCE_TYPES)
+    storage_rotate.add_argument("--name", default="default")
     storage_remove = storage_commands.add_parser("remove")
     storage_remove.add_argument("slug")
-    storage_remove.add_argument("types", nargs="+", choices=RESOURCE_TYPES)
+    storage_remove.add_argument("type", choices=RESOURCE_TYPES)
+    storage_remove.add_argument("--name", default="default")
     storage_remove.add_argument("--confirm", required=True)
     storage_remove.add_argument("--purge-s3", action="store_true")
     return parser
@@ -1118,7 +1130,9 @@ def _environment_mutation(
             ):
                 raise app.ApplicationError("interrupted environment intent is malformed")
             recovery_intended_names = {env_key(item) for item in intended}
-            if recovery_intended_names & _PLATFORM_ENVIRONMENT:
+            if recovery_intended_names & _PLATFORM_ENVIRONMENT or any(
+                name.startswith(RESERVED_ENVIRONMENT_PREFIX) for name in recovery_intended_names
+            ):
                 raise app.ApplicationError(
                     "interrupted staff environment intent used a reserved key"
                 )
@@ -1191,7 +1205,9 @@ def _environment_mutation(
         protected = {
             name
             for name in intended_names
-            if name in _PLATFORM_ENVIRONMENT or (name in ownership and ownership[name] != "staff")
+            if name in _PLATFORM_ENVIRONMENT
+            or name.startswith(RESERVED_ENVIRONMENT_PREFIX)
+            or (name in ownership and ownership[name] != "staff")
         }
         if protected:
             raise ValidationError(
@@ -1301,14 +1317,8 @@ def _app_read(
 
 
 def _manifest_from_build(value: object) -> app.Manifest:
-    if not isinstance(value, dict) or value.keys() != {
-        "runtime",
-        "packages",
-        "buildScript",
-        "startScript",
-        "port",
-        "healthPath",
-    }:
+    required = {"runtime", "packages", "buildScript", "startScript", "port", "healthPath"}
+    if not isinstance(value, dict) or set(value) not in (required, required | {"storageBindings"}):
         raise app.ApplicationError("build helper returned invalid manifest evidence")
     packages = value["packages"]
     if not isinstance(packages, list) or not packages:
@@ -1316,6 +1326,19 @@ def _manifest_from_build(value: object) -> app.Manifest:
     runtime_name = value["runtime"]
     if not isinstance(runtime_name, str) or runtime_name not in {"bun", "node"}:
         raise app.ApplicationError("build helper returned invalid runtime evidence")
+    raw_bindings = value.get("storageBindings", [])
+    if not isinstance(raw_bindings, list):
+        raise app.ApplicationError("build helper returned invalid storage binding evidence")
+    bindings: list[app.StorageBinding] = []
+    for binding in raw_bindings:
+        if not isinstance(binding, dict) or binding.keys() != {"name", "type", "environment"}:
+            raise app.ApplicationError("build helper returned invalid storage binding evidence")
+        environment = binding["environment"]
+        if not isinstance(environment, dict):
+            raise app.ApplicationError("build helper returned invalid storage binding evidence")
+        bindings.append(
+            app.StorageBinding(binding["name"], binding["type"], tuple(sorted(environment.items())))
+        )
     return app.Manifest(
         runtime=runtime_name,
         packages=tuple(relative_path(item, field="package path") for item in packages),
@@ -1323,6 +1346,7 @@ def _manifest_from_build(value: object) -> app.Manifest:
         start_script=script_name(value["startScript"]),
         port=value["port"],
         health_path=health_path(value["healthPath"]),
+        storage_bindings=tuple(bindings),
     )
 
 
@@ -1521,6 +1545,14 @@ def _prepare_platform_environment(
     build: _DeploymentBuild,
     deadline: float,
 ) -> dict[str, Any]:
+    _validate_storage_bindings(
+        connection,
+        config,
+        application_id=application_id,
+        application_slug=application_slug,
+        manifest=build.manifest,
+        deadline=deadline,
+    )
     platform_values = platform_environment_values(
         application_id,
         application_slug,
@@ -1667,6 +1699,53 @@ def _prepare_deployment_worker(
     return _DeploymentWorker(server_id, server_name, port_id, port_name, refs)
 
 
+def _validate_storage_bindings(
+    connection: sqlite3.Connection,
+    config: Config,
+    *,
+    application_id: str,
+    application_slug: str,
+    manifest: app.Manifest,
+    deadline: float,
+) -> None:
+    if not manifest.storage_bindings:
+        return
+    resources = {
+        (item.resource_type, item.resource_name): item
+        for item in db.list_managed_resources(connection, application_id=application_id)
+    }
+    required_keys: set[str] = set()
+    targets: set[str] = set()
+    for binding in manifest.storage_bindings:
+        resource = resources.get((binding.resource_type, binding.name))
+        if resource is None or resource.lifecycle_state != "active":
+            raise ValidationError(
+                f"storage binding {binding.name!r} references a missing or inactive {binding.resource_type} resource"
+            )
+        for output, target in binding.environment:
+            required_keys.add(canonical_secret_key(binding.resource_type, binding.name, output))
+            targets.add(target)
+    observed = app.list_environment(
+        application_slug,
+        timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
+        helper_caller=lambda action, values, **_bounds: _helper(
+            config, action, values, deadline=deadline
+        ),
+    )
+    names = observed.get("keys")
+    if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
+        raise app.ApplicationError("helper returned invalid environment-key evidence")
+    present = set(names)
+    missing = sorted(required_keys - present)
+    if missing:
+        raise ValidationError("storage binding outputs are missing from the application variable")
+    conflicts = sorted(targets & present)
+    if conflicts:
+        raise ValidationError(
+            f"storage binding target {conflicts[0]!r} conflicts with an existing environment key"
+        )
+
+
 def _deploy_and_accept_application(
     connection: sqlite3.Connection,
     config: Config,
@@ -1678,6 +1757,14 @@ def _deploy_and_accept_application(
     deadline: float,
 ) -> app.DeploymentResult:
     previous = db.get_deployment(connection, spec.application_id)
+    _validate_storage_bindings(
+        connection,
+        config,
+        application_id=spec.application_id,
+        application_slug=spec.application_slug,
+        manifest=build.manifest,
+        deadline=deadline,
+    )
     job = app.render_nomad_job(
         application_id=spec.application_id,
         application_slug=spec.application_slug,
@@ -1942,6 +2029,14 @@ def _recover_app_deployment(
     if recovery_action == "accept_deployment":
         candidate = oci_digest_pin(operation.candidate_digest, field="candidate digest")
         manifest = _manifest_from_build(operation.refs.get("manifest"))
+        _validate_storage_bindings(
+            connection,
+            config,
+            application_id=application_id,
+            application_slug=application_slug,
+            manifest=manifest,
+            deadline=deadline,
+        )
         job = app.render_nomad_job(
             application_id=application_id,
             application_slug=application_slug,
@@ -2346,6 +2441,7 @@ def _storage_row(item: Mapping[str, object]) -> tuple[object, ...]:
     return (
         item["slug"],
         item["type"],
+        item["name"],
         item.get("providerId"),
         item.get("providerName"),
         item["lifecycleState"],
@@ -2364,7 +2460,7 @@ def _storage_read(
 ) -> None:
     observe = status.storage_observer(connection, config)
     if args.storage_command == "show":
-        model = status.storage_show(connection, args.slug, args.type, observe=observe)
+        model = status.storage_show(connection, args.slug, args.type, args.name, observe=observe)
         models = [] if model is None else [model]
     else:
         models = status.storage_list(connection, application_identifier=args.slug, observe=observe)
@@ -2374,6 +2470,7 @@ def _storage_read(
         (
             "SLUG",
             "TYPE",
+            "NAME",
             "PROVIDER_ID",
             "PROVIDER_NAME",
             "STATE",
@@ -2395,12 +2492,49 @@ def _storage_mutation(
     with runtime.lock(args.state_directory, f"app-{application.application_id}", deadline=deadline):
         _verify_mutation_project(config, deadline=deadline)
         application = _application(connection, args.slug)
+        selected = None if args.storage_command == "verify" and args.type is None else [args.type]
+        if args.storage_command == "migrate-default":
+            resource = next(
+                (
+                    item
+                    for item in db.list_managed_resources(
+                        connection, application_id=application.application_id
+                    )
+                    if item.resource_type == args.type and item.resource_name == "default"
+                ),
+                None,
+            )
+            if resource is None:
+                raise ValidationError("default managed storage does not exist")
+            migrated = _helper(
+                config,
+                f"storage.{args.type}.migrate",
+                {
+                    "applicationId": application.application_id,
+                    "applicationSlug": application.slug,
+                    "resourceName": "default",
+                },
+                deadline=deadline,
+            )
+            if migrated.get("migrated") is not True or migrated.get("keyNames") != list(
+                canonical_secret_keys(args.type, "default")
+            ):
+                raise app.ApplicationError("default storage key migration was not confirmed")
+            db.set_environment_keys(
+                connection,
+                application_id=application.application_id,
+                owner=storage_owner(args.type, "default"),
+                keys=canonical_secret_keys(args.type, "default"),
+            )
+            print(f"type={args.type} name=default migrated=true", file=output)
+            return
         if args.storage_command == "create":
             result = storage.create(
                 connection,
                 config,
                 application.application_id,
-                args.types,
+                selected or (),
+                resource_name=args.name,
                 deadline_at=durable_deadline,
                 process_deadline=deadline,
             )
@@ -2409,7 +2543,8 @@ def _storage_mutation(
                 connection,
                 config,
                 application.application_id,
-                args.types or None,
+                selected,
+                resource_name=args.name,
                 deadline_at=durable_deadline,
                 process_deadline=deadline,
             )
@@ -2418,7 +2553,8 @@ def _storage_mutation(
                 connection,
                 config,
                 application.application_id,
-                args.types,
+                selected or (),
+                resource_name=args.name,
                 deadline_at=durable_deadline,
                 process_deadline=deadline,
             )
@@ -2427,8 +2563,9 @@ def _storage_mutation(
                 connection,
                 config,
                 application.application_id,
-                args.types,
-                confirm_slug=args.confirm,
+                selected or (),
+                resource_name=args.name,
+                confirm_name=args.confirm,
                 confirm_destructive=True,
                 purge_s3=args.purge_s3,
                 deadline_at=durable_deadline,

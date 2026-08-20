@@ -30,6 +30,13 @@ from . import db
 from .config import Config, PlatformConfig, RuntimeImages
 from .remote import call_helper
 from .runtime import bounded_http, ensure_private_directory, lock, run
+from .storage_contract import (
+    PLATFORM_ENVIRONMENT_KEYS,
+    RESERVED_ENVIRONMENT_PREFIX,
+    RESOURCE_OUTPUTS,
+    RESOURCE_TYPES,
+    canonical_secret_key,
+)
 from .validation import (
     ValidationError,
     bounded_text,
@@ -41,13 +48,14 @@ from .validation import (
     relative_path,
     repository_url,
     resolve_inside,
+    resource_name,
     script_name,
     sha256_hex,
     slug,
     uuid,
 )
 
-_MANIFEST_KEYS = {"version", "runtime", "packages", "scripts", "port", "health"}
+_MANIFEST_KEYS = {"version", "runtime", "packages", "scripts", "port", "health", "storage"}
 _SCRIPT_KEYS = {"build", "start"}
 _HEALTH_KEYS = {"path"}
 _RUNTIME_NAMES = {"bun", "node"}
@@ -174,6 +182,13 @@ class DeploymentFailed(ApplicationError):
 
 
 @dataclass(frozen=True, slots=True)
+class StorageBinding:
+    name: str
+    resource_type: str
+    environment: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Manifest:
     runtime: str
     packages: tuple[str, ...]
@@ -181,6 +196,7 @@ class Manifest:
     start_script: str
     port: int
     health_path: str
+    storage_bindings: tuple[StorageBinding, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,7 +388,7 @@ def load_platform_yaml(
     if not isinstance(document, dict) or any(not isinstance(key, str) for key in document):
         raise ValidationError("platform.yaml must be a mapping with string keys")
     unknown = document.keys() - _MANIFEST_KEYS
-    missing = (_MANIFEST_KEYS - {"packages"}) - document.keys()
+    missing = (_MANIFEST_KEYS - {"packages", "storage"}) - document.keys()
     if unknown or missing:
         details: list[str] = []
         if missing:
@@ -424,13 +440,56 @@ def load_platform_yaml(
     port = document["port"]
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65_535:
         raise ValidationError("platform.yaml port must be an integer from 1 through 65535")
+    storage = document.get("storage", {"bindings": {}})
+    if not isinstance(storage, dict):
+        raise ValidationError("platform.yaml storage must be a mapping")
+    _exact_keys(storage, {"bindings"}, field_name="platform.yaml storage")
+    raw_bindings = storage["bindings"]
+    if not isinstance(raw_bindings, dict) or any(not isinstance(key, str) for key in raw_bindings):
+        raise ValidationError("platform.yaml storage.bindings must be a mapping")
+    if len(raw_bindings) > 32:
+        raise ValidationError("platform.yaml supports at most 32 storage bindings")
+    bindings: list[StorageBinding] = []
+    targets: set[str] = set()
+    for raw_name, raw_binding in raw_bindings.items():
+        name = resource_name(raw_name)
+        if not isinstance(raw_binding, dict):
+            raise ValidationError(f"storage binding {name!r} must be a mapping")
+        _exact_keys(raw_binding, {"type", "environment"}, field_name=f"storage binding {name!r}")
+        resource_type = raw_binding["type"]
+        if resource_type not in RESOURCE_TYPES:
+            raise ValidationError(f"storage binding {name!r} type must be postgres, mongo, or s3")
+        environment = raw_binding["environment"]
+        if not isinstance(environment, dict) or any(
+            not isinstance(key, str) for key in environment
+        ):
+            raise ValidationError(f"storage binding {name!r} environment must be a mapping")
+        if not environment:
+            raise ValidationError(f"storage binding {name!r} must map at least one output")
+        mapped: list[tuple[str, str]] = []
+        for output, raw_target in environment.items():
+            if output not in RESOURCE_OUTPUTS[resource_type]:
+                raise ValidationError(
+                    f"storage binding {name!r} output {output!r} is not supported"
+                )
+            target = env_key(raw_target)
+            if target in PLATFORM_ENVIRONMENT_KEYS or target.startswith(
+                RESERVED_ENVIRONMENT_PREFIX
+            ):
+                raise ValidationError(f"storage binding target {target!r} is reserved")
+            if target in targets:
+                raise ValidationError(f"storage binding target {target!r} conflicts")
+            targets.add(target)
+            mapped.append((output, target))
+        bindings.append(StorageBinding(name, resource_type, tuple(sorted(mapped))))
     return Manifest(
-        runtime=runtime_name,
-        packages=packages,
-        build_script=build_script,
-        start_script=start,
-        port=port,
-        health_path=health_path(health["path"]),
+        runtime_name,
+        packages,
+        build_script,
+        start,
+        port,
+        health_path(health["path"]),
+        tuple(sorted(bindings, key=lambda item: (item.resource_type, item.name))),
     )
 
 
@@ -1812,6 +1871,11 @@ def render_nomad_job(
     checked_recipe = sha256_hex(recipe_hash, field="recipe hash")
     hostname = f"{app_slug}.{platform.domain}"
     variable = f"nomad/jobs/{app_slug}"
+    binding_aliases = "\n".join(
+        f'{{{{ $value := index . "{canonical_secret_key(binding.resource_type, binding.name, output)}" }}}}\n{target}={{{{ $value | toJSON }}}}'
+        for binding in manifest.storage_bindings
+        for output, target in binding.environment
+    )
     job = f'''job "{app_slug}" {{
   region      = "{platform.region}"
   datacenters = ["{platform.datacenter}"]
@@ -1909,8 +1973,10 @@ def render_nomad_job(
         change_mode = "restart"
         data = <<EOH
 {{{{ with nomadVar "{variable}" }}}}
-{{{{ range $key, $value := . }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}
+{{{{ range $key, $value := . }}}}{{{{ if not (hasPrefix "STORAGE__" $key) }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}
 {{{{ end }}}}{{{{ end }}}}
+{binding_aliases}
+{{{{ end }}}}
 EOH
       }}
       resources {{

@@ -381,7 +381,7 @@ class ApplicationHelperTests(unittest.TestCase):
             {
                 "slug": "demo-app",
                 "updates": {"API_KEY": SENTINEL},
-                "ownership": {"DATABASE_URL": "postgres"},
+                "ownership": {"DATABASE_URL": "storage.postgres.default"},
             }
         )
         assert self.variables.written is not None
@@ -491,12 +491,12 @@ class ApplicationHelperTests(unittest.TestCase):
         self.assertFalse(result["publicHealthy"])
 
     def test_environment_cannot_change_storage_owned_key(self) -> None:
-        with self.assertRaisesRegex(ValidationError, "owned by postgres"):
+        with self.assertRaisesRegex(ValidationError, "owned by storage.postgres.default"):
             self.actions["app.env.set"](
                 {
                     "slug": "demo-app",
                     "updates": {"DATABASE_URL": SENTINEL},
-                    "ownership": {"DATABASE_URL": "postgres"},
+                    "ownership": {"DATABASE_URL": "storage.postgres.default"},
                 }
             )
 

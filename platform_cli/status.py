@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 
 from . import db, openstack, remote, runtime
 from .config import Config, PlatformConfig
-from .storage_contract import ENVIRONMENT_KEYS, RESOURCE_TYPES
+from .storage_contract import RESOURCE_TYPES, canonical_secret_keys
 
 ROLES = ("admin", "builder", "ingress", "storage", "worker")
 _RESOURCE_TYPES = RESOURCE_TYPES
@@ -70,6 +70,7 @@ class StorageObservation:
 
     application_id: str
     resource_type: Literal["postgres", "mongo", "s3"]
+    resource_name: str = "default"
     health: Literal["healthy", "unhealthy", "unknown"] = "unknown"
     used_bytes: int | None = None
     object_count: int | None = None
@@ -79,7 +80,7 @@ class StorageObservation:
 
 InfrastructureObserver = Callable[[str], InfrastructureObservation]
 ApplicationObserver = Callable[[str], ApplicationObservation]
-StorageObserver = Callable[[str, str], StorageObservation]
+StorageObserver = Callable[[str, str, str], StorageObservation]
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +211,7 @@ def _application_observation(
 def _storage_observation(
     application_id: str,
     resource_type: str,
+    resource_name: str,
     observer: StorageObserver | None,
 ) -> dict[str, object]:
     unavailable: dict[str, object] = {
@@ -223,11 +225,12 @@ def _storage_observation(
     if observer is None:
         return unavailable
     try:
-        observed = observer(application_id, resource_type)
+        observed = observer(application_id, resource_type, resource_name)
         if (
             not isinstance(observed, StorageObservation)
             or observed.application_id != application_id
             or observed.resource_type != resource_type
+            or observed.resource_name != resource_name
         ):
             return unavailable
         return {
@@ -402,13 +405,15 @@ def storage_observer(
     helper_caller = _configured_helper_caller(config, helper_caller)
     applications = {item.application_id: item for item in db.list_applications(connection)}
     resources = {
-        (item.application_id, item.resource_type): item
+        (item.application_id, item.resource_type, item.resource_name): item
         for item in db.list_managed_resources(connection)
     }
 
-    def observe(application_id: str, resource_type: str) -> StorageObservation:
+    def observe(
+        application_id: str, resource_type: str, resource_name: str = "default"
+    ) -> StorageObservation:
         application = applications.get(application_id)
-        resource = resources.get((application_id, resource_type))
+        resource = resources.get((application_id, resource_type, resource_name))
         if application is None or resource is None:
             raise RuntimeError("storage observation unavailable")
         health = "unknown"
@@ -422,6 +427,7 @@ def storage_observer(
                         "applicationSlug": application.slug,
                         "providerId": resource.provider_id,
                         "providerName": resource.provider_name,
+                        "resourceName": resource.resource_name,
                     },
                     timeout_seconds=config.policy.limits.helper_seconds,
                     request_limit=config.policy.limits.helper_request_bytes,
@@ -430,7 +436,8 @@ def storage_observer(
                 )
                 if (
                     set(result) != {"observed", "keyNames", "modifyIndex"}
-                    or result.get("keyNames") != list(ENVIRONMENT_KEYS[resource_type])
+                    or result.get("keyNames")
+                    != list(canonical_secret_keys(resource_type, resource_name))
                     or isinstance(result.get("modifyIndex"), bool)
                     or not isinstance(result.get("modifyIndex"), int)
                     or result["modifyIndex"] < 0
@@ -446,6 +453,7 @@ def storage_observer(
         return StorageObservation(
             application_id,
             resource_type,  # type: ignore[arg-type]
+            resource_name,
             health,  # type: ignore[arg-type]
             None,
             None,
@@ -628,13 +636,16 @@ def _storage_model(
         "applicationId": application.application_id,
         "slug": application.slug,
         "type": resource.resource_type,
+        "name": resource.resource_name,
         "providerId": _safe_provider_identity(resource.provider_id),
         "providerName": _safe_provider_identity(resource.provider_name),
         "lifecycleState": resource.lifecycle_state,
         "quotas": quotas,
         "quotaEnforcement": enforcement,
         "lastVerifiedAt": _safe_timestamp(resource.last_verified_at),
-        "live": _storage_observation(application.application_id, resource.resource_type, observer),
+        "live": _storage_observation(
+            application.application_id, resource.resource_type, resource.resource_name, observer
+        ),
     }
 
 
@@ -644,7 +655,7 @@ def storage_list(
     application_identifier: str | None = None,
     observe: StorageObserver | None = None,
 ) -> list[dict[str, object]]:
-    """List managed-resource quota/usage projections; never names or contents."""
+    """List named managed-resource quota/usage projections; never contents."""
     application_id: str | None = None
     if application_identifier is not None:
         application = db.get_application(connection, application_identifier)
@@ -664,6 +675,7 @@ def storage_show(
     connection: sqlite3.Connection,
     application_identifier: str,
     resource_type: str,
+    resource_name: str = "default",
     *,
     observe: StorageObserver | None = None,
 ) -> dict[str, object] | None:
@@ -675,7 +687,14 @@ def storage_show(
         application_identifier=application_identifier,
         observe=observe,
     )
-    return next((item for item in resources if item["type"] == resource_type), None)
+    return next(
+        (
+            item
+            for item in resources
+            if item["type"] == resource_type and item["name"] == resource_name
+        ),
+        None,
+    )
 
 
 def status_show(
