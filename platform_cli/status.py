@@ -297,14 +297,31 @@ def infrastructure_observer(
     return observe
 
 
+def _configured_helper_caller(
+    config: Config, helper_caller: Callable[..., Mapping[str, Any]] | None
+) -> Callable[..., Mapping[str, Any]]:
+    if helper_caller is not None:
+        return helper_caller
+    root = config.platform.get("paths.root")
+    if not isinstance(root, str):
+        raise RuntimeError("configured helper path is unavailable")
+    helper_command = remote.helper_command_path(root)
+
+    def call(action: str, args: Mapping[str, Any], **bounds: Any) -> Mapping[str, Any]:
+        return remote.call_helper(action, args, helper_command=helper_command, **bounds)
+
+    return call
+
+
 def application_observer(
     connection: sqlite3.Connection,
     config: Config,
     *,
-    helper_caller: Callable[..., Mapping[str, Any]] = remote.call_helper,
+    helper_caller: Callable[..., Mapping[str, Any]] | None = None,
     http_get: Callable[..., runtime.HttpResult] = runtime.bounded_http,
 ) -> ApplicationObserver:
     """Compose bounded Nomad-helper and credential-free route observations."""
+    helper_caller = _configured_helper_caller(config, helper_caller)
     applications = {item.application_id: item for item in db.list_applications(connection)}
     deployments = {
         application_id: deployment
@@ -379,9 +396,10 @@ def storage_observer(
     connection: sqlite3.Connection,
     config: Config,
     *,
-    helper_caller: Callable[..., Mapping[str, Any]] = remote.call_helper,
+    helper_caller: Callable[..., Mapping[str, Any]] | None = None,
 ) -> StorageObserver:
     """Compose accepted identities with non-mutating scoped health observation."""
+    helper_caller = _configured_helper_caller(config, helper_caller)
     applications = {item.application_id: item for item in db.list_applications(connection)}
     resources = {
         (item.application_id, item.resource_type): item
@@ -443,7 +461,7 @@ def live_observers(
     config: Config,
     *,
     command_runner: Callable[..., Any] = runtime.run,
-    helper_caller: Callable[..., Mapping[str, Any]] = remote.call_helper,
+    helper_caller: Callable[..., Mapping[str, Any]] | None = None,
     http_get: Callable[..., runtime.HttpResult] = runtime.bounded_http,
 ) -> LiveObservers:
     """Build the three concrete live observers used by CLI read commands."""
@@ -723,7 +741,7 @@ def status_show_live(
     config: Config,
     *,
     command_runner: Callable[..., Any] = runtime.run,
-    helper_caller: Callable[..., Mapping[str, Any]] = remote.call_helper,
+    helper_caller: Callable[..., Mapping[str, Any]] | None = None,
     http_get: Callable[..., runtime.HttpResult] = runtime.bounded_http,
 ) -> dict[str, object]:
     """Concrete CLI composition for accepted state plus bounded live reads."""
