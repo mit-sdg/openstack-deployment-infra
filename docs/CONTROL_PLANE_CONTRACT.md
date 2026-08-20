@@ -93,6 +93,22 @@ operation's provenance metadata. On failure it restores the prior host. This
 CLI operation is the sole supported persistent-host replacement path; do not
 delete the old server first or detach volumes manually.
 
+## Declare an application
+
+An application must exist before managed storage or staff environment values
+can be addressed by its slug. A deployment creates one, which is enough when
+the application starts without a database. An application that reads its
+database at startup needs the database first, so declare it up front:
+
+```text
+openstack-platform app create SLUG
+```
+
+The declaration records the slug, the public URL, and the standard worker and
+scheduler sizing from policy. It is not running and has no deployment, worker,
+or source until a deployment is accepted, so it does not make the deployment
+unavailable. Creating an existing slug is refused.
+
 ## Deploy an application
 
 The repository must be public, credential-free GitHub HTTPS. `COMMIT` is a full
@@ -131,7 +147,7 @@ Each mutation requires restart, scheduler health, and public health. Generated r
 
 ## Manage storage
 
-An accepted application must exist before creation. Types are `postgres`, `mongo`, and `s3`.
+A declared or deployed application must exist before creation. Types are `postgres`, `mongo`, and `s3`.
 
 ```text
 openstack-platform storage create SLUG postgres|mongo|s3 [TYPE ...]
