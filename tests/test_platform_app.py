@@ -979,6 +979,32 @@ class DeploymentTests(unittest.TestCase):
             "terminal": terminal,
         }
 
+    def test_job_maps_named_storage_without_optional_template_functions(self) -> None:
+        manifest = Manifest(
+            "node",
+            (".",),
+            None,
+            "start",
+            3000,
+            "/health",
+            (StorageBinding("default", "mongo", (("uri", "MONGODB_URI"),)),),
+        )
+        job = render_nomad_job(
+            application_id=APP_ID,
+            application_slug="demo-app",
+            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
+            manifest=manifest,
+            platform=self.platform(),
+            cpu_mhz=1000,
+            memory_mib=2048,
+            source_commit=COMMIT,
+            recipe_hash="c" * 64,
+        )
+        self.assertIn('(ne $key "STORAGE__MONGO__DEFAULT__URI")', job)
+        self.assertIn('{{ $value := index . "STORAGE__MONGO__DEFAULT__URI" }}', job)
+        self.assertIn("MONGODB_URI={{ $value | toJSON }}", job)
+        self.assertNotIn("hasPrefix", job)
+
     def test_job_has_only_application_placement_and_explicit_standard_resources(self) -> None:
         job = render_nomad_job(
             application_id=APP_ID,

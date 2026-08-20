@@ -1721,6 +1721,16 @@ def _validate_storage_bindings(
     }
     required_keys: set[str] = set()
     targets: set[str] = set()
+    declared = {(binding.resource_type, binding.name) for binding in manifest.storage_bindings}
+    active = {
+        identity for identity, resource in resources.items() if resource.lifecycle_state == "active"
+    }
+    undeclared = sorted(active - declared)
+    if undeclared:
+        resource_type, resource_name = undeclared[0]
+        raise ValidationError(
+            f"active {resource_type} storage {resource_name!r} has no deployment binding"
+        )
     for binding in manifest.storage_bindings:
         resource = resources.get((binding.resource_type, binding.name))
         if resource is None or resource.lifecycle_state != "active":

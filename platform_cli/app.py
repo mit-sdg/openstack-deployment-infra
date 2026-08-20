@@ -36,6 +36,7 @@ from .storage_contract import (
     RESOURCE_OUTPUTS,
     RESOURCE_TYPES,
     canonical_secret_key,
+    canonical_secret_keys,
 )
 from .validation import (
     ValidationError,
@@ -1876,6 +1877,19 @@ def render_nomad_job(
         for binding in manifest.storage_bindings
         for output, target in binding.environment
     )
+    storage_keys = sorted(
+        key
+        for binding in manifest.storage_bindings
+        for key in canonical_secret_keys(binding.resource_type, binding.name)
+    )
+    if not storage_keys:
+        runtime_item = "{{ $key }}={{ $value | toJSON }}"
+    else:
+        comparisons = " ".join(f'(ne $key "{key}")' for key in storage_keys)
+        predicate = comparisons if len(storage_keys) == 1 else f"and {comparisons}"
+        runtime_item = (
+            f"{{{{ if {predicate} }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}\\n{{{{ end }}}}"
+        )
     job = f'''job "{app_slug}" {{
   region      = "{platform.region}"
   datacenters = ["{platform.datacenter}"]
@@ -1973,8 +1987,8 @@ def render_nomad_job(
         change_mode = "restart"
         data = <<EOH
 {{{{ with nomadVar "{variable}" }}}}
-{{{{ range $key, $value := . }}}}{{{{ if not (hasPrefix "STORAGE__" $key) }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}
-{{{{ end }}}}{{{{ end }}}}
+{{{{ range $key, $value := . }}}}{runtime_item}
+{{{{ end }}}}
 {binding_aliases}
 {{{{ end }}}}
 EOH
