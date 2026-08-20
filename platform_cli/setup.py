@@ -1016,7 +1016,7 @@ def _bootstrap_roles(
         ),
         environment=child,
     )
-    transfers = (
+    transfers = [
         (paths.openstack_environment, f"{remote_root}/secrets/openstack.env", "0600"),
         (
             paths.bootstrap / "storage-bootstrap.env",
@@ -1036,7 +1036,10 @@ def _bootstrap_roles(
         ),
         (paths.pki / "nomad-worker.pem", f"{provisioning}/nomad-worker.pem", "0644"),
         (paths.pki / "nomad-worker-key.pem", f"{provisioning}/nomad-worker-key.pem", "0600"),
-    )
+    ]
+    internal_ca_name = str(platform["pki"]["internalCaFile"])
+    if internal_ca_name != "internal-ca.pem":
+        transfers.append((paths.pki / internal_ca_name, f"{provisioning}/internal-ca.pem", "0644"))
     for source, destination, mode in transfers:
         _command(
             ("scp", "-F", ssh_config, "--", source, f"platform-admin:{destination}"),

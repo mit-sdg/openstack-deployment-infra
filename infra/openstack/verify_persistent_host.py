@@ -63,6 +63,18 @@ def resource_uuid(value: Any, label: str) -> str:
     return canonical_uuid(value, label)
 
 
+def resource_name(value: Any, label: str) -> str:
+    if isinstance(value, Mapping):
+        value = field(value, "original_name", field(value, "name"))
+    elif isinstance(value, str):
+        if value.count(" (") != 1 or not value.endswith(")"):
+            fail(f"{label} is malformed")
+        value = value.rsplit(" (", 1)[0]
+    if not isinstance(value, str) or not value:
+        fail(f"{label} is malformed")
+    return value
+
+
 def properties(value: Any) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         fail("existing persistent host metadata is malformed")
@@ -117,13 +129,7 @@ def verify(args: argparse.Namespace) -> None:
         fail("existing persistent host image UUID does not match the configured image")
     if resource_uuid(field(server, "flavor"), "existing server flavor UUID") != args.flavor_id:
         fail("existing persistent host flavor UUID does not match the configured flavor")
-    flavor = field(server, "flavor")
-    observed_flavor_name = (
-        field(flavor, "original_name", field(flavor, "name"))
-        if isinstance(flavor, Mapping)
-        else None
-    )
-    if observed_flavor_name != args.flavor_name:
+    if resource_name(field(server, "flavor"), "existing server flavor name") != args.flavor_name:
         fail("existing persistent host flavor name does not match the configured flavor")
 
     prefix = args.metadata_prefix
