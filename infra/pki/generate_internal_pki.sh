@@ -83,9 +83,8 @@ issue_cert nomad-worker client.global.nomad clientAuth \
 issue_cert storage "storage.${PLATFORM_PREFIX}.internal" serverAuth \
   "DNS:storage.${PLATFORM_PREFIX}.internal,DNS:postgres.${PLATFORM_PREFIX}.internal,DNS:mongo.${PLATFORM_PREFIX}.internal,DNS:s3.${PLATFORM_PREFIX}.internal,DNS:registry.${PLATFORM_PREFIX}.internal,DNS:${PLATFORM_STORAGE_HOST},IP:${PLATFORM_STORAGE_IP}"
 
-chmod 0600 "$OUTPUT_DIR"/*-key.pem
 chmod 0644 "$OUTPUT_DIR"/*.pem
-chmod 0600 "$ca_key"
+chmod 0600 "$OUTPUT_DIR"/*-key.pem
 openssl verify -CAfile "$ca_cert" \
   "$OUTPUT_DIR/nomad-server.pem" "$OUTPUT_DIR/nomad-cli.pem" \
   "$OUTPUT_DIR/nomad-ingress.pem" "$OUTPUT_DIR/nomad-worker.pem" \
