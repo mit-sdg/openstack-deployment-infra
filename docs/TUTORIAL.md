@@ -4,10 +4,9 @@ This tutorial takes a new operator from a private checkout to one verified
 HTTPS application and one verified PostgreSQL resource, then removes them. It
 starts from an empty database and freshly configured OpenStack resources.
 
-For the complete file formats, transfer paths, host contexts, and recovery
-rules, keep [OPERATIONS.md](OPERATIONS.md) open beside this tutorial. Commands
-marked `<PUBLIC_EXAMPLE>` are safe placeholders; `<SECRET>` is never a value
-to paste into tracked documentation.
+Keep [OPERATIONS.md](OPERATIONS.md) open for complete file formats, transfer
+paths, host contexts, and recovery rules. `<PUBLIC_EXAMPLE>` marks a safe
+placeholder. Never paste a value marked `<SECRET>` into tracked documentation.
 
 ## What you need
 
@@ -19,7 +18,7 @@ You need:
   environment;
 - Nix/QEMU for image evaluation and tests;
 - a management host with the unprivileged `/srv/openstack-platform` owner;
-- a public DNS/TLS/forwarding service that preserves `Host`; and
+- a public DNS/TLS/forwarding service that preserves `Host`;
 - custody for the backup and managed-data age identities; and
 - a public GitHub repository holding the application you will deploy, with a
   `platform.yaml` at its root. Private repositories cannot be fetched.
@@ -39,9 +38,9 @@ uv run python --version              # Python 3.14.x
 uv run python -m unittest discover -s tests -v
 ```
 
-Create private inventory and policy copies, set the project target, and verify
-that the authenticated token belongs to exactly that project. These checks do
-not mutate OpenStack:
+Create private inventory and policy copies, set the project target, then verify
+that the authenticated token belongs to that project. These checks do not
+mutate OpenStack:
 
 ```bash
 cp -n config/platform.example.json config/platform.json
@@ -116,10 +115,10 @@ done
 Each successful line reports an image UUID, `status=active`, the provider
 checksum, and the full `source_commit`. The publisher computes the local
 OpenStack-compatible MD5 checksum and rejects the upload unless Glance reports
-the same checksum; record that value and the separately printed local
-SHA-256 artifact checksum with the owner project and live-test evidence. The
-protected CI route and its complete `SOURCE_COMMIT` metadata behavior are in
-[IMAGE_PUBLISHING.md](IMAGE_PUBLISHING.md).
+the same value. Record it and the separately printed local SHA-256 artifact
+checksum with the owner project and live-test evidence. See
+[IMAGE_PUBLISHING.md](IMAGE_PUBLISHING.md) for the protected CI route and its
+full `SOURCE_COMMIT` metadata behavior.
 
 ## 3. Bootstrap the persistent roles
 
@@ -177,9 +176,9 @@ printf '%s\n' "$helper_output"
 test "$(tail -n1 <<<"$helper_output")" = "helper-release=$commit:verified"
 ```
 
-The helper deployment and CLI must use the generated `platform-admin` bridge. The
-first status invocation creates the empty management schema. This is the first verified
-control-plane result:
+The helper deployment and CLI must use the generated `platform-admin` bridge.
+The first status invocation creates the empty management schema and gives the
+first verified control-plane result:
 
 ```bash
 status_output="$(/srv/openstack-platform/bin/openstack-platform status)"
@@ -210,10 +209,11 @@ Select the five accepted UUIDs recorded during image publication:
 
 ## 5. Deploy the application and storage
 
-The public source must contain a supported `platform.yaml`, a full lowercase
-40-character commit, and the matching lockfile. For Node, the relevant package
-directory contains `package-lock.json`; for Bun it contains `bun.lock` or
-`bun.lockb`. Script values are package-script names, not shell commands.
+The public source must contain a supported `platform.yaml` at the selected full
+lowercase 40-character commit, plus the matching lockfile. For Node, the
+relevant package directory contains `package-lock.json`; for Bun it contains
+`bun.lock` or `bun.lockb`. Script values are package-script names, not shell
+commands.
 
 ```bash
 /srv/openstack-platform/bin/openstack-platform app deploy demo \
@@ -240,9 +240,9 @@ values are targets, not collected usage.
 
 ## 6. Back up, restore-check, and clean up
 
-The management-database backup runs on the management host and uses the policy recipient; managed-data
-backup and restore verification run on admin. Do not run the latter scripts
-from the checkout:
+The management-database backup runs on the management host and uses the policy
+recipient. Managed-data backup and restore verification run on admin; do not
+run those scripts from the checkout:
 
 ```bash
 m1_backup_output="$(/srv/openstack-platform/bin/openstack-platform backup)"
@@ -294,15 +294,16 @@ systemctl --user start openstack-platform-backup.timer
 /srv/openstack-platform/bin/openstack-platform status
 ```
 
-The installed `openstack-platform-restore` launcher fixes the managed destination
-at `/srv/openstack-platform/state/platform.sqlite3`; it does not accept a
-separate destination. Restore verifies age/SQLite/schema/integrity/foreign keys,
-the deployment-bound project/namespace/inventory marker, and unfinished
-operations in a temporary file, then atomically replaces the destination. A
-backup from another deployment or an older unbound backup is refused. Refusals
-leave the current database untouched. It contacts no provider and does not restore workers, Nomad
-Variables, or managed data; compare live observations after restore and use
-checkpointed CLI recovery, never manual SQLite/provider edits.
+The installed `openstack-platform-restore` launcher fixes the managed
+destination at `/srv/openstack-platform/state/platform.sqlite3`; it does not
+accept a separate destination. Restore checks age, SQLite, schema, integrity,
+foreign keys, the deployment-bound project/namespace/inventory marker, and
+unfinished operations in a temporary file. It then atomically replaces the
+destination. A backup from another deployment or an older unbound backup is
+refused, leaving the current database untouched. Restore contacts no provider
+and does not restore workers, Nomad Variables, or managed data. Compare live
+observations afterward and use checkpointed CLI recovery, never manual
+SQLite/provider edits.
 
 Remove storage before the application and preserve encrypted evidence and age
 identity custody until the retention decision is recorded:

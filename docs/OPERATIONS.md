@@ -1,8 +1,8 @@
 # Provision, operate, back up, restore, and remove a fresh deployment
 
-This is the end-to-end procedure for a new OpenStack project. It assumes the
-repository is at the reviewed commit, an empty management state directory, and
-no records to migrate. It is intentionally explicit about where commands run:
+Use this procedure to set up a new OpenStack project from end to end. It
+assumes a checkout at the reviewed commit, an empty management state directory,
+and no records to migrate. Commands run in three places:
 
 - **Management host / repository root** is the unprivileged owner of `/srv/openstack-platform`.
   It holds the checkout, private inventory, policy, OpenStack wrapper, and
@@ -29,10 +29,10 @@ The following inputs cannot be supplied by this repository:
 | Backup age identity | decrypting an offline management SQLite backup | Keep the `AGE-SECRET-KEY-...` file outside Git and outside SQLite, in an offline/escrowed operator record. Verify file ownership and mode only. |
 | Admin managed-data age identity | encrypting and verifying PostgreSQL, MongoDB, and Garage backups | Keep `/paths.root/persistent/secrets/backup-age-key.txt` on admin and escrow a protected copy before relying on the backups. Verify its mode without reading it. |
 
-`<PUBLIC_EXAMPLE>` means a value that must be replaced with a real, non-secret
-configuration value. `<SECRET>` means a value that must be generated or
-obtained privately; it must not be committed, pasted into a ticket, or printed.
-The JSON examples are sanitized templates, not deployment inputs.
+Replace `<PUBLIC_EXAMPLE>` with a real, non-secret configuration value.
+Generate or obtain `<SECRET>` values privately; never commit, print, or paste
+them into a ticket. The JSON examples are sanitized templates, not deployment
+inputs.
 
 ## 1. Prepare the management host and private inputs
 
@@ -93,10 +93,12 @@ chmod 0644 "$PRIVATE_BOOTSTRAP"/*_ed25519.pub
 ```
 
 Use the first key as both `ADMIN_PUBLIC_KEY` and `AGENTOPS_PUBLIC_KEY`. The
-second key is used by the admin host's disposable-builder SSH client; its
-private half must later be installed as
-`/home/agentops/.ssh/id_ed25519` on admin, mode `0600`, unless an equivalent
-admin-local SSH identity is already configured.
+admin host's disposable-builder SSH client uses the second key. Both halves are
+transferred to admin later: the public half to
+`$PLATFORM_ROOT/secrets/builder_operator_ed25519.pub`, which is injected into
+each builder, and the private half to
+`$PLATFORM_ROOT/secrets/builder_operator_ed25519`, mode `0600`, which the
+client passes to `ssh -i`.
 
 Generate the backup age identity with the packaged Nix age derivation before
 installing management. The identity file is private; only its recipient
@@ -111,10 +113,10 @@ export M1_AGE_RECIPIENT="$(awk '$1 == "#" && $2 == "public" && $3 == "key:" { pr
 case "$M1_AGE_RECIPIENT" in age1*) ;; *) exit 1 ;; esac
 ```
 
-The final `case` check is a readability check, not a secret display. Put the value
-of `M1_AGE_RECIPIENT` in `backupAgeRecipient` in the private policy, then
-verify that the identity file remains outside Git. Do not copy the identity
-into `config/`, `/srv/openstack-platform/state`, or the admin helper.
+The final `case` checks readability; it does not display a secret. Put
+`M1_AGE_RECIPIENT` in the private policy's `backupAgeRecipient`, then verify
+that the identity file remains outside Git. Do not copy the identity into
+`config/`, `/srv/openstack-platform/state`, or the admin helper.
 
 Create the exact role secret files. These are dotenv-like `KEY=value` files;
 values must be non-empty, and each file must contain exactly the listed keys.
@@ -215,11 +217,10 @@ chmod 0500 "$OPENSTACK_WRAPPER"
 test -f "$OPENSTACK_WRAPPER" && test ! -L "$OPENSTACK_WRAPPER"
 ```
 
-This is a shape-only file: replace each placeholder in a protected editor or
-secret manager with a shell-quoted value. Do not interpolate a password into a
-command argument or an unquoted assignment. Keep the file at mode `0600`; the
-quoted wrapper argument list passes provider commands without exposing
-credentials.
+Replace each placeholder in this shape-only file with a shell-quoted value,
+using a protected editor or secret manager. Do not put a password in a command
+argument or unquoted assignment. Keep the file at mode `0600`; the quoted
+wrapper argument list passes provider commands without exposing credentials.
 
 Use the configured project identity for this shell without printing a token or
 credential. Run this from the repository root; the supported helper accepts
@@ -294,8 +295,9 @@ export KEYPAIR_NAME="$(uv run python infra/lib/platform_config.py get prefix)-ad
 ```
 
 Boot admin first. The command renders a mode-`0600` temporary config-drive
-payload, removes it on exit, retains/attaches the configured admin and backup
-volumes, and waits for the exact serial-console readiness marker:
+payload and removes it on exit. It creates missing configured admin and backup
+volumes, checks the size and type of existing ones, attaches them, and waits for
+the exact serial-console readiness marker:
 
 ```bash
 ADMIN_PUBLIC_KEY="$ADMIN_PUBLIC_KEY" \
@@ -367,11 +369,12 @@ bridge_output="$(
 test "$bridge_output" = management-bridge=verified
 ```
 
-The resulting `config` contains alias `platform-admin`, user `agentops`, the configured
-admin address, `IdentitiesOnly yes`, ED25519-only host keys, strict host-key
-checking, no password or agent forwarding, a ten-second connect timeout, and
-one connection attempt. Verify ownership/modes and exercise the alias without
-printing a secret:
+The resulting `config` defines the `platform-admin` alias with user `agentops`
+and the configured admin address. It sets `IdentitiesOnly yes`, allows only
+ED25519 host keys, uses strict host-key checking, disables password and agent
+forwarding, sets a ten-second connect timeout, and makes one connection
+attempt. Verify ownership and modes, then exercise the alias without printing a
+secret:
 
 ```bash
 test "$(stat -c '%a' "$SSH_DIR")" = 700
@@ -460,8 +463,7 @@ copy for its constrained tools:
 ```bash
 ssh -F "$SSH_CONFIG" platform-admin -- install -d -m 0700 \
   "$PLATFORM_ROOT/secrets" \
-  "$PLATFORM_ROOT/persistent/secrets/provisioning-pki" \
-  /home/agentops/.ssh
+  "$PLATFORM_ROOT/persistent/secrets/provisioning-pki"
 scp -F "$SSH_CONFIG" -- "$OPENSTACK_ENV" \
   "platform-admin:$PLATFORM_ROOT/secrets/openstack.env"
 scp -F "$SSH_CONFIG" -- "$STORAGE_SECRETS_FILE" \
@@ -470,7 +472,7 @@ scp -F "$SSH_CONFIG" -- "$PRIVATE_BOOTSTRAP/builder_operator_ed25519.pub" \
   "platform-admin:$PLATFORM_ROOT/secrets/builder_operator_ed25519.pub"
 scp -F "$SSH_CONFIG" -- \
   "$PRIVATE_BOOTSTRAP/builder_operator_ed25519" \
-  "platform-admin:/home/agentops/.ssh/id_ed25519"
+  "platform-admin:$PLATFORM_ROOT/secrets/builder_operator_ed25519"
 scp -F "$SSH_CONFIG" -- \
   "$PKI_DIR/$(uv run python infra/lib/platform_config.py get pki.internalCaFile)" \
   "$PKI_DIR/nomad-worker.pem" "$PKI_DIR/nomad-worker-key.pem" \
@@ -479,7 +481,7 @@ ssh -F "$SSH_CONFIG" platform-admin -- chmod 0600 \
   "$PLATFORM_ROOT/secrets/openstack.env" \
   "$PLATFORM_ROOT/secrets/storage-bootstrap.env" \
   "$PLATFORM_ROOT/secrets/builder_operator_ed25519.pub" \
-  /home/agentops/.ssh/id_ed25519 \
+  "$PLATFORM_ROOT/secrets/builder_operator_ed25519" \
   "$PLATFORM_ROOT/persistent/secrets/provisioning-pki/nomad-worker-key.pem"
 ssh -F "$SSH_CONFIG" platform-admin -- chmod 0644 \
   "$PLATFORM_ROOT/persistent/secrets/provisioning-pki/$(uv run python infra/lib/platform_config.py get pki.internalCaFile)" \
@@ -492,6 +494,12 @@ available to the wrapper. The admin-local storage file has the same eight keys
 as the management `STORAGE_SECRETS_FILE`. The private builder key is used only
 by admin-side disposable builder SSH. Verify only modes, direct-file status,
 and the token project ID through the wrapper; do not `cat` any of these files.
+
+`$PLATFORM_ROOT/secrets` is a symlink onto the admin state volume, so these
+inputs survive admin replacement. Files in the admin home directory do not.
+The platform reads the builder SSH key only when a deployment reaches its build
+step, so a missing copy appears later as an authentication failure rather than
+at replacement time.
 
 All guest-side services and health checks load the guest inventory at
 `/etc/$PLATFORM_NAMESPACE/platform.json`. Commands sent through the bridge set
@@ -735,13 +743,13 @@ admin-side path:
 <paths.backups>/m1/.staging/platform-YYYYMMDDTHHMMSSZ.sqlite3.age
 ```
 
-The helper verifies the age-v1 header and ciphertext SHA-256, then publishes
-one evidence set on the same backup filesystem. It fsyncs the ciphertext and
-checksum before the final manifest rename; the manifest is the commit marker,
-so readers and retention never accept a partial trio. Retries reconcile a
-ciphertext or evidence move interrupted before that marker, while a malformed
-committed set is preserved for operator attention. Complete sets only are
-counted by retention. The accepted paths are:
+The helper verifies the age-v1 header and ciphertext SHA-256, then publishes an
+evidence set on the same backup filesystem. It fsyncs the ciphertext and
+checksum before the final manifest rename. The manifest is the commit marker,
+so readers and retention never accept a partial trio. A retry reconciles a
+ciphertext or evidence move interrupted before that marker. The helper
+preserves a malformed committed set for operator attention. Retention counts
+only complete sets. The accepted paths are:
 
 ```text
 <paths.backups>/m1/platform-YYYYMMDDTHHMMSSZ.sqlite3.age
@@ -750,11 +758,11 @@ counted by retention. The accepted paths are:
 ```
 
 `<paths.backups>` comes only from the installed inventory; it is not a fixed
-`/srv/openstack-platform` or checkout path. The output contains the backup name and
-ciphertext checksum, not database or credential content. The management user
-The timer runs this operation daily at 02:45 UTC with a 30-minute randomized
-delay. Verify the timer and the accepted evidence with private file metadata;
-do not list or print credentials.
+`/srv/openstack-platform` or checkout path. The output contains the backup name
+and ciphertext checksum, not database or credential content. The timer runs
+this operation daily at 02:45 UTC with a 30-minute randomized delay. Verify the
+timer and accepted evidence with private file metadata; do not list or print
+credentials.
 
 These backups contain the management database only. They do not contain
 PostgreSQL, MongoDB, Garage objects, registry blobs, or an age identity. Registry blobs are rebuilt
@@ -831,13 +839,14 @@ The first command creates encrypted `postgres.age`, `mongodb.age`, and
 `garage.age` under `<paths.backups>/<namespace>/<timestamp>/`, plus `MANIFEST`
 and `SHA256SUMS`. The admin role also has its own
 `<namespace>-platform-backup.timer` for this managed-data job (03:15 UTC with a
-30-minute randomized delay); the management `openstack-platform-backup.timer` is
-the management database only. It decrypts each archive only into the temporary restore
-check. The second command starts temporary PostgreSQL and MongoDB containers,
-checks the Garage catalog/payload archive, removes the temporary containers on
-success or failure, and atomically writes mode-`0600` `RESTORE-MANIFEST` only
-when all checks pass. It never overwrites live services. The expected final
-line is `latest platform restore=verified .../RESTORE-MANIFEST`.
+30-minute randomized delay). The management
+`openstack-platform-backup.timer` covers only the management database. The
+restore check decrypts each archive only into temporary storage. The second
+command starts temporary PostgreSQL and MongoDB containers, checks the Garage
+catalog/payload archive, and removes the temporary containers on success or
+failure. It atomically writes mode-`0600` `RESTORE-MANIFEST` only when all
+checks pass and never overwrites live services. The expected final line is
+`latest platform restore=verified .../RESTORE-MANIFEST`.
 
 ### Offline management-database restore
 

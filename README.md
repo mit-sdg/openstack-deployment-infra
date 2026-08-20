@@ -2,18 +2,14 @@
 
 [![CI](https://github.com/mit-sdg/openstack-deployment-infra/actions/workflows/ci.yml/badge.svg)](https://github.com/mit-sdg/openstack-deployment-infra/actions/workflows/ci.yml)
 
-Give each person or team a place to deploy a web application without giving
-them cloud credentials or server access. Each application gets a stable HTTPS
-URL, health-checked deployments, and optional managed data services.
+This platform hosts web applications without giving users cloud credentials or
+server access. Each application gets a stable HTTPS URL, health-checked
+deployments, and optional managed data services.
 
-For example:
-
-- **A class** can give every student a personal project, create shared projects
-  for team assignments, and keep databases running when application workers are
-  replaced.
-- **A hackathon or research group** can host many small applications in one
-  OpenStack project while keeping infrastructure credentials with the
-  organizers.
+A class can give each student a project and create shared projects for teams.
+A hackathon or research group can host many small applications in one OpenStack
+project. In both cases, organizers keep the infrastructure credentials, and
+databases survive worker replacement.
 
 Applications can use managed PostgreSQL, MongoDB, and S3-compatible object
 storage. The platform also runs a private image registry, encrypted backups,
@@ -45,8 +41,8 @@ A deployment:
 - takes encrypted backups of managed data and control-plane state, with
   restore verification.
 
-Participants do not receive SSH keys, OpenStack or scheduler credentials,
-registry credentials, or database administrator passwords.
+Participants receive no SSH keys, OpenStack or scheduler credentials, registry
+credentials, or database administrator passwords.
 
 Applications currently run as one OCI container, serve HTTP on one port, and
 provide a health path. The current scheduler configuration runs one application
@@ -83,10 +79,10 @@ explains what each one means.
 
 ## Designed to be extended
 
-The platform is split into small role-specific services and narrow operator
-commands. You can build a portal or API on top of those commands, choose a
-different public DNS and HTTPS provider, change application and quota policy,
-or add operator workflows without exposing unrestricted infrastructure access.
+Small role-specific services and narrow operator commands make up the platform.
+You can build a portal or API on those commands, choose another public DNS and
+HTTPS provider, change application and quota policy, or add operator workflows
+without exposing unrestricted infrastructure access.
 
 Cloudflare Tunnel is the reference public-ingress setup, but it is not required.
 An institutional or managed ingress service can be used instead, provided it

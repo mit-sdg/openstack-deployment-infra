@@ -2,16 +2,18 @@
 
 ## Scope
 
-This repository contains OpenStack/NixOS role images, a restart-aware staff CLI, constrained application and managed-storage helpers, backup, recovery, and monitoring. It does not include an authenticated production API, self-service product, or turnkey installer.
+This repository contains OpenStack/NixOS role images, a restart-aware staff
+CLI, constrained application and managed-storage helpers, backups, recovery,
+and monitoring. It does not include an authenticated production API,
+self-service product, or turnkey installer.
 
 A deployment is created from scratch. Reconciliation may preserve safety evidence for configured resources, but no external row is imported into the database, and only resources the inventory names are in scope.
 
 ## Current capability
 
 "Implemented" below means the code and its tests exist. It does not mean the
-path has been run end to end against a live cloud. If you are standing this up
-for the first time, follow [the tutorial](TUTORIAL.md) and treat the first run
-of each command as the real test.
+path has been run end to end against a live cloud. For a first deployment, follow [the tutorial](TUTORIAL.md). The first run of
+each command is the real test.
 
 | Capability | State |
 | --- | --- |
@@ -28,7 +30,7 @@ of each command as the real test.
 
 ## Now — staff control surface
 
-An operator with the CLI installed can:
+With the CLI installed, an operator can:
 
 - deploy an application from an exact Git commit, and get either a working
   HTTPS URL or a clear reason it was rejected;
@@ -46,8 +48,8 @@ Operations are resumable. If a command is interrupted, running it again picks
 up from the last recorded checkpoint instead of starting over or applying the
 same change twice.
 
-There is no way to import state from another system, and nothing reads or
-writes resources the inventory does not name.
+There is no way to import state from another system, and nothing outside the
+inventory is written.
 
 ## 1. Identity, roster, and GitHub App
 

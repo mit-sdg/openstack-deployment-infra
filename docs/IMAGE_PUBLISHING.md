@@ -1,6 +1,13 @@
 # Publish new role images automatically
 
-This procedure publishes role-image candidates. It never imports platform state, replaces servers, or attaches volumes. For automatic runs, the `CI` workflow builds and uploads commit-addressed NixOS role images in the same matrix job when a push to `main` changes `flake.nix`, `flake.lock`, or anything under `nix/` or `infra/`. The `infra/` tree is an image input because the admin image embeds it and the storage image references its registry-GC implementation. The workflow publishes images only; it does not select an image for a role, replace servers, or attach volumes.
+This procedure publishes role-image candidates. It does not import platform
+state, replace servers, or attach volumes. For automatic runs, the `CI`
+workflow builds and uploads commit-addressed NixOS role images in the same
+matrix job. It runs when a push to `main` changes `flake.nix`, `flake.lock`, or
+anything under `nix/` or `infra/`. The `infra/` tree is an image input because
+the admin image embeds it and the storage image references its registry-GC
+implementation. The workflow only publishes images; it does not select them or
+replace servers.
 
 Publication remains disabled until the `openstack-images` GitHub environment has OpenStack credentials and the repository variable `OPENSTACK_PUBLISH_ENABLED` is set to `true`.
 
@@ -24,12 +31,11 @@ use the same eight-character suffix and embed the same derived image-name set.
 The full commit remains the checkout identity and is stored in each Glance
 image's deployment-namespaced `source_commit` property.
 
-The publisher does not overwrite an existing image. If an image for that commit
-already exists, a rerun leaves it unchanged. If an eight-character suffix ever
-collides with an image carrying a different full commit, publication fails
-rather than silently reusing it. Entries under `images` remain stable base
-names; the workflow derives immutable candidate names without changing the
-stored inventory.
+The publisher does not overwrite an existing image. A rerun leaves an image for
+that commit unchanged. If an eight-character suffix collides with an image
+carrying a different full commit, publication fails instead of reusing it.
+Entries under `images` remain stable base names; the workflow derives immutable
+candidate names without changing the stored inventory.
 
 A successful upload does not make an image ready for deployment. Before selecting it in a fresh control database, complete the disposable live tests and follow the persistent-role safeguards in [`../nix/README.md`](../nix/README.md).
 
@@ -76,10 +82,10 @@ with `PLATFORM_CONFIG_JSON` and uploads the resulting file before the ephemeral
 runner exits. No multi-gigabyte QCOW2 artifact is passed to another job, and no
 second image build is required.
 
-Because build and publication share a job, an OpenStack outage makes the
-corresponding main-branch image check fail after its build has succeeded. The
-job can be rerun safely: an existing image is reused only when its full
-`source_commit` metadata matches.
+Because build and publication share a job, an OpenStack outage can make the
+main-branch image check fail after a successful build. You can rerun the job:
+it reuses an existing image only when the full `source_commit` metadata
+matches.
 
 ## Repository security boundary
 
@@ -93,7 +99,10 @@ The publication workflow has access to an OpenStack password that authorizes pro
 - force pushes and branch deletion are disabled; and
 - `.github/CODEOWNERS` identifies the workflow, Nix source, platform-config parser, and publisher as the image-publication boundary.
 
-The current branch protection does not require an approving review. CODEOWNERS records ownership of the publication boundary; branch protection, not CODEOWNERS, controls who can update `main`. Organization owners may still have platform-level emergency powers outside repository configuration.
+The current branch protection does not require an approving review. CODEOWNERS
+records ownership of the publication boundary, but branch protection controls
+who can update `main`. Organization owners may still have platform-level
+emergency powers outside repository configuration.
 
 When available, Keystone application credentials allow independent revocation and restriction. The target cloud currently returns `404` for the application-credential API, so the workflow uses password authentication. The password must remain an environment secret, must never be printed or copied into the inventory, and should be replaced with a dedicated automation identity if the cloud operator provides one.
 

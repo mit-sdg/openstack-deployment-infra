@@ -1,8 +1,13 @@
 # Documentation
 
-This repository contains OpenStack/NixOS infrastructure and an unprivileged staff control surface. It is not a self-service portal or turnkey installer.
+This repository contains OpenStack/NixOS infrastructure and an unprivileged
+staff control surface. It is not a self-service portal or turnkey installer.
 
-A deployment starts from an empty management database; the tooling creates its own state rather than importing records from another system. Every command in this repository acts only on the resources named in your platform configuration. Unrelated servers, volumes, and images that share the same OpenStack project are never inspected, changed, or deleted.
+A deployment starts with an empty management database. The tooling creates its
+own state instead of importing records from another system. Every command in
+this repository creates, changes, and deletes only the resources named in your
+platform configuration. Some commands list servers and images project-wide to
+decide what they may touch, but nothing outside your inventory is modified.
 
 ## Learn by doing
 
@@ -31,4 +36,6 @@ A deployment starts from an empty management database; the tooling creates its o
 
 - [Traceable acceptance checklist](ACCEPTANCE_CHECKLIST.md) — command-to-evidence mapping for a fresh deployment, first application, backups, restore, upgrade, and cleanup.
 
-Live deployment identifiers, credentials, incident notes, and handoff records do not belong in tracked documentation. Keep them in your deployment's private operations system.
+Keep live deployment identifiers, credentials, incident notes, and handoff
+records out of tracked documentation. Store them in your deployment's private
+operations system.
