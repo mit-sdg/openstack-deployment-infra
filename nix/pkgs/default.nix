@@ -94,6 +94,11 @@ let
     '';
   };
 
+  # The control plane reaches the helper at <paths.root>/bin, and a tmpfiles
+  # rule repoints that name at this launcher on every boot. Running the helper
+  # module from here would drop PLATFORM_CONFIG, which the helper requires, so
+  # every helper call would fail after any admin replacement. Hand over to the
+  # accepted release's own launcher, which validates and exports it.
   platformCliHelperLauncher = pkgs.writeShellScriptBin "openstack-platform-helper" ''
     set -eu
     release=${platform.paths.adminState}/controller/platform-cli/current
@@ -101,9 +106,12 @@ let
       echo "no accepted helper release" >&2
       exit 69
     fi
-    export PYTHONDONTWRITEBYTECODE=1
-    export PYTHONPATH="$release/source"
-    exec ${platformCliPython}/bin/python -P -m platform_cli.helper.main "$@"
+    launcher="$release/bin/openstack-platform-helper"
+    if [[ ! -x "$launcher" ]]; then
+      echo "accepted helper release has no launcher" >&2
+      exit 69
+    fi
+    exec "$launcher" "$@"
   '';
 in
 {

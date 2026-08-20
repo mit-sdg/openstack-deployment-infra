@@ -191,6 +191,24 @@ let
               machine.succeed("${packages.platformCliPython}/bin/python -c 'import sys, yaml; assert sys.version_info[:2] == (3, 14)'")
               machine.succeed("openstack-platform-install-release --help >/dev/null")
               machine.fail("${root}/bin/openstack-platform-helper </dev/null")
+              # The control plane calls the helper by this name, and a tmpfiles
+              # rule owns it, so it must reach the accepted release rather than
+              # run the helper module without PLATFORM_CONFIG.
+              machine.succeed(
+                  "install -d -m 0750 ${state}/controller/platform-cli/current/bin"
+              )
+              machine.succeed(
+                  "printf '#!/bin/sh\\necho delegated-to-release\\n' "
+                  "> ${state}/controller/platform-cli/current/bin/openstack-platform-helper"
+              )
+              machine.succeed(
+                  "chmod 0550 ${state}/controller/platform-cli/current/bin/openstack-platform-helper"
+              )
+              machine.succeed("printf 'commit\\n' > ${state}/controller/platform-cli/current/.complete")
+              machine.succeed(
+                  "${root}/bin/openstack-platform-helper </dev/null | grep -Fx delegated-to-release"
+              )
+              machine.succeed("rm -rf ${state}/controller/platform-cli/current")
               machine.succeed("test -d ${state}/controller/platform-cli/releases")
               machine.succeed("test -d ${state}/controller/platform-cli/incoming")
               machine.succeed("test -d ${backups}/m1/.staging")
