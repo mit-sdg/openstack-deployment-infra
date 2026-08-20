@@ -414,6 +414,20 @@ class BuilderTests(unittest.TestCase):
                 )
             )
 
+        # BuildKit's image exporter always reports the reference it pushed, so
+        # rejecting it would fail every otherwise successful build.
+        self.assertEqual(
+            parse_build_metadata(
+                json.dumps(
+                    {
+                        "containerimage.digest": f"sha256:{DIGEST}",
+                        "image.name": "registry.example:5000/apps/demo-app:build-0",
+                    }
+                )
+            ),
+            f"sha256:{DIGEST}",
+        )
+
 
 class ProviderCommandTests(unittest.TestCase):
     IMAGE_ID = "00000000-0000-4000-8000-000000000099"

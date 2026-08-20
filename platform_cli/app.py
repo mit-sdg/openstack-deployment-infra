@@ -718,6 +718,8 @@ def parse_build_metadata(payload: bytes | str) -> str:
         "containerimage.digest",
         "containerimage.config.digest",
         "containerimage.descriptor",
+        # The image exporter always reports the reference it pushed.
+        "image.name",
         "buildkit/trace",
     }
     if any(not isinstance(key, str) or key not in allowed for key in value):
