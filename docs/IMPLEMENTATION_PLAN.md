@@ -4,21 +4,24 @@
 
 This is the remaining implementation plan for a self-hosted management
 application. Typed product services, immutable UI-owned configuration
-snapshots, safe candidates, the local Unix-socket controller API, and retirement
-of the product CLI/repository manifest are implemented. Admin hosting, state
-cutover, the sync-engine management application, and the external
-authentication application are not implemented.
+snapshots, safe candidates, the local Unix-socket controller API, product
+lifecycle services, admin-host controller service, and retirement of the
+product CLI/repository manifest are implemented. Fresh state cutover, live
+candidate/route drills, the sync-engine management application, and the
+external authentication application are not implemented.
 
-The current supported surface is setup, infrastructure operations, backup, and
-recovery. The implemented controller is not started by setup and is not an
-end-user interface. [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md)
+The current supported operator surface is setup, infrastructure operations,
+backup, and recovery. The admin role starts the controller under a dedicated
+trusted account once its policy and helper release are installed, but the
+controller is not an end-user interface. [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md)
 defines current behavior; [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md)
-defines the future UI/authentication completion boundary.
+defines the ready-to-build UI/authentication boundary.
 
 The target lets a signed-in user manage a small web application without cloud,
-SSH, Nomad, registry, or storage-administrator credentials. The management
-application and controller will run on the persistent `admin` host. Enabled
-projects will serve at `https://<slug>.mit-sdg.dev`.
+SSH, Nomad, registry, or storage-administrator credentials. The controller runs
+on the persistent `admin` host; the management application will run there under
+the reserved unprivileged account. Enabled projects will serve at
+`https://<slug>.mit-sdg.dev`.
 
 ## Decisions
 
@@ -80,10 +83,11 @@ controller (trusted account)
   `-- protected OpenStack provider adapter
 ```
 
-The repository already opens admin port 8080 and routes platform-level hosts
-from ingress to it. The management web account must be separate from the
-controller account and unable to read OpenStack, Nomad, storage, builder,
-backup, or age credentials.
+The admin role reserves port 8080 to the configured ingress address and creates
+the unprivileged `management-web` account without a web service. That account
+is separate from the controller and unable to read OpenStack, Nomad, storage,
+builder, backup, or age credentials; it can access only the restricted
+controller socket group.
 
 The helper remains a strict action boundary even though it becomes local. The
 local transport must preserve the fixed action allowlist, bounded JSON envelope,
