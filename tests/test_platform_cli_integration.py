@@ -231,7 +231,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(database.stat().st_mode & 0o777, 0o600)
         connection = db.connect(database)
         try:
-            self.assertEqual(db.schema_version(connection), 5)
+            self.assertEqual(db.schema_version(connection), db.MIGRATIONS[-1].version)
         finally:
             connection.close()
 

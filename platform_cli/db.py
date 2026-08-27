@@ -14,7 +14,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .deployment_config import DeploymentConfiguration
 
 from .config import PlatformConfig, platform_config_identity
 from .runtime import ensure_private_directory, safe_summary
@@ -53,6 +56,10 @@ class DatabaseError(RuntimeError):
 
 
 class MigrationError(DatabaseError):
+    pass
+
+
+class IdempotencyConflictError(DatabaseError):
     pass
 
 
@@ -132,8 +139,12 @@ class Application:
 
 
 @dataclass(frozen=True, slots=True)
-class Deployment:
+class DeploymentAttempt:
+    deployment_id: str
     application_id: str
+    snapshot_kind: str
+    configuration: DeploymentConfiguration | None
+    configuration_sha256: str | None
     source_commit: str
     recipe_hash: str
     image_digest: str
@@ -147,11 +158,50 @@ class Deployment:
     last_healthy_at: str
 
 
+# The accepted deployment returned by the pre-controller callers is now the
+# active immutable attempt.
+Deployment = DeploymentAttempt
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveDeployment:
+    application_id: str
+    deployment_id: str
+    lifecycle_state: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotencyRequest:
+    request_id: str
+    request_fingerprint: str
+    result_kind: str | None
+    result_id: str | None
+    created_at: str
+    completed_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentRevision:
+    application_id: str
+    revision: int
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class SlugTombstone:
+    slug: str
+    application_id: str
+    deleted_at: str
+
+
 @dataclass(frozen=True, slots=True)
 class ManagedResource:
+    resource_id: str
     application_id: str
     resource_type: str
     resource_name: str
+    display_label: str
     provider_id: str | None
     provider_name: str
     lifecycle_state: str
@@ -349,6 +399,153 @@ MIGRATIONS: tuple[Migration, ...] = (
             "DROP TABLE environment_keys_unnamed",
         ),
     ),
+    Migration(
+        6,
+        (
+            """
+            CREATE TABLE deployment_attempts (
+                deployment_id TEXT PRIMARY KEY,
+                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
+                snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ('strict','legacy')),
+                configuration_json TEXT,
+                configuration_sha256 TEXT,
+                source_commit TEXT NOT NULL,
+                recipe_hash TEXT NOT NULL,
+                image_digest TEXT NOT NULL,
+                nomad_job TEXT NOT NULL,
+                nomad_version INTEGER NOT NULL CHECK (nomad_version >= 0),
+                build_log_path TEXT NOT NULL,
+                accepted_at TEXT NOT NULL,
+                last_healthy_at TEXT NOT NULL,
+                nomad_job_sha256 TEXT NOT NULL,
+                health_path TEXT NOT NULL,
+                application_port INTEGER NOT NULL CHECK (application_port BETWEEN 1 AND 65535),
+                UNIQUE (application_id, deployment_id),
+                CHECK (
+                    (snapshot_kind = 'legacy' AND configuration_json IS NULL AND configuration_sha256 IS NULL)
+                    OR
+                    (snapshot_kind = 'strict' AND json_valid(configuration_json)
+                     AND json_type(configuration_json) = 'object'
+                     AND length(configuration_sha256) = 64
+                     AND configuration_sha256 NOT GLOB '*[^0-9a-f]*')
+                )
+            ) STRICT
+            """,
+            """
+            INSERT INTO deployment_attempts
+            SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
+                   '-4' || substr(lower(hex(randomblob(2))), 2) || '-' ||
+                   substr('89ab', (random() & 3) + 1, 1) ||
+                   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
+                   application_id, 'legacy', NULL, NULL, source_commit, recipe_hash,
+                   image_digest, nomad_job, nomad_version, build_log_path, accepted_at,
+                   last_healthy_at, nomad_job_sha256, health_path, application_port
+              FROM deployments
+            """,
+            """
+            CREATE TABLE active_deployments (
+                application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE,
+                deployment_id TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('running','stopped')),
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (application_id, deployment_id)
+                    REFERENCES deployment_attempts(application_id, deployment_id)
+            ) STRICT
+            """,
+            """
+            INSERT INTO active_deployments
+            SELECT attempt.application_id, attempt.deployment_id,
+                   CASE application.desired_running WHEN 1 THEN 'running' ELSE 'stopped' END,
+                   attempt.accepted_at
+              FROM deployment_attempts AS attempt
+              JOIN applications AS application USING (application_id)
+            """,
+            "DROP TABLE deployments",
+            """
+            CREATE TRIGGER deployment_attempts_immutable
+            BEFORE UPDATE ON deployment_attempts
+            BEGIN
+                SELECT RAISE(ABORT, 'deployment attempts are immutable');
+            END
+            """,
+            "ALTER TABLE managed_resources RENAME TO managed_resources_by_name",
+            """
+            CREATE TABLE managed_resources (
+                resource_id TEXT PRIMARY KEY,
+                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
+                resource_type TEXT NOT NULL CHECK (resource_type IN ('postgres','mongo','s3')),
+                resource_name TEXT NOT NULL CHECK (
+                    length(resource_name) BETWEEN 1 AND 40
+                    AND resource_name GLOB '[a-z]*'
+                    AND resource_name NOT GLOB '*[^a-z0-9-]*'
+                    AND resource_name NOT GLOB '*--*'
+                    AND (length(resource_name) = 1 OR substr(resource_name, -1) GLOB '[a-z0-9]')
+                ),
+                display_label TEXT NOT NULL CHECK (length(display_label) BETWEEN 1 AND 100),
+                provider_id TEXT,
+                provider_name TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('creating','active','removing','recovery_required')),
+                postgres_connections INTEGER CHECK (postgres_connections > 0),
+                measured_target_bytes INTEGER CHECK (measured_target_bytes > 0),
+                s3_bytes INTEGER CHECK (s3_bytes > 0),
+                s3_objects INTEGER CHECK (s3_objects > 0),
+                last_verified_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (application_id, resource_type, resource_name),
+                CHECK (resource_type = 'postgres' OR postgres_connections IS NULL),
+                CHECK (resource_type IN ('postgres','mongo') OR measured_target_bytes IS NULL),
+                CHECK (resource_type = 's3' OR (s3_bytes IS NULL AND s3_objects IS NULL))
+            ) STRICT
+            """,
+            """
+            INSERT INTO managed_resources
+            SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
+                   '-4' || substr(lower(hex(randomblob(2))), 2) || '-' ||
+                   substr('89ab', (random() & 3) + 1, 1) ||
+                   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
+                   application_id, resource_type, resource_name, resource_name,
+                   provider_id, provider_name, lifecycle_state, postgres_connections,
+                   measured_target_bytes, s3_bytes, s3_objects, last_verified_at,
+                   created_at, updated_at
+              FROM managed_resources_by_name
+            """,
+            "DROP TABLE managed_resources_by_name",
+            """
+            CREATE TABLE idempotency_requests (
+                request_id TEXT PRIMARY KEY,
+                request_fingerprint TEXT NOT NULL CHECK (
+                    length(request_fingerprint) = 64
+                    AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+                ),
+                result_kind TEXT,
+                result_id TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                CHECK ((result_kind IS NULL) = (result_id IS NULL)),
+                CHECK ((result_id IS NULL) = (completed_at IS NULL))
+            ) STRICT
+            """,
+            """
+            CREATE TABLE environment_revisions (
+                application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                updated_at TEXT NOT NULL
+            ) STRICT
+            """,
+            """
+            INSERT INTO environment_revisions
+            SELECT application_id, 0, updated_at FROM applications
+            """,
+            """
+            CREATE TABLE application_slug_tombstones (
+                slug TEXT PRIMARY KEY,
+                application_id TEXT NOT NULL,
+                deleted_at TEXT NOT NULL
+            ) STRICT
+            """,
+        ),
+    ),
 )
 
 _BOOTSTRAP = """
@@ -372,6 +569,11 @@ _SCHEMA_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SCHEMA_OBJECT_RE = re.compile(
     r"\bCREATE\s+(?:(UNIQUE)\s+)?(TABLE|INDEX|VIEW|TRIGGER)\s+"
     r"(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+_SCHEMA_DROP_RE = re.compile(
+    r"\bDROP\s+(TABLE|INDEX|VIEW|TRIGGER)\s+(?:IF\s+EXISTS\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -401,15 +603,26 @@ def _expected_schema_objects(target_version: int | None = None) -> dict[str, str
         if target_version is not None and migration.version > target_version:
             break
         for statement in migration.statements:
-            for match in _SCHEMA_OBJECT_RE.finditer(statement):
-                _unique, kind, name = match.groups()
+            changes = [
+                (match.start(), "create", match)
+                for match in _SCHEMA_OBJECT_RE.finditer(statement)
+            ] + [
+                (match.start(), "drop", match) for match in _SCHEMA_DROP_RE.finditer(statement)
+            ]
+            for _position, action, match in sorted(changes, key=lambda item: item[0]):
+                if action == "create":
+                    _unique, kind, name = match.groups()
+                    normalized_kind = kind.lower()
+                    prior = expected.get(name)
+                    if prior is not None and prior != normalized_kind:
+                        raise MigrationError("migration schema object kind changed")
+                    expected[name] = normalized_kind
+                else:
+                    kind, name = match.groups()
+                    if expected.get(name) == kind.lower():
+                        del expected[name]
                 if not _SCHEMA_NAME.fullmatch(name):
                     raise MigrationError("migration schema object name is malformed")
-                normalized_kind = kind.lower()
-                prior = expected.get(name)
-                if prior is not None and prior != normalized_kind:
-                    raise MigrationError("migration schema object kind changed")
-                expected[name] = normalized_kind
     return expected
 
 
@@ -508,8 +721,17 @@ def _validate_greenfield_marker(
             raise MigrationError("SQLite database belongs to a different deployment identity")
     # Low-level callers that do not have the platform inventory can still
     # inspect a bound database. The CLI and restore paths always pass an
-    # identity and perform the cross-deployment check above.
-    _validate_schema_objects(connection, require_complete=False)
+    # identity and perform the cross-deployment check above. Validate against
+    # the schema generation actually present so a migration may retire an old
+    # object without making its immediate predecessor look external.
+    current = connection.execute(
+        "SELECT max(version) AS version FROM schema_migrations WHERE version > 0"
+    ).fetchone()["version"]
+    _validate_schema_objects(
+        connection,
+        target_version=0 if current is None else int(current),
+        require_complete=False,
+    )
 
 
 def _initialize_greenfield_schema(
@@ -764,6 +986,92 @@ def _cleanup_state(value: str) -> str:
     if not isinstance(value, str) or not _CLEANUP_STATE.fullmatch(value):
         raise ValidationError("operation cleanup state is malformed")
     return value
+
+
+def request_fingerprint(request: Mapping[str, Any]) -> str:
+    """Hash a bounded canonical request without persisting its contents."""
+    return hashlib.sha256(_refs_json(request).encode()).hexdigest()
+
+
+def _idempotency_request(row: sqlite3.Row | None) -> IdempotencyRequest | None:
+    if row is None:
+        return None
+    return IdempotencyRequest(
+        request_id=row["request_id"],
+        request_fingerprint=row["request_fingerprint"],
+        result_kind=row["result_kind"],
+        result_id=row["result_id"],
+        created_at=row["created_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+def get_idempotency_request(
+    connection: sqlite3.Connection, request_id: str
+) -> IdempotencyRequest | None:
+    identifier = uuid(request_id, field="request_id")
+    return _idempotency_request(
+        connection.execute(
+            "SELECT * FROM idempotency_requests WHERE request_id = ?", (identifier,)
+        ).fetchone()
+    )
+
+
+def claim_idempotency_request(
+    connection: sqlite3.Connection,
+    *,
+    request_id: str,
+    request_fingerprint: str,
+    now: str | None = None,
+) -> IdempotencyRequest:
+    identifier = uuid(request_id, field="request_id")
+    fingerprint = sha256_hex(request_fingerprint, field="request fingerprint")
+    with transaction(connection):
+        existing = get_idempotency_request(connection, identifier)
+        if existing is not None:
+            if existing.request_fingerprint != fingerprint:
+                raise IdempotencyConflictError(
+                    "idempotency request was already used for different input"
+                )
+            return existing
+        connection.execute(
+            "INSERT INTO idempotency_requests VALUES (?, ?, NULL, NULL, ?, NULL)",
+            (identifier, fingerprint, now or utc_now()),
+        )
+    result = get_idempotency_request(connection, identifier)
+    assert result is not None
+    return result
+
+
+def complete_idempotency_request(
+    connection: sqlite3.Connection,
+    *,
+    request_id: str,
+    result_kind: str,
+    result_id: str,
+    now: str | None = None,
+) -> IdempotencyRequest:
+    identifier = uuid(request_id, field="request_id")
+    kind = _operation_token(result_kind, field="result kind")
+    result_identifier = uuid(result_id, field="idempotency result ID")
+    with transaction(connection):
+        existing = get_idempotency_request(connection, identifier)
+        if existing is None:
+            raise DatabaseError("idempotency request is missing")
+        if existing.result_id is not None:
+            if (existing.result_kind, existing.result_id) != (kind, result_identifier):
+                raise IdempotencyConflictError(
+                    "idempotency request already has a different result"
+                )
+            return existing
+        connection.execute(
+            "UPDATE idempotency_requests SET result_kind = ?, result_id = ?, completed_at = ? "
+            "WHERE request_id = ?",
+            (kind, result_identifier, now or utc_now(), identifier),
+        )
+    result = get_idempotency_request(connection, identifier)
+    assert result is not None
+    return result
 
 
 def _operation(row: sqlite3.Row | None) -> Operation | None:
@@ -1164,7 +1472,23 @@ def put_application(
     if scheduler_cpu_mhz <= 0 or scheduler_memory_mib <= 0 or not worker_flavor:
         raise ValidationError("application sizing must be positive and have a worker flavor")
     timestamp = now or utc_now()
+    product_schema = schema_version(connection) >= 6
     with transaction(connection):
+        if product_schema:
+            tombstone = connection.execute(
+                "SELECT 1 FROM application_slug_tombstones WHERE slug = ?",
+                (application_slug,),
+            ).fetchone()
+            if tombstone is not None:
+                raise DatabaseError("application slug is permanently retired")
+            existing = connection.execute(
+                "SELECT slug FROM applications WHERE application_id = ?", (application_id,)
+            ).fetchone()
+            if existing is not None and existing["slug"] != application_slug:
+                connection.execute(
+                    "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
+                    (existing["slug"], application_id, timestamp),
+                )
         connection.execute(
             """
             INSERT INTO applications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1195,6 +1519,17 @@ def put_application(
                 timestamp,
             ),
         )
+        if product_schema:
+            connection.execute(
+                "INSERT INTO environment_revisions VALUES (?, 0, ?) "
+                "ON CONFLICT(application_id) DO NOTHING",
+                (application_id, timestamp),
+            )
+            connection.execute(
+                "UPDATE active_deployments SET lifecycle_state = ?, updated_at = ? "
+                "WHERE application_id = ?",
+                ("running" if desired_running else "stopped", timestamp, application_id),
+            )
 
 
 def _application(row: sqlite3.Row | None) -> Application | None:
@@ -1237,14 +1572,25 @@ def list_applications(connection: sqlite3.Connection) -> list[Application]:
     return applications
 
 
-def get_deployment(connection: sqlite3.Connection, application_id: str) -> Deployment | None:
-    row = connection.execute(
-        "SELECT * FROM deployments WHERE application_id = ?", (application_id,)
-    ).fetchone()
+def _deployment_attempt(row: sqlite3.Row | None) -> DeploymentAttempt | None:
     if row is None:
         return None
-    return Deployment(
+    configuration = None
+    if row["snapshot_kind"] == "strict":
+        from .deployment_config import parse_configuration
+
+        encoded = row["configuration_json"]
+        if hashlib.sha256(encoded.encode()).hexdigest() != row["configuration_sha256"]:
+            raise DatabaseError("deployment configuration snapshot hash does not match")
+        configuration = parse_configuration(encoded)
+        if configuration.canonical_json() != encoded:
+            raise DatabaseError("deployment configuration snapshot is not canonical")
+    return DeploymentAttempt(
+        deployment_id=row["deployment_id"],
         application_id=row["application_id"],
+        snapshot_kind=row["snapshot_kind"],
+        configuration=configuration,
+        configuration_sha256=row["configuration_sha256"],
         source_commit=row["source_commit"],
         recipe_hash=row["recipe_hash"],
         image_digest=row["image_digest"],
@@ -1259,6 +1605,91 @@ def get_deployment(connection: sqlite3.Connection, application_id: str) -> Deplo
     )
 
 
+def get_deployment_attempt(
+    connection: sqlite3.Connection, deployment_id: str
+) -> DeploymentAttempt | None:
+    identifier = uuid(deployment_id, field="deployment_id")
+    return _deployment_attempt(
+        connection.execute(
+            "SELECT * FROM deployment_attempts WHERE deployment_id = ?", (identifier,)
+        ).fetchone()
+    )
+
+
+def get_active_deployment(
+    connection: sqlite3.Connection, application_id: str
+) -> ActiveDeployment | None:
+    row = connection.execute(
+        "SELECT * FROM active_deployments WHERE application_id = ?", (application_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return ActiveDeployment(
+        application_id=row["application_id"],
+        deployment_id=row["deployment_id"],
+        lifecycle_state=row["lifecycle_state"],
+        updated_at=row["updated_at"],
+    )
+
+
+def set_deployment_lifecycle(
+    connection: sqlite3.Connection,
+    application_id: str,
+    lifecycle_state: str,
+    *,
+    now: str | None = None,
+) -> ActiveDeployment:
+    identifier = uuid(application_id, field="application_id")
+    if lifecycle_state not in {"running", "stopped"}:
+        raise ValidationError("deployment lifecycle must be running or stopped")
+    timestamp = now or utc_now()
+    with transaction(connection):
+        cursor = connection.execute(
+            "UPDATE active_deployments SET lifecycle_state = ?, updated_at = ? "
+            "WHERE application_id = ?",
+            (lifecycle_state, timestamp, identifier),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("active deployment is missing")
+        connection.execute(
+            "UPDATE applications SET desired_running = ?, updated_at = ? "
+            "WHERE application_id = ?",
+            (int(lifecycle_state == "running"), timestamp, identifier),
+        )
+    result = get_active_deployment(connection, identifier)
+    assert result is not None
+    return result
+
+
+def get_deployment(
+    connection: sqlite3.Connection, application_id: str
+) -> DeploymentAttempt | None:
+    row = connection.execute(
+        """
+        SELECT attempt.*
+          FROM active_deployments AS active
+          JOIN deployment_attempts AS attempt
+            ON attempt.deployment_id = active.deployment_id
+           AND attempt.application_id = active.application_id
+         WHERE active.application_id = ?
+        """,
+        (application_id,),
+    ).fetchone()
+    return _deployment_attempt(row)
+
+
+def list_deployment_attempts(
+    connection: sqlite3.Connection, application_id: str
+) -> tuple[DeploymentAttempt, ...]:
+    identifier = uuid(application_id, field="application_id")
+    rows = connection.execute(
+        "SELECT * FROM deployment_attempts WHERE application_id = ? "
+        "ORDER BY accepted_at DESC, deployment_id DESC",
+        (identifier,),
+    )
+    return tuple(attempt for row in rows if (attempt := _deployment_attempt(row)) is not None)
+
+
 def list_application_manifest_images(
     connection: sqlite3.Connection,
     application_id: str,
@@ -1270,10 +1701,10 @@ def list_application_manifest_images(
     current row.
     """
     identifier = uuid(application_id, field="application_id")
-    images: list[str] = []
-    deployment = get_deployment(connection, identifier)
-    if deployment is not None:
-        images.append(oci_digest_pin(deployment.image_digest, field="deployment image"))
+    images = [
+        oci_digest_pin(attempt.image_digest, field="deployment image")
+        for attempt in list_deployment_attempts(connection, identifier)
+    ]
     rows = connection.execute(
         """
         SELECT candidate_digest
@@ -1296,10 +1727,10 @@ def list_application_successful_manifest_history(
 ) -> tuple[str, ...]:
     """Return current then previously accepted manifests in recency order."""
     identifier = uuid(application_id, field="application_id")
-    images: list[str] = []
-    deployment = get_deployment(connection, identifier)
-    if deployment is not None:
-        images.append(oci_digest_pin(deployment.image_digest, field="deployment image"))
+    images = [
+        oci_digest_pin(attempt.image_digest, field="deployment image")
+        for attempt in list_deployment_attempts(connection, identifier)
+    ]
     rows = connection.execute(
         """
         SELECT candidate_digest
@@ -1360,78 +1791,61 @@ def accept_deployment(
     application_port: int = 8080,
     accepted_at: str | None = None,
     last_healthy_at: str | None = None,
-) -> None:
-    """Accept a complete M1 deployment with source and recipe evidence."""
-    _accept_deployment(
-        connection,
-        application_id=application_id,
-        source_commit=commit(source_commit),
-        recipe_hash=sha256_hex(recipe_hash, field="recipe_hash"),
-        image_digest=image_digest,
-        nomad_job=nomad_job,
-        nomad_version=nomad_version,
-        build_log_path=build_log_path,
-        nomad_job_sha256=nomad_job_sha256,
-        health_path=health_path,
-        application_port=application_port,
-        accepted_at=accepted_at,
-        last_healthy_at=last_healthy_at,
-    )
+    deployment_id: str | None = None,
+    configuration: DeploymentConfiguration | None = None,
+) -> DeploymentAttempt:
+    """Append one accepted attempt and atomically make it active.
 
+    ``configuration=None`` is retained only for the pre-controller deployment
+    path and is explicitly marked legacy; controller writes provide the parsed,
+    canonical configuration object.
+    """
+    from .deployment_config import DeploymentConfiguration
 
-def _accept_deployment(
-    connection: sqlite3.Connection,
-    *,
-    application_id: str,
-    source_commit: str,
-    recipe_hash: str,
-    image_digest: str,
-    nomad_job: str,
-    nomad_version: int,
-    build_log_path: str,
-    nomad_job_sha256: str | None,
-    health_path: str,
-    application_port: int,
-    accepted_at: str | None,
-    last_healthy_at: str | None,
-) -> None:
     application_id = uuid(application_id, field="application_id")
-    oci_digest_pin(image_digest, field="image_digest")
+    identifier = uuid(
+        deployment_id or str(uuid_module.uuid4()), field="deployment_id"
+    )
+    checked_source = commit(source_commit)
+    checked_recipe = sha256_hex(recipe_hash, field="recipe_hash")
+    checked_image = oci_digest_pin(image_digest, field="image_digest")
     checked_job_sha256 = sha256_hex(
-        nomad_job_sha256 or _nomad_job_sha256(nomad_job),
-        field="nomad_job_sha256",
+        nomad_job_sha256 or _nomad_job_sha256(nomad_job), field="nomad_job_sha256"
     )
     checked_health_path = validate_health_path(health_path)
+    if (
+        isinstance(nomad_version, bool)
+        or not isinstance(nomad_version, int)
+        or nomad_version < 0
+    ):
+        raise ValidationError("nomad_version must be non-negative")
     if (
         isinstance(application_port, bool)
         or not isinstance(application_port, int)
         or not 1 <= application_port <= 65_535
     ):
         raise ValidationError("application_port must be from 1 through 65535")
+    if configuration is not None and not isinstance(configuration, DeploymentConfiguration):
+        raise ValidationError("deployment configuration snapshot is malformed")
+    encoded = None if configuration is None else configuration.canonical_json()
+    configuration_hash = None if encoded is None else hashlib.sha256(encoded.encode()).hexdigest()
     timestamp = accepted_at or utc_now()
     with transaction(connection):
         connection.execute(
             """
-            INSERT INTO deployments(
-              application_id, source_commit, recipe_hash,
-              image_digest, nomad_job, nomad_version, build_log_path,
-              accepted_at, last_healthy_at, nomad_job_sha256, health_path,
-              application_port
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(application_id) DO UPDATE SET
-              source_commit=excluded.source_commit, recipe_hash=excluded.recipe_hash,
-              image_digest=excluded.image_digest, nomad_job=excluded.nomad_job,
-              nomad_job_sha256=excluded.nomad_job_sha256,
-              nomad_version=excluded.nomad_version, health_path=excluded.health_path,
-              application_port=excluded.application_port,
-              build_log_path=excluded.build_log_path,
-              accepted_at=excluded.accepted_at, last_healthy_at=excluded.last_healthy_at
+            INSERT INTO deployment_attempts VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
+                identifier,
                 application_id,
-                source_commit,
-                recipe_hash,
-                image_digest,
+                "legacy" if encoded is None else "strict",
+                encoded,
+                configuration_hash,
+                checked_source,
+                checked_recipe,
+                checked_image,
                 nomad_job,
                 nomad_version,
                 build_log_path,
@@ -1442,6 +1856,35 @@ def _accept_deployment(
                 application_port,
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO active_deployments VALUES (?, ?, 'running', ?)
+            ON CONFLICT(application_id) DO UPDATE SET
+              deployment_id=excluded.deployment_id,
+              lifecycle_state=excluded.lifecycle_state,
+              updated_at=excluded.updated_at
+            """,
+            (application_id, identifier, timestamp),
+        )
+        connection.execute(
+            "UPDATE applications SET desired_running = 1, updated_at = ? "
+            "WHERE application_id = ?",
+            (timestamp, application_id),
+        )
+    result = get_deployment_attempt(connection, identifier)
+    assert result is not None
+    return result
+
+
+def _display_label(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 100
+        or value != value.strip()
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise ValidationError("storage display label must be 1-100 printable characters")
+    return value
 
 
 def put_managed_resource(
@@ -1453,21 +1896,44 @@ def put_managed_resource(
     provider_name: str,
     lifecycle_state: str,
     provider_id: str | None = None,
+    resource_id: str | None = None,
+    display_label: str | None = None,
     postgres_connections: int | None = None,
     measured_target_bytes: int | None = None,
     s3_bytes: int | None = None,
     s3_objects: int | None = None,
     last_verified_at: str | None = None,
     now: str | None = None,
-) -> None:
+) -> ManagedResource:
     application_id = uuid(application_id, field="application_id")
     checked_resource_name = validate_resource_name(resource_name)
+    checked_label = _display_label(
+        checked_resource_name if display_label is None else display_label
+    )
+    supplied_id = None if resource_id is None else uuid(resource_id, field="resource_id")
     timestamp = now or utc_now()
     with transaction(connection):
+        existing = connection.execute(
+            "SELECT resource_id FROM managed_resources "
+            "WHERE application_id = ? AND resource_type = ? AND resource_name = ?",
+            (application_id, resource_type, checked_resource_name),
+        ).fetchone()
+        if (
+            existing is not None
+            and supplied_id is not None
+            and existing["resource_id"] != supplied_id
+        ):
+            raise DatabaseError("storage resource UUID is immutable")
+        identifier = (
+            existing["resource_id"]
+            if existing is not None
+            else supplied_id or str(uuid_module.uuid4())
+        )
         connection.execute(
             """
-            INSERT INTO managed_resources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO managed_resources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(application_id, resource_type, resource_name) DO UPDATE SET
+              display_label=excluded.display_label,
               provider_id=excluded.provider_id, provider_name=excluded.provider_name,
               lifecycle_state=excluded.lifecycle_state,
               postgres_connections=excluded.postgres_connections,
@@ -1476,9 +1942,11 @@ def put_managed_resource(
               last_verified_at=excluded.last_verified_at, updated_at=excluded.updated_at
             """,
             (
+                identifier,
                 application_id,
                 resource_type,
                 checked_resource_name,
+                checked_label,
                 provider_id,
                 provider_name,
                 lifecycle_state,
@@ -1491,6 +1959,63 @@ def put_managed_resource(
                 timestamp,
             ),
         )
+    result = get_managed_resource(connection, identifier)
+    assert result is not None
+    return result
+
+
+def _managed_resource(row: sqlite3.Row | None) -> ManagedResource | None:
+    if row is None:
+        return None
+    return ManagedResource(
+        resource_id=row["resource_id"],
+        application_id=row["application_id"],
+        resource_type=row["resource_type"],
+        resource_name=row["resource_name"],
+        display_label=row["display_label"],
+        provider_id=row["provider_id"],
+        provider_name=row["provider_name"],
+        lifecycle_state=row["lifecycle_state"],
+        postgres_connections=row["postgres_connections"],
+        measured_target_bytes=row["measured_target_bytes"],
+        s3_bytes=row["s3_bytes"],
+        s3_objects=row["s3_objects"],
+        last_verified_at=row["last_verified_at"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def get_managed_resource(
+    connection: sqlite3.Connection, resource_id: str
+) -> ManagedResource | None:
+    identifier = uuid(resource_id, field="resource_id")
+    return _managed_resource(
+        connection.execute(
+            "SELECT * FROM managed_resources WHERE resource_id = ?", (identifier,)
+        ).fetchone()
+    )
+
+
+def rename_managed_resource(
+    connection: sqlite3.Connection,
+    resource_id: str,
+    display_label: str,
+    *,
+    now: str | None = None,
+) -> ManagedResource:
+    identifier = uuid(resource_id, field="resource_id")
+    label = _display_label(display_label)
+    with transaction(connection):
+        cursor = connection.execute(
+            "UPDATE managed_resources SET display_label = ?, updated_at = ? WHERE resource_id = ?",
+            (label, now or utc_now(), identifier),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("storage resource is missing")
+    result = get_managed_resource(connection, identifier)
+    assert result is not None
+    return result
 
 
 def list_managed_resources(
@@ -1507,24 +2032,7 @@ def list_managed_resources(
             "SELECT * FROM managed_resources WHERE application_id = ? ORDER BY resource_type, resource_name",
             (application_id,),
         )
-    return [
-        ManagedResource(
-            application_id=row["application_id"],
-            resource_type=row["resource_type"],
-            resource_name=row["resource_name"],
-            provider_id=row["provider_id"],
-            provider_name=row["provider_name"],
-            lifecycle_state=row["lifecycle_state"],
-            postgres_connections=row["postgres_connections"],
-            measured_target_bytes=row["measured_target_bytes"],
-            s3_bytes=row["s3_bytes"],
-            s3_objects=row["s3_objects"],
-            last_verified_at=row["last_verified_at"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-        for row in rows
-    ]
+    return [resource for row in rows if (resource := _managed_resource(row)) is not None]
 
 
 def delete_managed_resource(
@@ -1541,6 +2049,59 @@ def delete_managed_resource(
             "DELETE FROM managed_resources WHERE application_id = ? AND resource_type = ? AND resource_name = ?",
             (application_id, resource_type, checked_name),
         )
+
+
+def get_environment_revision(
+    connection: sqlite3.Connection, application_id: str
+) -> EnvironmentRevision | None:
+    identifier = uuid(application_id, field="application_id")
+    row = connection.execute(
+        "SELECT * FROM environment_revisions WHERE application_id = ?", (identifier,)
+    ).fetchone()
+    if row is None:
+        return None
+    return EnvironmentRevision(
+        application_id=row["application_id"],
+        revision=row["revision"],
+        updated_at=row["updated_at"],
+    )
+
+
+def advance_environment_revision(
+    connection: sqlite3.Connection,
+    *,
+    application_id: str,
+    expected_revision: int,
+    now: str | None = None,
+) -> EnvironmentRevision:
+    identifier = uuid(application_id, field="application_id")
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+        raise ValidationError("expected environment revision must be an integer")
+    with transaction(connection):
+        cursor = connection.execute(
+            "UPDATE environment_revisions SET revision = revision + 1, updated_at = ? "
+            "WHERE application_id = ? AND revision = ?",
+            (now or utc_now(), identifier, expected_revision),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("environment revision is missing or stale")
+    result = get_environment_revision(connection, identifier)
+    assert result is not None
+    return result
+
+
+def get_slug_tombstone(
+    connection: sqlite3.Connection, application_slug: str
+) -> SlugTombstone | None:
+    checked_slug = slug(application_slug)
+    row = connection.execute(
+        "SELECT * FROM application_slug_tombstones WHERE slug = ?", (checked_slug,)
+    ).fetchone()
+    if row is None:
+        return None
+    return SlugTombstone(
+        slug=row["slug"], application_id=row["application_id"], deleted_at=row["deleted_at"]
+    )
 
 
 def set_environment_keys(
@@ -1617,6 +2178,15 @@ def complete_application_removal(
         ).fetchone()
         if managed is not None:
             raise DatabaseError("application removal refuses managed resource rows")
+        application = connection.execute(
+            "SELECT slug FROM applications WHERE application_id = ?", (application_id,)
+        ).fetchone()
+        if application is None:
+            raise DatabaseError("application is missing")
+        connection.execute(
+            "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
+            (application["slug"], application_id, timestamp),
+        )
         connection.execute("DELETE FROM applications WHERE application_id = ?", (application_id,))
         cursor = connection.execute(
             """

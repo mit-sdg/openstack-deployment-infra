@@ -9,11 +9,14 @@ from pathlib import Path
 
 from platform_cli import db
 from platform_cli.config import load_platform
+from platform_cli.deployment_config import parse_configuration
 from platform_cli.validation import ValidationError
 
 APP_ID = "00000000-0000-4000-8000-000000000001"
 IMAGE_ID = "00000000-0000-4000-8000-000000000002"
 DIGEST = "registry.example/projects/demo/app@sha256:" + "a" * 64
+DEPLOYMENT_ID = "00000000-0000-4000-8000-000000000004"
+REQUEST_ID = "00000000-0000-4000-8000-000000000005"
 
 
 class DatabaseTests(unittest.TestCase):
@@ -43,7 +46,7 @@ class DatabaseTests(unittest.TestCase):
             now="2026-01-01T00:00:00Z",
         )
 
-    def test_fresh_and_incremental_migrations_create_exactly_seven_tables(self) -> None:
+    def test_fresh_and_incremental_migrations_create_exact_product_schema(self) -> None:
         db.migrate(self.connection, target_version=1)
         self.assertEqual(db.schema_version(self.connection), 1)
         self.assertEqual(
@@ -57,7 +60,7 @@ class DatabaseTests(unittest.TestCase):
             {"schema_migrations", "image_selections", "applications"},
         )
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 5)
+        self.assertEqual(db.schema_version(self.connection), 6)
         tables = {
             row[0]
             for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -69,10 +72,14 @@ class DatabaseTests(unittest.TestCase):
                 "schema_migrations",
                 "image_selections",
                 "applications",
-                "deployments",
+                "deployment_attempts",
+                "active_deployments",
                 "managed_resources",
                 "environment_keys",
                 "operations",
+                "idempotency_requests",
+                "environment_revisions",
+                "application_slug_tombstones",
             },
         )
         schema_sql = "\n".join(
@@ -102,6 +109,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(
             (resource.provider_id, resource.provider_name), ("provider-id", "p_existing")
         )
+        self.assertEqual(resource.display_label, "default")
+        self.assertEqual(str(uuid.UUID(resource.resource_id)), resource.resource_id)
         key = db.list_environment_keys(self.connection, application_id=APP_ID)[0]
         self.assertEqual((key.key_name, key.owner), ("MONGODB_URI", "storage.mongo.default"))
 
@@ -119,7 +128,7 @@ class DatabaseTests(unittest.TestCase):
         db.migrate(self.connection, target_version=1)
         self.assertEqual(db.schema_version(self.connection), 1)
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 5)
+        self.assertEqual(db.schema_version(self.connection), 6)
         self.assertEqual(
             self.connection.execute(
                 "SELECT checksum FROM schema_migrations WHERE version = 0"
@@ -143,7 +152,7 @@ class DatabaseTests(unittest.TestCase):
 
         same_deployment = db.connect(self.path, identity=identity)
         db.migrate(same_deployment, identity=identity)
-        self.assertEqual(db.schema_version(same_deployment), 5)
+        self.assertEqual(db.schema_version(same_deployment), 6)
         same_deployment.close()
 
         wrong_project = db.deployment_identity(replace(platform, project_id=IMAGE_ID))
@@ -181,6 +190,12 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(deployment.nomad_job_sha256, job_identity)
         self.assertEqual(deployment.health_path, "/")
         self.assertEqual(deployment.application_port, 8080)
+        self.assertEqual(deployment.snapshot_kind, "legacy")
+        self.assertIsNone(deployment.configuration)
+        self.assertEqual(
+            db.get_active_deployment(self.connection, APP_ID).deployment_id,  # type: ignore[union-attr]
+            deployment.deployment_id,
+        )
 
     def test_missing_expected_schema_object_is_refused_even_with_its_migration_row(self) -> None:
         self.migrate()
@@ -487,6 +502,17 @@ class DatabaseTests(unittest.TestCase):
             )
         self.assertIsNotNone(db.get_application(self.connection, APP_ID))
         self.assertEqual(db.get_operation(self.connection, operation_id).status, "running")  # type: ignore[union-attr]
+        db.delete_managed_resource(
+            self.connection, application_id=APP_ID, resource_type="mongo"
+        )
+        db.complete_application_removal(
+            self.connection,
+            application_id=APP_ID,
+            operation_id=operation_id,
+            now="2026-01-01T00:01:00Z",
+        )
+        self.assertIsNone(db.get_application(self.connection, APP_ID))
+        self.assertEqual(db.get_slug_tombstone(self.connection, "demo-app").application_id, APP_ID)  # type: ignore[union-attr]
 
     def test_all_manifest_history_and_only_active_references_are_exposed(self) -> None:
         self.migrate()
@@ -544,6 +570,182 @@ class DatabaseTests(unittest.TestCase):
             set(db.list_active_application_manifest_references(self.connection, APP_ID)),
             {current, candidate},
         )
+
+    def test_strict_deployment_attempts_are_immutable_and_keep_history(self) -> None:
+        self.migrate()
+        self.add_application()
+        configuration = parse_configuration(
+            {
+                "schemaVersion": 1,
+                "build": {
+                    "runtime": "node",
+                    "packages": ["."],
+                    "buildScript": "build",
+                    "startScript": "start",
+                },
+                "runtime": {"port": 3000, "healthPath": "/health"},
+                "storageBindings": [],
+            }
+        )
+        first = db.accept_deployment(
+            self.connection,
+            deployment_id=DEPLOYMENT_ID,
+            application_id=APP_ID,
+            source_commit="a" * 40,
+            recipe_hash="b" * 64,
+            image_digest=DIGEST,
+            nomad_job="first",
+            nomad_version=1,
+            build_log_path="logs/first.log",
+            configuration=configuration,
+            accepted_at="2026-01-01T00:00:00Z",
+        )
+        second = db.accept_deployment(
+            self.connection,
+            deployment_id=IMAGE_ID,
+            application_id=APP_ID,
+            source_commit="c" * 40,
+            recipe_hash="d" * 64,
+            image_digest="registry.example/projects/demo/app@sha256:" + "e" * 64,
+            nomad_job="second",
+            nomad_version=2,
+            build_log_path="logs/second.log",
+            configuration=configuration,
+            accepted_at="2026-01-02T00:00:00Z",
+        )
+        self.assertEqual(first.snapshot_kind, "strict")
+        self.assertEqual(first.configuration, configuration)
+        self.assertEqual(db.get_deployment(self.connection, APP_ID), second)
+        self.assertEqual(
+            db.set_deployment_lifecycle(
+                self.connection,
+                APP_ID,
+                "stopped",
+                now="2026-01-02T00:01:00Z",
+            ).lifecycle_state,
+            "stopped",
+        )
+        self.assertEqual(
+            [item.deployment_id for item in db.list_deployment_attempts(self.connection, APP_ID)],
+            [IMAGE_ID, DEPLOYMENT_ID],
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            self.connection.execute(
+                "UPDATE deployment_attempts SET source_commit = ? WHERE deployment_id = ?",
+                ("f" * 40, DEPLOYMENT_ID),
+            )
+
+    def test_idempotency_fingerprint_and_result_are_stable_on_replay(self) -> None:
+        self.migrate()
+        fingerprint = db.request_fingerprint({"slug": "demo-app", "runtime": {"port": 3000}})
+        claimed = db.claim_idempotency_request(
+            self.connection,
+            request_id=REQUEST_ID,
+            request_fingerprint=fingerprint,
+            now="2026-01-01T00:00:00Z",
+        )
+        self.assertIsNone(claimed.result_id)
+        self.assertEqual(
+            db.claim_idempotency_request(
+                self.connection,
+                request_id=REQUEST_ID,
+                request_fingerprint=fingerprint,
+            ),
+            claimed,
+        )
+        completed = db.complete_idempotency_request(
+            self.connection,
+            request_id=REQUEST_ID,
+            result_kind="deployment",
+            result_id=DEPLOYMENT_ID,
+            now="2026-01-01T00:01:00Z",
+        )
+        self.assertEqual((completed.result_kind, completed.result_id), ("deployment", DEPLOYMENT_ID))
+        self.assertEqual(
+            db.complete_idempotency_request(
+                self.connection,
+                request_id=REQUEST_ID,
+                result_kind="deployment",
+                result_id=DEPLOYMENT_ID,
+            ),
+            completed,
+        )
+        with self.assertRaises(db.IdempotencyConflictError):
+            db.claim_idempotency_request(
+                self.connection,
+                request_id=REQUEST_ID,
+                request_fingerprint="f" * 64,
+            )
+        with self.assertRaisesRegex(ValidationError, "secret material"):
+            db.request_fingerprint({"api_token": "must-not-be-persisted"})
+        self.assertNotIn(b"must-not-be-persisted", self.path.read_bytes())
+
+    def test_environment_revision_storage_identity_and_slug_tombstone(self) -> None:
+        self.migrate()
+        self.add_application()
+        revision = db.get_environment_revision(self.connection, APP_ID)
+        assert revision is not None
+        self.assertEqual(revision.revision, 0)
+        self.assertEqual(
+            db.advance_environment_revision(
+                self.connection,
+                application_id=APP_ID,
+                expected_revision=0,
+                now="2026-01-01T00:01:00Z",
+            ).revision,
+            1,
+        )
+        with self.assertRaisesRegex(db.DatabaseError, "stale"):
+            db.advance_environment_revision(
+                self.connection, application_id=APP_ID, expected_revision=0
+            )
+
+        resource = db.put_managed_resource(
+            self.connection,
+            application_id=APP_ID,
+            resource_type="postgres",
+            resource_name="primary",
+            display_label="Primary database",
+            provider_name="app_demo",
+            lifecycle_state="active",
+        )
+        renamed = db.rename_managed_resource(
+            self.connection, resource.resource_id, "Customer data"
+        )
+        self.assertEqual(renamed.resource_id, resource.resource_id)
+        self.assertEqual(renamed.display_label, "Customer data")
+        with self.assertRaisesRegex(db.DatabaseError, "immutable"):
+            db.put_managed_resource(
+                self.connection,
+                application_id=APP_ID,
+                resource_id=DEPLOYMENT_ID,
+                resource_type="postgres",
+                resource_name="primary",
+                provider_name="app_demo",
+                lifecycle_state="active",
+            )
+
+        db.put_application(
+            self.connection,
+            application_id=APP_ID,
+            application_slug="demo-renamed",
+            worker_flavor="example.1c2g",
+            scheduler_cpu_mhz=1000,
+            scheduler_memory_mib=2048,
+            now="2026-01-01T00:02:00Z",
+        )
+        tombstone = db.get_slug_tombstone(self.connection, "demo-app")
+        assert tombstone is not None
+        self.assertEqual(tombstone.application_id, APP_ID)
+        with self.assertRaisesRegex(db.DatabaseError, "retired"):
+            db.put_application(
+                self.connection,
+                application_id=IMAGE_ID,
+                application_slug="demo-app",
+                worker_flavor="example.1c2g",
+                scheduler_cpu_mhz=1000,
+                scheduler_memory_mib=2048,
+            )
 
     def test_database_path_must_not_be_a_symlink_even_when_dangling(self) -> None:
         symlink = self.directory / "dangling.sqlite3"
