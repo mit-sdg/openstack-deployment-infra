@@ -7,6 +7,13 @@ on admin through the pinned `platform-admin` alias. Do not clear SQLite rows,
 bypass the helper, detach resources manually, print a secret, or touch a
 resource the inventory does not name.
 
+The operator CLI has no application, deployment, environment, or managed-storage
+commands. If an installed binary exposes them, stop using that obsolete release.
+The local controller API is not started by setup, and the management and
+authentication applications do not exist yet; do not launch release-internal
+entry points as a workaround. Future integration follows
+[MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
+
 When a command below uses variables, initialize them on the management host
 from the private inventory without printing it:
 
@@ -172,21 +179,21 @@ management inventory into the admin Nix-store configuration path.
 
 ## Public ingress
 
-**Symptom:** DNS does not resolve or TLS does not cover the hostname.
+**Symptom:** DNS does not resolve or TLS does not cover the platform hostname.
 
-**Evidence:** Query the exact platform/application hostname and inspect the
-provider certificate/route separately.
+**Evidence:** Query the exact configured platform hostname and inspect the
+provider certificate and origin route separately.
 
-**Correction:** Add the wildcard/per-host record or certificate in the
-external provider. Do not disable certificate validation in acceptance checks.
+**Correction:** Add the exact or wildcard record/certificate in the external
+provider. Do not disable certificate validation in acceptance checks.
 
-**Symptom:** Traefik returns no route while ingress is reachable.
+**Symptom:** Traefik returns no platform route while ingress is reachable.
 
 **Evidence:** The external service replaced the original `Host` header, or the
-hostname is not exactly `<slug>.<domain>`.
+hostname differs from the configured platform domain.
 
 **Correction:** Preserve `Host`, forward to ingress port 80, and repeat the
-public HTTPS health request. A request to the ingress IP is not equivalent.
+public `/healthz` request. A request to the ingress address is not equivalent.
 
 **Symptom:** Cloudflare ingress bootstrap rejects the token.
 
@@ -202,7 +209,7 @@ pre-control-surface rebuild. With another provider set
 `ENABLE_CLOUDFLARED=false` and satisfy the same forwarding/host/certificate
 contract.
 
-## Images, deployments, and replacement
+## Images and persistent-role replacement
 
 **Symptom:** `infra image set` rejects an image.
 
@@ -212,14 +219,6 @@ metadata, wrong project owner/status, or a compatibility mismatch.
 **Correction:** Publish a new full-commit candidate with `SOURCE_COMMIT`, run
 all role/live acceptance checks, and select its exact UUID. Do not use an image
 with incomplete provenance or overwrite a tested image name.
-
-**Symptom:** builder or worker remains after a failed operation.
-
-**Evidence:** `app show`, the operation error, or bounded provider observation
-reports cleanup/recovery-required.
-
-**Correction:** Restore OpenStack/SSH/registry/Nomad connectivity and rerun the
-same owning CLI operation. Do not create a second resource or delete by name.
 
 **Symptom:** `infra image prune` refuses a plan because a server image is
 missing, malformed, or ambiguous.
@@ -247,15 +246,6 @@ until readiness succeeds.
 after restoring the named dependency. Never delete the old server first or
 detach a volume manually. An ambiguous provider result is recovery-required;
 rerun the same command with the same selected image and role.
-
-**Symptom:** application candidate fails health.
-
-**Evidence:** `app show SLUG` reports scheduler/public health failure; bounded
-`app logs SLUG --build` or `--runtime` identifies the build/runtime symptom.
-
-**Correction:** Fix the public repository manifest, lockfile, runtime, health
-path, or ingress route and deploy the intended full commit again. Failed
-candidate cleanup is bounded recovery, not a manual job-history rollback.
 
 ## Backups and restore
 
@@ -337,9 +327,10 @@ grep -Eq '^restore=verified schema-version=[0-9]+ integrity=ok$' <<<"$restore_ou
 ```
 
 The tool is offline and atomic; it does not restore provider resources. After a
-successful restore, run `status`, `infra list`, `app list`, and `storage list`
-to reconcile accepted records with live observations. Do not import external
-rows or edit SQLite/provider state by hand.
+successful restore, run `status` and `infra list` to reconcile infrastructure
+and aggregate accepted counts with live observations. If `APPS` or `STORAGE` is
+nonzero, preserve state for controlled controller/management recovery. Do not
+use an obsolete product CLI or edit SQLite/provider state by hand.
 
 **Symptom:** a command reports that its operation deadline or lock deadline was
 reached.
@@ -375,14 +366,15 @@ uv run mypy
 uv run python -m unittest discover -s tests -v
 ```
 
-**Symptom:** fresh CLI state contains unexpected rows or restored records do
-not match live resources.
+**Symptom:** fresh CLI status has nonzero `APPS` or `STORAGE`, or restored
+infrastructure records do not match live resources.
 
-**Evidence:** `status`, `app list`, `storage list`, `infra list`, or a private
-operation record names a record not created by this deployment.
+**Evidence:** `status`, `infra list`, or a private operation record identifies
+state not created by this deployment.
 
 **Correction:** Stop mutations and preserve the database and operation ID.
-Escalate the bounded evidence. Do not delete rows, adopt an external resource,
+Escalate the bounded evidence for controlled controller/management recovery.
+Do not install an older product CLI, delete rows, adopt an external resource,
 or inspect a resource the inventory does not name.
 
 For an unresolved failure, report only the safe correlation or operation ID,

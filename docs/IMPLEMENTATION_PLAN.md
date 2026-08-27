@@ -2,16 +2,23 @@
 
 ## Status and goal
 
-This is the implementation target for replacing the current operator-driven
-application CLI with a self-hosted management application and local controller
-API. It is not implemented yet. Until a phase is completed and its contract is
-updated, the current CLI, `platform.yaml`, setup, and recovery documentation
-remain authoritative.
+This is the remaining implementation plan for a self-hosted management
+application. Typed product services, immutable UI-owned configuration
+snapshots, safe candidates, the local Unix-socket controller API, and retirement
+of the product CLI/repository manifest are implemented. Admin hosting, state
+cutover, the sync-engine management application, and the external
+authentication application are not implemented.
+
+The current supported surface is setup, infrastructure operations, backup, and
+recovery. The implemented controller is not started by setup and is not an
+end-user interface. [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md)
+defines current behavior; [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md)
+defines the future UI/authentication completion boundary.
 
 The target lets a signed-in user manage a small web application without cloud,
 SSH, Nomad, registry, or storage-administrator credentials. The management
-application and controller run on the persistent `admin` host. Enabled projects
-serve at `https://<slug>.mit-sdg.dev`.
+application and controller will run on the persistent `admin` host. Enabled
+projects will serve at `https://<slug>.mit-sdg.dev`.
 
 ## Decisions
 
@@ -27,7 +34,7 @@ serve at `https://<slug>.mit-sdg.dev`.
 | Environment | Values are write-only and live only in Nomad Variables. Databases and output contain names, ownership, revisions, and timestamps, never values. |
 | Storage | PostgreSQL, MongoDB, and S3 resources belong to one project. Machine names are immutable; UI display labels are mutable. Project deletion removes all attached storage. |
 | Domains | `domain = mit-sdg.dev` produces `https://<slug>.mit-sdg.dev`; ingress must cover the base and wildcard hostnames. |
-| Authentication | A controlled external application provides one-time login codes and Ed25519-signed JWTs. Full OIDC is not required. The sync-engine management application is implemented in this repository. |
+| Authentication | A future controlled external application provides one-time login codes and Ed25519-signed JWTs. Full OIDC is not required. Neither that authentication application nor the sync-engine management application is implemented. |
 | Authorization | The authentication application supplies stable subject and global `user`/`admin` role. The management database owns project authorization and per-user quotas. |
 | Hosting | Management web listens on `admin:8080` behind ingress. The controller uses a restricted Unix socket and is not publicly reachable. |
 | CLI | The CLI becomes a setup, infrastructure, backup, restore, diagnostic, and recovery surface. It no longer deploys or manages application product state after cutover. |
@@ -111,7 +118,7 @@ A lost response is an unknown result, not failure evidence.
 
 The minimal login protocol is:
 
-1. the user signs in to the existing authentication application;
+1. the user signs in to the future controlled authentication application;
 2. it creates a short-lived, single-use code and redirects to the management
    callback with the code;
 3. the management backend exchanges the code over a backend request;
@@ -432,13 +439,11 @@ openstack-platform backup
 openstack-platform restore
 ```
 
-Retire public `openstack-platform app ...` and `openstack-platform storage ...`
-commands after API parity and migration. A short compatibility window may route
-old commands through the same extracted services, but no independent deployment
-implementation may remain. Low-level managed-data backup/restore checks and
-release installers remain operator tools.
+The product CLI command families are retired. There is no compatibility window
+and no supported invocation through an older release. Low-level managed-data
+backup/restore checks and release installers remain operator tools.
 
-The management application never invokes or parses CLI output.
+The future management application must never invoke or parse CLI output.
 
 ## State placement, backup, and admin recovery
 
@@ -505,6 +510,11 @@ Code rollback and database rollback are separate. Never overwrite a migrated
 database with an older release's copy.
 
 ## Implementation sequence
+
+Work landed out of the original phase order. Service/configuration/candidate/
+lifecycle/controller work (phases 1–5) and the CLI/manifest retirement portion
+of phase 9 are present. Admin hosting, management/authentication integration,
+state cutover, and the full no-shell user-lifecycle exit condition remain.
 
 | Phase | Work | Exit condition |
 | --- | --- | --- |

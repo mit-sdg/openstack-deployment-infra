@@ -2,6 +2,8 @@
 
 Use `openstack-platform setup` to create a new deployment in an empty OpenStack project. The command generates the private inventory, SSH and age keys, service credentials, internal PKI, five NixOS role images, security groups, fixed ports, persistent volumes, three VMs, management bridge, releases, image selections, and backup initialization.
 
+The supported result is infrastructure-only: setup does not start the local controller API, a sync-engine management application, or an authentication application. Product lifecycle commands are not part of the operator CLI. Future UI work follows [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
+
 The command is resumable: rerun the same command with the same protected environment file and workspace after correcting a failed dependency. It verifies an existing named resource before reusing it and refuses an existing setup inventory that differs from the requested deployment.
 
 ## Before running setup
@@ -156,4 +158,4 @@ Keep the generated workspace and `/srv/openstack-platform/.secrets/setup`. Corre
 
 Setup reuses generated private material and verifies commit-addressed images and configured resources before continuing. It refuses a changed inventory in the same workspace. To request different stable names, addresses, volume sizes, or project identity, use an empty workspace and an empty provider resource set.
 
-For bounded diagnosis after a role exists, use [Troubleshooting](TROUBLESHOOTING.md). The expanded manual procedure in [Operations](OPERATIONS.md) remains the recovery and audit reference for each setup checkpoint.
+After completion, use the [fresh-platform tutorial](TUTORIAL.md) to verify public health and both backup classes. For bounded diagnosis after a role exists, use [Troubleshooting](TROUBLESHOOTING.md). The expanded manual procedure in [Operations](OPERATIONS.md) remains the recovery and audit reference for each setup checkpoint.

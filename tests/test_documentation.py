@@ -10,7 +10,24 @@ DOCUMENTS = (
     ROOT / "nix/README.md",
     *sorted((ROOT / "docs").glob("*.md")),
 )
+CURRENT_PRODUCT_DOCUMENTS = (
+    ROOT / "README.md",
+    *(ROOT / "docs" / name for name in (
+        "ACCEPTANCE_CHECKLIST.md",
+        "ARCHITECTURE.md",
+        "CONFIGURATION.md",
+        "CONTROL_PLANE_CONTRACT.md",
+        "GETTING_STARTED.md",
+        "OPERATIONS.md",
+        "PUBLIC_INGRESS.md",
+        "README.md",
+        "SETUP.md",
+        "TROUBLESHOOTING.md",
+        "TUTORIAL.md",
+    )),
+)
 LINK_RE = re.compile(r"\[[^]]*\]\(([^)]+)\)")
+ROUTE_RE = re.compile(r'\("(GET|POST|PUT|PATCH|DELETE)", "(/v1/[^\"]+)", self\.')
 
 
 class DocumentationTests(unittest.TestCase):
@@ -24,28 +41,51 @@ class DocumentationTests(unittest.TestCase):
                     with self.subTest(document=document.relative_to(ROOT), target=target):
                         self.assertTrue((document.parent / path).resolve().exists())
 
-    def test_current_rollback_and_private_diagnostic_claims_match_m1(self) -> None:
+    def test_current_operator_and_pre_management_boundary_is_documented(self) -> None:
         readme = (ROOT / "README.md").read_text()
         architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
         contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
-        admin_role = (ROOT / "nix" / "roles" / "admin.nix").read_text()
+        tutorial = (ROOT / "docs" / "TUTORIAL.md").read_text()
 
-        self.assertNotIn("rollback to earlier versions", readme)
-        self.assertIn("failed deployment candidates", readme)
-        self.assertIn("no general operator command", architecture)
-        self.assertIn("A failed candidate is removed", contract)
-        self.assertIn("`Dockerfile*` files may coexist as inert source files", contract)
-        self.assertIn("`NODE_ENV=production`", contract)
-        self.assertIn("Staff `set`, `import`, and `unset` refuse", contract)
-        self.assertIn("ModifyIndex compare-and-set", contract)
-        self.assertIn("or provisioning requests", contract)
-        self.assertIn("Bindings neither create nor remove storage", contract)
-        self.assertIn("helper-diagnostics/<correlation-id>.trace", contract)
-        self.assertIn("source file/line locations", contract)
+        normalized_readme = " ".join(readme.split())
+        self.assertIn("There is not yet a supported end-user application workflow", normalized_readme)
+        self.assertIn("sync-engine management application", normalized_readme)
+        self.assertIn("authentication application do not exist", normalized_readme)
+        self.assertIn("no product commands", architecture)
+        self.assertIn("admin NixOS role runs that executable", architecture)
         self.assertIn(
-            "controllerRoot}/helper-diagnostics 0700 ${controllerUser} ${controllerGroup}",
-            admin_role,
+            "setup`, `status`, `backup`, `restore`, and `infra`",
+            " ".join(tutorial.split()),
         )
+        self.assertIn("The CLI has no application, deployment, environment", contract)
+        self.assertIn("implemented, packaged, and run by the admin", contract)
+        self.assertIn("does not authenticate HTTP requests", contract)
+        self.assertIn("socket is mode `0660`", contract)
+        self.assertIn("Idempotency-Key", contract)
+
+    def test_retired_product_cli_and_repository_manifest_are_not_current_instructions(self) -> None:
+        retired_commands = (
+            "openstack-platform app ",
+            "openstack-platform storage ",
+            "$PLATFORM_CLI app ",
+            "$PLATFORM_CLI storage ",
+        )
+        retired_manifest = "platform" + ".yaml"
+        for document in CURRENT_PRODUCT_DOCUMENTS:
+            text = document.read_text()
+            with self.subTest(document=document.relative_to(ROOT)):
+                for command in retired_commands:
+                    self.assertNotIn(command, text)
+                self.assertNotIn(retired_manifest, text)
+
+    def test_documented_controller_routes_match_implementation(self) -> None:
+        implementation = (ROOT / "platform_cli" / "controller_api.py").read_text()
+        contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
+        routes = set(ROUTE_RE.findall(implementation))
+        self.assertEqual(len(routes), 29)
+        for method, path in routes:
+            with self.subTest(method=method, path=path):
+                self.assertIn(f"`{method} {path}`", contract)
 
     def test_automated_setup_contract_is_documented(self) -> None:
         readme = (ROOT / "README.md").read_text()
@@ -53,7 +93,7 @@ class DocumentationTests(unittest.TestCase):
         contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
         example = (ROOT / "config" / "platform.example.json").read_text()
 
-        self.assertIn("Automated setup", readme)
+        self.assertIn("automated setup", readme.lower())
         self.assertIn("PLATFORM_INGRESS_ADDRESS", setup)
         self.assertIn("PLATFORM_DATA_GIB", setup)
         self.assertIn("PLATFORM_BACKUP_GIB", setup)

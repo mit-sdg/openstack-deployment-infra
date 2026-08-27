@@ -1,11 +1,14 @@
 # Platform architecture
 
-The platform hosts small HTTP applications in one OpenStack project. It keeps
-persistent control and data services separate from replaceable workers and
-single-use builders. The control database starts empty and accepts only state
-created by this deployment.
+The platform infrastructure hosts small HTTP applications in one OpenStack
+project. Persistent control and data services are separate from replaceable
+workers and single-use builders. The implemented operator surface manages the
+infrastructure; the implemented local controller owns product lifecycle logic.
+The browser management and authentication applications do not exist yet.
 
-In this documentation, an **OpenStack project** is the cloud tenant that owns infrastructure. An **application project** is one hosted application, its worker, deployments, and managed data.
+An **OpenStack project** is the cloud tenant that owns infrastructure. An
+**application project** is a future user-facing record containing one hosted
+application, its worker, deployments, and managed data.
 
 ![Platform architecture](architecture-overview.svg)
 
@@ -13,78 +16,148 @@ In this documentation, an **OpenStack project** is the cloud tenant that owns in
 
 | Role | Lifetime | Responsibility | Persistent state |
 | --- | --- | --- | --- |
-| `admin` | persistent | Nomad control plane, constrained helper, monitoring, and backup staging | Nomad/helper state and backup volume |
-| `ingress` | persistent | Discovers healthy Nomad services and routes public requests | No durable application state |
+| `admin` | persistent | Nomad control plane, local controller, constrained helper, monitoring, and backup staging | Controller/Nomad state and backup volume |
+| `ingress` | persistent | Routes platform and healthy Nomad services | No durable application state |
 | `storage` | persistent | PostgreSQL, MongoDB, Garage object storage, and OCI registry | Managed-data volume |
 | `worker` | replaceable | Runs one application's allocation | None |
 | `builder` | single use | Builds one source snapshot with rootless BuildKit | None |
 
-All role images use one private `config/platform.json`, which provides the deployment identity, resource names, addresses, versions, image names, volume labels, and paths. The private operator policy supplies the standard worker and managed-storage profile and runtime image digests.
+All role images use one private `config/platform.json`, which contains
+deployment identity, resource names, addresses, versions, image names, volume
+labels, and paths. A separate private operator policy supplies the standard
+worker/storage profile, runtime image digests, and management-backup age
+recipient.
+
+## Current control surfaces
+
+`openstack-platform` is an operator-only interface for setup, status, image
+selection/pruning, persistent-host lifecycle, management-state backup, and
+offline restore. It has no product commands. The CLI database still reports
+aggregate application and storage counts so an operator can detect restored or
+pre-cutover state without exposing product mutation paths.
+
+`openstack-platform-controller` implements bounded HTTP/1.1 JSON over a Unix
+socket. Its services own application declarations, typed deployment snapshots,
+environment metadata, managed-storage lifecycle, operation journals, safe
+reads, and destructive cleanup. The controller invokes a fixed local
+constrained helper. It does not authenticate users or authorize project/admin
+access; socket access is the entire implemented transport boundary.
+
+The admin NixOS role runs that executable under the dedicated trusted
+`platform-controller` account after the retained state mount, Nomad, controller
+policy, and helper release are available. The sync-engine management
+application, browser sessions, quota/ownership model, and external
+authentication application remain future work. Their intended boundary is
+specified in [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 
 ## Fresh deployment flow
 
 The operator reconciles the configured foundation, boots and verifies the
-three persistent roles, then installs matching management and helper releases.
-The first `openstack-platform status` invocation creates the empty SQLite
-schema. Its marker is bound to the deployment project UUID, namespace, and
-stable inventory identity. There is no import phase. Reconciliation reads the
-configured resources and accepted image candidates to confirm what exists; it
-never writes a record it did not create. The platform rejects a copied database
-or restore from another deployment. Normal image, flavor, version, checksum,
-and container upgrades do not change the marker.
+three persistent roles, and installs matching management and helper releases.
+The first `openstack-platform status` invocation creates an empty SQLite schema
+bound to the deployment project UUID, namespace, and stable inventory identity.
+There is no import phase. Reconciliation confirms only configured resources and
+accepted image candidates; it never writes a provider row as accepted product
+state. A copied database or restore from another deployment is rejected.
+Normal image, flavor, version, checksum, and container upgrades do not change
+the database identity.
 
-For an application deployment, the control surface:
+A future management application will submit product intent and immutable typed
+configuration to the local controller. The repository source contributes code,
+`package.json`, and supported lockfiles; it does not control platform
+configuration. For a deployment, the controller:
 
-1. validates a public GitHub repository, full source commit, and `platform.yaml`;
+1. validates the application, public credential-free GitHub URL, requested ref,
+   exact commit, configuration revision, and typed snapshot;
 2. asks the constrained helper to create a single-use builder;
-3. transfers a generated recipe and exact source snapshot, then records the pushed digest;
-4. deletes and verifies the builder and its fixed port;
+3. transfers a generated recipe and exact source snapshot, then records the
+   pushed immutable digest;
+4. deletes and verifies the builder and fixed port;
 5. creates or verifies the application's dedicated worker;
 6. submits the constrained Nomad job; and
-7. accepts it only after scheduler and public route health pass.
+7. accepts only after scheduler, application, and public-route health pass.
 
-A failed candidate is removed with bounded cleanup and its registry manifest is cleaned up without rebuilding source. Deployment work, including lock acquisition, source transfer, builder execution/cleanup, helper calls, and health checks, shares one policy-bounded whole-operation deadline. The builder receives the same wall-clock deadline, so cleanup or BuildKit cannot run indefinitely. There is no general operator command for rolling back an already accepted Nomad job.
+A failed candidate is removed with bounded cleanup while the prior accepted
+route is preserved. Deployment work shares one policy-bounded whole-operation
+deadline. There is no general operator command for rolling back or otherwise
+mutating product state.
 
 ## Isolation boundaries
 
-Participants do not receive SSH, OpenStack, Nomad, registry, or database-admin credentials. The staff interface accepts validated slugs, source selections, and manifest values, not shell text, provider IDs, host paths, or arbitrary Nomad jobs.
+End users receive no SSH, OpenStack, Nomad, registry, or database-administrator
+credentials. The future management backend sends typed product inputs, not
+shell text, host paths, arbitrary Nomad jobs, or provider-selected IDs.
 
-Builders receive registry push access and the internal CA, but not application runtime or managed-service credentials. Builders deny metadata access, expire automatically, and are unconditionally deleted after success, failure, cancellation, or timeout.
+Builders receive registry push access and the internal CA, but not application
+runtime or managed-service credentials. Builders deny metadata access, expire
+automatically, and are deleted after success, failure, cancellation, or
+timeout.
 
-Workers have no SSH service, deny metadata access, and accept application traffic only from ingress. The generated job blocks privileged containers and host volumes, uses a read-only root by default, and applies CPU, memory, PID, capability, and log limits. Deleting a worker does not delete managed data or deployment history.
+Workers have no SSH service, deny metadata access, and accept application
+traffic only from ingress. Generated jobs block privileged containers and host
+volumes, use a read-only root by default, and apply CPU, memory, PID,
+capability, and log limits. Deleting a worker does not delete managed data or
+deployment history.
+
+The reserved `management-web` account has access only to its future state and
+the controller socket. It must not read controller SQLite, OpenStack
+credentials, Nomad tokens, provider administrator credentials, builder keys,
+backup keys, age identities, diagnostics, or build logs directly.
 
 ## Persistent data and backups
 
-The admin state volume holds Nomad, helper, and control-plane state. The storage volume holds managed services and registry data. The backup volume holds encrypted logical backups. Managed-service credentials are scoped per application and synchronized through owner-specific Nomad Variable keys; credential values never enter management SQLite.
+The admin state volume holds controller, Nomad, operator-helper, and diagnostic
+state. The storage volume holds
+managed services and registry data. The backup volume holds encrypted logical
+backups. Managed-service credentials are scoped per application and
+synchronized through owner-specific Nomad Variable keys; values never enter
+controller SQLite.
 
-The management database is backed up separately from PostgreSQL, MongoDB, and Garage. Each backup is encrypted to the policy's age recipient and written under the configured backup root.
+The current management SQLite database is backed up separately from PostgreSQL,
+MongoDB, and Garage. The future hosted controller database must retain this
+boundary after cutover. Each backup is encrypted to its configured age recipient and
+written below the configured backup root. A management backup counts as
+accepted only when its ciphertext, checksum, and final manifest exist. The
+manifest is the commit marker, so interrupted partial files are not treated as
+backups. Restore is offline, checks deployment identity/schema/integrity before
+replacement, and contacts no provider.
 
-A backup counts as accepted only once its manifest exists. The ciphertext and checksum are fsynced before the manifest is renamed into place, so an interrupted run leaves partial files that the next run cleans up rather than mistaking for a real backup. Retention only ever deletes complete sets.
-
-Restore is offline and contacts no provider. It unpacks the backup into a
-private temporary file and checks it before touching the database. It refuses a
-backup from another deployment, a corrupt or unfinished backup, or one written
-by a newer version. Only then does it atomically replace the database. Live
-state must be reconciled afterward.
-
-Managed data is checked separately. That check runs on admin in throwaway containers and records evidence only after the restored contents match their checksums. Registry blobs are not backed up at all; they are rebuilt from source.
+Managed-data restore checks run on admin in throwaway containers and record
+evidence only after restored contents match checksums. Registry blobs are not
+backed up; they are rebuilt from source.
 
 ## Public ingress
 
-A public service supplies DNS and HTTPS, forwards to ingress port 80, preserves the original `Host`, and allows health paths. Traefik uses the hostname to select a healthy Nomad service. Cloudflare Tunnel is the reference provider, not a requirement; the complete provider-neutral contract is in [PUBLIC_INGRESS.md](PUBLIC_INGRESS.md).
+An external service supplies DNS and HTTPS, forwards to ingress port 80,
+preserves the original `Host`, and allows the platform health route. Traefik
+uses the hostname to select a static platform route or a healthy Nomad service.
+Cloudflare Tunnel is the reference, not a requirement. See
+[PUBLIC_INGRESS.md](PUBLIC_INGRESS.md).
 
-## Capacity and application policy
+## Capacity and policy
 
-The platform runs one allocation per application. Applications use Bun or Node, one HTTP port, and one health path. Generated recipes select digest-pinned runtime images and set `NODE_ENV=production`. One private standard profile supplies worker flavor, 1,000 scheduler CPU MHz, memory, PostgreSQL connections, monitored database targets, and S3 quotas. PostgreSQL and MongoDB measured-byte values are targets rather than hard quotas, and no periodic usage measurement is installed.
+The controller supports one allocation per application, one HTTP port, one
+health path, and Node or Bun builds from typed configuration. Generated recipes
+select digest-pinned runtime images and set `NODE_ENV=production`. One standard
+policy profile supplies worker flavor, scheduler CPU/memory, PostgreSQL
+connections, monitored database targets, and S3 quotas. PostgreSQL and MongoDB
+measured-byte values are targets rather than hard quotas; no periodic usage
+measurement is installed.
 
 ## Failure and recovery boundaries
 
-- A Nix build or Glance upload produces a candidate; live role checks are required for acceptance.
-- Builder cleanup is required on both success and failure. An ambiguous provider result is recovery-required, not permission to guess.
-- Failed application candidates are removed with bounded cleanup; accepted deployments have no manual job-history rollback command.
+- A Nix build or Glance upload produces a candidate; live role checks are
+  required for acceptance.
+- Builder cleanup is required on success and failure. An ambiguous provider
+  result is recovery-required, not permission to guess.
 - Worker replacement leaves managed data intact.
-- Persistent-role replacement retains the prior host and volumes until readiness passes, and accepts a replacement only after exact image UUID, retained flavor UUID, configured name, and operation provenance are re-read from the provider.
-- Destructive storage/application cleanup requires explicit confirmation and absence evidence.
-- Management and helper releases are selected atomically; keep a complete prior release for executable recovery, not as a database or provider migration source.
+- Persistent-role replacement retains the prior host and volumes until exact
+  identity and readiness checks pass.
+- Product mutations are absent from the operator CLI. Do not recover old
+  product operations by using an older binary.
+- Management/helper releases are selected atomically; a prior release is an
+  executable recovery aid, not a database/provider rollback mechanism.
 
-Use [OPERATIONS.md](OPERATIONS.md) for actions and [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md) for exact command behavior.
+Use [OPERATIONS.md](OPERATIONS.md) for supported operator actions and
+[CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md) for exact CLI and local
+API contracts.

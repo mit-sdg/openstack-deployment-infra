@@ -616,26 +616,22 @@ A live admin `/etc/<namespace>/platform.json` may be the NixOS symlink to a root
 non-writable regular file under `/nix/store`; never replace it with the
 management copy.
 
-The first CLI invocation creates the empty schema. Verify it
-before selecting images or creating an application:
+The first CLI invocation creates the empty schema. Verify it before selecting
+images:
 
 ```bash
 status_output="$(/srv/openstack-platform/bin/openstack-platform status)"
 printf '%s\n' "$status_output"
 grep -Eq '^degraded +0 +0 +0 +0 +3 +0$' <<<"$status_output"
-app_output="$(/srv/openstack-platform/bin/openstack-platform app list)"
-storage_output="$(/srv/openstack-platform/bin/openstack-platform storage list)"
-grep -Eq '^SLUG +RUNNING +COMMIT +DIGEST +CPU +MEMORY +LIVE$' <<<"$app_output"
-grep -Eq '^SLUG +TYPE +PROVIDER_ID +PROVIDER_NAME +STATE +QUOTA +VERIFIED +HEALTH$' <<<"$storage_output"
 ```
 
+The columns are `STATE INFRA APPS STORAGE LIVE UNAVAILABLE UNHEALTHY`.
 Record zero accepted applications and zero accepted managed resources. The
-fresh state reports `degraded` with three unavailable observations for the
-persistent admin, ingress, and storage hosts. The disposable builder is
-observed only while a durable build operation is unfinished, and worker
-observations begin with an accepted application. This is not an accepted
-application or storage row. If unexpected rows exist,
-stop: do not delete rows or import external declarations.
+fresh state reports `degraded` with three unavailable observations for admin,
+ingress, and storage until accepted image records are selected. The operator
+CLI intentionally has no product list or mutation commands. If `APPS` or
+`STORAGE` is nonzero, stop and preserve the database for controlled
+management/controller cutover; do not install an older CLI or delete rows.
 
 Select the five accepted image UUIDs from `infra image list`. The image names
 are lookup labels; the CLI records and verifies the provider UUID, full source
@@ -655,78 +651,21 @@ Replace each `*_IMAGE_UUID` with the exact UUID from the accepted, active,
 configured-project image record. Do not select an image with missing or
 incompatible metadata.
 
-## 6. Deploy the first application and create storage
+## Product management is not yet an operator procedure
 
-The application source must be public, credential-free GitHub HTTPS. Its
-selected full lowercase commit must contain `platform.yaml` and the runtime
-lockfile. A minimal Node example is:
+The product CLI and repository-owned deployment manifest have been retired.
+The local controller API and typed lifecycle services are implemented, but this
+setup does not run the controller, sync-engine management application, or
+authentication application as services. Do not invoke release-internal entry
+points or install an older CLI to create applications or storage.
 
-```yaml
-version: 1
-runtime: node
-packages: [.]                 # package-lock.json must be in the repository
-scripts:
-  build: build
-  start: start
-port: 8080
-health:
-  path: /health
-```
+Future operators and UI implementers must use
+[MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md) for the management/authentication
+boundary and [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md) for the
+implemented local API. Until that integration is deployed, infrastructure and
+backup verification are the supported completion boundary.
 
-The `build` value may be `null`; script values are package-script names, not
-shell commands. Dockerfiles, repository-controlled environment, build
-arguments, and host mounts are not part of this manifest.
-
-Deploy one exact commit and inspect the accepted record:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform app deploy demo \
-  --repo https://github.com/OWNER/REPOSITORY \
-  --commit FULL_LOWERCASE_40_CHARACTER_COMMIT
-/srv/openstack-platform/bin/openstack-platform app show demo
-test "$(curl --fail --show-error --silent --output /dev/null \
-  --write-out '%{http_code}' "https://demo.$PLATFORM_DOMAIN/health")" = 200
-printf '\nfirst-application-health=verified\n'
-```
-
-Acceptance requires the builder and fixed port to be absent, the worker to be
-ready, scheduler health to pass, the public route to pass, and `app show` to
-contain the exact commit, recipe identity, and immutable image digest. The
-whole command is bounded by the policy process deadline: lock waits, source
-acquisition, helper calls, builder create/build/cleanup, and health probes each
-receive only the remaining time. The builder records the same wall-clock
-deadline and passes it to the admin-side source receiver and BuildKit. Use bounded logs only when diagnosing. Build logs select the newest attempt by default, including an active attempt. The header reports its build UUID; select any retained attempt with `--id`, or follow the active build as it is persisted on the admin state volume:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform app logs demo --build --list
-/srv/openstack-platform/bin/openstack-platform app logs demo --build --lines 200
-/srv/openstack-platform/bin/openstack-platform app logs demo --build --follow --lines 200
-/srv/openstack-platform/bin/openstack-platform app logs demo --build --id BUILD_UUID --lines 200
-/srv/openstack-platform/bin/openstack-platform app logs demo --runtime --lines 200
-```
-
-Only after the application is accepted, create and verify managed storage:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform storage create demo postgres --name default
-/srv/openstack-platform/bin/openstack-platform storage verify demo postgres --name default
-/srv/openstack-platform/bin/openstack-platform storage show demo postgres --name default
-```
-
-Use `mongo` or `s3` instead/as well when required. SQLite stores only the
-non-secret provider identity, ownership, limits, and checkpoints. Credentials
-remain in the helper and owner-specific Nomad Variables. Rotate only through
-the same control surface:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform storage rotate demo postgres --name default
-/srv/openstack-platform/bin/openstack-platform storage verify demo postgres --name default
-```
-
-PostgreSQL and MongoDB measured-byte values are configured targets, not usage
-observations; no periodic usage collector is installed.
-
-## 7. Back up, restore, and reconcile
+## 6. Back up, restore, and reconcile
 
 ### Where management-database backups go
 
@@ -906,22 +845,22 @@ lock, source equal to destination, unsafe state directory, or a file over the
 configured 1 GiB limit. It also refuses unsafe WAL/SHM sidecars. Do not bypass
 a refusal by deleting SQLite rows or sidecars.
 
-Re-enable the timer and reconcile accepted records with live observations:
+Re-enable the timer and reconcile infrastructure plus aggregate accepted
+counts with live observations:
 
 ```bash
 systemctl --user start openstack-platform-backup.timer
 /srv/openstack-platform/bin/openstack-platform status
 /srv/openstack-platform/bin/openstack-platform infra list
-/srv/openstack-platform/bin/openstack-platform app list
-/srv/openstack-platform/bin/openstack-platform storage list
 ```
 
 Restore changes accepted SQLite state only. It does not recreate providers,
 workers, Nomad jobs, variables, or managed data, and it never imports an
-external row. If restored records and live provider identities differ, stop
-mutations, preserve the evidence and operation IDs, and use the owning
-checkpointed CLI operation or recovery procedure; never edit SQLite or a
-provider by hand.
+external row. The CLI cannot inspect or mutate restored product records. If
+`APPS` or `STORAGE` is nonzero, or accepted infrastructure differs from live
+identity, stop mutations and preserve the database, evidence, and operation
+IDs for controlled controller/management recovery. Never edit SQLite, invoke
+an obsolete product CLI, or change a provider by hand.
 
 For a disposable offline destination rather than the live state path, use
 the installed CLI with a separate private state directory. The directory is
@@ -940,7 +879,7 @@ The destination parent must be a direct current-user-owned mode-`0700`
 directory. Inspect the result with that separate CLI state directory; do not
 point a running deployment at an unverified copy.
 
-## 8. Upgrade safely
+## 7. Upgrade safely
 
 Publish and live-test a new commit-addressed role image before selecting it.
 For a persistent role, select the new UUID and use the CLI replacement command;
@@ -969,20 +908,13 @@ It atomically selects only a complete release; retain the previous complete
 release for executable recovery. A release rollback does not restore SQLite or
 provider state, and a database restore is the separate offline procedure above.
 
-## 9. Clean up and preserve evidence
+## 8. Clean up and preserve evidence
 
-Remove managed storage before its application, using exact-slug confirmation.
-S3 removal additionally requires explicit `--purge-s3` when non-empty:
+The operator CLI cannot remove applications or managed storage. If restored or
+pre-cutover state has nonzero product counts, preserve it for the controlled
+controller/management cutover; do not use an older binary or delete provider
+resources manually.
 
-```bash
-/srv/openstack-platform/bin/openstack-platform storage remove demo postgres --name default --confirm default
-/srv/openstack-platform/bin/openstack-platform app remove demo --confirm demo
-/srv/openstack-platform/bin/openstack-platform app list
-/srv/openstack-platform/bin/openstack-platform storage list
-```
-
-Application removal proves the Nomad job and variables, worker and fixed port,
-and every tracked current/prior/failed-candidate registry manifest are absent.
 Keep accepted encrypted backups, both age identities, and restore evidence
 until the retention decision is recorded. Use image pruning only as a reviewed
 plan/apply pair. The plan protects selected images, images referenced by
@@ -998,13 +930,16 @@ continue only through the recorded checkpointed recovery operation:
 /srv/openstack-platform/bin/openstack-platform infra image prune --apply --yes
 ```
 
-For whole-deployment teardown, first complete application/storage cleanup,
-copy/verify the backups and private evidence, stop the two platform backup
-timers, and obtain a separate reviewed provider teardown for only the configured
-prefix and project. Do not use the teardown as a persistent-role replacement
-procedure. Remove temporary management copies of ACL, storage, and Cloudflare
-files only after their required escrow/replacement copies are confirmed; do
-not remove the admin copies while the deployment is live.
+For whole-deployment teardown, first confirm through the deployed management
+boundary that no product resources remain. In the current pre-management state,
+nonzero product counts are a stop condition rather than permission to delete
+provider resources manually. Copy and verify backups/private evidence, stop the
+two platform backup timers, and obtain a separate reviewed provider teardown
+for only the configured prefix and project. Do not use teardown as a
+persistent-role replacement procedure. Remove temporary management copies of
+ACL, storage, and Cloudflare files only after their required escrow/replacement
+copies are confirmed; do not remove the admin copies while the deployment is
+live.
 
 Use [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) to record command output
 paths, timestamps, image UUID/checksums, readiness markers, public health,
@@ -1028,12 +963,13 @@ payloads, and age identities out of tracked evidence.
   `0600`; regenerate the file without printing its values.
 - Helper, SSH, Nomad, provider, or storage dependency unavailable: restore the
   named dependency and rerun the same command with the same identity arguments.
-- Unfinished or recovery-required operation: preserve the database and
-  correlation/operation ID and rerun the owning command. Never clear SQLite
+- Unfinished or recovery-required infrastructure operation: preserve the
+  database and correlation/operation ID, then rerun the same current CLI
+  command. For a product operation, preserve state for controlled controller
+  recovery; the operator CLI has no owning product command. Never clear SQLite
   operation rows manually.
-- Public health failure: test the exact DNS name, trusted certificate,
-  preserved `Host`, ingress route, Nomad allocation, and application health
-  path separately.
+- Public platform-health failure: test the exact DNS name, trusted certificate,
+  preserved `Host`, provider origin, ingress route, and `/healthz` separately.
 - Management-database backup failure: inspect only safe file metadata and the fixed staging/
   accepted paths; verify `/srv/openstack-platform/bin/age`, the policy recipient, bridge, and
   backup volume, then emit a new backup. Do not copy a live WAL file.

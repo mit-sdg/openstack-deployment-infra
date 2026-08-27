@@ -1,53 +1,50 @@
 # Fresh deployment acceptance checklist
 
-Follow [OPERATIONS.md](OPERATIONS.md) in order. In a private evidence system,
-record command output paths, timestamps, image UUIDs and checksums, readiness
-markers, public health results, `RESTORE-MANIFEST`, and reviewer initials. Do
-not put credentials, provider payloads, or age identities in this checklist.
+Follow [OPERATIONS.md](OPERATIONS.md) in order. Record command-output paths,
+timestamps, image UUIDs/checksums, readiness markers, public health,
+`RESTORE-MANIFEST`, and reviewer initials in a private evidence system. Never
+record credentials, provider payloads, or age identities here.
 
-The command names below define the evidence boundary. Check a box only when the
-observable result passed, not when a command merely exited zero.
+This checklist covers the implemented pre-management state. The sync-engine
+management application and authentication application are not acceptance
+claims. Product lifecycle acceptance belongs to the future
+[management application specification](MANAGEMENT_APP_SPEC.md).
+
+Check a box only when the observable result passed, not merely when a command
+exited zero.
 
 ## Reset and scope
 
 - [ ] **RESET-01** Human authorization records the from-scratch deployment and
-  which application data, if any, must be preserved. Evidence: private change
-  approval in your operations system.
-- [ ] **RESET-02** Resources in the OpenStack project that this deployment does
-  not own are explicitly out of scope and untouched. Evidence: the private
-  scope-record entry in the deployment evidence index. It preserves the exact
-  exclusion list without copying UUIDs into Git. A missing private scope record
-  is a live evidence gap.
-- [ ] **RESET-03** Only the configured OpenStack project/prefix was reconciled;
-  no external row was imported. Evidence: `apply_foundation.py` plan/apply,
-  token project/name comparison, and scoped provider evidence.
-- [ ] **RESET-04** Management state is fresh and empty. Evidence from the
-  management host:
+  any data that must be preserved. Evidence: private change approval.
+- [ ] **RESET-02** Resources not owned by this deployment are explicitly out of
+  scope and untouched. Evidence: a private scope-record entry with the exact
+  exclusion list.
+- [ ] **RESET-03** Only the configured project/prefix was reconciled; no provider
+  row was imported. Evidence: `apply_foundation.py` plan/apply, token
+  project/name comparison, and scoped provider evidence.
+- [ ] **RESET-04** Management state starts with no product records. Evidence:
 
   ```bash
   /srv/openstack-platform/bin/openstack-platform status
-  /srv/openstack-platform/bin/openstack-platform app list
-  /srv/openstack-platform/bin/openstack-platform storage list
   ```
 
-  The first invocation creates the schema; the initial application and storage
-  lists contain zero accepted records.
+  The status row reports `APPS=0` and `STORAGE=0`. The operator CLI has no
+  commands to list or mutate product records.
 
 ## Configuration, runtime, and images
 
-- [ ] **CFG-01** Private inventory/policy replace every example identity, digest,
-  path, and age recipient. Evidence:
+- [ ] **CFG-01** Private inventory and policy replace every example identity,
+  digest, path, and age recipient. Evidence:
 
   ```bash
   uv sync --frozen
   nix flake check --impure --no-build --print-build-logs
   ```
 
-- [ ] **CFG-02** The token and configured project agree. Evidence is
-  `verify_openstack_project` from `infra/lib/platform-config.sh`, as used in
-  [OPERATIONS.md](OPERATIONS.md#2-scope-and-reconcile-the-openstack-foundation).
-  The helper compares project identity after normalizing compact/canonical
-  provider UUIDs and checks the configured project name.
+- [ ] **CFG-02** The authenticated token and configured project agree. Evidence:
+  `verify_openstack_project` from `infra/lib/platform-config.sh`, including
+  normalized project UUID and exact project-name comparison.
 - [ ] **CFG-03** Locked project checks pass on Python 3.14 with uv 0.12.2:
 
   ```bash
@@ -63,96 +60,72 @@ observable result passed, not when a command merely exited zero.
   static, package, VM, config-drive, and role-specific live checks. Evidence:
   [nix/README.md](../nix/README.md) output and private test logs.
 - [ ] **IMG-02** Every published image has full `SOURCE_COMMIT`, complete
-  metadata, a provider checksum matching the local publisher checksum, a
-  separately recorded QCOW2 SHA-256, active status, configured-project owner,
-  and UUID evidence. Evidence: the five successful
-  [image publication](IMAGE_PUBLISHING.md#publish-all-five-roles-from-one-reviewed-commit)
-  outputs and `infra image list`.
+  metadata, matching provider/local checksums, separately recorded QCOW2
+  SHA-256, active status, configured-project ownership, and UUID evidence.
+  Evidence: five successful image-publication outputs and `infra image list`.
 
-## Foundation, bridge, and role bootstrap
+## Foundation, bridge, and persistent roles
 
-- [ ] **ROLE-01** Foundation plan was reviewed before apply; configured ports
+- [ ] **ROLE-01** Foundation plan was reviewed before apply. Configured ports
   have the expected network, fixed address, and security group. Evidence:
-  `apply_foundation.py` plan/apply output and three scoped `openstack port show`
-  records.
-- [ ] **ROLE-02** Admin, storage, and ingress each emit the configured exact
-  readiness marker, with no failed required unit. Existing-host apply scripts
-  first fail closed on any server/image/flavor/metadata/port/volume identity
-  mismatch and do not reapply user data. Evidence: bounded serial console
-  output and `apply_admin.sh`, `apply_storage.sh`, and `apply_ingress.sh`
-  results.
+  plan/apply output and three scoped `openstack port show` records.
+- [ ] **ROLE-02** Admin, storage, and ingress each emit the exact configured
+  readiness marker with no failed required unit. Existing-host scripts reject
+  any server/image/flavor/metadata/port/volume mismatch and do not reapply user
+  data. Evidence: bounded console output and role-apply results.
 - [ ] **ROLE-03** `setup_management_bridge.py` returns
-  `management-bridge=verified`; its SSH config/known-hosts are direct mode
-  `0600` files below a mode-`0700` directory; and the alias smoke returns an
-  unprivileged UID. Evidence:
+  `management-bridge=verified`; its config/known-hosts files are direct mode
+  `0600` below a mode-`0700` directory; and the alias is unprivileged:
 
   ```bash
   test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- id -un)" = agentops
   test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- id -u)" -gt 0
   ```
 
-- [ ] **ROLE-04** Nomad ACL bootstrap returns `nomad-acl-and-raft=healthy`.
-  Evidence: private admin output, mode-`0600`
-  `<paths.root>/secrets/nomad-tokens.env`, and the ingress transfer record.
-  Never record token contents.
-- [ ] **ROLE-05** Admin receives direct mode-`0600` OpenStack/storage inputs,
-  provisioning PKI, and builder SSH identity at the exact paths in
-  [OPERATIONS.md](OPERATIONS.md#4-boot-storage-and-ingress-with-exact-transfers).
-  Evidence: private ownership/mode checks only.
-- [ ] **ROLE-06** Public platform health passes through the external DNS/TLS
-  service with original `Host` preserved:
+- [ ] **ROLE-04** Nomad ACL bootstrap returns
+  `nomad-acl-and-raft=healthy`. Evidence: private admin output, direct mode
+  `0600` token file, and ingress transfer record; never token contents.
+- [ ] **ROLE-05** Admin receives the exact direct mode-`0600`
+  OpenStack/storage inputs, provisioning PKI, and builder SSH identity from
+  [Operations](OPERATIONS.md#4-boot-storage-and-ingress-with-exact-transfers).
+  Evidence: ownership and mode checks only.
+- [ ] **ROLE-06** Public platform health passes through external DNS/TLS with
+  original `Host` preserved:
 
   ```bash
   test "$(curl --fail --show-error --silent "https://$PLATFORM_HOSTNAME/healthz")" = OK
   ```
 
-  Expected body: `OK`. Cloudflare token/account or the equivalent external
-  ingress service is recorded as an external input, never as a secret value.
+## Current control-surface boundary
 
-## First application and managed storage
-
-- [ ] **APP-01** A public credential-free repository, full lowercase 40-character
-  commit, `platform.yaml`, and supported lockfile pass validation. Evidence:
-  `app deploy` output and the source commit record.
-- [ ] **APP-02** Builder and fixed port are absent after deployment; worker is
-  ready and scheduler health passes. Evidence: `app show`, `infra list`, and
-  bounded cleanup evidence.
-- [ ] **APP-03** Application public health passes at the exact configured
-  hostname and health path. Evidence:
+- [ ] **CTRL-01** Installed CLI help exposes only `setup`, `status`, `backup`,
+  `restore`, and `infra` at the top level. No product lifecycle command is
+  present. Evidence: installed `--help` output and CLI integration tests.
+- [ ] **CTRL-02** `status` reports five accepted image roles, three available
+  persistent observations, and zero application/storage records. Evidence:
+  status and `infra list` output.
+- [ ] **CTRL-03** Controller transport/API tests pass for restricted Unix-socket
+  mode, bounded strict JSON, canonical UUID idempotency, safe errors, product
+  routes, and administrator reads. Evidence:
 
   ```bash
-  test "$(curl --fail --show-error --silent --output /dev/null \
-    --write-out '%{http_code}' "https://<slug>.<domain>/<health-path>")" = 200
+  uv run python -m unittest \
+    tests.test_controller_http tests.test_controller_api -v
   ```
 
-- [ ] **APP-04** `app show` records the immutable image digest, exact commit,
-  recipe identity, and public URL. Credentials are absent from output/logs.
-- [ ] **DATA-01** Storage is created only after app acceptance and then passes
-  provider access/application health verification:
-
-  ```bash
-  /srv/openstack-platform/bin/openstack-platform storage create SLUG postgres --name default
-  /srv/openstack-platform/bin/openstack-platform storage verify SLUG postgres --name default
-  /srv/openstack-platform/bin/openstack-platform storage show SLUG postgres --name default
-  ```
-
-- [ ] **DATA-02** Storage credentials are absent from SQLite, command output,
-  management logs, and evidence. `storage list/show` exposes the non-secret
-  `PROVIDER_ID` and `PROVIDER_NAME` columns. The recorded storage row contains
-  only provider identity, ownership, limits, and checkpoints.
+- [ ] **CTRL-04** No deployment service claims a management UI or authentication
+  application is running. No public listener exposes the controller. Evidence:
+  setup output, active unit inventory, and architecture review.
 
 ## Backups, restore, upgrade, and cleanup
 
 - [ ] **BACKUP-01** `openstack-platform backup` produces an age-v1 encrypted
-  management database accepted under `<paths.backups>/m1`, with checksum and
-  manifest evidence. The manifest is the commit marker and retention counts only
-  complete ciphertext/checksum/manifest trios. Evidence includes the output
-  name/SHA-256 and private file metadata, not database content. Verify
-  `/srv/openstack-platform/bin/age --version` and the configured staging path
-  `<paths.backups>/m1/.staging`.
-- [ ] **BACKUP-02** On **admin**, not management, managed-data backup emits
-  PostgreSQL, MongoDB, and Garage archives, and the restore check writes
-  mode-`0600` `RESTORE-MANIFEST` only after all temporary checks pass. Evidence:
+  management database under `<paths.backups>/m1` with checksum and final
+  manifest evidence. Retention counts only complete trios. Evidence: output
+  name/SHA-256 and private metadata, not database content.
+- [ ] **BACKUP-02** On admin, managed-data backup emits PostgreSQL, MongoDB, and
+  Garage archives; restore checking writes mode-`0600` `RESTORE-MANIFEST` only
+  after all temporary checks pass. Evidence:
 
   ```bash
   ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- env \
@@ -162,40 +135,29 @@ observable result passed, not when a command merely exited zero.
     "$PLATFORM_ROOT/infra/backup/verify_latest_restore.sh"
   ```
 
-- [ ] **BACKUP-03** Offline restore is rehearsed with the operator age
-  identity and `--yes` through the installed fixed-destination
-  `openstack-platform-restore` launcher. Evidence:
+- [ ] **BACKUP-03** Offline restore is rehearsed with the operator age identity
+  through `openstack-platform-restore ... --yes`. Evidence:
   `restore=verified schema-version=... integrity=ok`, destination mode `0600`,
-  and post-restore `status`/read-list reconciliation.
-  Restore must match the installed deployment's project/namespace/stable
-  inventory identity; a backup from another deployment is refused. The
-  identity remains outside Git and SQLite.
+  and post-restore `status`/`infra list` reconciliation. A backup with a
+  different deployment identity is refused.
 - [ ] **UPGRADE-01** A tested role image is selected by UUID and
-  `openstack-platform infra replace ROLE --yes` retains old host/volumes until
-  readiness. Acceptance re-reads the replacement and requires the exact
-  selected image UUID, retained flavor UUID, configured name, and operation
-  provenance before declaring the role healthy. Evidence: operation phase,
-  `infra logs`, and live provider/health records. No delete-first action is
-  accepted.
+  `openstack-platform infra replace ROLE --yes` retains the old host/volumes
+  until readiness. Acceptance re-reads exact image UUID, retained flavor UUID,
+  configured name, and operation provenance. No delete-first action is used.
 - [ ] **UPGRADE-02** Management/helper release installation selects a complete
-  full-commit release and leaves the prior complete release available for
-  executable recovery. Evidence: `.complete`, release smoke, helper malformed
-  envelope response, and timer state.
-- [ ] **CLEAN-01** Managed storage removal uses exact-slug confirmation and
-  proves provider absence and environment-key removal; S3 purge is supplied
-  explicitly only when authorized.
-- [ ] **CLEAN-02** Application removal proves job, variables, worker/fixed port,
-  and all tracked current/prior/failed-candidate manifests are absent:
-
-  ```bash
-  /srv/openstack-platform/bin/openstack-platform app remove SLUG --confirm SLUG
-  /srv/openstack-platform/bin/openstack-platform app list
-  /srv/openstack-platform/bin/openstack-platform storage list
-  ```
-
-- [ ] **RECOVER-01** At least one interrupted-operation drill reruns the exact
-  command and reaches a recorded result without manual SQLite/provider edits.
-  Evidence: operation ID, phase, safe recovery output, and final observation.
+  full-commit release and retains the prior complete release for executable
+  recovery. Evidence: `.complete`, release smoke, helper malformed-envelope
+  response, and timer state.
+- [ ] **CLEAN-01** Image cleanup uses `infra image prune` followed by reviewed
+  `--apply --yes`; selected, server-referenced, and operation-referenced images
+  remain protected.
+- [ ] **CLEAN-02** Whole-deployment teardown has separate human authorization,
+  preserves both backup classes and age identities, and scopes provider removal
+  to the configured project/prefix. It does not use retired product commands.
+- [ ] **RECOVER-01** An interrupted infrastructure operation is rerun with the
+  same command identity and reaches a recorded result without manual SQLite or
+  provider edits. Evidence: operation ID, phase, safe output, and final
+  observation.
 
 ## Sign-off
 

@@ -1,48 +1,71 @@
 # Documentation
 
-This repository currently contains OpenStack/NixOS infrastructure, an automated
-OpenStack setup command, and an unprivileged staff control surface. It is not
-yet a self-service portal. The accepted
-[self-hosted management implementation plan](IMPLEMENTATION_PLAN.md) defines
-the target UI and controller without changing the current command contracts on
-this page.
+This repository currently provides OpenStack/NixOS infrastructure, automated
+setup, backup/restore tooling, an operator-only infrastructure CLI, and an
+implemented local controller API. It does not provide a self-service portal or
+authentication application, and setup does not start the controller as a
+service.
 
-A deployment starts with an empty management database. The tooling creates its
-own state instead of importing records from another system. Every command in
-this repository creates, changes, and deletes only the resources named in your
-platform configuration. Some commands list servers and images project-wide to
-decide what they may touch, but nothing outside your inventory is modified.
+The former product CLI and repository deployment manifest are retired. Future
+UI readers should use the
+[management application specification](MANAGEMENT_APP_SPEC.md), which is an
+implementation target rather than a description of a running product.
+
+A deployment starts with an empty management SQLite database. Tooling creates accepted
+state instead of importing provider records. Operator actions change only
+resources named by the private infrastructure inventory.
 
 ## Learn by doing
 
-- [Tutorial: deploy the first application](TUTORIAL.md) — deploy one app on a setup-created platform, verify managed storage and backups, and clean up.
+- [Verify a fresh platform and its backups](TUTORIAL.md) — confirm the current
+  pre-management result: infrastructure, public health, backup, and restore
+  checks.
 
 ## Complete a task
 
-- [Automated greenfield setup](SETUP.md) — turn one protected environment file into generated keys, images, VMs, volumes, releases, and backup configuration.
-- [Operator journey](OPERATIONS.md) — exact manual checkpoints, secret-file formats, foundation/ACL/role bootstrap, backups, offline restore, upgrades, cleanup, and recovery.
-- [Troubleshooting](TROUBLESHOOTING.md) — diagnostic chains for common observable failures.
-- [Public ingress](PUBLIC_INGRESS.md) — configure DNS, TLS, forwarding, and host preservation.
-- [Release installation](RELEASE_INSTALLER.md) — install the committed management and helper releases.
-- [Image publication](IMAGE_PUBLISHING.md) — publish commit-addressed role images through CI.
+- [Automated greenfield setup](SETUP.md) — turn one protected environment file
+  into keys, images, VMs, volumes, releases, and backup configuration.
+- [Operator journey](OPERATIONS.md) — manual checkpoints, secret-file formats,
+  foundation/ACL/role bootstrap, backups, offline restore, upgrades, cleanup,
+  and recovery.
+- [Troubleshooting](TROUBLESHOOTING.md) — diagnostic chains for observable
+  infrastructure, ingress, backup, restore, and release failures.
+- [Public ingress](PUBLIC_INGRESS.md) — configure current platform DNS, TLS,
+  forwarding, and original-host preservation.
+- [Release installation](RELEASE_INSTALLER.md) — install committed management
+  and helper releases.
+- [Image publication](IMAGE_PUBLISHING.md) — publish commit-addressed role
+  images through CI.
 
 ## Look up a contract
 
-- [Configuration reference](CONFIGURATION.md) — private inventory and policy fields.
-- [`openstack-platform` command reference](CONTROL_PLANE_CONTRACT.md) — commands, preconditions, results, destructive actions, and recovery.
-- [NixOS image reference](../nix/README.md) — image outputs, tests, exact-UUID selection, and role acceptance.
+- [Configuration reference](CONFIGURATION.md) — private infrastructure
+  inventory and policy fields.
+- [Operator CLI and local controller API](CONTROL_PLANE_CONTRACT.md) — exact
+  current commands, Unix transport, routes, idempotency, responses, and
+  recovery boundaries.
+- [NixOS image reference](../nix/README.md) — image outputs, tests, exact-UUID
+  selection, and role acceptance.
 
 ## Understand the design
 
-- [Architecture](ARCHITECTURE.md) — current roles, state ownership, isolation, and failure boundaries.
-- [Self-hosted management implementation plan](IMPLEMENTATION_PLAN.md) — target product model, component boundaries, migrations, implementation phases, and acceptance evidence.
-- [Implementation baseline](IMPLEMENTATION_BASELINE.md) — current CLI, helper, state, recovery, test boundaries, and the failed-candidate availability gap recorded before extraction.
-- [Management application specification](MANAGEMENT_APP_SPEC.md) — self-contained sync-engine application brief, authentication contract, UI flows, controller requests, reconciliation, and acceptance evidence.
+- [Architecture](ARCHITECTURE.md) — current roles, control surfaces, state
+  ownership, isolation, and failure boundaries.
+- [Management application specification](MANAGEMENT_APP_SPEC.md) — future
+  sync-engine UI, external authentication contract, authorization, controller
+  requests, reconciliation, and acceptance evidence.
+- [Self-hosted management implementation plan](IMPLEMENTATION_PLAN.md) —
+  completed controller/retirement work and remaining hosting, UI, auth, cutover,
+  and recovery phases.
+- [Implementation baseline](IMPLEMENTATION_BASELINE.md) — historical Phase 0
+  extraction inventory; not a current product contract.
 
 ## Verify acceptance
 
-- [Traceable acceptance checklist](ACCEPTANCE_CHECKLIST.md) — command-to-evidence mapping for a fresh deployment, first application, backups, restore, upgrade, and cleanup.
+- [Traceable acceptance checklist](ACCEPTANCE_CHECKLIST.md) — current
+  infrastructure, operator/controller boundary, backups, restore, upgrade, and
+  cleanup evidence.
 
-Keep live deployment identifiers, credentials, incident notes, and handoff
-records out of tracked documentation. Store them in your deployment's private
-operations system.
+Keep live identifiers, credentials, incident notes, and handoff records out of
+tracked documentation. Store them in the deployment's private operations
+system.

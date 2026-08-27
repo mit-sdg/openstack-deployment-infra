@@ -1,34 +1,47 @@
 # Provide public DNS and HTTPS
 
-Each deployed application needs a public hostname with HTTPS. You may use any
-DNS or TLS provider that meets the forwarding contract below.
+The platform needs a public hostname with HTTPS for its health route. A future
+management application and hosted projects will add management and project
+hostnames under the same forwarding contract. You may use any DNS/TLS provider
+that meets the requirements below.
 
-The reference deployment uses Cloudflare Tunnel. You can use an institutional
-ingress service instead, including one that assigns a hostname such as
-`apps.example.edu`, if it provides the same behavior.
+Cloudflare Tunnel is the reference deployment. An institutional ingress service
+is also valid when it provides the same behavior.
+
+## Current and future completion boundaries
+
+Automated setup can verify only the platform route:
+
+```text
+https://<domain>/healthz
+```
+
+The sync-engine management application and authentication application are not
+implemented, and setup does not start the local controller API. Do not treat a
+healthy platform route as evidence that users can sign in or deploy projects.
+Future management/project hostname behavior is specified in
+[MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 
 ## Required behavior
 
 The public ingress service must:
 
-1. resolve the platform hostname and every application hostname;
+1. resolve the configured platform hostname;
 2. present a certificate trusted by ordinary browsers and HTTP clients;
 3. forward requests to port 80 on the ingress host;
 4. preserve the original HTTP `Host` header; and
-5. allow `/healthz` and application health paths to reach ingress.
+5. allow `/healthz` to reach ingress.
 
-The job renderer assigns each application a hostname in this form:
+For the future product, the provider must also cover the management hostname and
+project hostnames of the form:
 
 ```text
-<project-slug>.<domain>
+<slug>.<domain>
 ```
 
-For example, the domain `apps.example.edu` and slug `demo` produce
-`demo.apps.example.edu`.
-
-A provider can use a wildcard DNS record and certificate, or provision each
-hostname separately. Per-application provisioning must finish before the
-platform reports the deployment healthy.
+A provider may use wildcard DNS/certificates or provision each hostname
+separately. That future provisioning must finish before a project route can be
+reported healthy.
 
 ## Request path
 
@@ -39,30 +52,29 @@ browser or API client
         v
 public DNS/TLS service
         |
-        | HTTP, original Host header preserved
+        | HTTP, original Host preserved
         v
 ingress host:80 (Traefik)
         |
-        | healthy Nomad service only
+        | current static platform route, or future healthy Nomad service
         v
-project worker:application port
+admin/platform health or project worker
 ```
 
-Traefik selects the application route from the `Host` header. If the public
-service replaces that header with an origin hostname or IP address, Traefik will
-select the wrong route or no route.
+Traefik selects a route from `Host`. Replacing the original header with an
+origin hostname or address selects the wrong route or no route.
 
-Although the current role image opens ports 80 and 443, generated application
-routers use the HTTP `web` entry point on port 80. Traefik does not currently
-request or install public certificates. Do not send public HTTPS traffic
-directly to port 443 unless you add and test a separate TLS configuration.
+Although the current ingress image opens ports 80 and 443, generated routers
+use the HTTP `web` entry point on port 80. Traefik does not currently request or
+install public certificates. Do not send public HTTPS directly to port 443
+without adding and testing a separate TLS configuration.
 
 ## Use Cloudflare Tunnel
 
-Cloudflare Tunnel is enabled by default when you create the ingress host.
-The Cloudflare account and token are external inputs. Create a direct,
+Cloudflare Tunnel is enabled when an ingress host is created with a token. The
+Cloudflare account and token are external inputs. Create a direct,
 current-user-owned mode-`0600` file containing exactly one non-whitespace token
-line, then set its **path**:
+line, then set its path:
 
 ```bash
 umask 077
@@ -75,35 +87,30 @@ test "$(stat -c '%a' "$CLOUDFLARE_TUNNEL_TOKEN_FILE")" = 600
 `infra/openstack/apply_ingress.sh` validates the file, embeds it only in the
 mode-`0600` temporary config-drive payload, and removes that payload after the
 request. Do not store the token in `config/platform.json`, commit it, print it,
-or put it in a command argument. Verify the result through DNS and HTTPS, not
-by echoing the file.
+or place it directly in a command argument. Verify the result through DNS and
+HTTPS, not by echoing the file.
 
-Configure Cloudflare to route the required hostnames through the tunnel to the
-Traefik HTTP origin. This repository does not manage account-specific DNS or
-tunnel configuration.
+Configure Cloudflare to route the platform hostname through the tunnel to the
+Traefik HTTP origin. This repository does not manage account-specific DNS,
+tunnel, or certificate configuration.
 
 ## Use another ingress service
 
-To create the ingress host without cloudflared, set:
+Create ingress without cloudflared by setting:
 
 ```bash
 export ENABLE_CLOUDFLARED=false
 ```
 
-Configure the external service to meet the required behavior above. Verify that
-it forwards to the configured ingress address, preserves the original `Host`
-header, and covers each new application hostname.
+Configure the external service to forward to the configured ingress address,
+preserve `Host`, and validate a certificate for the platform hostname.
 
-The platform health monitor currently calls its public check
-`cloudflare_tunnel`, although the check makes ordinary HTTPS requests. With
-another provider, the status key is a historical monitor label only; it does not
-mean that cloudflared is running. `ENABLE_CLOUDFLARED=false` removes the
-Cloudflare token requirement; the external provider still must preserve `Host`,
-certificate validation, DNS, and health paths.
+The platform monitor calls its public check `cloudflare_tunnel`, although the
+check makes an ordinary HTTPS request. With another provider, this is a
+historical status label; it does not mean cloudflared is running.
+`ENABLE_CLOUDFLARED=false` removes only the token requirement.
 
-## Verify the public path
-
-Check the platform health route through the public service:
+## Verify the current public path
 
 ```bash
 PLATFORM_HOSTNAME=apps.example.edu
@@ -111,36 +118,31 @@ test "$(curl --fail --show-error --silent \
   "https://$PLATFORM_HOSTNAME/healthz")" = OK
 ```
 
-The response body must be:
+The response body must be exactly:
 
 ```text
 OK
 ```
 
-After deploying an application, check its configured health path through its
-public hostname:
+This verifies public DNS, certificate validation, forwarding, host-based
+routing, ingress, and the platform health route. A request directly to the
+ingress address does not verify the intended public path.
 
-```bash
-APPLICATION_HOSTNAME=demo.apps.example.edu
-HEALTH_PATH=/health
-test "$(curl --fail --show-error --silent --output /dev/null \
-  --write-out '%{http_code}' "https://$APPLICATION_HOSTNAME$HEALTH_PATH")" = 200
-```
-
-A successful request verifies public DNS, certificate validation, forwarding,
-host-based routing, the Nomad service route, and application health. A request
-directly to the ingress IP does not verify the intended public path.
+Do not add a project health check to the current end-user acceptance evidence.
+The controller service is local and hosted, but project routes become a
+supported user acceptance surface only after the management and authentication
+applications are implemented.
 
 ## Diagnose common failures
 
 | Symptom | Check | Correction |
 | --- | --- | --- |
-| DNS name does not resolve | Query the exact platform or application hostname | Add the wildcard or per-host record in the public ingress service |
-| Certificate name mismatch | Inspect the certificate's covered names | Issue a certificate that covers the exact hostname or wildcard |
-| Traefik returns no matching route | Compare the forwarded `Host` header with `<slug>.<domain>` | Preserve the original host instead of replacing it with the origin address |
-| `/healthz` works by ingress IP but not publicly | Test DNS, TLS, and the provider's origin route separately | Correct the public service's hostname or origin mapping |
-| Platform route works but one application fails | Check Nomad allocation health and the application's configured health path | Restore a healthy allocation or correct the health path before publishing it |
+| Platform name does not resolve | Query the exact configured hostname | Add the matching DNS record in the external provider |
+| Certificate name mismatch | Inspect the certificate's covered names | Issue a certificate for the exact hostname or matching wildcard |
+| Traefik returns no route | Compare the forwarded `Host` with the configured platform hostname | Preserve the original host instead of replacing it with the origin address |
+| `/healthz` works by ingress address but not publicly | Test DNS, TLS, and provider origin routing separately | Correct the provider hostname/origin mapping |
+| Setup rejects a Cloudflare token | Check direct-file ownership, mode `0600`, and one-line token shape without printing it | Install a fresh provider token and rerun the same setup checkpoint |
 
-See [`CONFIGURATION.md`](CONFIGURATION.md) for `domain` and `recoveryDomains`,
-and [`CONTROL_PLANE_CONTRACT.md`](CONTROL_PLANE_CONTRACT.md) for application
-route success criteria.
+See [CONFIGURATION.md](CONFIGURATION.md) for `domain`, `recoveryDomains`, and
+static ingress routes. See [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md)
+for the current operator/controller boundary.

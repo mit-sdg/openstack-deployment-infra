@@ -2,11 +2,21 @@
 
 ## Purpose and completion boundary
 
-This document is the implementation brief for the sync-engine management
-application. The application runs on the persistent admin host and gives signed-in
-users a browser UI for projects, deployments, environment metadata, managed
-storage, and operation progress. It calls the local controller API; it never
-invokes the operator CLI, SSH, Nomad, OpenStack, registry, or storage providers.
+This document is the implementation brief for a future sync-engine management
+application. The management application and its external authentication
+application are not implemented. The admin role already runs the local
+controller under a restricted service account and reserves the unprivileged
+`management-web` identity for this application. Nothing on this page is a claim
+that browser login, user authorization, quota enforcement, or a hosted UI exists
+today. Current
+operator and controller behavior is documented in
+[CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md).
+
+When implemented, the application will run on the persistent admin host and
+give signed-in users a browser UI for projects, deployments, environment
+metadata, managed storage, and operation progress. It will call the local
+controller API; it must never invoke the operator CLI, SSH, Nomad, OpenStack,
+registry, or storage providers.
 
 The application is complete when a user can perform the full project lifecycle
 without shell or infrastructure credentials, administrators can inspect safe
@@ -21,7 +31,7 @@ visible credentials, and persistent runtime-log archives are outside this build.
 ```text
 browser -> HTTPS ingress -> management web :8080
                             |
-                            `-> HTTP over /run/openstack-platform/controller.sock
+                            `-> HTTP over /run/<namespace>-controller/controller.sock
                                 -> trusted controller and local constrained helper
 ```
 
@@ -56,6 +66,7 @@ never creates a replacement key for the same intent.
 
 The deployment supplies these required settings:
 
+- `CONTROLLER_SOCKET_PATH`: fixed admin-provided controller socket;
 - `AUTH_AUTHORIZE_URL`: HTTPS browser authorization endpoint;
 - `AUTH_EXCHANGE_URL`: HTTPS backend code-exchange endpoint;
 - `AUTH_ISSUER`: exact JWT `iss`;

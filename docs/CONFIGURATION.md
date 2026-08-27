@@ -1,8 +1,11 @@
 # Deployment configuration reference
 
-This reference defines the inventory for a new deployment. Use it with empty
-management state; it is not a state-import format. No external rows are copied
-into the database, and only the resources named here are ever touched.
+This reference defines the infrastructure inventory for a new deployment. Use
+it with empty management state; it is not a state-import format. No external
+rows are copied into the database, and only resources named here are touched.
+It does not configure an application build. Future application configuration
+is a typed management-owned snapshot sent to the local controller API; the
+source repository does not supply platform configuration.
 
 Role-image builds and repository tools use `config/platform.json` from the
 operator's private repository. The installed command reads its persistent copy
@@ -144,10 +147,15 @@ copy state from another namespace.
 
 ### Application slugs
 
-Application slugs are separate from `prefix` and `namespace`. Worker lifecycle
-commands currently require 3–40 lowercase letters, numbers, or hyphens. A slug
-must start with a letter, end with a letter or number, and cannot contain
-consecutive hyphens.
+Application slugs are separate from `prefix` and `namespace`. The implemented
+local controller accepts 3–40 lowercase letters, numbers, or hyphens. A slug
+must start with a letter, end with a letter or number, cannot contain
+consecutive hyphens, and cannot use controller-reserved names such as `admin`,
+`api`, `auth`, `status`, or `www`.
+
+There is no operator CLI for creating slugs. The future management application
+will own user authorization and submit an accepted slug to the controller; see
+[MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 
 ## Host and network fields
 
@@ -185,15 +193,17 @@ cloud exposes metadata at another address.
 
 ## Public hostnames
 
-The job renderer uses `domain` as the hostname suffix:
+The local controller's job renderer uses `domain` as the hostname suffix:
 
 ```text
 <application-slug>.<domain>
 ```
 
-The public ingress service must provide DNS and HTTPS for these names and
-forward the original `Host` header to ingress. It can use wildcard DNS and a
-wildcard certificate, or provision each application hostname separately.
+The public ingress service must eventually provide DNS and HTTPS for these
+names and forward the original `Host` header to ingress. It can use wildcard
+DNS and a wildcard certificate, or provision each project hostname separately.
+Current setup verifies only the platform-level health route because the
+management and authentication applications do not exist yet.
 
 `recoveryDomains` contains two additional hostnames for the platform-level
 route. They are not alternate suffixes for application slugs.

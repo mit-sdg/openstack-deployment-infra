@@ -1,15 +1,46 @@
-# `openstack-platform` command reference
+# Operator CLI and local controller API reference
 
-`openstack-platform` is the unprivileged staff control surface for one
-deployment. It stores accepted non-secret records and operation checkpoints in
-`/srv/openstack-platform/state`. It invokes the constrained admin helper through
-the pinned `platform-admin` SSH alias.
+This page defines the two implemented control surfaces:
 
-The database starts empty and is initialized on first invocation.
-Reconciliation does not import external rows. Commands are limited to the
-resource names in your platform configuration.
+- `openstack-platform`, the supported operator-only CLI for setup,
+  infrastructure, backup, and recovery; and
+- `openstack-platform-controller`, the local Unix-socket product API intended
+  for the future management application.
 
-## Create a greenfield deployment
+The CLI has no application, deployment, environment, or managed-storage
+commands. The controller has no public listener, browser authentication, or
+project authorization. Automated setup does not currently install a controller
+service or management application, so there is no supported end-user product
+workflow yet. See [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md) for the
+future UI and authentication integration.
+
+## Operator CLI
+
+### Global syntax
+
+```text
+openstack-platform [--platform-config PATH] [--state-directory PATH]
+  [--policy PATH] COMMAND
+```
+
+Except for `setup`, the defaults are:
+
+```text
+--platform-config  $PLATFORM_CONFIG, or config/platform.json
+--state-directory  /srv/openstack-platform/state
+--policy           <state-directory>/policy.json
+```
+
+The installed launcher pins the installed inventory rather than relying on the
+source-tree default. Global options precede the command. Run as the
+unprivileged `/srv/openstack-platform` owner, never as root.
+
+The command database starts empty and is initialized or migrated on first use.
+Its identity is bound to the configured project UUID, namespace, stable
+resource inventory, and state paths. A database copied from another deployment
+is rejected. Accepted records are not imported from provider resources.
+
+### Greenfield setup
 
 ```text
 openstack-platform setup --env-file PATH [--workspace PATH]
@@ -17,282 +48,321 @@ openstack-platform setup --env-file PATH [--workspace PATH]
   [--cloudflare-token-file PATH] --apply
 ```
 
-`setup` is the only command that runs before an installed inventory, policy, or
-management database exists. The default invocation validates the private input
-file and prints a non-mutating summary. `--apply` authenticates to the named
-OpenStack project, generates private deployment material, reserves the fixed
-ports, builds and QEMU-tests five role images, creates the VMs and persistent
-volumes, then installs and verifies the management/helper releases and backups.
+Without `--apply`, setup validates the protected input and prints a
+non-mutating plan. With `--apply`, it verifies the authenticated OpenStack
+project, generates private deployment material, reserves fixed ports, builds
+and tests all five role images, creates the persistent roles and volumes,
+installs management/helper releases, selects images, and initializes backups.
 
 The environment file must be a direct current-user-owned mode-`0600` file.
-Literal dotenv and OpenRC assignments are parsed without executing the file.
-Standard `OS_*` credentials select the project. `PLATFORM_*` assignments supply
-stable names, domain, network, fixed addresses, management CIDR, flavors,
-volume type, and optional size overrides. Missing non-secret choices prompt
-with a discovered or documented default when one exists; a non-interactive run
-must provide choices that cannot be inferred. Missing password authentication
-prompts through a hidden terminal input.
+Setup parses literal dotenv/OpenRC assignments without executing them. Missing
+non-secret choices may prompt; password input uses a hidden terminal prompt.
+The default workspace is `/srv/openstack-platform/setup`. Fresh volume defaults
+are 32 GiB for admin state, 500 GiB for managed data, and 200 GiB for backups.
 
-Fresh volume defaults are 32 GiB for admin state, 500 GiB for managed data, and
-200 GiB for backups. Image names include the first eight characters of the
-clean source commit. Setup reuses its generated secret material and verifies
-named resources on retry; it refuses a different generated inventory in the
-same workspace. The default workspace is
-`/srv/openstack-platform/setup`.
+Cloudflare account and DNS administration remain external. A direct mode-`0600`
+token file enables the reference tunnel during ingress bootstrap. Without one,
+setup completes the OpenStack deployment and reports public ingress as pending.
+See [SETUP.md](SETUP.md) for inputs, ordered mutations, verification, and retry
+boundaries.
 
-Cloudflare account, tunnel, DNS, and certificate creation are external. A
-direct mode-`0600` token file enables `cloudflared` during ingress first boot.
-Without it, setup completes the OpenStack deployment and reports public ingress
-as pending. See [SETUP.md](SETUP.md) for the complete environment contract,
-ordered mutations, verification, and retry boundary.
-
-## Preconditions
-
-Install matching management/helper releases as described in [RELEASE_INSTALLER.md](RELEASE_INSTALLER.md). Install:
-
-- the real project name and UUID in mode-`0600` `/srv/openstack-platform/config/platform.json`;
-- a mode-`0600` policy at `/srv/openstack-platform/state/policy.json` with reviewed runtime digests and age recipient;
-- `platform-admin` with strict host-key checking and the fixed remote helper command.
-
-For commands other than `setup`, persistent roles, Nomad ACLs, registry,
-internal PKI, and public ingress must be healthy. Run as the unprivileged
-`/srv/openstack-platform` owner. Optional global paths are:
-
-```text
-openstack-platform [--platform-config PATH] [--state-directory PATH] [--policy PATH] COMMAND
-```
-
-The helper does not read management SQLite. Only validated, non-secret action arguments cross SSH. The management side also requires the generated `platform-admin` bridge at direct mode-`0600` `/srv/openstack-platform/.secrets/ssh/config`; use [`OPERATIONS.md`](OPERATIONS.md) to generate and smoke-test it rather than hand-writing SSH settings.
-
-## Read state
+### Status and infrastructure reads
 
 ```text
 openstack-platform status
 openstack-platform infra list
 openstack-platform infra image list
-openstack-platform app list
-openstack-platform app show SLUG
-openstack-platform storage list [SLUG]
-openstack-platform storage show SLUG postgres|mongo|s3 [--name NAME]
+openstack-platform infra logs admin|ingress|storage [--lines COUNT]
 ```
 
-The first invocation creates or migrates the fresh SQLite schema. Its
-version-zero marker is bound to the deployment project UUID, namespace, and
-stable inventory identity, including resource names and state paths. The CLI
-rejects a database copied from another deployment, or an older unbound
-database, before enabling SQLite WAL sidecars. Changing images, flavors,
-versions, checksums, or container pins does not change this state identity.
-Read commands combine accepted records with bounded live
-observations. Unavailable observations do not erase accepted records; `status`
-reports degraded state when observations are unavailable or unhealthy.
+`status` combines accepted counts with bounded live observations. Its columns
+are:
 
-On a fresh database with no accepted images, `status` reports three unavailable
-observations for the persistent admin, ingress, and storage hosts:
-`degraded  0  0  0  0  3  0`. Builder observation is included only while a
-build operation is unfinished, and worker observations require an accepted
-application.
+```text
+STATE INFRA APPS STORAGE LIVE UNAVAILABLE UNHEALTHY
+```
 
-Storage reads show `providerId` and `providerName` alongside configured limits.
-The table output columns are `SLUG TYPE NAME PROVIDER_ID PROVIDER_NAME STATE QUOTA
-VERIFIED HEALTH`. PostgreSQL and MongoDB measured-byte fields are targets, not
-observations; no periodic usage collector is supported.
+`APPS` and `STORAGE` are aggregate management-state counts only. The CLI
+cannot list or mutate those records. An unavailable observation does not erase
+accepted state. On a fresh database before image selection, the three
+persistent-role observations are unavailable.
 
-## Select images and operate persistent roles
+`infra list` shows accepted role image metadata and bounded live state.
+`infra image list` lists candidate images with safe metadata. Host logs are
+bounded to 1–2,000 lines; the default is 200.
+
+### Select and prune images
 
 ```text
 openstack-platform infra image set admin|ingress|storage|worker|builder IMAGE
 openstack-platform infra image prune
 openstack-platform infra image prune --apply --yes
+```
+
+Image selection resolves the provider image and records its exact UUID, full
+source commit, and compatibility hash. Incomplete or incompatible metadata is
+rejected.
+
+Pruning is plan-first. The plan protects selected images, images referenced by
+unfinished operations or servers, and the configured newest complete images
+per role. Incomplete metadata-bearing images are review-only. Apply re-reads
+UUIDs, fingerprints, server references, and protections under the
+infrastructure lock and refuses drift. Deletion is checkpointed per UUID;
+ambiguous or interrupted results become recovery-required.
+
+### Operate persistent hosts
+
+```text
 openstack-platform infra start  admin|ingress|storage
 openstack-platform infra stop   admin|ingress|storage --yes
 openstack-platform infra reboot admin|ingress|storage --yes
 openstack-platform infra replace admin|ingress|storage --yes
-openstack-platform infra logs admin|ingress|storage [--lines COUNT]
 ```
 
-Image selection resolves a provider image and records its UUID, full source
-commit, and compatibility hash. The image must be complete and accepted;
-selection rejects incomplete metadata.
+Stop, reboot, and replace require confirmation. Replacement retains the old
+server and required volumes until the candidate passes role readiness and the
+provider re-confirms the selected image UUID, retained flavor UUID, configured
+name, and operation provenance. On readiness failure, the prior host is
+restored. This is the only supported persistent-host replacement path.
 
-Image pruning is plan-first. The plan protects selected images, images named by
-unfinished operations, images referenced by servers, and the newest bounded
-number of complete images per role; metadata-bearing but incomplete images are
-review-only, not deletion candidates. Apply re-observes the exact UUID,
-fingerprint, server-reference, and protection plan under the infrastructure
-lock and refuses drift. A missing or malformed server image projection fails
-closed rather than being treated as a volume-booted server. Deletions are
-checkpointed one UUID at a time; an ambiguous or interrupted result becomes
-recovery-required and must be reconciled before continuing.
-
-Persistent replacement through `infra replace` retains the current server and
-required volumes until the replacement passes role readiness. Before readiness
-can count as acceptance, the provider is re-read and must show the exact
-selected image UUID, retained flavor UUID, configured server name, and this
-operation's provenance metadata. On failure it restores the prior host. This
-CLI operation is the sole supported persistent-host replacement path; do not
-delete the old server first or detach volumes manually.
-
-## Declare an application
-
-An application must exist before managed storage or staff environment values
-can be addressed by its slug. A deployment creates one, which is enough when
-the application starts without a database. An application that reads its
-database at startup needs the database first, so declare it up front:
-
-```text
-openstack-platform app create SLUG
-```
-
-The declaration records the slug, the public URL, and the standard worker and
-scheduler sizing from policy. It is not running and has no deployment, worker,
-or source until a deployment is accepted, so it does not make the deployment
-unavailable. Creating an existing slug is refused.
-
-## Deploy an application
-
-The repository must be public, credential-free GitHub HTTPS. `COMMIT` is a full
-lowercase 40-character commit. The selected builder and worker images must be
-accepted current images. The repository must contain a supported
-`platform.yaml` and lockfile.
-
-```text
-openstack-platform app deploy SLUG \
-  --repo https://github.com/OWNER/REPOSITORY \
-  --commit COMMIT \
-  [--config platform.yaml]
-openstack-platform app logs SLUG --build [--list | --id BUILD_UUID] [--lines COUNT] [--follow]
-openstack-platform app logs SLUG --runtime [--lines COUNT] [--follow]
-```
-
-`platform.yaml` accepts runtime `bun` or `node`, contained package paths, package-script names for build/start, an application port, a health path, and the typed `storage.bindings` mapping below. It does not accept Dockerfile instructions, command text, build arguments, build-time environment, resource settings, or provisioning requests. Repository `Dockerfile*` files may coexist as inert source files; the platform generates `recipe/Dockerfile` separately.
-
-```yaml
-storage:
-  bindings:
-    primary:                 # exact managed-resource name
-      type: mongo
-      environment:
-        uri: MONGODB_URI     # typed output: runtime target
-```
-
-Binding names are 1–40 lowercase letters, numbers, or interior hyphens. Types are `postgres`, `mongo`, and `s3`. Output names are type-specific: PostgreSQL has `url`, `host`, `port`, `database`, `user`, `password`, `sslmode`, and `sslrootcert`; MongoDB has `uri`; S3 has `endpoint`, `region`, `access_key_id`, `secret_access_key`, `ca_bundle`, `bucket`, and `force_path_style`. Targets must be unique environment names and cannot be platform-reserved or start with `STORAGE__`.
-
-Deployment requires every referenced `(application, type, name)` row to be active and every selected canonical output to exist in the application's Nomad Variable. It fails before job submission when a resource or output is missing, or when a target conflicts with an existing runtime key. Bindings neither create nor remove storage.
-
-The operation acquires the exact commit, creates a single-use builder, generates a recipe with a policy-pinned runtime image, pushes one immutable digest, deletes the builder and fixed port, creates/verifies the dedicated worker, submits a constrained Nomad job, and accepts only after scheduler and public health pass. A failed candidate is removed and its manifest cleanup is confirmed. The command has one policy-bounded whole-operation deadline: lock waits, source acquisition, builder creation/build/cleanup, helper calls, and health probes receive only the remaining time. The helper and BuildKit receive the same durable wall-clock deadline, so a build cannot outlive its recorded operation. There is no manual job-history rollback command for an already accepted deployment.
-
-## Manage application environment
-
-Supply values through a hidden prompt, bounded stdin, or strict dotenv file.
-They remain in Nomad Variables and never enter SQLite or command output.
-
-```text
-openstack-platform app env set SLUG KEY
-printf '%s' "$VALUE" | openstack-platform app env set SLUG KEY
-openstack-platform app env import SLUG --file PRIVATE.env
-openstack-platform app env unset SLUG KEY [KEY ...]
-openstack-platform app env list SLUG
-```
-
-Each mutation requires restart, scheduler health, and public health. Generated recipes keep the image default `NODE_ENV=production`; platform-owned keys, including `NODE_ENV`, and storage-owned keys cannot be changed through staff environment commands. Staff `set`, `import`, and `unset` refuse reserved keys. Variable updates use ModifyIndex compare-and-set.
-
-## Manage storage
-
-A declared or deployed application must exist before creation. Every identity is `(application_id, type, name)`; `--name` defaults to `default`.
-
-```text
-openstack-platform storage list [SLUG]
-openstack-platform storage show SLUG postgres|mongo|s3 [--name NAME]
-openstack-platform storage create SLUG postgres|mongo|s3 [--name NAME]
-openstack-platform storage verify SLUG [postgres|mongo|s3] [--name NAME]
-openstack-platform storage rotate SLUG postgres|mongo|s3 [--name NAME]
-openstack-platform storage remove SLUG postgres|mongo|s3 [--name NAME] \
-  --confirm NAME [--purge-s3]
-```
-
-Each mutation selects one exact instance. Its durable operation records the type and name, so a retry must repeat both. Create generates a provider identity, database/user or bucket/key scoped to that instance, verifies access and application health, writes collision-free `STORAGE__TYPE__NAME__OUTPUT` keys to the app Nomad Variable with compare-and-set, and records only non-secret identity and limits. Rotate and remove affect only that key set and provider instance. Remove requires the exact resource name in `--confirm`, performs preflight before irreversible deletion, and requires `--purge-s3` for a non-empty bucket. Provider absence and canonical-key removal are confirmed before accepted records are deleted.
-
-Do not create credential JSON, synchronize whole Nomad Variables, or use provider administrator credentials as a substitute for these commands.
-
-## Back up and restore management state
+### Back up management state
 
 ```text
 openstack-platform backup
-openstack-platform restore BACKUP --age-identity IDENTITY --yes
 ```
 
-`backup` uses SQLite's online backup API, creates a private temporary copy,
-encrypts it with the policy `backupAgeRecipient` through the verified age
-executable, and stages it through the pinned admin alias. The remote staging
-path is `<paths.backups>/m1/.staging/<name>`; helper acceptance verifies an
-age-v1 header and SHA-256, then publishes the file at
-`<paths.backups>/m1/<name>` with `<name>.sha256` plus
-`<name>.manifest`. The manifest is the commit marker: ciphertext and checksum
-are written and fsynced before its final rename, and the accepted directory is
-fsynced after each rename. Readers and retention count only complete evidence
-trios. A retry reconciles a ciphertext/evidence move interrupted before the
-manifest appeared; a malformed set that already has a manifest is refused,
-not silently repaired. `paths.backups` is read from the installed inventory and
-is not a fixed management or checkout path. This backup does not include managed
-data.
-
-`restore` is an offline operation. Global options must precede `restore`:
+The command uses SQLite's online backup API, encrypts the private copy to the
+policy `backupAgeRecipient`, and stages it through the pinned admin alias at:
 
 ```text
-openstack-platform --state-directory /srv/openstack-platform/state \
-  restore /private/path/platform-YYYYMMDDTHHMMSSZ.sqlite3.age \
-  --age-identity /private/path/backup-age-identity.txt --yes
+<paths.backups>/m1/.staging/<name>
 ```
 
-An installed management release also provides the preferred fixed-destination
-launcher:
+Helper acceptance verifies the age-v1 header and ciphertext SHA-256, then
+publishes the ciphertext, checksum, and manifest under
+`<paths.backups>/m1/`. The manifest is the commit marker. Retention counts only
+complete evidence trios. This backup contains management SQLite state only,
+not managed PostgreSQL, MongoDB, Garage data, registry blobs, or an age
+identity.
+
+### Restore management state offline
 
 ```text
-/srv/openstack-platform/bin/openstack-platform-restore \
-  /private/path/platform-YYYYMMDDTHHMMSSZ.sqlite3.age \
-  --age-identity /private/path/backup-age-identity.txt --yes
+openstack-platform --state-directory PATH restore BACKUP
+  [--age-identity IDENTITY] --yes
 ```
 
-It always targets `/srv/openstack-platform/state/platform.sqlite3`; do not pass
-`--destination` to this launcher. It contacts no provider, helper, SSH, Nomad,
-or network service. It requires private direct mode-`0600` source/identity files
-and a private mode-`0700` destination directory, decrypts/validates a temporary
-candidate, checks the current deployment-bound marker, known schema, SQLite
-integrity, foreign keys, and unfinished operations, and then atomically replaces
-the destination. A backup from a different project, namespace, stable resource
-inventory, or state-path identity is refused; the existing database is left
-unchanged. Corrupt, future, unrecognized, unsafe, busy, or unfinished state is also
-refused. Restore does not recreate provider resources or import external rows;
-run
-`status` and the read commands afterward to reconcile live observations. The
-fixed launcher supplies the installed inventory and destination, so do not
-bypass it with a release-internal restore path.
-
-Managed PostgreSQL, MongoDB, and Garage backups use the admin scripts and
-packaged admin age identity documented in [OPERATIONS.md](OPERATIONS.md).
-
-## Remove an application
-
-Remove managed storage first, then confirm the exact slug:
+The installed fixed-destination launcher is preferred for live state:
 
 ```text
-openstack-platform app remove SLUG --confirm SLUG
+/srv/openstack-platform/bin/openstack-platform-restore BACKUP
+  [--age-identity IDENTITY] --yes
 ```
 
-Removal completes only after the Nomad job and Variables, worker and fixed port, and all tracked current, prior accepted, and failed-candidate registry manifests are absent. It does not delete unrelated provider resources.
+The launcher always targets
+`/srv/openstack-platform/state/platform.sqlite3`. Restore contacts no provider,
+helper, SSH, Nomad, or network service. It requires private direct files and a
+private destination directory; verifies deployment identity, known schema,
+SQLite integrity, foreign keys, and unfinished operations; then atomically
+replaces the destination. A failed verification leaves the existing database
+unchanged.
 
-## Recover an interrupted operation
+After restore, use `status` and `infra list` to compare aggregate accepted state
+with live observations. If `APPS` or `STORAGE` is nonzero, preserve the database
+for the future management/controller cutover; the operator CLI intentionally
+has no product-state reconciliation commands.
 
-Provider, SSH, HTTP, Git, Nomad, and SQLite calls do not share one transaction.
-Commands serialize infrastructure work globally and application/environment/
-storage work per application. Mutating operations use a policy-bounded
-whole-call deadline, and their deadline-aware lock waits use non-blocking
-probes and fail closed before the deadline rather than blocking indefinitely.
-Read-side provider calls retain their individual configured bounds.
+### CLI recovery and exits
 
-1. Do not manually delete, detach, rotate, rename, or recreate the referenced resource.
-2. Restore the dependency named by the safe error.
-3. Rerun the same command with the same identity arguments and confirmation. The recorded phase either continues, confirms cleanup, restores prior healthy state, or stops with a narrower action.
-4. If another command owns the unfinished scope, run the command family named by the error.
+Mutations journal checkpoints and serialize infrastructure work. Lock waits and
+external calls share bounded deadlines. For an interrupted operation:
 
-Secret values are not persisted for replay. Unexpected management failures provide a correlation ID and private diagnostics below the state directory; helper diagnostics are private on admin at `controller/helper-diagnostics/<correlation-id>.trace`. The trace contains bounded source file/line locations and never secret values or provider payloads. Protocol responses are bounded and do not contain credentials or unrestricted provider payloads.
+1. do not edit SQLite or manually rename, detach, delete, or recreate the
+   referenced provider resource;
+2. restore the dependency named by the safe error; and
+3. rerun the same operator command with the same role, image, and confirmation.
+
+Exit codes are `0` success, `1` safe operation failure, `2` usage or validation
+failure, `3` conflict/recovery-required, `4` unavailable dependency, and `130`
+interrupt. Unexpected failures print a correlation ID and write a private
+bounded diagnostic below the state directory.
+
+## Local controller API
+
+### Availability and trust boundary
+
+`openstack-platform-controller` is implemented, packaged, and run by the admin
+NixOS role under the dedicated `platform-controller` account. It starts after
+the retained state mount, Nomad, controller policy, and operator-owned helper
+release are available. The socket is mode `0660` for the restricted
+`controller-api` group; the reserved `management-web` account can connect but
+cannot read controller or operator credentials. Browser login, project
+authorization, quota, and the management application remain unimplemented and
+are specified in [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
+
+The executable syntax is:
+
+```text
+openstack-platform-controller
+  [--platform-config PATH]
+  [--state-directory PATH]
+  [--policy PATH]
+  [--socket PATH]
+  [--socket-group GROUP]
+```
+
+Its defaults are:
+
+```text
+--platform-config  $PLATFORM_CONFIG, or /etc/openstack-platform/platform.json
+--state-directory  /srv/openstack-platform/state/controller
+--policy           <state-directory>/policy.json
+--socket           /run/openstack-platform/controller.sock
+```
+
+The admin service supplies deployment-specific values:
+`/etc/<namespace>/platform.json`, `<adminState>/controller/state`, and
+`/run/<namespace>-controller/controller.sock`, with socket group
+`controller-api`.
+
+The socket path must be absolute. Its parent must already be owned by the
+controller process and grant no permissions to the `other` class. The server
+creates the socket as mode `0660` and optionally assigns `--socket-group`. It removes only an owned inactive Unix
+socket; it refuses a regular file, foreign socket, or active listener.
+
+The API does not authenticate HTTP requests or enforce user/project/admin
+authorization. Access to the Unix socket grants access to every route,
+including administrator reads and destructive product mutations. The future
+management backend must enforce authentication, project ownership, quota, and
+global administrator role before calling it.
+
+### HTTP transport
+
+The API uses HTTP/1.1 JSON over the Unix stream socket. Paths are under `/v1/`.
+Request and response bodies are each limited to 1 MiB. Chunked request bodies,
+duplicate JSON keys, repeated `Content-Length` or `Idempotency-Key` headers,
+non-finite JSON numbers, unknown mutation fields, and unsupported content types
+are rejected.
+
+Every mutation requires `Idempotency-Key` containing a canonical lowercase
+UUID. A repeated key with identical input replays the recorded result; the same
+key with different method, path, or body returns `409 IDEMPOTENCY_CONFLICT`.
+Database-only application creation returns `201`. External mutations return
+`202`, `Location: /v1/operations/{id}`, and:
+
+```json
+{
+  "operationId": "00000000-0000-4000-8000-000000000001",
+  "statusUrl": "/v1/operations/00000000-0000-4000-8000-000000000001",
+  "result": {"kind": "operation", "id": "00000000-0000-4000-8000-000000000001"}
+}
+```
+
+Work may finish before the `202` response. Callers determine completion from
+the operation resource, not request duration.
+
+### Product routes
+
+All `{id}` values are canonical UUIDs.
+
+| Method and route | JSON body or query |
+| --- | --- |
+| `POST /v1/applications` | `{"slug": string}` |
+| `GET /v1/applications/{id}` | none |
+| `POST /v1/applications/{id}/enable` | absent or `{}` |
+| `POST /v1/applications/{id}/disable` | absent or `{}` |
+| `POST /v1/applications/{id}/delete` | `{"confirmation": exactSlug}` |
+| `POST /v1/applications/{id}/deployments` | repository, exact commit, requested ref, configuration revision, and typed configuration; all required |
+| `GET /v1/applications/{id}/deployments` | `limit` and `cursor` optional |
+| `GET /v1/deployments/{id}` | none |
+| `GET /v1/deployments/{id}/build-log` | `lines` and `offset` optional |
+| `GET /v1/applications/{id}/runtime-log` | `lines` optional |
+| `GET /v1/applications/{id}/environment` | none; values are never returned |
+| `PUT /v1/applications/{id}/environment/{key}` | `{"value": string}` |
+| `DELETE /v1/applications/{id}/environment/{key}` | absent or `{}` |
+| `POST /v1/applications/{id}/environment/import` | `{"dotenv": string}` |
+| `POST /v1/applications/{id}/storage` | `{"type": "postgres"|"mongo"|"s3", "name"?: string}` |
+| `GET /v1/applications/{id}/storage` | `limit` and `cursor` optional |
+| `GET /v1/storage/{id}` | none |
+| `PATCH /v1/storage/{id}/label` | `{"displayLabel": string}` |
+| `POST /v1/storage/{id}/verify` | absent or `{}` |
+| `POST /v1/storage/{id}/rotate` | absent or `{}` |
+| `DELETE /v1/storage/{id}` | `{"confirmation": exactMachineName, "purge"?: boolean}` |
+| `GET /v1/operations/{id}` | none |
+
+The deployment body has exactly these fields:
+
+```json
+{
+  "repository": "https://github.com/OWNER/REPOSITORY",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "requestedRef": "main",
+  "configurationRevision": 1,
+  "configuration": {
+    "schemaVersion": 1,
+    "build": {
+      "runtime": "node",
+      "packages": ["."],
+      "buildScript": "build",
+      "startScript": "start"
+    },
+    "runtime": {"port": 3000, "healthPath": "/health"},
+    "storageBindings": []
+  }
+}
+```
+
+Configuration is supplied by the caller as an immutable typed snapshot. The
+source repository supplies code and supported lockfiles, not platform
+configuration. Build and start values are package-script names, not shell
+commands. The schema rejects Dockerfile selection, command text, build
+arguments, build-time environment, provider IDs, host paths, resource
+provisioning, and unknown fields.
+
+A storage binding identifies an existing active resource by controller UUID and
+maps typed outputs to unique runtime environment keys. Bindings neither create
+nor remove storage. Environment values remain in Nomad Variables; controller
+SQLite and API reads contain names, ownership, revisions, and timestamps only.
+
+### Administrator reads
+
+| Route | Pagination |
+| --- | --- |
+| `GET /v1/admin/status` | none |
+| `GET /v1/admin/hosts` | none |
+| `GET /v1/admin/images` | none |
+| `GET /v1/admin/applications` | optional `limit`, `cursor` |
+| `GET /v1/admin/deployments` | optional `limit`, `cursor` |
+| `GET /v1/admin/storage` | optional `limit`, `cursor` |
+| `GET /v1/admin/operations` | optional `limit`, `cursor` |
+
+The controller does not distinguish these routes by caller. “Administrator” is
+a management-application authorization requirement, not controller-side
+authentication.
+
+Paginated lists default to 50 and accept `limit` from 1 through 100. Log reads
+default to 200 lines and accept 1 through 1,000. Build offsets are additionally
+bounded by the configured build-log byte limit.
+
+### Responses and errors
+
+Every transport response includes `Content-Type: application/json`,
+`Cache-Control: no-store`, and `X-Correlation-ID`. Error bodies are:
+
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "summary": "bounded safe summary",
+    "correlationId": "canonical UUID",
+    "retryable": false,
+    "operationId": "optional conflicting operation UUID"
+  }
+}
+```
+
+Implemented result classes include invalid request/body/query/JSON/media,
+not-found, method-not-allowed, idempotency conflict, unfinished-operation
+conflict, state conflict, deadline exceeded, dependency unavailable, helper or
+external-operation failure, and bounded internal failure. Provider payloads,
+stack traces, secret values, and operation refs are not returned.

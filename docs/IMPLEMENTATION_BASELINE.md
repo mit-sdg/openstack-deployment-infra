@@ -1,9 +1,10 @@
 # Self-hosted management implementation baseline
 
-This inventory records the current implementation boundary before the
-self-hosted management work begins. It is a Phase 0 implementation aid, not a
-supported product contract. The current supported behavior remains documented
-in [`CONTROL_PLANE_CONTRACT.md`](CONTROL_PLANE_CONTRACT.md).
+This inventory records the historical implementation boundary before the
+self-hosted management work began. It is an archived Phase 0 extraction aid,
+not a description of the current code and not a supported product contract.
+Current behavior is documented in
+[`CONTROL_PLANE_CONTRACT.md`](CONTROL_PLANE_CONTRACT.md).
 
 ## CLI composition
 

@@ -2,134 +2,117 @@
 
 [![CI](https://github.com/mit-sdg/openstack-deployment-infra/actions/workflows/ci.yml/badge.svg)](https://github.com/mit-sdg/openstack-deployment-infra/actions/workflows/ci.yml)
 
-This platform hosts web applications without giving users cloud credentials or
-server access. Each application gets a stable HTTPS URL, health-checked
-deployments, and optional managed data services.
-
-A class can give each student a project and create shared projects for teams.
-A hackathon or research group can host many small applications in one OpenStack
-project. In both cases, organizers keep the infrastructure credentials, and
-databases survive worker replacement.
-
-Applications can use multiple named PostgreSQL, MongoDB, and S3-compatible
-resources. A narrow `platform.yaml` binding maps selected outputs from an
-existing named resource to runtime environment keys; repositories cannot
-provision resources or supply arbitrary platform-controlled environment. The
-platform also runs a private image registry, encrypted backups,
-restore checks, and health monitoring.
+This repository builds and operates the OpenStack infrastructure for hosting
+small HTTP applications. It provides NixOS role images, greenfield setup,
+persistent data services, encrypted backups, a constrained helper, an
+operator-only infrastructure CLI, and a local application controller API.
 
 ## Current status
 
-The infrastructure, operator tools, and greenfield setup command are
-implemented. A protected environment file plus interactive answers for any
-missing deployment choices can create the keys, images, network foundation,
-VMs, volumes, management bridge, releases, and backup configuration.
-Cloudflare or another public-ingress account remains an external input.
+The infrastructure, setup, backup, restore, and infrastructure-operator paths
+are implemented. The repository also contains the typed local controller API
+and application lifecycle services that a future management application will
+call.
 
-The self-service portal and production API are not implemented. This repository
-is useful today for an operator-managed platform or as a base for another
-control plane; it is not yet a service where end users sign in and deploy
-applications themselves. The accepted
-[self-hosted management implementation plan](docs/IMPLEMENTATION_PLAN.md)
-defines the replacement UI, controller API, state migration, and CLI reduction.
+There is not yet a supported end-user application workflow. The sync-engine
+management application and its external authentication application do not exist
+in this repository. The admin role does run the controller API on a restricted
+local socket once its policy and helper release are installed. The former
+application/storage CLI and repository deployment manifest have been retired.
+Do not use an older `openstack-platform` binary or old instructions to manage
+product state.
 
-## What it provides
+The future browser product is specified in the
+[management application specification](docs/MANAGEMENT_APP_SPEC.md). That
+specification is an implementation target, not a claim that the UI or
+authentication service is available today.
 
-A deployment:
+## Implemented infrastructure
 
-- builds an exact source commit in a single-use builder;
-- publishes the resulting container image by immutable digest;
-- runs each active application project on a dedicated, replaceable worker;
-- routes public traffic only to healthy applications;
-- keeps managed data separate from application workers;
-- supports scoped, rotatable database and object-storage credentials;
-- cleans up failed deployment candidates without rebuilding source; and
-- takes encrypted backups of managed data and control-plane state, with
-  restore verification.
+A deployment provides:
+
+- persistent `admin`, `ingress`, and `storage` roles;
+- replaceable application workers and single-use builders for the controller;
+- PostgreSQL, MongoDB, S3-compatible storage, and a private OCI registry;
+- provider-scoped host lifecycle and exact-image selection;
+- public DNS/HTTPS integration through Cloudflare Tunnel or another provider;
+- encrypted management-state and managed-data backups with restore checks; and
+- a local Unix-socket controller contract for future product integration.
 
 Participants receive no SSH keys, OpenStack or scheduler credentials, registry
-credentials, or database administrator passwords.
+credentials, or database administrator passwords. Application source remains
+limited to public, credential-free GitHub repositories and typed Node or Bun
+configuration when the future management application is implemented. Private
+repositories are outside the current target.
 
-Applications currently run as one OCI container, serve HTTP on one port, and
-provide a health path. The current scheduler configuration runs one application
-instance per project. Periodic managed-storage usage collection is not
-implemented.
+Every operator command acts only on resources named by the deployment
+configuration, leaving unrelated resources in the OpenStack project alone.
 
-Source must come from a **public** GitHub repository. Deployments fetch the
-exact commit over HTTPS with no credentials, so a private repository cannot be
-deployed. Private repositories remain outside the initial self-service target.
+## Set up a deployment
 
-Every command acts only on the resources your configuration names, so unrelated
-servers and volumes in the same OpenStack project are left alone.
+To create the infrastructure in your own OpenStack project:
 
-## Set up your own deployment
+1. [Prepare the management host](docs/GETTING_STARTED.md).
+2. [Run automated setup](docs/SETUP.md) from a protected environment file.
+3. [Verify the fresh platform](docs/TUTORIAL.md).
+4. Use [Operations](docs/OPERATIONS.md) for backup, restore, upgrades, recovery,
+   and individual setup checkpoints.
 
-The platform is not specific to any one institution or course. To run it on
-your own OpenStack project:
+Automated setup writes its private source inventory below the protected
+workspace and installs it at
+`/srv/openstack-platform/config/platform.json`. The tracked
+`config/platform.example.json` documents the shape; the
+[configuration reference](docs/CONFIGURATION.md) explains every field.
 
-1. [Automated setup](docs/SETUP.md) — create a protected environment file,
-   review the plan, then generate and verify the complete platform.
-2. [Tutorial](docs/TUTORIAL.md) — deploy a verified HTTPS application and a
-   managed database, then clean them up.
-3. [Operations](docs/OPERATIONS.md) — back up, restore, upgrade, troubleshoot,
-   or execute an individual setup checkpoint manually.
-4. [Image publication](docs/IMAGE_PUBLISHING.md) — understand the image
-   acceptance contract or configure protected CI publication.
+Setup requires an external public-ingress account. Cloudflare Tunnel is the
+reference, but an institutional service can be used when it satisfies the
+[public ingress contract](docs/PUBLIC_INGRESS.md).
 
-Automated setup writes the private source inventory below its protected
-workspace and installs it at `/srv/openstack-platform/config/platform.json`.
-`config/platform.example.json` remains the tracked template documenting every
-field; the [configuration reference](docs/CONFIGURATION.md) explains each one.
+## Operator and controller boundaries
 
-## Designed to be extended
+`openstack-platform` is now an operator-only command. It supports setup,
+platform status, management-state backup/offline restore, image selection and
+pruning, and persistent-host lifecycle. It does not expose application,
+environment, deployment, or managed-storage commands. See the
+[operator CLI and local controller reference](docs/CONTROL_PLANE_CONTRACT.md).
 
-Small role-specific services and narrow operator commands make up the current
-platform. The accepted implementation plan extracts application orchestration
-behind a typed local controller API, runs the management application on admin,
-and leaves the CLI as an infrastructure and recovery surface.
+The controller implementation accepts bounded HTTP/1.1 JSON on a restricted
+Unix socket and owns application, deployment, environment, storage, operation,
+and safe administrator-read routes. It has no browser authentication or
+project authorization layer; filesystem access to the socket is its only
+transport boundary. The admin NixOS role starts it under a dedicated trusted
+account and grants only the reserved `management-web` account access to its
+socket. Future UI and authentication behavior belongs in
+[`docs/MANAGEMENT_APP_SPEC.md`](docs/MANAGEMENT_APP_SPEC.md).
 
-Cloudflare Tunnel is the reference public-ingress setup, but it is not required.
-An institutional or managed ingress service can be used instead, provided it
-meets the [public ingress contract](docs/PUBLIC_INGRESS.md). PostgreSQL,
-MongoDB, and S3-compatible storage are included; additional managed services
-can be added by implementing their provisioning, credential, health, backup,
-and cleanup lifecycle.
-
-## How it fits together
+## Architecture
 
 ![Platform architecture](docs/architecture-overview.svg)
 
 | Role | Responsibility |
 | --- | --- |
-| `admin` | Runs the scheduler control plane, constrained operator helper, and monitoring |
-| `ingress` | Routes public requests to healthy applications |
+| `admin` | Runs the scheduler control plane, local controller, constrained helper, monitoring, and backup staging |
+| `ingress` | Routes public requests to healthy platform services |
 | `storage` | Runs PostgreSQL, MongoDB, object storage, and the private image registry |
 | `worker` | Runs one application project without durable local state |
 | `builder` | Builds one source snapshot, then is deleted |
 
-The [architecture guide](docs/ARCHITECTURE.md) explains the isolation, data, and
-failure boundaries.
+The [architecture guide](docs/ARCHITECTURE.md) explains state ownership,
+isolation, and failure boundaries.
 
 ## Documentation
 
-- [Automated setup](docs/SETUP.md) — create a complete greenfield deployment
-  from one protected environment file
-- [Getting started](docs/GETTING_STARTED.md) — applicability and management-host prerequisites
-- [Tutorial](docs/TUTORIAL.md) — deploy the first application and managed service
-- [Operations](docs/OPERATIONS.md) — deployment, backup, restore, and cleanup
-  procedures
-- [Troubleshooting](docs/TROUBLESHOOTING.md) — symptom, evidence, correction
-- [Configuration reference](docs/CONFIGURATION.md) — every deployment setting
-- [Image publication](docs/IMAGE_PUBLISHING.md) — local and CI publication
-- [Public ingress](docs/PUBLIC_INGRESS.md) — provider-neutral DNS and HTTPS
-  requirements
-- [`openstack-platform` commands](docs/CONTROL_PLANE_CONTRACT.md) — the
-  installed staff interface for infrastructure, applications, storage, and
-  recovery
-- [Self-hosted management implementation plan](docs/IMPLEMENTATION_PLAN.md) —
-  accepted target architecture, migration phases, API boundary, and acceptance
-  criteria
-- [Documentation index](docs/README.md) — all guides and references
+- [Automated setup](docs/SETUP.md)
+- [Getting started](docs/GETTING_STARTED.md)
+- [Fresh-platform tutorial](docs/TUTORIAL.md)
+- [Operations](docs/OPERATIONS.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Configuration reference](docs/CONFIGURATION.md)
+- [Image publication](docs/IMAGE_PUBLISHING.md)
+- [Public ingress](docs/PUBLIC_INGRESS.md)
+- [Operator CLI and local controller API](docs/CONTROL_PLANE_CONTRACT.md)
+- [Management application specification](docs/MANAGEMENT_APP_SPEC.md)
+- [Documentation index](docs/README.md)
 
 ## License
 
