@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
+import socket
 import socketserver
+import stat
 import uuid as uuid_module
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -144,14 +148,89 @@ class Router:
 
 
 class _ThreadingUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    daemon_threads = True
+    daemon_threads = False
+    block_on_close = True
     allow_reuse_address = False
 
 
+def prepare_socket_path(socket_path: str) -> None:
+    """Remove only an owned, inactive Unix socket; reject every other object."""
+    path = os.path.abspath(socket_path)
+    if path != socket_path or len(path.encode()) > 4_096:
+        raise ValueError("controller socket path must be canonical and absolute")
+    parent = os.path.dirname(path)
+    metadata = os.lstat(parent)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o007
+    ):
+        raise PermissionError("controller socket directory must be owned and private")
+    try:
+        socket_metadata = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISSOCK(socket_metadata.st_mode)
+        or socket_metadata.st_uid != os.geteuid()
+    ):
+        raise FileExistsError("controller socket path is not an owned Unix socket")
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.connect(path)
+    except OSError as error:
+        if error.errno not in {errno.ECONNREFUSED, errno.ENOENT}:
+            raise OSError("controller socket activity could not be determined") from error
+    else:
+        raise OSError(errno.EADDRINUSE, "controller socket is already active", path)
+    finally:
+        probe.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 class ControllerServer(_ThreadingUnixServer):
-    def __init__(self, socket_path: str, router: Router) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        router: Router,
+        *,
+        socket_mode: int = 0o660,
+        socket_gid: int | None = None,
+    ) -> None:
+        if socket_mode != 0o660:
+            raise ValueError("controller socket mode must be 0660")
+        prepare_socket_path(socket_path)
         self.router = router
-        super().__init__(socket_path, ControllerRequestHandler)
+        try:
+            super().__init__(socket_path, ControllerRequestHandler)
+            os.chmod(socket_path, socket_mode, follow_symlinks=False)
+            if socket_gid is not None:
+                os.chown(socket_path, -1, socket_gid, follow_symlinks=False)
+        except BaseException:
+            try:
+                socketserver.UnixStreamServer.server_close(self)
+            except AttributeError:
+                pass
+            try:
+                if stat.S_ISSOCK(os.lstat(socket_path).st_mode):
+                    os.unlink(socket_path)
+            except FileNotFoundError:
+                pass
+            raise
+
+    def server_close(self) -> None:
+        socket_path = self.server_address
+        super().server_close()
+        if isinstance(socket_path, str):
+            try:
+                metadata = os.lstat(socket_path)
+                if stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == os.geteuid():
+                    os.unlink(socket_path)
+            except FileNotFoundError:
+                pass
 
 
 class ControllerRequestHandler(BaseHTTPRequestHandler):

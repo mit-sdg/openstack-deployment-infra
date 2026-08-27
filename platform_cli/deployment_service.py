@@ -62,6 +62,7 @@ class DeploymentRequest:
     source_commit: str
     configuration_revision: int
     configuration: DeploymentConfiguration
+    request_id: str | None = None
 
 
 RecoveryKind = Literal["candidate-removed", "accepted", "deployment-healthy"]
@@ -1256,6 +1257,11 @@ class DeploymentService:
             existing.application_id if existing is not None else str(uuid_module.uuid4())
         )
         _configuration_manifest(self.connection, application_id, request.configuration)
+        selected_request_id = (
+            None
+            if request.request_id is None
+            else uuid(request.request_id, field="deployment request ID")
+        )
         standard = self.config.policy.standard
         spec = app.DeploymentSpec(
             application_id,
@@ -1276,21 +1282,43 @@ class DeploymentService:
         )
         completed_recovery: RecoveryKind | None = None
 
-        def create_attempt(operation_id: str) -> None:
+        def deployment_fingerprint() -> tuple[str, int]:
             environment = db.get_environment_revision(self.connection, application_id)
             if environment is None:
                 raise db.DatabaseError("application environment revision is missing")
-            fingerprint = db.request_fingerprint(
-                {
-                    "applicationId": application_id,
-                    "repository": repository,
-                    "requestedRef": requested_ref,
-                    "commit": source_commit,
-                    "configurationRevision": request.configuration_revision,
-                    "configuration": json.loads(configuration_json),
-                    "environmentRevision": environment.revision,
-                }
+            return (
+                db.request_fingerprint(
+                    {
+                        "applicationId": application_id,
+                        "repository": repository,
+                        "requestedRef": requested_ref,
+                        "commit": source_commit,
+                        "configurationRevision": request.configuration_revision,
+                        "configuration": json.loads(configuration_json),
+                    }
+                ),
+                environment.revision,
             )
+
+        if selected_request_id is not None:
+            fingerprint, _environment_revision = deployment_fingerprint()
+            claimed = db.claim_idempotency_request(
+                self.connection,
+                request_id=selected_request_id,
+                request_fingerprint=fingerprint,
+            )
+            if claimed.result_id is not None:
+                if claimed.result_kind != "deployment":
+                    raise db.IdempotencyConflictError(
+                        "idempotency request already has a different result"
+                    )
+                attempt = db.get_deployment_attempt(self.connection, claimed.result_id)
+                if attempt is None or attempt.application_id != application_id:
+                    raise db.DatabaseError("idempotency result deployment is missing")
+                return DeploymentOutcome(application_slug, image=attempt.image_digest)
+
+        def create_attempt(operation_id: str) -> None:
+            fingerprint, environment_revision = deployment_fingerprint()
             db.claim_idempotency_request(
                 self.connection,
                 request_id=operation_id,
@@ -1304,7 +1332,7 @@ class DeploymentService:
                 requested_ref=requested_ref,
                 configuration_revision=request.configuration_revision,
                 configuration=request.configuration,
-                environment_revision=environment.revision,
+                environment_revision=environment_revision,
                 idempotency_request_id=operation_id,
             )
 
@@ -1335,6 +1363,11 @@ class DeploymentService:
 
         def recover(operation: db.Operation) -> db.Operation | None:
             nonlocal completed_recovery
+            if (
+                operation.phase == "validated"
+                and db.get_deployment_attempt(self.connection, operation.operation_id) is None
+            ):
+                create_attempt(operation.operation_id)
             recovered = self.recover_operation(spec, operation, deadline=selected_deadline)
             completed_recovery = recovered.completed
             return recovered.operation
@@ -1431,6 +1464,7 @@ class DeploymentService:
             deploy_and_accept=deploy_and_accept,
             create_attempt=create_attempt,
             checkpoint_attempt=checkpoint_attempt,
+            operation_id=selected_request_id,
         )
         if result is None:
             if completed_recovery is None:

@@ -31,6 +31,7 @@ from .validation import ValidationError, bounded_text, env_key, resource_name, s
 StorageAction = Literal["create", "verify", "rotate", "remove"]
 EnvironmentAction = Literal["set", "unset", "import"]
 HelperCaller = Callable[..., Mapping[str, object]]
+_RESERVED_APPLICATION_SLUGS = {"admin", "api", "auth", "status", "www"}
 
 
 class ServiceDeadlineError(RuntimeError):
@@ -53,6 +54,7 @@ class StorageMutationRequest:
     resource_name: str = "default"
     confirm_name: str | None = None
     purge_s3: bool = False
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,7 @@ class EnvironmentMutationRequest:
     application: str
     updates: Mapping[str, str] = field(default_factory=dict, repr=False)
     removals: tuple[str, ...] = ()
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,16 +186,27 @@ def _tail_file(path: Path, *, lines: int, maximum_bytes: int) -> str:
 class ProductReadService:
     """Return safe product models without table or process rendering."""
 
-    def __init__(self, connection: sqlite3.Connection, config: Config) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        config: Config,
+        *,
+        helper_caller: Callable[..., Mapping[str, object]] | None = None,
+    ) -> None:
         self.connection = connection
         self.config = config
+        self.helper_caller = helper_caller
 
     def applications(self) -> tuple[Mapping[str, object], ...]:
-        observe = status.application_observer(self.connection, self.config)
+        observe = status.application_observer(
+            self.connection, self.config, helper_caller=self.helper_caller
+        )
         return tuple(status.app_list(self.connection, observe=observe))
 
     def application(self, application_identifier: str) -> Mapping[str, object]:
-        observe = status.application_observer(self.connection, self.config)
+        observe = status.application_observer(
+            self.connection, self.config, helper_caller=self.helper_caller
+        )
         result = status.app_show(
             self.connection,
             application_identifier,
@@ -206,7 +220,9 @@ class ProductReadService:
         self,
         application_identifier: str | None = None,
     ) -> tuple[Mapping[str, object], ...]:
-        observe = status.storage_observer(self.connection, self.config)
+        observe = status.storage_observer(
+            self.connection, self.config, helper_caller=self.helper_caller
+        )
         return tuple(
             status.storage_list(
                 self.connection,
@@ -221,7 +237,9 @@ class ProductReadService:
         resource_type: str,
         resource_name_value: str,
     ) -> Mapping[str, object]:
-        observe = status.storage_observer(self.connection, self.config)
+        observe = status.storage_observer(
+            self.connection, self.config, helper_caller=self.helper_caller
+        )
         result = status.storage_show(
             self.connection,
             application_identifier,
@@ -250,14 +268,22 @@ class ApplicationService:
         self.state_directory = state_directory
         self.helper_caller = helper_caller
 
-    def declare(self, application_slug: str) -> ApplicationCreated:
+    def declare(
+        self, application_slug: str, *, application_id: str | None = None
+    ) -> ApplicationCreated:
         """Create one inert disabled application before storage or deployment."""
         checked_slug = slug(application_slug)
+        if checked_slug in _RESERVED_APPLICATION_SLUGS:
+            raise ValidationError("application slug is reserved by the platform")
         if db.get_application(self.connection, checked_slug) is not None:
             raise ValidationError("application already exists")
         if db.get_slug_tombstone(self.connection, checked_slug) is not None:
             raise ValidationError("application slug is permanently reserved")
-        identifier = str(uuid_module.uuid4())
+        identifier = (
+            str(uuid_module.uuid4())
+            if application_id is None
+            else uuid(application_id, field="application ID")
+        )
         standard = self.config.policy.standard
         url = f"https://{checked_slug}.{self.config.platform.domain}"
         db.put_application(
@@ -290,6 +316,8 @@ class ApplicationService:
         kind: str,
         refs: Mapping[str, object],
         deadline: float,
+        *,
+        operation_id: str | None = None,
     ) -> tuple[db.Operation, bool]:
         scope = f"app-{application.application_id}"
         unfinished = db.get_unfinished_operation(self.connection, scope)
@@ -307,7 +335,11 @@ class ApplicationService:
         return (
             db.begin_operation(
                 self.connection,
-                operation_id=str(uuid_module.uuid4()),
+                operation_id=(
+                    str(uuid_module.uuid4())
+                    if operation_id is None
+                    else uuid(operation_id, field="operation ID")
+                ),
                 kind=kind,
                 scope=scope,
                 phase="validated",
@@ -317,7 +349,9 @@ class ApplicationService:
             False,
         )
 
-    def disable(self, application_identifier: str) -> ApplicationLifecycleChanged:
+    def disable(
+        self, application_identifier: str, *, request_id: str | None = None
+    ) -> ApplicationLifecycleChanged:
         """Stop only the accepted job and its exact worker slot, preserving data."""
         application = db.get_application(self.connection, application_identifier)
         if application is None:
@@ -354,7 +388,9 @@ class ApplicationService:
                 "worker_server_id": current.worker_server_id,
                 "worker_port_id": current.worker_port_id,
             }
-            operation, _resuming = self._operation(current, "app.disable", refs, deadline)
+            operation, _resuming = self._operation(
+                current, "app.disable", refs, deadline, operation_id=request_id
+            )
             try:
                 removed = self.helper_caller(
                     self.config,
@@ -402,7 +438,9 @@ class ApplicationService:
                 raise
         return ApplicationLifecycleChanged(current.application_id, current.slug, "disabled")
 
-    def enable(self, application_identifier: str) -> ApplicationLifecycleChanged:
+    def enable(
+        self, application_identifier: str, *, request_id: str | None = None
+    ) -> ApplicationLifecycleChanged:
         """Recreate runtime from the accepted immutable job without a source build."""
         application = db.get_application(self.connection, application_identifier)
         if application is None:
@@ -462,7 +500,9 @@ class ApplicationService:
                 "image": deployment.image_digest,
                 "route_marker": marker,
             }
-            operation, _resuming = self._operation(current, "app.enable", refs, deadline)
+            operation, _resuming = self._operation(
+                current, "app.enable", refs, deadline, operation_id=request_id
+            )
             refs = dict(operation.refs)
             try:
                 worker = self.helper_caller(
@@ -566,6 +606,7 @@ class ApplicationService:
         *,
         confirmation: str,
         _operation_kind: str = "app.delete",
+        request_id: str | None = None,
     ) -> ApplicationRemoved:
         """Resumably purge all app-owned provider/runtime resources and tombstone it."""
         application = db.get_application(self.connection, application_identifier)
@@ -589,7 +630,7 @@ class ApplicationService:
                 "confirmed_slug": confirmation,
             }
             operation, resuming = self._operation(
-                current, _operation_kind, refs, deadline
+                current, _operation_kind, refs, deadline, operation_id=request_id
             )
             try:
                 deployment = db.get_deployment(
@@ -774,12 +815,19 @@ class ApplicationService:
                 raise
         return ApplicationRemoved(current.application_id, current.slug)
 
-    def remove(self, application_identifier: str, *, confirmation: str) -> ApplicationRemoved:
+    def remove(
+        self,
+        application_identifier: str,
+        *,
+        confirmation: str,
+        request_id: str | None = None,
+    ) -> ApplicationRemoved:
         """Compatibility name for the product cascade-delete service."""
         return self.delete(
             application_identifier,
             confirmation=confirmation,
             _operation_kind="app.remove",
+            request_id=request_id,
         )
 
 
@@ -940,10 +988,22 @@ class EnvironmentService:
         connection: sqlite3.Connection,
         config: Config,
         state_directory: Path,
+        *,
+        helper_caller: HelperCaller = _call_helper,
     ) -> None:
         self.connection = connection
         self.config = config
         self.state_directory = state_directory
+        self.helper_caller = helper_caller
+
+    def _helper(
+        self,
+        action: str,
+        values: Mapping[str, object],
+        *,
+        deadline: float,
+    ) -> Mapping[str, object]:
+        return self.helper_caller(self.config, action, values, deadline=deadline)
 
     def preflight(self, application_identifier: str) -> None:
         """Reject an absent app or wrong cloud project before accepting a secret value."""
@@ -993,11 +1053,8 @@ class EnvironmentService:
         observed = app.list_environment(
             application.slug,
             timeout_seconds=_remaining(deadline, self.config.policy.limits.helper_seconds),
-            helper_caller=lambda action, values, **_bounds: _call_helper(
-                self.config,
-                action,
-                values,
-                deadline=deadline,
+            helper_caller=lambda action, values, **_bounds: self._helper(
+                action, values, deadline=deadline
             ),
         )
         names = observed.get("keys")
@@ -1059,6 +1116,11 @@ class EnvironmentService:
             if refreshed is None or refreshed.application_id != application.application_id:
                 raise ValidationError("application does not exist")
             ownership = self._ownership(refreshed.application_id)
+            environment_revision = db.get_environment_revision(
+                self.connection, refreshed.application_id
+            )
+            if environment_revision is None:
+                raise db.DatabaseError("application environment revision is missing")
             unfinished = db.get_unfinished_operation(self.connection, scope)
             if unfinished is not None:
                 if not unfinished.kind.startswith("app.env."):
@@ -1089,7 +1151,11 @@ class EnvironmentService:
                     f"environment key {first!r} is reserved for the platform or storage"
                 )
             mutation = "unset" if removals else "set"
-            operation_id = str(uuid_module.uuid4())
+            operation_id = (
+                str(uuid_module.uuid4())
+                if request.request_id is None
+                else uuid(request.request_id, field="environment operation ID")
+            )
             db.begin_operation(
                 self.connection,
                 operation_id=operation_id,
@@ -1100,11 +1166,8 @@ class EnvironmentService:
                 refs={"key_names": intended_names, "mutation": mutation},
             )
             try:
-                helper_caller = lambda action, values, **_bounds: _call_helper(
-                    self.config,
-                    action,
-                    values,
-                    deadline=deadline,
+                helper_caller = lambda action, values, **_bounds: self._helper(
+                    action, values, deadline=deadline
                 )
                 if removals:
                     result = app.remove_environment(
@@ -1153,6 +1216,11 @@ class EnvironmentService:
                     owner="staff",
                     keys=sorted((prior_staff | set(updates)) & present),
                 )
+                db.advance_environment_revision(
+                    self.connection,
+                    application_id=refreshed.application_id,
+                    expected_revision=environment_revision.revision,
+                )
                 db.checkpoint_operation(
                     self.connection,
                     operation_id,
@@ -1181,11 +1249,8 @@ class EnvironmentService:
         result = app.list_environment(
             application.slug,
             timeout_seconds=self.config.policy.limits.helper_seconds,
-            helper_caller=lambda action, values, **_bounds: _call_helper(
-                self.config,
-                action,
-                values,
-                deadline=_deadline(self.config),
+            helper_caller=lambda action, values, **_bounds: self._helper(
+                action, values, deadline=_deadline(self.config)
             ),
         )
         names = result.get("keys")
@@ -1210,10 +1275,13 @@ class StorageService:
         connection: sqlite3.Connection,
         config: Config,
         state_directory: Path,
+        *,
+        helper_caller: HelperCaller = _call_helper,
     ) -> None:
         self.connection = connection
         self.config = config
         self.state_directory = state_directory
+        self.helper_caller = helper_caller
 
     def mutate(self, request: StorageMutationRequest) -> StorageMutationResult:
         application = db.get_application(self.connection, request.application)
@@ -1248,6 +1316,19 @@ class StorageService:
             if refreshed is None or refreshed.application_id != application.application_id:
                 raise ValidationError("application does not exist")
             durable_deadline = _wall_deadline(deadline)
+            operation_id = (
+                None
+                if request.request_id is None
+                else uuid(request.request_id, field="storage operation ID")
+            )
+
+            def call_helper(
+                action: str, values: Mapping[str, object], **_bounds: object
+            ) -> Mapping[str, object]:
+                return self.helper_caller(
+                    self.config, action, values, deadline=deadline
+                )
+
             if request.action == "create":
                 result = storage.create(
                     self.connection,
@@ -1255,6 +1336,8 @@ class StorageService:
                     refreshed.application_id,
                     selected or (),
                     resource_name=checked_name,
+                    helper_caller=call_helper,
+                    operation_id=operation_id,
                     deadline_at=durable_deadline,
                     process_deadline=deadline,
                 )
@@ -1265,6 +1348,8 @@ class StorageService:
                     refreshed.application_id,
                     selected,
                     resource_name=checked_name,
+                    helper_caller=call_helper,
+                    operation_id=operation_id,
                     deadline_at=durable_deadline,
                     process_deadline=deadline,
                 )
@@ -1275,6 +1360,8 @@ class StorageService:
                     refreshed.application_id,
                     selected or (),
                     resource_name=checked_name,
+                    helper_caller=call_helper,
+                    operation_id=operation_id,
                     deadline_at=durable_deadline,
                     process_deadline=deadline,
                 )
@@ -1288,6 +1375,8 @@ class StorageService:
                     confirm_name=request.confirm_name,
                     confirm_destructive=True,
                     purge_s3=request.purge_s3,
+                    helper_caller=call_helper,
+                    operation_id=operation_id,
                     deadline_at=durable_deadline,
                     process_deadline=deadline,
                 )

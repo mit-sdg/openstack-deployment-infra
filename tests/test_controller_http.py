@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import stat
 import tempfile
 import threading
 import unittest
@@ -135,6 +136,29 @@ class ControllerTransportTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertNotIn(sentinel, rendered)
         self.assertEqual(body["error"]["code"], "INTERNAL_ERROR")
+
+
+class ControllerSocketSecurityTests(unittest.TestCase):
+    def test_owned_stale_socket_is_replaced_with_restricted_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = str(Path(temporary) / "controller.sock")
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(path)
+            stale.close()
+            server = ControllerServer(path, Router())
+            try:
+                self.assertEqual(stat.S_IMODE(Path(path).lstat().st_mode), 0o660)
+            finally:
+                server.server_close()
+            self.assertFalse(Path(path).exists())
+
+    def test_regular_file_at_socket_path_is_never_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "controller.sock"
+            path.write_text("do-not-remove")
+            with self.assertRaises(FileExistsError):
+                ControllerServer(str(path), Router())
+            self.assertEqual(path.read_text(), "do-not-remove")
 
 
 if __name__ == "__main__":

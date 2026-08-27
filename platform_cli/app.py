@@ -2104,6 +2104,7 @@ def execute_deployment_workflow(
     deploy_and_accept: Callable[[str, DeploymentBuild, DeploymentWorker], DeploymentResult],
     create_attempt: Callable[[str], None],
     checkpoint_attempt: Callable[[str, BaseException], None],
+    operation_id: str | None = None,
 ) -> tuple[str, DeploymentResult] | None:
     """Own the durable top-level deploy sequence outside CLI presentation.
 
@@ -2167,7 +2168,11 @@ def execute_deployment_workflow(
                 return None
             operation_id = unfinished.operation_id
         else:
-            operation_id = str(uuid_module.uuid4())
+            operation_id = (
+                str(uuid_module.uuid4())
+                if operation_id is None
+                else uuid(operation_id, field="deployment operation ID")
+            )
             db.begin_operation(
                 connection,
                 operation_id=operation_id,

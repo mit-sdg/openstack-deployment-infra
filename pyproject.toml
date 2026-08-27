@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 openstack-platform = "platform_cli.cli:main"
 openstack-platform-helper = "platform_cli.helper.main:main"
+openstack-platform-controller = "platform_cli.controller_main:main"
 openstack-platform-restore = "platform_cli.restore:main"
 
 [dependency-groups]

@@ -845,6 +845,7 @@ def connect(
     *,
     create: bool = True,
     identity: DeploymentIdentity | None = None,
+    check_same_thread: bool = True,
 ) -> sqlite3.Connection:
     """Open a private SQLite database with the required connection settings.
 
@@ -872,6 +873,7 @@ def connect(
             database_path,
             timeout=BUSY_TIMEOUT_MS / 1000,
             isolation_level=None,
+            check_same_thread=check_same_thread,
         )
     except BaseException:
         if not existed:
@@ -1061,7 +1063,21 @@ def _cleanup_state(value: str) -> str:
 
 def request_fingerprint(request: Mapping[str, Any]) -> str:
     """Hash a bounded canonical request without persisting its contents."""
-    return hashlib.sha256(_refs_json(request).encode()).hexdigest()
+    plain = dict(request)
+    _walk_refs(plain)
+    try:
+        encoded = json.dumps(
+            plain,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode()
+    except (TypeError, ValueError):
+        raise ValidationError("idempotency request must be strict JSON") from None
+    if len(encoded) > 1_048_576:
+        raise ValidationError("idempotency request exceeds its 1048576-byte limit")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _idempotency_request(row: sqlite3.Row | None) -> IdempotencyRequest | None:
