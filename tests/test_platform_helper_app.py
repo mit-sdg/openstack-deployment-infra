@@ -131,6 +131,17 @@ class ApplicationHelperTests(unittest.TestCase):
             },
         )
 
+    @unittest.expectedFailure
+    def test_candidate_cleanup_preserves_shared_accepted_job(self) -> None:
+        """Phase 0 proof of the current failed-candidate availability gap.
+
+        Candidate cleanup currently purges the stable slug's only Nomad job.
+        Keep this expected failure until distinct candidate cleanup can leave
+        the accepted allocation and route serving.
+        """
+        self.actions["app.remove"]({"slug": "demo-app", "preserveVariable": True})
+        self.assertFalse(self.nomad.job_absent)
+
     def test_deploy_rejects_unmarked_pre_m1_job_before_provider_calls(self) -> None:
         job = 'job "demo-app" { # sentinel job data\n}'
         with self.assertRaisesRegex(ValidationError, "M1 candidate marker"):

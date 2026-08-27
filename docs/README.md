@@ -1,8 +1,11 @@
 # Documentation
 
-This repository contains OpenStack/NixOS infrastructure, an automated
-OpenStack setup command, and an unprivileged staff control surface. It is not a
-self-service portal.
+This repository currently contains OpenStack/NixOS infrastructure, an automated
+OpenStack setup command, and an unprivileged staff control surface. It is not
+yet a self-service portal. The accepted
+[self-hosted management implementation plan](IMPLEMENTATION_PLAN.md) defines
+the target UI and controller without changing the current command contracts on
+this page.
 
 A deployment starts with an empty management database. The tooling creates its
 own state instead of importing records from another system. Every command in
@@ -31,8 +34,9 @@ decide what they may touch, but nothing outside your inventory is modified.
 
 ## Understand the design
 
-- [Architecture](ARCHITECTURE.md) — roles, state ownership, isolation, and failure boundaries.
-- [Roadmap](ROADMAP.md) — what is implemented today and what comes next.
+- [Architecture](ARCHITECTURE.md) — current roles, state ownership, isolation, and failure boundaries.
+- [Self-hosted management implementation plan](IMPLEMENTATION_PLAN.md) — target product model, component boundaries, migrations, implementation phases, and acceptance evidence.
+- [Implementation baseline](IMPLEMENTATION_BASELINE.md) — current CLI, helper, state, recovery, test boundaries, and the failed-candidate availability gap recorded before extraction.
 
 ## Verify acceptance
 

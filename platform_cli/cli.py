@@ -26,11 +26,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, mkstemp
 from typing import Any, cast
 
-from . import app, db, openstack, remote, restore, runtime, setup, status, storage
+from . import app, db, openstack, remote, restore, runtime, services, setup, status, storage
 from .config import Config, load, load_platform
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
-    RESERVED_ENVIRONMENT_PREFIX,
     RESOURCE_TYPES,
     canonical_secret_key,
     platform_environment_values,
@@ -1104,172 +1103,46 @@ def _environment_mutation(
     stdin: Any,
     output: Any,
 ) -> None:
-    application = _application(connection, args.slug)
-    scope = f"app-{application.application_id}"
-    deadline = _command_deadline(config)
-    with runtime.lock(args.state_directory, scope, deadline=deadline):
-        _verify_mutation_project(config, deadline=deadline)
-        ownership = _ownership(connection, application.application_id)
-        unfinished = db.get_unfinished_operation(connection, scope)
-        if unfinished is not None:
-            if not unfinished.kind.startswith("app.env."):
-                raise db.UnfinishedOperationError(scope, unfinished.operation_id, unfinished.kind)
-            intended = unfinished.refs.get("key_names")
-            mutation = unfinished.refs.get("mutation")
-            if (
-                not isinstance(intended, list)
-                or any(not isinstance(item, str) for item in intended)
-                or mutation not in {"set", "unset"}
-            ):
-                raise app.ApplicationError("interrupted environment intent is malformed")
-            recovery_intended_names = {env_key(item) for item in intended}
-            if recovery_intended_names & _PLATFORM_ENVIRONMENT or any(
-                name.startswith(RESERVED_ENVIRONMENT_PREFIX) for name in recovery_intended_names
-            ):
-                raise app.ApplicationError(
-                    "interrupted staff environment intent used a reserved key"
-                )
-            observed = app.list_environment(
-                application.slug,
-                timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
-                helper_caller=lambda action, values, **_bounds: _helper(
-                    config, action, values, deadline=deadline
-                ),
+    environment_service = services.EnvironmentService(connection, config, args.state_directory)
+    environment_service.preflight(args.slug)
+    if args.env_command == "set":
+        updates = {
+            env_key(args.key): _read_secret(
+                stdin,
+                maximum=config.policy.limits.environment_value_bytes,
             )
-            names = observed.get("keys")
-            if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
-                raise app.ApplicationError(
-                    "helper returned invalid interrupted environment evidence"
-                )
-            present = {env_key(item) for item in names}
-            recovered = {
-                name for name, owner in ownership.items() if owner == "staff" and name in present
-            }
-            if mutation == "set":
-                # The CAS is atomic.  Names explicitly journaled before the call
-                # can be reclaimed without retaining any corresponding values.
-                recovered.update(
-                    name
-                    for name in recovery_intended_names & present
-                    if ownership.get(name, "staff") == "staff"
-                )
-            db.set_environment_keys(
-                connection,
-                application_id=application.application_id,
-                owner="staff",
-                keys=sorted(recovered),
-            )
-            db.mark_failed(
-                connection,
-                unfinished.operation_id,
-                "interrupted environment state was observed before explicit retry",
-                cleanup_state="not_required",
-            )
-            ownership = _ownership(connection, application.application_id)
-
-        if args.env_command == "set":
-            key = env_key(args.key)
-            updates = {
-                key: _read_secret(stdin, maximum=config.policy.limits.environment_value_bytes)
-            }
-            removals: list[str] = []
-        elif args.env_command == "unset":
-            updates = {}
-            removals = [env_key(value) for value in args.keys]
-        else:
-            if args.file == "-":
-                stream = stdin.buffer if hasattr(stdin, "buffer") else stdin
-                raw = stream.read(config.policy.limits.dotenv_bytes + 1)
-                if isinstance(raw, str):
-                    raw = raw.encode()
-            else:
-                source = Path(args.file)
-                metadata = source.lstat()
-                if stat.S_IMODE(metadata.st_mode) & 0o077:
-                    print("warning: dotenv file is readable by group or others", file=sys.stderr)
-                raw = _read_bounded_file(
-                    source,
-                    maximum=config.policy.limits.dotenv_bytes,
-                    field="dotenv input",
-                )
-            updates = app.parse_dotenv(raw, maximum_bytes=config.policy.limits.dotenv_bytes)
-            removals = []
-        intended_names = sorted(set(updates) | set(removals))
-        protected = {
-            name
-            for name in intended_names
-            if name in _PLATFORM_ENVIRONMENT
-            or name.startswith(RESERVED_ENVIRONMENT_PREFIX)
-            or (name in ownership and ownership[name] != "staff")
         }
-        if protected:
-            raise ValidationError(
-                f"environment key {sorted(protected)[0]!r} is reserved for the platform or storage"
+        removals: tuple[str, ...] = ()
+    elif args.env_command == "unset":
+        updates = {}
+        removals = tuple(args.keys)
+    else:
+        if args.file == "-":
+            stream = stdin.buffer if hasattr(stdin, "buffer") else stdin
+            raw = stream.read(config.policy.limits.dotenv_bytes + 1)
+            if isinstance(raw, str):
+                raw = raw.encode()
+        else:
+            source = Path(args.file)
+            metadata = source.lstat()
+            if stat.S_IMODE(metadata.st_mode) & 0o077:
+                print("warning: dotenv file is readable by group or others", file=sys.stderr)
+            raw = _read_bounded_file(
+                source,
+                maximum=config.policy.limits.dotenv_bytes,
+                field="dotenv input",
             )
-        mutation = "unset" if removals else "set"
-        operation_id = _begin(
-            connection,
-            config,
-            kind=f"app.env.{args.env_command}",
-            scope=scope,
-            phase="intent_recorded",
-            refs={"key_names": intended_names, "mutation": mutation},
+        updates = app.parse_dotenv(raw, maximum_bytes=config.policy.limits.dotenv_bytes)
+        removals = ()
+    result = environment_service.mutate(
+        services.EnvironmentMutationRequest(
+            action=args.env_command,
+            application=args.slug,
+            updates=updates,
+            removals=removals,
         )
-        try:
-            if removals:
-                result = app.remove_environment(
-                    application.slug,
-                    removals,
-                    ownership,
-                    timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
-                    helper_caller=lambda action, values, **_bounds: _helper(
-                        config, action, values, deadline=deadline
-                    ),
-                )
-            else:
-                result = app.set_environment(
-                    application.slug,
-                    updates,
-                    ownership,
-                    timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
-                    helper_caller=lambda action, values, **_bounds: _helper(
-                        config, action, values, deadline=deadline
-                    ),
-                )
-            names = result.get("keys")
-            if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
-                raise app.ApplicationError("helper returned invalid environment key evidence")
-            if (
-                application.desired_running
-                and db.get_deployment(connection, application.application_id) is not None
-                and (
-                    result.get("restarted") is not True
-                    or result.get("schedulerHealthy") is not True
-                    or result.get("publicHealthy") is not True
-                )
-            ):
-                raise app.ApplicationError(
-                    "environment restart and health evidence was not confirmed"
-                )
-            present = set(names)
-            prior_staff = {name for name, owner in ownership.items() if owner == "staff"}
-            db.set_environment_keys(
-                connection,
-                application_id=application.application_id,
-                owner="staff",
-                keys=sorted((prior_staff | set(updates)) & present),
-            )
-            db.checkpoint_operation(
-                connection,
-                operation_id,
-                phase="accepted",
-                refs={"key_names": intended_names, "mutation": mutation},
-            )
-            db.mark_succeeded(connection, operation_id, cleanup_state="not_required")
-        except Exception as error:
-            db.mark_recovery_required(connection, operation_id, error)
-            raise
-    print(f"keys={len(result['keys'])} modify-index={result.get('modifyIndex')}", file=output)
+    )
+    print(f"keys={len(result.key_names)} modify-index={result.modify_index}", file=output)
 
 
 def _app_row(item: Mapping[str, object]) -> tuple[object, ...]:
@@ -1294,14 +1167,12 @@ def _app_read(
     *,
     output: Any,
 ) -> None:
-    observe = status.application_observer(connection, config)
-    if args.app_command == "list":
-        models = status.app_list(connection, observe=observe)
-    else:
-        model = status.app_show(connection, args.slug, observe=observe)
-        if model is None:
-            raise ValidationError("application does not exist")
-        models = [model]
+    reads = services.ProductReadService(connection, config)
+    models = (
+        reads.applications()
+        if args.app_command == "list"
+        else (reads.application(args.slug),)
+    )
     _table(
         ("SLUG", "RUNNING", "COMMIT", "DIGEST", "CPU", "MEMORY", "LIVE"),
         tuple(_app_row(item) for item in models),
@@ -2163,34 +2034,8 @@ def _app_create(
     *,
     output: Any,
 ) -> None:
-    """Declare an application before its first deployment.
-
-    Managed storage and staff environment values are addressed by slug, so both
-    need an application to exist. Only ``app deploy`` used to create one, which
-    left no way to have a database ready for the first deployment: an
-    application that reads its database at startup could not pass the health
-    check that ``app deploy`` requires before it will record anything. Creating
-    the application separately breaks that cycle.
-
-    The declaration is inert. It is not running, has no deployment, no worker,
-    and no source, until a deployment accepts one.
-    """
-    application_slug = slug(args.slug)
-    if db.get_application(connection, application_slug) is not None:
-        raise ValidationError("application already exists")
-    standard = config.policy.standard
-    db.put_application(
-        connection,
-        application_id=str(uuid_module.uuid4()),
-        application_slug=application_slug,
-        worker_flavor=standard.worker_flavor,
-        scheduler_cpu_mhz=standard.cpu_mhz,
-        scheduler_memory_mib=standard.memory_mib,
-        desired_running=False,
-        url=f"https://{application_slug}.{config.platform.domain}",
-    )
-    application = _application(connection, application_slug)
-    print(f"slug={application.slug} application={application.application_id}", file=output)
+    created = services.ApplicationService(connection, config).declare(args.slug)
+    print(f"slug={created.slug} application={created.application_id}", file=output)
 
 
 def _app_deploy(
@@ -2549,14 +2394,11 @@ def _storage_read(
     *,
     output: Any,
 ) -> None:
-    observe = status.storage_observer(connection, config)
+    reads = services.ProductReadService(connection, config)
     if args.storage_command == "show":
-        model = status.storage_show(connection, args.slug, args.type, args.name, observe=observe)
-        models = [] if model is None else [model]
+        models = (reads.storage_resource(args.slug, args.type, args.name),)
     else:
-        models = status.storage_list(connection, application_identifier=args.slug, observe=observe)
-    if not models and args.storage_command == "show":
-        raise ValidationError("managed storage does not exist")
+        models = reads.storage(args.slug)
     _table(
         (
             "SLUG",
@@ -2577,56 +2419,17 @@ def _storage_read(
 def _storage_mutation(
     args: argparse.Namespace, connection: sqlite3.Connection, config: Config, *, output: Any
 ) -> None:
-    application = _application(connection, args.slug)
-    deadline = _command_deadline(config)
-    durable_deadline = _wall_deadline(deadline)
-    with runtime.lock(args.state_directory, f"app-{application.application_id}", deadline=deadline):
-        _verify_mutation_project(config, deadline=deadline)
-        application = _application(connection, args.slug)
-        selected = None if args.storage_command == "verify" and args.type is None else [args.type]
-        if args.storage_command == "create":
-            result = storage.create(
-                connection,
-                config,
-                application.application_id,
-                selected or (),
-                resource_name=args.name,
-                deadline_at=durable_deadline,
-                process_deadline=deadline,
-            )
-        elif args.storage_command == "verify":
-            result = storage.verify(
-                connection,
-                config,
-                application.application_id,
-                selected,
-                resource_name=args.name,
-                deadline_at=durable_deadline,
-                process_deadline=deadline,
-            )
-        elif args.storage_command == "rotate":
-            result = storage.rotate(
-                connection,
-                config,
-                application.application_id,
-                selected or (),
-                resource_name=args.name,
-                deadline_at=durable_deadline,
-                process_deadline=deadline,
-            )
-        else:
-            result = storage.remove(
-                connection,
-                config,
-                application.application_id,
-                selected or (),
-                resource_name=args.name,
-                confirm_name=args.confirm,
-                confirm_destructive=True,
-                purge_s3=args.purge_s3,
-                deadline_at=durable_deadline,
-                process_deadline=deadline,
-            )
+    resource_types = () if args.storage_command == "verify" and args.type is None else (args.type,)
+    result = services.StorageService(connection, config, args.state_directory).mutate(
+        services.StorageMutationRequest(
+            action=args.storage_command,
+            application=args.slug,
+            resource_types=resource_types,
+            resource_name=args.name,
+            confirm_name=args.confirm if args.storage_command == "remove" else None,
+            purge_s3=args.purge_s3 if args.storage_command == "remove" else False,
+        )
+    )
     print(
         f"requested={','.join(result.requested)} completed={','.join(result.completed)}",
         file=output,
@@ -2830,17 +2633,12 @@ def dispatch(
         elif args.command == "app":
             if args.app_command == "env":
                 if args.env_command == "list":
-                    application = _application(connection, args.slug)
-                    result = app.list_environment(
-                        application.slug,
-                        timeout_seconds=config.policy.limits.helper_seconds,
-                        helper_caller=lambda action, values, **_bounds: _helper(
-                            config, action, values
-                        ),
-                    )
-                    _table(
-                        ("KEY",), tuple((item,) for item in result.get("keys", [])), output=stdout
-                    )
+                    result = services.EnvironmentService(
+                        connection,
+                        config,
+                        args.state_directory,
+                    ).list(args.slug)
+                    _table(("KEY",), tuple((item,) for item in result.key_names), output=stdout)
                 else:
                     _environment_mutation(args, connection, config, stdin=stdin, output=stdout)
             elif args.app_command == "logs":
@@ -2882,6 +2680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         app.ApplicationError,
         openstack.OpenStackError,
         storage.StorageOperationError,
+        services.ServiceDeadlineError,
         setup.SetupError,
         remote.HelperError,
         remote.ProtocolError,

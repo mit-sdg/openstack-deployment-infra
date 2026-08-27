@@ -29,7 +29,9 @@ Cloudflare or another public-ingress account remains an external input.
 The self-service portal and production API are not implemented. This repository
 is useful today for an operator-managed platform or as a base for another
 control plane; it is not yet a service where end users sign in and deploy
-applications themselves. The [roadmap](docs/ROADMAP.md) tracks that work.
+applications themselves. The accepted
+[self-hosted management implementation plan](docs/IMPLEMENTATION_PLAN.md)
+defines the replacement UI, controller API, state migration, and CLI reduction.
 
 ## What it provides
 
@@ -55,7 +57,7 @@ implemented.
 
 Source must come from a **public** GitHub repository. Deployments fetch the
 exact commit over HTTPS with no credentials, so a private repository cannot be
-deployed; the [roadmap](docs/ROADMAP.md) tracks GitHub App support.
+deployed. Private repositories remain outside the initial self-service target.
 
 Every command acts only on the resources your configuration names, so unrelated
 servers and volumes in the same OpenStack project are left alone.
@@ -81,10 +83,10 @@ field; the [configuration reference](docs/CONFIGURATION.md) explains each one.
 
 ## Designed to be extended
 
-Small role-specific services and narrow operator commands make up the platform.
-You can build a portal or API on those commands, choose another public DNS and
-HTTPS provider, change application and quota policy, or add operator workflows
-without exposing unrestricted infrastructure access.
+Small role-specific services and narrow operator commands make up the current
+platform. The accepted implementation plan extracts application orchestration
+behind a typed local controller API, runs the management application on admin,
+and leaves the CLI as an infrastructure and recovery surface.
 
 Cloudflare Tunnel is the reference public-ingress setup, but it is not required.
 An institutional or managed ingress service can be used instead, provided it
@@ -124,6 +126,9 @@ failure boundaries.
 - [`openstack-platform` commands](docs/CONTROL_PLANE_CONTRACT.md) — the
   installed staff interface for infrastructure, applications, storage, and
   recovery
+- [Self-hosted management implementation plan](docs/IMPLEMENTATION_PLAN.md) —
+  accepted target architecture, migration phases, API boundary, and acceptance
+  criteria
 - [Documentation index](docs/README.md) — all guides and references
 
 ## License
