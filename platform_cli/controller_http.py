@@ -16,6 +16,7 @@ _MAX_BODY = 1_048_576
 _MAX_RESPONSE = 1_048_576
 _PATH_PARAMETER = re.compile(r"\{([a-z][a-zA-Z0-9]*)\}")
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
+_RESPONSE_HEADERS = {"Location", "Retry-After"}
 
 
 class HttpError(RuntimeError):
@@ -221,12 +222,23 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         ).encode()
         if len(payload) > _MAX_RESPONSE:
             raise HttpError(500, "RESPONSE_TOO_LARGE", "controller response exceeded its limit")
+        extra_headers = response.headers or {}
+        if any(
+            key not in _RESPONSE_HEADERS
+            or not isinstance(value, str)
+            or not value
+            or "\r" in value
+            or "\n" in value
+            or len(value) > 1_024
+            for key, value in extra_headers.items()
+        ):
+            raise HttpError(500, "INVALID_RESPONSE", "controller response headers were invalid")
         self.send_response(response.status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Correlation-ID", correlation_id)
-        for key, value in (response.headers or {}).items():
+        for key, value in extra_headers.items():
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(payload)
