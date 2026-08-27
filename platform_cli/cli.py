@@ -29,7 +29,6 @@ from typing import Any, cast
 from . import (
     app,
     db,
-    deployment_service,
     openstack,
     remote,
     restore,
@@ -179,15 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("host", choices=openstack.PERSISTENT_ROLES)
     logs.add_argument("--lines", type=_lines, default=200)
 
-    application = commands.add_parser("app", help="deploy and operate applications")
+    application = commands.add_parser("app", help="operate applications")
     app_commands = application.add_subparsers(dest="app_command", required=True)
     create = app_commands.add_parser("create")
     create.add_argument("slug")
-    deploy = app_commands.add_parser("deploy")
-    deploy.add_argument("slug")
-    deploy.add_argument("--repo", required=True)
-    deploy.add_argument("--commit", required=True)
-    deploy.add_argument("--config", default="platform.yaml")
     remove = app_commands.add_parser("remove")
     remove.add_argument("slug")
     remove.add_argument("--confirm", required=True)
@@ -1168,36 +1162,6 @@ def _app_create(
     print(f"slug={created.slug} application={created.application_id}", file=output)
 
 
-def _app_deploy(
-    args: argparse.Namespace,
-    connection: sqlite3.Connection,
-    config: Config,
-    *,
-    output: Any,
-) -> None:
-    result = deployment_service.DeploymentService(
-        connection,
-        config,
-        args.state_directory,
-        helper_caller=_helper,
-    ).deploy(
-        deployment_service.DeploymentRequest(
-            application=args.slug,
-            repository=args.repo,
-            source_commit=args.commit,
-            config_path=args.config,
-        ),
-        deadline=_command_deadline(config),
-    )
-    if result.recovered is not None:
-        print(f"slug={result.application_slug} recovered={result.recovered}", file=output)
-        return
-    print(
-        f"slug={result.application_slug} image={result.image} nomad-version={result.nomad_version}",
-        file=output,
-    )
-
-
 def _app_remove(
     args: argparse.Namespace,
     connection: sqlite3.Connection,
@@ -1541,8 +1505,6 @@ def dispatch(
                 _app_logs(args, connection, config, output=stdout)
             elif args.app_command == "create":
                 _app_create(args, connection, config, output=stdout)
-            elif args.app_command == "deploy":
-                _app_deploy(args, connection, config, output=stdout)
             else:
                 _app_remove(args, connection, config, output=stdout)
         elif args.command == "storage":
@@ -1577,7 +1539,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         openstack.OpenStackError,
         storage.StorageOperationError,
         services.ServiceDeadlineError,
-        deployment_service.DeploymentDeadlineError,
         setup.SetupError,
         remote.HelperError,
         remote.ProtocolError,

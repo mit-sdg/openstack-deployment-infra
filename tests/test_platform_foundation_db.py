@@ -40,7 +40,6 @@ class DatabaseTests(unittest.TestCase):
             application_id=APP_ID,
             application_slug="demo-app",
             repository_url="https://github.com/example/demo",
-            config_path="platform.yaml",
             worker_flavor="example.1c2g",
             scheduler_cpu_mhz=1000,
             scheduler_memory_mib=2048,

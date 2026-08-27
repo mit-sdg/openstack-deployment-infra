@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .app import Manifest, StorageBinding
@@ -21,6 +24,7 @@ from .validation import (
     health_path,
     relative_path,
     repository_url,
+    resolve_inside,
     resource_name,
     script_name,
     uuid,
@@ -208,6 +212,80 @@ def parse_configuration(payload: bytes | str | Mapping[str, Any]) -> DeploymentC
         port=port,
         health_path=checked_health,
         storage_bindings=tuple(sorted(bindings, key=lambda item: item.resource_id)),
+    )
+
+
+def validate_checkout(
+    configuration: DeploymentConfiguration,
+    source_root: str | Path,
+    *,
+    maximum_package_bytes: int = 65_536,
+) -> None:
+    """Validate UI-selected package inputs in an acquired exact checkout."""
+    if not isinstance(configuration, DeploymentConfiguration):
+        raise ValidationError("deployment configuration snapshot is malformed")
+    root = Path(source_root).resolve(strict=True)
+    if not root.is_dir():
+        raise ValidationError("source checkout is not a directory")
+    lock_names = (
+        ("bun.lock", "bun.lockb")
+        if configuration.runtime == "bun"
+        else ("package-lock.json",)
+    )
+    for package in configuration.packages:
+        directory = resolve_inside(root, package, field="package path")
+        if not directory.is_dir():
+            raise ValidationError(f"package {package!r} is not a source directory")
+        locks = [directory / name for name in lock_names]
+        if not any(_direct_file(path, maximum_package_bytes) for path in locks):
+            raise ValidationError(f"package {package!r} is missing its supported lockfile")
+
+    package_json = root / "package.json"
+    if not _direct_file(package_json, maximum_package_bytes):
+        raise ValidationError("source root is missing a bounded direct package.json")
+    try:
+        descriptor = os.open(
+            package_json,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+    except OSError as error:
+        raise ValidationError("package.json could not be opened safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum_package_bytes:
+            raise ValidationError("package.json exceeds its size limit")
+        chunks: list[bytes] = []
+        remaining = maximum_package_bytes + 1
+        while remaining and (chunk := os.read(descriptor, remaining)):
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum_package_bytes:
+        raise ValidationError("package.json exceeds its size limit")
+    value = _load_json(raw)
+    if not isinstance(value, dict) or not isinstance(value.get("scripts"), dict):
+        raise ValidationError("package.json scripts must be an object")
+    scripts = value["scripts"]
+    required = (configuration.start_script,) + (
+        () if configuration.build_script is None else (configuration.build_script,)
+    )
+    for name in required:
+        command = scripts.get(name)
+        if not isinstance(command, str) or not command:
+            raise ValidationError(f"package.json is missing configured script {name!r}")
+
+
+def _direct_file(path: Path, maximum_bytes: int) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_size <= maximum_bytes
     )
 
 

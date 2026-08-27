@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from platform_cli import app, cli, db, deployment_service, openstack, remote, status
+from platform_cli.deployment_config import parse_configuration
 from platform_cli.helper.main import default_handlers
 from platform_cli.helper.production import ACTION_MANIFEST
 from platform_cli.storage_contract import PLATFORM_ENVIRONMENT_KEYS
@@ -165,7 +166,6 @@ class CliIntegrationTests(unittest.TestCase):
             ("infra", "replace", "admin", "--yes"),
             ("infra", "logs", "admin"),
             ("app", "create", "demo-app"),
-            ("app", "deploy", "demo-app", "--repo", "https://github.com/o/r", "--commit", "a" * 40),
             ("app", "remove", "demo-app", "--confirm", "demo-app"),
             ("app", "list"),
             ("app", "show", "demo-app"),
@@ -634,19 +634,43 @@ class CliIntegrationTests(unittest.TestCase):
                     compatibility_hash="c" * 64,
                 )
 
+    def _deploy(self, application: str) -> deployment_service.DeploymentOutcome:
+        args = cli.build_parser().parse_args(self.argv("status"))
+        configured = cli._load_config(args)
+        configuration = parse_configuration(
+            {
+                "schemaVersion": 1,
+                "build": {
+                    "runtime": "node",
+                    "packages": ["."],
+                    "buildScript": None,
+                    "startScript": "serve",
+                },
+                "runtime": {"port": 8080, "healthPath": "/ready"},
+                "storageBindings": [],
+            }
+        )
+        with cli._database(args) as connection:
+            return deployment_service.DeploymentService(
+                connection,
+                configured,
+                self.state,
+                helper_caller=cli._helper,
+            ).deploy(
+                deployment_service.DeploymentRequest(
+                    application=application,
+                    repository="https://github.com/o/r",
+                    requested_ref="main",
+                    source_commit="a" * 40,
+                    configuration_revision=1,
+                    configuration=configuration,
+                ),
+                deadline=cli._command_deadline(configured),
+            )
+
     def test_deploy_recovers_builder_phase_and_remove_recovers_worker_phase(self) -> None:
         self._select_deployment_images()
-        deploy_args = cli.build_parser().parse_args(
-            self.argv(
-                "app",
-                "deploy",
-                "demo-app",
-                "--repo",
-                "https://github.com/o/r",
-                "--commit",
-                "a" * 40,
-            )
-        )
+        deploy_args = cli.build_parser().parse_args(self.argv("status"))
         manifest = app.Manifest("node", (".",), None, "serve", 8080, "/ready")
         recipe = app.generate_recipe(
             manifest,
@@ -777,10 +801,14 @@ class CliIntegrationTests(unittest.TestCase):
             mock.patch.object(cli.app, "check_public_health", return_value=True),
         ):
             with self.assertRaises(app.ApplicationError):
-                cli.dispatch(deploy_args)
+                self._deploy("demo-app")
+            result = self._deploy("demo-app")
+            self.assertEqual(result.nomad_version, 4)
+            build_request = call_values["app.build"][-1]
+            self.assertEqual(build_request["requestedRef"], "main")  # type: ignore[index]
+            self.assertEqual(build_request["configurationRevision"], 1)  # type: ignore[index]
+            self.assertNotIn("configPath", build_request)  # type: ignore[operator]
             output = StringIO()
-            cli.dispatch(deploy_args, stdout=output)
-            self.assertIn("nomad-version=4", output.getvalue())
             environment_call = call_values["app.env.set"][-1]
             self.assertEqual(
                 environment_call["updates"],  # type: ignore[index]
@@ -808,6 +836,14 @@ class CliIntegrationTests(unittest.TestCase):
                     owners,
                     {name: "platform" for name in PLATFORM_ENVIRONMENT_KEYS},
                 )
+                attempts = db.list_deployment_attempts(
+                    connection, application.application_id
+                )
+                self.assertEqual(
+                    (attempts[0].snapshot_kind, attempts[0].status),
+                    ("strict", "succeeded"),
+                )
+                self.assertEqual(attempts[0].configuration_revision, 1)
             finally:
                 connection.close()
             self.observe_flavor_mock.assert_called()
@@ -884,7 +920,9 @@ class CliIntegrationTests(unittest.TestCase):
                     "slug": "demo-app",
                     "repository": "https://github.com/o/r",
                     "source_commit": "f" * 40,
-                    "config_path": "platform.yaml",
+                    "requested_ref": "main",
+                    "configuration_revision": 0,
+                    "configuration_sha256": "0" * 64,
                     "platform_key_names": sorted(PLATFORM_ENVIRONMENT_KEYS),
                     "desired_platform_values": desired,
                     "prior_platform_values": prior,
@@ -903,9 +941,10 @@ class CliIntegrationTests(unittest.TestCase):
                 "demo-app",
                 "https://github.com/o/r",
                 "f" * 40,
-                "platform.yaml",
-                "one-vcpu",
-                1000,
+                "main",
+                0,
+                "0" * 64,
+                "one-vcpu",                1000,
                 2048,
             )
 
@@ -1025,17 +1064,7 @@ class CliIntegrationTests(unittest.TestCase):
 
     def test_confirmed_candidate_removal_is_terminal_and_candidate_is_cleaned(self) -> None:
         self._select_deployment_images()
-        args = cli.build_parser().parse_args(
-            self.argv(
-                "app",
-                "deploy",
-                "failed-app",
-                "--repo",
-                "https://github.com/o/r",
-                "--commit",
-                "a" * 40,
-            )
-        )
+        args = cli.build_parser().parse_args(self.argv("status"))
         manifest = app.Manifest("node", (".",), None, "serve", 8080, "/ready")
         recipe = app.generate_recipe(manifest, cli._load_config(args).policy.runtime_images)
         image = "storage.internal:5000/projects/failed-app/app@sha256:" + "e" * 64
@@ -1097,8 +1126,9 @@ class CliIntegrationTests(unittest.TestCase):
             ) as deploy,
         ):
             with self.assertRaises(app.ApplicationError):
-                cli.dispatch(args)
-            cli.dispatch(args, stdout=StringIO())
+                self._deploy("failed-app")
+            recovered = self._deploy("failed-app")
+            self.assertEqual(recovered.recovered, "candidate-removed")
         self.assertEqual(actions.count("app.build"), 1)
         self.assertEqual(actions.count("app.manifest.delete"), 2)
         deploy.assert_called_once()

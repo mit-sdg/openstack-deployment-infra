@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from platform_cli.deployment_config import (
     branch_name,
     parse_configuration,
     resolve_github_branch,
+    validate_checkout,
 )
 from platform_cli.validation import ValidationError
 
@@ -106,6 +109,23 @@ class DeploymentConfigurationTests(unittest.TestCase):
             parsed.manifest({RESOURCE_ID: ("mongo", "primary")})
         with self.assertRaisesRegex(ValidationError, "missing or inactive"):
             parsed.manifest({})
+
+    def test_exact_checkout_requires_supported_locks_and_configured_scripts(self) -> None:
+        parsed = parse_configuration(configuration() | {"storageBindings": []})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "package-lock.json").write_text("{}")
+            (root / "package.json").write_text(
+                json.dumps({"scripts": {"build": "safe build", "start": "safe start"}})
+            )
+            validate_checkout(parsed, root)
+            (root / "package-lock.json").unlink()
+            with self.assertRaisesRegex(ValidationError, "lockfile"):
+                validate_checkout(parsed, root)
+            (root / "package-lock.json").write_text("{}")
+            (root / "package.json").write_text(json.dumps({"scripts": {"start": "run"}}))
+            with self.assertRaisesRegex(ValidationError, "script 'build'"):
+                validate_checkout(parsed, root)
 
     def test_binding_targets_and_resources_are_unique(self) -> None:
         document = configuration()

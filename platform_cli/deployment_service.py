@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sqlite3
 import time
@@ -15,6 +17,7 @@ from typing import Any, Literal, Protocol
 
 from . import app, db, openstack, remote, runtime
 from .config import Config
+from .deployment_config import DeploymentConfiguration, branch_name
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
     canonical_secret_key,
@@ -25,11 +28,9 @@ from .validation import (
     bounded_text,
     commit,
     env_key,
-    health_path,
     oci_digest_pin,
     relative_path,
     repository_url,
-    script_name,
     sha256_hex,
     slug,
     uuid,
@@ -57,8 +58,10 @@ class HelperCaller(Protocol):
 class DeploymentRequest:
     application: str
     repository: str
+    requested_ref: str
     source_commit: str
-    config_path: str = "platform.yaml"
+    configuration_revision: int
+    configuration: DeploymentConfiguration
 
 
 RecoveryKind = Literal["candidate-removed", "accepted", "deployment-healthy"]
@@ -124,38 +127,29 @@ def _ownership(connection: sqlite3.Connection, application_id: str) -> dict[str,
     }
 
 
-def _manifest_from_build(value: object) -> app.Manifest:
-    required = {"runtime", "packages", "buildScript", "startScript", "port", "healthPath"}
-    if not isinstance(value, dict) or set(value) not in (required, required | {"storageBindings"}):
-        raise app.ApplicationError("build helper returned invalid manifest evidence")
-    packages = value["packages"]
-    if not isinstance(packages, list) or not packages:
-        raise app.ApplicationError("build helper returned invalid package evidence")
-    runtime_name = value["runtime"]
-    if not isinstance(runtime_name, str) or runtime_name not in {"bun", "node"}:
-        raise app.ApplicationError("build helper returned invalid runtime evidence")
-    raw_bindings = value.get("storageBindings", [])
-    if not isinstance(raw_bindings, list):
-        raise app.ApplicationError("build helper returned invalid storage binding evidence")
-    bindings: list[app.StorageBinding] = []
-    for binding in raw_bindings:
-        if not isinstance(binding, dict) or binding.keys() != {"name", "type", "environment"}:
-            raise app.ApplicationError("build helper returned invalid storage binding evidence")
-        environment = binding["environment"]
-        if not isinstance(environment, dict):
-            raise app.ApplicationError("build helper returned invalid storage binding evidence")
-        bindings.append(
-            app.StorageBinding(binding["name"], binding["type"], tuple(sorted(environment.items())))
+def _configuration_manifest(
+    connection: sqlite3.Connection,
+    application_id: str,
+    configuration: DeploymentConfiguration,
+) -> app.Manifest:
+    resources = db.list_managed_resources(connection, application_id=application_id)
+    active = {
+        item.resource_id: (item.resource_type, item.resource_name)
+        for item in resources
+        if item.lifecycle_state == "active"
+    }
+    manifest = configuration.manifest(active)
+    declared = {binding.resource_id for binding in configuration.storage_bindings}
+    undeclared = [
+        item
+        for item in resources
+        if item.lifecycle_state == "active" and item.resource_id not in declared
+    ]
+    if undeclared:
+        raise ValidationError(
+            f"active {undeclared[0].resource_type} storage {undeclared[0].resource_name!r} has no deployment binding"
         )
-    return app.Manifest(
-        runtime=runtime_name,
-        packages=tuple(relative_path(item, field="package path") for item in packages),
-        build_script=(None if value["buildScript"] is None else script_name(value["buildScript"])),
-        start_script=script_name(value["startScript"]),
-        port=value["port"],
-        health_path=health_path(value["healthPath"]),
-        storage_bindings=tuple(bindings),
-    )
+    return manifest
 
 
 def _write_build_log(
@@ -226,13 +220,19 @@ def _prepare_deployment_build(
     application_id: str,
     application_slug: str,
     repository: str,
+    requested_ref: str,
     source_commit: str,
-    config_path: str,
+    configuration_revision: int,
+    configuration: DeploymentConfiguration,
+    manifest: app.Manifest,
     deadline: float,
 ) -> app.DeploymentBuild:
     refs = dict(operation.refs)
     candidate = operation.candidate_digest
     if candidate is None:
+        db.checkpoint_deployment_attempt(
+            connection, operation.operation_id, status="building"
+        )
         with runtime.lock(state_directory, "infrastructure", deadline=deadline):
             builder_image = db.get_image_selection(connection, "builder")
             if builder_image is None:
@@ -251,8 +251,10 @@ def _prepare_deployment_build(
                 "buildId": operation.operation_id,
                 "slug": application_slug,
                 "repository": repository,
+                "requestedRef": requested_ref,
                 "commit": source_commit,
-                "configPath": config_path,
+                "configurationRevision": configuration_revision,
+                "configuration": json.loads(configuration.canonical_json()),
                 "builderImageId": builder_image.image_id,
                 "runtimeImages": {
                     "bun": config.policy.runtime_images.bun,
@@ -275,7 +277,6 @@ def _prepare_deployment_build(
             raise app.ApplicationError(
                 "build helper returned an image outside the application repository"
             )
-        manifest = _manifest_from_build(built.get("manifest"))
         recipe = app.generate_recipe(manifest, config.policy.runtime_images)
         recipe_hash = sha256_hex(built.get("recipeHash"), field="recipe hash")
         if recipe_hash != recipe.sha256:
@@ -294,7 +295,6 @@ def _prepare_deployment_build(
         )
         refs = {
             **refs,
-            "manifest": built["manifest"],
             "recipe_hash": recipe_hash,
             "build_log_path": build_log_path,
         }
@@ -306,8 +306,16 @@ def _prepare_deployment_build(
             candidate_digest=candidate,
             cleanup_state="confirmed",
         )
+        db.checkpoint_deployment_attempt(
+            connection,
+            operation.operation_id,
+            status="building",
+            recipe_hash=recipe_hash,
+            image_digest=candidate,
+            build_log_path=build_log_path,
+            cleanup_state="confirmed",
+        )
     else:
-        manifest = _manifest_from_build(refs.get("manifest"))
         recipe_hash = sha256_hex(refs.get("recipe_hash"), field="recipe hash")
         build_log_path = relative_path(
             refs.get("build_log_path"), field="build log path", allow_dot=False
@@ -771,6 +779,13 @@ def _deploy_and_accept_application(
                     "candidate manifest cleanup was not confirmed"
                 ) from error
         db.mark_failed(connection, operation_id, error, cleanup_state="confirmed")
+        db.checkpoint_deployment_attempt(
+            connection,
+            operation_id,
+            status="failed",
+            error=error,
+            cleanup_state="confirmed",
+        )
         raise
 
     accepted_job = promoted_job if updating else job
@@ -810,7 +825,7 @@ def _deploy_and_accept_application(
             application_id=spec.application_id,
             application_slug=spec.application_slug,
             repository=spec.repository,
-            config_path=spec.config_path,
+            deployment_id=operation_id,
             worker_server_id=worker.server_id,
             worker_server_name=worker.server_name,
             worker_port_id=worker.port_id,
@@ -965,10 +980,18 @@ def _recover_app_deployment(
             )
             if result.get("absent") is not True:
                 raise app.ApplicationError("candidate manifest cleanup was not confirmed")
+        message = "confirmed candidate removal recovered and manifest cleaned"
         db.mark_failed(
             connection,
             operation_id,
-            "confirmed candidate removal recovered and manifest cleaned",
+            message,
+            cleanup_state="confirmed",
+        )
+        db.checkpoint_deployment_attempt(
+            connection,
+            operation_id,
+            status="failed",
+            error=message,
             cleanup_state="confirmed",
         )
         return DeploymentRecovery(None, "candidate-removed")
@@ -997,7 +1020,10 @@ def _recover_app_deployment(
     )
     if recovery_action == "accept_deployment":
         candidate = oci_digest_pin(operation.candidate_digest, field="candidate digest")
-        manifest = _manifest_from_build(operation.refs.get("manifest"))
+        attempt = db.get_deployment_attempt(connection, operation_id)
+        if attempt is None or attempt.configuration is None:
+            raise app.ApplicationError("deployment configuration snapshot is missing")
+        manifest = _configuration_manifest(connection, application_id, attempt.configuration)
         _validate_storage_bindings(
             connection,
             config,
@@ -1060,7 +1086,7 @@ def _recover_app_deployment(
                 application_id=application_id,
                 application_slug=application_slug,
                 repository=spec.repository,
-                config_path=spec.config_path,
+                deployment_id=operation_id,
                 worker_server_id=worker_server_id,
                 worker_server_name=worker_server_name,
                 worker_port_id=worker_port_id,
@@ -1205,19 +1231,32 @@ class DeploymentService:
     ) -> DeploymentOutcome:
         application_slug = slug(request.application)
         repository = repository_url(request.repository)
+        requested_ref = branch_name(request.requested_ref)
         source_commit = commit(request.source_commit)
-        config_path = relative_path(request.config_path, field="config path", allow_dot=False)
+        if (
+            isinstance(request.configuration_revision, bool)
+            or not isinstance(request.configuration_revision, int)
+            or request.configuration_revision < 0
+        ):
+            raise ValidationError("configuration revision must be a non-negative integer")
+        if not isinstance(request.configuration, DeploymentConfiguration):
+            raise ValidationError("deployment configuration snapshot is malformed")
+        configuration_json = request.configuration.canonical_json()
+        configuration_sha256 = hashlib.sha256(configuration_json.encode()).hexdigest()
         existing = db.get_application(self.connection, application_slug)
         application_id = (
             existing.application_id if existing is not None else str(uuid_module.uuid4())
         )
+        _configuration_manifest(self.connection, application_id, request.configuration)
         standard = self.config.policy.standard
         spec = app.DeploymentSpec(
             application_id,
             application_slug,
             repository,
             source_commit,
-            config_path,
+            requested_ref,
+            request.configuration_revision,
+            configuration_sha256,
             existing.worker_flavor if existing is not None else standard.worker_flavor,
             existing.scheduler_cpu_mhz if existing is not None else standard.cpu_mhz,
             existing.scheduler_memory_mib if existing is not None else standard.memory_mib,
@@ -1229,6 +1268,63 @@ class DeploymentService:
         )
         completed_recovery: RecoveryKind | None = None
 
+        def create_attempt(operation_id: str) -> None:
+            environment = db.get_environment_revision(self.connection, application_id)
+            if environment is None:
+                raise db.DatabaseError("application environment revision is missing")
+            fingerprint = db.request_fingerprint(
+                {
+                    "applicationId": application_id,
+                    "repository": repository,
+                    "requestedRef": requested_ref,
+                    "commit": source_commit,
+                    "configurationRevision": request.configuration_revision,
+                    "configuration": json.loads(configuration_json),
+                    "environmentRevision": environment.revision,
+                }
+            )
+            db.claim_idempotency_request(
+                self.connection,
+                request_id=operation_id,
+                request_fingerprint=fingerprint,
+            )
+            db.create_deployment_attempt(
+                self.connection,
+                deployment_id=operation_id,
+                application_id=application_id,
+                source_commit=source_commit,
+                requested_ref=requested_ref,
+                configuration_revision=request.configuration_revision,
+                configuration=request.configuration,
+                environment_revision=environment.revision,
+                idempotency_request_id=operation_id,
+            )
+
+        def snapshot(operation_id: str) -> tuple[DeploymentConfiguration, app.Manifest]:
+            attempt = db.get_deployment_attempt(self.connection, operation_id)
+            if (
+                attempt is None
+                or attempt.configuration is None
+                or attempt.source_commit != source_commit
+                or attempt.requested_ref != requested_ref
+                or attempt.configuration_revision != request.configuration_revision
+                or attempt.configuration_sha256 != configuration_sha256
+            ):
+                raise app.ApplicationError("deployment attempt snapshot does not match request")
+            return attempt.configuration, _configuration_manifest(
+                self.connection, application_id, attempt.configuration
+            )
+
+        def checkpoint_attempt(operation_id: str, error: BaseException) -> None:
+            attempt = db.get_deployment_attempt(self.connection, operation_id)
+            if attempt is not None and attempt.status not in {"failed", "succeeded"}:
+                db.checkpoint_deployment_attempt(
+                    self.connection,
+                    operation_id,
+                    status="recovery_required",
+                    error=error,
+                )
+
         def recover(operation: db.Operation) -> db.Operation | None:
             nonlocal completed_recovery
             recovered = self.recover_operation(spec, operation, deadline=selected_deadline)
@@ -1236,6 +1332,7 @@ class DeploymentService:
             return recovered.operation
 
         def prepare_build(operation: db.Operation) -> app.DeploymentBuild:
+            configuration, snapshotted_manifest = snapshot(operation.operation_id)
             return _prepare_deployment_build(
                 self.connection,
                 self.config,
@@ -1245,8 +1342,11 @@ class DeploymentService:
                 application_id=application_id,
                 application_slug=application_slug,
                 repository=repository,
+                requested_ref=requested_ref,
                 source_commit=source_commit,
-                config_path=config_path,
+                configuration_revision=request.configuration_revision,
+                configuration=configuration,
+                manifest=snapshotted_manifest,
                 deadline=selected_deadline,
             )
 
@@ -1269,6 +1369,9 @@ class DeploymentService:
             build: app.DeploymentBuild,
             refs: dict[str, Any],
         ) -> app.DeploymentWorker:
+            db.checkpoint_deployment_attempt(
+                self.connection, operation_id, status="deploying"
+            )
             return _prepare_deployment_worker(
                 self.connection,
                 self.config,
@@ -1318,6 +1421,8 @@ class DeploymentService:
             prepare_environment=prepare_environment,
             prepare_worker=prepare_worker,
             deploy_and_accept=deploy_and_accept,
+            create_attempt=create_attempt,
+            checkpoint_attempt=checkpoint_attempt,
         )
         if result is None:
             if completed_recovery is None:

@@ -31,7 +31,6 @@ from platform_cli.app import (
     deployment_recovery_action,
     execute_builder_build,
     generate_recipe,
-    load_platform_yaml,
     nomad_candidate_identity,
     parse_build_metadata,
     parse_builder_observation,
@@ -41,12 +40,12 @@ from platform_cli.app import (
     set_environment,
 )
 from platform_cli.config import PlatformConfig, RuntimeImages
+from platform_cli.deployment_config import parse_configuration
 from platform_cli.helper import production
 from platform_cli.runtime import HttpResult
 from platform_cli.validation import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / "tests" / "fixtures" / "apps"
 COMMIT = "a" * 40
 DIGEST = "b" * 64
 BUN_IMAGE = f"docker.io/oven/bun@sha256:{'1' * 64}"
@@ -56,92 +55,8 @@ SENTINEL = "provider-secret-that-must-not-escape"
 
 
 class ManifestAndRecipeTests(unittest.TestCase):
-    def test_fixtures_load_as_the_complete_strict_schema(self) -> None:
-        bun = load_platform_yaml(FIXTURES / "bun" / "platform.yaml")
-        node = load_platform_yaml(FIXTURES / "node" / "platform.yaml")
-        self.assertEqual(bun, Manifest("bun", (".",), "build", "start", 3000, "/health"))
-        self.assertEqual(node, Manifest("node", (".",), None, "serve", 8080, "/ready"))
-        self.assertEqual(
-            json.loads((FIXTURES / "bun" / "package.json").read_text())["scripts"],
-            {
-                "build": "bun build server.ts --target=bun --outfile=dist/server.js",
-                "start": "bun dist/server.js",
-            },
-        )
-        self.assertEqual(
-            json.loads((FIXTURES / "node" / "package.json").read_text())["scripts"],
-            {"serve": "node server.js"},
-        )
-        self.assertTrue((FIXTURES / "bun" / "server.ts").is_file())
-        self.assertTrue((FIXTURES / "node" / "server.js").is_file())
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "package-lock.json").write_text("{}")
-            (root / "platform.yaml").write_text(
-                "version: 1\nruntime: node\nscripts: {start: serve}\nport: 8080\nhealth: {path: /ready}\n"
-            )
-            self.assertEqual(load_platform_yaml(root / "platform.yaml").packages, (".",))
-
-    def test_named_storage_bindings_are_typed_and_targets_are_unique(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "package-lock.json").write_text("{}")
-            path = root / "platform.yaml"
-            path.write_text(
-                "version: 1\nruntime: node\nscripts: {start: serve}\nport: 8080\n"
-                "health: {path: /ready}\nstorage:\n  bindings:\n    primary:\n"
-                "      type: mongo\n      environment: {uri: MONGODB_URI}\n"
-            )
-            manifest = load_platform_yaml(path)
-            self.assertEqual(
-                manifest.storage_bindings,
-                (StorageBinding("primary", "mongo", (("uri", "MONGODB_URI"),)),),
-            )
-            path.write_text(
-                "version: 1\nruntime: node\nscripts: {start: serve}\nport: 8080\n"
-                "health: {path: /ready}\nstorage:\n  bindings:\n"
-                "    primary: {type: mongo, environment: {uri: DATABASE_URL}}\n"
-                "    replica: {type: mongo, environment: {uri: DATABASE_URL}}\n"
-            )
-            with self.assertRaisesRegex(ValidationError, "conflicts"):
-                load_platform_yaml(path)
-
-    def test_unknown_duplicate_and_command_shaped_values_are_rejected(self) -> None:
-        documents = (
-            "version: 1\nruntime: bun\npackages: [.]\nscripts: {build: build, start: start}\nport: 3000\nhealth: {path: /}\nextra: no\n",
-            "version: 1\nruntime: bun\npackages: [.]\nscripts: {build: build, build: again, start: start}\nport: 3000\nhealth: {path: /}\n",
-            "version: 1\nruntime: node\npackages: [.]\nscripts: {build: null, start: 'start; cat /etc/passwd'}\nport: 3000\nhealth: {path: /}\n",
-        )
-        for text in documents:
-            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "platform.yaml"
-                path.write_text(text)
-                (Path(directory) / "bun.lock").write_text("")
-                (Path(directory) / "package-lock.json").write_text("{}")
-                with self.assertRaises(ValidationError):
-                    load_platform_yaml(path)
-
-    def test_schema_cannot_select_dockerfiles_or_supply_build_environment(self) -> None:
-        unsupported_fields = (
-            "dockerfile: Dockerfile.malicious",
-            "buildArgs: {TOKEN: secret}",
-            "environment: {NODE_ENV: development}",
-        )
-        base = (
-            "version: 1\nruntime: bun\npackages: [.]\n"
-            "scripts: {build: build, start: start}\nport: 3000\nhealth: {path: /}\n"
-        )
-        for field in unsupported_fields:
-            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                (root / "bun.lock").write_text("")
-                path = root / "platform.yaml"
-                path.write_text(base + field + "\n")
-                with self.assertRaisesRegex(ValidationError, "unknown"):
-                    load_platform_yaml(path)
-
     def test_recipe_is_digest_pinned_deterministic_and_uses_exec_forms(self) -> None:
-        manifest = load_platform_yaml(FIXTURES / "bun" / "platform.yaml")
+        manifest = Manifest("bun", (".",), "build", "start", 3000, "/health")
         images = RuntimeImages(bun=BUN_IMAGE, node=NODE_IMAGE)
         first = generate_recipe(manifest, images)
         second = generate_recipe(manifest, images)
@@ -159,7 +74,7 @@ class ManifestAndRecipeTests(unittest.TestCase):
         self.assertEqual(len(first.sha256), 64)
 
     def test_node_recipe_uses_frozen_npm_install_and_asserted_script_command(self) -> None:
-        manifest = load_platform_yaml(FIXTURES / "node" / "platform.yaml")
+        manifest = Manifest("node", (".",), None, "serve", 8080, "/ready")
         recipe = generate_recipe(
             manifest,
             RuntimeImages(bun=BUN_IMAGE, node=NODE_IMAGE),
@@ -198,9 +113,7 @@ class SourceTests(unittest.TestCase):
             destination = Path(argv[argv.index("-C") + 1]) if "-C" in argv else Path(argv[-1])
             if "init" in argv:
                 (destination / ".git").mkdir()
-                (destination / "platform.yaml").write_text(
-                    (FIXTURES / "bun" / "platform.yaml").read_text()
-                )
+                (destination / "README.md").write_text("exact checkout\n")
             stdout = (COMMIT + "\n").encode() if "rev-parse" in argv else b""
             self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
             self.assertEqual(kwargs["env"]["GIT_LFS_SKIP_SMUDGE"], "1")
@@ -214,7 +127,7 @@ class SourceTests(unittest.TestCase):
                 Path(directory) / "source",
                 command_runner=runner,
             )
-            self.assertTrue((source / "platform.yaml").is_file())
+            self.assertTrue((source / "README.md").is_file())
             self.assertFalse((source / ".git").exists())
         fetch = next(call for call in calls if "fetch" in call)
         self.assertIn("https://github.com/example/public-app", fetch)
@@ -229,9 +142,7 @@ class SourceTests(unittest.TestCase):
             root = Path(argv[argv.index("-C") + 1]) if "-C" in argv else Path(argv[-1])
             if "init" in argv:
                 (root / ".git").mkdir()
-                (root / "platform.yaml").write_text(
-                    (FIXTURES / "bun" / "platform.yaml").read_text()
-                )
+                (root / "README.md").write_text("exact checkout\n")
             time.sleep(0.01)
             stdout = (COMMIT + "\n").encode() if "rev-parse" in argv else b""
             return SimpleNamespace(stdout=stdout)
@@ -294,9 +205,6 @@ class SourceTests(unittest.TestCase):
                     root = Path(argv[argv.index("-C") + 1]) if "-C" in argv else Path(argv[-1])
                     if "init" in argv:
                         (root / ".git").mkdir()
-                        (root / "platform.yaml").write_text(
-                            (FIXTURES / "bun" / "platform.yaml").read_text()
-                        )
                         (root / "bun.lock").write_text("")
                         path = root / selected
                         path.parent.mkdir(parents=True, exist_ok=True)
@@ -316,9 +224,8 @@ class SourceTests(unittest.TestCase):
                     (source / malicious_name).read_text(),
                     "RUN malicious-build-instruction\n",
                 )
-                manifest = load_platform_yaml(source / "platform.yaml", source_root=source)
                 recipe = generate_recipe(
-                    manifest,
+                    Manifest("bun", (".",), "build", "start", 3000, "/health"),
                     RuntimeImages(bun=BUN_IMAGE, node=NODE_IMAGE),
                 ).dockerfile
                 self.assertNotIn(b"malicious-build-instruction", recipe)
@@ -1266,7 +1173,7 @@ class DeploymentTests(unittest.TestCase):
             application_id=APP_ID,
             application_slug="demo-app",
             repository="https://github.com/example/demo-app",
-            config_path="platform.yaml",
+            deployment_id="00000000-0000-4000-8000-000000000099",
             worker_server_id="00000000-0000-4000-8000-000000000004",
             worker_server_name="example-worker-demo",
             worker_port_id="00000000-0000-4000-8000-000000000005",
@@ -1292,6 +1199,43 @@ class DeploymentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             connection = db.connect(Path(directory) / "state.sqlite3")
             db.migrate(connection)
+            db.put_application(
+                connection,
+                application_id=APP_ID,
+                application_slug="demo-app",
+                worker_flavor="one-vcpu",
+                scheduler_cpu_mhz=1000,
+                scheduler_memory_mib=2048,
+            )
+            configuration = parse_configuration(
+                {
+                    "schemaVersion": 1,
+                    "build": {
+                        "runtime": "bun",
+                        "packages": ["."],
+                        "buildScript": "build",
+                        "startScript": "start",
+                    },
+                    "runtime": {"port": 3000, "healthPath": "/health"},
+                    "storageBindings": [],
+                }
+            )
+            db.claim_idempotency_request(
+                connection,
+                request_id=acceptance.deployment_id,
+                request_fingerprint="d" * 64,
+            )
+            db.create_deployment_attempt(
+                connection,
+                deployment_id=acceptance.deployment_id,
+                application_id=APP_ID,
+                source_commit=COMMIT,
+                requested_ref="main",
+                configuration_revision=1,
+                configuration=configuration,
+                environment_revision=0,
+                idempotency_request_id=acceptance.deployment_id,
+            )
             with self.assertRaisesRegex(ApplicationError, "public deployment route"):
                 accept_healthy_deployment(
                     connection,

@@ -43,7 +43,7 @@ uv run --no-sync python - <<'PY'
 import os
 from pathlib import Path
 
-from platform_cli.app import generate_recipe, load_platform_yaml
+from platform_cli.app import Manifest, generate_recipe
 from platform_cli.config import RuntimeImages
 
 fixtures = Path("tests/fixtures/apps")
@@ -52,8 +52,11 @@ images = RuntimeImages(
     bun=os.environ["BUN_RUNTIME_IMAGE"],
     node=os.environ["NODE_RUNTIME_IMAGE"],
 )
-for runtime in ("bun", "node"):
-    manifest = load_platform_yaml(fixtures / runtime / "platform.yaml")
+manifests = {
+    "bun": Manifest("bun", (".",), "build", "start", 3000, "/health"),
+    "node": Manifest("node", (".",), None, "serve", 8080, "/ready"),
+}
+for runtime, manifest in manifests.items():
     recipe = generate_recipe(manifest, images)
     destination = output / runtime
     destination.mkdir(mode=0o700)

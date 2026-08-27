@@ -22,11 +22,11 @@ from typing import Any
 
 from .. import app as application
 from ..config import PlatformConfig, RuntimeImages, load_platform
+from ..deployment_config import branch_name, parse_configuration, validate_checkout
 from ..runtime import bounded_http, ensure_private_directory, run
 from ..validation import (
     ValidationError,
     bounded_text,
-    relative_path,
     slug,
     uuid,
 )
@@ -314,8 +314,10 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
             "buildId",
             "slug",
             "repository",
+            "requestedRef",
             "commit",
-            "configPath",
+            "configurationRevision",
+            "configuration",
             "builderImageId",
             "runtimeImages",
             "sourceLimit",
@@ -327,7 +329,11 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
     )
     build_id = uuid(args["buildId"], field="build ID")
     app_slug = slug(args["slug"])
-    config_path = relative_path(args["configPath"], field="config path", allow_dot=False)
+    branch_name(args["requestedRef"])
+    revision = args["configurationRevision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise ValidationError("configuration revision must be a non-negative integer")
+    configuration = parse_configuration(args["configuration"])
     runtime_images = args["runtimeImages"]
     if not isinstance(runtime_images, dict) or runtime_images.keys() != {"bun", "node"}:
         raise HelperActionError("INVALID_ARGS", "runtime image pins are invalid")
@@ -366,9 +372,14 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                     timeout_seconds=300,
                     deadline=operation_deadline,
                 )
-                manifest = application.load_platform_yaml(
-                    source / config_path,
-                    source_root=source,
+                validate_checkout(configuration, source)
+                manifest = application.Manifest(
+                    configuration.runtime,
+                    configuration.packages,
+                    configuration.build_script,
+                    configuration.start_script,
+                    configuration.port,
+                    configuration.health_path,
                 )
                 recipe = application.generate_recipe(manifest, images)
                 result = application.build_with_disposable_builder(
@@ -404,22 +415,6 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
         "buildId": result.build_id,
         "image": result.image,
         "recipeHash": recipe.sha256,
-        "manifest": {
-            "runtime": manifest.runtime,
-            "packages": list(manifest.packages),
-            "buildScript": manifest.build_script,
-            "startScript": manifest.start_script,
-            "port": manifest.port,
-            "healthPath": manifest.health_path,
-            "storageBindings": [
-                {
-                    "name": binding.name,
-                    "type": binding.resource_type,
-                    "environment": dict(binding.environment),
-                }
-                for binding in manifest.storage_bindings
-            ],
-        },
         "log": log.decode("utf-8", errors="replace"),
         "logTruncated": result.build_log_truncated or len(log) != len(result.build_log),
         "builderAbsent": result.cleanup_confirmed,

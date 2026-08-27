@@ -32,9 +32,6 @@ from .remote import call_helper
 from .runtime import bounded_http, ensure_private_directory, lock, run
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
-    RESERVED_ENVIRONMENT_PREFIX,
-    RESOURCE_OUTPUTS,
-    RESOURCE_TYPES,
     canonical_secret_key,
     canonical_secret_keys,
 )
@@ -44,22 +41,15 @@ from .validation import (
     commit,
     env_key,
     health_path,
-    load_strict_yaml,
     oci_digest_pin,
     relative_path,
     repository_url,
-    resolve_inside,
-    resource_name,
     script_name,
     sha256_hex,
     slug,
     uuid,
 )
 
-_MANIFEST_KEYS = {"version", "runtime", "packages", "scripts", "port", "health", "storage"}
-_SCRIPT_KEYS = {"build", "start"}
-_HEALTH_KEYS = {"path"}
-_RUNTIME_NAMES = {"bun", "node"}
 _RECIPE_GENERATOR_VERSION = 2
 _IMAGE_NAME = re.compile(r"[a-z0-9.-]+(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -275,7 +265,9 @@ class DeploymentSpec:
     application_slug: str
     repository: str
     source_commit: str
-    config_path: str
+    requested_ref: str
+    configuration_revision: int
+    configuration_sha256: str
     worker_flavor: str
     cpu_mhz: int
     memory_mib: int
@@ -304,7 +296,7 @@ class DeploymentAcceptance:
     application_id: str
     application_slug: str
     repository: str
-    config_path: str
+    deployment_id: str
     worker_server_id: str
     worker_server_name: str
     worker_port_id: str
@@ -322,167 +314,6 @@ class DeploymentAcceptance:
     application_port: int
     build_log_path: str
     public_url: str
-
-
-def _exact_keys(value: Mapping[str, Any], expected: set[str], *, field_name: str) -> None:
-    if value.keys() != expected:
-        unknown = value.keys() - expected
-        missing = expected - value.keys()
-        details: list[str] = []
-        if missing:
-            details.append(f"missing {', '.join(sorted(missing))}")
-        if unknown:
-            details.append(f"unknown {', '.join(sorted(unknown))}")
-        raise ValidationError(f"{field_name} fields are invalid: {'; '.join(details)}")
-
-
-def load_platform_yaml(
-    path: str | Path,
-    *,
-    source_root: str | Path | None = None,
-    maximum_bytes: int = 65_536,
-) -> Manifest:
-    """Load the complete, deliberately small ``platform.yaml`` schema.
-
-    ``scripts.build`` may be null for an application without a build script.
-    Script values are package-script names, never command strings. Package
-    paths are normalized and must resolve inside the source checkout.
-    """
-    manifest_path = Path(path)
-    try:
-        metadata = manifest_path.lstat()
-    except FileNotFoundError:
-        raise ValidationError("platform.yaml was not found") from None
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ValidationError("platform.yaml must be a direct regular file")
-    if metadata.st_size > maximum_bytes:
-        raise ValidationError(f"platform.yaml exceeds its {maximum_bytes}-byte limit")
-    try:
-        descriptor = os.open(
-            manifest_path,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
-        )
-    except OSError as error:
-        raise ValidationError("platform.yaml could not be opened safely") from error
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_size > maximum_bytes:
-            raise ValidationError("platform.yaml must be a bounded direct regular file")
-        raw = b""
-        while chunk := os.read(descriptor, min(65_536, maximum_bytes + 1 - len(raw))):
-            raw += chunk
-            if len(raw) > maximum_bytes:
-                raise ValidationError(f"platform.yaml exceeds its {maximum_bytes}-byte limit")
-    finally:
-        os.close(descriptor)
-
-    document = load_strict_yaml(raw, maximum_bytes=maximum_bytes)
-    if not isinstance(document, dict) or any(not isinstance(key, str) for key in document):
-        raise ValidationError("platform.yaml must be a mapping with string keys")
-    unknown = document.keys() - _MANIFEST_KEYS
-    missing = (_MANIFEST_KEYS - {"packages", "storage"}) - document.keys()
-    if unknown or missing:
-        details: list[str] = []
-        if missing:
-            details.append(f"missing {', '.join(sorted(missing))}")
-        if unknown:
-            details.append(f"unknown {', '.join(sorted(unknown))}")
-        raise ValidationError(f"platform.yaml fields are invalid: {'; '.join(details)}")
-    if isinstance(document["version"], bool) or document["version"] != 1:
-        raise ValidationError("platform.yaml version must be exactly 1")
-    runtime_name = document["runtime"]
-    if runtime_name not in _RUNTIME_NAMES:
-        raise ValidationError("platform.yaml runtime must be bun or node")
-    packages_value = document.get("packages", ["."])
-    if not isinstance(packages_value, list) or not packages_value:
-        raise ValidationError("platform.yaml packages must be a non-empty array")
-    packages = tuple(relative_path(value, field="package path") for value in packages_value)
-    if len(packages) != len(set(packages)) or len(packages) > 32:
-        raise ValidationError("platform.yaml packages must be unique and contain at most 32 paths")
-    checkout = (
-        Path(source_root).resolve(strict=True)
-        if source_root is not None
-        else manifest_path.parent.resolve(strict=True)
-    )
-    resolved_manifest = manifest_path.resolve(strict=True)
-    if not resolved_manifest.is_relative_to(checkout):
-        raise ValidationError("platform.yaml must remain inside the source checkout")
-    for package in packages:
-        directory = resolve_inside(checkout, package, field="package path")
-        if not directory.is_dir():
-            raise ValidationError("package path must name a source directory")
-        lock_names = ("bun.lock", "bun.lockb") if runtime_name == "bun" else ("package-lock.json",)
-        if not any((directory / name).is_file() for name in lock_names):
-            raise ValidationError(f"package {package!r} is missing its supported lockfile")
-
-    scripts = document["scripts"]
-    if not isinstance(scripts, dict):
-        raise ValidationError("platform.yaml scripts must be a mapping")
-    unknown_scripts = scripts.keys() - _SCRIPT_KEYS
-    missing_scripts = {"start"} - scripts.keys()
-    if unknown_scripts or missing_scripts:
-        raise ValidationError("platform.yaml scripts fields are invalid")
-    build_value = scripts.get("build")
-    build_script = None if build_value is None else script_name(build_value)
-    start = script_name(scripts["start"])
-    health = document["health"]
-    if not isinstance(health, dict):
-        raise ValidationError("platform.yaml health must be a mapping")
-    _exact_keys(health, _HEALTH_KEYS, field_name="platform.yaml health")
-    port = document["port"]
-    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65_535:
-        raise ValidationError("platform.yaml port must be an integer from 1 through 65535")
-    storage = document.get("storage", {"bindings": {}})
-    if not isinstance(storage, dict):
-        raise ValidationError("platform.yaml storage must be a mapping")
-    _exact_keys(storage, {"bindings"}, field_name="platform.yaml storage")
-    raw_bindings = storage["bindings"]
-    if not isinstance(raw_bindings, dict) or any(not isinstance(key, str) for key in raw_bindings):
-        raise ValidationError("platform.yaml storage.bindings must be a mapping")
-    if len(raw_bindings) > 32:
-        raise ValidationError("platform.yaml supports at most 32 storage bindings")
-    bindings: list[StorageBinding] = []
-    targets: set[str] = set()
-    for raw_name, raw_binding in raw_bindings.items():
-        name = resource_name(raw_name)
-        if not isinstance(raw_binding, dict):
-            raise ValidationError(f"storage binding {name!r} must be a mapping")
-        _exact_keys(raw_binding, {"type", "environment"}, field_name=f"storage binding {name!r}")
-        resource_type = raw_binding["type"]
-        if resource_type not in RESOURCE_TYPES:
-            raise ValidationError(f"storage binding {name!r} type must be postgres, mongo, or s3")
-        environment = raw_binding["environment"]
-        if not isinstance(environment, dict) or any(
-            not isinstance(key, str) for key in environment
-        ):
-            raise ValidationError(f"storage binding {name!r} environment must be a mapping")
-        if not environment:
-            raise ValidationError(f"storage binding {name!r} must map at least one output")
-        mapped: list[tuple[str, str]] = []
-        for output, raw_target in environment.items():
-            if output not in RESOURCE_OUTPUTS[resource_type]:
-                raise ValidationError(
-                    f"storage binding {name!r} output {output!r} is not supported"
-                )
-            target = env_key(raw_target)
-            if target in PLATFORM_ENVIRONMENT_KEYS or target.startswith(
-                RESERVED_ENVIRONMENT_PREFIX
-            ):
-                raise ValidationError(f"storage binding target {target!r} is reserved")
-            if target in targets:
-                raise ValidationError(f"storage binding target {target!r} conflicts")
-            targets.add(target)
-            mapped.append((output, target))
-        bindings.append(StorageBinding(name, resource_type, tuple(sorted(mapped))))
-    return Manifest(
-        runtime_name,
-        packages,
-        build_script,
-        start,
-        port,
-        health_path(health["path"]),
-        tuple(sorted(bindings, key=lambda item: (item.resource_type, item.name))),
-    )
 
 
 def parse_dotenv(payload: bytes | str, *, maximum_bytes: int = 262_144) -> dict[str, str]:
@@ -2271,6 +2102,8 @@ def execute_deployment_workflow(
     prepare_environment: Callable[[str, DeploymentBuild], dict[str, Any]],
     prepare_worker: Callable[[str, DeploymentBuild, dict[str, Any]], DeploymentWorker],
     deploy_and_accept: Callable[[str, DeploymentBuild, DeploymentWorker], DeploymentResult],
+    create_attempt: Callable[[str], None],
+    checkpoint_attempt: Callable[[str, BaseException], None],
 ) -> tuple[str, DeploymentResult] | None:
     """Own the durable top-level deploy sequence outside CLI presentation.
 
@@ -2297,7 +2130,11 @@ def execute_deployment_workflow(
         "slug": app_slug,
         "repository": repository_url(spec.repository),
         "source_commit": commit(spec.source_commit),
-        "config_path": relative_path(spec.config_path, field="config path", allow_dot=False),
+        "requested_ref": spec.requested_ref,
+        "configuration_revision": spec.configuration_revision,
+        "configuration_sha256": sha256_hex(
+            spec.configuration_sha256, field="configuration SHA-256"
+        ),
     }
     with lock(state_directory, scope, deadline=lock_deadline):
         verify_project()
@@ -2307,7 +2144,6 @@ def execute_deployment_workflow(
                 application_id=identifier,
                 application_slug=app_slug,
                 repository_url=spec.repository,
-                config_path=spec.config_path,
                 desired_running=True,
                 url=f"https://{app_slug}.{config.platform.domain}",
                 worker_flavor=spec.worker_flavor,
@@ -2343,6 +2179,11 @@ def execute_deployment_workflow(
             )
             unfinished = db.get_operation(connection, operation_id)
             assert unfinished is not None
+            try:
+                create_attempt(operation_id)
+            except Exception as error:
+                db.mark_failed(connection, operation_id, error, cleanup_state="not_required")
+                raise
         try:
             build = prepare_build(unfinished)
             refs = prepare_environment(operation_id, build)
@@ -2352,6 +2193,7 @@ def execute_deployment_workflow(
             current = db.get_operation(connection, operation_id)
             if current is not None and current.status == "running":
                 db.mark_recovery_required(connection, operation_id, error)
+                checkpoint_attempt(operation_id, error)
             raise
     return build.image, result
 
@@ -2415,12 +2257,14 @@ def accept_healthy_deployment(
         raise ApplicationError("public deployment route could not be reobserved") from error
     if route_healthy is not True:
         raise ApplicationError("public deployment route was not healthy for acceptance")
+    attempt = db.get_deployment_attempt(connection, acceptance.deployment_id)
+    if attempt is None or attempt.application_id != identifier:
+        raise ApplicationError("deployment attempt snapshot is missing for acceptance")
     db.put_application(
         connection,
         application_id=identifier,
         application_slug=app_slug,
         repository_url=acceptance.repository,
-        config_path=acceptance.config_path,
         desired_running=True,
         url=acceptance.public_url,
         worker_server_id=acceptance.worker_server_id,
@@ -2431,18 +2275,17 @@ def accept_healthy_deployment(
         scheduler_cpu_mhz=acceptance.cpu_mhz,
         scheduler_memory_mib=acceptance.memory_mib,
     )
-    db.accept_deployment(
+    db.checkpoint_deployment_attempt(
         connection,
-        application_id=identifier,
-        source_commit=acceptance.source_commit,
+        acceptance.deployment_id,
+        status="succeeded",
         recipe_hash=acceptance.recipe_hash,
         image_digest=expected_image,
         nomad_job=acceptance.nomad_job,
         nomad_job_sha256=expected_hash,
         nomad_version=version,
-        health_path=acceptance.health_path,
-        application_port=acceptance.application_port,
         build_log_path=acceptance.build_log_path,
+        cleanup_state="not_required",
     )
     return DeploymentResult(nomad_version=version, observations=1)
 

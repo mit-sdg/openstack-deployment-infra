@@ -133,7 +133,6 @@ class Application:
     application_id: str
     slug: str
     repository_url: str | None
-    config_path: str | None
     desired_running: bool
     url: str | None
     worker_server_id: str | None
@@ -1526,7 +1525,6 @@ def put_application(
     scheduler_cpu_mhz: int,
     scheduler_memory_mib: int,
     repository_url: str | None = None,
-    config_path: str | None = None,
     desired_running: bool = True,
     url: str | None = None,
     worker_server_id: str | None = None,
@@ -1577,7 +1575,7 @@ def put_application(
                 application_id,
                 application_slug,
                 repository_url,
-                config_path,
+                None,
                 int(desired_running),
                 url,
                 worker_server_id,
@@ -1611,7 +1609,6 @@ def _application(row: sqlite3.Row | None) -> Application | None:
         application_id=row["application_id"],
         slug=row["slug"],
         repository_url=row["repository_url"],
-        config_path=row["config_path"],
         desired_running=bool(row["desired_running"]),
         url=row["url"],
         worker_server_id=row["worker_server_id"],
