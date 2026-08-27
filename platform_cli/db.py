@@ -1561,7 +1561,11 @@ def put_application(
                 )
         connection.execute(
             """
-            INSERT INTO applications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO applications(
+              application_id, slug, repository_url, config_path, desired_running, url,
+              worker_server_id, worker_server_name, worker_port_id, worker_port_name,
+              worker_flavor, scheduler_cpu_mhz, scheduler_memory_mib, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(application_id) DO UPDATE SET
               slug=excluded.slug, repository_url=excluded.repository_url,
               config_path=excluded.config_path, desired_running=excluded.desired_running,
@@ -1626,19 +1630,94 @@ def _application(row: sqlite3.Row | None) -> Application | None:
 def get_application(connection: sqlite3.Connection, identifier: str) -> Application | None:
     return _application(
         connection.execute(
-            "SELECT * FROM applications WHERE application_id = ? OR slug = ?",
+            "SELECT application.* FROM applications AS application "
+            "WHERE (application.application_id = ? OR application.slug = ?) "
+            "AND NOT EXISTS (SELECT 1 FROM application_slug_tombstones AS tombstone "
+            "WHERE tombstone.application_id = application.application_id)",
             (identifier, identifier),
+        ).fetchone()
+    )
+
+
+def _get_application_including_tombstone(
+    connection: sqlite3.Connection, application_id: str
+) -> Application | None:
+    return _application(
+        connection.execute(
+            "SELECT * FROM applications WHERE application_id = ?", (application_id,)
         ).fetchone()
     )
 
 
 def list_applications(connection: sqlite3.Connection) -> list[Application]:
     applications: list[Application] = []
-    for row in connection.execute("SELECT * FROM applications ORDER BY slug"):
+    for row in connection.execute(
+        "SELECT application.* FROM applications AS application "
+        "WHERE NOT EXISTS (SELECT 1 FROM application_slug_tombstones AS tombstone "
+        "WHERE tombstone.application_id = application.application_id) ORDER BY application.slug"
+    ):
         application = _application(row)
         assert application is not None
         applications.append(application)
     return applications
+
+
+def set_application_runtime(
+    connection: sqlite3.Connection,
+    application_id: str,
+    *,
+    running: bool,
+    worker_server_id: str | None = None,
+    worker_server_name: str | None = None,
+    worker_port_id: str | None = None,
+    worker_port_name: str | None = None,
+    nomad_version: int | None = None,
+    now: str | None = None,
+) -> None:
+    """Atomically record only accepted runtime presence; deployment snapshots stay intact."""
+    identifier = uuid(application_id, field="application_id")
+    if running and None in (
+        worker_server_id,
+        worker_server_name,
+        worker_port_id,
+        worker_port_name,
+    ):
+        raise ValidationError("running application requires exact worker identity")
+    if worker_server_id is not None:
+        uuid(worker_server_id, field="worker_server_id")
+    if worker_port_id is not None:
+        uuid(worker_port_id, field="worker_port_id")
+    if nomad_version is not None:
+        _revision(nomad_version, field="nomad version")
+    timestamp = now or utc_now()
+    with transaction(connection):
+        cursor = connection.execute(
+            "UPDATE applications SET desired_running = ?, worker_server_id = ?, "
+            "worker_server_name = ?, worker_port_id = ?, worker_port_name = ?, updated_at = ? "
+            "WHERE application_id = ?",
+            (
+                int(running), worker_server_id, worker_server_name, worker_port_id,
+                worker_port_name, timestamp, identifier,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("application is missing")
+        active = connection.execute(
+            "SELECT deployment_id FROM active_deployments WHERE application_id = ?",
+            (identifier,),
+        ).fetchone()
+        if active is not None:
+            connection.execute(
+                "UPDATE active_deployments SET lifecycle_state = ?, updated_at = ? "
+                "WHERE application_id = ?",
+                ("running" if running else "stopped", timestamp, identifier),
+            )
+            if nomad_version is not None:
+                connection.execute(
+                    "UPDATE deployment_attempts SET nomad_version = ?, last_healthy_at = ?, "
+                    "updated_at = ? WHERE deployment_id = ? AND application_id = ?",
+                    (nomad_version, timestamp, timestamp, active["deployment_id"], identifier),
+                )
 
 
 def _deployment_attempt(row: sqlite3.Row | None) -> DeploymentAttempt | None:
@@ -1978,6 +2057,19 @@ def list_deployment_attempts(
         query + " ORDER BY requested_at DESC, deployment_id DESC", parameters
     )
     return tuple(attempt for row in rows if (attempt := _deployment_attempt(row)) is not None)
+
+
+def active_storage_resource_ids(
+    connection: sqlite3.Connection, application_id: str
+) -> tuple[str, ...]:
+    """Return immutable storage UUIDs referenced by the accepted configuration."""
+    active = get_active_deployment(connection, uuid(application_id, field="application_id"))
+    if active is None:
+        return ()
+    attempt = get_deployment_attempt(connection, active.deployment_id)
+    if attempt is None or attempt.configuration is None:
+        return ()
+    return tuple(binding.resource_id for binding in attempt.configuration.storage_bindings)
 
 
 def list_application_manifest_images(
@@ -2320,6 +2412,26 @@ def list_managed_resources(
     return [resource for row in rows if (resource := _managed_resource(row)) is not None]
 
 
+def set_managed_resource_lifecycle(
+    connection: sqlite3.Connection,
+    resource_id: str,
+    lifecycle_state: str,
+    *,
+    now: str | None = None,
+) -> None:
+    identifier = uuid(resource_id, field="resource_id")
+    if lifecycle_state not in {"creating", "active", "removing", "recovery_required"}:
+        raise ValidationError("storage lifecycle state is invalid")
+    with transaction(connection):
+        cursor = connection.execute(
+            "UPDATE managed_resources SET lifecycle_state = ?, updated_at = ? "
+            "WHERE resource_id = ?",
+            (lifecycle_state, now or utc_now(), identifier),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("storage resource is missing")
+
+
 def delete_managed_resource(
     connection: sqlite3.Connection,
     *,
@@ -2434,6 +2546,63 @@ def list_environment_keys(
         )
         for row in rows
     ]
+
+
+def complete_application_deletion(
+    connection: sqlite3.Connection,
+    *,
+    application_id: str,
+    operation_id: str,
+    now: str | None = None,
+) -> None:
+    """Tombstone a fully purged app while retaining deployment and operation history."""
+    identifier = uuid(application_id, field="application_id")
+    operation_identifier = uuid(operation_id, field="operation_id")
+    timestamp = now or utc_now()
+    with transaction(connection):
+        operation = get_operation(connection, operation_identifier)
+        if (
+            operation is None
+            or operation.kind not in {"app.delete", "app.remove"}
+            or operation.status not in {"running", "recovery_required"}
+            or operation.refs.get("application_id") != identifier
+            or operation.phase != "manifest_absent"
+        ):
+            raise DatabaseError("application deletion operation is not ready to complete")
+        if connection.execute(
+            "SELECT 1 FROM managed_resources WHERE application_id = ? LIMIT 1", (identifier,)
+        ).fetchone() is not None:
+            raise DatabaseError("application deletion refuses managed resource rows")
+        application = _get_application_including_tombstone(connection, identifier)
+        if application is None:
+            raise DatabaseError("application is missing")
+        connection.execute(
+            "INSERT INTO application_slug_tombstones VALUES (?, ?, ?) "
+            "ON CONFLICT(slug) DO NOTHING",
+            (application.slug, identifier, timestamp),
+        )
+        connection.execute(
+            "DELETE FROM environment_keys WHERE application_id = ?", (identifier,)
+        )
+        connection.execute(
+            "UPDATE applications SET desired_running = 0, url = NULL, "
+            "worker_server_id = NULL, worker_server_name = NULL, worker_port_id = NULL, "
+            "worker_port_name = NULL, updated_at = ? WHERE application_id = ?",
+            (timestamp, identifier),
+        )
+        connection.execute(
+            "UPDATE active_deployments SET lifecycle_state = 'stopped', updated_at = ? "
+            "WHERE application_id = ?",
+            (timestamp, identifier),
+        )
+        cursor = connection.execute(
+            "UPDATE operations SET status = 'succeeded', phase = 'tombstoned', "
+            "updated_at = ?, safe_error = NULL, cleanup_state = 'confirmed' "
+            "WHERE operation_id = ? AND status IN ('running','recovery_required')",
+            (timestamp, operation_identifier),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("application deletion operation could not be completed")
 
 
 def complete_application_removal(

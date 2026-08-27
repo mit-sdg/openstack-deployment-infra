@@ -1244,6 +1244,14 @@ class DeploymentService:
         configuration_json = request.configuration.canonical_json()
         configuration_sha256 = hashlib.sha256(configuration_json.encode()).hexdigest()
         existing = db.get_application(self.connection, application_slug)
+        if existing is not None:
+            unfinished = db.get_unfinished_operation(
+                self.connection, f"app-{existing.application_id}"
+            )
+            if unfinished is not None and unfinished.kind in {"app.delete", "app.remove"}:
+                raise db.UnfinishedOperationError(
+                    unfinished.scope, unfinished.operation_id, unfinished.kind
+                )
         application_id = (
             existing.application_id if existing is not None else str(uuid_module.uuid4())
         )

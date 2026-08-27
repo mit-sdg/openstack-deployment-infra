@@ -968,6 +968,29 @@ def remove(
         if operation is not None:
             raise StorageOperationError("unfinished storage removal metadata is inconsistent")
         raise ValidationError(f"storage does not exist: {', '.join(missing)}")
+    active_references = set(
+        db.active_storage_resource_ids(connection, application.application_id)
+    )
+    accepted = db.get_deployment(connection, application.application_id)
+    referenced = [
+        item
+        for item in selected
+        if (resource := resources.get((item, checked_name))) is not None
+        and (
+            resource.resource_id in active_references
+            or (
+                accepted is not None
+                and any(
+                    key in accepted.nomad_job
+                    for key in canonical_secret_keys(item, checked_name)
+                )
+            )
+        )
+    ]
+    if referenced:
+        raise ValidationError(
+            f"active deployment references {referenced[0]} storage {checked_name!r}"
+        )
     if operation is None:
         operation = _begin(
             connection,
