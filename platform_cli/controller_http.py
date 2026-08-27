@@ -15,7 +15,9 @@ from urllib.parse import parse_qs, urlsplit
 _MAX_BODY = 1_048_576
 _MAX_RESPONSE = 1_048_576
 _PATH_PARAMETER = re.compile(r"\{([a-z][a-zA-Z0-9]*)\}")
-_IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
+_IDEMPOTENCY_KEY = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
 _RESPONSE_HEADERS = {"Location", "Retry-After"}
 
 
@@ -49,7 +51,11 @@ class Request:
     def idempotency_key(self) -> str:
         value = self.headers.get("idempotency-key")
         if value is None or _IDEMPOTENCY_KEY.fullmatch(value) is None:
-            raise HttpError(400, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key is required")
+            raise HttpError(
+                400,
+                "INVALID_IDEMPOTENCY_KEY",
+                "Idempotency-Key must be a canonical UUID",
+            )
         return value
 
 

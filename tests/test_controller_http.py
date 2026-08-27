@@ -88,11 +88,14 @@ class ControllerTransportTests(unittest.TestCase):
             body=b'{"name":"demo"}',
             headers={
                 "Content-Type": "application/json",
-                "Idempotency-Key": "request-0001",
+                "Idempotency-Key": "00000000-0000-4000-8000-000000000001",
             },
         )
         self.assertEqual(status, 202)
-        self.assertEqual(body, {"name": "demo", "operationId": "request-0001"})
+        self.assertEqual(
+            body,
+            {"name": "demo", "operationId": "00000000-0000-4000-8000-000000000001"},
+        )
         self.assertEqual(headers["Location"], "/v1/operations/operation-1")
 
     def test_invalid_json_method_and_route_return_only_safe_json(self) -> None:
