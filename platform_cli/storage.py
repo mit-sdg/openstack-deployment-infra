@@ -2,8 +2,8 @@
 
 SQLite contains platform-created provider identities, fixed policy values, key
 ownership, and operation checkpoints. Scoped credentials never cross the helper
-boundary. Each storage command has a deliberately small, phase-specific restart
-path.
+boundary. Each storage mutation has a deliberately small, phase-specific
+restart path.
 """
 
 from __future__ import annotations
@@ -19,9 +19,6 @@ from typing import Any
 
 from . import db, remote
 from .config import Config
-from .storage_contract import (
-    ENVIRONMENT_KEYS as ENVIRONMENT_KEYS,
-)
 from .storage_contract import (
     RESOURCE_TYPES,
     canonical_secret_keys,
@@ -359,25 +356,6 @@ def _checkpoint_refs(
     }
 
 
-def _recovery_action(
-    kind: str,
-    resource_type: str,
-    application: db.Application,
-    operation: db.Operation,
-) -> str:
-    command = kind.removeprefix("storage.")
-    name = validate_resource_name(operation.refs.get("resource_name", "default"))
-    arguments = f"{application.slug} {resource_type} --name {name}"
-    if kind == "storage.remove":
-        arguments += f" --confirm {name}"
-        if operation.refs.get("purge_s3") is True:
-            arguments += " --purge-s3"
-    return (
-        f"exact action: run openstack-platform storage {command} {arguments}; "
-        "the helper will reconcile the recorded provider generation and Nomad ModifyIndex"
-    )
-
-
 def _mark_ambiguous(
     connection: sqlite3.Connection,
     config: Config,
@@ -385,7 +363,6 @@ def _mark_ambiguous(
     operation: db.Operation,
     resource_type: str,
     *,
-    kind: str,
     phase: str,
     provider_id: str | None,
     provider_name: str,
@@ -406,7 +383,7 @@ def _mark_ambiguous(
         provider_name=provider_name,
         existing=existing,
     )
-    action = _recovery_action(kind, resource_type, application, operation)
+    action = "retry the original controller request with the same Idempotency-Key"
     db.mark_recovery_required(
         connection, operation.operation_id, f"{message}; {action}", phase=phase
     )
@@ -590,7 +567,6 @@ def create(
                 application,
                 operation,
                 resource_type,
-                kind="storage.create",
                 phase=f"create_{resource_type}",
                 provider_id=current.provider_id if current is not None else None,
                 provider_name=anticipated_name,
@@ -726,7 +702,6 @@ def verify(
                 application,
                 operation,
                 resource_type,
-                kind="storage.verify",
                 phase=f"verify_{resource_type}",
                 provider_id=resource.provider_id,
                 provider_name=resource.provider_name,
@@ -848,7 +823,6 @@ def rotate(
                 application,
                 operation,
                 resource_type,
-                kind="storage.rotate",
                 phase=f"rotate_{resource_type}",
                 provider_id=resource.provider_id,
                 provider_name=resource.provider_name,
@@ -862,8 +836,7 @@ def rotate(
                     application,
                     operation,
                     resource_type,
-                    kind="storage.rotate",
-                    phase=f"rotate_{resource_type}",
+                        phase=f"rotate_{resource_type}",
                     provider_id=resource.provider_id,
                     provider_name=resource.provider_name,
                     message=f"{resource_type} rotation rollback was not confirmed",
@@ -893,7 +866,6 @@ def rotate(
                 application,
                 operation,
                 resource_type,
-                kind="storage.rotate",
                 phase=f"retire_{resource_type}",
                 provider_id=resource.provider_id,
                 provider_name=resource.provider_name,
@@ -1154,7 +1126,6 @@ def remove(
                 application,
                 operation,
                 resource_type,
-                kind="storage.remove",
                 phase=f"remove_{resource_type}",
                 provider_id=resource.provider_id,
                 provider_name=resource.provider_name,

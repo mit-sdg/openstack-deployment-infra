@@ -424,8 +424,7 @@ class ReleaseInstallerTests(unittest.TestCase):
                 parser.add_argument("--state-directory", required=True)
                 parser.add_argument("--policy", required=True)
                 commands = parser.add_subparsers(dest="command", required=True)
-                app = commands.add_parser("app")
-                app.add_subparsers(dest="app_command", required=True).add_parser("list")
+                commands.add_parser("status")
                 args = parser.parse_args()
                 with open(args.platform_config, encoding="utf-8") as stream:
                     platform = json.load(stream)
@@ -660,12 +659,12 @@ class ReleaseInstallerTests(unittest.TestCase):
             config_installer.resolve(), release / "bin/openstack-platform-install-config"
         )
         launched = subprocess.run(
-            [launcher, "app", "list"], check=True, stdout=subprocess.PIPE, text=True
+            [launcher, "status"], check=True, stdout=subprocess.PIPE, text=True
         ).stdout
         self.assertEqual(launched, "management-fixture=ok\n")
         policy = self.root / "management/state/policy.json"
         policy.chmod(0o640)
-        rejected = subprocess.run([launcher, "app", "list"], capture_output=True, text=True)
+        rejected = subprocess.run([launcher, "status"], capture_output=True, text=True)
         self.assertEqual(rejected.returncode, 78)
         self.assertIn("ownership or mode is invalid", rejected.stderr)
         policy.chmod(0o600)
@@ -688,7 +687,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         for option in fixed:
             with self.subTest(option=option):
                 result = subprocess.run(
-                    [launcher, option, str(self.root / "attacker"), "app", "list"],
+                    [launcher, option, str(self.root / "attacker"), "status"],
                     capture_output=True,
                     text=True,
                 )

@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import uuid as uuid_module
 from pathlib import Path, PurePosixPath
-from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -196,69 +195,3 @@ def bounded_text(value: object, *, field: str, maximum: int) -> str:
     if len(value.encode("utf-8")) > maximum:
         raise ValidationError(f"{field} exceeds its {maximum}-byte limit")
     return value
-
-
-def load_strict_yaml(text: str | bytes, *, maximum_bytes: int = 65_536) -> Any:
-    """Parse bounded YAML without duplicate keys, aliases, or custom tags.
-
-    PyYAML is imported lazily so infrastructure-only users that never parse an
-    application configuration do not need to import it at startup.
-    """
-    raw = text.encode("utf-8") if isinstance(text, str) else text
-    if len(raw) > maximum_bytes:
-        raise ValidationError(f"YAML exceeds its {maximum_bytes}-byte limit")
-    try:
-        decoded = raw.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ValidationError("YAML must be UTF-8") from error
-
-    try:
-        import yaml
-    except ImportError as error:  # pragma: no cover - packaging supplies PyYAML
-        raise RuntimeError("strict YAML parsing requires PyYAML") from error
-
-    class StrictLoader(yaml.SafeLoader):
-        node_count = 0
-        node_depth = 0
-
-        def compose_node(self, parent: Any, index: Any) -> Any:
-            if self.check_event(yaml.AliasEvent):
-                raise ValidationError("YAML aliases are not supported")
-            self.node_count += 1
-            if self.node_count > 2_048:
-                raise ValidationError("YAML contains too many nodes")
-            self.node_depth += 1
-            if self.node_depth > 64:
-                raise ValidationError("YAML nesting is too deep")
-            try:
-                return super().compose_node(parent, index)
-            finally:
-                self.node_depth -= 1
-
-    def construct_mapping(loader: Any, node: Any, deep: bool = False) -> dict[Any, Any]:
-        loader.flatten_mapping(node)
-        result: dict[Any, Any] = {}
-        for key_node, value_node in node.value:
-            key = loader.construct_object(key_node, deep=deep)
-            try:
-                duplicate = key in result
-            except TypeError as error:
-                raise ValidationError("YAML mapping keys must be scalar") from error
-            if duplicate:
-                raise ValidationError(f"YAML contains duplicate key {key!r}")
-            result[key] = loader.construct_object(value_node, deep=deep)
-        return result
-
-    StrictLoader.add_constructor(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-        construct_mapping,
-    )
-    try:
-        documents = list(yaml.load_all(decoded, Loader=StrictLoader))
-    except ValidationError:
-        raise
-    except yaml.YAMLError as error:
-        raise ValidationError("YAML is malformed or uses an unsupported tag") from error
-    if len(documents) != 1 or documents[0] is None:
-        raise ValidationError("YAML must contain exactly one non-empty document")
-    return documents[0]

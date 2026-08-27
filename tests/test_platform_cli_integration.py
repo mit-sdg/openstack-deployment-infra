@@ -12,7 +12,7 @@ from platform_cli.deployment_config import parse_configuration
 from platform_cli.helper.main import default_handlers
 from platform_cli.helper.production import ACTION_MANIFEST
 from platform_cli.storage_contract import PLATFORM_ENVIRONMENT_KEYS
-from platform_cli.validation import ValidationError
+from tests.product_fixtures import accept_deployment
 
 APP_ID = "00000000-0000-4000-8000-000000000001"
 IMAGE_ID = "00000000-0000-4000-8000-000000000002"
@@ -142,7 +142,7 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(cli.main(["status"]), cli.EXIT_UNAVAILABLE)
         self.assertIn("unavailable:", stderr.getvalue())
 
-    def test_complete_command_tree_parses(self) -> None:
+    def test_operator_command_tree_excludes_controller_product_commands(self) -> None:
         commands = (
             ("setup", "--env-file", str(self.root / "setup.env")),
             (
@@ -165,63 +165,14 @@ class CliIntegrationTests(unittest.TestCase):
             ("infra", "reboot", "ingress", "--yes"),
             ("infra", "replace", "admin", "--yes"),
             ("infra", "logs", "admin"),
-            ("app", "create", "demo-app"),
-            ("app", "remove", "demo-app", "--confirm", "demo-app"),
-            ("app", "list"),
-            ("app", "show", "demo-app"),
-            ("app", "logs", "demo-app", "--runtime"),
-            ("app", "env", "set", "demo-app", "MODE"),
-            ("app", "env", "unset", "demo-app", "MODE"),
-            ("app", "env", "import", "demo-app", "--file", "-"),
-            ("app", "env", "list", "demo-app"),
-            ("storage", "list"),
-            ("storage", "show", "demo-app", "postgres", "--name", "analytics"),
-            ("storage", "create", "demo-app", "postgres", "--name", "default"),
-            ("storage", "verify", "demo-app", "mongo", "--name", "analytics"),
-            ("storage", "rotate", "demo-app", "mongo", "--name", "analytics"),
-            ("storage", "remove", "demo-app", "s3", "--name", "default", "--confirm", "default"),
         )
         parser = cli.build_parser()
         for command in commands:
             with self.subTest(command=command):
                 parser.parse_args(self.argv(*command))
-
-    def test_build_logs_default_to_latest_attempt_and_accept_exact_id(self) -> None:
-        build_id = "00000000-0000-4000-8000-000000000099"
-        relative = f"build-logs/{APP_ID}/{build_id}.log"
-        path = self.state / relative
-        path.parent.mkdir(parents=True)
-        self.state.chmod(0o700)
-        path.write_text("historical output\n", encoding="utf-8")
-        with cli._database(cli.build_parser().parse_args(self.argv("status"))) as connection:
-            db.put_application(
-                connection,
-                application_id=APP_ID,
-                application_slug="demo-app",
-                worker_flavor="one-vcpu",
-                scheduler_cpu_mhz=1000,
-                scheduler_memory_mib=2048,
-            )
-            db.begin_operation(
-                connection,
-                operation_id=build_id,
-                kind="app.deploy",
-                scope=f"app-{APP_ID}",
-                phase="image_pushed",
-                deadline_at="2026-08-18T01:00:00Z",
-                refs={"build_log_path": relative},
-            )
-            db.mark_failed(connection, build_id, RuntimeError("failed"), cleanup_state="confirmed")
-        output = StringIO()
-        with mock.patch.object(cli, "_helper", return_value={"exists": False}):
-            cli.dispatch(
-                cli.build_parser().parse_args(
-                    self.argv("app", "logs", "demo-app", "--build", "--id", build_id)
-                ),
-                stdout=output,
-            )
-        self.assertIn(f"build={build_id} status=failed", output.getvalue())
-        self.assertIn("historical output", output.getvalue())
+        for command in (("app", "list"), ("storage", "list")):
+            with self.subTest(command=command), self.assertRaises(SystemExit):
+                parser.parse_args(self.argv(*command))
 
     def test_status_initializes_private_database_and_renders_table(self) -> None:
         output = StringIO()
@@ -344,162 +295,14 @@ class CliIntegrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_created_application_is_inert_and_lets_storage_precede_deployment(self) -> None:
-        """An application that reads a database at startup needs one first.
-
-        Only a deployment used to create an application row, and managed
-        storage needs that row to exist, so such an application could never
-        pass the health check its first deployment demanded.
-        """
-        output = StringIO()
-        cli.dispatch(
-            cli.build_parser().parse_args(self.argv("app", "create", "demo-app")), stdout=output
-        )
-        self.assertIn("slug=demo-app", output.getvalue())
-
-        connection = db.connect(self.state / "platform.sqlite3")
-        try:
-            application = db.get_application(connection, "demo-app")
-            self.assertIsNotNone(application)
-            assert application is not None
-            # Declared, not running: nothing is deployed yet, so the platform
-            # must not report the application as unavailable.
-            self.assertFalse(application.desired_running)
-            self.assertIsNone(application.repository_url)
-            self.assertIsNone(application.worker_server_id)
-            self.assertEqual(application.url, "https://demo-app.apps.example.com")
-        finally:
-            connection.close()
-
-        # The slug now resolves, which is all managed storage and staff
-        # environment values require.
-        duplicate = cli.build_parser().parse_args(self.argv("app", "create", "demo-app"))
-        with self.assertRaisesRegex(ValidationError, "already exists"):
-            cli.dispatch(duplicate, stdout=StringIO())
-
-    def test_environment_value_never_enters_output_or_sqlite(self) -> None:
-        args = cli.build_parser().parse_args(self.argv("app", "env", "set", "demo-app", "MODE"))
-        with cli._database(args) as connection:
-            db.put_application(
-                connection,
-                application_id=APP_ID,
-                application_slug="demo-app",
-                worker_flavor="one-vcpu",
-                scheduler_cpu_mhz=1000,
-                scheduler_memory_mib=2048,
-            )
-        sentinel = "sentinel-secret-environment-value"
-        output = StringIO()
-        with mock.patch.object(
-            cli.app,
-            "set_environment",
-            return_value={"keys": ["MODE"], "modifyIndex": 4},
-        ) as invoked:
-            cli.dispatch(args, stdin=StringIO(sentinel + "\n"), stdout=output)
-        self.assertEqual(invoked.call_args.args[1], {"MODE": sentinel})
-        self.assertNotIn(sentinel, output.getvalue())
-        self.assertNotIn(sentinel.encode(), (self.state / "platform.sqlite3").read_bytes())
-        connection = db.connect(self.state / "platform.sqlite3")
-        try:
-            keys = db.list_environment_keys(connection, application_id=APP_ID)
-            self.assertEqual([(item.key_name, item.owner) for item in keys], [("MODE", "staff")])
-        finally:
-            connection.close()
-
-    def test_environment_retry_observes_and_closes_interrupted_phase(self) -> None:
-        args = cli.build_parser().parse_args(self.argv("app", "env", "set", "demo-app", "MODE"))
-        configured = cli._load_config(args)
-        with cli._database(args) as connection:
-            db.put_application(
-                connection,
-                application_id=APP_ID,
-                application_slug="demo-app",
-                worker_flavor="one-vcpu",
-                scheduler_cpu_mhz=1000,
-                scheduler_memory_mib=2048,
-            )
-            interrupted = cli._begin(
-                connection,
-                configured,
-                kind="app.env.set",
-                scope=f"app-{APP_ID}",
-                phase="intent_recorded",
-                refs={"key_names": ["MODE"], "mutation": "set"},
-            )
-            db.mark_recovery_required(connection, interrupted, "injected interruption")
-        with (
-            mock.patch.object(
-                cli.app,
-                "list_environment",
-                return_value={"keys": ["MODE"], "modifyIndex": 3},
-            ) as observed,
-            mock.patch.object(
-                cli.app,
-                "set_environment",
-                return_value={"keys": ["MODE"], "modifyIndex": 4},
-            ),
-        ):
-            cli.dispatch(args, stdin=StringIO("new-value\n"), stdout=StringIO())
-        observed.assert_called_once()
-        connection = db.connect(self.state / "platform.sqlite3")
-        try:
-            rows = list(
-                connection.execute(
-                    "SELECT status FROM operations WHERE kind='app.env.set' ORDER BY rowid"
-                )
-            )
-            self.assertEqual([row["status"] for row in rows], ["failed", "succeeded"])
-        finally:
-            connection.close()
-
-    def test_bounded_file_reader_rejects_symlinks_and_oversized_inputs(self) -> None:
-        source = self.root / "source.env"
-        source.write_bytes(b"12345")
-        self.assertEqual(
-            cli._read_bounded_file(source, maximum=5, field="environment file"),
-            b"12345",
-        )
-        link = self.root / "linked.env"
-        link.symlink_to(source)
-        with self.assertRaisesRegex(ValidationError, "direct regular file"):
-            cli._read_bounded_file(link, maximum=5, field="environment file")
-        with self.assertRaisesRegex(ValidationError, "bounded"):
-            cli._read_bounded_file(source, maximum=4, field="environment file")
-
-    def test_log_line_bounds_are_shared_by_host_and_application_logs(self) -> None:
+    def test_host_log_line_bounds(self) -> None:
         parser = cli.build_parser()
         for command in (
             ("infra", "logs", "admin", "--lines", "0"),
             ("infra", "logs", "admin", "--lines", "2001"),
-            ("app", "logs", "demo-app", "--build", "--lines", "-1"),
         ):
             with self.subTest(command=command), self.assertRaises(SystemExit):
                 parser.parse_args(self.argv(*command))
-
-    def test_wrong_project_refuses_environment_before_secret_or_helper_mutation(self) -> None:
-        args = cli.build_parser().parse_args(self.argv("app", "env", "set", "demo-app", "MODE"))
-        with cli._database(args) as connection:
-            db.put_application(
-                connection,
-                application_id=APP_ID,
-                application_slug="demo-app",
-                worker_flavor="one-vcpu",
-                scheduler_cpu_mhz=1000,
-                scheduler_memory_mib=2048,
-            )
-        secret = StringIO("must-not-be-read\n")
-        with (
-            mock.patch.object(
-                cli.openstack,
-                "verify_project",
-                side_effect=openstack.OpenStackError("wrong project"),
-            ),
-            mock.patch.object(cli.app, "set_environment") as mutate,
-            self.assertRaisesRegex(openstack.OpenStackError, "wrong project"),
-        ):
-            cli.dispatch(args, stdin=secret)
-        mutate.assert_not_called()
-        self.assertEqual(secret.tell(), 0)
 
     def test_platform_ownership_transfer_preserves_unrelated_staff_keys(self) -> None:
         args = cli.build_parser().parse_args(self.argv("status"))
@@ -530,97 +333,6 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(ownership["NODE_ENV"], "platform")
         self.assertEqual(ownership["STAFF_SENTINEL"], "staff")
 
-    def test_staff_environment_commands_cannot_modify_node_env(self) -> None:
-        status_args = cli.build_parser().parse_args(self.argv("status"))
-        with cli._database(status_args) as connection:
-            db.put_application(
-                connection,
-                application_id=APP_ID,
-                application_slug="demo-app",
-                worker_flavor="one-vcpu",
-                scheduler_cpu_mhz=1000,
-                scheduler_memory_mib=2048,
-            )
-        commands = (
-            (("app", "env", "set", "demo-app", "NODE_ENV"), "sentinel-development\n"),
-            (("app", "env", "unset", "demo-app", "NODE_ENV"), ""),
-            (("app", "env", "import", "demo-app", "--file", "-"), "NODE_ENV=staging\n"),
-        )
-        for command, payload in commands:
-            args = cli.build_parser().parse_args(self.argv(*command))
-            with (
-                self.subTest(command=command),
-                mock.patch.object(cli.app, "set_environment") as set_values,
-                mock.patch.object(cli.app, "remove_environment") as remove_values,
-                self.assertRaisesRegex(ValidationError, "reserved") as raised,
-            ):
-                cli.dispatch(args, stdin=StringIO(payload))
-            set_values.assert_not_called()
-            remove_values.assert_not_called()
-            self.assertNotIn("sentinel-development", str(raised.exception))
-
-    def test_app_remove_deletes_current_and_prior_manifest_history(self) -> None:
-        prior = "registry.example/runtime/image@sha256:" + "b" * 64
-        args = cli.build_parser().parse_args(
-            self.argv("app", "remove", "demo-app", "--confirm", "demo-app")
-        )
-        with cli._database(args) as connection:
-            db.put_application(
-                connection,
-                application_id=APP_ID,
-                application_slug="demo-app",
-                worker_flavor="one-vcpu",
-                scheduler_cpu_mhz=1000,
-                scheduler_memory_mib=2048,
-            )
-            db.accept_deployment(
-                connection,
-                application_id=APP_ID,
-                source_commit="a" * 40,
-                recipe_hash="b" * 64,
-                image_digest=DIGEST,
-                nomad_job=(
-                    '    attribute = "${meta.application_id}"\n'
-                    '    operator  = "="\n'
-                    f'    value     = "{APP_ID}"'
-                ),
-                nomad_version=4,
-                build_log_path="logs/build.log",
-            )
-            operation_id = "00000000-0000-4000-8000-000000000099"
-            db.begin_operation(
-                connection,
-                operation_id=operation_id,
-                kind="app.deploy",
-                scope=f"app-{APP_ID}",
-                phase="accepted",
-                deadline_at="2026-08-18T01:00:00Z",
-            )
-            db.checkpoint_operation(
-                connection,
-                operation_id,
-                phase="accepted",
-                candidate_digest=prior,
-            )
-            db.mark_succeeded(connection, operation_id)
-        deleted: list[str] = []
-
-        def helper(
-            _config: object, action: str, values: dict[str, object], **_kwargs: object
-        ) -> dict[str, object]:
-            if action == "app.remove":
-                return {"jobAbsent": True, "variableAbsent": True}
-            if action == "app.worker.delete":
-                return {"absent": True}
-            if action == "app.manifest.delete":
-                deleted.append(str(values["image"]))
-                return {"absent": True}
-            raise AssertionError(action)
-
-        with mock.patch.object(cli, "_helper", side_effect=helper):
-            cli.dispatch(args, stdout=StringIO())
-        self.assertEqual(set(deleted), {DIGEST, prior})
-
     def _select_deployment_images(self) -> None:
         args = cli.build_parser().parse_args(self.argv("status"))
         with cli._database(args) as connection:
@@ -634,7 +346,7 @@ class CliIntegrationTests(unittest.TestCase):
                     compatibility_hash="c" * 64,
                 )
 
-    def _deploy(self, application: str) -> deployment_service.DeploymentOutcome:
+    def _deploy(self, application: str, helper_caller) -> deployment_service.DeploymentOutcome:
         args = cli.build_parser().parse_args(self.argv("status"))
         configured = cli._load_config(args)
         configuration = parse_configuration(
@@ -655,7 +367,7 @@ class CliIntegrationTests(unittest.TestCase):
                 connection,
                 configured,
                 self.state,
-                helper_caller=cli._helper,
+                helper_caller=helper_caller,
             ).deploy(
                 deployment_service.DeploymentRequest(
                     application=application,
@@ -668,7 +380,7 @@ class CliIntegrationTests(unittest.TestCase):
                 deadline=cli._command_deadline(configured),
             )
 
-    def test_deploy_recovers_builder_phase_and_remove_recovers_worker_phase(self) -> None:
+    def test_deploy_recovers_builder_phase(self) -> None:
         self._select_deployment_images()
         deploy_args = cli.build_parser().parse_args(self.argv("status"))
         manifest = app.Manifest("node", (".",), None, "serve", 8080, "/ready")
@@ -683,7 +395,6 @@ class CliIntegrationTests(unittest.TestCase):
             actions.append("flavor.verify") or "one-vcpu"
         )
         fail_build = [True]
-        fail_worker_remove = [True]
 
         def helper(
             _config: object, action: str, values: object, **_kwargs: object
@@ -786,9 +497,6 @@ class CliIntegrationTests(unittest.TestCase):
             if action == "app.remove":
                 return {"jobAbsent": True, "variableAbsent": True}
             if action == "app.worker.delete":
-                if fail_worker_remove[0]:
-                    fail_worker_remove[0] = False
-                    raise app.ApplicationError("bounded worker interruption")
                 return {"absent": True}
             if action == "app.manifest.delete":
                 return {"absent": True}
@@ -796,19 +504,15 @@ class CliIntegrationTests(unittest.TestCase):
                 return {"protected": [image], "deleted": []}
             raise AssertionError((action, values))
 
-        with (
-            mock.patch.object(cli, "_helper", side_effect=helper),
-            mock.patch.object(cli.app, "check_public_health", return_value=True),
-        ):
+        with mock.patch.object(cli.app, "check_public_health", return_value=True):
             with self.assertRaises(app.ApplicationError):
-                self._deploy("demo-app")
-            result = self._deploy("demo-app")
+                self._deploy("demo-app", helper)
+            result = self._deploy("demo-app", helper)
             self.assertEqual(result.nomad_version, 4)
             build_request = call_values["app.build"][-1]
             self.assertEqual(build_request["requestedRef"], "main")  # type: ignore[index]
             self.assertEqual(build_request["configurationRevision"], 1)  # type: ignore[index]
             self.assertNotIn("configPath", build_request)  # type: ignore[operator]
-            output = StringIO()
             environment_call = call_values["app.env.set"][-1]
             self.assertEqual(
                 environment_call["updates"],  # type: ignore[index]
@@ -849,25 +553,14 @@ class CliIntegrationTests(unittest.TestCase):
             self.observe_flavor_mock.assert_called()
             self.assertLess(actions.index("flavor.verify"), actions.index("app.worker.create"))
 
-            remove_args = cli.build_parser().parse_args(
-                self.argv("app", "remove", "demo-app", "--confirm", "demo-app")
-            )
-            with self.assertRaises(app.ApplicationError):
-                cli.dispatch(remove_args)
-            cli.dispatch(remove_args, stdout=output)
-
         self.assertIn("app.builder.delete", actions)
         self.assertIn("app.manifest.retain", actions)
-        self.assertGreaterEqual(actions.count("app.remove"), 2)
         connection = db.connect(self.state / "platform.sqlite3")
         try:
-            self.assertIsNone(db.get_application(connection, "demo-app"))
-            statuses = {
-                row["kind"]: row["status"]
-                for row in connection.execute("SELECT kind, status FROM operations")
-            }
-            self.assertEqual(statuses["app.deploy"], "succeeded")
-            self.assertEqual(statuses["app.remove"], "succeeded")
+            operation = connection.execute(
+                "SELECT status FROM operations WHERE kind='app.deploy'"
+            ).fetchone()
+            self.assertEqual(operation["status"], "succeeded")
         finally:
             connection.close()
 
@@ -894,7 +587,7 @@ class CliIntegrationTests(unittest.TestCase):
                 scheduler_cpu_mhz=1000,
                 scheduler_memory_mib=2048,
             )
-            db.accept_deployment(
+            accept_deployment(
                 connection,
                 application_id=APP_ID,
                 source_commit="a" * 40,
@@ -1004,7 +697,7 @@ class CliIntegrationTests(unittest.TestCase):
             scheduler_cpu_mhz=1000,
             scheduler_memory_mib=2048,
         )
-        db.accept_deployment(
+        accept_deployment(
             connection,
             application_id=APP_ID,
             source_commit="a" * 40,
@@ -1116,7 +809,6 @@ class CliIntegrationTests(unittest.TestCase):
             raise AssertionError(action)
 
         with (
-            mock.patch.object(cli, "_helper", side_effect=helper),
             mock.patch.object(
                 cli.app,
                 "deploy_and_cleanup",
@@ -1126,8 +818,8 @@ class CliIntegrationTests(unittest.TestCase):
             ) as deploy,
         ):
             with self.assertRaises(app.ApplicationError):
-                self._deploy("failed-app")
-            recovered = self._deploy("failed-app")
+                self._deploy("failed-app", helper)
+            recovered = self._deploy("failed-app", helper)
             self.assertEqual(recovered.recovered, "candidate-removed")
         self.assertEqual(actions.count("app.build"), 1)
         self.assertEqual(actions.count("app.manifest.delete"), 2)

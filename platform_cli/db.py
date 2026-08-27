@@ -31,9 +31,6 @@ from .validation import (
     uuid,
 )
 from .validation import (
-    health_path as validate_health_path,
-)
-from .validation import (
     resource_name as validate_resource_name,
 )
 
@@ -255,365 +252,207 @@ MIGRATIONS: tuple[Migration, ...] = (
         (
             """
             CREATE TABLE image_selections (
-                role TEXT PRIMARY KEY CHECK (role IN ('admin','ingress','storage','worker','builder')),
-                image_id TEXT NOT NULL,
-                display_name TEXT NOT NULL,
-                source_commit TEXT NOT NULL,
-                compatibility_hash TEXT NOT NULL,
-                selected_at TEXT NOT NULL
-            ) STRICT
+                            role TEXT PRIMARY KEY CHECK (role IN ('admin','ingress','storage','worker','builder')),
+                            image_id TEXT NOT NULL,
+                            display_name TEXT NOT NULL,
+                            source_commit TEXT NOT NULL,
+                            compatibility_hash TEXT NOT NULL,
+                            selected_at TEXT NOT NULL
+                        ) STRICT
             """,
             """
             CREATE TABLE applications (
-                application_id TEXT PRIMARY KEY,
-                slug TEXT NOT NULL UNIQUE,
-                repository_url TEXT,
-                config_path TEXT,
-                desired_running INTEGER NOT NULL CHECK (desired_running IN (0,1)),
-                url TEXT,
-                worker_server_id TEXT,
-                worker_server_name TEXT,
-                worker_port_id TEXT,
-                worker_port_name TEXT,
-                worker_flavor TEXT NOT NULL,
-                scheduler_cpu_mhz INTEGER NOT NULL CHECK (scheduler_cpu_mhz > 0),
-                scheduler_memory_mib INTEGER NOT NULL CHECK (scheduler_memory_mib > 0),
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            ) STRICT
+                            application_id TEXT PRIMARY KEY,
+                            slug TEXT NOT NULL UNIQUE,
+                            repository_url TEXT,
+                            desired_running INTEGER NOT NULL CHECK (desired_running IN (0,1)),
+                            url TEXT,
+                            worker_server_id TEXT,
+                            worker_server_name TEXT,
+                            worker_port_id TEXT,
+                            worker_port_name TEXT,
+                            worker_flavor TEXT NOT NULL,
+                            scheduler_cpu_mhz INTEGER NOT NULL CHECK (scheduler_cpu_mhz > 0),
+                            scheduler_memory_mib INTEGER NOT NULL CHECK (scheduler_memory_mib > 0),
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        ) STRICT
             """,
-        ),
-    ),
-    Migration(
-        2,
-        (
-            """
-            CREATE TABLE deployments (
-                application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE,
-                source_commit TEXT NOT NULL,
-                recipe_hash TEXT NOT NULL,
-                image_digest TEXT NOT NULL,
-                nomad_job TEXT NOT NULL,
-                nomad_version INTEGER NOT NULL CHECK (nomad_version >= 0),
-                build_log_path TEXT NOT NULL,
-                accepted_at TEXT NOT NULL,
-                last_healthy_at TEXT NOT NULL,
-                nomad_job_sha256 TEXT NOT NULL,
-                health_path TEXT NOT NULL,
-                application_port INTEGER NOT NULL CHECK (application_port BETWEEN 1 AND 65535)
-            ) STRICT
-            """,
-        ),
-    ),
-    Migration(
-        3,
-        (
-            """
-            CREATE TABLE managed_resources (
-                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
-                resource_type TEXT NOT NULL CHECK (resource_type IN ('postgres','mongo','s3')),
-                provider_id TEXT,
-                provider_name TEXT NOT NULL,
-                lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('creating','active','removing','recovery_required')),
-                postgres_connections INTEGER CHECK (postgres_connections > 0),
-                measured_target_bytes INTEGER CHECK (measured_target_bytes > 0),
-                s3_bytes INTEGER CHECK (s3_bytes > 0),
-                s3_objects INTEGER CHECK (s3_objects > 0),
-                last_verified_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (application_id, resource_type),
-                CHECK (resource_type = 'postgres' OR postgres_connections IS NULL),
-                CHECK (resource_type IN ('postgres','mongo') OR measured_target_bytes IS NULL),
-                CHECK (resource_type = 's3' OR (s3_bytes IS NULL AND s3_objects IS NULL))
-            ) STRICT
-            """,
-            """
-            CREATE TABLE environment_keys (
-                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
-                key_name TEXT NOT NULL,
-                owner TEXT NOT NULL CHECK (owner IN ('platform','staff','postgres','mongo','s3')),
-                PRIMARY KEY (application_id, key_name)
-            ) STRICT
-            """,
-        ),
-    ),
-    Migration(
-        4,
-        (
             """
             CREATE TABLE operations (
-                operation_id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                scope TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (status IN ('running','succeeded','failed','recovery_required')),
-                phase TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                deadline_at TEXT NOT NULL,
-                refs_json TEXT NOT NULL CHECK (json_valid(refs_json) AND json_type(refs_json) = 'object'),
-                candidate_digest TEXT,
-                safe_error TEXT,
-                cleanup_state TEXT NOT NULL,
-                CHECK (length(refs_json) <= 16384),
-                CHECK (safe_error IS NULL OR length(safe_error) <= 1024)
-            ) STRICT
+                            operation_id TEXT PRIMARY KEY,
+                            kind TEXT NOT NULL,
+                            scope TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (status IN ('running','succeeded','failed','recovery_required')),
+                            phase TEXT NOT NULL,
+                            started_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            deadline_at TEXT NOT NULL,
+                            refs_json TEXT NOT NULL CHECK (json_valid(refs_json) AND json_type(refs_json) = 'object'),
+                            candidate_digest TEXT,
+                            safe_error TEXT,
+                            cleanup_state TEXT NOT NULL,
+                            CHECK (length(refs_json) <= 16384),
+                            CHECK (safe_error IS NULL OR length(safe_error) <= 1024)
+                        ) STRICT
             """,
             """
             CREATE UNIQUE INDEX one_unfinished_operation_per_scope
-            ON operations(scope)
-            WHERE status IN ('running','recovery_required')
-            """,
-            "CREATE INDEX operations_updated_at ON operations(updated_at)",
-        ),
-    ),
-    Migration(
-        5,
-        (
-            """
-            ALTER TABLE managed_resources RENAME TO managed_resources_unnamed
+                        ON operations(scope)
+                        WHERE status IN ('running','recovery_required')
             """,
             """
-            CREATE TABLE managed_resources (
-                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
-                resource_type TEXT NOT NULL CHECK (resource_type IN ('postgres','mongo','s3')),
-                resource_name TEXT NOT NULL CHECK (
-                    length(resource_name) BETWEEN 1 AND 40
-                    AND resource_name GLOB '[a-z]*'
-                    AND resource_name NOT GLOB '*[^a-z0-9-]*'
-                    AND resource_name NOT GLOB '*--*'
-                    AND (length(resource_name) = 1 OR substr(resource_name, -1) GLOB '[a-z0-9]')
-                ),
-                provider_id TEXT,
-                provider_name TEXT NOT NULL,
-                lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('creating','active','removing','recovery_required')),
-                postgres_connections INTEGER CHECK (postgres_connections > 0),
-                measured_target_bytes INTEGER CHECK (measured_target_bytes > 0),
-                s3_bytes INTEGER CHECK (s3_bytes > 0),
-                s3_objects INTEGER CHECK (s3_objects > 0),
-                last_verified_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (application_id, resource_type, resource_name),
-                CHECK (resource_type = 'postgres' OR postgres_connections IS NULL),
-                CHECK (resource_type IN ('postgres','mongo') OR measured_target_bytes IS NULL),
-                CHECK (resource_type = 's3' OR (s3_bytes IS NULL AND s3_objects IS NULL))
-            ) STRICT
+            CREATE INDEX operations_updated_at ON operations(updated_at)
             """,
-            """
-            INSERT INTO managed_resources
-            SELECT application_id, resource_type, 'default', provider_id, provider_name,
-                   lifecycle_state, postgres_connections, measured_target_bytes,
-                   s3_bytes, s3_objects, last_verified_at, created_at, updated_at
-              FROM managed_resources_unnamed
-            """,
-            "DROP TABLE managed_resources_unnamed",
-            "ALTER TABLE environment_keys RENAME TO environment_keys_unnamed",
             """
             CREATE TABLE environment_keys (
-                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
-                key_name TEXT NOT NULL,
-                owner TEXT NOT NULL,
-                PRIMARY KEY (application_id, key_name)
-            ) STRICT
+                            application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
+                            key_name TEXT NOT NULL,
+                            owner TEXT NOT NULL,
+                            PRIMARY KEY (application_id, key_name)
+                        ) STRICT
             """,
-            """
-            INSERT INTO environment_keys
-            SELECT application_id, key_name,
-                   CASE WHEN owner IN ('postgres','mongo','s3')
-                        THEN 'storage.' || owner || '.default' ELSE owner END
-              FROM environment_keys_unnamed
-            """,
-            "DROP TABLE environment_keys_unnamed",
-        ),
-    ),
-    Migration(
-        6,
-        (
             """
             CREATE TABLE idempotency_requests (
-                request_id TEXT PRIMARY KEY,
-                request_fingerprint TEXT NOT NULL CHECK (
-                    length(request_fingerprint) = 64
-                    AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
-                ),
-                result_kind TEXT,
-                result_id TEXT,
-                created_at TEXT NOT NULL,
-                completed_at TEXT,
-                CHECK ((result_kind IS NULL) = (result_id IS NULL)),
-                CHECK ((result_id IS NULL) = (completed_at IS NULL))
-            ) STRICT
+                            request_id TEXT PRIMARY KEY,
+                            request_fingerprint TEXT NOT NULL CHECK (
+                                length(request_fingerprint) = 64
+                                AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+                            ),
+                            result_kind TEXT,
+                            result_id TEXT,
+                            created_at TEXT NOT NULL,
+                            completed_at TEXT,
+                            CHECK ((result_kind IS NULL) = (result_id IS NULL)),
+                            CHECK ((result_id IS NULL) = (completed_at IS NULL))
+                        ) STRICT
             """,
             """
             CREATE TABLE deployment_attempts (
-                deployment_id TEXT PRIMARY KEY,
-                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
-                status TEXT NOT NULL CHECK (status IN (
-                    'queued','building','deploying','succeeded','failed','recovery_required'
-                )),
-                snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ('strict','legacy')),
-                source_commit TEXT NOT NULL,
-                requested_ref TEXT,
-                configuration_revision INTEGER CHECK (configuration_revision >= 0),
-                configuration_json TEXT,
-                configuration_sha256 TEXT,
-                environment_revision INTEGER CHECK (environment_revision >= 0),
-                idempotency_request_id TEXT UNIQUE REFERENCES idempotency_requests(request_id),
-                recipe_hash TEXT,
-                image_digest TEXT,
-                nomad_job TEXT,
-                nomad_job_sha256 TEXT,
-                nomad_version INTEGER CHECK (nomad_version >= 0),
-                health_path TEXT,
-                application_port INTEGER CHECK (application_port BETWEEN 1 AND 65535),
-                build_log_path TEXT,
-                safe_error TEXT CHECK (safe_error IS NULL OR length(safe_error) <= 1024),
-                cleanup_state TEXT,
-                requested_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                accepted_at TEXT,
-                last_healthy_at TEXT,
-                UNIQUE (application_id, deployment_id),
-                CHECK (
-                    (snapshot_kind = 'legacy' AND requested_ref IS NULL
-                     AND configuration_revision IS NULL AND configuration_json IS NULL
-                     AND configuration_sha256 IS NULL AND environment_revision IS NULL
-                     AND idempotency_request_id IS NULL)
-                    OR
-                    (snapshot_kind = 'strict' AND requested_ref IS NOT NULL
-                     AND configuration_revision IS NOT NULL
-                     AND json_valid(configuration_json) AND json_type(configuration_json) = 'object'
-                     AND length(configuration_sha256) = 64
-                     AND configuration_sha256 NOT GLOB '*[^0-9a-f]*'
-                     AND environment_revision IS NOT NULL AND idempotency_request_id IS NOT NULL)
-                ),
-                CHECK (status != 'succeeded' OR (
-                    recipe_hash IS NOT NULL AND image_digest IS NOT NULL
-                    AND nomad_job IS NOT NULL AND nomad_job_sha256 IS NOT NULL
-                    AND nomad_version IS NOT NULL AND build_log_path IS NOT NULL
-                    AND accepted_at IS NOT NULL AND last_healthy_at IS NOT NULL
-                )),
-                CHECK (status NOT IN ('failed','recovery_required') OR safe_error IS NOT NULL)
-            ) STRICT
+                            deployment_id TEXT PRIMARY KEY,
+                            application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
+                            status TEXT NOT NULL CHECK (status IN (
+                                'queued','building','deploying','succeeded','failed','recovery_required'
+                            )),
+                            snapshot_kind TEXT NOT NULL CHECK (snapshot_kind = 'strict'),
+                            source_commit TEXT NOT NULL,
+                            requested_ref TEXT,
+                            configuration_revision INTEGER CHECK (configuration_revision >= 0),
+                            configuration_json TEXT,
+                            configuration_sha256 TEXT,
+                            environment_revision INTEGER CHECK (environment_revision >= 0),
+                            idempotency_request_id TEXT UNIQUE REFERENCES idempotency_requests(request_id),
+                            recipe_hash TEXT,
+                            image_digest TEXT,
+                            nomad_job TEXT,
+                            nomad_job_sha256 TEXT,
+                            nomad_version INTEGER CHECK (nomad_version >= 0),
+                            health_path TEXT,
+                            application_port INTEGER CHECK (application_port BETWEEN 1 AND 65535),
+                            build_log_path TEXT,
+                            safe_error TEXT CHECK (safe_error IS NULL OR length(safe_error) <= 1024),
+                            cleanup_state TEXT,
+                            requested_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            accepted_at TEXT,
+                            last_healthy_at TEXT,
+                            UNIQUE (application_id, deployment_id),
+                            CHECK (
+                                requested_ref IS NOT NULL
+                                AND configuration_revision IS NOT NULL
+                                AND json_valid(configuration_json)
+                                AND json_type(configuration_json) = 'object'
+                                AND length(configuration_sha256) = 64
+                                AND configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+                                AND environment_revision IS NOT NULL
+                                AND idempotency_request_id IS NOT NULL
+                            ),
+                            CHECK (status != 'succeeded' OR (
+                                recipe_hash IS NOT NULL AND image_digest IS NOT NULL
+                                AND nomad_job IS NOT NULL AND nomad_job_sha256 IS NOT NULL
+                                AND nomad_version IS NOT NULL AND build_log_path IS NOT NULL
+                                AND accepted_at IS NOT NULL AND last_healthy_at IS NOT NULL
+                            )),
+                            CHECK (status NOT IN ('failed','recovery_required') OR safe_error IS NOT NULL)
+                        ) STRICT
             """,
             """
             CREATE UNIQUE INDEX one_unfinished_deployment_per_application
-            ON deployment_attempts(application_id)
-            WHERE status IN ('queued','building','deploying','recovery_required')
-            """,
-            """
-            INSERT INTO deployment_attempts
-            SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
-                   '-4' || substr(lower(hex(randomblob(2))), 2) || '-' ||
-                   substr('89ab', (random() & 3) + 1, 1) ||
-                   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
-                   application_id, 'succeeded', 'legacy', source_commit,
-                   NULL, NULL, NULL, NULL, NULL, NULL,
-                   recipe_hash, image_digest, nomad_job, nomad_job_sha256, nomad_version,
-                   health_path, application_port, build_log_path, NULL, NULL,
-                   accepted_at, accepted_at, accepted_at, last_healthy_at
-              FROM deployments
+                        ON deployment_attempts(application_id)
+                        WHERE status IN ('queued','building','deploying','recovery_required')
             """,
             """
             CREATE TABLE active_deployments (
-                application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE,
-                deployment_id TEXT NOT NULL,
-                lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('running','stopped')),
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (application_id, deployment_id)
-                    REFERENCES deployment_attempts(application_id, deployment_id)
-            ) STRICT
+                            application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE,
+                            deployment_id TEXT NOT NULL,
+                            lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('running','stopped')),
+                            updated_at TEXT NOT NULL,
+                            FOREIGN KEY (application_id, deployment_id)
+                                REFERENCES deployment_attempts(application_id, deployment_id)
+                        ) STRICT
             """,
-            """
-            INSERT INTO active_deployments
-            SELECT attempt.application_id, attempt.deployment_id,
-                   CASE application.desired_running WHEN 1 THEN 'running' ELSE 'stopped' END,
-                   attempt.accepted_at
-              FROM deployment_attempts AS attempt
-              JOIN applications AS application USING (application_id)
-            """,
-            "DROP TABLE deployments",
             """
             CREATE TRIGGER deployment_attempt_request_immutable
-            BEFORE UPDATE ON deployment_attempts
-            WHEN OLD.deployment_id IS NOT NEW.deployment_id
-              OR OLD.application_id IS NOT NEW.application_id
-              OR OLD.snapshot_kind IS NOT NEW.snapshot_kind
-              OR OLD.source_commit IS NOT NEW.source_commit
-              OR OLD.requested_ref IS NOT NEW.requested_ref
-              OR OLD.configuration_revision IS NOT NEW.configuration_revision
-              OR OLD.configuration_json IS NOT NEW.configuration_json
-              OR OLD.configuration_sha256 IS NOT NEW.configuration_sha256
-              OR OLD.environment_revision IS NOT NEW.environment_revision
-              OR OLD.idempotency_request_id IS NOT NEW.idempotency_request_id
-              OR OLD.requested_at IS NOT NEW.requested_at
-              OR OLD.health_path IS NOT NEW.health_path
-              OR OLD.application_port IS NOT NEW.application_port
-            BEGIN
-                SELECT RAISE(ABORT, 'deployment attempt request is immutable');
-            END
+                        BEFORE UPDATE ON deployment_attempts
+                        WHEN OLD.deployment_id IS NOT NEW.deployment_id
+                          OR OLD.application_id IS NOT NEW.application_id
+                          OR OLD.snapshot_kind IS NOT NEW.snapshot_kind
+                          OR OLD.source_commit IS NOT NEW.source_commit
+                          OR OLD.requested_ref IS NOT NEW.requested_ref
+                          OR OLD.configuration_revision IS NOT NEW.configuration_revision
+                          OR OLD.configuration_json IS NOT NEW.configuration_json
+                          OR OLD.configuration_sha256 IS NOT NEW.configuration_sha256
+                          OR OLD.environment_revision IS NOT NEW.environment_revision
+                          OR OLD.idempotency_request_id IS NOT NEW.idempotency_request_id
+                          OR OLD.requested_at IS NOT NEW.requested_at
+                          OR OLD.health_path IS NOT NEW.health_path
+                          OR OLD.application_port IS NOT NEW.application_port
+                        BEGIN
+                            SELECT RAISE(ABORT, 'deployment attempt request is immutable');
+                        END
             """,
-            "ALTER TABLE managed_resources RENAME TO managed_resources_by_name",
             """
             CREATE TABLE managed_resources (
-                resource_id TEXT PRIMARY KEY,
-                application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
-                resource_type TEXT NOT NULL CHECK (resource_type IN ('postgres','mongo','s3')),
-                resource_name TEXT NOT NULL CHECK (
-                    length(resource_name) BETWEEN 1 AND 40
-                    AND resource_name GLOB '[a-z]*'
-                    AND resource_name NOT GLOB '*[^a-z0-9-]*'
-                    AND resource_name NOT GLOB '*--*'
-                    AND (length(resource_name) = 1 OR substr(resource_name, -1) GLOB '[a-z0-9]')
-                ),
-                display_label TEXT NOT NULL CHECK (length(display_label) BETWEEN 1 AND 100),
-                provider_id TEXT,
-                provider_name TEXT NOT NULL,
-                lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('creating','active','removing','recovery_required')),
-                postgres_connections INTEGER CHECK (postgres_connections > 0),
-                measured_target_bytes INTEGER CHECK (measured_target_bytes > 0),
-                s3_bytes INTEGER CHECK (s3_bytes > 0),
-                s3_objects INTEGER CHECK (s3_objects > 0),
-                last_verified_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE (application_id, resource_type, resource_name),
-                CHECK (resource_type = 'postgres' OR postgres_connections IS NULL),
-                CHECK (resource_type IN ('postgres','mongo') OR measured_target_bytes IS NULL),
-                CHECK (resource_type = 's3' OR (s3_bytes IS NULL AND s3_objects IS NULL))
-            ) STRICT
+                            resource_id TEXT PRIMARY KEY,
+                            application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
+                            resource_type TEXT NOT NULL CHECK (resource_type IN ('postgres','mongo','s3')),
+                            resource_name TEXT NOT NULL CHECK (
+                                length(resource_name) BETWEEN 1 AND 40
+                                AND resource_name GLOB '[a-z]*'
+                                AND resource_name NOT GLOB '*[^a-z0-9-]*'
+                                AND resource_name NOT GLOB '*--*'
+                                AND (length(resource_name) = 1 OR substr(resource_name, -1) GLOB '[a-z0-9]')
+                            ),
+                            display_label TEXT NOT NULL CHECK (length(display_label) BETWEEN 1 AND 100),
+                            provider_id TEXT,
+                            provider_name TEXT NOT NULL,
+                            lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('creating','active','removing','recovery_required')),
+                            postgres_connections INTEGER CHECK (postgres_connections > 0),
+                            measured_target_bytes INTEGER CHECK (measured_target_bytes > 0),
+                            s3_bytes INTEGER CHECK (s3_bytes > 0),
+                            s3_objects INTEGER CHECK (s3_objects > 0),
+                            last_verified_at TEXT,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            UNIQUE (application_id, resource_type, resource_name),
+                            CHECK (resource_type = 'postgres' OR postgres_connections IS NULL),
+                            CHECK (resource_type IN ('postgres','mongo') OR measured_target_bytes IS NULL),
+                            CHECK (resource_type = 's3' OR (s3_bytes IS NULL AND s3_objects IS NULL))
+                        ) STRICT
             """,
-            """
-            INSERT INTO managed_resources
-            SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
-                   '-4' || substr(lower(hex(randomblob(2))), 2) || '-' ||
-                   substr('89ab', (random() & 3) + 1, 1) ||
-                   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
-                   application_id, resource_type, resource_name, resource_name,
-                   provider_id, provider_name, lifecycle_state, postgres_connections,
-                   measured_target_bytes, s3_bytes, s3_objects, last_verified_at,
-                   created_at, updated_at
-              FROM managed_resources_by_name
-            """,
-            "DROP TABLE managed_resources_by_name",
             """
             CREATE TABLE environment_revisions (
-                application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE,
-                revision INTEGER NOT NULL CHECK (revision >= 0),
-                updated_at TEXT NOT NULL
-            ) STRICT
-            """,
-            """
-            INSERT INTO environment_revisions
-            SELECT application_id, 0, updated_at FROM applications
+                            application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE,
+                            revision INTEGER NOT NULL CHECK (revision >= 0),
+                            updated_at TEXT NOT NULL
+                        ) STRICT
             """,
             """
             CREATE TABLE application_slug_tombstones (
-                slug TEXT PRIMARY KEY,
-                application_id TEXT NOT NULL,
-                deleted_at TEXT NOT NULL
-            ) STRICT
+                            slug TEXT PRIMARY KEY,
+                            application_id TEXT NOT NULL,
+                            deleted_at TEXT NOT NULL
+                        ) STRICT
             """,
         ),
     ),
@@ -821,13 +660,6 @@ def _initialize_greenfield_schema(
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _nomad_job_sha256(nomad_job: str) -> str:
-    markers: list[str] = _NOMAD_JOB_SHA.findall(nomad_job)
-    if len(markers) == 1:
-        return markers[0]
-    return hashlib.sha256(nomad_job.encode()).hexdigest()
 
 
 def _validate_private_file(path: Path) -> None:
@@ -1558,34 +1390,32 @@ def put_application(
     if scheduler_cpu_mhz <= 0 or scheduler_memory_mib <= 0 or not worker_flavor:
         raise ValidationError("application sizing must be positive and have a worker flavor")
     timestamp = now or utc_now()
-    product_schema = schema_version(connection) >= 6
     with transaction(connection):
-        if product_schema:
-            tombstone = connection.execute(
-                "SELECT 1 FROM application_slug_tombstones WHERE slug = ?",
-                (application_slug,),
-            ).fetchone()
-            if tombstone is not None:
-                raise DatabaseError("application slug is permanently retired")
-            existing = connection.execute(
-                "SELECT slug FROM applications WHERE application_id = ?", (application_id,)
-            ).fetchone()
-            if existing is not None and existing["slug"] != application_slug:
-                connection.execute(
-                    "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
-                    (existing["slug"], application_id, timestamp),
-                )
+        tombstone = connection.execute(
+            "SELECT 1 FROM application_slug_tombstones WHERE slug = ?",
+            (application_slug,),
+        ).fetchone()
+        if tombstone is not None:
+            raise DatabaseError("application slug is permanently retired")
+        existing = connection.execute(
+            "SELECT slug FROM applications WHERE application_id = ?", (application_id,)
+        ).fetchone()
+        if existing is not None and existing["slug"] != application_slug:
+            connection.execute(
+                "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
+                (existing["slug"], application_id, timestamp),
+            )
         connection.execute(
             """
             INSERT INTO applications(
-              application_id, slug, repository_url, config_path, desired_running, url,
+              application_id, slug, repository_url, desired_running, url,
               worker_server_id, worker_server_name, worker_port_id, worker_port_name,
               worker_flavor, scheduler_cpu_mhz, scheduler_memory_mib, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(application_id) DO UPDATE SET
               slug=excluded.slug, repository_url=excluded.repository_url,
-              config_path=excluded.config_path, desired_running=excluded.desired_running,
-              url=excluded.url, worker_server_id=excluded.worker_server_id,
+              desired_running=excluded.desired_running, url=excluded.url,
+              worker_server_id=excluded.worker_server_id,
               worker_server_name=excluded.worker_server_name, worker_port_id=excluded.worker_port_id,
               worker_port_name=excluded.worker_port_name, worker_flavor=excluded.worker_flavor,
               scheduler_cpu_mhz=excluded.scheduler_cpu_mhz,
@@ -1595,7 +1425,6 @@ def put_application(
                 application_id,
                 application_slug,
                 repository_url,
-                None,
                 int(desired_running),
                 url,
                 worker_server_id,
@@ -1609,17 +1438,16 @@ def put_application(
                 timestamp,
             ),
         )
-        if product_schema:
-            connection.execute(
-                "INSERT INTO environment_revisions VALUES (?, 0, ?) "
-                "ON CONFLICT(application_id) DO NOTHING",
-                (application_id, timestamp),
-            )
-            connection.execute(
-                "UPDATE active_deployments SET lifecycle_state = ?, updated_at = ? "
-                "WHERE application_id = ?",
-                ("running" if desired_running else "stopped", timestamp, application_id),
-            )
+        connection.execute(
+            "INSERT INTO environment_revisions VALUES (?, 0, ?) "
+            "ON CONFLICT(application_id) DO NOTHING",
+            (application_id, timestamp),
+        )
+        connection.execute(
+            "UPDATE active_deployments SET lifecycle_state = ?, updated_at = ? "
+            "WHERE application_id = ?",
+            ("running" if desired_running else "stopped", timestamp, application_id),
+        )
 
 
 def _application(row: sqlite3.Row | None) -> Application | None:
@@ -1803,35 +1631,6 @@ def get_active_deployment(
         lifecycle_state=row["lifecycle_state"],
         updated_at=row["updated_at"],
     )
-
-
-def set_deployment_lifecycle(
-    connection: sqlite3.Connection,
-    application_id: str,
-    lifecycle_state: str,
-    *,
-    now: str | None = None,
-) -> ActiveDeployment:
-    identifier = uuid(application_id, field="application_id")
-    if lifecycle_state not in {"running", "stopped"}:
-        raise ValidationError("deployment lifecycle must be running or stopped")
-    timestamp = now or utc_now()
-    with transaction(connection):
-        cursor = connection.execute(
-            "UPDATE active_deployments SET lifecycle_state = ?, updated_at = ? "
-            "WHERE application_id = ?",
-            (lifecycle_state, timestamp, identifier),
-        )
-        if cursor.rowcount != 1:
-            raise DatabaseError("active deployment is missing")
-        connection.execute(
-            "UPDATE applications SET desired_running = ?, updated_at = ? "
-            "WHERE application_id = ?",
-            (int(lifecycle_state == "running"), timestamp, identifier),
-        )
-    result = get_active_deployment(connection, identifier)
-    assert result is not None
-    return result
 
 
 def get_deployment(
@@ -2176,99 +1975,6 @@ def list_active_application_manifest_references(
     return tuple(images)
 
 
-def accept_deployment(
-    connection: sqlite3.Connection,
-    *,
-    application_id: str,
-    source_commit: str,
-    recipe_hash: str,
-    image_digest: str,
-    nomad_job: str,
-    nomad_version: int,
-    build_log_path: str,
-    nomad_job_sha256: str | None = None,
-    health_path: str = "/",
-    application_port: int = 8080,
-    accepted_at: str | None = None,
-    last_healthy_at: str | None = None,
-    deployment_id: str | None = None,
-    configuration: DeploymentConfiguration | None = None,
-) -> DeploymentAttempt:
-    """Compatibility path that appends an explicitly legacy accepted attempt."""
-    application_id = uuid(application_id, field="application_id")
-    identifier = uuid(
-        deployment_id or str(uuid_module.uuid4()), field="deployment_id"
-    )
-    checked_source = commit(source_commit)
-    checked_recipe = sha256_hex(recipe_hash, field="recipe_hash")
-    checked_image = oci_digest_pin(image_digest, field="image_digest")
-    checked_job_sha256 = sha256_hex(
-        nomad_job_sha256 or _nomad_job_sha256(nomad_job), field="nomad_job_sha256"
-    )
-    checked_health_path = validate_health_path(health_path)
-    if (
-        isinstance(nomad_version, bool)
-        or not isinstance(nomad_version, int)
-        or nomad_version < 0
-    ):
-        raise ValidationError("nomad_version must be non-negative")
-    if (
-        isinstance(application_port, bool)
-        or not isinstance(application_port, int)
-        or not 1 <= application_port <= 65_535
-    ):
-        raise ValidationError("application_port must be from 1 through 65535")
-    if configuration is not None:
-        raise ValidationError("strict deployments must use create_deployment_attempt")
-    timestamp = accepted_at or utc_now()
-    with transaction(connection):
-        connection.execute(
-            """
-            INSERT INTO deployment_attempts(
-                deployment_id, application_id, status, snapshot_kind, source_commit,
-                recipe_hash, image_digest, nomad_job, nomad_job_sha256, nomad_version,
-                health_path, application_port, build_log_path, requested_at, updated_at,
-                accepted_at, last_healthy_at
-            ) VALUES (?, ?, 'succeeded', 'legacy', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                identifier,
-                application_id,
-                checked_source,
-                checked_recipe,
-                checked_image,
-                nomad_job,
-                checked_job_sha256,
-                nomad_version,
-                checked_health_path,
-                application_port,
-                build_log_path,
-                timestamp,
-                timestamp,
-                timestamp,
-                last_healthy_at or timestamp,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO active_deployments VALUES (?, ?, 'running', ?)
-            ON CONFLICT(application_id) DO UPDATE SET
-              deployment_id=excluded.deployment_id,
-              lifecycle_state=excluded.lifecycle_state,
-              updated_at=excluded.updated_at
-            """,
-            (application_id, identifier, timestamp),
-        )
-        connection.execute(
-            "UPDATE applications SET desired_running = 1, updated_at = ? "
-            "WHERE application_id = ?",
-            (timestamp, application_id),
-        )
-    result = get_deployment_attempt(connection, identifier)
-    assert result is not None
-    return result
-
-
 def _display_label(value: object) -> str:
     if (
         not isinstance(value, str)
@@ -2579,7 +2285,7 @@ def complete_application_deletion(
         operation = get_operation(connection, operation_identifier)
         if (
             operation is None
-            or operation.kind not in {"app.delete", "app.remove"}
+            or operation.kind != "app.delete"
             or operation.status not in {"running", "recovery_required"}
             or operation.refs.get("application_id") != identifier
             or operation.phase != "manifest_absent"
@@ -2619,56 +2325,6 @@ def complete_application_deletion(
         )
         if cursor.rowcount != 1:
             raise DatabaseError("application deletion operation could not be completed")
-
-
-def complete_application_removal(
-    connection: sqlite3.Connection,
-    *,
-    application_id: str,
-    operation_id: str,
-    now: str | None = None,
-) -> None:
-    """Atomically remove accepted app state and finish its verified remove operation."""
-    uuid(application_id, field="application_id")
-    uuid(operation_id, field="operation_id")
-    timestamp = now or utc_now()
-    with transaction(connection):
-        operation = get_operation(connection, operation_id)
-        if (
-            operation is None
-            or operation.kind != "app.remove"
-            or operation.status not in {"running", "recovery_required"}
-            or operation.refs.get("application_id") != application_id
-            or operation.phase != "manifest_absent"
-        ):
-            raise DatabaseError("application removal operation is not ready to complete")
-        managed = connection.execute(
-            "SELECT 1 FROM managed_resources WHERE application_id = ? LIMIT 1",
-            (application_id,),
-        ).fetchone()
-        if managed is not None:
-            raise DatabaseError("application removal refuses managed resource rows")
-        application = connection.execute(
-            "SELECT slug FROM applications WHERE application_id = ?", (application_id,)
-        ).fetchone()
-        if application is None:
-            raise DatabaseError("application is missing")
-        connection.execute(
-            "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
-            (application["slug"], application_id, timestamp),
-        )
-        connection.execute("DELETE FROM applications WHERE application_id = ?", (application_id,))
-        cursor = connection.execute(
-            """
-            UPDATE operations
-               SET status = 'succeeded', updated_at = ?, safe_error = NULL,
-                   cleanup_state = 'confirmed'
-             WHERE operation_id = ? AND status IN ('running','recovery_required')
-            """,
-            (timestamp, operation_id),
-        )
-        if cursor.rowcount != 1:
-            raise DatabaseError("application removal operation could not be completed")
 
 
 def backup_database(connection: sqlite3.Connection, destination: str | Path) -> Path:

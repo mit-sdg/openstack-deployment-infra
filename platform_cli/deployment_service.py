@@ -1249,7 +1249,7 @@ class DeploymentService:
             unfinished = db.get_unfinished_operation(
                 self.connection, f"app-{existing.application_id}"
             )
-            if unfinished is not None and unfinished.kind in {"app.delete", "app.remove"}:
+            if unfinished is not None and unfinished.kind == "app.delete":
                 raise db.UnfinishedOperationError(
                     unfinished.scope, unfinished.operation_id, unfinished.kind
                 )

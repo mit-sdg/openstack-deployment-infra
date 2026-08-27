@@ -6,10 +6,26 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import app, db, services, storage
+from platform_cli import app, db, openstack, storage
+from platform_cli.application_service import ApplicationCreated, ApplicationService
+from platform_cli.environment_service import (
+    EnvironmentMutationRequest,
+    EnvironmentMutationResult,
+    EnvironmentService,
+)
+from platform_cli.storage_service import (
+    StorageMutationRequest,
+    StorageMutationResult,
+    StorageService,
+)
 from platform_cli.config import load
 from platform_cli.deployment_config import parse_configuration
 from platform_cli.validation import ValidationError
+from tests.product_fixtures import accept_deployment
+
+
+def unreachable_helper(*_args, **_kwargs):
+    raise AssertionError("helper transport was not expected")
 
 
 def config_fixture(directory: Path):
@@ -63,11 +79,12 @@ class ProductServiceTests(unittest.TestCase):
         self.connection.close()
         self.temporary.cleanup()
 
-    def declare(self) -> services.ApplicationCreated:
-        return services.ApplicationService(
+    def declare(self) -> ApplicationCreated:
+        return ApplicationService(
             self.connection,
             self.config,
             self.root / "service-state",
+            helper_caller=unreachable_helper,
         ).declare("demo-app")
 
     def test_application_declaration_is_typed_inert_and_independent_of_cli(self) -> None:
@@ -90,15 +107,16 @@ class ProductServiceTests(unittest.TestCase):
             ("retired-app", application.application_id, "2026-08-27T00:00:00Z"),
         )
         with self.assertRaisesRegex(ValidationError, "permanently reserved"):
-            services.ApplicationService(
+            ApplicationService(
                 self.connection,
                 self.config,
                 self.root / "service-state",
+                helper_caller=unreachable_helper,
             ).declare("retired-app")
 
     def test_environment_service_hides_values_and_records_only_accepted_key_names(self) -> None:
         created = self.declare()
-        request = services.EnvironmentMutationRequest(
+        request = EnvironmentMutationRequest(
             action="set",
             application="demo-app",
             updates={"API_TOKEN": "secret-that-must-not-render"},
@@ -106,20 +124,21 @@ class ProductServiceTests(unittest.TestCase):
         self.assertNotIn("secret-that-must-not-render", repr(request))
 
         with (
-            mock.patch.object(services.openstack, "verify_project"),
+            mock.patch.object(openstack, "verify_project"),
             mock.patch.object(
-                services.app,
+                app,
                 "set_environment",
                 return_value={"keys": ["API_TOKEN"], "modifyIndex": 4},
             ) as update,
         ):
-            result = services.EnvironmentService(
+            result = EnvironmentService(
                 self.connection,
                 self.config,
                 self.root / "service-state",
+                helper_caller=unreachable_helper,
             ).mutate(request)
 
-        self.assertEqual(result, services.EnvironmentMutationResult(("API_TOKEN",), 4))
+        self.assertEqual(result, EnvironmentMutationResult(("API_TOKEN",), 4))
         self.assertEqual(
             [
                 (item.key_name, item.owner)
@@ -142,15 +161,16 @@ class ProductServiceTests(unittest.TestCase):
         expected = storage.StorageResult(("mongo",), ("mongo",))
 
         with (
-            mock.patch.object(services.openstack, "verify_project") as verify_project,
-            mock.patch.object(services.storage, "create", return_value=expected) as create,
+            mock.patch.object(openstack, "verify_project") as verify_project,
+            mock.patch.object(storage, "create", return_value=expected) as create,
         ):
-            result = services.StorageService(
+            result = StorageService(
                 self.connection,
                 self.config,
                 self.root / "service-state",
+                helper_caller=unreachable_helper,
             ).mutate(
-                services.StorageMutationRequest(
+                StorageMutationRequest(
                     action="create",
                     application="demo-app",
                     resource_types=("mongo",),
@@ -158,7 +178,7 @@ class ProductServiceTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(result, services.StorageMutationResult(("mongo",), ("mongo",)))
+        self.assertEqual(result, StorageMutationResult(("mongo",), ("mongo",)))
         verify_project.assert_called_once()
         call = create.call_args
         self.assertEqual(call.args[:3], (self.connection, self.config, created.application_id))
@@ -166,35 +186,6 @@ class ProductServiceTests(unittest.TestCase):
         self.assertEqual(call.kwargs["resource_name"], "primary")
         self.assertGreater(call.kwargs["process_deadline"], 0)
         self.assertTrue(call.kwargs["deadline_at"].endswith("Z"))
-
-    def test_storage_verify_without_type_is_the_only_empty_selection(self) -> None:
-        self.declare()
-        service = services.StorageService(self.connection, self.config, self.root / "service-state")
-
-        with self.assertRaisesRegex(ValidationError, "select at least one"):
-            service.mutate(
-                services.StorageMutationRequest(
-                    action="create",
-                    application="demo-app",
-                    resource_types=(),
-                )
-            )
-        with (
-            mock.patch.object(services.openstack, "verify_project"),
-            mock.patch.object(
-                services.storage,
-                "verify",
-                return_value=storage.StorageResult(("postgres",), ("postgres",)),
-            ) as verify,
-        ):
-            service.mutate(
-                services.StorageMutationRequest(
-                    action="verify",
-                    application="demo-app",
-                    resource_types=(),
-                )
-            )
-        self.assertIsNone(verify.call_args.args[3])
 
     def accepted_application(self, *, running: bool = True) -> tuple[str, str, str, str]:
         created = self.declare()
@@ -214,7 +205,7 @@ class ProductServiceTests(unittest.TestCase):
             recipe_hash="b" * 64,
             route_marker=marker,
         )
-        db.accept_deployment(
+        accept_deployment(
             self.connection,
             application_id=created.application_id,
             source_commit="a" * 40,
@@ -265,8 +256,8 @@ class ProductServiceTests(unittest.TestCase):
                 return {"absent": True}
             raise AssertionError(action)
 
-        with mock.patch.object(services.openstack, "verify_project"):
-            result = services.ApplicationService(
+        with mock.patch.object(openstack, "verify_project"):
+            result = ApplicationService(
                 self.connection,
                 self.config,
                 self.root / "service-state",
@@ -345,11 +336,11 @@ class ProductServiceTests(unittest.TestCase):
             raise AssertionError(action)
 
         with (
-            mock.patch.object(services.openstack, "verify_project"),
-            mock.patch.object(services.openstack, "observe_flavor", return_value="example.1c2g"),
-            mock.patch.object(services.app, "check_public_health", return_value=True),
+            mock.patch.object(openstack, "verify_project"),
+            mock.patch.object(openstack, "observe_flavor", return_value="example.1c2g"),
+            mock.patch.object(app, "check_public_health", return_value=True),
         ):
-            result = services.ApplicationService(
+            result = ApplicationService(
                 self.connection,
                 self.config,
                 self.root / "service-state",
@@ -411,13 +402,13 @@ class ProductServiceTests(unittest.TestCase):
                 return {"absent": True}
             raise AssertionError(action)
 
-        service = services.ApplicationService(
+        service = ApplicationService(
             self.connection,
             self.config,
             self.root / "service-state",
             helper_caller=helper,
         )
-        with mock.patch.object(services.openstack, "verify_project"):
+        with mock.patch.object(openstack, "verify_project"):
             with self.assertRaisesRegex(RuntimeError, "interrupted"):
                 service.delete("demo-app", confirmation="demo-app")
             unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
@@ -425,10 +416,13 @@ class ProductServiceTests(unittest.TestCase):
             self.assertEqual((unfinished.kind, unfinished.phase), ("app.delete", "storage_removing"))
             self.assertEqual(db.get_managed_resource(self.connection, resource.resource_id).lifecycle_state, "recovery_required")  # type: ignore[union-attr]
             with self.assertRaises(db.UnfinishedOperationError):
-                services.EnvironmentService(
-                    self.connection, self.config, self.root / "service-state"
+                EnvironmentService(
+                    self.connection,
+                    self.config,
+                    self.root / "service-state",
+                    helper_caller=unreachable_helper,
                 ).mutate(
-                    services.EnvironmentMutationRequest(
+                    EnvironmentMutationRequest(
                         action="set", application="demo-app", updates={"OTHER": "secret"}
                     )
                 )

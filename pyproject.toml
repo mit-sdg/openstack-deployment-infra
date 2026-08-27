@@ -12,7 +12,6 @@ dependencies = [
   "boto3==1.42.54",
   "psycopg[binary]==3.3.3",
   "pymongo==4.16.0",
-  "PyYAML==6.0.3",
 ]
 
 [project.scripts]
@@ -25,7 +24,6 @@ openstack-platform-restore = "platform_cli.restore:main"
 dev = [
   "mypy==1.19.1",
   "ruff==0.15.4",
-  "types-PyYAML==6.0.12.20250915",
   "vulture==2.15.0",
 ]
 
@@ -46,10 +44,6 @@ exclude = ["deploy/platform-cli/tests/fixtures"]
 [[tool.mypy.overrides]]
 module = "platform_cli.runtime"
 disable_error_code = ["arg-type", "union-attr"]
-
-[[tool.mypy.overrides]]
-module = "platform_cli.validation"
-disable_error_code = ["no-untyped-call"]
 
 [[tool.mypy.overrides]]
 module = "platform_cli.remote"

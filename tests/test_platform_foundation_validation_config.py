@@ -11,7 +11,6 @@ from platform_cli.validation import (
     commit,
     env_key,
     health_path,
-    load_strict_yaml,
     openstack_uuid,
     relative_path,
     repository_url,
@@ -138,20 +137,6 @@ class CommonValidationTests(unittest.TestCase):
             finally:
                 outside.unlink()
 
-    def test_yaml_rejects_duplicates_aliases_tags_and_multiple_documents(self) -> None:
-        self.assertEqual(
-            load_strict_yaml("version: 1\nruntime: bun\n"), {"version": 1, "runtime": "bun"}
-        )
-        for invalid in (
-            "version: 1\nversion: 1\n",
-            "base: &base {a: 1}\ncopy: *base\n",
-            "value: !!python/object/apply:os.system [id]\n",
-            "a: 1\n---\nb: 2\n",
-        ):
-            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
-                load_strict_yaml(invalid)
-        with self.assertRaisesRegex(ValidationError, "byte limit"):
-            load_strict_yaml("x" * 20, maximum_bytes=10)
 
 
 class ConfigTests(unittest.TestCase):

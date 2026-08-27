@@ -30,11 +30,7 @@ from . import db
 from .config import Config, PlatformConfig, RuntimeImages
 from .remote import call_helper
 from .runtime import bounded_http, ensure_private_directory, lock, run
-from .storage_contract import (
-    PLATFORM_ENVIRONMENT_KEYS,
-    canonical_secret_key,
-    canonical_secret_keys,
-)
+from .storage_contract import canonical_secret_key, canonical_secret_keys
 from .validation import (
     ValidationError,
     bounded_text,

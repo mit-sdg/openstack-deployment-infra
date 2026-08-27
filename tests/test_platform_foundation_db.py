@@ -11,6 +11,7 @@ from platform_cli import db
 from platform_cli.config import load_platform
 from platform_cli.deployment_config import parse_configuration
 from platform_cli.validation import ValidationError
+from tests.product_fixtures import accept_deployment
 
 APP_ID = "00000000-0000-4000-8000-000000000001"
 IMAGE_ID = "00000000-0000-4000-8000-000000000002"
@@ -46,21 +47,9 @@ class DatabaseTests(unittest.TestCase):
             now="2026-01-01T00:00:00Z",
         )
 
-    def test_fresh_and_incremental_migrations_create_exact_product_schema(self) -> None:
-        db.migrate(self.connection, target_version=1)
-        self.assertEqual(db.schema_version(self.connection), 1)
-        self.assertEqual(
-            {
-                row[0]
-                for row in self.connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-                if not row[0].startswith("sqlite_")
-            },
-            {"schema_migrations", "image_selections", "applications"},
-        )
+    def test_fresh_migration_creates_exact_product_schema(self) -> None:
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 6)
+        self.assertEqual(db.schema_version(self.connection), 1)
         tables = {
             row[0]
             for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -88,31 +77,11 @@ class DatabaseTests(unittest.TestCase):
                 "SELECT sql FROM sqlite_master WHERE type IN ('table', 'index')"
             )
         )
+        self.assertNotIn("config_path", schema_sql)
         self.assertNotIn("class", schema_sql.lower())
         self.assertEqual(self.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
-
-    def test_named_resource_migration_preserves_default_provider_identity(self) -> None:
-        db.migrate(self.connection, target_version=4)
-        self.add_application()
-        self.connection.execute(
-            "INSERT INTO managed_resources VALUES (?, 'mongo', ?, ?, 'active', NULL, 1024, NULL, NULL, NULL, ?, ?)",
-            (APP_ID, "provider-id", "p_existing", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
-        )
-        self.connection.execute(
-            "INSERT INTO environment_keys VALUES (?, 'MONGODB_URI', 'mongo')", (APP_ID,)
-        )
-        db.migrate(self.connection)
-        resource = db.list_managed_resources(self.connection, application_id=APP_ID)[0]
-        self.assertEqual((resource.resource_type, resource.resource_name), ("mongo", "default"))
-        self.assertEqual(
-            (resource.provider_id, resource.provider_name), ("provider-id", "p_existing")
-        )
-        self.assertEqual(resource.display_label, "default")
-        self.assertEqual(str(uuid.UUID(resource.resource_id)), resource.resource_id)
-        key = db.list_environment_keys(self.connection, application_id=APP_ID)[0]
-        self.assertEqual((key.key_name, key.owner), ("MONGODB_URI", "storage.mongo.default"))
 
     def test_external_schema_is_rejected_before_greenfield_migration(self) -> None:
         self.connection.close()
@@ -124,11 +93,9 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaises(db.MigrationError):
             db.connect(self.path)
 
-    def test_explicit_greenfield_marker_survives_incremental_upgrade(self) -> None:
-        db.migrate(self.connection, target_version=1)
-        self.assertEqual(db.schema_version(self.connection), 1)
+    def test_explicit_greenfield_marker_is_recorded(self) -> None:
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 6)
+        self.assertEqual(db.schema_version(self.connection), 1)
         self.assertEqual(
             self.connection.execute(
                 "SELECT checksum FROM schema_migrations WHERE version = 0"
@@ -136,7 +103,7 @@ class DatabaseTests(unittest.TestCase):
             db._GREENFIELD_MARKER_CHECKSUM,
         )
 
-    def test_bound_deployment_marker_rejects_copied_state_and_survives_upgrade(self) -> None:
+    def test_bound_deployment_marker_rejects_copied_state(self) -> None:
         platform = load_platform(Path(__file__).parents[1] / "config/platform.example.json")
         identity = db.deployment_identity(platform)
         self.connection.close()
@@ -152,7 +119,7 @@ class DatabaseTests(unittest.TestCase):
 
         same_deployment = db.connect(self.path, identity=identity)
         db.migrate(same_deployment, identity=identity)
-        self.assertEqual(db.schema_version(same_deployment), 6)
+        self.assertEqual(db.schema_version(same_deployment), 1)
         same_deployment.close()
 
         wrong_project = db.deployment_identity(replace(platform, project_id=IMAGE_ID))
@@ -162,44 +129,6 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(db.MigrationError, "different deployment identity"):
             db.connect(self.path, identity=wrong_namespace)
 
-    def test_legacy_accepted_deployment_migration_preserves_exact_job_identity(self) -> None:
-        db.migrate(self.connection, target_version=2)
-        self.add_application()
-        job_identity = "d" * 64
-        job = f'job "demo-app" {{\n  meta {{\n    m1_candidate_job_sha256 = "{job_identity}"\n  }}\n}}\n'
-        self.connection.execute(
-            "INSERT INTO deployments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                APP_ID,
-                "a" * 40,
-                "b" * 64,
-                DIGEST,
-                job,
-                4,
-                "logs/build.log",
-                "2026-01-01T00:00:00Z",
-                "2026-01-01T00:00:00Z",
-                job_identity,
-                "/",
-                8080,
-            ),
-        )
-        db.migrate(self.connection)
-        deployment = db.get_deployment(self.connection, APP_ID)
-        assert deployment is not None
-        self.assertEqual(deployment.nomad_job_sha256, job_identity)
-        self.assertEqual(deployment.health_path, "/")
-        self.assertEqual(deployment.application_port, 8080)
-        attempt = db.list_deployment_attempts(self.connection, APP_ID)[0]
-        self.assertEqual((attempt.status, attempt.snapshot_kind), ("succeeded", "legacy"))
-        self.assertIsNone(attempt.configuration)
-        self.assertIsNone(attempt.requested_ref)
-        self.assertIsNone(attempt.idempotency_request_id)
-        self.assertEqual(
-            db.get_active_deployment(self.connection, APP_ID).deployment_id,  # type: ignore[union-attr]
-            attempt.deployment_id,
-        )
-
     def test_missing_expected_schema_object_is_refused_even_with_its_migration_row(self) -> None:
         self.migrate()
         self.connection.execute("DROP TABLE applications")
@@ -208,10 +137,10 @@ class DatabaseTests(unittest.TestCase):
 
     def test_changed_or_future_migration_is_refused(self) -> None:
         self.migrate()
-        self.connection.execute("UPDATE schema_migrations SET checksum = 'bad' WHERE version = 2")
+        self.connection.execute("UPDATE schema_migrations SET checksum = 'bad' WHERE version = 1")
         with self.assertRaisesRegex(db.MigrationError, "checksum"):
             db.migrate(self.connection)
-        self.connection.execute("DELETE FROM schema_migrations WHERE version = 2")
+        self.connection.execute("DELETE FROM schema_migrations WHERE version = 1")
         self.connection.execute(
             "INSERT INTO schema_migrations VALUES (99, 'x', '2026-01-01T00:00:00Z')"
         )
@@ -348,7 +277,7 @@ class DatabaseTests(unittest.TestCase):
                 source_commit="a" * 40,
                 compatibility_hash="not-a-hash",
             )
-        db.accept_deployment(
+        accept_deployment(
             self.connection,
             application_id=APP_ID,
             source_commit="a" * 40,
@@ -360,7 +289,7 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(db.get_deployment(self.connection, APP_ID).nomad_version, 1)  # type: ignore[union-attr]
         with self.assertRaisesRegex(ValidationError, "recipe_hash"):
-            db.accept_deployment(
+            accept_deployment(
                 self.connection,
                 application_id=APP_ID,
                 source_commit="a" * 40,
@@ -477,53 +406,13 @@ class DatabaseTests(unittest.TestCase):
             (other_image,),
         )
 
-    def test_application_removal_completion_refuses_a_late_managed_row(self) -> None:
-        self.migrate()
-        self.add_application()
-        operation_id = str(uuid.uuid4())
-        db.begin_operation(
-            self.connection,
-            operation_id=operation_id,
-            kind="app.remove",
-            scope=f"app-{APP_ID}",
-            phase="manifest_absent",
-            deadline_at="2026-01-01T00:15:00Z",
-            refs={"application_id": APP_ID, "slug": "demo-app"},
-        )
-        db.put_managed_resource(
-            self.connection,
-            application_id=APP_ID,
-            resource_type="mongo",
-            provider_name="app_demo",
-            lifecycle_state="active",
-        )
-        with self.assertRaisesRegex(db.DatabaseError, "managed resource"):
-            db.complete_application_removal(
-                self.connection,
-                application_id=APP_ID,
-                operation_id=operation_id,
-            )
-        self.assertIsNotNone(db.get_application(self.connection, APP_ID))
-        self.assertEqual(db.get_operation(self.connection, operation_id).status, "running")  # type: ignore[union-attr]
-        db.delete_managed_resource(
-            self.connection, application_id=APP_ID, resource_type="mongo"
-        )
-        db.complete_application_removal(
-            self.connection,
-            application_id=APP_ID,
-            operation_id=operation_id,
-            now="2026-01-01T00:01:00Z",
-        )
-        self.assertIsNone(db.get_application(self.connection, APP_ID))
-        self.assertEqual(db.get_slug_tombstone(self.connection, "demo-app").application_id, APP_ID)  # type: ignore[union-attr]
-
     def test_all_manifest_history_and_only_active_references_are_exposed(self) -> None:
         self.migrate()
         self.add_application()
         current = DIGEST
         prior = "registry.example/projects/demo/app@sha256:" + "b" * 64
         candidate = "registry.example/projects/demo/app@sha256:" + "c" * 64
-        db.accept_deployment(
+        accept_deployment(
             self.connection,
             application_id=APP_ID,
             source_commit="a" * 40,

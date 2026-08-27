@@ -145,7 +145,7 @@ class ControllerAPITests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "INVALID_IDEMPOTENCY_KEY")
 
-    @mock.patch("platform_cli.services.openstack.verify_project")
+    @mock.patch("platform_cli.application_service.openstack.verify_project")
     def test_lost_environment_response_replays_without_value_persistence(
         self, verify_project
     ) -> None:
@@ -184,7 +184,7 @@ class ControllerAPITests(unittest.TestCase):
         )
         self.assertNotIn("value", str(environment.body).lower())
 
-    @mock.patch("platform_cli.services.openstack.verify_project")
+    @mock.patch("platform_cli.application_service.openstack.verify_project")
     def test_cascade_delete_replays_after_application_is_tombstoned(
         self, verify_project
     ) -> None:

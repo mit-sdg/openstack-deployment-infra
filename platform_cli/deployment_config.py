@@ -1,4 +1,4 @@
-"""Strict UI-owned deployment configuration and public branch resolution."""
+"""Strict parsing and checkout validation for UI-owned deployment configuration."""
 
 from __future__ import annotations
 
@@ -6,13 +6,12 @@ import json
 import os
 import re
 import stat
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .app import Manifest, StorageBinding
-from .runtime import run
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
     RESERVED_ENVIRONMENT_PREFIX,
@@ -23,7 +22,6 @@ from .validation import (
     env_key,
     health_path,
     relative_path,
-    repository_url,
     resolve_inside,
     resource_name,
     script_name,
@@ -33,7 +31,6 @@ from .validation import (
 _SCHEMA_VERSION = 1
 _RUNTIMES = {"node", "bun"}
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
-_COMMIT = re.compile(r"[0-9a-f]{40}")
 _MAX_CONFIGURATION_BYTES = 65_536
 
 
@@ -300,34 +297,3 @@ def branch_name(value: object) -> str:
     ):
         raise ValidationError("repository branch is malformed")
     return value
-
-
-def resolve_github_branch(
-    repository: str,
-    branch: str = "main",
-    *,
-    timeout_seconds: float = 30,
-    command_runner: Callable[..., Any] = run,
-) -> str:
-    checked_repository = repository_url(repository)
-    checked_branch = branch_name(branch)
-    reference = f"refs/heads/{checked_branch}"
-    result = command_runner(
-        ("git", "ls-remote", "--refs", "--exit-code", checked_repository, reference),
-        timeout_seconds=timeout_seconds,
-        stdout_limit=256,
-        stderr_limit=4_096,
-        env={
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_NOSYSTEM": "1",
-        },
-    )
-    try:
-        text = result.stdout.decode("ascii").strip()
-    except (AttributeError, UnicodeDecodeError):
-        raise ValidationError("repository branch resolution was malformed") from None
-    fields = text.split("\t")
-    if len(fields) != 2 or fields[1] != reference or _COMMIT.fullmatch(fields[0]) is None:
-        raise ValidationError("repository branch did not resolve to one exact commit")
-    return fields[0]

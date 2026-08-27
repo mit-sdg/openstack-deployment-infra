@@ -8,7 +8,6 @@ responses.
 from __future__ import annotations
 
 import argparse
-import getpass
 import hashlib
 import json
 import os
@@ -33,22 +32,12 @@ from . import (
     remote,
     restore,
     runtime,
-    services,
     setup,
     status,
     storage,
 )
 from .config import Config, load, load_platform
-from .storage_contract import RESOURCE_TYPES
-from .validation import (
-    ValidationError,
-    bounded_text,
-    commit,
-    env_key,
-    sha256_hex,
-    slug,
-    uuid,
-)
+from .validation import ValidationError, bounded_text, commit, sha256_hex, uuid
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -87,17 +76,6 @@ def _command_deadline(config: Config) -> float:
             raise CliError("operation exceeded its whole-command deadline")
         return active
     return time.monotonic() + config.policy.limits.process_seconds
-
-
-def _wall_deadline(deadline: float) -> str:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise CliError("operation exceeded its whole-command deadline")
-    return (
-        (datetime.now(UTC) + timedelta(seconds=remaining))
-        .isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
-    )
 
 
 def _remaining(deadline: float, maximum: float) -> float:
@@ -178,65 +156,6 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("host", choices=openstack.PERSISTENT_ROLES)
     logs.add_argument("--lines", type=_lines, default=200)
 
-    application = commands.add_parser("app", help="operate applications")
-    app_commands = application.add_subparsers(dest="app_command", required=True)
-    create = app_commands.add_parser("create")
-    create.add_argument("slug")
-    remove = app_commands.add_parser("remove")
-    remove.add_argument("slug")
-    remove.add_argument("--confirm", required=True)
-    app_commands.add_parser("list")
-    show = app_commands.add_parser("show")
-    show.add_argument("slug")
-    app_logs = app_commands.add_parser("logs")
-    app_logs.add_argument("slug")
-    source = app_logs.add_mutually_exclusive_group(required=True)
-    source.add_argument("--build", action="store_true")
-    source.add_argument("--runtime", action="store_true")
-    app_logs.add_argument("--follow", action="store_true")
-    app_logs.add_argument("--lines", type=_lines, default=200)
-    app_logs.add_argument("--id", dest="build_id")
-    app_logs.add_argument("--list", dest="list_builds", action="store_true")
-    environment = app_commands.add_parser("env")
-    env_commands = environment.add_subparsers(dest="env_command", required=True)
-    env_set = env_commands.add_parser("set")
-    env_set.add_argument("slug")
-    env_set.add_argument("key")
-    env_unset = env_commands.add_parser("unset")
-    env_unset.add_argument("slug")
-    env_unset.add_argument("keys", nargs="+")
-    env_import = env_commands.add_parser("import")
-    env_import.add_argument("slug")
-    env_import.add_argument("--file", required=True)
-    env_list = env_commands.add_parser("list")
-    env_list.add_argument("slug")
-
-    managed = commands.add_parser("storage", help="operate managed storage")
-    storage_commands = managed.add_subparsers(dest="storage_command", required=True)
-    storage_list = storage_commands.add_parser("list")
-    storage_list.add_argument("slug", nargs="?")
-    storage_show = storage_commands.add_parser("show")
-    storage_show.add_argument("slug")
-    storage_show.add_argument("type", choices=RESOURCE_TYPES)
-    storage_show.add_argument("--name", default="default")
-    storage_create = storage_commands.add_parser("create")
-    storage_create.add_argument("slug")
-    storage_create.add_argument("type", choices=RESOURCE_TYPES)
-    storage_create.add_argument("--name", default="default")
-    storage_verify = storage_commands.add_parser("verify")
-    storage_verify.add_argument("slug")
-    storage_verify.add_argument("type", nargs="?", choices=RESOURCE_TYPES)
-    storage_verify.add_argument("--name", default="default")
-    storage_rotate = storage_commands.add_parser("rotate")
-    storage_rotate.add_argument("slug")
-    storage_rotate.add_argument("type", choices=RESOURCE_TYPES)
-    storage_rotate.add_argument("--name", default="default")
-    storage_remove = storage_commands.add_parser("remove")
-    storage_remove.add_argument("slug")
-    storage_remove.add_argument("type", choices=RESOURCE_TYPES)
-    storage_remove.add_argument("--name", default="default")
-    storage_remove.add_argument("--confirm", required=True)
-    storage_remove.add_argument("--purge-s3", action="store_true")
     return parser
 
 
@@ -295,13 +214,6 @@ def _database(
             _ACTIVE_COMMAND_DEADLINE.reset(token)
 
 
-def _application(connection: sqlite3.Connection, identifier: str) -> db.Application:
-    record = db.get_application(connection, identifier)
-    if record is None:
-        raise ValidationError("application does not exist")
-    return record
-
-
 def _confirm(message: str, *, yes: bool, input_stream: Any, output: Any) -> None:
     print(message, file=output)
     if yes:
@@ -340,34 +252,6 @@ def _begin(
 
 def _selected_image_ids(connection: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(item.image_id for item in db.list_image_selections(connection))
-
-
-def _helper(
-    config: Config,
-    action: str,
-    args: Mapping[str, Any],
-    *,
-    deadline: float | None = None,
-) -> Mapping[str, Any]:
-    timeout = float(config.policy.limits.helper_seconds)
-    if deadline is not None:
-        timeout = _remaining(deadline, timeout)
-    return remote.call_helper(
-        action,
-        args,
-        timeout_seconds=timeout,
-        request_limit=config.policy.limits.helper_request_bytes,
-        response_limit=config.policy.limits.helper_response_bytes,
-        stderr_limit=config.policy.limits.stderr_bytes,
-        helper_command=remote.helper_command_path(config.platform.get("paths.root")),
-    )
-
-
-def _verify_mutation_project(config: Config, *, deadline: float) -> None:
-    openstack.verify_project(
-        config.platform,
-        timeout_seconds=_remaining(deadline, config.policy.limits.process_seconds),
-    )
 
 
 def _role_health_check(config: Config) -> openstack.HealthCheck:
@@ -990,33 +874,6 @@ def _infra_replace(
     )
 
 
-def _read_bounded_file(path: Path, *, maximum: int, field: str) -> bytes:
-    """Read one direct regular file without a path-swap or unbounded allocation."""
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-    except OSError as error:
-        if isinstance(error, FileNotFoundError):
-            raise
-        raise ValidationError(f"{field} must be a direct regular file") from error
-    chunks: list[bytes] = []
-    total = 0
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
-            raise ValidationError(f"{field} must be a bounded direct regular file")
-        while True:
-            chunk = os.read(descriptor, min(65_536, maximum + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > maximum:
-                raise ValidationError(f"{field} exceeds its configured limit")
-    finally:
-        os.close(descriptor)
-    return b"".join(chunks)
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -1038,262 +895,6 @@ def _sha256_file(path: Path) -> str:
     finally:
         os.close(descriptor)
     return digest.hexdigest()
-
-
-def _read_secret(stdin: Any, *, maximum: int) -> str:
-    if stdin is sys.stdin and stdin.isatty():
-        value = getpass.getpass("Value: ")
-    else:
-        raw = (
-            stdin.buffer.read(maximum + 1) if hasattr(stdin, "buffer") else stdin.read(maximum + 1)
-        )
-        if isinstance(raw, str):
-            raw = raw.encode()
-        if len(raw) > maximum:
-            raise ValidationError("environment value exceeds its configured limit")
-        try:
-            value = raw.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ValidationError("environment value must be UTF-8") from error
-        value = value.removesuffix("\n")
-    if "\x00" in value or len(value.encode()) > maximum:
-        raise ValidationError("environment value is malformed or too large")
-    return value
-
-
-def _environment_mutation(
-    args: argparse.Namespace,
-    connection: sqlite3.Connection,
-    config: Config,
-    *,
-    stdin: Any,
-    output: Any,
-) -> None:
-    environment_service = services.EnvironmentService(connection, config, args.state_directory)
-    environment_service.preflight(args.slug)
-    if args.env_command == "set":
-        updates = {
-            env_key(args.key): _read_secret(
-                stdin,
-                maximum=config.policy.limits.environment_value_bytes,
-            )
-        }
-        removals: tuple[str, ...] = ()
-    elif args.env_command == "unset":
-        updates = {}
-        removals = tuple(args.keys)
-    else:
-        if args.file == "-":
-            stream = stdin.buffer if hasattr(stdin, "buffer") else stdin
-            raw = stream.read(config.policy.limits.dotenv_bytes + 1)
-            if isinstance(raw, str):
-                raw = raw.encode()
-        else:
-            source = Path(args.file)
-            metadata = source.lstat()
-            if stat.S_IMODE(metadata.st_mode) & 0o077:
-                print("warning: dotenv file is readable by group or others", file=sys.stderr)
-            raw = _read_bounded_file(
-                source,
-                maximum=config.policy.limits.dotenv_bytes,
-                field="dotenv input",
-            )
-        updates = app.parse_dotenv(raw, maximum_bytes=config.policy.limits.dotenv_bytes)
-        removals = ()
-    result = environment_service.mutate(
-        services.EnvironmentMutationRequest(
-            action=args.env_command,
-            application=args.slug,
-            updates=updates,
-            removals=removals,
-        )
-    )
-    print(f"keys={len(result.key_names)} modify-index={result.modify_index}", file=output)
-
-
-def _app_row(item: Mapping[str, object]) -> tuple[object, ...]:
-    deployment = item["deployment"]
-    sizing = cast(Mapping[str, object], item["sizing"])
-    live = cast(Mapping[str, object], item["live"])
-    return (
-        item["slug"],
-        item["desiredRunning"],
-        deployment["sourceCommit"] if isinstance(deployment, dict) else None,
-        deployment["imageDigest"] if isinstance(deployment, dict) else None,
-        sizing["cpuMHz"],
-        sizing["memoryMiB"],
-        live["schedulerState"],
-    )
-
-
-def _app_read(
-    args: argparse.Namespace,
-    connection: sqlite3.Connection,
-    config: Config,
-    *,
-    output: Any,
-) -> None:
-    reads = services.ProductReadService(connection, config)
-    models = (
-        reads.applications()
-        if args.app_command == "list"
-        else (reads.application(args.slug),)
-    )
-    _table(
-        ("SLUG", "RUNNING", "COMMIT", "DIGEST", "CPU", "MEMORY", "LIVE"),
-        tuple(_app_row(item) for item in models),
-        output=output,
-    )
-
-
-def _app_create(
-    args: argparse.Namespace,
-    connection: sqlite3.Connection,
-    config: Config,
-    *,
-    output: Any,
-) -> None:
-    created = services.ApplicationService(
-        connection,
-        config,
-        args.state_directory,
-        helper_caller=_helper,
-    ).declare(args.slug)
-    print(f"slug={created.slug} application={created.application_id}", file=output)
-
-
-def _app_remove(
-    args: argparse.Namespace,
-    connection: sqlite3.Connection,
-    config: Config,
-    *,
-    output: Any,
-) -> None:
-    removed = services.ApplicationService(
-        connection,
-        config,
-        args.state_directory,
-        helper_caller=_helper,
-    ).remove(args.slug, confirmation=args.confirm)
-    print(f"removed={removed.slug}", file=output)
-
-
-def _app_logs(
-    args: argparse.Namespace, connection: sqlite3.Connection, config: Config, *, output: Any
-) -> None:
-    logs = services.LogService(
-        connection,
-        config,
-        args.state_directory,
-        helper_caller=_helper,
-    )
-    if args.runtime and (args.build_id is not None or args.list_builds):
-        raise ValidationError("--id and --list are available only for build logs")
-    if args.runtime:
-        chunk = logs.runtime(args.slug, lines=args.lines, follow=args.follow)
-        print(chunk.text, end="", file=output)
-        return
-    if args.list_builds:
-        if args.build_id is not None or args.follow:
-            raise ValidationError("--list cannot be combined with --id or --follow")
-        attempts = logs.attempts(args.slug)
-        if not attempts:
-            raise ValidationError("application has no build attempts")
-        _table(
-            ("BUILD", "STATUS", "PHASE", "STARTED", "COMMIT"),
-            tuple(
-                (item.build_id, item.status, item.phase, item.started_at, item.source_commit)
-                for item in attempts
-            ),
-            output=output,
-        )
-        return
-    attempt, chunk = logs.build(
-        args.slug,
-        build_id=args.build_id,
-        lines=args.lines,
-    )
-    print(
-        f"build={attempt.build_id} status={attempt.status} phase={attempt.phase}",
-        file=output,
-    )
-    print(chunk.text, end="", file=output, flush=True)
-    while args.follow and chunk.state == "running":
-        time.sleep(1)
-        previous_offset = chunk.next_offset
-        _, chunk = logs.build(
-            args.slug,
-            build_id=attempt.build_id,
-            lines=args.lines,
-            offset=previous_offset,
-        )
-        if chunk.next_offset < previous_offset:
-            raise app.ApplicationError("helper returned regressed build log offset")
-        print(chunk.text, end="", file=output, flush=True)
-
-
-def _storage_row(item: Mapping[str, object]) -> tuple[object, ...]:
-    live = cast(Mapping[str, object], item["live"])
-    return (
-        item["slug"],
-        item["type"],
-        item["name"],
-        item.get("providerId"),
-        item.get("providerName"),
-        item["lifecycleState"],
-        json.dumps(item["quotas"], sort_keys=True),
-        item["lastVerifiedAt"],
-        live["health"],
-    )
-
-
-def _storage_read(
-    args: argparse.Namespace,
-    connection: sqlite3.Connection,
-    config: Config,
-    *,
-    output: Any,
-) -> None:
-    reads = services.ProductReadService(connection, config)
-    if args.storage_command == "show":
-        models = (reads.storage_resource(args.slug, args.type, args.name),)
-    else:
-        models = reads.storage(args.slug)
-    _table(
-        (
-            "SLUG",
-            "TYPE",
-            "NAME",
-            "PROVIDER_ID",
-            "PROVIDER_NAME",
-            "STATE",
-            "QUOTA",
-            "VERIFIED",
-            "HEALTH",
-        ),
-        tuple(_storage_row(item) for item in models),
-        output=output,
-    )
-
-
-def _storage_mutation(
-    args: argparse.Namespace, connection: sqlite3.Connection, config: Config, *, output: Any
-) -> None:
-    resource_types = () if args.storage_command == "verify" and args.type is None else (args.type,)
-    result = services.StorageService(connection, config, args.state_directory).mutate(
-        services.StorageMutationRequest(
-            action=args.storage_command,
-            application=args.slug,
-            resource_types=resource_types,
-            resource_name=args.name,
-            confirm_name=args.confirm if args.storage_command == "remove" else None,
-            purge_s3=args.purge_s3 if args.storage_command == "remove" else False,
-        )
-    )
-    print(
-        f"requested={','.join(result.requested)} completed={','.join(result.completed)}",
-        file=output,
-    )
 
 
 def _unlinked_backup_temp(directory: Path, *, suffix: str) -> Path:
@@ -1457,13 +1058,6 @@ def dispatch(
         if args.command == "infra" and args.infra_command == "list":
             _infra_list(connection, config, output=stdout)
             return
-        if args.command == "app" and args.app_command in {"list", "show"}:
-            _app_read(args, connection, config, output=stdout)
-            return
-        if args.command == "storage" and args.storage_command in {"list", "show"}:
-            _storage_read(args, connection, config, output=stdout)
-            return
-
         if args.command == "backup":
             _backup(args, connection, config, output=stdout)
         elif args.command == "infra":
@@ -1490,25 +1084,6 @@ def dispatch(
                     input_stream=stdin,
                     output=stdout,
                 )
-        elif args.command == "app":
-            if args.app_command == "env":
-                if args.env_command == "list":
-                    result = services.EnvironmentService(
-                        connection,
-                        config,
-                        args.state_directory,
-                    ).list(args.slug)
-                    _table(("KEY",), tuple((item,) for item in result.key_names), output=stdout)
-                else:
-                    _environment_mutation(args, connection, config, stdin=stdin, output=stdout)
-            elif args.app_command == "logs":
-                _app_logs(args, connection, config, output=stdout)
-            elif args.app_command == "create":
-                _app_create(args, connection, config, output=stdout)
-            else:
-                _app_remove(args, connection, config, output=stdout)
-        elif args.command == "storage":
-            _storage_mutation(args, connection, config, output=stdout)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1538,7 +1113,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         app.ApplicationError,
         openstack.OpenStackError,
         storage.StorageOperationError,
-        services.ServiceDeadlineError,
         setup.SetupError,
         remote.HelperError,
         remote.ProtocolError,

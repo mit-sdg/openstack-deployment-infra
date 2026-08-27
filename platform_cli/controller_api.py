@@ -13,22 +13,17 @@ from . import app, db, openstack, remote, status, storage
 from .config import Config
 from .controller_http import HttpError, Request, Response, Router
 from .deployment_config import parse_configuration
+from .application_service import ApplicationService
 from .deployment_service import (
     DeploymentDeadlineError,
     DeploymentRequest,
     DeploymentService,
 )
+from .environment_service import EnvironmentMutationRequest, EnvironmentService
+from .log_service import LogService
 from .runtime import safe_summary
-from .services import (
-    ApplicationService,
-    EnvironmentMutationRequest,
-    EnvironmentService,
-    LogService,
-    ProductReadService,
-    ServiceDeadlineError,
-    StorageMutationRequest,
-    StorageService,
-)
+from .service_support import ServiceDeadlineError
+from .storage_service import StorageMutationRequest, StorageService
 from .validation import ValidationError, bounded_text, env_key, resource_name, uuid
 
 _MAX_PAGE = 100
@@ -148,9 +143,6 @@ class ControllerAPI:
         )
         self.logs = LogService(
             connection, config, state_directory, helper_caller=helper_caller
-        )
-        self.reads = ProductReadService(
-            connection, config, helper_caller=observer_helper
         )
 
     def router(self) -> Router:
@@ -398,7 +390,19 @@ class ControllerAPI:
         if request.body is not None:
             raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
         application = self._application(self._path_uuid(request))
-        return Response(200, self.reads.application(application.application_id))
+        observe = status.application_observer(
+            self.connection,
+            self.config,
+            helper_caller=self.observer_helper,
+        )
+        model = status.app_show(
+            self.connection,
+            application.application_id,
+            observe=observe,
+        )
+        if model is None:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
+        return Response(200, model)
 
     def _enable_application(self, request: Request) -> Response:
         self._no_query(request)
@@ -518,7 +522,7 @@ class ControllerAPI:
     def _runtime_log(self, request: Request) -> Response:
         application = self._application(self._path_uuid(request))
         lines, _offset = self._log_query(request, allow_offset=False)
-        chunk = self.logs.runtime(application.application_id, lines=lines, follow=False)
+        chunk = self.logs.runtime(application.application_id, lines=lines)
         return Response(
             200,
             {

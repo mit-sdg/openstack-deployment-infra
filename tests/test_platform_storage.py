@@ -262,7 +262,7 @@ class ManagementStorageTests(unittest.TestCase):
             }
 
         with self.assertRaisesRegex(
-            StorageOperationError, "exact action: run openstack-platform storage create"
+            StorageOperationError, "same Idempotency-Key"
         ):
             create(self.connection, self.config, APP_ID, ["postgres"], helper_caller=caller)
         result = create(self.connection, self.config, APP_ID, ["postgres"], helper_caller=caller)

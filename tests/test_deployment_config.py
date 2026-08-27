@@ -4,18 +4,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from platform_cli.deployment_config import (
     branch_name,
     parse_configuration,
-    resolve_github_branch,
     validate_checkout,
 )
 from platform_cli.validation import ValidationError
 
 RESOURCE_ID = "11111111-1111-4111-8111-111111111111"
-COMMIT = "a" * 40
 
 
 def configuration() -> dict[str, object]:
@@ -143,44 +140,10 @@ class DeploymentConfigurationTests(unittest.TestCase):
 
 
 class BranchResolutionTests(unittest.TestCase):
-    def test_branch_is_resolved_with_fixed_credential_free_git_argv(self) -> None:
-        observed: dict[str, object] = {}
-
-        def runner(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
-            observed.update(argv=argv, kwargs=kwargs)
-            return SimpleNamespace(stdout=f"{COMMIT}\trefs/heads/main\n".encode())
-
-        resolved = resolve_github_branch(
-            "https://github.com/example/project",
-            command_runner=runner,
-        )
-        self.assertEqual(resolved, COMMIT)
-        self.assertEqual(
-            observed["argv"],
-            (
-                "git",
-                "ls-remote",
-                "--refs",
-                "--exit-code",
-                "https://github.com/example/project",
-                "refs/heads/main",
-            ),
-        )
-        kwargs = observed["kwargs"]
-        assert isinstance(kwargs, dict)
-        self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
-
-    def test_branch_and_response_are_exact(self) -> None:
+    def test_branch_name_is_exact(self) -> None:
         for value in ("", "../main", "main..next", "main.lock", "main//next", "@{bad"):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 branch_name(value)
-        with self.assertRaisesRegex(ValidationError, "one exact commit"):
-            resolve_github_branch(
-                "https://github.com/example/project",
-                command_runner=lambda *_args, **_kwargs: SimpleNamespace(
-                    stdout=f"{COMMIT}\trefs/heads/other\n".encode()
-                ),
-            )
 
 
 if __name__ == "__main__":
