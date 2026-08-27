@@ -8,10 +8,12 @@ rendered output.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 import time
 import uuid as uuid_module
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,10 +22,11 @@ from typing import Literal
 from . import app, db, openstack, remote, runtime, status, storage
 from .config import Config
 from .storage_contract import PLATFORM_ENVIRONMENT_KEYS, RESERVED_ENVIRONMENT_PREFIX
-from .validation import ValidationError, env_key, resource_name, slug
+from .validation import ValidationError, env_key, resource_name, slug, uuid
 
 StorageAction = Literal["create", "verify", "rotate", "remove"]
 EnvironmentAction = Literal["set", "unset", "import"]
+HelperCaller = Callable[..., Mapping[str, object]]
 
 
 class ServiceDeadlineError(RuntimeError):
@@ -68,6 +71,29 @@ class EnvironmentMutationResult:
     modify_index: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class BuildAttempt:
+    build_id: str
+    status: str
+    phase: str
+    started_at: str
+    source_commit: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LogChunk:
+    text: str
+    state: str
+    next_offset: int
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationRemoved:
+    application_id: str
+    slug: str
+
+
 def _deadline(config: Config) -> float:
     return time.monotonic() + config.policy.limits.process_seconds
 
@@ -106,6 +132,31 @@ def _wall_deadline(deadline: float) -> str:
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
+
+
+def _tail_file(path: Path, *, lines: int, maximum_bytes: int) -> str:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum_bytes:
+            raise ValidationError("accepted build log is not a bounded direct file")
+        position = metadata.st_size
+        chunks: list[bytes] = []
+        newlines = 0
+        while position and newlines <= lines:
+            amount = min(65_536, position)
+            position -= amount
+            os.lseek(descriptor, position, os.SEEK_SET)
+            chunk = os.read(descriptor, amount)
+            chunks.append(chunk)
+            newlines += chunk.count(b"\n")
+        return "\n".join(
+            b"".join(reversed(chunks))
+            .decode("utf-8", errors="replace")
+            .splitlines()[-lines:]
+        )
+    finally:
+        os.close(descriptor)
 
 
 class ProductReadService:
@@ -163,11 +214,20 @@ class ProductReadService:
 
 
 class ApplicationService:
-    """Own database-only application product mutations."""
+    """Own application declaration and destructive lifecycle orchestration."""
 
-    def __init__(self, connection: sqlite3.Connection, config: Config) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        config: Config,
+        state_directory: Path,
+        *,
+        helper_caller: HelperCaller = _call_helper,
+    ) -> None:
         self.connection = connection
         self.config = config
+        self.state_directory = state_directory
+        self.helper_caller = helper_caller
 
     def declare(self, application_slug: str) -> ApplicationCreated:
         """Create one inert disabled application before storage or deployment."""
@@ -188,6 +248,278 @@ class ApplicationService:
             url=url,
         )
         return ApplicationCreated(identifier, checked_slug, url, False)
+
+    def remove(self, application_identifier: str, *, confirmation: str) -> ApplicationRemoved:
+        if confirmation != application_identifier:
+            raise ValidationError("application removal requires the exact slug")
+        application = db.get_application(self.connection, application_identifier)
+        if application is None:
+            raise ValidationError("application does not exist")
+        if confirmation != application.slug:
+            raise ValidationError("application removal requires the exact slug")
+        deadline = _deadline(self.config)
+        scope = f"app-{application.application_id}"
+        with runtime.lock(self.state_directory, scope, deadline=deadline):
+            openstack.verify_project(
+                self.config.platform,
+                timeout_seconds=_remaining(
+                    deadline,
+                    self.config.policy.limits.process_seconds,
+                ),
+            )
+            current = db.get_application(self.connection, application.application_id)
+            if current is None:
+                raise ValidationError("application does not exist")
+            resources = db.list_managed_resources(
+                self.connection,
+                application_id=current.application_id,
+            )
+            if resources:
+                raise ValidationError("remove managed storage before removing the application")
+            manifests = db.list_application_manifest_images(
+                self.connection,
+                current.application_id,
+            )
+            refs: dict[str, object] = {
+                "application_id": current.application_id,
+                "slug": current.slug,
+            }
+            unfinished = db.get_unfinished_operation(self.connection, scope)
+            if unfinished is not None:
+                if unfinished.kind != "app.remove" or any(
+                    unfinished.refs.get(key) != value for key, value in refs.items()
+                ):
+                    raise db.UnfinishedOperationError(
+                        scope,
+                        unfinished.operation_id,
+                        unfinished.kind,
+                    )
+                operation_id = unfinished.operation_id
+                refs = dict(unfinished.refs)
+            else:
+                operation_id = str(uuid_module.uuid4())
+                db.begin_operation(
+                    self.connection,
+                    operation_id=operation_id,
+                    kind="app.remove",
+                    scope=scope,
+                    phase="validated",
+                    deadline_at=_wall_deadline(deadline),
+                    refs=refs,
+                )
+            try:
+                db.checkpoint_operation(
+                    self.connection,
+                    operation_id,
+                    phase="storage_absent",
+                    refs=refs,
+                )
+                removed = self.helper_caller(
+                    self.config,
+                    "app.remove",
+                    {"slug": current.slug},
+                    deadline=deadline,
+                )
+                if (
+                    removed.get("jobAbsent") is not True
+                    or removed.get("variableAbsent") is not True
+                ):
+                    raise app.ApplicationError("job or Variable absence was not confirmed")
+                db.checkpoint_operation(
+                    self.connection,
+                    operation_id,
+                    phase="job_absent",
+                    refs=refs,
+                )
+                worker = self.helper_caller(
+                    self.config,
+                    "app.worker.delete",
+                    {"applicationId": current.application_id, "slug": current.slug},
+                    deadline=deadline,
+                )
+                if worker.get("absent") is not True:
+                    raise app.ApplicationError("worker or fixed-port absence was not confirmed")
+                db.checkpoint_operation(
+                    self.connection,
+                    operation_id,
+                    phase="worker_absent",
+                    refs=refs,
+                )
+                for image in manifests:
+                    manifest = self.helper_caller(
+                        self.config,
+                        "app.manifest.delete",
+                        {"slug": current.slug, "image": image, "references": []},
+                        deadline=deadline,
+                    )
+                    if manifest.get("absent") is not True:
+                        raise app.ApplicationError("registry manifest absence was not confirmed")
+                db.checkpoint_operation(
+                    self.connection,
+                    operation_id,
+                    phase="manifest_absent",
+                    refs=refs,
+                )
+                db.complete_application_removal(
+                    self.connection,
+                    application_id=current.application_id,
+                    operation_id=operation_id,
+                )
+            except Exception as error:
+                operation = db.get_operation(self.connection, operation_id)
+                if operation is not None and operation.status == "running":
+                    db.mark_recovery_required(self.connection, operation_id, error)
+                raise
+        return ApplicationRemoved(current.application_id, current.slug)
+
+
+class LogService:
+    """Return bounded runtime and build logs without presentation concerns."""
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        config: Config,
+        state_directory: Path,
+        *,
+        helper_caller: HelperCaller = _call_helper,
+    ) -> None:
+        self.connection = connection
+        self.config = config
+        self.state_directory = state_directory
+        self.helper_caller = helper_caller
+
+    def _application(self, identifier: str) -> db.Application:
+        application = db.get_application(self.connection, identifier)
+        if application is None:
+            raise ValidationError("application does not exist")
+        return application
+
+    def runtime(
+        self,
+        application_identifier: str,
+        *,
+        lines: int,
+        follow: bool = False,
+    ) -> LogChunk:
+        application = self._application(application_identifier)
+        result = app.application_logs(
+            application.slug,
+            lines=lines,
+            follow=follow,
+            timeout_seconds=self.config.policy.limits.helper_seconds,
+            helper_caller=lambda action, values, **_bounds: self.helper_caller(
+                self.config,
+                action,
+                values,
+                deadline=_deadline(self.config),
+            ),
+        )
+        text = result.get("text")
+        if not isinstance(text, str):
+            raise app.ApplicationError("helper returned invalid runtime log evidence")
+        return LogChunk(text, "running", len(text.encode()), bool(result.get("truncated")))
+
+    def attempts(self, application_identifier: str) -> tuple[BuildAttempt, ...]:
+        application = self._application(application_identifier)
+        return tuple(
+            BuildAttempt(
+                item.operation_id,
+                item.status,
+                item.phase,
+                item.started_at,
+                item.refs.get("source_commit")
+                if isinstance(item.refs.get("source_commit"), str)
+                else None,
+            )
+            for item in db.list_application_deploy_operations(
+                self.connection,
+                application.application_id,
+            )
+        )
+
+    def build(
+        self,
+        application_identifier: str,
+        *,
+        build_id: str | None,
+        lines: int,
+        offset: int | None = None,
+    ) -> tuple[BuildAttempt, LogChunk]:
+        application = self._application(application_identifier)
+        operations = db.list_application_deploy_operations(
+            self.connection,
+            application.application_id,
+        )
+        if not operations:
+            raise ValidationError("application has no build attempts")
+        if build_id is None:
+            operation = operations[0]
+        else:
+            selected_id = uuid(build_id, field="build ID")
+            operation = next(
+                (item for item in operations if item.operation_id == selected_id),
+                None,
+            )
+            if operation is None:
+                raise ValidationError("build ID does not belong to the application")
+        attempt = BuildAttempt(
+            operation.operation_id,
+            operation.status,
+            operation.phase,
+            operation.started_at,
+            operation.refs.get("source_commit")
+            if isinstance(operation.refs.get("source_commit"), str)
+            else None,
+        )
+        result = self.helper_caller(
+            self.config,
+            "app.build.logs",
+            {
+                "slug": application.slug,
+                "buildId": operation.operation_id,
+                "lines": lines,
+                "offset": offset,
+            },
+            deadline=_deadline(self.config),
+        )
+        if result.get("exists") is True:
+            text = result.get("text")
+            next_offset = result.get("nextOffset")
+            state = result.get("state")
+            if (
+                not isinstance(text, str)
+                or isinstance(next_offset, bool)
+                or not isinstance(next_offset, int)
+                or state not in {"running", "complete", "failed", "unknown"}
+            ):
+                raise app.ApplicationError("helper returned invalid build log evidence")
+            return attempt, LogChunk(
+                text,
+                state,
+                next_offset,
+                bool(result.get("truncated")),
+            )
+        if offset is not None:
+            raise ValidationError("live build log is unavailable for this historical attempt")
+        stored = operation.refs.get("build_log_path")
+        if not isinstance(stored, str):
+            raise ValidationError("build attempt has no captured output")
+        root = self.state_directory.resolve(strict=True)
+        path = (self.state_directory / stored).resolve(strict=True)
+        if not path.is_relative_to(root) or not path.is_file():
+            raise ValidationError("build log path is invalid")
+        text = _tail_file(
+            path,
+            lines=lines,
+            maximum_bytes=self.config.policy.limits.build_log_bytes,
+        )
+        return attempt, LogChunk(
+            text + ("\n" if text else ""),
+            "complete",
+            path.stat().st_size,
+            False,
+        )
 
 
 class EnvironmentService:

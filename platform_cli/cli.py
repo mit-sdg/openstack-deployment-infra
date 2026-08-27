@@ -1046,27 +1046,6 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _tail_file_lines(path: Path, *, lines: int, maximum_bytes: int) -> list[str]:
-    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum_bytes:
-            raise ValidationError("accepted build log is not a bounded direct file")
-        position = metadata.st_size
-        chunks: list[bytes] = []
-        newlines = 0
-        while position and newlines <= lines:
-            amount = min(65_536, position)
-            position -= amount
-            os.lseek(descriptor, position, os.SEEK_SET)
-            chunk = os.read(descriptor, amount)
-            chunks.append(chunk)
-            newlines += chunk.count(b"\n")
-        return b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()[-lines:]
-    finally:
-        os.close(descriptor)
-
-
 def _read_secret(stdin: Any, *, maximum: int) -> str:
     if stdin is sys.stdin and stdin.isatty():
         value = getpass.getpass("Value: ")
@@ -2034,7 +2013,12 @@ def _app_create(
     *,
     output: Any,
 ) -> None:
-    created = services.ApplicationService(connection, config).declare(args.slug)
+    created = services.ApplicationService(
+        connection,
+        config,
+        args.state_directory,
+        helper_caller=_helper,
+    ).declare(args.slug)
     print(f"slug={created.slug} application={created.application_id}", file=output)
 
 
@@ -2171,205 +2155,67 @@ def _app_remove(
     *,
     output: Any,
 ) -> None:
-    if args.confirm != args.slug:
-        raise ValidationError("application removal requires the exact slug")
-    application = _application(connection, args.slug)
-    scope = f"app-{application.application_id}"
-    deadline = _command_deadline(config)
-    with runtime.lock(args.state_directory, scope, deadline=deadline):
-        _verify_mutation_project(config, deadline=deadline)
-        # SQLite is re-read on every attempt under the lock shared with storage
-        # creation. The fresh database records every platform-created resource;
-        # provider inventory reads are deliberately not a removal path.
-        application = _application(connection, args.slug)
-        resources = db.list_managed_resources(connection, application_id=application.application_id)
-        if resources:
-            raise ValidationError("remove managed storage before removing the application")
-        manifests = db.list_application_manifest_images(connection, application.application_id)
-        refs: dict[str, Any] = {
-            "application_id": application.application_id,
-            "slug": application.slug,
-        }
-        unfinished = db.get_unfinished_operation(connection, scope)
-        if unfinished is not None:
-            if unfinished.kind != "app.remove" or any(
-                unfinished.refs.get(key) != value for key, value in refs.items()
-            ):
-                raise db.UnfinishedOperationError(scope, unfinished.operation_id, unfinished.kind)
-            operation_id = unfinished.operation_id
-            refs = dict(unfinished.refs)
-        else:
-            operation_id = _begin(
-                connection,
-                config,
-                kind="app.remove",
-                scope=scope,
-                refs=refs,
-            )
-        try:
-            db.checkpoint_operation(
-                connection,
-                operation_id,
-                phase="storage_absent",
-                refs=refs,
-            )
-            removed = _helper(
-                config,
-                "app.remove",
-                {"slug": application.slug},
-                deadline=deadline,
-            )
-            if removed.get("jobAbsent") is not True or removed.get("variableAbsent") is not True:
-                raise app.ApplicationError("job or Variable absence was not confirmed")
-            db.checkpoint_operation(connection, operation_id, phase="job_absent", refs=refs)
-            worker = _helper(
-                config,
-                "app.worker.delete",
-                {"applicationId": application.application_id, "slug": application.slug},
-                deadline=deadline,
-            )
-            if worker.get("absent") is not True:
-                raise app.ApplicationError("worker or fixed-port absence was not confirmed")
-            db.checkpoint_operation(connection, operation_id, phase="worker_absent", refs=refs)
-            for image in manifests:
-                manifest = _helper(
-                    config,
-                    "app.manifest.delete",
-                    {"slug": application.slug, "image": image, "references": []},
-                    deadline=deadline,
-                )
-                if manifest.get("absent") is not True:
-                    raise app.ApplicationError("registry manifest absence was not confirmed")
-            db.checkpoint_operation(connection, operation_id, phase="manifest_absent", refs=refs)
-            db.complete_application_removal(
-                connection,
-                application_id=application.application_id,
-                operation_id=operation_id,
-            )
-        except Exception as error:
-            current = db.get_operation(connection, operation_id)
-            if current is not None and current.status == "running":
-                db.mark_recovery_required(connection, operation_id, error)
-            raise
-    print(f"removed={application.slug}", file=output)
+    removed = services.ApplicationService(
+        connection,
+        config,
+        args.state_directory,
+        helper_caller=_helper,
+    ).remove(args.slug, confirmation=args.confirm)
+    print(f"removed={removed.slug}", file=output)
 
 
 def _app_logs(
     args: argparse.Namespace, connection: sqlite3.Connection, config: Config, *, output: Any
 ) -> None:
-    application = _application(connection, args.slug)
+    logs = services.LogService(
+        connection,
+        config,
+        args.state_directory,
+        helper_caller=_helper,
+    )
     if args.runtime and (args.build_id is not None or args.list_builds):
         raise ValidationError("--id and --list are available only for build logs")
     if args.runtime:
-        result = app.application_logs(
-            application.slug,
-            lines=args.lines,
-            follow=args.follow,
-            timeout_seconds=config.policy.limits.helper_seconds,
-            helper_caller=lambda action, values, **_bounds: _helper(config, action, values),
-        )
-        print(result.get("text", ""), end="", file=output)
+        chunk = logs.runtime(args.slug, lines=args.lines, follow=args.follow)
+        print(chunk.text, end="", file=output)
         return
-    operations = db.list_application_deploy_operations(connection, application.application_id)
-    if not operations:
-        raise ValidationError("application has no build attempts")
     if args.list_builds:
         if args.build_id is not None or args.follow:
             raise ValidationError("--list cannot be combined with --id or --follow")
+        attempts = logs.attempts(args.slug)
+        if not attempts:
+            raise ValidationError("application has no build attempts")
         _table(
             ("BUILD", "STATUS", "PHASE", "STARTED", "COMMIT"),
             tuple(
-                (
-                    item.operation_id,
-                    item.status,
-                    item.phase,
-                    item.started_at,
-                    item.refs.get("source_commit"),
-                )
-                for item in operations
+                (item.build_id, item.status, item.phase, item.started_at, item.source_commit)
+                for item in attempts
             ),
             output=output,
         )
         return
-    if args.build_id is None:
-        operation = operations[0]
-    else:
-        build_id = uuid(args.build_id, field="build ID")
-        matched = next((item for item in operations if item.operation_id == build_id), None)
-        if matched is None:
-            raise ValidationError("build ID does not belong to the application")
-        operation = matched
+    attempt, chunk = logs.build(
+        args.slug,
+        build_id=args.build_id,
+        lines=args.lines,
+    )
     print(
-        f"build={operation.operation_id} status={operation.status} phase={operation.phase}",
+        f"build={attempt.build_id} status={attempt.status} phase={attempt.phase}",
         file=output,
     )
-    result = _helper(
-        config,
-        "app.build.logs",
-        {
-            "slug": application.slug,
-            "buildId": operation.operation_id,
-            "lines": args.lines,
-            "offset": None,
-        },
-    )
-    if result.get("exists") is True:
-        text = result.get("text")
-        size = result.get("size")
-        next_offset = result.get("nextOffset")
-        state = result.get("state")
-        if (
-            not isinstance(text, str)
-            or isinstance(size, bool)
-            or not isinstance(size, int)
-            or isinstance(next_offset, bool)
-            or not isinstance(next_offset, int)
-            or state not in {"running", "complete", "failed", "unknown"}
-        ):
-            raise app.ApplicationError("helper returned invalid build log evidence")
-        print(text, end="", file=output, flush=True)
-        while args.follow and state == "running":
-            time.sleep(1)
-            result = _helper(
-                config,
-                "app.build.logs",
-                {
-                    "slug": application.slug,
-                    "buildId": operation.operation_id,
-                    "lines": args.lines,
-                    "offset": next_offset,
-                },
-            )
-            text = result.get("text")
-            state = result.get("state")
-            candidate_offset = result.get("nextOffset")
-            if (
-                result.get("exists") is not True
-                or not isinstance(text, str)
-                or state not in {"running", "complete", "failed", "unknown"}
-                or isinstance(candidate_offset, bool)
-                or not isinstance(candidate_offset, int)
-                or candidate_offset < next_offset
-            ):
-                raise app.ApplicationError("helper returned invalid build log evidence")
-            print(text, end="", file=output, flush=True)
-            next_offset = candidate_offset
-        return
-    if args.follow:
-        raise ValidationError("live build log is unavailable for this historical attempt")
-    stored = operation.refs.get("build_log_path")
-    if not isinstance(stored, str):
-        raise ValidationError("build attempt has no captured output")
-    path = (args.state_directory / stored).resolve(strict=True)
-    root = args.state_directory.resolve(strict=True)
-    if not path.is_relative_to(root) or not path.is_file():
-        raise ValidationError("build log path is invalid")
-    lines = _tail_file_lines(
-        path,
-        lines=args.lines,
-        maximum_bytes=config.policy.limits.build_log_bytes,
-    )
-    print("\n".join(lines), file=output)
+    print(chunk.text, end="", file=output, flush=True)
+    while args.follow and chunk.state == "running":
+        time.sleep(1)
+        previous_offset = chunk.next_offset
+        _, chunk = logs.build(
+            args.slug,
+            build_id=attempt.build_id,
+            lines=args.lines,
+            offset=previous_offset,
+        )
+        if chunk.next_offset < previous_offset:
+            raise app.ApplicationError("helper returned regressed build log offset")
+        print(chunk.text, end="", file=output, flush=True)
 
 
 def _storage_row(item: Mapping[str, object]) -> tuple[object, ...]:

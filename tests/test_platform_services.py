@@ -62,8 +62,15 @@ class ProductServiceTests(unittest.TestCase):
         self.connection.close()
         self.temporary.cleanup()
 
+    def declare(self) -> services.ApplicationCreated:
+        return services.ApplicationService(
+            self.connection,
+            self.config,
+            self.root / "service-state",
+        ).declare("demo-app")
+
     def test_application_declaration_is_typed_inert_and_independent_of_cli(self) -> None:
-        created = services.ApplicationService(self.connection, self.config).declare("demo-app")
+        created = self.declare()
 
         persisted = db.get_application(self.connection, created.application_id)
         assert persisted is not None
@@ -73,10 +80,10 @@ class ProductServiceTests(unittest.TestCase):
         self.assertFalse(persisted.desired_running)
         self.assertIsNone(db.get_deployment(self.connection, created.application_id))
         with self.assertRaisesRegex(ValidationError, "already exists"):
-            services.ApplicationService(self.connection, self.config).declare("demo-app")
+            self.declare()
 
     def test_environment_service_hides_values_and_records_only_accepted_key_names(self) -> None:
-        created = services.ApplicationService(self.connection, self.config).declare("demo-app")
+        created = self.declare()
         request = services.EnvironmentMutationRequest(
             action="set",
             application="demo-app",
@@ -117,7 +124,7 @@ class ProductServiceTests(unittest.TestCase):
         self.assertIsNone(operation)
 
     def test_storage_service_owns_lock_project_check_and_typed_dispatch(self) -> None:
-        created = services.ApplicationService(self.connection, self.config).declare("demo-app")
+        created = self.declare()
         expected = storage.StorageResult(("mongo",), ("mongo",))
 
         with (
@@ -147,7 +154,7 @@ class ProductServiceTests(unittest.TestCase):
         self.assertTrue(call.kwargs["deadline_at"].endswith("Z"))
 
     def test_storage_verify_without_type_is_the_only_empty_selection(self) -> None:
-        services.ApplicationService(self.connection, self.config).declare("demo-app")
+        self.declare()
         service = services.StorageService(self.connection, self.config, self.root / "service-state")
 
         with self.assertRaisesRegex(ValidationError, "select at least one"):
