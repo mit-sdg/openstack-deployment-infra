@@ -13,7 +13,12 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from ..app import nomad_candidate_identity, nomad_job_id
+from ..app import (
+    nomad_candidate_identity,
+    nomad_job_id,
+    nomad_route_marker,
+    nomad_route_priority,
+)
 from ..runtime import CommandTimedOut, bounded_http, run
 from ..validation import (
     ValidationError,
@@ -23,6 +28,7 @@ from ..validation import (
     oci_digest_pin,
     sha256_hex,
     slug,
+    uuid,
 )
 from .main import Handler, HelperActionError
 from .nomad import (
@@ -260,6 +266,54 @@ def _inspected_candidate(
     return inspected_job_identity(value, job_id)
 
 
+def _inspected_route_marker(
+    job_id: str,
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+    response_limit: int,
+) -> str:
+    completed = command_runner(
+        (*nomad_command, "job", "inspect", "-json", job_id),
+        timeout_seconds=timeout_seconds,
+        stdout_limit=response_limit,
+        stderr_limit=65_536,
+        check=True,
+    )
+    value = _parse_json(completed.stdout, field="job inspection")
+    metadata = value.get("Meta") if isinstance(value, dict) else None
+    return uuid(
+        metadata.get("m1_route_marker") if isinstance(metadata, dict) else None,
+        field="Nomad route marker",
+    )
+
+
+def _only_job_id(
+    application_slug: str,
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+    response_limit: int,
+) -> str:
+    jobs = [
+        job_id
+        for job_id in (application_slug, f"{application_slug}-candidate")
+        if _inspected_candidate(
+            job_id,
+            command_runner=command_runner,
+            nomad_command=nomad_command,
+            timeout_seconds=timeout_seconds,
+            response_limit=response_limit,
+        )
+        is not None
+    ]
+    if len(jobs) > 1:
+        raise HelperActionError("JOB_AMBIGUOUS", "multiple application deployment jobs remain")
+    return jobs[0] if jobs else application_slug
+
+
 def _deploy_handler(
     *,
     command_runner: Callable[..., Any],
@@ -431,32 +485,61 @@ def _promote_handler(
     def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
         _exact_args(
             args,
-            {"slug", "job", "candidateVersion", "candidateJobSha256", "candidateImage"},
+            {
+                "slug",
+                "job",
+                "candidateJobId",
+                "candidateVersion",
+                "candidateJobSha256",
+                "routeMarker",
+                "predecessorPriority",
+                "candidateImage",
+            },
             "app.promote",
         )
         application_slug = slug(args["slug"])
         evidence = observe_health(
             {
                 "slug": application_slug,
-                "jobId": f"{application_slug}-candidate",
+                "jobId": args["candidateJobId"],
                 "version": args["candidateVersion"],
                 "candidateJobSha256": args["candidateJobSha256"],
                 "candidateImage": args["candidateImage"],
             }
         )
-        stable_job = bounded_text(args["job"], field="stable Nomad job", maximum=262_144)
-        stable_identity = nomad_candidate_identity(stable_job)
+        promoted_job = bounded_text(args["job"], field="promoted Nomad job", maximum=262_144)
+        promoted_identity = nomad_candidate_identity(promoted_job)
+        route_marker = uuid(args["routeMarker"], field="route marker")
+        predecessor_priority = args["predecessorPriority"]
+        if (
+            isinstance(predecessor_priority, bool)
+            or not isinstance(predecessor_priority, int)
+            or not 0 <= predecessor_priority < 1_000_000_000
+        ):
+            raise ValidationError("predecessor route priority is invalid")
         if (
             evidence.get("healthy") is not True
             or evidence.get("terminal") is not False
-            or nomad_job_id(stable_job, application_slug) != application_slug
-            or stable_identity[1]
+            or nomad_job_id(promoted_job, application_slug) != args["candidateJobId"]
+            or promoted_identity[1]
             != oci_digest_pin(args["candidateImage"], field="candidate image")
+            or nomad_route_marker(promoted_job) != route_marker
+            or nomad_route_priority(promoted_job) <= predecessor_priority
+            or f"Host(`{application_slug}." not in promoted_job
+            or f"customresponseheaders.X-M1-Deployment={route_marker}" not in promoted_job
+            or _inspected_route_marker(
+                args["candidateJobId"],
+                command_runner=command_runner,
+                nomad_command=nomad_command,
+                timeout_seconds=timeout_seconds,
+                response_limit=response_limit,
+            )
+            != route_marker
         ):
             raise HelperActionError(
                 "CANDIDATE_UNHEALTHY", "exact candidate health was not confirmed or promotable"
             )
-        return deploy_job({"slug": application_slug, "job": stable_job})
+        return deploy_job({"slug": application_slug, "job": promoted_job})
 
     return handle
 
@@ -481,8 +564,15 @@ def _logs_handler(
             raise ValidationError("log line count is invalid")
         if not isinstance(follow, bool):
             raise ValidationError("log follow selector must be boolean")
-        allocations = _allocations(
+        job_id = _only_job_id(
             application_slug,
+            command_runner=command_runner,
+            nomad_command=nomad_command,
+            timeout_seconds=timeout_seconds,
+            response_limit=response_limit,
+        )
+        allocations = _allocations(
+            job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
@@ -566,31 +656,35 @@ def _remove_handler(
 
         # Candidate cleanup is authorized by exact immutable identity and can
         # never select the stable job merely because both belong to one app.
-        before = _inspected_candidate(
-            job_id,
-            command_runner=command_runner,
-            nomad_command=nomad_command,
-            timeout_seconds=timeout_seconds,
-            response_limit=65_536,
-        )
-        if before is not None and expected is not None and before[1:] != expected:
-            raise HelperActionError("CANDIDATE_MISMATCH", "candidate cleanup identity did not match")
-        if before is not None:
-            command_runner(
-                (*nomad_command, "job", "stop", "-purge", "-yes", job_id),
-                timeout_seconds=timeout_seconds,
-                stdout_limit=65_536,
-                stderr_limit=65_536,
-                check=False,
-            )
-            after = _status_or_absent(
-                job_id,
+        job_ids = (application_slug, f"{application_slug}-candidate") if deleting_application else (job_id,)
+        for selected_job_id in job_ids:
+            before = _inspected_candidate(
+                selected_job_id,
                 command_runner=command_runner,
                 nomad_command=nomad_command,
                 timeout_seconds=timeout_seconds,
                 response_limit=65_536,
             )
-            if after is not None:
+            if before is not None and expected is not None and before[1:] != expected:
+                raise HelperActionError(
+                    "CANDIDATE_MISMATCH", "candidate cleanup identity did not match"
+                )
+            if before is None:
+                continue
+            command_runner(
+                (*nomad_command, "job", "stop", "-purge", "-yes", selected_job_id),
+                timeout_seconds=timeout_seconds,
+                stdout_limit=65_536,
+                stderr_limit=65_536,
+                check=False,
+            )
+            if _status_or_absent(
+                selected_job_id,
+                command_runner=command_runner,
+                nomad_command=nomad_command,
+                timeout_seconds=timeout_seconds,
+                response_limit=65_536,
+            ) is not None:
                 raise HelperActionError("JOB_REMAINS", "Nomad job remained after removal")
         variable_absent = False
         if deleting_application:
@@ -628,8 +722,15 @@ def _public_health_from_job(
     if not isinstance(trusted_domain, str) or not trusted_domain or "\x00" in trusted_domain:
         raise HelperActionError("NOMAD_RESPONSE_INVALID", "trusted public health domain is invalid")
     expected_host = f"{application_slug}.{trusted_domain}"
+    job_id = _only_job_id(
+        application_slug,
+        command_runner=command_runner,
+        nomad_command=nomad_command,
+        timeout_seconds=timeout_seconds,
+        response_limit=response_limit,
+    )
     completed = command_runner(
-        (*nomad_command, "job", "inspect", "-json", application_slug),
+        (*nomad_command, "job", "inspect", "-json", job_id),
         timeout_seconds=timeout_seconds,
         stdout_limit=response_limit,
         stderr_limit=65_536,
@@ -637,6 +738,9 @@ def _public_health_from_job(
     )
     value = _parse_json(completed.stdout, field="job inspection")
     groups = value.get("TaskGroups") if isinstance(value, dict) else None
+    metadata = value.get("Meta") if isinstance(value, dict) else None
+    raw_marker = metadata.get("m1_route_marker") if isinstance(metadata, dict) else None
+    route_marker = uuid(raw_marker, field="Nomad route marker") if raw_marker is not None else None
     hosts: list[str] = []
     paths: list[str] = []
     if isinstance(groups, list):
@@ -649,7 +753,7 @@ def _public_health_from_job(
             for service in services:
                 if (
                     not isinstance(service, dict)
-                    or service.get("Name") != f"app-{application_slug}"
+                    or service.get("Name") != f"app-{job_id}"
                 ):
                     continue
                 tags = service.get("Tags")
@@ -659,7 +763,7 @@ def _public_health_from_job(
                         if not isinstance(tag, str):
                             continue
                         match = re.fullmatch(
-                            rf"traefik\.http\.routers\.{re.escape(application_slug)}\.rule="
+                            r"traefik\.http\.routers\.[a-z0-9-]+\.rule="
                             rf"Host\(`{re.escape(expected_host)}`\)",
                             tag,
                         )
@@ -679,7 +783,10 @@ def _public_health_from_job(
         response_limit=4_096,
         allow_redirects=False,
     )
-    return 200 <= result.status < 300
+    return (
+        200 <= result.status < 300
+        and (route_marker is None or result.headers.get("x-m1-deployment") == route_marker)
+    )
 
 
 def _allocation_token(allocation: Mapping[str, Any]) -> tuple[object, ...]:
@@ -713,6 +820,7 @@ def _healthy_allocations(
 
 def _restart_and_observe_environment(
     application_slug: str,
+    job_id: str,
     modify_index: int,
     baseline: Sequence[Mapping[str, Any]],
     client: VariableClient,
@@ -728,7 +836,7 @@ def _restart_and_observe_environment(
 ) -> int:
     baseline_tokens = {_allocation_token(item) for item in baseline}
     command_runner(
-        (*nomad_command, "job", "restart", "-yes", application_slug),
+        (*nomad_command, "job", "restart", "-yes", job_id),
         timeout_seconds=timeout_seconds,
         stdout_limit=65_536,
         stderr_limit=65_536,
@@ -736,7 +844,7 @@ def _restart_and_observe_environment(
     )
     for attempt in range(attempts):
         current_job = _inspected_candidate(
-            application_slug,
+            job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
@@ -745,7 +853,7 @@ def _restart_and_observe_environment(
         if current_job is not None:
             version = current_job[0]
             allocations = _allocations(
-                application_slug,
+                job_id,
                 command_runner=command_runner,
                 nomad_command=nomad_command,
                 timeout_seconds=timeout_seconds,
@@ -854,8 +962,15 @@ def _environment_handlers(
         removals: Sequence[str],
     ) -> Mapping[str, Any]:
         path = variable_path(application_slug)
-        status = _status_or_absent(
+        job_id = _only_job_id(
             application_slug,
+            command_runner=command_runner,
+            nomad_command=nomad_command,
+            timeout_seconds=timeout_seconds,
+            response_limit=response_limit,
+        )
+        status = _status_or_absent(
+            job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
@@ -864,7 +979,7 @@ def _environment_handlers(
         running = status is not None and status.get("Status") in {"pending", "running"}
         before = (
             _allocations(
-                application_slug,
+                job_id,
                 command_runner=command_runner,
                 nomad_command=nomad_command,
                 timeout_seconds=timeout_seconds,
@@ -895,6 +1010,7 @@ def _environment_handlers(
         try:
             allocations = _restart_and_observe_environment(
                 application_slug,
+                job_id,
                 index,
                 before,
                 client,
@@ -922,6 +1038,7 @@ def _environment_handlers(
                 )
                 _restart_and_observe_environment(
                     application_slug,
+                    job_id,
                     rollback_index,
                     rollback_baseline,
                     client,

@@ -41,6 +41,8 @@ from platform_cli.app import (
     set_environment,
 )
 from platform_cli.config import PlatformConfig, RuntimeImages
+from platform_cli.helper import production
+from platform_cli.runtime import HttpResult
 from platform_cli.validation import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -524,6 +526,46 @@ class ProviderCommandTests(unittest.TestCase):
             },
         )
 
+    def test_worker_delete_expands_only_the_two_bounded_deployment_slots(self) -> None:
+        platform = SimpleNamespace(prefix="example", project_name="project", project_id=APP_ID)
+        observed: list[str] = []
+
+        def delete_worker(identity: str, slug: str, **_kwargs: object):
+            observed.append(identity)
+            return app_module.WorkerObservation(
+                identity,
+                slug,
+                None,
+                "absent",
+                None,
+                "absent-v4",
+                None,
+                None,
+                False,
+            )
+
+        with (
+            mock.patch.object(production, "helper_runtime", return_value=SimpleNamespace(platform=platform)),
+            mock.patch.object(production.application, "provider_command", return_value=("worker",)),
+            mock.patch.object(production.application, "delete_worker", side_effect=delete_worker),
+        ):
+            result = production._provider_app(
+                "app.worker.delete", {"applicationId": APP_ID, "slug": "demo-app"}
+            )
+        self.assertTrue(result["absent"])
+        self.assertEqual(observed, [APP_ID, *app_module.deployment_worker_ids(APP_ID)])
+        observed.clear()
+        with (
+            mock.patch.object(production, "helper_runtime", return_value=SimpleNamespace(platform=platform)),
+            mock.patch.object(production.application, "provider_command", return_value=("worker",)),
+            mock.patch.object(production.application, "delete_worker", side_effect=delete_worker),
+        ):
+            production._provider_app(
+                "app.worker.delete",
+                {"applicationId": APP_ID, "slug": "demo-app", "single": True},
+            )
+        self.assertEqual(observed, [APP_ID])
+
     def test_existing_worker_uuid_and_image_are_authoritative_over_new_selection(self) -> None:
         server_name = "example-worker-123456781234"
         old_image = "00000000-0000-4000-8000-000000000066"
@@ -949,11 +991,49 @@ class DeploymentTests(unittest.TestCase):
             recipe_hash="c" * 64,
             candidate=True,
             placement_id="00000000-0000-4000-8000-000000000099",
+            staged=True,
+            route_marker="00000000-0000-4000-8000-000000000099",
         )
         self.assertIn('job "demo-app-candidate"', candidate_job)
         self.assertIn('value     = "00000000-0000-4000-8000-000000000099"', candidate_job)
-        self.assertIn("Host(`demo-app-candidate.apps.example.com`)", candidate_job)
+        self.assertIn("Host(`demo-app-preview.apps.example.com`)", candidate_job)
         self.assertNotIn("Host(`demo-app.apps.example.com`)", candidate_job)
+        marker = "00000000-0000-4000-8000-000000000099"
+        self.assertIn(f"X-M1-Deployment={marker}", candidate_job)
+        promoted = render_nomad_job(
+            application_id=APP_ID,
+            application_slug="demo-app",
+            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
+            manifest=Manifest("node", (".",), None, "start", 3000, "/health"),
+            platform=self.platform(),
+            cpu_mhz=1000,
+            memory_mib=2048,
+            source_commit=COMMIT,
+            recipe_hash="c" * 64,
+            candidate=True,
+            placement_id=marker,
+            staged=True,
+            promoted=True,
+            route_marker=marker,
+            route_priority=200,
+        )
+        self.assertIn("Host(`demo-app-preview.apps.example.com`)", promoted)
+        self.assertIn("Host(`demo-app.apps.example.com`)", promoted)
+        self.assertIn("priority=200", promoted)
+
+        for observed, expected in (({}, False), ({"x-m1-deployment": marker}, True)):
+            with self.subTest(headers=observed):
+                self.assertEqual(
+                    app_module.check_public_health(
+                        "demo-app",
+                        self.platform(),
+                        "/health",
+                        timeout_seconds=5,
+                        expected_marker=marker,
+                        http_caller=lambda *_args, **_kwargs: HttpResult(200, observed, b"OK"),
+                    ),
+                    expected,
+                )
 
     def test_interrupted_submission_accepts_only_exact_candidate_evidence(self) -> None:
         job = render_nomad_job(
@@ -1087,6 +1167,62 @@ class DeploymentTests(unittest.TestCase):
             sleep=lambda _seconds: None,
         )
         self.assertEqual(result.observations, 2)
+
+    def test_promoted_route_identity_failure_removes_only_promoted_slot(self) -> None:
+        marker = "00000000-0000-4000-8000-000000000099"
+        job = render_nomad_job(
+            application_id=APP_ID,
+            application_slug="demo-app",
+            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
+            manifest=Manifest("node", (".",), None, "start", 3000, "/health"),
+            platform=self.platform(),
+            cpu_mhz=1000,
+            memory_mib=2048,
+            source_commit=COMMIT,
+            recipe_hash="c" * 64,
+            candidate=True,
+            placement_id=marker,
+            staged=True,
+            promoted=True,
+            route_marker=marker,
+            route_priority=200,
+        )
+        identity = nomad_candidate_identity(job)
+        calls: list[tuple[str, object]] = []
+
+        def helper(action: str, args: object, **_kwargs: object) -> dict[str, object]:
+            calls.append((action, args))
+            if action == "app.deploy":
+                return {
+                    "jobId": "demo-app-candidate",
+                    "nomadVersion": 9,
+                    "candidateJobSha256": identity[0],
+                    "candidateImage": identity[1],
+                }
+            if action == "app.health":
+                return self.health(9, identity, healthy=True, terminal=False)
+            return {"jobAbsent": True}
+
+        with self.assertRaises(DeploymentFailed):
+            deploy_and_cleanup(
+                "demo-app",
+                job,
+                attempts=1,
+                helper_caller=helper,
+                public_health_check=lambda: False,
+            )
+        self.assertIn(
+            (
+                "app.remove",
+                {
+                    "slug": "demo-app",
+                    "jobId": "demo-app-candidate",
+                    "candidateJobSha256": identity[0],
+                    "candidateImage": identity[1],
+                },
+            ),
+            calls,
+        )
 
     def test_terminal_deploy_removes_only_the_current_candidate(self) -> None:
         calls: list[tuple[str, object]] = []

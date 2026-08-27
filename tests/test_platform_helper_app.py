@@ -88,7 +88,11 @@ class FakeNomad:
         elif "allocs" in argv:
             output = json.dumps(self.allocations).encode()
         elif "inspect" in argv:
-            output = json.dumps(self.inspection).encode()
+            if self.inspection.get("ID") != argv[-1]:
+                output = b""
+                returncode = 1
+            else:
+                output = json.dumps(self.inspection).encode()
         elif "logs" in argv:
             output = b"bounded application output\n"
         else:
@@ -189,14 +193,24 @@ class ApplicationHelperTests(unittest.TestCase):
             "source_commit": COMMIT,
             "recipe_hash": "d" * 64,
         }
-        stable_job = render_nomad_job(**common)
         candidate_job = render_nomad_job(
             **common,
             candidate=True,
             placement_id="00000000-0000-4000-8000-000000000099",
+            staged=True,
+            route_marker="00000000-0000-4000-8000-000000000099",
         )
-        stable_identity = nomad_candidate_identity(stable_job)
+        promoted_job = render_nomad_job(
+            **common,
+            candidate=True,
+            placement_id="00000000-0000-4000-8000-000000000099",
+            staged=True,
+            promoted=True,
+            route_marker="00000000-0000-4000-8000-000000000099",
+            route_priority=200,
+        )
         candidate_identity = nomad_candidate_identity(candidate_job)
+        promoted_identity = nomad_candidate_identity(promoted_job)
         inspections = {
             "demo-app": {
                 "ID": "demo-app",
@@ -218,6 +232,7 @@ class ApplicationHelperTests(unittest.TestCase):
                 "Meta": {
                     "m1_candidate_job_sha256": candidate_identity[0],
                     "m1_candidate_image": candidate_identity[1],
+                    "m1_route_marker": "00000000-0000-4000-8000-000000000099",
                 },
                 "TaskGroups": [
                     {
@@ -248,18 +263,18 @@ class ApplicationHelperTests(unittest.TestCase):
                     ]
                 ).encode()
             elif "run" in argv:
-                inspections["demo-app"] = {
-                    "ID": "demo-app",
-                    "Version": 4,
+                inspections["demo-app-candidate"] = {
+                    "ID": "demo-app-candidate",
+                    "Version": 9,
                     "Meta": {
-                        "m1_candidate_job_sha256": stable_identity[0],
-                        "m1_candidate_image": stable_identity[1],
+                        "m1_candidate_job_sha256": promoted_identity[0],
+                        "m1_candidate_image": promoted_identity[1],
                     },
                     "TaskGroups": [
                         {
                             "Name": "app",
                             "Tasks": [
-                                {"Name": "app", "Config": {"image": stable_identity[1]}}
+                                {"Name": "app", "Config": {"image": promoted_identity[1]}}
                             ],
                         }
                     ],
@@ -273,10 +288,13 @@ class ApplicationHelperTests(unittest.TestCase):
         )
         args = {
             "slug": "demo-app",
-            "job": stable_job,
+            "job": promoted_job,
+            "candidateJobId": "demo-app-candidate",
             "candidateVersion": 8,
             "candidateJobSha256": candidate_identity[0],
             "candidateImage": candidate_identity[1],
+            "routeMarker": "00000000-0000-4000-8000-000000000099",
+            "predecessorPriority": 100,
         }
         healthy = False
         with self.assertRaisesRegex(HelperActionError, "health was not confirmed"):
@@ -284,9 +302,15 @@ class ApplicationHelperTests(unittest.TestCase):
         self.assertFalse(any("run" in argv for argv in calls))
 
         healthy = True
+        args["predecessorPriority"] = 200
+        with self.assertRaisesRegex(HelperActionError, "not confirmed"):
+            actions["app.promote"](args)
+        self.assertFalse(any("run" in argv for argv in calls))
+        args["predecessorPriority"] = 100
         promoted = actions["app.promote"](args)
-        self.assertEqual(promoted["jobId"], "demo-app")
-        self.assertEqual(promoted["candidateJobSha256"], stable_identity[0])
+        self.assertEqual(promoted["jobId"], "demo-app-candidate")
+        self.assertEqual(promoted["candidateJobSha256"], promoted_identity[0])
+        self.assertEqual(inspections["demo-app"]["Version"], 3)
         self.assertEqual(sum("run" in argv for argv in calls), 1)
 
     def test_deploy_rejects_unmarked_pre_m1_job_before_provider_calls(self) -> None:
@@ -433,7 +457,17 @@ class ApplicationHelperTests(unittest.TestCase):
 
     def test_public_health_rejects_a_nomad_route_outside_the_trusted_domain(self) -> None:
         inspection = {
+            "ID": "demo-app",
+            "Version": 7,
+            "Meta": {
+                "m1_candidate_job_sha256": CANDIDATE_SHA,
+                "m1_candidate_image": CANDIDATE_IMAGE,
+            },
             "TaskGroups": [
+                {
+                    "Name": "app",
+                    "Tasks": [{"Name": "app", "Config": {"image": CANDIDATE_IMAGE}}],
+                },
                 {
                     "Name": "app",
                     "Services": [
@@ -452,7 +486,16 @@ class ApplicationHelperTests(unittest.TestCase):
 
         def runner(argv, **kwargs):
             calls.append(" ".join(argv))
-            return SimpleNamespace(stdout=json.dumps(inspection).encode())
+            absent = argv[-1] == "demo-app-candidate"
+            return SimpleNamespace(
+                stdout=b"" if absent else json.dumps(inspection).encode(),
+                stderr=(
+                    b'No job(s) with prefix or ID "demo-app-candidate" found\n'
+                    if absent
+                    else b""
+                ),
+                returncode=1 if absent else 0,
+            )
 
         with self.assertRaisesRegex(HelperActionError, "exact public health evidence"):
             _public_health_from_job(
@@ -463,7 +506,14 @@ class ApplicationHelperTests(unittest.TestCase):
                 timeout_seconds=5,
                 response_limit=4096,
             )
-        self.assertEqual(calls, ["fixed-nomad-wrapper job inspect -json demo-app"])
+        self.assertEqual(
+            calls,
+            [
+                "fixed-nomad-wrapper job inspect -json demo-app",
+                "fixed-nomad-wrapper job inspect -json demo-app-candidate",
+                "fixed-nomad-wrapper job inspect -json demo-app",
+            ],
+        )
 
     def test_health_uses_current_version_allocations_without_raw_provider_data(self) -> None:
         args = {
@@ -681,12 +731,19 @@ class ApplicationHelperTests(unittest.TestCase):
         self.assertTrue(removed["removed"])
         self.assertTrue(removed["jobAbsent"])
         self.assertTrue(removed["variableAbsent"])
-        removal_argvs = [call[0] for call in self.nomad.calls[-3:]]
+        removal_argvs = [call[0] for call in self.nomad.calls[-4:]]
         self.assertEqual(
             removal_argvs,
             [
                 ("fixed-nomad-wrapper", "job", "stop", "-purge", "-yes", "demo-app"),
                 ("fixed-nomad-wrapper", "job", "status", "-json", "demo-app"),
+                (
+                    "fixed-nomad-wrapper",
+                    "job",
+                    "inspect",
+                    "-json",
+                    "demo-app-candidate",
+                ),
                 (
                     "fixed-nomad-wrapper",
                     "var",

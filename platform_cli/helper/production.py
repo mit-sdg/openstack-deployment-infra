@@ -445,12 +445,18 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
         )
         return {"buildId": builder.build_id, "absent": builder.absent}
     if action in {"app.worker.create", "app.worker.delete", "app.worker.observe"}:
-        expected = (
-            {"applicationId", "slug", "workerImageId", "standardFlavor"}
-            if action == "app.worker.create"
-            else {"applicationId", "slug"}
-        )
-        _exact_args(args, expected, action)
+        expected = {"applicationId", "slug", "workerImageId", "standardFlavor"}
+        if action == "app.worker.delete":
+            if args.keys() not in ({"applicationId", "slug"}, {"applicationId", "slug", "single"}):
+                raise HelperActionError("INVALID_ARGS", "app.worker.delete arguments are invalid")
+            if not isinstance(args.get("single", False), bool):
+                raise ValidationError("single-worker selector must be boolean")
+        else:
+            _exact_args(
+                args,
+                expected if action == "app.worker.create" else {"applicationId", "slug"},
+                action,
+            )
         if action == "app.worker.create":
             worker = application.create_worker(
                 args["applicationId"],
@@ -465,15 +471,29 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 project_id=platform.project_id,
             )
         elif action == "app.worker.delete":
-            worker = application.delete_worker(
-                args["applicationId"],
-                args["slug"],
-                prefix=platform.prefix,
-                worker_command=application.provider_command(platform, "worker"),
-                timeout_seconds=900,
-                project_name=platform.project_name,
-                project_id=platform.project_id,
+            identities = (
+                (args["applicationId"],)
+                if args.get("single", False)
+                else (
+                    args["applicationId"],
+                    *application.deployment_worker_ids(args["applicationId"]),
+                )
             )
+            observations = [
+                application.delete_worker(
+                    identity,
+                    args["slug"],
+                    prefix=platform.prefix,
+                    worker_command=application.provider_command(platform, "worker"),
+                    timeout_seconds=900,
+                    project_name=platform.project_name,
+                    project_id=platform.project_id,
+                )
+                for identity in identities
+            ]
+            if any(not item.absent for item in observations):
+                raise application.ApplicationError("worker slot cleanup was not confirmed")
+            worker = observations[0]
         else:
             worker = application.observe_worker(
                 args["applicationId"],

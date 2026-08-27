@@ -1752,13 +1752,22 @@ def render_nomad_job(
     recipe_hash: str,
     candidate: bool = False,
     placement_id: str | None = None,
+    staged: bool = False,
+    promoted: bool = False,
+    route_marker: str | None = None,
+    route_priority: int = 100,
 ) -> str:
     """Render one stable or isolated candidate Nomad job."""
     identifier = uuid(application_id, field="application ID")
     placement = uuid(placement_id or identifier, field="placement ID")
+    marker_id = uuid(route_marker or identifier, field="route marker")
     app_slug = slug(application_slug)
-    if not isinstance(candidate, bool):
-        raise ValidationError("candidate selector must be boolean")
+    if not all(isinstance(value, bool) for value in (candidate, staged, promoted)):
+        raise ValidationError("deployment route selectors must be boolean")
+    if promoted and not staged:
+        raise ValidationError("only a staged job can be route-promoted")
+    if isinstance(route_priority, bool) or not 100 <= route_priority <= 1_000_000_000:
+        raise ValidationError("route priority must be from 100 through 1000000000")
     job_id = f"{app_slug}-candidate" if candidate else app_slug
     image_pin = oci_digest_pin(image, field="application image")
     if isinstance(cpu_mhz, bool) or not isinstance(cpu_mhz, int) or not 100 <= cpu_mhz <= 2_000:
@@ -1771,8 +1780,24 @@ def render_nomad_job(
         raise ValidationError("scheduler memory must be an integer from 64 through 3072 MiB")
     checked_source = commit(source_commit)
     checked_recipe = sha256_hex(recipe_hash, field="recipe hash")
-    hostname = f"{job_id}.{platform.domain}"
+    hostname = f"{app_slug}.{platform.domain}"
+    preview_hostname = f"{app_slug}-preview.{platform.domain}"
     variable = f"nomad/jobs/{app_slug}"
+    routers = [
+        (f"{job_id}-preview", preview_hostname, 100)
+        if staged
+        else (job_id, hostname, 100)
+    ]
+    if promoted:
+        routers.append((f"{job_id}-promoted", hostname, route_priority))
+    route_tags = "\n".join(
+        f'''        "traefik.http.routers.{router}.entrypoints=web",
+        "traefik.http.routers.{router}.rule=Host(`{host}`)",
+        "traefik.http.routers.{router}.priority={priority}",
+        "traefik.http.routers.{router}.service={job_id}",
+        "traefik.http.routers.{router}.middlewares={job_id}-headers",'''
+        for router, host, priority in routers
+    )
     binding_aliases = "\n".join(
         f'{{{{ $value := index . "{canonical_secret_key(binding.resource_type, binding.name, output)}" }}}}\n{target}={{{{ $value | toJSON }}}}'
         for binding in manifest.storage_bindings
@@ -1837,13 +1862,11 @@ def render_nomad_job(
       tags = [
         "{platform.namespace}.platform=true",
         "traefik.enable=true",
-        "traefik.http.routers.{job_id}.entrypoints=web",
-        "traefik.http.routers.{job_id}.rule=Host(`{hostname}`)",
-        "traefik.http.routers.{job_id}.service={job_id}",
+{route_tags}
         "traefik.http.services.{job_id}.loadbalancer.server.port=8080",
         "traefik.http.middlewares.{job_id}-headers.headers.contenttypenosniff=true",
         "traefik.http.middlewares.{job_id}-headers.headers.referrerpolicy=no-referrer",
-        "traefik.http.routers.{job_id}.middlewares={job_id}-headers",
+        "traefik.http.middlewares.{job_id}-headers.headers.customresponseheaders.X-M1-Deployment={marker_id}",
       ]
       check {{
         name     = "http-ready"
@@ -1921,6 +1944,7 @@ EOH
     marker = f'''  meta {{
     m1_candidate_job_sha256 = "{identity}"
     m1_candidate_image      = "{image_pin}"
+    m1_route_marker         = "{marker_id}"
 {source_markers}  }}
 
 '''
@@ -1931,6 +1955,7 @@ _JOB_MARKER_BLOCK = re.compile(
     r"  meta \{\n"
     r'    m1_candidate_job_sha256 = "([0-9a-f]{64})"\n'
     r'    m1_candidate_image      = "([^"\n]+@sha256:[0-9a-f]{64})"\n'
+    r'(?:    m1_route_marker         = "[0-9a-f-]{36}"\n)?'
     r'    m1_source_commit        = "[0-9a-f]{40}"\n'
     r'    m1_recipe_sha256        = "[0-9a-f]{64}"\n'
     r"  \}\n\n"
@@ -1945,6 +1970,43 @@ def nomad_job_id(nomad_job: str, application_slug: str) -> str:
     if match is None or match.group(1) not in {app_slug, f"{app_slug}-candidate"}:
         raise ValidationError("Nomad job ID is not the stable or candidate application job")
     return match.group(1)
+
+
+def deployment_worker_ids(application_id: str) -> tuple[str, str]:
+    """Return the two bounded worker identities available for alternating jobs."""
+    identifier = uuid(application_id, field="application ID")
+    namespace = uuid_module.UUID(identifier)
+    return (
+        str(uuid_module.uuid5(namespace, "stable")),
+        str(uuid_module.uuid5(namespace, "candidate")),
+    )
+
+
+def nomad_placement_id(nomad_job: str) -> str:
+    job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
+    matches = re.findall(
+        r'    attribute = "\$\{meta\.application_id\}"\n'
+        r'    operator  = "="\n'
+        r'    value     = "([0-9a-f-]{36})"',
+        job,
+    )
+    if len(matches) != 1:
+        raise ValidationError("Nomad job placement identity was missing or ambiguous")
+    return uuid(matches[0], field="Nomad placement ID")
+
+
+def nomad_route_priority(nomad_job: str) -> int:
+    job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
+    priorities = [int(value) for value in re.findall(r'\.priority=([0-9]+)",', job)]
+    return max(priorities, default=0)
+
+
+def nomad_route_marker(nomad_job: str) -> str:
+    job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
+    matches = re.findall(r'    m1_route_marker         = "([0-9a-f-]{36})"\n', job)
+    if len(matches) != 1:
+        raise ValidationError("Nomad route marker was missing or ambiguous")
+    return uuid(matches[0], field="Nomad route marker")
 
 
 def nomad_candidate_identity(nomad_job: str) -> tuple[str, str]:
@@ -1981,13 +2043,15 @@ def check_public_health(
     path: str,
     *,
     timeout_seconds: float,
-    candidate: bool = False,
+    preview: bool = False,
+    expected_marker: str,
     http_caller: Callable[..., Any] = bounded_http,
 ) -> bool:
     """Check the canonical public HTTPS route without redirects or response bodies."""
     app_slug = slug(application_slug)
     checked_path = health_path(path)
-    route = f"{app_slug}-candidate" if candidate else app_slug
+    route = f"{app_slug}-preview" if preview else app_slug
+    marker = uuid(expected_marker, field="expected route marker")
     url = f"https://{route}.{platform.domain}{checked_path}"
     result = http_caller(
         url,
@@ -1995,7 +2059,11 @@ def check_public_health(
         response_limit=4_096,
         allow_redirects=False,
     )
-    return isinstance(result.status, int) and 200 <= result.status < 300
+    return (
+        isinstance(result.status, int)
+        and 200 <= result.status < 300
+        and result.headers.get("x-m1-deployment") == marker
+    )
 
 
 def deploy_and_cleanup(
@@ -2142,32 +2210,37 @@ def deploy_and_cleanup(
 
 def promote_candidate(
     application_slug: str,
-    stable_job: str,
+    promoted_job: str,
     candidate_version: int,
     candidate_identity: tuple[str, str],
+    predecessor_priority: int,
     *,
     helper_timeout_seconds: float = 30,
     helper_caller: Callable[..., Mapping[str, Any]] = call_helper,
 ) -> DeploymentResult:
-    """Explicitly promote one exact healthy candidate to the stable job."""
+    """Explicitly add the stable route to one exact healthy staged job."""
     app_slug = slug(application_slug)
-    job = bounded_text(stable_job, field="stable Nomad job", maximum=262_144)
-    if nomad_job_id(job, app_slug) != app_slug:
-        raise ValidationError("promotion requires the canonical stable Nomad job")
+    job = bounded_text(promoted_job, field="promoted Nomad job", maximum=262_144)
+    job_id = nomad_job_id(job, app_slug)
     expected = nomad_candidate_identity(job)
     candidate_hash = sha256_hex(candidate_identity[0], field="candidate job SHA-256")
+    if isinstance(predecessor_priority, bool) or not 0 <= predecessor_priority < 1_000_000_000:
+        raise ValidationError("predecessor route priority is invalid")
     candidate_image = oci_digest_pin(candidate_identity[1], field="candidate image")
     if expected[1] != candidate_image:
-        raise ValidationError("stable promotion image does not match the candidate")
+        raise ValidationError("promoted route image does not match the candidate")
     result = _call_helper(
         helper_caller,
         "app.promote",
         {
             "slug": app_slug,
             "job": job,
+            "candidateJobId": job_id,
             "candidateVersion": candidate_version,
             "candidateJobSha256": candidate_hash,
             "candidateImage": candidate_image,
+            "routeMarker": nomad_route_marker(job),
+            "predecessorPriority": predecessor_priority,
         },
         timeout_seconds=helper_timeout_seconds,
     )
@@ -2176,11 +2249,11 @@ def promote_candidate(
         isinstance(version, bool)
         or not isinstance(version, int)
         or version < 0
-        or result.get("jobId") != app_slug
+        or result.get("jobId") != job_id
         or result.get("candidateJobSha256") != expected[0]
         or result.get("candidateImage") != expected[1]
     ):
-        raise ApplicationError("helper did not confirm the exact stable promotion")
+        raise ApplicationError("helper did not confirm the exact route promotion")
     return DeploymentResult(version, 1)
 
 
@@ -2301,6 +2374,7 @@ def accept_healthy_deployment(
     app_slug = slug(acceptance.application_slug)
     expected_hash = sha256_hex(acceptance.nomad_job_sha256, field="Nomad job SHA-256")
     expected_image = oci_digest_pin(acceptance.image, field="accepted image")
+    expected_job_id = nomad_job_id(acceptance.nomad_job, app_slug)
     version = acceptance.nomad_version
     if isinstance(version, bool) or not isinstance(version, int) or version < 0:
         raise ValidationError("accepted Nomad version must be non-negative")
@@ -2312,6 +2386,7 @@ def accept_healthy_deployment(
             "version": version,
             "candidateJobSha256": expected_hash,
             "candidateImage": expected_image,
+            "jobId": expected_job_id,
         },
         timeout_seconds=helper_timeout_seconds,
     )

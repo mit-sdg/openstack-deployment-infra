@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from . import db, openstack, remote, runtime
+from . import app, db, openstack, remote, runtime
 from .config import Config, PlatformConfig
 from .storage_contract import RESOURCE_TYPES, canonical_secret_keys
 
@@ -349,6 +349,7 @@ def application_observer(
                         "version": deployment.nomad_version,
                         "candidateJobSha256": deployment.nomad_job_sha256,
                         "candidateImage": deployment.image_digest,
+                        "jobId": app.nomad_job_id(deployment.nomad_job, application.slug),
                     },
                     timeout_seconds=config.policy.limits.helper_seconds,
                     request_limit=config.policy.limits.helper_request_bytes,

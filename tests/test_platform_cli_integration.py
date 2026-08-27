@@ -579,7 +579,11 @@ class CliIntegrationTests(unittest.TestCase):
                 source_commit="a" * 40,
                 recipe_hash="b" * 64,
                 image_digest=DIGEST,
-                nomad_job="job",
+                nomad_job=(
+                    '    attribute = "${meta.application_id}"\n'
+                    '    operator  = "="\n'
+                    f'    value     = "{APP_ID}"'
+                ),
                 nomad_version=4,
                 build_log_path="logs/build.log",
             )
@@ -943,7 +947,7 @@ class CliIntegrationTests(unittest.TestCase):
             [action for action, _values in calls], ["app.env.set", "app.builder.delete"]
         )
 
-    def test_update_worker_is_operation_owned_while_accepted_worker_remains_selected(self) -> None:
+    def test_update_worker_uses_inactive_bounded_slot_while_accepted_worker_remains(self) -> None:
         args = cli.build_parser().parse_args(self.argv("status"))
         configured = cli._load_config(args)
         operation_id = "00000000-0000-4000-8000-000000000099"
@@ -967,7 +971,7 @@ class CliIntegrationTests(unittest.TestCase):
             source_commit="a" * 40,
             recipe_hash="b" * 64,
             image_digest=DIGEST,
-            nomad_job="stable",
+            nomad_job='job "demo-app" {\n}',
             nomad_version=3,
             build_log_path="logs/stable.log",
         )
@@ -1011,7 +1015,10 @@ class CliIntegrationTests(unittest.TestCase):
             [
                 (
                     "app.worker.observe",
-                    {"applicationId": operation_id, "slug": "demo-app"},
+                    {
+                        "applicationId": app.deployment_worker_ids(APP_ID)[1],
+                        "slug": "demo-app",
+                    },
                 )
             ],
         )

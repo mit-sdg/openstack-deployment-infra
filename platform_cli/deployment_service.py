@@ -444,13 +444,17 @@ def _prepare_deployment_worker(
     refs: dict[str, Any],
     deadline: float,
 ) -> app.DeploymentWorker:
-    # Updates use an operation-owned worker so candidate and stable fixed ports
-    # coexist until explicit promotion.
-    worker_application_id = (
-        operation_id
-        if db.get_deployment(connection, application_id) is not None
-        else application_id
-    )
+    # Alternate bounded worker slots so staged and accepted fixed ports coexist.
+    previous = db.get_deployment(connection, application_id)
+    if previous is None:
+        worker_application_id = application_id
+    else:
+        worker_ids = app.deployment_worker_ids(application_id)
+        worker_application_id = worker_ids[
+            1
+            if app.nomad_job_id(previous.nomad_job, application_slug) == application_slug
+            else 0
+        ]
     refs = {**refs, "worker_application_id": worker_application_id}
     db.checkpoint_operation(
         connection,
@@ -578,10 +582,11 @@ def _validate_storage_bindings(
         )
 
 
-def _cleanup_staged_candidate(
+def _cleanup_deployment(
     config: Config,
     application_slug: str,
-    operation_id: str,
+    job_id: str,
+    worker_application_id: str,
     identity: tuple[str, str],
     *,
     helper_caller: HelperCaller,
@@ -592,7 +597,7 @@ def _cleanup_staged_candidate(
         "app.remove",
         {
             "slug": application_slug,
-            "jobId": f"{application_slug}-candidate",
+            "jobId": job_id,
             "candidateJobSha256": identity[0],
             "candidateImage": identity[1],
         },
@@ -601,11 +606,15 @@ def _cleanup_staged_candidate(
     worker = helper_caller(
         config,
         "app.worker.delete",
-        {"applicationId": operation_id, "slug": application_slug},
+        {
+            "applicationId": worker_application_id,
+            "slug": application_slug,
+            "single": True,
+        },
         deadline=deadline,
     )
     if cleaned.get("jobAbsent") is not True or worker.get("absent") is not True:
-        raise app.ApplicationError("candidate job or worker cleanup was not confirmed")
+        raise app.ApplicationError("deployment job or worker cleanup was not confirmed")
 
 
 def _deploy_and_accept_application(
@@ -630,27 +639,14 @@ def _deploy_and_accept_application(
         deadline=deadline,
     )
     updating = previous is not None
-    stable_application = db.get_application(connection, spec.application_id)
-    if updating:
-        if stable_application is None:
-            raise app.ApplicationError("accepted deployment omitted its stable worker identity")
-        accepted_worker = app.DeploymentWorker(
-            uuid(stable_application.worker_server_id, field="stable worker server UUID"),
-            bounded_text(
-                stable_application.worker_server_name,
-                field="stable worker server name",
-                maximum=128,
-            ),
-            uuid(stable_application.worker_port_id, field="stable worker port UUID"),
-            bounded_text(
-                stable_application.worker_port_name,
-                field="stable worker port name",
-                maximum=128,
-            ),
-            worker.refs,
-        )
-    else:
-        accepted_worker = worker
+    previous_job_id = (
+        app.nomad_job_id(previous.nomad_job, spec.application_slug) if previous else None
+    )
+    target_candidate_slot = updating and previous_job_id == spec.application_slug
+    route_priority = (
+        max(100, app.nomad_route_priority(previous.nomad_job) + 100) if previous else 100
+    )
+    placement = worker.refs.get("worker_application_id", spec.application_id)
     job = app.render_nomad_job(
         application_id=spec.application_id,
         application_slug=spec.application_slug,
@@ -661,10 +657,12 @@ def _deploy_and_accept_application(
         memory_mib=spec.memory_mib,
         source_commit=spec.source_commit,
         recipe_hash=build.recipe_hash,
-        candidate=updating,
-        placement_id=operation_id if updating else spec.application_id,
+        candidate=target_candidate_slot,
+        placement_id=placement,
+        staged=updating,
+        route_marker=operation_id,
     )
-    stable_job = (
+    promoted_job = (
         app.render_nomad_job(
             application_id=spec.application_id,
             application_slug=spec.application_slug,
@@ -675,14 +673,21 @@ def _deploy_and_accept_application(
             memory_mib=spec.memory_mib,
             source_commit=spec.source_commit,
             recipe_hash=build.recipe_hash,
+            candidate=target_candidate_slot,
+            placement_id=placement,
+            staged=True,
+            promoted=True,
+            route_marker=operation_id,
+            route_priority=route_priority,
         )
         if updating
         else job
     )
-    try:
-        result = app.deploy_and_cleanup(
+
+    def observe(deployment_job: str, *, preview: bool) -> app.DeploymentResult:
+        return app.deploy_and_cleanup(
             spec.application_slug,
-            job,
+            deployment_job,
             attempts=max(
                 1,
                 min(
@@ -701,19 +706,44 @@ def _deploy_and_accept_application(
                 config.platform,
                 build.manifest.health_path,
                 timeout_seconds=_remaining(deadline, config.policy.limits.http_seconds),
-                candidate=updating,
+                preview=preview,
+                expected_marker=operation_id,
             ),
             sleep=lambda seconds: time.sleep(_remaining(deadline, seconds)),
         )
+
+    active_attempt_job = job
+    try:
+        result = observe(job, preview=updating)
+        candidate_identity = app.nomad_candidate_identity(job)
+        if updating:
+            assert previous is not None
+            result = app.promote_candidate(
+                spec.application_slug,
+                promoted_job,
+                result.nomad_version,
+                candidate_identity,
+                app.nomad_route_priority(previous.nomad_job),
+                helper_timeout_seconds=config.policy.limits.helper_seconds,
+                helper_caller=lambda action, values, **_bounds: helper_caller(
+                    config, action, values, deadline=deadline
+                ),
+            )
+            active_attempt_job = promoted_job
+            result = observe(promoted_job, preview=False)
     except app.DeploymentFailed as error:
         if not error.cleanup_succeeded:
             raise
         if updating:
-            _cleanup_staged_candidate(
+            _cleanup_deployment(
                 config,
                 spec.application_slug,
-                operation_id,
-                app.nomad_candidate_identity(job),
+                app.nomad_job_id(active_attempt_job, spec.application_slug),
+                uuid(
+                    worker.refs.get("worker_application_id"),
+                    field="candidate worker application ID",
+                ),
+                app.nomad_candidate_identity(active_attempt_job),
                 helper_caller=helper_caller,
                 deadline=deadline,
             )
@@ -743,31 +773,30 @@ def _deploy_and_accept_application(
         db.mark_failed(connection, operation_id, error, cleanup_state="confirmed")
         raise
 
-    candidate_identity = app.nomad_candidate_identity(job)
-    if updating:
-        result = app.promote_candidate(
-            spec.application_slug,
-            stable_job,
-            result.nomad_version,
-            candidate_identity,
-            helper_timeout_seconds=config.policy.limits.helper_seconds,
-            helper_caller=lambda action, values, **_bounds: helper_caller(
-                config,
-                action,
-                values,
-                deadline=deadline,
-            ),
-        )
-    accepted_identity = app.nomad_candidate_identity(stable_job)
+    accepted_job = promoted_job if updating else job
+    accepted_identity = app.nomad_candidate_identity(accepted_job)
     accepted_refs = {
         **worker.refs,
         "nomad_version": result.nomad_version,
         "candidate_job_sha256": accepted_identity[0],
-        "worker_server_id": accepted_worker.server_id,
-        "worker_server_name": accepted_worker.server_name,
-        "worker_port_id": accepted_worker.port_id,
-        "worker_port_name": accepted_worker.port_name,
+        "accepted_job_id": app.nomad_job_id(accepted_job, spec.application_slug),
+        "route_priority": route_priority,
+        "worker_server_id": worker.server_id,
+        "worker_server_name": worker.server_name,
+        "worker_port_id": worker.port_id,
+        "worker_port_name": worker.port_name,
     }
+    if previous is not None and previous_job_id is not None:
+        accepted_refs.update(
+            {
+                "predecessor_job_id": previous_job_id,
+                "predecessor_job_sha256": previous.nomad_job_sha256,
+                "predecessor_image": previous.image_digest,
+                "predecessor_worker_application_id": app.nomad_placement_id(
+                    previous.nomad_job
+                ),
+            }
+        )
     db.checkpoint_operation(
         connection,
         operation_id,
@@ -782,17 +811,17 @@ def _deploy_and_accept_application(
             application_slug=spec.application_slug,
             repository=spec.repository,
             config_path=spec.config_path,
-            worker_server_id=accepted_worker.server_id,
-            worker_server_name=accepted_worker.server_name,
-            worker_port_id=accepted_worker.port_id,
-            worker_port_name=accepted_worker.port_name,
+            worker_server_id=worker.server_id,
+            worker_server_name=worker.server_name,
+            worker_port_id=worker.port_id,
+            worker_port_name=worker.port_name,
             worker_flavor=spec.worker_flavor,
             cpu_mhz=spec.cpu_mhz,
             memory_mib=spec.memory_mib,
             source_commit=spec.source_commit,
             recipe_hash=build.recipe_hash,
             image=build.image,
-            nomad_job=stable_job,
+            nomad_job=accepted_job,
             nomad_job_sha256=accepted_identity[0],
             nomad_version=result.nomad_version,
             health_path=build.manifest.health_path,
@@ -809,14 +838,17 @@ def _deploy_and_accept_application(
             config.platform,
             build.manifest.health_path,
             timeout_seconds=_remaining(deadline, config.policy.limits.http_seconds),
+            expected_marker=operation_id,
         ),
     )
     if updating:
-        _cleanup_staged_candidate(
+        assert previous is not None and previous_job_id is not None
+        _cleanup_deployment(
             config,
             spec.application_slug,
-            operation_id,
-            candidate_identity,
+            previous_job_id,
+            app.nomad_placement_id(previous.nomad_job),
+            (previous.nomad_job_sha256, previous.image_digest),
             helper_caller=helper_caller,
             deadline=deadline,
         )
@@ -975,6 +1007,11 @@ def _recover_app_deployment(
             manifest=manifest,
             deadline=deadline,
         )
+        accepted_job_id = operation.refs.get("accepted_job_id", application_slug)
+        if accepted_job_id not in {application_slug, f"{application_slug}-candidate"}:
+            raise app.ApplicationError("healthy deployment recovery job ID was invalid")
+        has_predecessor = operation.refs.get("predecessor_job_id") is not None
+        recipe_hash = sha256_hex(operation.refs.get("recipe_hash"), field="recipe hash")
         job = app.render_nomad_job(
             application_id=application_id,
             application_slug=application_slug,
@@ -984,7 +1021,13 @@ def _recover_app_deployment(
             cpu_mhz=spec.cpu_mhz,
             memory_mib=spec.memory_mib,
             source_commit=spec.source_commit,
-            recipe_hash=sha256_hex(operation.refs.get("recipe_hash"), field="recipe hash"),
+            recipe_hash=recipe_hash,
+            candidate=accepted_job_id.endswith("-candidate"),
+            placement_id=operation.refs.get("worker_application_id", application_id),
+            staged=has_predecessor,
+            promoted=has_predecessor,
+            route_marker=operation_id,
+            route_priority=operation.refs.get("route_priority", 100),
         )
         candidate_identity = app.nomad_candidate_identity(job)
         if (
@@ -1008,7 +1051,6 @@ def _recover_app_deployment(
             field="worker port name",
             maximum=128,
         )
-        recipe_hash = sha256_hex(operation.refs.get("recipe_hash"), field="recipe hash")
         build_log_path = relative_path(
             operation.refs.get("build_log_path"), field="build log path", allow_dot=False
         )
@@ -1046,27 +1088,32 @@ def _recover_app_deployment(
                 config.platform,
                 manifest.health_path,
                 timeout_seconds=_remaining(deadline, config.policy.limits.http_seconds),
+                expected_marker=operation_id,
             ),
         )
-        if operation.refs.get("worker_application_id") == operation_id:
-            staged_job = app.render_nomad_job(
-                application_id=application_id,
-                application_slug=application_slug,
-                image=candidate,
-                manifest=manifest,
-                platform=config.platform,
-                cpu_mhz=spec.cpu_mhz,
-                memory_mib=spec.memory_mib,
-                source_commit=spec.source_commit,
-                recipe_hash=recipe_hash,
-                candidate=True,
-                placement_id=operation_id,
-            )
-            _cleanup_staged_candidate(
+        if has_predecessor:
+            predecessor_job_id = operation.refs.get("predecessor_job_id")
+            predecessor_worker_id = operation.refs.get("predecessor_worker_application_id")
+            predecessor_hash = operation.refs.get("predecessor_job_sha256")
+            predecessor_image = operation.refs.get("predecessor_image")
+            if not all(
+                isinstance(value, str)
+                for value in (
+                    predecessor_job_id,
+                    predecessor_worker_id,
+                    predecessor_hash,
+                    predecessor_image,
+                )
+            ):
+                raise app.ApplicationError(
+                    "predecessor cleanup recovery evidence was incomplete"
+                )
+            _cleanup_deployment(
                 config,
                 application_slug,
-                operation_id,
-                app.nomad_candidate_identity(staged_job),
+                predecessor_job_id,
+                predecessor_worker_id,
+                (predecessor_hash, predecessor_image),
                 helper_caller=helper_caller,
                 deadline=deadline,
             )
