@@ -79,7 +79,6 @@ let
     ps.boto3
     ps.psycopg
     ps.pymongo
-    ps.pyyaml
   ]);
 
   platformController = pkgs.python314Packages.buildPythonApplication {
@@ -93,7 +92,6 @@ let
       boto3
       psycopg
       pymongo
-      pyyaml
     ];
     doCheck = false;
     postInstall = ''

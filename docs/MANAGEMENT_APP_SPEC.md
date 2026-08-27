@@ -25,7 +25,7 @@ browser -> HTTPS ingress -> management web :8080
                                 -> trusted controller and local constrained helper
 ```
 
-The management process runs as the dedicated `platform-web` account. It can:
+The management process runs as the dedicated `management-web` account. It can:
 
 - listen on port 8080;
 - read its non-secret configuration and authentication public keys;
