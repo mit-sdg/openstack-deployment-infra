@@ -22,6 +22,7 @@ from platform_cli.remote import (
     DependencyUnavailable,
     ProtocolError,
     call_helper,
+    call_local_helper,
     encode_failure,
     encode_request,
     encode_success,
@@ -268,6 +269,42 @@ class ProtocolTests(unittest.TestCase):
                 "platform-admin:/srv/backups/.staging/backup.age",
             ),
         )
+
+    def test_local_helper_uses_one_fixed_absolute_argv_and_stdin(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Completed:
+            stdout = encode_success(self.REQUEST_ID, {"state": "ready"})
+
+        def runner(argv: object, **kwargs: object) -> Completed:
+            captured["argv"] = argv
+            captured.update(kwargs)
+            return Completed()
+
+        result = call_local_helper(
+            "app.observe",
+            {"slug": "demo-app"},
+            timeout_seconds=5,
+            helper_command="/srv/openstack-platform/bin/openstack-platform-helper",
+            request_id=self.REQUEST_ID,
+            command_runner=runner,
+        )
+        self.assertEqual(
+            captured["argv"],
+            ("/srv/openstack-platform/bin/openstack-platform-helper",),
+        )
+        self.assertNotIn("demo-app", captured["argv"])
+        self.assertIn(b"demo-app", captured["stdin"])
+        self.assertEqual(result, {"state": "ready"})
+        for command in ("relative-helper", "/srv/../unsafe-helper"):
+            with self.subTest(command=command), self.assertRaises(ValidationError):
+                call_local_helper(
+                    "app.observe",
+                    {},
+                    timeout_seconds=5,
+                    helper_command=command,
+                    command_runner=runner,
+                )
 
     def test_call_helper_types_ssh_and_helper_dependency_outages(self) -> None:
         def unavailable_runner(_argv: object, **_kwargs: object) -> None:

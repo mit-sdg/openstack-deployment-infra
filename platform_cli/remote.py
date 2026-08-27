@@ -336,6 +336,26 @@ def parse_response(
     )
 
 
+def _response_result(
+    payload: bytes,
+    *,
+    request_id: str,
+    response_limit: int,
+) -> Mapping[str, Any]:
+    response = parse_response(
+        payload,
+        expected_request_id=request_id,
+        maximum_bytes=response_limit,
+    )
+    if not response.ok:
+        assert response.error_code is not None and response.error_message is not None
+        if response.error_code == "DEPENDENCY_UNAVAILABLE":
+            raise DependencyUnavailable(response.error_message)
+        raise HelperError(response.error_code, response.error_message)
+    assert response.result is not None
+    return response.result
+
+
 def call_helper(
     action: str,
     args: Mapping[str, Any],
@@ -375,15 +395,54 @@ def call_helper(
         # Bounded stderr remains available to callers through the exception for
         # private diagnostics, but it is deliberately absent from this message.
         raise DependencyUnavailable("platform helper SSH is unavailable or timed out") from None
-    response = parse_response(
+    return _response_result(
         completed.stdout,
-        expected_request_id=identifier,
-        maximum_bytes=response_limit,
+        request_id=identifier,
+        response_limit=response_limit,
     )
-    if not response.ok:
-        assert response.error_code is not None and response.error_message is not None
-        if response.error_code == "DEPENDENCY_UNAVAILABLE":
-            raise DependencyUnavailable(response.error_message)
-        raise HelperError(response.error_code, response.error_message)
-    assert response.result is not None
-    return response.result
+
+
+def call_local_helper(
+    action: str,
+    args: Mapping[str, Any],
+    *,
+    timeout_seconds: float,
+    helper_command: str,
+    request_limit: int = DEFAULT_REQUEST_LIMIT,
+    response_limit: int = DEFAULT_RESPONSE_LIMIT,
+    stderr_limit: int = 262_144,
+    request_id: str | None = None,
+    command_runner: Callable[..., Any] = run,
+) -> Mapping[str, Any]:
+    """Invoke one fixed local helper executable with the same strict protocol."""
+    command = Path(helper_command)
+    if (
+        not helper_command
+        or "\x00" in helper_command
+        or not command.is_absolute()
+        or os.path.normpath(helper_command) != helper_command
+    ):
+        raise ValidationError("local helper command must be a canonical absolute path")
+    identifier, payload = encode_request(
+        action,
+        args,
+        request_id=request_id,
+        maximum_bytes=request_limit,
+    )
+    try:
+        completed = command_runner(
+            (helper_command,),
+            timeout_seconds=timeout_seconds,
+            stdin=payload,
+            stdout_limit=response_limit + 1,
+            stderr_limit=stderr_limit,
+            inherit_env=("HOME", "USER"),
+            check=True,
+        )
+    except CommandFailure:
+        raise DependencyUnavailable("local platform helper is unavailable or timed out") from None
+    return _response_result(
+        completed.stdout,
+        request_id=identifier,
+        response_limit=response_limit,
+    )
