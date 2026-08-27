@@ -41,6 +41,15 @@ BUSY_TIMEOUT_MS = 5_000
 _MAX_REFS_BYTES = 16_384
 _OPERATION_TOKEN = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _CLEANUP_STATE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_REQUESTED_REF = re.compile(r"[^\x00-\x20\x7f]{1,256}")
+_DEPLOYMENT_STATUSES = {
+    "queued",
+    "building",
+    "deploying",
+    "succeeded",
+    "failed",
+    "recovery_required",
+}
 _NOMAD_JOB_SHA: re.Pattern[str] = re.compile(r'm1_candidate_job_sha256\s*=\s*"([0-9a-f]{64})"')
 _ENVIRONMENT_OWNER = re.compile(
     r"(?:platform|staff|storage\.(?:postgres|mongo|s3)\.[a-z][a-z0-9-]{0,39})"
@@ -142,9 +151,34 @@ class Application:
 class DeploymentAttempt:
     deployment_id: str
     application_id: str
+    status: str
     snapshot_kind: str
+    source_commit: str
+    requested_ref: str | None
+    configuration_revision: int | None
     configuration: DeploymentConfiguration | None
     configuration_sha256: str | None
+    environment_revision: int | None
+    idempotency_request_id: str | None
+    recipe_hash: str | None
+    image_digest: str | None
+    nomad_job: str | None
+    nomad_job_sha256: str | None
+    nomad_version: int | None
+    health_path: str | None
+    application_port: int | None
+    build_log_path: str | None
+    safe_error: str | None
+    cleanup_state: str | None
+    requested_at: str
+    updated_at: str
+    accepted_at: str | None
+    last_healthy_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Deployment:
+    application_id: str
     source_commit: str
     recipe_hash: str
     image_digest: str
@@ -156,11 +190,6 @@ class DeploymentAttempt:
     build_log_path: str
     accepted_at: str
     last_healthy_at: str
-
-
-# The accepted deployment returned by the pre-controller callers is now the
-# active immutable attempt.
-Deployment = DeploymentAttempt
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,33 +432,76 @@ MIGRATIONS: tuple[Migration, ...] = (
         6,
         (
             """
+            CREATE TABLE idempotency_requests (
+                request_id TEXT PRIMARY KEY,
+                request_fingerprint TEXT NOT NULL CHECK (
+                    length(request_fingerprint) = 64
+                    AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+                ),
+                result_kind TEXT,
+                result_id TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                CHECK ((result_kind IS NULL) = (result_id IS NULL)),
+                CHECK ((result_id IS NULL) = (completed_at IS NULL))
+            ) STRICT
+            """,
+            """
             CREATE TABLE deployment_attempts (
                 deployment_id TEXT PRIMARY KEY,
                 application_id TEXT NOT NULL REFERENCES applications(application_id) ON DELETE CASCADE,
+                status TEXT NOT NULL CHECK (status IN (
+                    'queued','building','deploying','succeeded','failed','recovery_required'
+                )),
                 snapshot_kind TEXT NOT NULL CHECK (snapshot_kind IN ('strict','legacy')),
+                source_commit TEXT NOT NULL,
+                requested_ref TEXT,
+                configuration_revision INTEGER CHECK (configuration_revision >= 0),
                 configuration_json TEXT,
                 configuration_sha256 TEXT,
-                source_commit TEXT NOT NULL,
-                recipe_hash TEXT NOT NULL,
-                image_digest TEXT NOT NULL,
-                nomad_job TEXT NOT NULL,
-                nomad_version INTEGER NOT NULL CHECK (nomad_version >= 0),
-                build_log_path TEXT NOT NULL,
-                accepted_at TEXT NOT NULL,
-                last_healthy_at TEXT NOT NULL,
-                nomad_job_sha256 TEXT NOT NULL,
-                health_path TEXT NOT NULL,
-                application_port INTEGER NOT NULL CHECK (application_port BETWEEN 1 AND 65535),
+                environment_revision INTEGER CHECK (environment_revision >= 0),
+                idempotency_request_id TEXT UNIQUE REFERENCES idempotency_requests(request_id),
+                recipe_hash TEXT,
+                image_digest TEXT,
+                nomad_job TEXT,
+                nomad_job_sha256 TEXT,
+                nomad_version INTEGER CHECK (nomad_version >= 0),
+                health_path TEXT,
+                application_port INTEGER CHECK (application_port BETWEEN 1 AND 65535),
+                build_log_path TEXT,
+                safe_error TEXT CHECK (safe_error IS NULL OR length(safe_error) <= 1024),
+                cleanup_state TEXT,
+                requested_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                accepted_at TEXT,
+                last_healthy_at TEXT,
                 UNIQUE (application_id, deployment_id),
                 CHECK (
-                    (snapshot_kind = 'legacy' AND configuration_json IS NULL AND configuration_sha256 IS NULL)
+                    (snapshot_kind = 'legacy' AND requested_ref IS NULL
+                     AND configuration_revision IS NULL AND configuration_json IS NULL
+                     AND configuration_sha256 IS NULL AND environment_revision IS NULL
+                     AND idempotency_request_id IS NULL)
                     OR
-                    (snapshot_kind = 'strict' AND json_valid(configuration_json)
-                     AND json_type(configuration_json) = 'object'
+                    (snapshot_kind = 'strict' AND requested_ref IS NOT NULL
+                     AND configuration_revision IS NOT NULL
+                     AND json_valid(configuration_json) AND json_type(configuration_json) = 'object'
                      AND length(configuration_sha256) = 64
-                     AND configuration_sha256 NOT GLOB '*[^0-9a-f]*')
-                )
+                     AND configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+                     AND environment_revision IS NOT NULL AND idempotency_request_id IS NOT NULL)
+                ),
+                CHECK (status != 'succeeded' OR (
+                    recipe_hash IS NOT NULL AND image_digest IS NOT NULL
+                    AND nomad_job IS NOT NULL AND nomad_job_sha256 IS NOT NULL
+                    AND nomad_version IS NOT NULL AND build_log_path IS NOT NULL
+                    AND accepted_at IS NOT NULL AND last_healthy_at IS NOT NULL
+                )),
+                CHECK (status NOT IN ('failed','recovery_required') OR safe_error IS NOT NULL)
             ) STRICT
+            """,
+            """
+            CREATE UNIQUE INDEX one_unfinished_deployment_per_application
+            ON deployment_attempts(application_id)
+            WHERE status IN ('queued','building','deploying','recovery_required')
             """,
             """
             INSERT INTO deployment_attempts
@@ -437,9 +509,11 @@ MIGRATIONS: tuple[Migration, ...] = (
                    '-4' || substr(lower(hex(randomblob(2))), 2) || '-' ||
                    substr('89ab', (random() & 3) + 1, 1) ||
                    substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
-                   application_id, 'legacy', NULL, NULL, source_commit, recipe_hash,
-                   image_digest, nomad_job, nomad_version, build_log_path, accepted_at,
-                   last_healthy_at, nomad_job_sha256, health_path, application_port
+                   application_id, 'succeeded', 'legacy', source_commit,
+                   NULL, NULL, NULL, NULL, NULL, NULL,
+                   recipe_hash, image_digest, nomad_job, nomad_job_sha256, nomad_version,
+                   health_path, application_port, build_log_path, NULL, NULL,
+                   accepted_at, accepted_at, accepted_at, last_healthy_at
               FROM deployments
             """,
             """
@@ -462,10 +536,23 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
             "DROP TABLE deployments",
             """
-            CREATE TRIGGER deployment_attempts_immutable
+            CREATE TRIGGER deployment_attempt_request_immutable
             BEFORE UPDATE ON deployment_attempts
+            WHEN OLD.deployment_id IS NOT NEW.deployment_id
+              OR OLD.application_id IS NOT NEW.application_id
+              OR OLD.snapshot_kind IS NOT NEW.snapshot_kind
+              OR OLD.source_commit IS NOT NEW.source_commit
+              OR OLD.requested_ref IS NOT NEW.requested_ref
+              OR OLD.configuration_revision IS NOT NEW.configuration_revision
+              OR OLD.configuration_json IS NOT NEW.configuration_json
+              OR OLD.configuration_sha256 IS NOT NEW.configuration_sha256
+              OR OLD.environment_revision IS NOT NEW.environment_revision
+              OR OLD.idempotency_request_id IS NOT NEW.idempotency_request_id
+              OR OLD.requested_at IS NOT NEW.requested_at
+              OR OLD.health_path IS NOT NEW.health_path
+              OR OLD.application_port IS NOT NEW.application_port
             BEGIN
-                SELECT RAISE(ABORT, 'deployment attempts are immutable');
+                SELECT RAISE(ABORT, 'deployment attempt request is immutable');
             END
             """,
             "ALTER TABLE managed_resources RENAME TO managed_resources_by_name",
@@ -511,21 +598,6 @@ MIGRATIONS: tuple[Migration, ...] = (
               FROM managed_resources_by_name
             """,
             "DROP TABLE managed_resources_by_name",
-            """
-            CREATE TABLE idempotency_requests (
-                request_id TEXT PRIMARY KEY,
-                request_fingerprint TEXT NOT NULL CHECK (
-                    length(request_fingerprint) = 64
-                    AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
-                ),
-                result_kind TEXT,
-                result_id TEXT,
-                created_at TEXT NOT NULL,
-                completed_at TEXT,
-                CHECK ((result_kind IS NULL) = (result_id IS NULL)),
-                CHECK ((result_id IS NULL) = (completed_at IS NULL))
-            ) STRICT
-            """,
             """
             CREATE TABLE environment_revisions (
                 application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE,
@@ -1588,10 +1660,15 @@ def _deployment_attempt(row: sqlite3.Row | None) -> DeploymentAttempt | None:
     return DeploymentAttempt(
         deployment_id=row["deployment_id"],
         application_id=row["application_id"],
+        status=row["status"],
         snapshot_kind=row["snapshot_kind"],
+        source_commit=row["source_commit"],
+        requested_ref=row["requested_ref"],
+        configuration_revision=row["configuration_revision"],
         configuration=configuration,
         configuration_sha256=row["configuration_sha256"],
-        source_commit=row["source_commit"],
+        environment_revision=row["environment_revision"],
+        idempotency_request_id=row["idempotency_request_id"],
         recipe_hash=row["recipe_hash"],
         image_digest=row["image_digest"],
         nomad_job=row["nomad_job"],
@@ -1600,6 +1677,10 @@ def _deployment_attempt(row: sqlite3.Row | None) -> DeploymentAttempt | None:
         health_path=row["health_path"],
         application_port=row["application_port"],
         build_log_path=row["build_log_path"],
+        safe_error=row["safe_error"],
+        cleanup_state=row["cleanup_state"],
+        requested_at=row["requested_at"],
+        updated_at=row["updated_at"],
         accepted_at=row["accepted_at"],
         last_healthy_at=row["last_healthy_at"],
     )
@@ -1663,7 +1744,7 @@ def set_deployment_lifecycle(
 
 def get_deployment(
     connection: sqlite3.Connection, application_id: str
-) -> DeploymentAttempt | None:
+) -> Deployment | None:
     row = connection.execute(
         """
         SELECT attempt.*
@@ -1675,17 +1756,229 @@ def get_deployment(
         """,
         (application_id,),
     ).fetchone()
-    return _deployment_attempt(row)
+    attempt = _deployment_attempt(row)
+    if attempt is None:
+        return None
+    if (
+        attempt.recipe_hash is None
+        or attempt.image_digest is None
+        or attempt.nomad_job is None
+        or attempt.nomad_job_sha256 is None
+        or attempt.nomad_version is None
+        or attempt.health_path is None
+        or attempt.application_port is None
+        or attempt.build_log_path is None
+        or attempt.accepted_at is None
+        or attempt.last_healthy_at is None
+    ):
+        raise DatabaseError("active deployment evidence is incomplete")
+    return Deployment(
+        application_id=attempt.application_id,
+        source_commit=attempt.source_commit,
+        recipe_hash=attempt.recipe_hash,
+        image_digest=attempt.image_digest,
+        nomad_job=attempt.nomad_job,
+        nomad_job_sha256=attempt.nomad_job_sha256,
+        nomad_version=attempt.nomad_version,
+        health_path=attempt.health_path,
+        application_port=attempt.application_port,
+        build_log_path=attempt.build_log_path,
+        accepted_at=attempt.accepted_at,
+        last_healthy_at=attempt.last_healthy_at,
+    )
+
+
+def _revision(value: int, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValidationError(f"{field} must be a non-negative integer")
+    return value
+
+
+def create_deployment_attempt(
+    connection: sqlite3.Connection,
+    *,
+    deployment_id: str,
+    application_id: str,
+    source_commit: str,
+    requested_ref: str,
+    configuration_revision: int,
+    configuration: DeploymentConfiguration,
+    environment_revision: int,
+    idempotency_request_id: str,
+    now: str | None = None,
+) -> DeploymentAttempt:
+    from .deployment_config import DeploymentConfiguration
+
+    identifier = uuid(deployment_id, field="deployment_id")
+    application = uuid(application_id, field="application_id")
+    source = commit(source_commit)
+    if not isinstance(requested_ref, str) or not _REQUESTED_REF.fullmatch(requested_ref):
+        raise ValidationError("requested source ref is malformed")
+    config_revision = _revision(configuration_revision, field="configuration revision")
+    environment = _revision(environment_revision, field="environment revision")
+    request_id = uuid(idempotency_request_id, field="idempotency request ID")
+    if not isinstance(configuration, DeploymentConfiguration):
+        raise ValidationError("deployment configuration snapshot is malformed")
+    encoded = configuration.canonical_json()
+    fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
+    timestamp = now or utc_now()
+    with transaction(connection):
+        request = get_idempotency_request(connection, request_id)
+        if request is None:
+            raise DatabaseError("idempotency request is missing")
+        if request.result_id is not None:
+            if (request.result_kind, request.result_id) != ("deployment", identifier):
+                raise IdempotencyConflictError("idempotency request already has a different result")
+            existing = get_deployment_attempt(connection, identifier)
+            if existing is None:
+                raise DatabaseError("idempotency result deployment is missing")
+            return existing
+        current_environment = get_environment_revision(connection, application)
+        if current_environment is None or current_environment.revision != environment:
+            raise DatabaseError("environment revision is missing or stale")
+        unfinished = connection.execute(
+            "SELECT deployment_id FROM deployment_attempts WHERE application_id = ? "
+            "AND status IN ('queued','building','deploying','recovery_required')",
+            (application,),
+        ).fetchone()
+        if unfinished is not None:
+            raise DatabaseError("application already has an unfinished deployment attempt")
+        connection.execute(
+            """
+            INSERT INTO deployment_attempts(
+                deployment_id, application_id, status, snapshot_kind, source_commit,
+                requested_ref, configuration_revision, configuration_json,
+                configuration_sha256, environment_revision, idempotency_request_id,
+                health_path, application_port, requested_at, updated_at
+            ) VALUES (?, ?, 'queued', 'strict', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                identifier,
+                application,
+                source,
+                requested_ref,
+                config_revision,
+                encoded,
+                fingerprint,
+                environment,
+                request_id,
+                configuration.health_path,
+                configuration.port,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            "UPDATE idempotency_requests SET result_kind = 'deployment', result_id = ?, "
+            "completed_at = ? WHERE request_id = ?",
+            (identifier, timestamp, request_id),
+        )
+    result = get_deployment_attempt(connection, identifier)
+    assert result is not None
+    return result
+
+
+def checkpoint_deployment_attempt(
+    connection: sqlite3.Connection,
+    deployment_id: str,
+    *,
+    status: str,
+    recipe_hash: str | None = None,
+    image_digest: str | None = None,
+    nomad_job: str | None = None,
+    nomad_job_sha256: str | None = None,
+    nomad_version: int | None = None,
+    build_log_path: str | None = None,
+    error: BaseException | str | None = None,
+    cleanup_state: str | None = None,
+    now: str | None = None,
+) -> DeploymentAttempt:
+    identifier = uuid(deployment_id, field="deployment_id")
+    if status not in _DEPLOYMENT_STATUSES:
+        raise ValidationError("deployment attempt status is malformed")
+    evidence: dict[str, Any] = {}
+    if recipe_hash is not None:
+        evidence["recipe_hash"] = sha256_hex(recipe_hash, field="recipe_hash")
+    if image_digest is not None:
+        evidence["image_digest"] = oci_digest_pin(image_digest, field="image_digest")
+    if nomad_job is not None:
+        evidence["nomad_job"] = nomad_job
+    if nomad_job_sha256 is not None:
+        evidence["nomad_job_sha256"] = sha256_hex(
+            nomad_job_sha256, field="nomad_job_sha256"
+        )
+    if nomad_version is not None:
+        evidence["nomad_version"] = _revision(nomad_version, field="nomad version")
+    if build_log_path is not None:
+        if not build_log_path or len(build_log_path) > 1024:
+            raise ValidationError("build log path is malformed")
+        evidence["build_log_path"] = build_log_path
+    if error is not None:
+        evidence["safe_error"] = safe_summary(error)
+    if cleanup_state is not None:
+        evidence["cleanup_state"] = _cleanup_state(cleanup_state)
+    timestamp = now or utc_now()
+    with transaction(connection):
+        current = get_deployment_attempt(connection, identifier)
+        if current is None:
+            raise DatabaseError("deployment attempt is missing")
+        resulting_error = evidence.get("safe_error", current.safe_error)
+        if status in {"failed", "recovery_required"} and resulting_error is None:
+            raise DatabaseError("failed deployment attempt requires a safe error")
+        assignments = ["status = ?", "updated_at = ?"]
+        values: list[Any] = [status, timestamp]
+        for column, value in evidence.items():
+            assignments.append(f"{column} = ?")
+            values.append(value)
+        if status == "succeeded":
+            assignments.extend(["accepted_at = ?", "last_healthy_at = ?"])
+            values.extend([timestamp, timestamp])
+        values.append(identifier)
+        try:
+            connection.execute(
+                f"UPDATE deployment_attempts SET {', '.join(assignments)} "
+                "WHERE deployment_id = ?",
+                values,
+            )
+        except sqlite3.IntegrityError as database_error:
+            raise DatabaseError("deployment attempt evidence is incomplete") from database_error
+        if status == "succeeded":
+            connection.execute(
+                """
+                INSERT INTO active_deployments VALUES (?, ?, 'running', ?)
+                ON CONFLICT(application_id) DO UPDATE SET
+                  deployment_id=excluded.deployment_id,
+                  lifecycle_state=excluded.lifecycle_state,
+                  updated_at=excluded.updated_at
+                """,
+                (current.application_id, identifier, timestamp),
+            )
+            connection.execute(
+                "UPDATE applications SET desired_running = 1, updated_at = ? "
+                "WHERE application_id = ?",
+                (timestamp, current.application_id),
+            )
+    result = get_deployment_attempt(connection, identifier)
+    assert result is not None
+    return result
 
 
 def list_deployment_attempts(
-    connection: sqlite3.Connection, application_id: str
+    connection: sqlite3.Connection,
+    application_id: str,
+    *,
+    status: str | None = None,
 ) -> tuple[DeploymentAttempt, ...]:
     identifier = uuid(application_id, field="application_id")
+    if status is not None and status not in _DEPLOYMENT_STATUSES:
+        raise ValidationError("deployment attempt status is malformed")
+    query = "SELECT * FROM deployment_attempts WHERE application_id = ?"
+    parameters: tuple[str, ...] = (identifier,)
+    if status is not None:
+        query += " AND status = ?"
+        parameters += (status,)
     rows = connection.execute(
-        "SELECT * FROM deployment_attempts WHERE application_id = ? "
-        "ORDER BY accepted_at DESC, deployment_id DESC",
-        (identifier,),
+        query + " ORDER BY requested_at DESC, deployment_id DESC", parameters
     )
     return tuple(attempt for row in rows if (attempt := _deployment_attempt(row)) is not None)
 
@@ -1704,6 +1997,7 @@ def list_application_manifest_images(
     images = [
         oci_digest_pin(attempt.image_digest, field="deployment image")
         for attempt in list_deployment_attempts(connection, identifier)
+        if attempt.image_digest is not None
     ]
     rows = connection.execute(
         """
@@ -1729,7 +2023,8 @@ def list_application_successful_manifest_history(
     identifier = uuid(application_id, field="application_id")
     images = [
         oci_digest_pin(attempt.image_digest, field="deployment image")
-        for attempt in list_deployment_attempts(connection, identifier)
+        for attempt in list_deployment_attempts(connection, identifier, status="succeeded")
+        if attempt.image_digest is not None
     ]
     rows = connection.execute(
         """
@@ -1794,14 +2089,7 @@ def accept_deployment(
     deployment_id: str | None = None,
     configuration: DeploymentConfiguration | None = None,
 ) -> DeploymentAttempt:
-    """Append one accepted attempt and atomically make it active.
-
-    ``configuration=None`` is retained only for the pre-controller deployment
-    path and is explicitly marked legacy; controller writes provide the parsed,
-    canonical configuration object.
-    """
-    from .deployment_config import DeploymentConfiguration
-
+    """Compatibility path that appends an explicitly legacy accepted attempt."""
     application_id = uuid(application_id, field="application_id")
     identifier = uuid(
         deployment_id or str(uuid_module.uuid4()), field="deployment_id"
@@ -1825,35 +2113,35 @@ def accept_deployment(
         or not 1 <= application_port <= 65_535
     ):
         raise ValidationError("application_port must be from 1 through 65535")
-    if configuration is not None and not isinstance(configuration, DeploymentConfiguration):
-        raise ValidationError("deployment configuration snapshot is malformed")
-    encoded = None if configuration is None else configuration.canonical_json()
-    configuration_hash = None if encoded is None else hashlib.sha256(encoded.encode()).hexdigest()
+    if configuration is not None:
+        raise ValidationError("strict deployments must use create_deployment_attempt")
     timestamp = accepted_at or utc_now()
     with transaction(connection):
         connection.execute(
             """
-            INSERT INTO deployment_attempts VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
+            INSERT INTO deployment_attempts(
+                deployment_id, application_id, status, snapshot_kind, source_commit,
+                recipe_hash, image_digest, nomad_job, nomad_job_sha256, nomad_version,
+                health_path, application_port, build_log_path, requested_at, updated_at,
+                accepted_at, last_healthy_at
+            ) VALUES (?, ?, 'succeeded', 'legacy', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 identifier,
                 application_id,
-                "legacy" if encoded is None else "strict",
-                encoded,
-                configuration_hash,
                 checked_source,
                 checked_recipe,
                 checked_image,
                 nomad_job,
-                nomad_version,
-                build_log_path,
-                timestamp,
-                last_healthy_at or timestamp,
                 checked_job_sha256,
+                nomad_version,
                 checked_health_path,
                 application_port,
+                build_log_path,
+                timestamp,
+                timestamp,
+                timestamp,
+                last_healthy_at or timestamp,
             ),
         )
         connection.execute(

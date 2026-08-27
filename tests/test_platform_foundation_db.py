@@ -17,6 +17,7 @@ IMAGE_ID = "00000000-0000-4000-8000-000000000002"
 DIGEST = "registry.example/projects/demo/app@sha256:" + "a" * 64
 DEPLOYMENT_ID = "00000000-0000-4000-8000-000000000004"
 REQUEST_ID = "00000000-0000-4000-8000-000000000005"
+SECOND_REQUEST_ID = "00000000-0000-4000-8000-000000000006"
 
 
 class DatabaseTests(unittest.TestCase):
@@ -162,7 +163,7 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(db.MigrationError, "different deployment identity"):
             db.connect(self.path, identity=wrong_namespace)
 
-    def test_deployment_schema_records_embedded_exact_job_identity(self) -> None:
+    def test_legacy_accepted_deployment_migration_preserves_exact_job_identity(self) -> None:
         db.migrate(self.connection, target_version=2)
         self.add_application()
         job_identity = "d" * 64
@@ -190,11 +191,14 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(deployment.nomad_job_sha256, job_identity)
         self.assertEqual(deployment.health_path, "/")
         self.assertEqual(deployment.application_port, 8080)
-        self.assertEqual(deployment.snapshot_kind, "legacy")
-        self.assertIsNone(deployment.configuration)
+        attempt = db.list_deployment_attempts(self.connection, APP_ID)[0]
+        self.assertEqual((attempt.status, attempt.snapshot_kind), ("succeeded", "legacy"))
+        self.assertIsNone(attempt.configuration)
+        self.assertIsNone(attempt.requested_ref)
+        self.assertIsNone(attempt.idempotency_request_id)
         self.assertEqual(
             db.get_active_deployment(self.connection, APP_ID).deployment_id,  # type: ignore[union-attr]
-            deployment.deployment_id,
+            attempt.deployment_id,
         )
 
     def test_missing_expected_schema_object_is_refused_even_with_its_migration_row(self) -> None:
@@ -571,7 +575,7 @@ class DatabaseTests(unittest.TestCase):
             {current, candidate},
         )
 
-    def test_strict_deployment_attempts_are_immutable_and_keep_history(self) -> None:
+    def test_attempt_request_is_immutable_while_evidence_and_status_evolve(self) -> None:
         self.migrate()
         self.add_application()
         configuration = parse_configuration(
@@ -587,53 +591,125 @@ class DatabaseTests(unittest.TestCase):
                 "storageBindings": [],
             }
         )
-        first = db.accept_deployment(
+        for request_id in (REQUEST_ID, SECOND_REQUEST_ID):
+            db.claim_idempotency_request(
+                self.connection,
+                request_id=request_id,
+                request_fingerprint=db.request_fingerprint({"requestId": request_id}),
+            )
+        first = db.create_deployment_attempt(
             self.connection,
             deployment_id=DEPLOYMENT_ID,
             application_id=APP_ID,
             source_commit="a" * 40,
-            recipe_hash="b" * 64,
-            image_digest=DIGEST,
-            nomad_job="first",
-            nomad_version=1,
-            build_log_path="logs/first.log",
+            requested_ref="refs/heads/main",
+            configuration_revision=7,
             configuration=configuration,
-            accepted_at="2026-01-01T00:00:00Z",
+            environment_revision=0,
+            idempotency_request_id=REQUEST_ID,
+            now="2026-01-01T00:00:00Z",
         )
-        second = db.accept_deployment(
+        self.assertEqual((first.status, first.snapshot_kind), ("queued", "strict"))
+        self.assertEqual(first.configuration, configuration)
+        self.assertIsNone(first.recipe_hash)
+        self.assertIsNone(first.image_digest)
+        self.assertIsNone(first.safe_error)
+
+        immutable_changes = {
+            "application_id": IMAGE_ID,
+            "source_commit": "f" * 40,
+            "requested_ref": "refs/heads/other",
+            "configuration_revision": 8,
+            "configuration_json": "{}",
+            "environment_revision": 1,
+            "idempotency_request_id": SECOND_REQUEST_ID,
+        }
+        for column, value in immutable_changes.items():
+            with self.subTest(column=column), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "immutable"
+            ):
+                self.connection.execute(
+                    f"UPDATE deployment_attempts SET {column} = ? WHERE deployment_id = ?",
+                    (value, DEPLOYMENT_ID),
+                )
+
+        with self.assertRaisesRegex(db.DatabaseError, "unfinished"):
+            db.create_deployment_attempt(
+                self.connection,
+                deployment_id=IMAGE_ID,
+                application_id=APP_ID,
+                source_commit="c" * 40,
+                requested_ref="refs/heads/next",
+                configuration_revision=8,
+                configuration=configuration,
+                environment_revision=0,
+                idempotency_request_id=SECOND_REQUEST_ID,
+            )
+        building = db.checkpoint_deployment_attempt(
+            self.connection,
+            DEPLOYMENT_ID,
+            status="building",
+            recipe_hash="b" * 64,
+            build_log_path="logs/first.log",
+            now="2026-01-01T00:01:00Z",
+        )
+        self.assertEqual(
+            db.list_deployment_attempts(self.connection, APP_ID, status="building"),
+            (building,),
+        )
+        recovery = db.checkpoint_deployment_attempt(
+            self.connection,
+            DEPLOYMENT_ID,
+            status="recovery_required",
+            error="builder result was ambiguous",
+            now="2026-01-01T00:02:00Z",
+        )
+        self.assertEqual(recovery.status, "recovery_required")
+        self.assertEqual(recovery.recipe_hash, "b" * 64)
+        failed = db.checkpoint_deployment_attempt(
+            self.connection,
+            DEPLOYMENT_ID,
+            status="failed",
+            cleanup_state="confirmed",
+            now="2026-01-01T00:03:00Z",
+        )
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(
+            db.list_deployment_attempts(self.connection, APP_ID, status="failed"),
+            (failed,),
+        )
+
+        second = db.create_deployment_attempt(
             self.connection,
             deployment_id=IMAGE_ID,
             application_id=APP_ID,
             source_commit="c" * 40,
+            requested_ref="refs/heads/next",
+            configuration_revision=8,
+            configuration=configuration,
+            environment_revision=0,
+            idempotency_request_id=SECOND_REQUEST_ID,
+            now="2026-01-02T00:00:00Z",
+        )
+        second = db.checkpoint_deployment_attempt(
+            self.connection,
+            second.deployment_id,
+            status="succeeded",
             recipe_hash="d" * 64,
             image_digest="registry.example/projects/demo/app@sha256:" + "e" * 64,
             nomad_job="second",
+            nomad_job_sha256="e" * 64,
             nomad_version=2,
             build_log_path="logs/second.log",
-            configuration=configuration,
-            accepted_at="2026-01-02T00:00:00Z",
+            cleanup_state="not_required",
+            now="2026-01-02T00:01:00Z",
         )
-        self.assertEqual(first.snapshot_kind, "strict")
-        self.assertEqual(first.configuration, configuration)
-        self.assertEqual(db.get_deployment(self.connection, APP_ID), second)
-        self.assertEqual(
-            db.set_deployment_lifecycle(
-                self.connection,
-                APP_ID,
-                "stopped",
-                now="2026-01-02T00:01:00Z",
-            ).lifecycle_state,
-            "stopped",
-        )
+        self.assertEqual(db.get_deployment(self.connection, APP_ID).nomad_version, 2)  # type: ignore[union-attr]
         self.assertEqual(
             [item.deployment_id for item in db.list_deployment_attempts(self.connection, APP_ID)],
             [IMAGE_ID, DEPLOYMENT_ID],
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
-            self.connection.execute(
-                "UPDATE deployment_attempts SET source_commit = ? WHERE deployment_id = ?",
-                ("f" * 40, DEPLOYMENT_ID),
-            )
+        self.assertEqual(second.status, "succeeded")
 
     def test_idempotency_fingerprint_and_result_are_stable_on_replay(self) -> None:
         self.migrate()
