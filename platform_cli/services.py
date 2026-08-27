@@ -234,6 +234,8 @@ class ApplicationService:
         checked_slug = slug(application_slug)
         if db.get_application(self.connection, checked_slug) is not None:
             raise ValidationError("application already exists")
+        if db.get_slug_tombstone(self.connection, checked_slug) is not None:
+            raise ValidationError("application slug is permanently reserved")
         identifier = str(uuid_module.uuid4())
         standard = self.config.policy.standard
         url = f"https://{checked_slug}.{self.config.platform.domain}"

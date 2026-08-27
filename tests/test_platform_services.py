@@ -82,6 +82,19 @@ class ProductServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "already exists"):
             self.declare()
 
+    def test_deleted_slug_cannot_be_redeclared(self) -> None:
+        application = self.declare()
+        self.connection.execute(
+            "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
+            ("retired-app", application.application_id, "2026-08-27T00:00:00Z"),
+        )
+        with self.assertRaisesRegex(ValidationError, "permanently reserved"):
+            services.ApplicationService(
+                self.connection,
+                self.config,
+                self.root / "service-state",
+            ).declare("retired-app")
+
     def test_environment_service_hides_values_and_records_only_accepted_key_names(self) -> None:
         created = self.declare()
         request = services.EnvironmentMutationRequest(
