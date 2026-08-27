@@ -37,6 +37,7 @@ decide what they may touch, but nothing outside your inventory is modified.
 - [Architecture](ARCHITECTURE.md) — current roles, state ownership, isolation, and failure boundaries.
 - [Self-hosted management implementation plan](IMPLEMENTATION_PLAN.md) — target product model, component boundaries, migrations, implementation phases, and acceptance evidence.
 - [Implementation baseline](IMPLEMENTATION_BASELINE.md) — current CLI, helper, state, recovery, test boundaries, and the failed-candidate availability gap recorded before extraction.
+- [Management application specification](MANAGEMENT_APP_SPEC.md) — self-contained sync-engine application brief, authentication contract, UI flows, controller requests, reconciliation, and acceptance evidence.
 
 ## Verify acceptance
 
