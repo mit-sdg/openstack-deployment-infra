@@ -42,7 +42,10 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("Bindings neither create nor remove storage", contract)
         self.assertIn("helper-diagnostics/<correlation-id>.trace", contract)
         self.assertIn("source file/line locations", contract)
-        self.assertIn("controller/helper-diagnostics 0700 agentops agentops", admin_role)
+        self.assertIn(
+            "controllerRoot}/helper-diagnostics 0700 ${controllerUser} ${controllerGroup}",
+            admin_role,
+        )
 
     def test_automated_setup_contract_is_documented(self) -> None:
         readme = (ROOT / "README.md").read_text()

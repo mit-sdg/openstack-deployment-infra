@@ -901,15 +901,15 @@ class ReleaseInstallerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
-        release = admin_state / "controller/platform-cli/releases" / commit
+        release = admin_state / "operator/platform-cli/releases" / commit
         launcher = admin_root / "bin/openstack-platform-helper"
         self.assertEqual(result.stdout.splitlines()[-1], f"helper-release={commit}:verified")
-        self.assertEqual((admin_state / "controller/platform-cli/current").resolve(), release)
+        self.assertEqual((admin_state / "operator/platform-cli/current").resolve(), release)
         self.assertEqual(launcher.resolve(), release / "bin/openstack-platform-helper")
         launcher_text = launcher.resolve().read_text(encoding="utf-8")
         self.assertIn(f"platform_config={live_platform}", launcher_text)
         self.assertEqual((release / ".complete").read_text(), f"{commit}\n")
-        self.assertEqual(list((admin_state / "controller/platform-cli/incoming").iterdir()), [])
+        self.assertEqual(list((admin_state / "operator/platform-cli/incoming").iterdir()), [])
 
     def test_helper_deployment_refuses_mismatched_live_config_before_upload(self) -> None:
         repository, commit = self._repository()

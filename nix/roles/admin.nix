@@ -20,6 +20,19 @@ let
   backups = platform.paths.backups;
   root = platform.paths.root;
   stateMountUnit = "${systemdEscapePath state}.mount";
+  controllerUser = "platform-controller";
+  controllerGroup = "platform-controller";
+  controllerSocketGroup = "controller-api";
+  managementWebUser = "management-web";
+  controllerRoot = "${state}/controller";
+  controllerState = "${controllerRoot}/state";
+  controllerPolicy = "${controllerRoot}/policy.json";
+  operatorRoot = "${state}/operator";
+  operatorPolicy = "${operatorRoot}/policy.json";
+  helperReleaseRoot = "${operatorRoot}/platform-cli";
+  controllerSocketDirectory = "${namespace}-controller";
+  controllerSocket = "/run/${controllerSocketDirectory}/controller.sock";
+  helperReleaseMarker = "${helperReleaseRoot}/current/.complete";
 
   openstackSdg = pkgs.writeShellScriptBin "platform-openstack" ''
     set -euo pipefail
@@ -85,6 +98,26 @@ let
       BUILDER_OPERATOR_PUBLIC_KEY=${root}/secrets/builder_operator_ed25519.pub \
       ${infra}/openstack/builder_lifecycle.sh "$@"
   '';
+  prepareController = pkgs.writeShellScript "${namespace}-prepare-controller" ''
+    set -euo pipefail
+
+    policy_source=${lib.escapeShellArg operatorPolicy}
+    policy=${lib.escapeShellArg controllerPolicy}
+    test -f "$policy_source" && test ! -L "$policy_source"
+    test "$(stat -c %U:%a "$policy_source")" = agentops:600
+    install -m 0600 -o ${controllerUser} -g ${controllerGroup} \
+      "$policy_source" "$policy"
+
+    # Keep credentials owned by their installer or operator. Grant only the
+    # dedicated trusted controller group read/traverse access.
+    tree=${lib.escapeShellArg "${operatorRoot}/secrets"}
+    if test -d "$tree" && test ! -L "$tree"; then
+      ${pkgs.findutils}/bin/find -P "$tree" -type d \
+        -exec chgrp ${controllerGroup} '{}' + -exec chmod 0750 '{}' +
+      ${pkgs.findutils}/bin/find -P "$tree" -type f \
+        -exec chgrp ${controllerGroup} '{}' + -exec chmod 0640 '{}' +
+    fi
+  '';
 in
 {
   networking.hostName = platform.hosts.admin;
@@ -93,12 +126,35 @@ in
     4646
     4647
     4648
-    8080
   ];
+  # The future management application owns this unprivileged port. Only the
+  # ingress host may cross the host firewall boundary to reach it.
+  networking.firewall.extraCommands = ''
+    iptables -A nixos-fw -p tcp -s ${platform.addresses.ingress}/32 --dport 8080 -j nixos-fw-accept
+  '';
 
+  users.groups.${controllerSocketGroup}.gid = 984;
+  users.groups.${controllerGroup}.gid = 985;
+  users.groups.${managementWebUser}.gid = 986;
   users.groups.platform-admin.gid = 987;
   users.groups.nomad.gid = 988;
   users.users.agentops.extraGroups = [ "platform-admin" ];
+  users.users.${controllerUser} = {
+    isSystemUser = true;
+    uid = 997;
+    group = controllerGroup;
+    extraGroups = [
+      "agentops"
+      "platform-admin"
+      controllerSocketGroup
+    ];
+  };
+  users.users.${managementWebUser} = {
+    isSystemUser = true;
+    uid = 998;
+    group = managementWebUser;
+    extraGroups = [ controllerSocketGroup ];
+  };
   users.users.nomad = {
     isSystemUser = true;
     uid = 999;
@@ -188,21 +244,24 @@ in
     "z /etc/${namespace}/pki 0750 root platform-admin -"
     "z /etc/${namespace}/secrets 0750 root nomad -"
     "d ${state}/nomad 0750 nomad nomad -"
-    "d ${state}/controller 0700 agentops agentops -"
-    "d ${state}/controller/secrets 0700 agentops agentops -"
-    "d ${state}/controller/status 0750 agentops agentops -"
-    "d ${state}/controller/platform-cli 0750 agentops agentops -"
-    "d ${state}/controller/platform-cli/releases 0750 agentops agentops -"
-    "d ${state}/controller/platform-cli/incoming 0700 agentops agentops -"
-    "d ${state}/controller/helper-diagnostics 0700 agentops agentops -"
-    "d ${backups} 0700 agentops agentops -"
-    "d ${backups}/m1 0700 agentops agentops -"
-    "d ${backups}/m1/.staging 0700 agentops agentops -"
-    "L+ ${root}/persistent - - - - ${state}/controller"
+    "d ${controllerRoot} 0700 ${controllerUser} ${controllerGroup} -"
+    "d ${controllerState} 0700 ${controllerUser} ${controllerGroup} -"
+    "d ${controllerRoot}/build-logs 0700 ${controllerUser} ${controllerGroup} -"
+    "d ${controllerRoot}/helper-diagnostics 0700 ${controllerUser} ${controllerGroup} -"
+    "d ${operatorRoot} 0750 agentops agentops -"
+    "d ${operatorRoot}/secrets 0700 agentops agentops -"
+    "d ${operatorRoot}/status 0750 agentops agentops -"
+    "d ${helperReleaseRoot} 0750 agentops agentops -"
+    "d ${helperReleaseRoot}/releases 0750 agentops agentops -"
+    "d ${helperReleaseRoot}/incoming 0700 agentops agentops -"
+    "d ${backups} 0710 agentops ${controllerGroup} -"
+    "d ${backups}/m1 0770 agentops ${controllerGroup} -"
+    "d ${backups}/m1/.staging 0770 agentops ${controllerGroup} -"
+    "L+ ${root}/persistent - - - - ${operatorRoot}"
     "d ${root}/bin 0750 agentops agentops -"
     "L+ ${root}/infra - - - - ${infra}"
-    "L+ ${root}/secrets - - - - ${state}/controller/secrets"
-    "L+ ${state}/controller/secrets/nomad-cli - - - - ${state}/controller/secrets/provisioning-pki"
+    "L+ ${root}/secrets - - - - ${operatorRoot}/secrets"
+    "L+ ${operatorRoot}/secrets/nomad-cli - - - - ${operatorRoot}/secrets/provisioning-pki"
     "L+ ${root}/nomad.env - - - - /etc/${namespace}/nomad.env"
     "L+ ${root}/bin/platform-openstack - - - - ${openstackSdg}/bin/platform-openstack"
     "L+ ${root}/bin/${namespace}-nomad - - - - ${nomadCli}/bin/${namespace}-nomad"
@@ -213,6 +272,175 @@ in
     "L+ ${root}/bin/age - - - - ${pkgs.age}/bin/age"
     "L+ ${root}/bin/age-keygen - - - - ${pkgs.age}/bin/age-keygen"
   ];
+
+  systemd.services."${namespace}-controller-prepare" = {
+    description = "Prepare private ${platform.displayName} controller paths";
+    after = [
+      "cloud-final.service"
+      stateMountUnit
+    ];
+    requires = [ stateMountUnit ];
+    unitConfig.ConditionPathExists = [
+      operatorPolicy
+      helperReleaseMarker
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = prepareController;
+      UMask = "0027";
+    };
+  };
+
+  systemd.services."${namespace}-controller" = {
+    description = "Local ${platform.displayName} application controller";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [
+      "network-online.target"
+      "nomad.service"
+      "${namespace}-controller-prepare.service"
+      stateMountUnit
+    ];
+    requires = [
+      "nomad.service"
+      "${namespace}-controller-prepare.service"
+      stateMountUnit
+    ];
+    unitConfig.ConditionPathExists = [
+      controllerPolicy
+      helperReleaseMarker
+    ];
+    environment = {
+      PLATFORM_OPENSTACK_COMMAND = "${openstackSdg}/bin/platform-openstack";
+      PYTHONDONTWRITEBYTECODE = "1";
+    };
+    serviceConfig = {
+      Type = "simple";
+      User = controllerUser;
+      Group = controllerSocketGroup;
+      SupplementaryGroups = [
+        controllerGroup
+        "agentops"
+        "platform-admin"
+      ];
+      RuntimeDirectory = controllerSocketDirectory;
+      RuntimeDirectoryMode = "0750";
+      UMask = "0077";
+      ExecStart = lib.concatStringsSep " " [
+        "${packages.platformController}/bin/openstack-platform-controller"
+        "--platform-config /etc/${namespace}/platform.json"
+        "--state-directory ${controllerState}"
+        "--policy ${controllerPolicy}"
+        "--socket ${controllerSocket}"
+        "--socket-group ${controllerSocketGroup}"
+      ];
+      Restart = "on-failure";
+      RestartSec = 2;
+
+      AmbientCapabilities = "";
+      CapabilityBoundingSet = "";
+      DevicePolicy = "closed";
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      NoNewPrivileges = true;
+      PrivateDevices = true;
+      PrivateMounts = true;
+      PrivateTmp = true;
+      ProcSubset = "pid";
+      ProtectClock = true;
+      ProtectControlGroups = true;
+      ProtectHome = true;
+      ProtectHostname = true;
+      ProtectKernelLogs = true;
+      ProtectKernelModules = true;
+      ProtectKernelTunables = true;
+      ProtectProc = "invisible";
+      ProtectSystem = "strict";
+      RemoveIPC = true;
+      RestrictAddressFamilies = [
+        "AF_UNIX"
+        "AF_INET"
+        "AF_INET6"
+      ];
+      RestrictNamespaces = true;
+      RestrictRealtime = true;
+      RestrictSUIDSGID = true;
+      SystemCallArchitectures = "native";
+      ReadOnlyPaths = [
+        "/etc/${namespace}/platform.json"
+        controllerPolicy
+        "${root}/bin"
+        "${root}/infra"
+        helperReleaseRoot
+        "${operatorRoot}/secrets"
+      ];
+      ReadWritePaths = [
+        controllerState
+        "${controllerRoot}/build-logs"
+        "${controllerRoot}/helper-diagnostics"
+        "${backups}/m1"
+      ];
+    };
+  };
+
+  # Installing the operator-owned helper release or policy after boot starts
+  # the controller without granting the operator service-management rights.
+  systemd.paths."${namespace}-controller" = {
+    wantedBy = [ "multi-user.target" ];
+    pathConfig = {
+      PathExists = [
+        operatorPolicy
+        helperReleaseMarker
+      ];
+      Unit = "${namespace}-controller.service";
+    };
+  };
+
+  systemd.services."${namespace}-controller-readiness" = {
+    description = "Verify the restricted local ${platform.displayName} controller API";
+    after = [ "${namespace}-controller.service" ];
+    requires = [ "${namespace}-controller.service" ];
+    partOf = [ "${namespace}-controller.service" ];
+    unitConfig.ConditionPathExists = [
+      controllerPolicy
+      helperReleaseMarker
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      User = managementWebUser;
+      Group = managementWebUser;
+      SupplementaryGroups = [ controllerSocketGroup ];
+      ExecStart = pkgs.writeShellScript "${namespace}-controller-readiness" ''
+        set -euo pipefail
+        for attempt in {1..24}; do
+          if ${pkgs.curl}/bin/curl --fail --silent --show-error --max-time 5 \
+            --unix-socket ${lib.escapeShellArg controllerSocket} \
+            'http://localhost/v1/admin/applications?limit=1' >/dev/null; then
+            echo "${namespace} controller ready"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "${namespace} controller readiness failed" >&2
+        exit 1
+      '';
+      NoNewPrivileges = true;
+      PrivateDevices = true;
+      PrivateTmp = true;
+      ProtectHome = true;
+      ProtectSystem = "strict";
+      RestrictAddressFamilies = [ "AF_UNIX" ];
+    };
+  };
+
+  systemd.paths."${namespace}-controller-readiness" = {
+    wantedBy = [ "multi-user.target" ];
+    pathConfig = {
+      PathExists = controllerSocket;
+      Unit = "${namespace}-controller-readiness.service";
+    };
+  };
 
   systemd.services.nomad = {
     description = "Nomad ${platform.displayName} control-plane server";

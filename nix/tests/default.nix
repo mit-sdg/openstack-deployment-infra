@@ -6,6 +6,8 @@ let
   state = platform.paths.adminState;
   backups = platform.paths.backups;
   packages = import ../pkgs { inherit pkgs platform; };
+  systemdEscapePath =
+    path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   testPki = pkgs.runCommand "${namespace}-test-pki" { nativeBuildInputs = [ pkgs.openssl ]; } ''
         set -euo pipefail
         install -d -m 0755 "$out"
@@ -124,6 +126,45 @@ let
                   > /run/${namespace}-nomad/90-runtime.hcl
                 chown nomad:nomad /run/${namespace}-nomad/90-runtime.hcl
               '';
+              "${namespace}-controller-test-fixture" = {
+                description = "Install disposable controller policy and helper release";
+                before = [ "${namespace}-controller-prepare.service" ];
+                after = [
+                  "systemd-tmpfiles-setup.service"
+                  "${systemdEscapePath state}.mount"
+                ];
+                requires = [ "${systemdEscapePath state}.mount" ];
+                serviceConfig.Type = "oneshot";
+                script = ''
+                  install -d -m 0750 -o agentops -g agentops \
+                    ${state}/operator/platform-cli/current/bin
+                  install -m 0600 -o agentops -g agentops \
+                    ${../../config/platform-policy.example.json} \
+                    ${state}/operator/policy.json
+                  cat > ${state}/operator/platform-cli/current/bin/openstack-platform-helper <<'EOF'
+                  #!/bin/sh
+                  printf '%s\n' '{"version":1,"requestId":"00000000-0000-0000-0000-000000000000","ok":false,"error":{"code":"INVALID_REQUEST","message":"helper request is invalid"}}'
+                  EOF
+                  chown agentops:agentops \
+                    ${state}/operator/platform-cli/current/bin/openstack-platform-helper
+                  chmod 0550 \
+                    ${state}/operator/platform-cli/current/bin/openstack-platform-helper
+                  printf 'vm-test\n' > ${state}/operator/platform-cli/current/.complete
+                  chown agentops:agentops ${state}/operator/platform-cli/current/.complete
+                  chmod 0440 ${state}/operator/platform-cli/current/.complete
+                  for credential in \
+                    openstack.env nomad-tokens.env storage-bootstrap.env \
+                    builder_operator_ed25519 backup-age-key.txt; do
+                    printf 'controller-secret\n' > ${state}/operator/secrets/$credential
+                    chown agentops:agentops ${state}/operator/secrets/$credential
+                    chmod 0600 ${state}/operator/secrets/$credential
+                  done
+                '';
+              };
+              "${namespace}-controller" = {
+                after = [ "${namespace}-controller-test-fixture.service" ];
+                requires = [ "${namespace}-controller-test-fixture.service" ];
+              };
             })
             (lib.mkIf (role == "ingress") {
               "${namespace}-ingress-readiness".wantedBy = lib.mkForce [ ];
@@ -186,31 +227,53 @@ let
             ''
               machine.wait_for_unit("nomad.service")
               machine.wait_for_unit("${namespace}-admin-readiness.service")
+              machine.wait_for_unit("${namespace}-controller.service")
+              machine.wait_for_unit("${namespace}-controller-readiness.service")
               machine.succeed("systemctl is-active --quiet nomad.service")
+              machine.succeed("systemctl is-active --quiet ${namespace}-controller.service")
               machine.succeed("${pkgs.curl}/bin/curl --fail --silent --cacert /etc/${namespace}/pki/internal-ca.pem --cert /etc/${namespace}/pki/nomad-cli.pem --key /etc/${namespace}/pki/nomad-cli-key.pem https://127.0.0.1:4646/v1/status/leader >/dev/null")
               machine.succeed("${packages.platformCliPython}/bin/python -c 'import sys, yaml; assert sys.version_info[:2] == (3, 14)'")
+              machine.succeed("${packages.platformController}/bin/openstack-platform-controller --help >/dev/null")
               machine.succeed("openstack-platform-install-release --help >/dev/null")
-              machine.fail("${root}/bin/openstack-platform-helper </dev/null")
+              machine.succeed("test $(stat -c %a /run/${namespace}-controller/controller.sock) = 660")
+              machine.succeed("test $(stat -c %U /run/${namespace}-controller/controller.sock) = platform-controller")
+              machine.succeed("test $(stat -c %G /run/${namespace}-controller/controller.sock) = controller-api")
+              machine.succeed("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-controller/controller.sock 'http://localhost/v1/admin/applications?limit=1' >/dev/null")
+              machine.fail("runuser -u management-web -- cat ${state}/controller/policy.json")
+              machine.succeed("runuser -u management-web -- sh -c 'for name in openstack.env nomad-tokens.env storage-bootstrap.env builder_operator_ed25519 backup-age-key.txt; do test ! -r ${state}/operator/secrets/\"$name\" || exit 1; done'")
+              machine.fail("runuser -u management-web -- cat /etc/${namespace}/pki/nomad-cli-key.pem")
+              machine.succeed("runuser -u platform-controller -- cat ${state}/operator/secrets/openstack.env >/dev/null")
+              machine.fail("runuser -u nomad -- cat ${state}/operator/secrets/openstack.env")
+              machine.succeed("id -nG management-web | grep -Fx 'management-web controller-api'")
+              machine.succeed("test $(stat -c %U:%G:%a ${state}/controller) = platform-controller:platform-controller:700")
+              machine.succeed("test $(stat -c %U:%G:%a ${state}/controller/state) = platform-controller:platform-controller:700")
+              machine.succeed("test $(stat -c %U:%G:%a ${state}/operator/platform-cli) = agentops:agentops:750")
+              machine.succeed("test $(stat -c %U:%a ${state}/operator/policy.json) = agentops:600")
+              machine.succeed("systemctl show ${namespace}-controller.service -p ProtectSystem --value | grep -Fx strict")
+              machine.succeed("systemctl show ${namespace}-controller.service -p NoNewPrivileges --value | grep -Fx yes")
+              machine.succeed("${pkgs.iptables}/bin/iptables -C nixos-fw -p tcp -s ${platform.addresses.ingress}/32 --dport 8080 -j nixos-fw-accept")
+              machine.fail("${pkgs.curl}/bin/curl --fail --silent --max-time 1 http://127.0.0.1:8080/")
+              machine.succeed("${root}/bin/openstack-platform-helper </dev/null | grep -F INVALID_REQUEST")
               # The control plane calls the helper by this name, and a tmpfiles
               # rule owns it, so it must reach the accepted release rather than
               # run the helper module without PLATFORM_CONFIG.
               machine.succeed(
-                  "install -d -m 0750 ${state}/controller/platform-cli/current/bin"
+                  "install -d -m 0750 ${state}/operator/platform-cli/current/bin"
               )
               machine.succeed(
                   "printf '#!/bin/sh\\necho delegated-to-release\\n' "
-                  "> ${state}/controller/platform-cli/current/bin/openstack-platform-helper"
+                  "> ${state}/operator/platform-cli/current/bin/openstack-platform-helper"
               )
               machine.succeed(
-                  "chmod 0550 ${state}/controller/platform-cli/current/bin/openstack-platform-helper"
+                  "chmod 0550 ${state}/operator/platform-cli/current/bin/openstack-platform-helper"
               )
-              machine.succeed("printf 'commit\\n' > ${state}/controller/platform-cli/current/.complete")
+              machine.succeed("printf 'commit\\n' > ${state}/operator/platform-cli/current/.complete")
               machine.succeed(
                   "${root}/bin/openstack-platform-helper </dev/null | grep -Fx delegated-to-release"
               )
-              machine.succeed("rm -rf ${state}/controller/platform-cli/current")
-              machine.succeed("test -d ${state}/controller/platform-cli/releases")
-              machine.succeed("test -d ${state}/controller/platform-cli/incoming")
+              machine.succeed("rm -rf ${state}/operator/platform-cli/current")
+              machine.succeed("test -d ${state}/operator/platform-cli/releases")
+              machine.succeed("test -d ${state}/operator/platform-cli/incoming")
               machine.succeed("test -d ${backups}/m1/.staging")
               machine.fail("systemctl cat ${namespace}-managed-usage.service")
               machine.fail("systemctl cat ${namespace}-managed-usage.timer")
@@ -220,6 +283,7 @@ let
               machine.wait_for_unit("traefik.service")
               machine.wait_until_succeeds("${pkgs.curl}/bin/curl --fail --silent http://127.0.0.1:8082/ping | grep -Fx OK", timeout=30)
               machine.succeed("grep -F 'one-off.apps.example.com' /etc/traefik/dynamic/platform.yaml")
+              machine.succeed("grep -F 'http://${platform.addresses.admin}:8080' /etc/traefik/dynamic/platform.yaml")
               machine.succeed("grep -F 'http://192.0.2.14:4444' /etc/traefik/dynamic/platform.yaml")
             ''
           else if role == "storage" then

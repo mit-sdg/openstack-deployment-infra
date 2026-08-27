@@ -82,6 +82,28 @@ let
     ps.pyyaml
   ]);
 
+  platformController = pkgs.python314Packages.buildPythonApplication {
+    pname = "openstack-platform-controller";
+    version = "0.1.0";
+    pyproject = true;
+    src = pkgs.lib.cleanSource ../..;
+    build-system = [ pkgs.python314Packages.hatchling ];
+    dependencies = with pkgs.python314Packages; [
+      bcrypt
+      boto3
+      psycopg
+      pymongo
+      pyyaml
+    ];
+    doCheck = false;
+    postInstall = ''
+      rm "$out/bin/openstack-platform" \
+        "$out/bin/openstack-platform-helper" \
+        "$out/bin/openstack-platform-restore"
+    '';
+    pythonImportsCheck = [ "platform_cli.controller_main" ];
+  };
+
   platformCliInstaller = pkgs.writeShellApplication {
     name = "openstack-platform-install-release";
     runtimeInputs = [
@@ -101,7 +123,7 @@ let
   # accepted release's own launcher, which validates and exports it.
   platformCliHelperLauncher = pkgs.writeShellScriptBin "openstack-platform-helper" ''
     set -eu
-    release=${platform.paths.adminState}/controller/platform-cli/current
+    release=${platform.paths.adminState}/operator/platform-cli/current
     if [[ ! -f "$release/.complete" ]]; then
       echo "no accepted helper release" >&2
       exit 69
@@ -133,6 +155,7 @@ in
     buildkit
     python
     platformCliPython
+    platformController
     platformCliInstaller
     platformCliHelperLauncher
     imageSmoke

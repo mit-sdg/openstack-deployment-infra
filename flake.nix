@@ -70,6 +70,7 @@
           traefik
           buildkit
           platformCliPython
+          platformController
           platformCliInstaller
           platformCliHelperLauncher
           imageSmoke
@@ -90,6 +91,7 @@
             ${rolePackages.age}/bin/age --version >/dev/null
             ${rolePackages.python}/bin/openstack --version >/dev/null
             ${rolePackages.platformCliPython}/bin/python -c 'import sys, yaml; assert sys.version_info[:2] == (3, 14)'
+            ${rolePackages.platformController}/bin/openstack-platform-controller --help >/dev/null
             ${rolePackages.platformCliInstaller}/bin/openstack-platform-install-release --help >/dev/null
             touch "$out"
           '';
