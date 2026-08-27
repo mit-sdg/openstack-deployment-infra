@@ -7,9 +7,10 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import app, cli, db, openstack, remote, status
+from platform_cli import app, cli, db, deployment_service, openstack, remote, status
 from platform_cli.helper.main import default_handlers
 from platform_cli.helper.production import ACTION_MANIFEST
+from platform_cli.storage_contract import PLATFORM_ENVIRONMENT_KEYS
 from platform_cli.validation import ValidationError
 
 APP_ID = "00000000-0000-4000-8000-000000000001"
@@ -517,10 +518,10 @@ class CliIntegrationTests(unittest.TestCase):
                 owner="staff",
                 keys=["NODE_ENV", "STAFF_SENTINEL"],
             )
-            cli._record_platform_environment_ownership(
+            deployment_service._record_platform_environment_ownership(
                 connection,
                 APP_ID,
-                sorted(cli._PLATFORM_ENVIRONMENT),
+                sorted(PLATFORM_ENVIRONMENT_KEYS),
             )
             ownership = {
                 item.key_name: item.owner
@@ -800,7 +801,7 @@ class CliIntegrationTests(unittest.TestCase):
                 }
                 self.assertEqual(
                     owners,
-                    {name: "platform" for name in cli._PLATFORM_ENVIRONMENT},
+                    {name: "platform" for name in PLATFORM_ENVIRONMENT_KEYS},
                 )
             finally:
                 connection.close()
@@ -879,7 +880,7 @@ class CliIntegrationTests(unittest.TestCase):
                     "repository": "https://github.com/o/r",
                     "source_commit": "f" * 40,
                     "config_path": "platform.yaml",
-                    "platform_key_names": sorted(cli._PLATFORM_ENVIRONMENT),
+                    "platform_key_names": sorted(PLATFORM_ENVIRONMENT_KEYS),
                     "desired_platform_values": desired,
                     "prior_platform_values": prior,
                 },
@@ -919,16 +920,19 @@ class CliIntegrationTests(unittest.TestCase):
                     return {"absent": True}
                 raise AssertionError(action)
 
-            with mock.patch.object(cli, "_helper", side_effect=helper):
-                recovered = cli._recover_app_deployment(
-                    connection,
-                    configured,
-                    spec,
-                    operation,
-                    deadline=cli._command_deadline(configured),
-                    output=StringIO(),
-                )
-            self.assertIsNotNone(recovered)
+            service = deployment_service.DeploymentService(
+                connection,
+                configured,
+                self.state,
+                helper_caller=helper,
+            )
+            recovered = service.recover_operation(
+                spec,
+                operation,
+                deadline=cli._command_deadline(configured),
+            )
+            self.assertIsNotNone(recovered.operation)
+            self.assertIsNone(recovered.completed)
             owners = {
                 item.key_name: item.owner
                 for item in db.list_environment_keys(connection, application_id=APP_ID)
@@ -978,7 +982,7 @@ class CliIntegrationTests(unittest.TestCase):
                 }
             if action == "app.env.set":
                 return {
-                    "keys": sorted(cli._PLATFORM_ENVIRONMENT),
+                    "keys": sorted(PLATFORM_ENVIRONMENT_KEYS),
                     "modifyIndex": 2,
                     "restarted": False,
                     "schedulerHealthy": False,
