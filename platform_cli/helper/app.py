@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from ..app import nomad_candidate_identity
+from ..app import nomad_candidate_identity, nomad_job_id
 from ..runtime import CommandTimedOut, bounded_http, run
 from ..validation import (
     ValidationError,
@@ -176,13 +176,13 @@ def _validated_ownership(value: object) -> dict[str, str]:
     return result
 
 
-def inspected_job_identity(value: Mapping[str, Any], application_slug: str) -> tuple[int, str, str]:
+def inspected_job_identity(value: Mapping[str, Any], job_id: str) -> tuple[int, str, str]:
     """Reduce one live Nomad job to an exact stable definition hash and image.
 
     M1 jobs carry the generated-job hash and immutable image explicitly. Jobs
     without those markers are not accepted as deployment evidence.
     """
-    if value.get("ID") != application_slug:
+    if value.get("ID") != job_id:
         raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
     version = value.get("Version")
     groups = value.get("TaskGroups")
@@ -230,7 +230,7 @@ def inspected_job_identity(value: Mapping[str, Any], application_slug: str) -> t
 
 
 def _inspected_candidate(
-    application_slug: str,
+    job_id: str,
     *,
     command_runner: Callable[..., Any],
     nomad_command: tuple[str, ...],
@@ -244,20 +244,20 @@ def _inspected_candidate(
     submit a replacement or issue a destructive command.
     """
     completed = command_runner(
-        (*nomad_command, "job", "inspect", "-json", application_slug),
+        (*nomad_command, "job", "inspect", "-json", job_id),
         timeout_seconds=timeout_seconds,
         stdout_limit=response_limit,
         stderr_limit=65_536,
         check=False,
     )
     if completed.returncode != 0:
-        if completed.returncode == 1 and _exact_absence(completed.stderr, application_slug):
+        if completed.returncode == 1 and _exact_absence(completed.stderr, job_id):
             return None
         raise HelperActionError("NOMAD_UNAVAILABLE", "Nomad job inspection was unavailable")
     value = _parse_json(completed.stdout, field="job inspection")
-    if not isinstance(value, dict) or value.get("ID") != application_slug:
+    if not isinstance(value, dict) or value.get("ID") != job_id:
         raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
-    return inspected_job_identity(value, application_slug)
+    return inspected_job_identity(value, job_id)
 
 
 def _deploy_handler(
@@ -272,6 +272,7 @@ def _deploy_handler(
         application_slug = slug(args["slug"])
         job = bounded_text(args["job"], field="Nomad job", maximum=262_144)
         candidate = nomad_candidate_identity(job)
+        job_id = nomad_job_id(job, application_slug)
         command_runner(
             (*nomad_command, "job", "validate", "-"),
             timeout_seconds=timeout_seconds,
@@ -281,7 +282,7 @@ def _deploy_handler(
             check=True,
         )
         current = _inspected_candidate(
-            application_slug,
+            job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
@@ -290,6 +291,7 @@ def _deploy_handler(
         if current is not None and current[1:] == candidate:
             return {
                 "slug": application_slug,
+                "jobId": job_id,
                 "nomadVersion": current[0],
                 "candidateJobSha256": candidate[0],
                 "candidateImage": candidate[1],
@@ -304,7 +306,7 @@ def _deploy_handler(
             check=True,
         )
         observed = _inspected_candidate(
-            application_slug,
+            job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
@@ -317,6 +319,7 @@ def _deploy_handler(
             )
         return {
             "slug": application_slug,
+            "jobId": job_id,
             "nomadVersion": observed[0],
             "candidateJobSha256": candidate[0],
             "candidateImage": candidate[1],
@@ -334,19 +337,20 @@ def _health_handler(
     response_limit: int,
 ) -> Handler:
     def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
-        _exact_args(
-            args,
-            {"slug", "version", "candidateJobSha256", "candidateImage"},
-            "app.health",
-        )
+        expected = {"slug", "version", "candidateJobSha256", "candidateImage"}
+        if args.keys() not in (expected, expected | {"jobId"}):
+            raise HelperActionError("INVALID_ARGS", "app.health arguments are invalid")
         application_slug = slug(args["slug"])
+        job_id = args.get("jobId", application_slug)
+        if job_id not in {application_slug, f"{application_slug}-candidate"}:
+            raise ValidationError("Nomad job ID is not an application deployment job")
         version = args["version"]
         if isinstance(version, bool) or not isinstance(version, int) or version < 0:
             raise ValidationError("Nomad version must be a non-negative integer")
         expected_identity = sha256_hex(args["candidateJobSha256"], field="candidate job SHA-256")
         expected_image = oci_digest_pin(args["candidateImage"], field="candidate image")
         current = _inspected_candidate(
-            application_slug,
+            job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
@@ -360,7 +364,7 @@ def _health_handler(
             and current_version == version
         )
         allocations = _allocations(
-            application_slug,
+            job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
@@ -391,6 +395,7 @@ def _health_handler(
         )
         return {
             "slug": application_slug,
+            "jobId": job_id,
             "version": version,
             "currentVersion": current_version,
             "candidateJobSha256": current[1] if current is not None else None,
@@ -399,6 +404,59 @@ def _health_handler(
             "terminal": terminal,
             "allocations": len(selected),
         }
+
+    return handle
+
+
+def _promote_handler(
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+    response_limit: int,
+) -> Handler:
+    observe_health = _health_handler(
+        command_runner=command_runner,
+        nomad_command=nomad_command,
+        timeout_seconds=timeout_seconds,
+        response_limit=response_limit,
+    )
+    deploy_job = _deploy_handler(
+        command_runner=command_runner,
+        nomad_command=nomad_command,
+        timeout_seconds=timeout_seconds,
+        response_limit=response_limit,
+    )
+
+    def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
+        _exact_args(
+            args,
+            {"slug", "job", "candidateVersion", "candidateJobSha256", "candidateImage"},
+            "app.promote",
+        )
+        application_slug = slug(args["slug"])
+        evidence = observe_health(
+            {
+                "slug": application_slug,
+                "jobId": f"{application_slug}-candidate",
+                "version": args["candidateVersion"],
+                "candidateJobSha256": args["candidateJobSha256"],
+                "candidateImage": args["candidateImage"],
+            }
+        )
+        stable_job = bounded_text(args["job"], field="stable Nomad job", maximum=262_144)
+        stable_identity = nomad_candidate_identity(stable_job)
+        if (
+            evidence.get("healthy") is not True
+            or evidence.get("terminal") is not False
+            or nomad_job_id(stable_job, application_slug) != application_slug
+            or stable_identity[1]
+            != oci_digest_pin(args["candidateImage"], field="candidate image")
+        ):
+            raise HelperActionError(
+                "CANDIDATE_UNHEALTHY", "exact candidate health was not confirmed or promotable"
+            )
+        return deploy_job({"slug": application_slug, "job": stable_job})
 
     return handle
 
@@ -491,34 +549,42 @@ def _remove_handler(
     timeout_seconds: float,
 ) -> Handler:
     def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
-        if args.keys() not in ({"slug"}, {"slug", "preserveVariable"}):
+        candidate_keys = {"slug", "jobId", "candidateJobSha256", "candidateImage"}
+        if args.keys() not in ({"slug"}, candidate_keys):
             raise HelperActionError("INVALID_ARGS", "app.remove arguments are invalid")
         application_slug = slug(args["slug"])
-        preserve_variable = args.get("preserveVariable", False)
-        if not isinstance(preserve_variable, bool):
-            raise ValidationError("preserveVariable must be boolean")
+        deleting_application = args.keys() == {"slug"}
+        job_id = application_slug if deleting_application else args["jobId"]
+        if job_id not in {application_slug, f"{application_slug}-candidate"}:
+            raise ValidationError("Nomad job ID is not an application deployment job")
+        expected = None
+        if not deleting_application:
+            expected = (
+                sha256_hex(args["candidateJobSha256"], field="candidate job SHA-256"),
+                oci_digest_pin(args["candidateImage"], field="candidate image"),
+            )
 
-        # Establish a safe precondition before issuing the destructive stop.
-        # Exact absence is a successful no-op; every other non-zero/ambiguous
-        # inspection blocks the stop and therefore cannot remove an unrelated
-        # job after a dependency failure.
+        # Candidate cleanup is authorized by exact immutable identity and can
+        # never select the stable job merely because both belong to one app.
         before = _inspected_candidate(
-            application_slug,
+            job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
             response_limit=65_536,
         )
+        if before is not None and expected is not None and before[1:] != expected:
+            raise HelperActionError("CANDIDATE_MISMATCH", "candidate cleanup identity did not match")
         if before is not None:
             command_runner(
-                (*nomad_command, "job", "stop", "-purge", "-yes", application_slug),
+                (*nomad_command, "job", "stop", "-purge", "-yes", job_id),
                 timeout_seconds=timeout_seconds,
                 stdout_limit=65_536,
                 stderr_limit=65_536,
                 check=False,
             )
             after = _status_or_absent(
-                application_slug,
+                job_id,
                 command_runner=command_runner,
                 nomad_command=nomad_command,
                 timeout_seconds=timeout_seconds,
@@ -527,7 +593,7 @@ def _remove_handler(
             if after is not None:
                 raise HelperActionError("JOB_REMAINS", "Nomad job remained after removal")
         variable_absent = False
-        if not preserve_variable:
+        if deleting_application:
             path = variable_path(application_slug)
             command_runner(
                 (*nomad_command, "var", "purge", "-force", path),
@@ -937,6 +1003,12 @@ def handlers(
             response_limit=response_limit,
         ),
         "app.health": _health_handler(
+            command_runner=command_runner,
+            nomad_command=command,
+            timeout_seconds=timeout_seconds,
+            response_limit=response_limit,
+        ),
+        "app.promote": _promote_handler(
             command_runner=command_runner,
             nomad_command=command,
             timeout_seconds=timeout_seconds,

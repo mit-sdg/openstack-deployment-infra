@@ -42,6 +42,7 @@ class FakeNomad:
         self.calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
         self.variables = variables
         self.job_absent = False
+        self.stopped_jobs: set[str] = set()
         self.status = {"ID": "demo-app", "Version": 7, "Status": "running"}
         self.inspection = {
             "ID": "demo-app",
@@ -72,7 +73,7 @@ class FakeNomad:
         self.calls.append((tuple(argv), dict(kwargs)))
         returncode = 0
         if "stop" in argv:
-            self.job_absent = True
+            self.stopped_jobs.add(argv[-1])
             output = b""
         elif "purge" in argv:
             self.variables.index = 0
@@ -80,7 +81,7 @@ class FakeNomad:
             output = b""
         elif "status" in argv:
             output = json.dumps(self.status).encode()
-            returncode = 1 if self.job_absent else 0
+            returncode = 1 if self.job_absent or argv[-1] in self.stopped_jobs else 0
         elif "restart" in argv:
             self.allocations[0]["ModifyIndex"] = self.allocations[0].get("ModifyIndex", 0) + 1
             output = b""
@@ -92,7 +93,11 @@ class FakeNomad:
             output = b"bounded application output\n"
         else:
             output = b""
-        stderr = b'No job(s) with prefix or ID "demo-app" found\n' if returncode == 1 else b""
+        stderr = (
+            f'No job(s) with prefix or ID "{argv[-1]}" found\n'.encode()
+            if returncode == 1
+            else b""
+        )
         return SimpleNamespace(
             stdout=output,
             stderr=stderr,
@@ -124,6 +129,7 @@ class ApplicationHelperTests(unittest.TestCase):
                 "app.deploy",
                 "app.health",
                 "app.logs",
+                "app.promote",
                 "app.remove",
                 "app.env.set",
                 "app.env.remove",
@@ -131,16 +137,157 @@ class ApplicationHelperTests(unittest.TestCase):
             },
         )
 
-    @unittest.expectedFailure
     def test_candidate_cleanup_preserves_shared_accepted_job(self) -> None:
-        """Phase 0 proof of the current failed-candidate availability gap.
+        """Candidate cleanup selects only the exact distinct candidate job."""
+        self.nomad.inspection["ID"] = "demo-app-candidate"
+        self.actions["app.remove"](
+            {
+                "slug": "demo-app",
+                "jobId": "demo-app-candidate",
+                "candidateJobSha256": CANDIDATE_SHA,
+                "candidateImage": CANDIDATE_IMAGE,
+            }
+        )
+        self.assertEqual(self.nomad.stopped_jobs, {"demo-app-candidate"})
+        self.assertFalse(any(call[0][-1] == "demo-app" for call in self.nomad.calls if "stop" in call[0]))
+        self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
 
-        Candidate cleanup currently purges the stable slug's only Nomad job.
-        Keep this expected failure until distinct candidate cleanup can leave
-        the accepted allocation and route serving.
-        """
-        self.actions["app.remove"]({"slug": "demo-app", "preserveVariable": True})
-        self.assertFalse(self.nomad.job_absent)
+    def test_candidate_cleanup_refuses_identity_drift_without_stopping(self) -> None:
+        self.nomad.inspection["ID"] = "demo-app-candidate"
+        with self.assertRaisesRegex(HelperActionError, "identity did not match"):
+            self.actions["app.remove"](
+                {
+                    "slug": "demo-app",
+                    "jobId": "demo-app-candidate",
+                    "candidateJobSha256": "0" * 64,
+                    "candidateImage": CANDIDATE_IMAGE,
+                }
+            )
+        self.assertEqual(self.nomad.stopped_jobs, set())
+
+    def test_promotion_requires_exact_healthy_candidate_before_stable_submit(self) -> None:
+        platform = PlatformConfig(
+            project_name="project",
+            project_id="12345678-1234-4234-8234-123456789abc",
+            prefix="example",
+            namespace="app-platform",
+            domain="apps.example.com",
+            datacenter="dc1",
+            region="global",
+            network="private",
+            document={},
+        )
+        image = "registry.example/projects/demo-app/app@sha256:" + "e" * 64
+        common = {
+            "application_id": "12345678-1234-4234-8234-123456789abc",
+            "application_slug": "demo-app",
+            "image": image,
+            "manifest": Manifest("node", (".",), None, "start", 3000, "/health"),
+            "platform": platform,
+            "cpu_mhz": 1000,
+            "memory_mib": 2048,
+            "source_commit": COMMIT,
+            "recipe_hash": "d" * 64,
+        }
+        stable_job = render_nomad_job(**common)
+        candidate_job = render_nomad_job(
+            **common,
+            candidate=True,
+            placement_id="00000000-0000-4000-8000-000000000099",
+        )
+        stable_identity = nomad_candidate_identity(stable_job)
+        candidate_identity = nomad_candidate_identity(candidate_job)
+        inspections = {
+            "demo-app": {
+                "ID": "demo-app",
+                "Version": 3,
+                "Meta": {
+                    "m1_candidate_job_sha256": "0" * 64,
+                    "m1_candidate_image": CANDIDATE_IMAGE,
+                },
+                "TaskGroups": [
+                    {
+                        "Name": "app",
+                        "Tasks": [{"Name": "app", "Config": {"image": CANDIDATE_IMAGE}}],
+                    }
+                ],
+            },
+            "demo-app-candidate": {
+                "ID": "demo-app-candidate",
+                "Version": 8,
+                "Meta": {
+                    "m1_candidate_job_sha256": candidate_identity[0],
+                    "m1_candidate_image": candidate_identity[1],
+                },
+                "TaskGroups": [
+                    {
+                        "Name": "app",
+                        "Tasks": [{"Name": "app", "Config": {"image": candidate_identity[1]}}],
+                    }
+                ],
+            },
+        }
+        healthy = True
+        calls: list[tuple[str, ...]] = []
+
+        def runner(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+            nonlocal healthy
+            calls.append(argv)
+            output = b""
+            if "inspect" in argv:
+                output = json.dumps(inspections[argv[-1]]).encode()
+            elif "allocs" in argv:
+                output = json.dumps(
+                    [
+                        {
+                            "JobVersion": 8,
+                            "ClientStatus": "running" if healthy else "failed",
+                            "DesiredStatus": "run",
+                            "DeploymentStatus": {"Healthy": healthy},
+                        }
+                    ]
+                ).encode()
+            elif "run" in argv:
+                inspections["demo-app"] = {
+                    "ID": "demo-app",
+                    "Version": 4,
+                    "Meta": {
+                        "m1_candidate_job_sha256": stable_identity[0],
+                        "m1_candidate_image": stable_identity[1],
+                    },
+                    "TaskGroups": [
+                        {
+                            "Name": "app",
+                            "Tasks": [
+                                {"Name": "app", "Config": {"image": stable_identity[1]}}
+                            ],
+                        }
+                    ],
+                }
+            return SimpleNamespace(stdout=output, stderr=b"", returncode=0)
+
+        actions = handlers(
+            self.variables,
+            command_runner=runner,
+            nomad_command=("fixed-nomad-wrapper",),
+        )
+        args = {
+            "slug": "demo-app",
+            "job": stable_job,
+            "candidateVersion": 8,
+            "candidateJobSha256": candidate_identity[0],
+            "candidateImage": candidate_identity[1],
+        }
+        healthy = False
+        with self.assertRaisesRegex(HelperActionError, "health was not confirmed"):
+            actions["app.promote"](args)
+        self.assertFalse(any("run" in argv for argv in calls))
+
+        healthy = True
+        promoted = actions["app.promote"](args)
+        self.assertEqual(promoted["jobId"], "demo-app")
+        self.assertEqual(promoted["candidateJobSha256"], stable_identity[0])
+        self.assertEqual(sum("run" in argv for argv in calls), 1)
 
     def test_deploy_rejects_unmarked_pre_m1_job_before_provider_calls(self) -> None:
         job = 'job "demo-app" { # sentinel job data\n}'

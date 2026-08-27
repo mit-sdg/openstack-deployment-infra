@@ -937,6 +937,24 @@ class DeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "exact job"):
             nomad_candidate_identity(job.replace("memory = 2048", "memory = 2047"))
 
+        candidate_job = render_nomad_job(
+            application_id=APP_ID,
+            application_slug="demo-app",
+            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
+            manifest=Manifest("node", (".",), None, "start", 3000, "/health"),
+            platform=self.platform(),
+            cpu_mhz=1000,
+            memory_mib=2048,
+            source_commit=COMMIT,
+            recipe_hash="c" * 64,
+            candidate=True,
+            placement_id="00000000-0000-4000-8000-000000000099",
+        )
+        self.assertIn('job "demo-app-candidate"', candidate_job)
+        self.assertIn('value     = "00000000-0000-4000-8000-000000000099"', candidate_job)
+        self.assertIn("Host(`demo-app-candidate.apps.example.com`)", candidate_job)
+        self.assertNotIn("Host(`demo-app.apps.example.com`)", candidate_job)
+
     def test_interrupted_submission_accepts_only_exact_candidate_evidence(self) -> None:
         job = render_nomad_job(
             application_id=APP_ID,
@@ -957,6 +975,7 @@ class DeploymentTests(unittest.TestCase):
             calls.append(action)
             if action == "app.deploy":
                 return {
+                    "jobId": "demo-app",
                     "nomadVersion": 4,
                     "candidateJobSha256": candidate[0],
                     "candidateImage": candidate[1],
@@ -976,6 +995,7 @@ class DeploymentTests(unittest.TestCase):
         def wrong_helper(action: str, _args: object, **_kwargs: object) -> dict[str, object]:
             if action == "app.deploy":
                 return {
+                    "jobId": "demo-app",
                     "nomadVersion": 4,
                     "candidateJobSha256": "0" * 64,
                     "candidateImage": candidate[1],
@@ -997,6 +1017,7 @@ class DeploymentTests(unittest.TestCase):
             calls.append(action)
             if action == "app.deploy":
                 return {
+                    "jobId": "demo-app",
                     "nomadVersion": 4,
                     "candidateJobSha256": candidate[0],
                     "candidateImage": candidate[1],
@@ -1022,6 +1043,7 @@ class DeploymentTests(unittest.TestCase):
             calls.append(action)
             if action == "app.deploy":
                 return {
+                    "jobId": "demo-app",
                     "nomadVersion": 4,
                     "candidateJobSha256": candidate[0],
                     "candidateImage": candidate[1],
@@ -1049,6 +1071,7 @@ class DeploymentTests(unittest.TestCase):
         def helper(action: str, _args: object, **_kwargs: object) -> dict[str, object]:
             if action == "app.deploy":
                 return {
+                    "jobId": "demo-app",
                     "nomadVersion": 4,
                     "candidateJobSha256": candidate[0],
                     "candidateImage": candidate[1],
@@ -1073,6 +1096,7 @@ class DeploymentTests(unittest.TestCase):
             calls.append((action, args))
             if action == "app.deploy":
                 return {
+                    "jobId": "demo-app",
                     "nomadVersion": 4,
                     "candidateJobSha256": candidate[0],
                     "candidateImage": candidate[1],
@@ -1084,7 +1108,18 @@ class DeploymentTests(unittest.TestCase):
         with self.assertRaises(DeploymentFailed) as raised:
             deploy_and_cleanup("demo-app", job, helper_caller=helper, sleep=lambda _seconds: None)
         self.assertTrue(raised.exception.cleanup_succeeded)
-        self.assertIn(("app.remove", {"slug": "demo-app", "preserveVariable": True}), calls)
+        self.assertIn(
+            (
+                "app.remove",
+                {
+                    "slug": "demo-app",
+                    "jobId": "demo-app",
+                    "candidateJobSha256": candidate[0],
+                    "candidateImage": candidate[1],
+                },
+            ),
+            calls,
+        )
         self.assertEqual(raised.exception.cleanup_evidence["action"], "remove-candidate")
 
     def test_shared_acceptance_reobserves_exact_job_and_public_route_before_database_write(

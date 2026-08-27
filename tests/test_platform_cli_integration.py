@@ -733,6 +733,7 @@ class CliIntegrationTests(unittest.TestCase):
                 candidate = app.nomad_candidate_identity(values["job"])  # type: ignore[index]
                 assert candidate is not None
                 return {
+                    "jobId": app.nomad_job_id(values["job"], "demo-app"),  # type: ignore[index]
                     "nomadVersion": 4,
                     "candidateJobSha256": candidate[0],
                     "candidateImage": candidate[1],
@@ -940,6 +941,79 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(owners, {name: "platform" for name in prior})
         self.assertEqual(
             [action for action, _values in calls], ["app.env.set", "app.builder.delete"]
+        )
+
+    def test_update_worker_is_operation_owned_while_accepted_worker_remains_selected(self) -> None:
+        args = cli.build_parser().parse_args(self.argv("status"))
+        configured = cli._load_config(args)
+        operation_id = "00000000-0000-4000-8000-000000000099"
+        connection = db.connect(self.state / "platform.sqlite3")
+        db.migrate(connection)
+        db.put_application(
+            connection,
+            application_id=APP_ID,
+            application_slug="demo-app",
+            worker_server_id="00000000-0000-4000-8000-000000000004",
+            worker_server_name="example-worker-stable",
+            worker_port_id="00000000-0000-4000-8000-000000000005",
+            worker_port_name="example-worker-stable-v4",
+            worker_flavor="one-vcpu",
+            scheduler_cpu_mhz=1000,
+            scheduler_memory_mib=2048,
+        )
+        db.accept_deployment(
+            connection,
+            application_id=APP_ID,
+            source_commit="a" * 40,
+            recipe_hash="b" * 64,
+            image_digest=DIGEST,
+            nomad_job="stable",
+            nomad_version=3,
+            build_log_path="logs/stable.log",
+        )
+        db.begin_operation(
+            connection,
+            operation_id=operation_id,
+            kind="app.deploy",
+            scope=f"app-{APP_ID}",
+            phase="validated",
+            deadline_at="2026-08-18T01:00:00Z",
+        )
+        calls: list[tuple[str, object]] = []
+
+        def helper(_config: object, action: str, values: object, **_kwargs: object):
+            calls.append((action, values))
+            return {
+                "ready": True,
+                "serverId": "00000000-0000-4000-8000-000000000006",
+                "serverName": "example-worker-candidate",
+                "portId": "00000000-0000-4000-8000-000000000007",
+                "portName": "example-worker-candidate-v4",
+            }
+
+        worker = deployment_service._prepare_deployment_worker(
+            connection,
+            configured,
+            helper_caller=helper,
+            state_directory=self.state,
+            operation_id=operation_id,
+            application_id=APP_ID,
+            application_slug="demo-app",
+            worker_flavor="one-vcpu",
+            candidate=DIGEST,
+            refs={},
+            deadline=cli._command_deadline(configured),
+        )
+        connection.close()
+        self.assertEqual(worker.server_name, "example-worker-candidate")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "app.worker.observe",
+                    {"applicationId": operation_id, "slug": "demo-app"},
+                )
+            ],
         )
 
     def test_confirmed_candidate_removal_is_terminal_and_candidate_is_cleaned(self) -> None:

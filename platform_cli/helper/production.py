@@ -47,6 +47,7 @@ APP_ACTIONS = (
     "app.logs",
     "app.manifest.delete",
     "app.manifest.retain",
+    "app.promote",
     "app.remove",
     "app.worker.create",
     "app.worker.delete",

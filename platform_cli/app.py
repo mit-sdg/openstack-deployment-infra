@@ -1750,10 +1750,16 @@ def render_nomad_job(
     memory_mib: int,
     source_commit: str,
     recipe_hash: str,
+    candidate: bool = False,
+    placement_id: str | None = None,
 ) -> str:
-    """Render the complete constrained one-container Nomad job."""
+    """Render one stable or isolated candidate Nomad job."""
     identifier = uuid(application_id, field="application ID")
+    placement = uuid(placement_id or identifier, field="placement ID")
     app_slug = slug(application_slug)
+    if not isinstance(candidate, bool):
+        raise ValidationError("candidate selector must be boolean")
+    job_id = f"{app_slug}-candidate" if candidate else app_slug
     image_pin = oci_digest_pin(image, field="application image")
     if isinstance(cpu_mhz, bool) or not isinstance(cpu_mhz, int) or not 100 <= cpu_mhz <= 2_000:
         raise ValidationError("scheduler CPU must be an integer from 100 through 2000 MHz")
@@ -1765,7 +1771,7 @@ def render_nomad_job(
         raise ValidationError("scheduler memory must be an integer from 64 through 3072 MiB")
     checked_source = commit(source_commit)
     checked_recipe = sha256_hex(recipe_hash, field="recipe hash")
-    hostname = f"{app_slug}.{platform.domain}"
+    hostname = f"{job_id}.{platform.domain}"
     variable = f"nomad/jobs/{app_slug}"
     binding_aliases = "\n".join(
         f'{{{{ $value := index . "{canonical_secret_key(binding.resource_type, binding.name, output)}" }}}}\n{target}={{{{ $value | toJSON }}}}'
@@ -1785,7 +1791,7 @@ def render_nomad_job(
         runtime_item = (
             f"{{{{ if {predicate} }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}\n{{{{ end }}}}"
         )
-    job = f'''job "{app_slug}" {{
+    job = f'''job "{job_id}" {{
   region      = "{platform.region}"
   datacenters = ["{platform.datacenter}"]
   type        = "service"
@@ -1793,7 +1799,7 @@ def render_nomad_job(
   constraint {{
     attribute = "${{meta.application_id}}"
     operator  = "="
-    value     = "{identifier}"
+    value     = "{placement}"
   }}
 
   update {{
@@ -1825,19 +1831,19 @@ def render_nomad_job(
 
     service {{
       provider     = "nomad"
-      name         = "app-{app_slug}"
+      name         = "app-{job_id}"
       port         = "http"
       address_mode = "host"
       tags = [
         "{platform.namespace}.platform=true",
         "traefik.enable=true",
-        "traefik.http.routers.{app_slug}.entrypoints=web",
-        "traefik.http.routers.{app_slug}.rule=Host(`{hostname}`)",
-        "traefik.http.routers.{app_slug}.service={app_slug}",
-        "traefik.http.services.{app_slug}.loadbalancer.server.port=8080",
-        "traefik.http.middlewares.{app_slug}-headers.headers.contenttypenosniff=true",
-        "traefik.http.middlewares.{app_slug}-headers.headers.referrerpolicy=no-referrer",
-        "traefik.http.routers.{app_slug}.middlewares={app_slug}-headers",
+        "traefik.http.routers.{job_id}.entrypoints=web",
+        "traefik.http.routers.{job_id}.rule=Host(`{hostname}`)",
+        "traefik.http.routers.{job_id}.service={job_id}",
+        "traefik.http.services.{job_id}.loadbalancer.server.port=8080",
+        "traefik.http.middlewares.{job_id}-headers.headers.contenttypenosniff=true",
+        "traefik.http.middlewares.{job_id}-headers.headers.referrerpolicy=no-referrer",
+        "traefik.http.routers.{job_id}.middlewares={job_id}-headers",
       ]
       check {{
         name     = "http-ready"
@@ -1918,7 +1924,7 @@ EOH
 {source_markers}  }}
 
 '''
-    return job.replace(f'job "{app_slug}" {{\n', f'job "{app_slug}" {{\n{marker}', 1)
+    return job.replace(f'job "{job_id}" {{\n', f'job "{job_id}" {{\n{marker}', 1)
 
 
 _JOB_MARKER_BLOCK = re.compile(
@@ -1929,6 +1935,16 @@ _JOB_MARKER_BLOCK = re.compile(
     r'    m1_recipe_sha256        = "[0-9a-f]{64}"\n'
     r"  \}\n\n"
 )
+
+
+def nomad_job_id(nomad_job: str, application_slug: str) -> str:
+    """Return the only stable or candidate job ID allowed for an application."""
+    job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
+    app_slug = slug(application_slug)
+    match = re.match(r'^job "([^"\n]+)" \{\n', job)
+    if match is None or match.group(1) not in {app_slug, f"{app_slug}-candidate"}:
+        raise ValidationError("Nomad job ID is not the stable or candidate application job")
+    return match.group(1)
 
 
 def nomad_candidate_identity(nomad_job: str) -> tuple[str, str]:
@@ -1965,12 +1981,14 @@ def check_public_health(
     path: str,
     *,
     timeout_seconds: float,
+    candidate: bool = False,
     http_caller: Callable[..., Any] = bounded_http,
 ) -> bool:
     """Check the canonical public HTTPS route without redirects or response bodies."""
     app_slug = slug(application_slug)
     checked_path = health_path(path)
-    url = f"https://{app_slug}.{platform.domain}{checked_path}"
+    route = f"{app_slug}-candidate" if candidate else app_slug
+    url = f"https://{route}.{platform.domain}{checked_path}"
     result = http_caller(
         url,
         timeout_seconds=timeout_seconds,
@@ -1997,12 +2015,15 @@ def deploy_and_cleanup(
     if not 1 <= attempts <= 300 or not 0 < poll_interval_seconds <= 30:
         raise ValueError("health observation bounds are invalid")
     candidate = nomad_candidate_identity(job)
+    job_id = nomad_job_id(job, app_slug)
     deployed = _call_helper(
         helper_caller,
         "app.deploy",
         {"slug": app_slug, "job": job},
         timeout_seconds=helper_timeout_seconds,
     )
+    if deployed.get("jobId") != job_id:
+        raise ApplicationError("helper observed an unexpected deployment job")
     version = deployed.get("nomadVersion")
     if isinstance(version, bool) or not isinstance(version, int) or version < 0:
         raise ApplicationError("helper returned an invalid Nomad version")
@@ -2021,6 +2042,7 @@ def deploy_and_cleanup(
             "version": observed_version,
             "candidateJobSha256": observed_candidate[0],
             "candidateImage": observed_candidate[1],
+            "jobId": job_id,
         }
 
     def exact_health(
@@ -2085,7 +2107,12 @@ def deploy_and_cleanup(
         removed = _call_helper(
             helper_caller,
             "app.remove",
-            {"slug": app_slug, "preserveVariable": True},
+            {
+                "slug": app_slug,
+                "jobId": job_id,
+                "candidateJobSha256": candidate[0],
+                "candidateImage": candidate[1],
+            },
             timeout_seconds=helper_timeout_seconds,
         )
         cleanup_succeeded = removed.get("jobAbsent") is True
@@ -2111,6 +2138,50 @@ def deploy_and_cleanup(
         cleanup_succeeded=cleanup_succeeded,
         cleanup_evidence=cleanup_evidence,
     ) from failure
+
+
+def promote_candidate(
+    application_slug: str,
+    stable_job: str,
+    candidate_version: int,
+    candidate_identity: tuple[str, str],
+    *,
+    helper_timeout_seconds: float = 30,
+    helper_caller: Callable[..., Mapping[str, Any]] = call_helper,
+) -> DeploymentResult:
+    """Explicitly promote one exact healthy candidate to the stable job."""
+    app_slug = slug(application_slug)
+    job = bounded_text(stable_job, field="stable Nomad job", maximum=262_144)
+    if nomad_job_id(job, app_slug) != app_slug:
+        raise ValidationError("promotion requires the canonical stable Nomad job")
+    expected = nomad_candidate_identity(job)
+    candidate_hash = sha256_hex(candidate_identity[0], field="candidate job SHA-256")
+    candidate_image = oci_digest_pin(candidate_identity[1], field="candidate image")
+    if expected[1] != candidate_image:
+        raise ValidationError("stable promotion image does not match the candidate")
+    result = _call_helper(
+        helper_caller,
+        "app.promote",
+        {
+            "slug": app_slug,
+            "job": job,
+            "candidateVersion": candidate_version,
+            "candidateJobSha256": candidate_hash,
+            "candidateImage": candidate_image,
+        },
+        timeout_seconds=helper_timeout_seconds,
+    )
+    version = result.get("nomadVersion")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version < 0
+        or result.get("jobId") != app_slug
+        or result.get("candidateJobSha256") != expected[0]
+        or result.get("candidateImage") != expected[1]
+    ):
+        raise ApplicationError("helper did not confirm the exact stable promotion")
+    return DeploymentResult(version, 1)
 
 
 def execute_deployment_workflow(
