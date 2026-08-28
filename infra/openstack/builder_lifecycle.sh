@@ -247,12 +247,13 @@ cleanup() {
 trap cleanup EXIT
 python3 - "$TEMPLATE" "$PKI_DIR" "$PLATFORM_INTERNAL_CA_FILE" \
   "$STORAGE_SECRETS_FILE" "$BUILDER_OPERATOR_PUBLIC_KEY" "$server_name" \
-  "$PLATFORM_STORAGE_IP" "$PLATFORM_NAMESPACE" "$tmp" <<'PY'
+  "$PLATFORM_STORAGE_IP" "$PLATFORM_NAMESPACE" "$PLATFORM_REGISTRY_PORT" \
+  "$PLATFORM_OPERATOR_USER" "$PLATFORM_OPERATOR_UID" "$tmp" <<'PY'
 from base64 import b64encode
 from pathlib import Path
 import json,re,sys
 (template,pki_dir,ca_file,secrets_path,key_path,builder_name,storage_ip,
- namespace,output)=sys.argv[1:]
+ namespace,registry_port,operator_user,operator_uid,output)=sys.argv[1:]
 key=Path(key_path).read_text().strip()
 if "\n" in key or not key.startswith("ssh-ed25519 "):
     raise SystemExit("builder operator key must be one Ed25519 public-key line")
@@ -264,7 +265,10 @@ password=secrets.get("REGISTRY_BUILDER_PASSWORD")
 if not password: raise SystemExit("registry builder password is missing")
 def b64(data: bytes)->str: return b64encode(data).decode()
 auth=b64(f"builder:{password}".encode())
-docker_auth=json.dumps({"auths":{f"{storage_ip}:5000":{"auth":auth}}},separators=(",",":")).encode()
+docker_auth=json.dumps(
+    {"auths": {f"{storage_ip}:{registry_port}": {"auth": auth}}},
+    separators=(",", ":"),
+).encode()
 text=Path(template).read_text()
 replacements={
  "__BUILDER_NAME__":builder_name,
@@ -273,6 +277,8 @@ replacements={
  "__DOCKER_AUTH_B64__":b64(docker_auth),
  "__STORAGE_IP__":storage_ip,
  "__PLATFORM_NAMESPACE__":namespace,
+ "__OPERATOR_USER__":operator_user,
+ "__OPERATOR_UID__":operator_uid,
 }
 found=set(re.findall(r"__[A-Z0-9_]+__",text))
 if found != replacements.keys():

@@ -23,7 +23,7 @@ exited zero.
 - [ ] **RESET-03** Only the configured project/prefix was reconciled; no provider
   row was imported. Evidence: `apply_foundation.py` plan/apply, token
   project/name comparison, and scoped provider evidence.
-- [ ] **RESET-04** Management state starts with no product records. Evidence:
+- [ ] **RESET-04** Operator state starts with no product records. Evidence:
 
   ```bash
   /srv/openstack-platform/bin/openstack-platform status
@@ -50,8 +50,8 @@ exited zero.
   ```bash
   uv --version
   uv run python --version
-  uv run ruff format --check platform_cli deploy/platform-cli infra tests
-  uv run ruff check platform_cli deploy/platform-cli infra tests
+  uv run ruff format --check openstack_platform deploy/releases infra tests
+  uv run ruff check openstack_platform deploy/releases infra tests
   uv run mypy
   uv run python -m unittest discover -s tests -v
   ```
@@ -73,8 +73,8 @@ exited zero.
   readiness marker with no failed required unit. Existing-host scripts reject
   any server/image/flavor/metadata/port/volume mismatch and do not reapply user
   data. Evidence: bounded console output and role-apply results.
-- [ ] **ROLE-03** `setup_management_bridge.py` returns
-  `management-bridge=verified`; its config/known-hosts files are direct mode
+- [ ] **ROLE-03** `setup_operator_bridge.py` returns
+  `operator-bridge=verified`; its config/known-hosts files are direct mode
   `0600` below a mode-`0700` directory; and the alias is unprivileged:
 
   ```bash
@@ -120,7 +120,7 @@ exited zero.
 ## Backups, restore, upgrade, and cleanup
 
 - [ ] **BACKUP-01** `openstack-platform backup` produces an age-v1 encrypted
-  management database under `<paths.backups>/m1` with checksum and final
+  controller database under `<paths.backups>/controller` with checksum and final
   manifest evidence. Retention counts only complete trios. Evidence: output
   name/SHA-256 and private metadata, not database content.
 - [ ] **BACKUP-02** On admin, managed-data backup emits PostgreSQL, MongoDB, and

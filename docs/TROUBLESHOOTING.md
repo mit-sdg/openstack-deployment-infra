@@ -14,7 +14,7 @@ authentication applications do not exist yet; do not launch release-internal
 entry points as a workaround. Future integration follows
 [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 
-When a command below uses variables, initialize them on the management host
+When a command below uses variables, initialize them on the operator host
 from the private inventory without printing it:
 
 ```bash
@@ -28,7 +28,7 @@ export SSH_CONFIG=/srv/openstack-platform/.secrets/ssh/config
 
 **Symptom:** foundation or CLI reports a project name/UUID mismatch.
 
-**Evidence:** On the management host, from the repository root, load the
+**Evidence:** On the operator host, from the repository root, load the
 protected credential file and use the supported project helper. It normalizes
 compact and canonical provider UUIDs without printing credentials:
 
@@ -118,7 +118,7 @@ scripts are fail-closed and do not reapply user data to an existing server.
 Use a reviewed image rebuild/replacement boundary rather than rerunning an
 apply script against a failed host.
 
-**Symptom:** `setup_management_bridge.py` fails or the SSH smoke returns root.
+**Symptom:** `setup_operator_bridge.py` fails or the SSH smoke returns root.
 
 **Evidence:** Check only ownership/modes and repeat the wrapper's non-secret
 project identity checks:
@@ -128,19 +128,19 @@ stat -c '%U:%G %a %F' /srv/openstack-platform/bin/platform-openstack \
   /srv/openstack-platform/.secrets/ssh/config \
   /srv/openstack-platform/.secrets/ssh/known_hosts
 bridge_output="$(
-  /srv/openstack-platform/runtime/python3.14 deploy/platform-cli/setup_management_bridge.py \
+  /srv/openstack-platform/runtime/python3.14 deploy/releases/setup_operator_bridge.py \
     --platform-config /srv/openstack-platform/config/platform.json \
     --ssh-identity /srv/openstack-platform/.secrets/ssh/id_ed25519 \
     --ssh-config /srv/openstack-platform/.secrets/ssh/config \
     --known-hosts /srv/openstack-platform/.secrets/ssh/known_hosts \
     --provider-command /srv/openstack-platform/bin/platform-openstack
 )"
-test "$bridge_output" = management-bridge=verified
+test "$bridge_output" = operator-bridge=verified
 test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- id -un)" = agentops
 test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- id -u)" -gt 0
 ```
 
-**Correction:** Run as the unprivileged management owner. Make the wrapper a
+**Correction:** Run as the unprivileged operator owner. Make the wrapper a
 direct owner-only mode-`0500`/`0700` executable, check that its token is scoped
 to the configured project, and rerun the automation. A console ED25519
 fingerprint/keyscan mismatch is a stop condition, not a reason to edit
@@ -175,7 +175,7 @@ pre-control-surface rebuild. Do not invent or paste a Nomad token.
 **Correction:** Transfer the exact files described in
 [OPERATIONS.md](OPERATIONS.md#4-boot-storage-and-ingress-with-exact-transfers),
 repair only their ownership/modes, and rerun the owning command. Never copy the
-management inventory into the admin Nix-store configuration path.
+operator inventory into the admin Nix-store configuration path.
 
 ## Public ingress
 
@@ -255,15 +255,15 @@ rerun the same command with the same selected image and role.
 
 ```bash
 backup_root="$(uv run python infra/lib/platform_config.py get paths.backups)"
-test "$(ssh -F "$SSH_CONFIG" platform-admin -- stat -c '%a' "$backup_root/m1/.staging")" = 700
+test "$(ssh -F "$SSH_CONFIG" platform-admin -- stat -c '%a' "$backup_root/controller/.staging")" = 700
 test -x /srv/openstack-platform/bin/age
 /srv/openstack-platform/bin/age --version >/dev/null
 ```
 
 **Correction:** Verify `/srv/openstack-platform/bin/age --version`, the policy's public age
 recipient, the pinned bridge, and admin backup-volume mount. The expected
-remote staging path is `$backup_root/m1/.staging`; accepted files are under
-`$backup_root/m1`. Do not put a live WAL file in staging or manually move a
+remote staging path is `$backup_root/controller/.staging`; accepted files are under
+`$backup_root/controller`. Do not put a live WAL file in staging or manually move a
 ciphertext.
 
 **Symptom:** managed-data backup or restore check reports missing backup,
@@ -360,8 +360,8 @@ Run the locked project checks from the repository root:
 ```bash
 uv --version
 uv sync --frozen
-uv run ruff format --check platform_cli deploy/platform-cli infra tests
-uv run ruff check platform_cli deploy/platform-cli infra tests
+uv run ruff format --check openstack_platform deploy/releases infra tests
+uv run ruff check openstack_platform deploy/releases infra tests
 uv run mypy
 uv run python -m unittest discover -s tests -v
 ```

@@ -10,7 +10,7 @@ source "$SCRIPT_DIR/persistent-host.sh"
 
 OSC=${OSC:-openstack}
 TEMPLATE=${TEMPLATE:-$SCRIPT_DIR/../cloud-init-nixos/storage.yaml}
-AGENTOPS_PUBLIC_KEY=${AGENTOPS_PUBLIC_KEY:?set AGENTOPS_PUBLIC_KEY to the agentops public-key path}
+OPERATOR_PUBLIC_KEY=${OPERATOR_PUBLIC_KEY:?set OPERATOR_PUBLIC_KEY to the operator public-key path}
 STORAGE_SECRETS_FILE=${STORAGE_SECRETS_FILE:?set STORAGE_SECRETS_FILE to the storage bootstrap secret path}
 PKI_DIR=${PKI_DIR:?set PKI_DIR to the internal PKI directory}
 SERVER_NAME=${SERVER_NAME:-$PLATFORM_STORAGE_HOST}
@@ -27,7 +27,7 @@ BOOTSTRAP_POLL_INTERVAL=${BOOTSTRAP_POLL_INTERVAL:-10}
 
 verify_openstack_project "$OSC" || exit 2
 required_files=(
-  "$TEMPLATE" "$AGENTOPS_PUBLIC_KEY" "$STORAGE_SECRETS_FILE"
+  "$TEMPLATE" "$OPERATOR_PUBLIC_KEY" "$STORAGE_SECRETS_FILE"
   "$PKI_DIR/$PLATFORM_INTERNAL_CA_FILE" "$PKI_DIR/storage.pem" "$PKI_DIR/storage-key.pem"
 )
 for path in "${required_files[@]}"; do
@@ -73,7 +73,7 @@ chmod 0600 "$tmp"
 trap 'rm -f "$tmp"' EXIT
 python3 "$SCRIPT_DIR/render_host_user_data.py" \
   --role storage --template "$TEMPLATE" \
-  --agentops-public-key "$AGENTOPS_PUBLIC_KEY" \
+  --operator-public-key "$OPERATOR_PUBLIC_KEY" \
   --secret-file "$STORAGE_SECRETS_FILE" --pki-directory "$PKI_DIR" \
   --volume "$VOLUME_NAME" "$volume_id" --output "$tmp"
 

@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from openstack_platform import contracts
+
 ROOT = Path(__file__).resolve().parents[1]
 HELPER_PATH = ROOT / "infra" / "lib" / "platform_config.py"
 SPEC = importlib.util.spec_from_file_location("platform_config", HELPER_PATH)
@@ -74,10 +76,10 @@ class PlatformRoleNamespaceTests(unittest.TestCase):
 
     def test_config_drive_placeholders_have_renderer_substitutions(self) -> None:
         pairs = {
-            "infra/cloud-init-nixos/admin.yaml": "platform_cli/host_user_data.py",
+            "infra/cloud-init-nixos/admin.yaml": "openstack_platform/host_user_data.py",
             "infra/cloud-init-nixos/builder.yaml": "infra/openstack/builder_lifecycle.sh",
-            "infra/cloud-init-nixos/ingress.yaml": "platform_cli/host_user_data.py",
-            "infra/cloud-init-nixos/storage.yaml": "platform_cli/host_user_data.py",
+            "infra/cloud-init-nixos/ingress.yaml": "openstack_platform/host_user_data.py",
+            "infra/cloud-init-nixos/storage.yaml": "openstack_platform/host_user_data.py",
             "infra/cloud-init-nixos/worker.yaml": "infra/openstack/worker_lifecycle.sh",
         }
         pattern = re.compile(r"__[A-Z0-9_]+__")
@@ -122,15 +124,22 @@ class PlatformConfigValidationTests(unittest.TestCase):
         self.assertIn("images.admin", message)
         self.assertIn("paths.root", message)
 
-    def test_required_paths_cover_every_shell_value_dereference(self) -> None:
-        # A field that shell_values() reads but REQUIRED_PATHS omits would slip
-        # past validation and fail later inside a build.
+    def test_required_paths_are_shared_and_complete(self) -> None:
         document = self.example()
+        self.assertEqual(platform_config.REQUIRED_PATHS, contracts.INVENTORY_REQUIRED_PATHS)
         for dotted in platform_config.REQUIRED_PATHS:
             platform_config.get(document, dotted)
         self.assertEqual(
             len(set(platform_config.REQUIRED_PATHS)), len(platform_config.REQUIRED_PATHS)
         )
+
+    def test_nix_and_python_load_the_same_contract_file(self) -> None:
+        constants = (ROOT / "nix/lib/constants.nix").read_text(encoding="utf-8")
+        self.assertIn("../../infra/lib/platform_contract.json", constants)
+        self.assertNotRegex(constants, r"\b(?:8080|4646|997|998)\b")
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('"infra/lib/platform_contract.json"', pyproject)
+        self.assertIn('"openstack_platform/platform_contract.json"', pyproject)
 
 
 if __name__ == "__main__":

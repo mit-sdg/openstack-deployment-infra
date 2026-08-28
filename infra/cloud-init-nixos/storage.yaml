@@ -4,11 +4,11 @@ ssh_pwauth: false
 disable_root: true
 users:
   - default
-  - name: agentops
+  - name: __OPERATOR_USER__
     lock_passwd: true
     shell: /run/current-system/sw/bin/bash
     ssh_authorized_keys:
-      - __AGENTOPS_PUBLIC_KEY__
+      - __OPERATOR_PUBLIC_KEY__
 bootcmd:
   - |
     set -eu
@@ -83,7 +83,7 @@ write_files:
       api_bind_addr = "[::]:3900"
       root_domain = ".__OBJECT_STORAGE_INTERNAL_NAME__"
       [admin]
-      api_bind_addr = "[::]:3903"
+      api_bind_addr = "[::]:__GARAGE_RPC_PORT__"
       admin_token = "__GARAGE_ADMIN_TOKEN__"
       metrics_token = "__GARAGE_METRICS_TOKEN__"
   - path: /etc/__PLATFORM_NAMESPACE__/registry.env

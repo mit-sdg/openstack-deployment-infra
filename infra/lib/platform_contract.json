@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "roles": {
+    "all": ["admin", "ingress", "storage", "worker", "builder"],
+    "persistent": ["admin", "ingress", "storage"]
+  },
+  "ports": {
+    "ssh": 22,
+    "http": 80,
+    "https": 443,
+    "application": 8080,
+    "managementWeb": 8080,
+    "traefikHealth": 8082,
+    "nomadHttp": 4646,
+    "nomadRpc": 4647,
+    "nomadSerf": 4648,
+    "garageRpc": 3903,
+    "garageAdminProxy": 13903,
+    "registry": 5000,
+    "postgres": 5432,
+    "garageS3": 9000,
+    "mongodb": 27017
+  },
+  "accounts": {
+    "operator": {"name": "agentops", "uid": 1000, "gid": 1000},
+    "recovery": {"name": "ubuntu", "uid": 1001, "gid": 1001},
+    "controller": {"name": "platform-controller", "uid": 997, "gid": 985},
+    "controllerSocket": {"name": "controller-api", "gid": 984},
+    "managementWeb": {"name": "management-web", "uid": 998, "gid": 986},
+    "platformAdmin": {"name": "platform-admin", "gid": 987},
+    "nomad": {"name": "nomad", "uid": 999, "gid": 988}
+  },
+  "executables": {
+    "builder": "openstack-platform-builder"
+  },
+  "directories": {
+    "controllerBackup": "controller"
+  },
+  "installation": {
+    "operatorRoot": "/srv/openstack-platform",
+    "systemConfigRoot": "/etc/openstack-platform",
+    "systemRuntimeRoot": "/run/openstack-platform",
+    "inventoryFilename": "platform.json",
+    "policyFilename": "policy.json",
+    "databaseFilename": "platform.sqlite3",
+    "sshAlias": "platform-admin"
+  },
+  "protocol": {
+    "deploymentRouteHeader": "X-Platform-Deployment",
+    "nomadCandidateJobShaKey": "platform_candidate_job_sha256",
+    "nomadCandidateImageKey": "platform_candidate_image",
+    "nomadRouteMarkerKey": "platform_route_marker",
+    "nomadSourceCommitKey": "platform_source_commit",
+    "nomadRecipeShaKey": "platform_recipe_sha256",
+    "databaseGreenfieldMarker": "openstack-platform:database:v1:greenfield",
+    "databaseDeploymentMarkerPrefix": "openstack-platform:database:v1:deployment:",
+    "postgresOwnershipMarkerPrefix": "platform-controller-create",
+    "mongoOwnerField": "platformControllerOwner",
+    "mongoOperationField": "platformOperationId",
+    "mongoGenerationField": "platformCredentialGeneration"
+  },
+  "inventory": {
+    "allowedTopLevel": [
+      "project", "projectId", "displayName", "organization", "prefix", "namespace",
+      "domain", "recoveryDomains", "staticIngressRoutes", "datacenter", "region",
+      "network", "internalNames", "pki", "operatorCidr", "metadataAddress",
+      "addresses", "hosts", "ports", "volumes", "images", "flavors", "versions",
+      "checksums", "containers", "paths"
+    ],
+    "requiredTopLevel": [
+      "project", "projectId", "displayName", "organization", "prefix", "namespace",
+      "domain", "recoveryDomains", "datacenter", "region", "network", "internalNames",
+      "pki", "operatorCidr", "metadataAddress", "addresses", "hosts", "ports",
+      "volumes", "images", "flavors", "versions", "checksums", "containers", "paths"
+    ],
+    "requiredPaths": [
+      "project", "projectId", "displayName", "organization", "prefix", "namespace",
+      "pki.internalCaFile", "domain", "recoveryDomains.0", "recoveryDomains.1",
+      "datacenter", "region", "network", "internalNames.storage",
+      "internalNames.objectStorage", "operatorCidr", "metadataAddress",
+      "addresses.admin", "addresses.ingress", "addresses.storage", "hosts.admin",
+      "hosts.ingress", "hosts.storage", "ports.admin", "ports.ingress", "ports.storage",
+      "volumes.adminState.name", "volumes.adminState.label", "volumes.adminState.sizeGiB",
+      "volumes.backup.name", "volumes.backup.label", "volumes.backup.sizeGiB",
+      "volumes.data.name", "volumes.data.label", "volumes.data.sizeGiB", "volumes.data.type",
+      "images.admin", "images.ingress", "images.storage", "images.worker", "images.builder",
+      "flavors.admin", "flavors.ingress", "flavors.storage", "flavors.worker", "flavors.builder",
+      "versions.nomad", "versions.traefik", "versions.buildkit",
+      "checksums.nomadLinuxAmd64Zip", "checksums.traefikLinuxAmd64TarGz",
+      "checksums.buildkitLinuxAmd64TarGz", "containers.postgres", "containers.mongodb",
+      "containers.garage", "containers.registry", "containers.cloudflared",
+      "paths.root", "paths.adminState", "paths.backups", "paths.data"
+    ]
+  }
+}

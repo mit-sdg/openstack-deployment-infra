@@ -3,16 +3,25 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CONFIG_HELPER="$SCRIPT_DIR/../lib/platform_config.py"
+CONTRACT="$SCRIPT_DIR/../lib/platform_contract.json"
 OSC=${OSC:-openstack}
 
 usage() {
-  echo "usage: $0 admin|ingress|storage|worker|builder QCOW2_FILE" >&2
+  echo "usage: $0 ROLE QCOW2_FILE" >&2
   exit 2
 }
 [[ $# == 2 ]] || usage
 role=$1
 image_file=$2
-case "$role" in admin|ingress|storage|worker|builder) ;; *) usage ;; esac
+python3 - "$CONTRACT" "$role" <<'PY' || usage
+import json
+import sys
+
+contract_path, role = sys.argv[1:]
+with open(contract_path, encoding="utf-8") as stream:
+    roles = json.load(stream)["roles"]["all"]
+raise SystemExit(0 if role in roles else 1)
+PY
 [[ -f $image_file && ! -L $image_file && -r $image_file ]] || {
   echo "image must be a readable direct regular file: $image_file" >&2
   exit 2
@@ -27,7 +36,7 @@ image_name=$("$CONFIG_HELPER" get "images.$role")
 }
 repository_root=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 metadata_output=$(
-  PYTHONPATH="$repository_root" python3 -m platform_cli.openstack \
+  PYTHONPATH="$repository_root" python3 -m openstack_platform.openstack \
     --platform "${PLATFORM_CONFIG:-$repository_root/config/platform.json}" \
     --role "$role" \
     --source-commit "$SOURCE_COMMIT"

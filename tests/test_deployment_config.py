@@ -5,12 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from platform_cli.deployment_config import (
+from openstack_platform.controller.deployment_config import (
     branch_name,
     parse_configuration,
     validate_checkout,
 )
-from platform_cli.validation import ValidationError
+from openstack_platform.validation import ValidationError
 
 RESOURCE_ID = "11111111-1111-4111-8111-111111111111"
 

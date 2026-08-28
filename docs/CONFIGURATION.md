@@ -1,7 +1,7 @@
 # Deployment configuration reference
 
 This reference defines the infrastructure inventory for a new deployment. Use
-it with empty management state; it is not a state-import format. No external
+it with empty operator state; it is not a state-import format. No external
 rows are copied into the database, and only resources named here are touched.
 It does not configure an application build. Future application configuration
 is a typed management-owned snapshot sent to the local controller API; the
@@ -14,6 +14,13 @@ archives. The file contains deployment names and other non-secret settings.
 Start from
 [`config/platform.example.json`](../config/platform.example.json); do not add
 credentials or private keys.
+
+Implementation-level roles, service ports, system accounts, protocol metadata,
+and required inventory paths are not copied into each deployment inventory.
+They are defined once in `infra/lib/platform_contract.json`, validated in CI,
+and consumed directly by Python, standalone infrastructure scripts, and Nix.
+Changing that versioned contract is a coordinated platform release, not an
+operator configuration edit.
 
 ## Select a configuration
 
@@ -63,7 +70,7 @@ This prevents a checkout or management-host config from being used on a guest.
 | `network` | OpenStack network used for persistent and disposable hosts. |
 | `internalNames` | Internal DNS names for storage and object storage. |
 | `pki` | Internal CA filename. |
-| `managementCidr` | CIDR allowed to reach management interfaces such as admin SSH. |
+| `operatorCidr` | CIDR allowed to reach operator interfaces such as admin SSH. |
 | `metadataAddress` | Cloud metadata address blocked on builders and workers. |
 | `addresses` | Fixed addresses for the persistent roles. |
 | `hosts` | Server names for the persistent roles. |
@@ -74,9 +81,9 @@ This prevents a checkout or management-host config from being used on a guest.
 | `versions` | Nomad, Traefik, and BuildKit versions packaged in role images. |
 | `checksums` | SHA-256 checksums for downloaded Nomad, Traefik, and BuildKit archives; these are separate from the provider checksum verified when publishing a QCOW2. |
 | `containers` | Digest-pinned container images used by storage and ingress. |
-| `paths` | Persistent and runtime paths mounted or used by role services. The configured `backups` path is also the management-database backup root. |
+| `paths` | Persistent and runtime paths mounted or used by role services. The configured `backups` path is also the controller-database backup root. |
 
-The management database is deployment-bound. Its deployment marker hashes the
+The controller database is deployment-bound. Its deployment marker hashes the
 project UUID, namespace, and a stable inventory projection containing resource
 names, network/address identity, volumes, paths, and PKI naming. Image, flavor,
 version, checksum, and container selections are intentionally excluded so
@@ -98,11 +105,11 @@ must be a direct current-user-owned mode-`0600` file. It contains:
 - `standard`, including worker flavor and managed-service targets;
 - `runtimeImages.bun` and `runtimeImages.node`, each pinned by OCI digest; and
 - `backupAgeRecipient`, a public `age1...` recipient used only to encrypt
-  management database backups.
+  controller database backups.
 
 The recipient is not an age identity. Keep the matching
 `AGE-SECRET-KEY-...` file in operator custody, outside Git and the management
-database. The management runtime bootstrap validates and exposes a protected
+database. The operator runtime bootstrap validates and exposes a protected
 age executable at `/srv/openstack-platform/bin/age`. The admin NixOS role
 separately provides `<paths.root>/bin/age` and
 `<paths.root>/bin/age-keygen` for managed-data backups. Neither backup process
@@ -185,7 +192,7 @@ Every address must belong to the configured OpenStack network. Foundation
 reconciliation rejects an existing port if it is on the wrong network or lacks
 its configured address.
 
-`managementCidr` sets the source CIDR allowed by the generated admin security
+`operatorCidr` sets the source CIDR allowed by the generated admin security
 group. Set it to the narrowest operator network that needs access.
 
 `metadataAddress` is normally `169.254.169.254`. Change it only if the target
@@ -270,16 +277,16 @@ by the images. Changing a path does not move existing data.
 Backup placement is derived from `paths.backups`, not from a hard-coded host
 path:
 
-- The CLI stages uploads at `<paths.backups>/m1/.staging/` and accepted encrypted
+- The CLI stages uploads at `<paths.backups>/controller/.staging/` and accepted encrypted
   SQLite files and their `.sha256`/`.manifest` evidence live at
-  `<paths.backups>/m1/`. The manifest is the commit marker: ciphertext and
+  `<paths.backups>/controller/`. The manifest is the commit marker: ciphertext and
   checksum are durable before its final rename, and retention counts only
   complete evidence trios. Interrupted pre-commit leftovers may be reconciled
   on retry; a malformed set with a manifest is preserved for investigation.
 - The admin managed-data scripts write timestamped directories at
   `<paths.backups>/<namespace>/`.
 
-The policy's `backupAgeRecipient` encrypts SQLite on the management host.
+The policy's `backupAgeRecipient` encrypts SQLite on the operator host.
 The matching private age identity is not configuration and must remain in
 operator custody. The admin managed-data scripts use the packaged
 `<paths.root>/bin/age` and `<paths.root>/bin/age-keygen` with their separate

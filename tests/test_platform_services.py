@@ -6,21 +6,24 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import app, db, openstack, storage
-from platform_cli.application_service import ApplicationCreated, ApplicationService
-from platform_cli.environment_service import (
+from openstack_platform import openstack
+from openstack_platform.controller import application_runtime as app
+from openstack_platform.controller import database as db
+from openstack_platform.controller import storage
+from openstack_platform.controller.application_service import ApplicationCreated, ApplicationService
+from openstack_platform.controller.environment_service import (
     EnvironmentMutationRequest,
     EnvironmentMutationResult,
     EnvironmentService,
 )
-from platform_cli.storage_service import (
+from openstack_platform.controller.storage_service import (
     StorageMutationRequest,
     StorageMutationResult,
     StorageService,
 )
-from platform_cli.config import load
-from platform_cli.deployment_config import parse_configuration
-from platform_cli.validation import ValidationError
+from openstack_platform.config import load
+from openstack_platform.controller.deployment_config import parse_configuration
+from openstack_platform.validation import ValidationError
 from tests.product_fixtures import accept_deployment
 
 
@@ -29,19 +32,9 @@ def unreachable_helper(*_args, **_kwargs):
 
 
 def config_fixture(directory: Path):
-    platform = {
-        "project": "example-project",
-        "projectId": "00000000-0000-4000-8000-000000000000",
-        "prefix": "example",
-        "namespace": "app-platform",
-        "domain": "apps.example.com",
-        "datacenter": "example-dc",
-        "region": "global",
-        "network": "example-network",
-        "hosts": {"admin": "example-admin"},
-        "ports": {"admin": "example-admin-port"},
-        "paths": {"root": "/srv/app-platform"},
-    }
+    platform = json.loads(
+        (Path(__file__).resolve().parents[1] / "config/platform.example.json").read_text()
+    )
     policy = {
         "standard": {
             "workerFlavor": "example.1c2g",

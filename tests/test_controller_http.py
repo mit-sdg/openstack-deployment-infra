@@ -9,7 +9,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from platform_cli.controller_http import ControllerServer, HttpError, Response, Router
+from openstack_platform.controller.http import ControllerServer, HttpError, Response, Router
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):

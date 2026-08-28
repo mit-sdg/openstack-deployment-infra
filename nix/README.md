@@ -32,14 +32,14 @@ uv sync --frozen
 uv run python --version            # Python 3.14.x
 uv run python -m compileall -q infra tests
 uv run python -m unittest discover -s tests -v
-uv run ruff format --check platform_cli deploy/platform-cli infra tests
-uv run ruff check platform_cli deploy/platform-cli infra tests
+uv run ruff format --check openstack_platform deploy/releases infra tests
+uv run ruff check openstack_platform deploy/releases infra tests
 uv run mypy
 find infra -type f \( -name '*.sh' -o -path 'infra/control/bin/*' \) \
   -exec bash -n {} +
 ```
 
-If the unprivileged operator cannot access the Nix daemon socket on the management host, a build there requires the deployment's approved privileged-build procedure. Do not use a rootful container socket as a workaround.
+If the unprivileged operator cannot access the Nix daemon socket on the operator host, a build there requires the deployment's approved privileged-build procedure. Do not use a rootful container socket as a workaround.
 
 ## Automated package, VM, and image tests
 
@@ -194,7 +194,7 @@ persistent-host replacement path; do not delete a server first, detach a volume
 manually, or recreate the host with provider commands.
 
 After publishing and live-testing a new role image, select its exact UUID and
-run one replacement at a time from the management host:
+run one replacement at a time from the operator host:
 
 ```sh
 /srv/openstack-platform/bin/openstack-platform infra image set ingress NEW_INGRESS_IMAGE_UUID
@@ -204,7 +204,7 @@ run one replacement at a time from the management host:
 
 Use `admin`, `ingress`, or `storage` as the role. Before replacing storage,
 complete a fresh managed-data restore check; before replacing admin, complete a
-fresh management-database backup. The command retains the old server, fixed port, and volumes
+fresh controller-database backup. The command retains the old server, fixed port, and volumes
 until readiness passes, then removes only the retained old host. If readiness
 fails it restores the prior host. An ambiguous provider result is
 `recovery-required`; rerun the same CLI operation after restoring its named

@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import db
-from platform_cli.config import (
+from openstack_platform.controller import database as db
+from openstack_platform.config import (
     Config,
     Limits,
     PlatformConfig,
@@ -14,8 +14,8 @@ from platform_cli.config import (
     RuntimeImages,
     StandardProfile,
 )
-from platform_cli.controller_api import ControllerAPI
-from platform_cli.controller_http import HttpError
+from openstack_platform.controller.api import ControllerAPI
+from openstack_platform.controller.http import HttpError
 
 
 class ControllerAPITests(unittest.TestCase):
@@ -145,7 +145,7 @@ class ControllerAPITests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "INVALID_IDEMPOTENCY_KEY")
 
-    @mock.patch("platform_cli.application_service.openstack.verify_project")
+    @mock.patch("openstack_platform.controller.application_service.openstack.verify_project")
     def test_lost_environment_response_replays_without_value_persistence(
         self, verify_project
     ) -> None:
@@ -184,7 +184,7 @@ class ControllerAPITests(unittest.TestCase):
         )
         self.assertNotIn("value", str(environment.body).lower())
 
-    @mock.patch("platform_cli.application_service.openstack.verify_project")
+    @mock.patch("openstack_platform.controller.application_service.openstack.verify_project")
     def test_cascade_delete_replays_after_application_is_tombstoned(
         self, verify_project
     ) -> None:

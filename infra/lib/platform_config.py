@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -12,6 +13,16 @@ import uuid as uuid_module
 from pathlib import Path
 from typing import Any, cast
 
+LIB_DIRECTORY = Path(__file__).resolve().parent
+_CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "platform_implementation_contract", LIB_DIRECTORY / "platform_contract.py"
+)
+if _CONTRACT_SPEC is None or _CONTRACT_SPEC.loader is None:
+    raise RuntimeError("platform contract loader is unavailable")
+_CONTRACT_MODULE = importlib.util.module_from_spec(_CONTRACT_SPEC)
+_CONTRACT_SPEC.loader.exec_module(_CONTRACT_MODULE)
+CONTRACT = cast(dict[str, Any], _CONTRACT_MODULE.CONTRACT)
+
 NAMESPACE_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
 FILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}")
 DISPLAY_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,38}[A-Za-z0-9._-])?")
@@ -19,65 +30,13 @@ PROJECT_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,126}[A-Za-z0-9._-])?")
 ORGANIZATION_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9._-])?")
 
 REPOSITORY_CONFIG = Path(__file__).resolve().parents[2] / "config" / "platform.json"
-DEFAULT_PATHS = (
-    Path("/etc/app-platform/platform.json"),
-    Path("/srv/app-platform/config/platform.json"),
-    REPOSITORY_CONFIG,
-)
+DEFAULT_PATHS = (REPOSITORY_CONFIG,)
 
 
-REQUIRED_PATHS = (
-    "project",
-    "projectId",
-    "displayName",
-    "organization",
-    "prefix",
-    "namespace",
-    "pki.internalCaFile",
-    "domain",
-    "recoveryDomains.0",
-    "recoveryDomains.1",
-    "datacenter",
-    "region",
-    "network",
-    "internalNames.storage",
-    "internalNames.objectStorage",
-    "managementCidr",
-    "metadataAddress",
-    "addresses.admin",
-    "addresses.ingress",
-    "addresses.storage",
-    "hosts.admin",
-    "hosts.ingress",
-    "hosts.storage",
-    "ports.admin",
-    "ports.ingress",
-    "ports.storage",
-    "volumes.adminState.name",
-    "volumes.adminState.sizeGiB",
-    "volumes.backup.name",
-    "volumes.backup.sizeGiB",
-    "volumes.data.name",
-    "volumes.data.sizeGiB",
-    "volumes.data.type",
-    "images.admin",
-    "images.ingress",
-    "images.storage",
-    "images.worker",
-    "images.builder",
-    "flavors.admin",
-    "flavors.ingress",
-    "flavors.storage",
-    "flavors.worker",
-    "flavors.builder",
-    "containers.postgres",
-    "containers.mongodb",
-    "containers.registry",
-    "paths.root",
-    "paths.adminState",
-    "paths.backups",
-    "paths.data",
-)
+INVENTORY_CONTRACT = cast(dict[str, Any], CONTRACT["inventory"])
+ALLOWED_TOP_LEVEL = frozenset(cast(list[str], INVENTORY_CONTRACT["allowedTopLevel"]))
+REQUIRED_TOP_LEVEL = frozenset(cast(list[str], INVENTORY_CONTRACT["requiredTopLevel"]))
+REQUIRED_PATHS = tuple(cast(list[str], INVENTORY_CONTRACT["requiredPaths"]))
 
 
 def config_path() -> Path:
@@ -96,33 +55,10 @@ def load() -> dict[str, Any]:
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValueError("platform config must be a JSON object with string keys")
     document = cast(dict[str, Any], value)
-    required = {
-        "project",
-        "projectId",
-        "displayName",
-        "organization",
-        "prefix",
-        "namespace",
-        "domain",
-        "datacenter",
-        "region",
-        "network",
-        "internalNames",
-        "pki",
-        "managementCidr",
-        "metadataAddress",
-        "addresses",
-        "hosts",
-        "ports",
-        "volumes",
-        "images",
-        "flavors",
-        "versions",
-        "checksums",
-        "containers",
-        "paths",
-    }
-    missing = required - document.keys()
+    unknown = document.keys() - ALLOWED_TOP_LEVEL
+    missing = REQUIRED_TOP_LEVEL - document.keys()
+    if unknown:
+        raise ValueError(f"platform config has unknown keys: {', '.join(sorted(unknown))}")
     if missing:
         raise ValueError(f"platform config is missing keys: {', '.join(sorted(missing))}")
 
@@ -190,6 +126,10 @@ def validate(document: dict[str, Any]) -> None:
 
 
 def shell_values(document: dict[str, Any]) -> dict[str, str | int]:
+    contract_ports = cast(dict[str, int], CONTRACT["ports"])
+    contract_accounts = cast(dict[str, dict[str, str | int]], CONTRACT["accounts"])
+    operator_account = contract_accounts["operator"]
+    controller_account = contract_accounts["controller"]
     return {
         "PLATFORM_PROJECT": document["project"],
         "PLATFORM_PROJECT_ID": document["projectId"],
@@ -207,7 +147,7 @@ def shell_values(document: dict[str, Any]) -> dict[str, str | int]:
         "PLATFORM_NETWORK": document["network"],
         "PLATFORM_STORAGE_INTERNAL_NAME": document["internalNames"]["storage"],
         "PLATFORM_OBJECT_STORAGE_INTERNAL_NAME": document["internalNames"]["objectStorage"],
-        "PLATFORM_MANAGEMENT_CIDR": document["managementCidr"],
+        "PLATFORM_OPERATOR_CIDR": document["operatorCidr"],
         "PLATFORM_METADATA_ADDRESS": document["metadataAddress"],
         "PLATFORM_ADMIN_IP": document["addresses"]["admin"],
         "PLATFORM_INGRESS_IP": document["addresses"]["ingress"],
@@ -242,6 +182,18 @@ def shell_values(document: dict[str, Any]) -> dict[str, str | int]:
         "PLATFORM_ADMIN_STATE": document["paths"]["adminState"],
         "PLATFORM_BACKUPS": document["paths"]["backups"],
         "PLATFORM_DATA": document["paths"]["data"],
+        "PLATFORM_APPLICATION_PORT": contract_ports["application"],
+        "PLATFORM_NOMAD_HTTP_PORT": contract_ports["nomadHttp"],
+        "PLATFORM_NOMAD_RPC_PORT": contract_ports["nomadRpc"],
+        "PLATFORM_NOMAD_SERF_PORT": contract_ports["nomadSerf"],
+        "PLATFORM_REGISTRY_PORT": contract_ports["registry"],
+        "PLATFORM_POSTGRES_PORT": contract_ports["postgres"],
+        "PLATFORM_MONGODB_PORT": contract_ports["mongodb"],
+        "PLATFORM_GARAGE_RPC_PORT": contract_ports["garageRpc"],
+        "PLATFORM_GARAGE_S3_PORT": contract_ports["garageS3"],
+        "PLATFORM_OPERATOR_USER": operator_account["name"],
+        "PLATFORM_OPERATOR_UID": operator_account["uid"],
+        "PLATFORM_CONTROLLER_USER": controller_account["name"],
     }
 
 

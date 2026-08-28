@@ -13,10 +13,10 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import openstack
-from platform_cli.config import load_platform
-from platform_cli.runtime import CommandFailure, CommandResult, HttpResult
-from platform_cli.validation import ValidationError
+from openstack_platform import openstack
+from openstack_platform.config import load_platform
+from openstack_platform.runtime import CommandFailure, CommandResult, HttpResult
+from openstack_platform.validation import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "00000000-0000-4000-8000-000000000000"
@@ -1093,7 +1093,7 @@ else:
             )
             tokens.chmod(0o600)
             environment = {
-                "AGENTOPS_PUBLIC_KEY": str(public_key),
+                "OPERATOR_PUBLIC_KEY": str(public_key),
                 "NOMAD_TOKENS_FILE": str(tokens),
                 "PKI_DIR": str(pki),
                 "ENABLE_CLOUDFLARED": "false",

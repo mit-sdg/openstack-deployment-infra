@@ -12,12 +12,12 @@ management backup, and a `RESTORE-MANIFEST` for the latest managed-data backup.
 
 ## What you need
 
-Run on the management host as the unprivileged owner of
+Run on the operator host as the unprivileged owner of
 `/srv/openstack-platform`. You need:
 
 - setup output ending in `setup=complete`;
 - configured external DNS and HTTPS for the platform hostname;
-- the generated management bridge at
+- the generated operator bridge at
   `/srv/openstack-platform/.secrets/ssh/config`; and
 - the managed-data age identity initialized on admin as described in
   [Operations](OPERATIONS.md#managed-data-backup-and-restore-check-on-admin).
@@ -98,8 +98,8 @@ grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$
   <<<"$management_backup"
 ```
 
-The backup contains management SQLite state only. It is encrypted on the
-management host and accepted under `<paths.backups>/m1` on admin as a
+The backup contains controller SQLite state only. It is encrypted on the
+operator host and accepted under `<paths.backups>/controller` on admin as a
 ciphertext/checksum/manifest trio. The output exposes only the name and
 ciphertext checksum.
 
@@ -155,7 +155,7 @@ ssh -F "$SSH_CONFIG" platform-admin -- \
   systemctl is-enabled "$PLATFORM_NAMESPACE-platform-backup.timer"
 ```
 
-The management timer covers management SQLite only. The admin timer covers
+The operator timer covers controller SQLite only. The admin timer covers
 PostgreSQL, MongoDB, and Garage. Registry blobs are not backed up and are
 rebuilt from source.
 

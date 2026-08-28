@@ -1,6 +1,6 @@
-# Install a platform CLI release without privileges
+# Install operator and helper releases without privileges
 
-This procedure installs one committed Python 3.14 management release under
+This procedure installs one committed Python 3.14 operator release under
 `/srv/openstack-platform` and the matching helper release in admin persistent
 state. It is for release maintainers; it does not describe platform commands or
 feature behavior.
@@ -9,9 +9,9 @@ Initialize a fresh database; do not copy a database or external declarations fro
 
 ## Prerequisites
 
-- Run management commands as the unprivileged owner of `/srv/openstack-platform`.
+- Run operator commands as the unprivileged owner of `/srv/openstack-platform`.
 - Use a clean checkout at the full commit being released.
-- Bootstrap the exact Python 3.14.7 and uv 0.12.2 management runtime once; do
+- Bootstrap the exact Python 3.14.7 and uv 0.12.2 operator runtime once; do
   not substitute the host's Python 3.12.
 - The current admin must provide Python 3.14 and the helper runtime libraries.
   It does not need Git or another archive/checksum executable, a preinstalled
@@ -27,7 +27,7 @@ Initialize a fresh database; do not copy a database or external declarations fro
   path and does not accept a host, identity file, or SSH configuration override.
 
 A helper candidate is accepted only when
-`platform_cli/helper/actions-v1.txt` names the exact complete protocol-v1 action
+`openstack_platform/helper/actions-v1.txt` names the exact complete protocol-v1 action
 map. The installer captures the handlers used by the production helper
 entrypoint and requires an exact match, including backup, application, and
 storage action families. It does not package the foundation-only default map.
@@ -41,15 +41,15 @@ policy plus the protected OpenStack wrapper. Before upload,
 admin identity and configured paths, including the accepted immutable Nix store
 configuration link. It also confirms that the remote alias selects an
 unprivileged account before invoking the helper installer. These checks do not
-copy management configuration into `/etc`.
+copy operator configuration into `/etc`.
 
-## Bootstrap the management runtime once
+## Bootstrap the operator runtime once
 
-From a reviewed checkout on the management host, run as the unprivileged
+From a reviewed checkout on the operator host, run as the unprivileged
 `/srv/openstack-platform` owner:
 
 ```sh
-deploy/platform-cli/bootstrap_management_runtime.sh
+deploy/releases/bootstrap_operator_runtime.sh
 test "$(/srv/openstack-platform/runtime/python3.14 --version)" = 'Python 3.14.7'
 test "$(/srv/openstack-platform/bin/uv --version)" = 'uv 0.12.2 (x86_64-unknown-linux-gnu)'
 /srv/openstack-platform/bin/age --version >/dev/null
@@ -65,15 +65,15 @@ not a root/current-user-owned, non-writable regular file. It refuses root and
 sudo. Subsequent releases reuse these stable paths and do not require access
 to the Nix daemon.
 
-## Install persistent management configuration
+## Install persistent operator configuration
 
-The management release never reads deployment configuration from its Git
+The operator release never reads deployment configuration from its Git
 archive. From a reviewed public checkout, install the inventory and private
 policy supplied by the operator's private repository:
 
 ```sh
 private_repo=/private/path/deployment-config
-/srv/openstack-platform/runtime/python3.14 deploy/platform-cli/install_management_config.py \
+/srv/openstack-platform/runtime/python3.14 deploy/releases/install_operator_config.py \
   --platform "$private_repo/config/platform.json" \
   --policy "$private_repo/config/platform-policy.json"
 ```
@@ -93,9 +93,9 @@ The inventory must contain the authenticated OpenStack project's real
 A fresh deployment starts with no application declarations; applications are
 created through the installed control surface.
 
-## Generate the pinned management bridge
+## Generate the pinned operator bridge
 
-Run this on the management host, as the unprivileged `/srv/openstack-platform` owner, after
+Run this on the operator host, as the unprivileged `/srv/openstack-platform` owner, after
 admin has booted and after the private inventory is installed. Do not hand-edit
 `config` or accept a changed host key. The provider wrapper must be a
 direct current-user-owned executable at mode `0500` or `0700`; its credential
@@ -107,20 +107,20 @@ form for the bridge helper).
 install -d -m 0700 /srv/openstack-platform/.secrets/ssh
 install -m 0600 /private/path/id_ed25519 /srv/openstack-platform/.secrets/ssh/id_ed25519
 bridge_output="$(
-  /srv/openstack-platform/runtime/python3.14 deploy/platform-cli/setup_management_bridge.py \
+  /srv/openstack-platform/runtime/python3.14 deploy/releases/setup_operator_bridge.py \
     --platform-config /srv/openstack-platform/config/platform.json \
     --ssh-identity /srv/openstack-platform/.secrets/ssh/id_ed25519 \
     --ssh-config /srv/openstack-platform/.secrets/ssh/config \
     --known-hosts /srv/openstack-platform/.secrets/ssh/known_hosts \
     --provider-command /srv/openstack-platform/bin/platform-openstack
 )"
-test "$bridge_output" = management-bridge=verified
+test "$bridge_output" = operator-bridge=verified
 ```
 
 The command verifies the token/project ID, project name, admin serial-console
 ED25519 fingerprint, and an `ssh-keyscan` result before atomically writing the
 mode-`0600` known-hosts and SSH config files below the mode-`0700` SSH
-directory. Expected output is `management-bridge=verified`. Smoke-test the
+directory. Expected output is `operator-bridge=verified`. Smoke-test the
 actual transport and account:
 
 ```sh
@@ -134,18 +134,18 @@ test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config platform-admin -- \
 
 The generated alias pins user `agentops`, the configured admin address,
 ED25519 host keys, strict host-key checking, no password or agent forwarding,
-and bounded connection attempts. The management CLI, helper deployment, and
-management-database backup transfer all use this alias and path.
+and bounded connection attempts. The operator CLI, helper deployment, and
+controller-database backup transfer all use this alias and path.
 
-## Install the management release
+## Install the operator release
 
-From the clean public checkout on the management host, after installing the
+From the clean public checkout on the operator host, after installing the
 configuration and policy:
 
 ```sh
 commit=$(git rev-parse HEAD)
-/srv/openstack-platform/runtime/python3.14 deploy/platform-cli/install_release.py \
-  --mode management \
+/srv/openstack-platform/runtime/python3.14 deploy/releases/install_release.py \
+  --mode operator \
   --source "$PWD" \
   --commit "$commit" \
   --python /srv/openstack-platform/runtime/python3.14 \
@@ -165,7 +165,7 @@ owned, and mode `0700`. It uses `uv sync --frozen --no-dev` to create the releas
 environment. Before writing `.complete`, it invokes the candidate's installed
 command with sanitized temporary inventory and policy files and requires that
 the command load them successfully. It then atomically replaces
-`platform-cli/current` without writing to an immutable completed release.
+`operator-releases/current` without writing to an immutable completed release.
 
 The stable launchers are `/srv/openstack-platform/bin/openstack-platform`,
 `/srv/openstack-platform/bin/openstack-platform-restore`, and
@@ -187,7 +187,7 @@ Verify the selected commit and timer rather than relying on installer exit
 status alone:
 
 ```sh
-test "$(cat /srv/openstack-platform/platform-cli/current/.complete)" = "$commit"
+test "$(cat /srv/openstack-platform/operator-releases/current/.complete)" = "$commit"
 test -x "$(readlink -e /srv/openstack-platform/bin/openstack-platform)"
 test -x "$(readlink -e /srv/openstack-platform/bin/openstack-platform-restore)"
 /srv/openstack-platform/bin/openstack-platform --help
@@ -208,8 +208,8 @@ command against the private repository:
 The timer explicitly supplies `/srv/openstack-platform/config/platform.json`, the stable state
 directory, and the private policy path to the ordinary `platform backup`
 command. That command derives the remote staging path from
-`paths.backups` as `<paths.backups>/m1/.staging/<name>`; the helper accepts it
-into `<paths.backups>/m1/<name>` and writes checksum/manifest evidence. It does
+`paths.backups` as `<paths.backups>/controller/.staging/<name>`; the helper accepts it
+into `<paths.backups>/controller/<name>` and writes checksum/manifest evidence. It does
 not copy a live WAL file and does not replace the existing PostgreSQL,
 MongoDB, or Garage backup timer. Those managed-data checks run on admin with
 the packaged age executable, as described in [OPERATIONS.md](OPERATIONS.md).
@@ -219,11 +219,11 @@ the packaged age executable, as described in [OPERATIONS.md](OPERATIONS.md).
 After the integrated action-map smoke check passes locally, run:
 
 ```sh
-deploy/platform-cli/deploy_helper_release.sh "$(git rev-parse HEAD)"
+deploy/releases/deploy_helper_release.sh "$(git rev-parse HEAD)"
 ```
 
 The script reads the deployment identity and all four `paths` values from the
-stable direct mode-`0600` management inventory at
+stable direct mode-`0600` operator inventory at
 `/srv/openstack-platform/config/platform.json` (or the explicit `PLATFORM_CONFIG` path),
 rejecting unsafe path syntax. Before uploading anything, it checks the live
 admin inventory at `/etc/<namespace>/platform.json`. A direct readable regular
@@ -233,17 +233,17 @@ group- or world-writable, and readable by `agentops`. A dangling link, mutable
 or arbitrary target outside `/nix/store`, non-regular target, or target reached
 by a chain that resolves outside `/nix/store` is rejected.
 
-The parsed live identity must match the management inventory's project,
+The parsed live identity must match the operator inventory's project,
 project ID, namespace, and complete `paths` object. The installer repeats the
 file and identity checks before selecting a release. This prevents a valid but
 unrelated image inventory from choosing helper state or data paths. The helper
-release is under `<paths.adminState>/controller/platform-cli/releases/<commit>/`
+release is under `<paths.adminState>/operator/helper-releases/releases/<commit>/`
 and its stable launcher is `<paths.root>/bin/openstack-platform-helper`; the
-management bridge invokes that fixed helper command through the pinned alias.
+operator bridge invokes that fixed helper command through the pinned alias.
 The helper launcher retains the stable `/etc/<namespace>/platform.json`
 selection; when it is the accepted NixOS symlink, the launcher rechecks and
 resolves it to the direct store file before starting the strict configuration
-loader. Management-provided authenticated health checks propagate the same
+loader. Controller-provided authenticated health checks propagate the same
 `PLATFORM_CONFIG=/etc/<namespace>/platform.json`; the storage check uses a
 fixed wrapper to set it before importing its script.
 
@@ -259,7 +259,7 @@ extraction. No remote `git`, checksum utility, sudo command, preinstalled
 installer, helper launcher, or image replacement is required.
 
 The installer extracts below
-`<paths.adminState>/controller/platform-cli/releases/<commit>/`, captures and
+`<paths.adminState>/operator/helper-releases/releases/<commit>/`, captures and
 checks the production action map, writes `.complete`, atomically changes
 `current`, and atomically selects the launcher below `<paths.root>/bin`. The
 script finally invokes that configured launcher with a malformed envelope and
@@ -273,14 +273,14 @@ candidate staging directory. A transferred archive is removed when the remote
 installer exits. An already complete release is smoke-tested again before it
 can be selected.
 
-To recover to a previously installed complete management release, select it
+To recover to a previously installed complete operator release, select it
 with an atomic symlink replacement and rerun the entrypoint check. This changes
 the executable release only; it does not migrate or restore platform database
 state:
 
 ```sh
 old=FULL_PREVIOUS_COMMIT
-cd /srv/openstack-platform/platform-cli
+cd /srv/openstack-platform/operator-releases
 ln -s "releases/$old" .current.rollback
 mv -Tf .current.rollback current
 /srv/openstack-platform/bin/openstack-platform --help
@@ -323,10 +323,10 @@ Do not select a directory without a matching `.complete` file.
 - **`production helper action map does not exactly match`**: update composition
   or the integration-owned manifest so they describe one complete protocol-v1
   release, then rerun tests and installation.
-- **`install persistent management configuration before installing a release`**:
+- **`install persistent operator configuration before installing a release`**:
   run the configuration and policy steps above as the same unprivileged account;
   do not copy a real deployment file into the release checkout.
-- **`management configuration ownership or mode is invalid`**: replace symlinks
+- **`operator configuration ownership or mode is invalid`**: replace symlinks
   with direct regular files owned by the management account and install them at
   mode `0600`; do not relax the launcher check.
 - **The user timer cannot connect to systemd**: verify the management account's

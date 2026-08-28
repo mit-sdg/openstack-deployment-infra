@@ -1,0 +1,12 @@
+[Unit]
+Description=Back up OpenStack platform controller SQLite state
+ConditionPathExists=@STATE_ROOT@/platform.sqlite3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@BIN_ROOT@/openstack-platform --platform-config @CONFIG_ROOT@/platform.json --state-directory @STATE_ROOT@ --policy @STATE_ROOT@/policy.json backup
+UMask=0077
+Environment=PLATFORM_CONFIG=@CONFIG_ROOT@/platform.json
+NoNewPrivileges=true

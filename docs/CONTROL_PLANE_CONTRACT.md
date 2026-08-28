@@ -52,7 +52,7 @@ Without `--apply`, setup validates the protected input and prints a
 non-mutating plan. With `--apply`, it verifies the authenticated OpenStack
 project, generates private deployment material, reserves fixed ports, builds
 and tests all five role images, creates the persistent roles and volumes,
-installs management/helper releases, selects images, and initializes backups.
+installs operator/helper releases, selects images, and initializes backups.
 
 The environment file must be a direct current-user-owned mode-`0600` file.
 Setup parses literal dotenv/OpenRC assignments without executing them. Missing
@@ -125,7 +125,7 @@ provider re-confirms the selected image UUID, retained flavor UUID, configured
 name, and operation provenance. On readiness failure, the prior host is
 restored. This is the only supported persistent-host replacement path.
 
-### Back up management state
+### Back up operator state
 
 ```text
 openstack-platform backup
@@ -135,17 +135,17 @@ The command uses SQLite's online backup API, encrypts the private copy to the
 policy `backupAgeRecipient`, and stages it through the pinned admin alias at:
 
 ```text
-<paths.backups>/m1/.staging/<name>
+<paths.backups>/controller/.staging/<name>
 ```
 
 Helper acceptance verifies the age-v1 header and ciphertext SHA-256, then
 publishes the ciphertext, checksum, and manifest under
-`<paths.backups>/m1/`. The manifest is the commit marker. Retention counts only
-complete evidence trios. This backup contains management SQLite state only,
+`<paths.backups>/controller/`. The manifest is the commit marker. Retention counts only
+complete evidence trios. This backup contains controller SQLite state only,
 not managed PostgreSQL, MongoDB, Garage data, registry blobs, or an age
 identity.
 
-### Restore management state offline
+### Restore operator state offline
 
 ```text
 openstack-platform --state-directory PATH restore BACKUP

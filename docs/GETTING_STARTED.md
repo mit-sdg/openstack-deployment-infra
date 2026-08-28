@@ -1,7 +1,7 @@
 # Prepare to create a fresh deployment
 
 Use this page to decide whether the current infrastructure release fits and to
-prepare the management host for [`openstack-platform setup`](SETUP.md). Setup
+prepare the operator host for [`openstack-platform setup`](SETUP.md). Setup
 creates OpenStack resources and private deployment material; this page does not
 mutate the cloud.
 
@@ -25,7 +25,7 @@ builders, one worker per future active application, five private Glance images,
 three fixed Neutron ports, and three Cinder volumes. Fresh setup defaults to 32
 GiB of admin state, 500 GiB of managed data, and 200 GiB of encrypted backups.
 
-## Prepare the management host
+## Prepare the operator host
 
 Use an `x86_64-linux` host with:
 

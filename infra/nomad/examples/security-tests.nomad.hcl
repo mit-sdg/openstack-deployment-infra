@@ -1,6 +1,6 @@
 job "metadata-block-test" {
   region      = "global"
-  datacenters = ["csail-stata"]
+  datacenters = ["example-datacenter"]
   type        = "batch"
 
   constraint {

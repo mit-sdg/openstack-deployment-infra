@@ -1,6 +1,6 @@
 # Create a platform from one environment file
 
-Use `openstack-platform setup` to create a new deployment in an empty OpenStack project. The command generates the private inventory, SSH and age keys, service credentials, internal PKI, five NixOS role images, security groups, fixed ports, persistent volumes, three VMs, management bridge, releases, image selections, and backup initialization.
+Use `openstack-platform setup` to create a new deployment in an empty OpenStack project. The command generates the private inventory, SSH and age keys, service credentials, internal PKI, five NixOS role images, security groups, fixed ports, persistent volumes, three VMs, operator bridge, releases, image selections, and backup initialization.
 
 The supported result is infrastructure-only: setup does not start the local controller API, a sync-engine management application, or an authentication application. Product lifecycle commands are not part of the operator CLI. Future UI work follows [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 
@@ -8,7 +8,7 @@ The command is resumable: rerun the same command with the same protected environ
 
 ## Before running setup
 
-Run setup from a clean, complete commit on an `x86_64-linux` management host. The host must have:
+Run setup from a clean, complete commit on an `x86_64-linux` operator host. The host must have:
 
 - Nix with flakes enabled; setup builds its OpenStack client, Python SDK, `age`, QEMU, and config-drive smoke tooling from the pinned flake;
 - `git`, `ssh`, `ssh-keygen`, `openssl`, `curl`, and a user systemd manager;
@@ -17,7 +17,7 @@ Run setup from a clean, complete commit on an `x86_64-linux` management host. Th
 
 Setup refuses root and `sudo`. Creating and assigning `/srv/openstack-platform` is a management-host administration task outside the OpenStack project; perform it before giving the environment file to the unprivileged operator.
 
-The OpenStack project should be empty of resources using the selected prefix. Setup does not adopt an unrelated server, volume, image, port, security group, keypair, management database, or private setup workspace merely because its name matches.
+The OpenStack project should be empty of resources using the selected prefix. Setup does not adopt an unrelated server, volume, image, port, security group, keypair, controller database, or private setup workspace merely because its name matches.
 
 ## Create the protected environment file
 
@@ -41,7 +41,7 @@ PLATFORM_DISPLAY_NAME='New Project Platform'
 PLATFORM_ORGANIZATION='Example Organization'
 PLATFORM_DOMAIN='apps.example.org'
 PLATFORM_NETWORK='public'
-PLATFORM_MANAGEMENT_CIDR='192.0.2.10/32'
+PLATFORM_OPERATOR_CIDR='192.0.2.10/32'
 PLATFORM_ADMIN_ADDRESS='192.0.2.11'
 PLATFORM_INGRESS_ADDRESS='192.0.2.12'
 PLATFORM_STORAGE_ADDRESS='192.0.2.13'
@@ -76,7 +76,7 @@ Use `OS_AUTH_TYPE=v3applicationcredential` with `OS_APPLICATION_CREDENTIAL_ID` a
 | `PLATFORM_ORGANIZATION` | Prompts with the display name as its default. |
 | `PLATFORM_DOMAIN` | Prompts with no default. |
 | `PLATFORM_NETWORK` | Uses the only visible network; otherwise prompts. |
-| `PLATFORM_MANAGEMENT_CIDR` | Uses the SSH client address as `/32` when available; otherwise prompts. |
+| `PLATFORM_OPERATOR_CIDR` | Uses the SSH client address as `/32` when available; otherwise prompts. |
 | `PLATFORM_*_ADDRESS` | Prompts for each stable IPv4 address. Setup never guesses a fixed address. |
 | `PLATFORM_*_FLAVOR` | Selects the smallest visible flavor meeting the role baseline; prompts if none does. |
 | `PLATFORM_VOLUME_TYPE` | Uses `production`, or the only visible type; otherwise prompts. |
@@ -136,10 +136,10 @@ The command performs these ordered checkpoints:
 3. Creates or verifies security groups and immediately reserves the three fixed ports.
 4. Builds each role image from the exact clean commit, boots the QCOW2 under QEMU with a config drive, and publishes it with commit and compatibility metadata.
 5. Boots admin with its 32 GiB state and 200 GiB backup volumes and waits for the exact readiness marker.
-6. Creates and verifies the pinned management bridge and bootstraps Nomad ACLs.
+6. Creates and verifies the pinned operator bridge and bootstraps Nomad ACLs.
 7. Boots storage with its 500 GiB data volume, transfers only the required private provisioning inputs, and waits for readiness.
 8. Boots ingress and verifies its readiness marker.
-9. Installs matching management/helper releases, initializes empty management state, and selects all five exact image UUIDs.
+9. Installs matching operator/helper releases, initializes empty operator state, and selects all five exact image UUIDs.
 10. Initializes managed-backup credentials, verifies the management backup timer, and requires healthy platform status.
 
 Successful output ends with:

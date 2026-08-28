@@ -1,4 +1,5 @@
 {
+  constants,
   lib,
   pkgs,
   platform,
@@ -6,6 +7,8 @@
 }:
 let
   namespace = platform.namespace;
+  operator = constants.accounts.operator;
+  recovery = constants.accounts.recovery;
   configRoot = "/etc/${namespace}";
   platformJson = pkgs.writeText "${namespace}-platform.json" (builtins.toJSON platform);
 in
@@ -30,24 +33,24 @@ in
   # The operator key is injected through OpenStack config-drive at first boot.
   users.allowNoPasswordLogin = true;
   users.mutableUsers = false;
-  users.groups.agentops.gid = 1000;
-  users.groups.ubuntu.gid = 1001;
-  users.users.agentops = {
+  users.groups.${operator.name}.gid = operator.gid;
+  users.groups.${recovery.name}.gid = recovery.gid;
+  users.users.${operator.name} = {
     isNormalUser = true;
-    uid = 1000;
-    group = "agentops";
-    home = "/home/agentops";
+    uid = operator.uid;
+    group = operator.name;
+    home = "/home/${operator.name}";
     createHome = true;
     shell = pkgs.bashInteractive;
     linger = true;
   };
   # OpenStack's keypair is installed for this approval-gated recovery user.
-  users.users.ubuntu = {
+  users.users.${recovery.name} = {
     isNormalUser = true;
-    uid = 1001;
-    group = "ubuntu";
+    uid = recovery.uid;
+    group = recovery.name;
     extraGroups = [ "wheel" ];
-    home = "/home/ubuntu";
+    home = "/home/${recovery.name}";
     createHome = true;
     shell = pkgs.bashInteractive;
   };
@@ -61,8 +64,8 @@ in
       PubkeyAuthentication = true;
       AuthenticationMethods = "publickey";
       AllowUsers = [
-        "agentops"
-        "ubuntu"
+        operator.name
+        recovery.name
       ];
     };
   };
@@ -89,7 +92,7 @@ in
       ssh_deletekeys = false;
       ssh_genkeytypes = [ ];
       system_info.default_user = {
-        name = "ubuntu";
+        name = recovery.name;
         gecos = "${platform.displayName} approval-gated recovery operator";
         groups = [ "wheel" ];
         lock_passwd = true;
@@ -99,7 +102,7 @@ in
       users = [
         "default"
         {
-          name = "agentops";
+          name = operator.name;
           gecos = "${platform.displayName} platform operator";
           lock_passwd = true;
           shell = "/run/current-system/sw/bin/bash";
@@ -132,10 +135,10 @@ in
     "d ${configRoot} 0750 root root -"
     "d ${configRoot}/pki 0750 root root -"
     "d ${configRoot}/secrets 0700 root root -"
-    "d ${platform.paths.root} 0750 agentops agentops -"
+    "d ${platform.paths.root} 0750 ${operator.name} ${operator.name} -"
   ];
 
-  # CSAIL OpenStack exposes Nova console logs through the first serial port.
+  # The target OpenStack deployment exposes Nova console logs through the first serial port.
   # Keep the VGA console while making ttyS0 the primary kernel/systemd console
   # so first-boot and cloud-init failures remain observable without SSH.
   boot.kernelParams = [ "console=ttyS0,115200n8" ];

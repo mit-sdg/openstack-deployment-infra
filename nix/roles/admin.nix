@@ -1,4 +1,5 @@
 {
+  constants,
   lib,
   pkgs,
   platform,
@@ -20,21 +21,28 @@ let
   backups = platform.paths.backups;
   root = platform.paths.root;
   stateMountUnit = "${systemdEscapePath state}.mount";
-  controllerUser = "platform-controller";
-  controllerGroup = "platform-controller";
-  controllerSocketGroup = "controller-api";
-  managementWebUser = "management-web";
+  controllerAccount = constants.accounts.controller;
+  controllerUser = controllerAccount.name;
+  controllerGroup = controllerAccount.name;
+  controllerSocketAccount = constants.accounts.controllerSocket;
+  controllerSocketGroup = controllerSocketAccount.name;
+  managementWebAccount = constants.accounts.managementWeb;
+  managementWebUser = managementWebAccount.name;
+  operatorAccount = constants.accounts.operator;
+  platformAdminAccount = constants.accounts.platformAdmin;
+  nomadAccount = constants.accounts.nomad;
   controllerRoot = "${state}/controller";
   controllerState = "${controllerRoot}/state";
   controllerPolicy = "${controllerRoot}/policy.json";
   operatorRoot = "${state}/operator";
   operatorPolicy = "${operatorRoot}/policy.json";
-  helperReleaseRoot = "${operatorRoot}/platform-cli";
+  helperReleaseRoot = "${operatorRoot}/helper-releases";
   controllerSocketDirectory = "${namespace}-controller";
   controllerSocket = "/run/${controllerSocketDirectory}/controller.sock";
   helperReleaseMarker = "${helperReleaseRoot}/current/.complete";
+  controllerBackupRoot = "${backups}/${constants.directories.controllerBackup}";
 
-  openstackSdg = pkgs.writeShellScriptBin "platform-openstack" ''
+  openstackClient = pkgs.writeShellScriptBin "platform-openstack" ''
     set -euo pipefail
     set -a
     source ${root}/secrets/openstack.env
@@ -68,9 +76,9 @@ let
       STORAGE_SECRETS_FILE=${root}/secrets/storage-bootstrap.env \
       ${infra}/openstack/worker_lifecycle.sh "$@"
   '';
-  setupManagementBridgeCli = pkgs.writeShellScriptBin "openstack-platform-setup-bridge" ''
+  setupOperatorBridgeCli = pkgs.writeShellScriptBin "openstack-platform-setup-bridge" ''
     set -euo pipefail
-    exec ${packages.platformCliPython}/bin/python ${../../deploy/platform-cli/setup_management_bridge.py} "$@"
+    exec ${packages.platformPython}/bin/python ${../../deploy/releases/setup_operator_bridge.py} "$@"
   '';
   pinBuilderHostKeyCli = pkgs.writeShellScriptBin "${namespace}-pin-builder-host-key" ''
     set -euo pipefail
@@ -104,7 +112,7 @@ let
     policy_source=${lib.escapeShellArg operatorPolicy}
     policy=${lib.escapeShellArg controllerPolicy}
     test -f "$policy_source" && test ! -L "$policy_source"
-    test "$(stat -c %U:%a "$policy_source")" = agentops:600
+    test "$(stat -c %U:%a "$policy_source")" = ${operatorAccount.name}:600
     install -m 0600 -o ${controllerUser} -g ${controllerGroup} \
       "$policy_source" "$policy"
 
@@ -121,45 +129,45 @@ let
 in
 {
   networking.hostName = platform.hosts.admin;
-  networking.firewall.allowedTCPPorts = [
-    22
-    4646
-    4647
-    4648
+  networking.firewall.allowedTCPPorts = with constants.ports; [
+    ssh
+    nomadHttp
+    nomadRpc
+    nomadSerf
   ];
   # The future management application owns this unprivileged port. Only the
   # ingress host may cross the host firewall boundary to reach it.
   networking.firewall.extraCommands = ''
-    iptables -A nixos-fw -p tcp -s ${platform.addresses.ingress}/32 --dport 8080 -j nixos-fw-accept
+    iptables -A nixos-fw -p tcp -s ${platform.addresses.ingress}/32 --dport ${toString constants.ports.managementWeb} -j nixos-fw-accept
   '';
 
-  users.groups.${controllerSocketGroup}.gid = 984;
-  users.groups.${controllerGroup}.gid = 985;
-  users.groups.${managementWebUser}.gid = 986;
-  users.groups.platform-admin.gid = 987;
-  users.groups.nomad.gid = 988;
-  users.users.agentops.extraGroups = [ "platform-admin" ];
+  users.groups.${controllerSocketGroup}.gid = controllerSocketAccount.gid;
+  users.groups.${controllerGroup}.gid = controllerAccount.gid;
+  users.groups.${managementWebUser}.gid = managementWebAccount.gid;
+  users.groups.${platformAdminAccount.name}.gid = platformAdminAccount.gid;
+  users.groups.${nomadAccount.name}.gid = nomadAccount.gid;
+  users.users.${operatorAccount.name}.extraGroups = [ platformAdminAccount.name ];
   users.users.${controllerUser} = {
     isSystemUser = true;
-    uid = 997;
+    uid = controllerAccount.uid;
     group = controllerGroup;
     extraGroups = [
-      "agentops"
-      "platform-admin"
+      operatorAccount.name
+      platformAdminAccount.name
       controllerSocketGroup
     ];
   };
   users.users.${managementWebUser} = {
     isSystemUser = true;
-    uid = 998;
+    uid = managementWebAccount.uid;
     group = managementWebUser;
     extraGroups = [ controllerSocketGroup ];
   };
-  users.users.nomad = {
+  users.users.${nomadAccount.name} = {
     isSystemUser = true;
-    uid = 999;
-    group = "nomad";
-    extraGroups = [ "platform-admin" ];
+    uid = nomadAccount.uid;
+    group = nomadAccount.name;
+    extraGroups = [ platformAdminAccount.name ];
   };
 
   fileSystems.${state} = {
@@ -187,14 +195,14 @@ in
     pkgs.git
     packages.nomad
     packages.python
-    packages.platformCliPython
-    packages.platformCliInstaller
-    openstackSdg
+    packages.platformPython
+    packages.releaseInstaller
+    openstackClient
     nomadCli
     workerCli
     builderCli
     pinBuilderHostKeyCli
-    setupManagementBridgeCli
+    setupOperatorBridgeCli
   ];
 
   environment.etc."${namespace}/nomad/10-server.hcl".text = ''
@@ -233,42 +241,42 @@ in
   '';
 
   environment.etc."${namespace}/nomad.env".text = ''
-    export NOMAD_ADDR=https://127.0.0.1:4646
+    export NOMAD_ADDR=https://127.0.0.1:${toString constants.ports.nomadHttp}
     export NOMAD_CACERT=${configRoot}/pki/internal-ca.pem
     export NOMAD_CLIENT_CERT=/etc/${namespace}/pki/nomad-cli.pem
     export NOMAD_CLIENT_KEY=/etc/${namespace}/pki/nomad-cli-key.pem
   '';
 
   systemd.tmpfiles.rules = [
-    "z /etc/${namespace} 0750 root platform-admin -"
-    "z /etc/${namespace}/pki 0750 root platform-admin -"
+    "z /etc/${namespace} 0750 root ${platformAdminAccount.name} -"
+    "z /etc/${namespace}/pki 0750 root ${platformAdminAccount.name} -"
     "z /etc/${namespace}/secrets 0750 root nomad -"
     "d ${state}/nomad 0750 nomad nomad -"
     "d ${controllerRoot} 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerState} 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerRoot}/build-logs 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerRoot}/helper-diagnostics 0700 ${controllerUser} ${controllerGroup} -"
-    "d ${operatorRoot} 0750 agentops agentops -"
-    "d ${operatorRoot}/secrets 0700 agentops agentops -"
-    "d ${operatorRoot}/status 0750 agentops agentops -"
-    "d ${helperReleaseRoot} 0750 agentops agentops -"
-    "d ${helperReleaseRoot}/releases 0750 agentops agentops -"
-    "d ${helperReleaseRoot}/incoming 0700 agentops agentops -"
-    "d ${backups} 0710 agentops ${controllerGroup} -"
-    "d ${backups}/m1 0770 agentops ${controllerGroup} -"
-    "d ${backups}/m1/.staging 0770 agentops ${controllerGroup} -"
+    "d ${operatorRoot} 0750 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d ${operatorRoot}/secrets 0700 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d ${operatorRoot}/status 0750 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d ${helperReleaseRoot} 0750 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d ${helperReleaseRoot}/releases 0750 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d ${helperReleaseRoot}/incoming 0700 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d ${backups} 0710 ${operatorAccount.name} ${controllerGroup} -"
+    "d ${controllerBackupRoot} 0770 ${operatorAccount.name} ${controllerGroup} -"
+    "d ${controllerBackupRoot}/.staging 0770 ${operatorAccount.name} ${controllerGroup} -"
     "L+ ${root}/persistent - - - - ${operatorRoot}"
-    "d ${root}/bin 0750 agentops agentops -"
+    "d ${root}/bin 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "L+ ${root}/infra - - - - ${infra}"
     "L+ ${root}/secrets - - - - ${operatorRoot}/secrets"
     "L+ ${operatorRoot}/secrets/nomad-cli - - - - ${operatorRoot}/secrets/provisioning-pki"
     "L+ ${root}/nomad.env - - - - /etc/${namespace}/nomad.env"
-    "L+ ${root}/bin/platform-openstack - - - - ${openstackSdg}/bin/platform-openstack"
+    "L+ ${root}/bin/platform-openstack - - - - ${openstackClient}/bin/platform-openstack"
     "L+ ${root}/bin/${namespace}-nomad - - - - ${nomadCli}/bin/${namespace}-nomad"
     "L+ ${root}/bin/${namespace}-worker - - - - ${workerCli}/bin/${namespace}-worker"
     "L+ ${root}/bin/${namespace}-builder - - - - ${builderCli}/bin/${namespace}-builder"
     "L+ ${root}/bin/${namespace}-pin-builder-host-key - - - - ${pinBuilderHostKeyCli}/bin/${namespace}-pin-builder-host-key"
-    "L+ ${root}/bin/openstack-platform-helper - - - - ${packages.platformCliHelperLauncher}/bin/openstack-platform-helper"
+    "L+ ${root}/bin/openstack-platform-helper - - - - ${packages.helperLauncher}/bin/openstack-platform-helper"
     "L+ ${root}/bin/age - - - - ${pkgs.age}/bin/age"
     "L+ ${root}/bin/age-keygen - - - - ${pkgs.age}/bin/age-keygen"
   ];
@@ -311,7 +319,7 @@ in
       helperReleaseMarker
     ];
     environment = {
-      PLATFORM_OPENSTACK_COMMAND = "${openstackSdg}/bin/platform-openstack";
+      PLATFORM_OPENSTACK_COMMAND = "${openstackClient}/bin/platform-openstack";
       PYTHONDONTWRITEBYTECODE = "1";
     };
     serviceConfig = {
@@ -320,14 +328,14 @@ in
       Group = controllerSocketGroup;
       SupplementaryGroups = [
         controllerGroup
-        "agentops"
-        "platform-admin"
+        operatorAccount.name
+        platformAdminAccount.name
       ];
       RuntimeDirectory = controllerSocketDirectory;
       RuntimeDirectoryMode = "0750";
       UMask = "0077";
       ExecStart = lib.concatStringsSep " " [
-        "${packages.platformController}/bin/openstack-platform-controller"
+        "${packages.controllerPackage}/bin/openstack-platform-controller"
         "--platform-config /etc/${namespace}/platform.json"
         "--state-directory ${controllerState}"
         "--policy ${controllerPolicy}"
@@ -378,7 +386,7 @@ in
         controllerState
         "${controllerRoot}/build-logs"
         "${controllerRoot}/helper-diagnostics"
-        "${backups}/m1"
+        controllerBackupRoot
       ];
     };
   };
@@ -468,7 +476,7 @@ in
       [[ $ADMIN_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
       umask 077
       {
-        printf 'advertise { http = "%s:4646" rpc = "%s:4647" serf = "%s:4648" }\n' \
+        printf 'advertise { http = "%s:${toString constants.ports.nomadHttp}" rpc = "%s:${toString constants.ports.nomadRpc}" serf = "%s:${toString constants.ports.nomadSerf}" }\n' \
           "$ADMIN_IP" "$ADMIN_IP" "$ADMIN_IP"
         printf 'server { encrypt = "%s" }\n' "$NOMAD_GOSSIP_KEY"
       } > /run/${namespace}-nomad/90-runtime.hcl
@@ -504,8 +512,8 @@ in
     unitConfig.ConditionPathExists = "${root}/persistent/secrets/backup-age-key.txt";
     serviceConfig = {
       Type = "oneshot";
-      User = "agentops";
-      Group = "agentops";
+      User = operatorAccount.name;
+      Group = operatorAccount.name;
       Environment = [
         "AGE=${pkgs.age}/bin/age"
         "AGE_KEYGEN=${pkgs.age}/bin/age-keygen"
@@ -542,17 +550,17 @@ in
     unitConfig.ConditionPathExists = "${root}/secrets/openstack.env";
     serviceConfig = {
       Type = "oneshot";
-      User = "agentops";
-      Group = "agentops";
+      User = operatorAccount.name;
+      Group = operatorAccount.name;
       Environment = [
         "PLATFORM_CONFIG=/etc/${namespace}/platform.json"
-        "OPENSTACK=${openstackSdg}/bin/platform-openstack"
+        "OPENSTACK=${openstackClient}/bin/platform-openstack"
         "NOMAD=${nomadCli}/bin/${namespace}-nomad"
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "CHECK_SERVICES=${infra}/monitor/check_services.py"
         "PATH=${
           lib.makeBinPath [
-            openstackSdg
+            openstackClient
             nomadCli
             packages.python
           ]
@@ -602,7 +610,7 @@ in
             --cacert ${configRoot}/pki/internal-ca.pem \
             --cert /etc/${namespace}/pki/nomad-cli.pem \
             --key /etc/${namespace}/pki/nomad-cli-key.pem \
-            https://127.0.0.1:4646/v1/status/leader >/dev/null; then
+            https://127.0.0.1:${toString constants.ports.nomadHttp}/v1/status/leader >/dev/null; then
           sleep 2
           echo "${namespace} NixOS admin services ready"
           exit 0

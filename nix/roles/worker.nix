@@ -1,4 +1,5 @@
 {
+  constants,
   lib,
   pkgs,
   platform,
@@ -10,7 +11,7 @@ let
   configRoot = "/etc/${namespace}";
 in
 {
-  networking.firewall.allowedTCPPorts = [ 8080 ];
+  networking.firewall.allowedTCPPorts = [ constants.ports.application ];
   services.openssh.enable = lib.mkForce false;
   # Workers have no SSH and consume only config-drive cloud-init. Disable the
   # EC2 key/data units inherited by the generic OpenStack image profile.
@@ -153,7 +154,7 @@ in
     "d /var/lib/nomad 0700 root root -"
     "d ${configRoot} 0750 root root -"
     "d ${configRoot}/pki 0750 root root -"
-    "d /etc/docker/certs.d/${platform.addresses.storage}:5000 0755 root root -"
-    "L+ /etc/docker/certs.d/${platform.addresses.storage}:5000/ca.crt - - - - ${configRoot}/pki/internal-ca.pem"
+    "d /etc/docker/certs.d/${platform.addresses.storage}:${toString constants.ports.registry} 0755 root root -"
+    "L+ /etc/docker/certs.d/${platform.addresses.storage}:${toString constants.ports.registry}/ca.crt - - - - ${configRoot}/pki/internal-ca.pem"
   ];
 }

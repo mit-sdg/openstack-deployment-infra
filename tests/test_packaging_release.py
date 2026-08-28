@@ -15,14 +15,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from platform_cli.helper import production
+from openstack_platform.helper import production
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "deploy/platform-cli/install_release.py"
-SMOKE = ROOT / "deploy/platform-cli/release_smoke.py"
-CONFIG_INSTALLER = ROOT / "deploy/platform-cli/install_management_config.py"
-HELPER_DEPLOY = ROOT / "deploy/platform-cli/deploy_helper_release.sh"
-UNITS = ROOT / "deploy/platform-cli/systemd"
+INSTALLER = ROOT / "deploy/releases/install_release.py"
+SMOKE = ROOT / "deploy/releases/release_smoke.py"
+CONFIG_INSTALLER = ROOT / "deploy/releases/install_operator_config.py"
+HELPER_DEPLOY = ROOT / "deploy/releases/deploy_helper_release.sh"
+UNITS = ROOT / "deploy/releases/systemd"
 UV = shutil.which("uv")
 
 
@@ -181,10 +181,10 @@ class HelperRuntimePathTests(unittest.TestCase):
             Path("/srv/test-platform-state/controller/helper-diagnostics"),
         )
         for relative in (
-            "platform_cli/helper/production.py",
-            "platform_cli/helper/main.py",
-            "platform_cli/helper/app.py",
-            "deploy/platform-cli/install_release.py",
+            "openstack_platform/helper/production.py",
+            "openstack_platform/helper/main.py",
+            "openstack_platform/helper/application_actions.py",
+            "deploy/releases/install_release.py",
         ):
             source = (ROOT / relative).read_text(encoding="utf-8")
             self.assertNotIn("/srv/app-platform", source)
@@ -220,6 +220,7 @@ class HelperRuntimePathTests(unittest.TestCase):
         self.assertEqual(tail["state"], "running")
         self.assertEqual(following["text"], "second\nthird\n")
 
+    @unittest.skipUnless(sys.version_info[:2] == (3, 14), "release smoke tests require Python 3.14")
     def test_helper_release_smoke_uses_only_sanitized_inventory(self) -> None:
         environment = os.environ.copy()
         environment["PLATFORM_CONFIG"] = "/private/inventory/must-not-be-read.json"
@@ -343,7 +344,7 @@ class HelperPlatformConfigurationVerificationTests(unittest.TestCase):
         with (
             mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()),
             mock.patch.object(INSTALLER_MODULE.os, "access", return_value=False),
-            self.assertRaisesRegex(INSTALLER_MODULE.InstallFailure, "readable by agentops"),
+            self.assertRaisesRegex(INSTALLER_MODULE.InstallFailure, "readable by the operator account"),
         ):
             self._verify()
 
@@ -398,10 +399,10 @@ class ReleaseInstallerTests(unittest.TestCase):
             dependencies = []
             """,
         )
-        self._write(repository, "platform_cli/__init__.py", "")
+        self._write(repository, "openstack_platform/__init__.py", "")
         self._write(
             repository,
-            "platform_cli/restore.py",
+            "openstack_platform/restore.py",
             """
             import argparse
 
@@ -412,7 +413,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         )
         self._write(
             repository,
-            "platform_cli/cli.py",
+            "openstack_platform/operator.py",
             """
             import argparse
             import json
@@ -432,14 +433,14 @@ class ReleaseInstallerTests(unittest.TestCase):
                     policy = json.load(stream)
                 assert platform["projectId"] and policy["backupAgeRecipient"]
                 assert stat.S_IMODE(__import__("os").stat(args.policy).st_mode) == 0o600
-                print("management-fixture=ok")
+                print("operator-fixture=ok")
                 return 0
 
             if __name__ == "__main__":
                 raise SystemExit(main())
             """,
         )
-        self._write(repository, "platform_cli/helper/__init__.py", "")
+        self._write(repository, "openstack_platform/helper/__init__.py", "")
         actions = (
             ["backup.accept"]
             if partial_helper
@@ -452,7 +453,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         rendered_actions = ", ".join(f'"{action}": lambda _args: {{}}' for action in actions)
         self._write(
             repository,
-            "platform_cli/helper/main.py",
+            "openstack_platform/helper/main.py",
             f"""
             import json
             import sys
@@ -479,13 +480,13 @@ class ReleaseInstallerTests(unittest.TestCase):
         )
         self._write(
             repository,
-            "platform_cli/helper/actions-v1.txt",
+            "openstack_platform/helper/actions-v1.txt",
             "\n".join(actions) + "\n",
         )
-        smoke_target = repository / "deploy/platform-cli/release_smoke.py"
+        smoke_target = repository / "deploy/releases/release_smoke.py"
         smoke_target.parent.mkdir(parents=True)
         shutil.copy2(SMOKE, smoke_target)
-        installer_target = repository / "deploy/platform-cli/install_release.py"
+        installer_target = repository / "deploy/releases/install_release.py"
         shutil.copy2(INSTALLER, installer_target)
         fixture_store = self.root / "fixture-nix/store"
         installer_target.write_text(
@@ -503,15 +504,18 @@ class ReleaseInstallerTests(unittest.TestCase):
             encoding="utf-8",
         )
         shutil.copy2(
-            CONFIG_INSTALLER, repository / "deploy/platform-cli/install_management_config.py"
+            CONFIG_INSTALLER, repository / "deploy/releases/install_operator_config.py"
         )
-        helper_deploy = repository / "deploy/platform-cli/deploy_helper_release.sh"
+        contract_target = repository / "infra/lib/platform_contract.json"
+        contract_target.parent.mkdir(parents=True)
+        shutil.copy2(ROOT / "infra/lib/platform_contract.json", contract_target)
+        helper_deploy = repository / "deploy/releases/deploy_helper_release.sh"
         shutil.copy2(HELPER_DEPLOY, helper_deploy)
         helper_deploy.write_text(
             helper_deploy.read_text(encoding="utf-8")
             .replace(
-                "/srv/openstack-platform/.secrets/ssh/config",
-                str(self.root / "fixture-ssh-config"),
+                "ssh_config=$operator_root/.secrets/ssh/config",
+                f"ssh_config={self.root / 'fixture-ssh-config'}",
             )
             .replace("/run/current-system/sw/bin/python3.14", sys.executable)
             .replace("/nix/store", str(fixture_store))
@@ -524,7 +528,7 @@ class ReleaseInstallerTests(unittest.TestCase):
             encoding="utf-8",
         )
         helper_deploy.chmod(0o755)
-        shutil.copytree(UNITS, repository / "deploy/platform-cli/systemd")
+        shutil.copytree(UNITS, repository / "deploy/releases/systemd")
         config = repository / "config"
         config.mkdir()
         shutil.copy2(ROOT / "config/platform.example.json", config / "platform.example.json")
@@ -562,13 +566,16 @@ class ReleaseInstallerTests(unittest.TestCase):
         install_units: bool = False,
         prepare_config: bool = True,
     ) -> subprocess.CompletedProcess[str]:
-        release_root = self.root / mode / "platform-cli"
-        bin_root = self.root / mode / "bin"
-        state_root = self.root / mode / "state"
-        unit_root = self.root / mode / "units"
-        config_root = self.root / mode / "config"
-        helper_platform = self.root / mode / "etc/test-platform/platform.json"
-        if mode == "management" and prepare_config and not (config_root / "platform.json").exists():
+        installation_root = self.root / f"{mode}-install"
+        release_root = installation_root / (
+            "helper-releases" if mode == "helper" else "operator-releases"
+        )
+        bin_root = installation_root / "bin"
+        state_root = installation_root / "state"
+        unit_root = installation_root / "units"
+        config_root = installation_root / "config"
+        helper_platform = installation_root / "etc/test-platform/platform.json"
+        if mode == "operator" and prepare_config and not (config_root / "platform.json").exists():
             config_root.mkdir(parents=True, mode=0o700)
             state_root.mkdir(parents=True, mode=0o700)
             shutil.copy2(ROOT / "config/platform.example.json", config_root / "platform.json")
@@ -630,59 +637,59 @@ class ReleaseInstallerTests(unittest.TestCase):
             text=True,
         )
 
-    def test_management_install_is_commit_addressed_and_idempotent(self) -> None:
+    def test_operator_install_is_commit_addressed_and_idempotent(self) -> None:
         repository, commit = self._repository()
-        first = self._install(repository, commit, "management", install_units=True)
-        second = self._install(repository, commit, "management", install_units=True)
+        first = self._install(repository, commit, "operator", install_units=True)
+        second = self._install(repository, commit, "operator", install_units=True)
 
-        release_root = self.root / "management/platform-cli"
+        release_root = self.root / "operator-install/operator-releases"
         release = release_root / "releases" / commit
-        launcher = self.root / "management/bin/openstack-platform"
+        launcher = self.root / "operator-install/bin/openstack-platform"
         self.assertIn(f"commit={commit}", first.stdout)
         self.assertIn(f"commit={commit}", second.stdout)
         self.assertEqual((release / ".complete").read_text(), f"{commit}\n")
         self.assertEqual((release_root / "current").resolve(), release)
         self.assertEqual(launcher.resolve(), release / "bin/openstack-platform")
-        restore_launcher = self.root / "management/bin/openstack-platform-restore"
+        restore_launcher = self.root / "operator-install/bin/openstack-platform-restore"
         self.assertEqual(restore_launcher.resolve(), release / "bin/openstack-platform-restore")
         restore_text = restore_launcher.resolve().read_text()
-        self.assertIn("platform_cli.restore", restore_text)
-        self.assertIn(str(self.root / "management/state/platform.sqlite3"), restore_text)
+        self.assertIn("openstack_platform.restore", restore_text)
+        self.assertIn(str(self.root / "operator-install/state/platform.sqlite3"), restore_text)
         launcher_text = launcher.resolve().read_text()
-        self.assertIn(str(self.root / "management/config/platform.json"), launcher_text)
+        self.assertIn(str(self.root / "operator-install/config/platform.json"), launcher_text)
         self.assertIn(f"openstack_command={self.openstack_command}", launcher_text)
         self.assertIn('export PLATFORM_OPENSTACK_COMMAND="$openstack_command"', launcher_text)
         self.assertNotIn("$release/source/config/platform.json", launcher_text)
         self.assertFalse((release / "source/config/platform.json").exists())
-        config_installer = self.root / "management/bin/openstack-platform-install-config"
+        config_installer = self.root / "operator-install/bin/openstack-platform-install-config"
         self.assertEqual(
             config_installer.resolve(), release / "bin/openstack-platform-install-config"
         )
         launched = subprocess.run(
             [launcher, "status"], check=True, stdout=subprocess.PIPE, text=True
         ).stdout
-        self.assertEqual(launched, "management-fixture=ok\n")
-        policy = self.root / "management/state/policy.json"
+        self.assertEqual(launched, "operator-fixture=ok\n")
+        policy = self.root / "operator-install/state/policy.json"
         policy.chmod(0o640)
         rejected = subprocess.run([launcher, "status"], capture_output=True, text=True)
         self.assertEqual(rejected.returncode, 78)
         self.assertIn("ownership or mode is invalid", rejected.stderr)
         policy.chmod(0o600)
         self.assertFalse((release / ".candidate").exists())
-        self.assertEqual(stat.S_IMODE((self.root / "management/state").stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((self.root / "operator-install/state").stat().st_mode), 0o700)
         for name in ("openstack-platform-backup.service", "openstack-platform-backup.timer"):
-            installed = self.root / "management/units" / name
+            installed = self.root / "operator-install/units" / name
             self.assertEqual(installed.read_text(), (UNITS / name).read_text())
             self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o600)
 
-    def test_installed_management_launcher_rejects_fixed_path_overrides(self) -> None:
+    def test_installed_operator_launcher_rejects_fixed_path_overrides(self) -> None:
         repository, commit = self._repository()
-        self._install(repository, commit, "management")
-        launcher = self.root / "management/bin/openstack-platform"
+        self._install(repository, commit, "operator")
+        launcher = self.root / "operator-install/bin/openstack-platform"
         fixed = {
-            "--platform-config": self.root / "management/config/platform.json",
-            "--state-directory": self.root / "management/state",
-            "--policy": self.root / "management/state/policy.json",
+            "--platform-config": self.root / "operator-install/config/platform.json",
+            "--state-directory": self.root / "operator-install/state",
+            "--policy": self.root / "operator-install/state/policy.json",
         }
         for option in fixed:
             with self.subTest(option=option):
@@ -694,23 +701,23 @@ class ReleaseInstallerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 78)
                 self.assertIn("fixed-path override", result.stderr)
 
-    def test_management_install_requires_persistent_owned_private_configuration(self) -> None:
+    def test_operator_install_requires_persistent_owned_private_configuration(self) -> None:
         repository, commit = self._repository()
-        result = self._install(repository, commit, "management", check=False, prepare_config=False)
+        result = self._install(repository, commit, "operator", check=False, prepare_config=False)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("install current M1 management configuration", result.stderr)
-        self.assertFalse((self.root / "management/platform-cli/current").exists())
+        self.assertIn("install current operator configuration", result.stderr)
+        self.assertFalse((self.root / "operator-install/operator-releases/current").exists())
 
-    def test_management_install_requires_protected_explicit_openstack_wrapper(self) -> None:
+    def test_operator_install_requires_protected_explicit_openstack_wrapper(self) -> None:
         repository, commit = self._repository()
         self.openstack_command.chmod(0o755)
 
-        result = self._install(repository, commit, "management", check=False)
+        result = self._install(repository, commit, "operator", check=False)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("protected OpenStack command", result.stderr)
-        self.assertFalse((self.root / "management/platform-cli/current").exists())
+        self.assertFalse((self.root / "operator-install/operator-releases/current").exists())
 
     def test_openstack_default_honors_launcher_selected_command(self) -> None:
         environment = os.environ.copy()
@@ -720,7 +727,7 @@ class ReleaseInstallerTests(unittest.TestCase):
                 sys.executable,
                 "-c",
                 (
-                    "import inspect,sys; from platform_cli import openstack; "
+                    "import inspect,sys; from openstack_platform import openstack; "
                     "assert inspect.signature(openstack.verify_project).parameters"
                     "['executable'].default == sys.argv[1]"
                 ),
@@ -731,10 +738,10 @@ class ReleaseInstallerTests(unittest.TestCase):
             check=True,
         )
 
-    def test_management_install_rejects_configuration_symlinks_and_bad_modes(self) -> None:
+    def test_operator_install_rejects_configuration_symlinks_and_bad_modes(self) -> None:
         repository, commit = self._repository()
-        config_root = self.root / "management/config"
-        state_root = self.root / "management/state"
+        config_root = self.root / "operator-install/config"
+        state_root = self.root / "operator-install/state"
         config_root.mkdir(parents=True, mode=0o700)
         state_root.mkdir(parents=True)
         source = self.root / "platform-source.json"
@@ -743,7 +750,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         shutil.copy2(ROOT / "config/platform-policy.example.json", state_root / "policy.json")
         (state_root / "policy.json").chmod(0o644)
 
-        result = self._install(repository, commit, "management", check=False)
+        result = self._install(repository, commit, "operator", check=False)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("direct regular file", result.stderr)
@@ -752,9 +759,9 @@ class ReleaseInstallerTests(unittest.TestCase):
         repository, commit = self._repository()
         self._install(repository, commit, "helper")
 
-        release = self.root / "helper/platform-cli/releases" / commit
-        launcher = self.root / "helper/bin/openstack-platform-helper"
-        self.assertEqual((self.root / "helper/platform-cli/current").resolve(), release)
+        release = self.root / "helper-install/helper-releases/releases" / commit
+        launcher = self.root / "helper-install/bin/openstack-platform-helper"
+        self.assertEqual((self.root / "helper-install/helper-releases/current").resolve(), release)
         self.assertEqual(launcher.resolve(), release / "bin/openstack-platform-helper")
         result = subprocess.run([launcher], check=True)
         self.assertEqual(result.returncode, 0)
@@ -769,7 +776,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertNotIn("/srv/app-platform", launcher_text)
         self.assertNotIn("/etc/app-platform", launcher_text)
 
-        platform_config = self.root / "helper/etc/test-platform/platform.json"
+        platform_config = self.root / "helper-install/etc/test-platform/platform.json"
         mutable = self.root / "mutable-platform.json"
         shutil.copy2(platform_config, mutable)
         platform_config.unlink()
@@ -784,38 +791,35 @@ class ReleaseInstallerTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("omits the app family", result.stderr)
-        self.assertFalse((self.root / "helper/platform-cli/current").exists())
-        self.assertFalse((self.root / "helper/bin/openstack-platform-helper").exists())
-        releases = self.root / "helper/platform-cli/releases"
+        self.assertFalse((self.root / "helper-install/helper-releases/current").exists())
+        self.assertFalse((self.root / "helper-install/bin/openstack-platform-helper").exists())
+        releases = self.root / "helper-install/helper-releases/releases"
         self.assertEqual(list(releases.iterdir()), [])
 
     def test_commit_mismatch_does_not_create_a_release(self) -> None:
         repository, _commit = self._repository()
         wrong_commit = "0" * 40
-        result = self._install(repository, wrong_commit, "management", check=False)
+        result = self._install(repository, wrong_commit, "operator", check=False)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not the checkout HEAD", result.stderr)
-        releases = self.root / "management/platform-cli/releases"
+        releases = self.root / "operator-install/operator-releases/releases"
         self.assertEqual(list(releases.iterdir()), [])
 
     def test_tracked_changes_must_be_committed(self) -> None:
         repository, commit = self._repository()
-        with (repository / "platform_cli/cli.py").open("a", encoding="utf-8") as output:
+        with (repository / "openstack_platform/operator.py").open("a", encoding="utf-8") as output:
             output.write("# dirty\n")
-        result = self._install(repository, commit, "management", check=False)
+        result = self._install(repository, commit, "operator", check=False)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be committed", result.stderr)
 
-    def test_backup_unit_pins_persistent_configuration_paths(self) -> None:
+    def test_backup_unit_uses_installer_owned_path_placeholders(self) -> None:
         service = (UNITS / "openstack-platform-backup.service").read_text()
-        self.assertIn("--platform-config /srv/openstack-platform/config/platform.json", service)
-        self.assertIn("--policy /srv/openstack-platform/state/policy.json", service)
-        self.assertNotIn(
-            "config/platform.json",
-            service.replace("/srv/openstack-platform/config/platform.json", ""),
-        )
+        for placeholder in ("@BIN_ROOT@", "@CONFIG_ROOT@", "@STATE_ROOT@"):
+            self.assertIn(placeholder, service)
+        self.assertNotIn("/srv/openstack-platform", service)
 
     def test_helper_deployment_bootstraps_an_empty_configured_admin(self) -> None:
         repository, commit = self._repository()
@@ -825,7 +829,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         admin = self.root / "empty-admin"
         admin_root = admin / "configured-root"
         admin_state = admin / "configured-state"
-        platform = self.root / "management-platform.json"
+        platform = self.root / "operator-platform.json"
         document = json.loads((ROOT / "config/platform.example.json").read_text())
         document["paths"]["root"] = str(admin_root)
         document["paths"]["adminState"] = str(admin_state)
@@ -892,7 +896,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         environment["PLATFORM_CONFIG"] = str(platform)
         environment["PLATFORM_HELPER_CONFIG_ROOT"] = str(helper_config_root)
         result = subprocess.run(
-            [repository / "deploy/platform-cli/deploy_helper_release.sh", commit],
+            [repository / "deploy/releases/deploy_helper_release.sh", commit],
             cwd=repository,
             env=environment,
             check=False,
@@ -901,22 +905,22 @@ class ReleaseInstallerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
-        release = admin_state / "operator/platform-cli/releases" / commit
+        release = admin_state / "operator/helper-releases/releases" / commit
         launcher = admin_root / "bin/openstack-platform-helper"
         self.assertEqual(result.stdout.splitlines()[-1], f"helper-release={commit}:verified")
-        self.assertEqual((admin_state / "operator/platform-cli/current").resolve(), release)
+        self.assertEqual((admin_state / "operator/helper-releases/current").resolve(), release)
         self.assertEqual(launcher.resolve(), release / "bin/openstack-platform-helper")
         launcher_text = launcher.resolve().read_text(encoding="utf-8")
         self.assertIn(f"platform_config={live_platform}", launcher_text)
         self.assertEqual((release / ".complete").read_text(), f"{commit}\n")
-        self.assertEqual(list((admin_state / "operator/platform-cli/incoming").iterdir()), [])
+        self.assertEqual(list((admin_state / "operator/helper-releases/incoming").iterdir()), [])
 
     def test_helper_deployment_refuses_mismatched_live_config_before_upload(self) -> None:
         repository, commit = self._repository()
         ssh_config = self.root / "fixture-ssh-config"
         ssh_config.write_text("fixture\n", encoding="utf-8")
         ssh_config.chmod(0o600)
-        platform = self.root / "management-platform.json"
+        platform = self.root / "operator-platform.json"
         document = json.loads((ROOT / "config/platform.example.json").read_text())
         document["namespace"] = "test-platform"
         document["paths"]["root"] = str(self.root / "admin-root")
@@ -965,7 +969,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         environment["PLATFORM_CONFIG"] = str(platform)
         environment["PLATFORM_HELPER_CONFIG_ROOT"] = str(helper_config_root)
         result = subprocess.run(
-            [repository / "deploy/platform-cli/deploy_helper_release.sh", commit],
+            [repository / "deploy/releases/deploy_helper_release.sh", commit],
             cwd=repository,
             env=environment,
             check=False,
@@ -974,14 +978,15 @@ class ReleaseInstallerTests(unittest.TestCase):
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("does not match management project, namespace, and paths", result.stderr)
+        self.assertIn("does not match operator project, namespace, and paths", result.stderr)
         self.assertFalse(upload_marker.exists())
         self.assertFalse((self.root / "admin-state").exists())
 
     def test_helper_deployment_uses_pinned_ssh_and_configured_admin_paths(self) -> None:
         script = HELPER_DEPLOY.read_text()
-        self.assertIn("readonly ssh_config=/srv/openstack-platform/.secrets/ssh/config", script)
-        self.assertNotIn("SSH_CONFIG", script)
+        self.assertIn('ssh_config=$operator_root/.secrets/ssh/config', script)
+        self.assertIn('platform_contract.json', script)
+        self.assertNotIn("PLATFORM_SSH_CONFIG", script)
         self.assertIn('paths["root"]', script)
         self.assertIn('paths["adminState"]', script)
         self.assertIn("/run/current-system/sw/bin/python3.14", script)
@@ -989,7 +994,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertNotIn("/srv/" + "test-platform", script)
 
 
-class ManagementConfigInstallerTests(unittest.TestCase):
+class OperatorConfigInstallerTests(unittest.TestCase):
     def setUp(self) -> None:
         if os.geteuid() == 0:
             self.skipTest("configuration installer deliberately refuses root")
@@ -1058,8 +1063,8 @@ class ManagementConfigInstallerTests(unittest.TestCase):
         self.policy.write_text(json.dumps(policy))
         second = self._run()
 
-        self.assertEqual(first.stdout, "management-config=installed\n")
-        self.assertEqual(second.stdout, "management-config=installed\n")
+        self.assertEqual(first.stdout, "operator-config=installed\n")
+        self.assertEqual(second.stdout, "operator-config=installed\n")
         self.assertNotIn("Updated Platform", second.stdout + second.stderr)
         self.assertNotEqual(before, installed_platform.stat().st_ino)
         self.assertNotEqual(policy_before, installed_policy.stat().st_ino)
@@ -1073,10 +1078,10 @@ class ManagementConfigInstallerTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700)
 
-    def test_install_creates_only_clean_m1_configuration_paths(self) -> None:
+    def test_install_creates_only_clean_operator_configuration_paths(self) -> None:
         result = self._run()
 
-        self.assertEqual(result.stdout, "management-config=installed\n")
+        self.assertEqual(result.stdout, "operator-config=installed\n")
         self.assertTrue((self.destination / "platform.json").is_file())
         self.assertTrue((self.state / "policy.json").is_file())
         self.assertFalse((self.destination / "projects").exists())

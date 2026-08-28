@@ -1,4 +1,5 @@
 {
+  constants,
   lib,
   pkgs,
   platform,
@@ -6,6 +7,7 @@
 }:
 let
   namespace = platform.namespace;
+  ports = constants.ports;
   data = platform.paths.data;
   infra = ../../infra;
   systemdEscapePath =
@@ -30,13 +32,13 @@ let
 in
 {
   networking.hostName = platform.hosts.storage;
-  networking.firewall.allowedTCPPorts = [
-    22
-    3903
-    5000
-    5432
-    9000
-    27017
+  networking.firewall.allowedTCPPorts = with constants.ports; [
+    ssh
+    garageRpc
+    registry
+    postgres
+    garageS3
+    mongodb
   ];
 
   # The pinned PostgreSQL and MongoDB containers both persist data as UID/GID
@@ -75,7 +77,7 @@ in
         "/etc/${namespace}/pg_hba.conf:/run/${namespace}-pg_hba.conf:ro"
         "/etc/${namespace}/postgres-init:/docker-entrypoint-initdb.d:ro"
       ];
-      ports = [ "5432:5432" ];
+      ports = [ "${toString ports.postgres}:${toString ports.postgres}" ];
       cmd = [
         "postgres"
         "-c"
@@ -106,7 +108,7 @@ in
         "${data}/mongodb:/data/db"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
       ];
-      ports = [ "27017:27017" ];
+      ports = [ "${toString ports.mongodb}:${toString ports.mongodb}" ];
       cmd = [
         "mongod"
         "--bind_ip_all"
@@ -127,7 +129,7 @@ in
       ];
       ports = [
         "127.0.0.1:19000:3900"
-        "127.0.0.1:13903:3903"
+        "127.0.0.1:${toString ports.garageAdminProxy}:${toString ports.garageRpc}"
       ];
       cmd = [
         "/garage"
@@ -143,7 +145,7 @@ in
         "/etc/${namespace}/registry.htpasswd:/auth/htpasswd:ro"
         "/etc/${namespace}/pki:/pki:ro"
       ];
-      ports = [ "5000:5000" ];
+      ports = [ "${toString ports.registry}:${toString ports.registry}" ];
     };
   };
 
@@ -300,7 +302,7 @@ in
         listen = [
           {
             addr = "0.0.0.0";
-            port = 9000;
+            port = ports.garageS3;
             ssl = true;
           }
         ];
@@ -325,17 +327,17 @@ in
         listen = [
           {
             addr = "0.0.0.0";
-            port = 3903;
+            port = ports.garageRpc;
             ssl = true;
           }
         ];
         sslCertificate = "/etc/${namespace}/pki/storage.pem";
         sslCertificateKey = "/etc/${namespace}/pki/storage-key.pem";
         locations."/" = {
-          proxyPass = "http://127.0.0.1:13903";
+          proxyPass = "http://127.0.0.1:${toString ports.garageAdminProxy}";
           extraConfig = ''
             proxy_http_version 1.1;
-            proxy_set_header Host ${platform.internalNames.storage}:3903;
+            proxy_set_header Host ${platform.internalNames.storage}:${toString ports.garageRpc};
             proxy_set_header X-Forwarded-Proto https;
             client_max_body_size 1m;
           '';

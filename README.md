@@ -1,7 +1,5 @@
 # A small application platform for OpenStack
 
-[![CI](https://github.com/mit-sdg/openstack-deployment-infra/actions/workflows/ci.yml/badge.svg)](https://github.com/mit-sdg/openstack-deployment-infra/actions/workflows/ci.yml)
-
 This repository builds and operates the OpenStack infrastructure for hosting
 small HTTP applications. It provides NixOS role images, greenfield setup,
 persistent data services, encrypted backups, a constrained helper, an
@@ -36,7 +34,7 @@ A deployment provides:
 - PostgreSQL, MongoDB, S3-compatible storage, and a private OCI registry;
 - provider-scoped host lifecycle and exact-image selection;
 - public DNS/HTTPS integration through Cloudflare Tunnel or another provider;
-- encrypted management-state and managed-data backups with restore checks; and
+- encrypted controller-state and managed-data backups with restore checks; and
 - a local Unix-socket controller contract for future product integration.
 
 Participants receive no SSH keys, OpenStack or scheduler credentials, registry
@@ -52,7 +50,7 @@ configuration, leaving unrelated resources in the OpenStack project alone.
 
 To create the infrastructure in your own OpenStack project:
 
-1. [Prepare the management host](docs/GETTING_STARTED.md).
+1. [Prepare the operator host](docs/GETTING_STARTED.md).
 2. [Run automated setup](docs/SETUP.md) from a protected environment file.
 3. [Verify the fresh platform](docs/TUTORIAL.md).
 4. Use [Operations](docs/OPERATIONS.md) for backup, restore, upgrades, recovery,
@@ -71,7 +69,7 @@ reference, but an institutional service can be used when it satisfies the
 ## Operator and controller boundaries
 
 `openstack-platform` is now an operator-only command. It supports setup,
-platform status, management-state backup/offline restore, image selection and
+platform status, controller-state backup/offline restore, image selection and
 pruning, and persistent-host lifecycle. It does not expose application,
 environment, deployment, or managed-storage commands. See the
 [operator CLI and local controller reference](docs/CONTROL_PLANE_CONTRACT.md).
@@ -84,6 +82,26 @@ transport boundary. The admin NixOS role starts it under a dedicated trusted
 account and grants only the reserved `management-web` account access to its
 socket. Future UI and authentication behavior belongs in
 [`docs/MANAGEMENT_APP_SPEC.md`](docs/MANAGEMENT_APP_SPEC.md).
+
+## Code organization
+
+The Python distribution is `openstack_platform`, not a CLI-named package:
+
+- `openstack_platform/operator.py` contains only the operator command adapter;
+- `openstack_platform/controller/` owns product state, lifecycle services, and
+  the local API, with application value objects and Nomad rendering separated
+  from deployment orchestration;
+- `openstack_platform/helper/` is the constrained action boundary; and
+- `openstack_platform/contracts.py` provides typed access to the shared
+  implementation contract; and
+- the remaining top-level modules provide shared configuration, provider,
+  installation, and runtime support.
+
+Cross-component roles, ports, accounts, protocol names, and required inventory
+paths are defined once in `infra/lib/platform_contract.json`. Python packages,
+standalone infrastructure scripts, and Nix load that same contract. Nix
+inventory validation lives in `nix/lib/inventory.nix`; role modules consume the
+validated inventory rather than redefining deployment identity.
 
 ## Architecture
 
@@ -112,6 +130,7 @@ isolation, and failure boundaries.
 - [Public ingress](docs/PUBLIC_INGRESS.md)
 - [Operator CLI and local controller API](docs/CONTROL_PLANE_CONTRACT.md)
 - [Management application specification](docs/MANAGEMENT_APP_SPEC.md)
+- [Platform hardening plan](docs/HARDENING_PLAN.md)
 - [Documentation index](docs/README.md)
 
 ## License

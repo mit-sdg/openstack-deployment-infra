@@ -1,4 +1,5 @@
 {
+  constants,
   lib,
   pkgs,
   platform,
@@ -34,7 +35,7 @@ let
     };
     entryPoints = {
       web = {
-        address = ":80";
+        address = ":${toString constants.ports.http}";
         forwardedHeaders.trustedIPs = [
           "127.0.0.1/32"
           "::1/128"
@@ -46,14 +47,14 @@ let
         };
       };
       websecure = {
-        address = ":443";
+        address = ":${toString constants.ports.https}";
         transport.respondingTimeouts = {
           readTimeout = "30s";
           writeTimeout = "0s";
           idleTimeout = "90s";
         };
       };
-      health.address = "127.0.0.1:8082";
+      health.address = "127.0.0.1:${toString constants.ports.traefikHealth}";
     };
     ping.entryPoint = "health";
     api.dashboard = false;
@@ -69,7 +70,7 @@ let
         throttleDuration = "1s";
         constraints = "Tag(`${namespace}.platform=true`)";
         endpoint = {
-          address = "https://${platform.addresses.admin}:4646";
+          address = "https://${platform.addresses.admin}:${toString constants.ports.nomadHttp}";
           region = platform.region;
           tls = {
             ca = "${configRoot}/pki/internal-ca.pem";
@@ -117,7 +118,7 @@ let
       // staticIngressRouters;
       services = {
         platform-portal.loadBalancer.servers = [
-          { url = "http://${platform.addresses.admin}:8080"; }
+          { url = "http://${platform.addresses.admin}:${toString constants.ports.managementWeb}"; }
         ];
       }
       // staticIngressServices;
@@ -131,10 +132,10 @@ let
 in
 {
   networking.hostName = platform.hosts.ingress;
-  networking.firewall.allowedTCPPorts = [
-    22
-    80
-    443
+  networking.firewall.allowedTCPPorts = with constants.ports; [
+    ssh
+    http
+    https
   ];
 
   environment.systemPackages = [ packages.traefik ];
@@ -237,15 +238,15 @@ in
       set +a
       for attempt in {1..24}; do
         if systemctl is-active --quiet traefik.service && \
-          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8082/ping >/dev/null && \
+          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${toString constants.ports.traefikHealth}/ping >/dev/null && \
           curl --fail --silent --show-error --max-time 5 \
             --cacert ${configRoot}/pki/internal-ca.pem \
             --cert /etc/${namespace}/pki/nomad-ingress.pem \
             --key /etc/${namespace}/pki/nomad-ingress-key.pem \
             --header "X-Nomad-Token: $TRAEFIK_PROVIDERS_NOMAD_ENDPOINT_TOKEN" \
-            "https://${platform.addresses.admin}:4646/v1/services" >/dev/null; then
+            "https://${platform.addresses.admin}:${toString constants.ports.nomadHttp}/v1/services" >/dev/null; then
           sleep 2
-          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8082/ping >/dev/null
+          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${toString constants.ports.traefikHealth}/ping >/dev/null
           echo "${namespace} NixOS ingress services ready"
           exit 0
         fi

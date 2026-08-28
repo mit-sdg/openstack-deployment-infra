@@ -11,7 +11,7 @@ UI readers should use the
 [management application specification](MANAGEMENT_APP_SPEC.md), which is an
 implementation target rather than a description of a running product.
 
-A deployment starts with an empty management SQLite database. Tooling creates accepted
+A deployment starts with an empty controller SQLite database. Tooling creates accepted
 state instead of importing provider records. Operator actions change only
 resources named by the private infrastructure inventory.
 
@@ -57,8 +57,9 @@ resources named by the private infrastructure inventory.
 - [Self-hosted management implementation plan](IMPLEMENTATION_PLAN.md) —
   completed controller/retirement work and remaining hosting, UI, auth, cutover,
   and recovery phases.
-- [Implementation baseline](IMPLEMENTATION_BASELINE.md) — historical Phase 0
-  extraction inventory; not a current product contract.
+- [Platform hardening plan](HARDENING_PLAN.md) — remaining verification,
+  typed-configuration, supply-chain, isolation, durability, fuzzing, and
+  network-boundary work with required exit evidence.
 
 ## Verify acceptance
 

@@ -316,12 +316,15 @@ trap cleanup EXIT
 python3 - "$TEMPLATE" "$PKI_DIR" "$PLATFORM_INTERNAL_CA_FILE" \
   "$STORAGE_SECRETS_FILE" "$server_name" "$worker_ip" "$application_id" \
   "$application_slug" "$PLATFORM_STORAGE_IP" "$PLATFORM_ADMIN_IP" \
-  "$PLATFORM_DATACENTER" "$PLATFORM_NAMESPACE" "$tmp" <<'PY'
+  "$PLATFORM_DATACENTER" "$PLATFORM_NAMESPACE" \
+  "$PLATFORM_NOMAD_HTTP_PORT" "$PLATFORM_NOMAD_RPC_PORT" \
+  "$PLATFORM_NOMAD_SERF_PORT" "$PLATFORM_REGISTRY_PORT" "$tmp" <<'PY'
 from base64 import b64encode
 from pathlib import Path
 import json,re,sys
 (template,pki_dir,ca_file,secrets_path,worker_name,worker_ip,application_id,slug,
- storage_ip,admin_ip,datacenter,namespace,output)=sys.argv[1:]
+ storage_ip,admin_ip,datacenter,namespace,nomad_http_port,nomad_rpc_port,
+ nomad_serf_port,registry_port,output)=sys.argv[1:]
 secrets={}
 for line in Path(secrets_path).read_text().splitlines():
     if line and not line.startswith("#"):
@@ -331,7 +334,7 @@ if not password: raise SystemExit("registry runtime password is missing")
 pki=Path(pki_dir)
 def b64(data: bytes)->str: return b64encode(data).decode()
 auth=b64(f"runtime:{password}".encode())
-registry=f"{storage_ip}:5000"
+registry=f"{storage_ip}:{registry_port}"
 docker_auth=json.dumps({"auths":{registry:{"auth":auth}}},separators=(",",":")).encode()
 text=Path(template).read_text()
 replacements={
@@ -347,6 +350,9 @@ replacements={
  "__STORAGE_IP__":storage_ip,
  "__DATACENTER__":datacenter,
  "__PLATFORM_NAMESPACE__":namespace,
+ "__NOMAD_HTTP_PORT__":nomad_http_port,
+ "__NOMAD_RPC_PORT__":nomad_rpc_port,
+ "__NOMAD_SERF_PORT__":nomad_serf_port,
 }
 found=set(re.findall(r"__[A-Z0-9_]+__",text))
 if found != replacements.keys():

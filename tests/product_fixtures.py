@@ -6,8 +6,8 @@ import hashlib
 import sqlite3
 import uuid
 
-from platform_cli import db
-from platform_cli.deployment_config import parse_configuration
+from openstack_platform.controller import database as db
+from openstack_platform.controller.deployment_config import parse_configuration
 
 
 def accept_deployment(

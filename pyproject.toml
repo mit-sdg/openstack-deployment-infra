@@ -3,9 +3,9 @@ requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "openstack-platform-cli"
+name = "openstack-application-platform"
 version = "0.1.0"
-description = "Staff control surface for an OpenStack application platform"
+description = "Operator, controller, and helper services for an OpenStack application platform"
 requires-python = ">=3.14,<3.15"
 dependencies = [
   "bcrypt==5.0.0",
@@ -15,10 +15,10 @@ dependencies = [
 ]
 
 [project.scripts]
-openstack-platform = "platform_cli.cli:main"
-openstack-platform-helper = "platform_cli.helper.main:main"
-openstack-platform-controller = "platform_cli.controller_main:main"
-openstack-platform-restore = "platform_cli.restore:main"
+openstack-platform = "openstack_platform.operator:main"
+openstack-platform-helper = "openstack_platform.helper.main:main"
+openstack-platform-controller = "openstack_platform.controller.main:main"
+openstack-platform-restore = "openstack_platform.restore:main"
 
 [dependency-groups]
 dev = [
@@ -28,25 +28,28 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["platform_cli"]
+packages = ["openstack_platform"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"infra/lib/platform_contract.json" = "openstack_platform/platform_contract.json"
 
 [tool.mypy]
 python_version = "3.14"
 strict = true
 explicit_package_bases = true
-files = ["platform_cli", "deploy", "infra"]
+files = ["openstack_platform", "deploy", "infra"]
 mypy_path = ["infra"]
-exclude = ["deploy/platform-cli/tests/fixtures"]
+exclude = ["deploy/releases/tests/fixtures"]
 
 # Frozen foundation signatures deliberately accept generic SSL contexts and
 # streams. Keep the rest of the package strict while those concrete runtime
 # checks remain covered by tests.
 [[tool.mypy.overrides]]
-module = "platform_cli.runtime"
+module = "openstack_platform.runtime"
 disable_error_code = ["arg-type", "union-attr"]
 
 [[tool.mypy.overrides]]
-module = "platform_cli.remote"
+module = "openstack_platform.remote"
 disable_error_code = ["misc"]
 
 # Boto does not publish complete type information. Maintained infrastructure

@@ -8,9 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from platform_cli import host_user_data
-from platform_cli.config import load_platform
-from platform_cli.validation import ValidationError
+from openstack_platform import host_user_data
+from openstack_platform.config import load_platform
+from openstack_platform.validation import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN_VOLUME = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -74,7 +74,7 @@ class HostUserDataTests(unittest.TestCase):
             tunnel.chmod(0o600)
         return host_user_data.HostUserDataInputs(
             template=ROOT / "infra" / "cloud-init-nixos" / f"{role}.yaml",
-            agentops_public_key=self.public_key,
+            operator_public_key=self.public_key,
             secret_file=self.secret_file(f"{role}.env", secrets),
             pki_directory=self.pki,
             cloudflare_tunnel_token_file=tunnel,
@@ -181,8 +181,8 @@ class HostUserDataTests(unittest.TestCase):
                 str(ROOT / "config" / "platform.example.json"),
                 "--template",
                 str(inputs.template),
-                "--agentops-public-key",
-                str(inputs.agentops_public_key),
+                "--operator-public-key",
+                str(inputs.operator_public_key),
                 "--secret-file",
                 str(inputs.secret_file),
                 "--pki-directory",
@@ -212,7 +212,7 @@ class HostUserDataTests(unittest.TestCase):
         changed.write_text(inputs.template.read_text() + "\n# __ADMIN_HOST__\n")
         changed_inputs = host_user_data.HostUserDataInputs(
             template=changed,
-            agentops_public_key=inputs.agentops_public_key,
+            operator_public_key=inputs.operator_public_key,
             secret_file=inputs.secret_file,
             pki_directory=inputs.pki_directory,
         )
@@ -275,7 +275,7 @@ class HostUserDataTests(unittest.TestCase):
             },
         )
         environment = {
-            "AGENTOPS_PUBLIC_KEY": str(self.public_key),
+            "OPERATOR_PUBLIC_KEY": str(self.public_key),
             "NOMAD_TOKENS_FILE": str(secret),
             "PKI_DIR": str(self.pki),
             "ENABLE_CLOUDFLARED": "false",

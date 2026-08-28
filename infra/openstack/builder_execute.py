@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fixed, rootless BuildKit command installed only on disposable builders.
 
-The management controller sends a verified tar archive on stdin and invokes
+The application controller sends a verified tar archive on stdin and invokes
 this program through a console-pinned SSH connection. No remote shell text,
 Dockerfile command, credential, or host path is accepted as an argument.
 """
@@ -158,12 +158,18 @@ def build(identifier: str, image_name: str, deadline_at: str) -> int:
     if executable is None:
         raise RuntimeError("buildctl is unavailable")
     reference = f"{image_name}:build-{identifier.replace('-', '')}"
+    home = os.environ.get("HOME")
+    runtime_directory = os.environ.get("XDG_RUNTIME_DIR")
+    if not home or not Path(home).is_absolute():
+        raise RuntimeError("builder HOME is unavailable")
+    if not runtime_directory or not Path(runtime_directory).is_absolute():
+        raise RuntimeError("builder runtime directory is unavailable")
     environment = {
-        "HOME": "/home/agentops",
+        "HOME": home,
         "LANG": "C.UTF-8",
         "PATH": os.environ.get("PATH", "/run/current-system/sw/bin:/usr/bin:/bin"),
-        "SSL_CERT_FILE": "/run/user/1000/buildkit/ca-bundle.crt",
-        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "SSL_CERT_FILE": str(Path(runtime_directory) / "buildkit/ca-bundle.crt"),
+        "XDG_RUNTIME_DIR": runtime_directory,
     }
     try:
         build_timeout = deadline_remaining(deadline_at)
@@ -218,7 +224,7 @@ def main() -> int:
             return receive(sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[1])
         if len(sys.argv) == 5 and sys.argv[2] == "build":
             return build(sys.argv[3], sys.argv[4], sys.argv[1])
-        raise ValueError("usage: app-platform-builder-execute receive|build ...")
+        raise ValueError(f"usage: {Path(sys.argv[0]).name} receive|build ...")
     except (ValueError, OSError, tarfile.TarError, json.JSONDecodeError, RuntimeError) as error:
         print(f"builder execution failed: {error}", file=sys.stderr)
         return 1

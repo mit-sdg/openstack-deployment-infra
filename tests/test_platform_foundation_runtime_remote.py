@@ -11,14 +11,14 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import remote as runtime_remote
-from platform_cli import runtime
-from platform_cli.helper.main import (
+from openstack_platform import remote as runtime_remote
+from openstack_platform import runtime
+from openstack_platform.helper.main import (
     HelperActionError,
     accept_staged_backup,
     serve_once,
 )
-from platform_cli.remote import (
+from openstack_platform.remote import (
     DependencyUnavailable,
     ProtocolError,
     call_helper,
@@ -30,7 +30,7 @@ from platform_cli.remote import (
     parse_response,
     pinned_admin_scp,
 )
-from platform_cli.runtime import (
+from openstack_platform.runtime import (
     CommandFailure,
     CommandTimedOut,
     LockBusy,
@@ -39,7 +39,7 @@ from platform_cli.runtime import (
     run,
     write_private_stack_diagnostic,
 )
-from platform_cli.validation import ValidationError
+from openstack_platform.validation import ValidationError
 
 
 class RuntimeTests(unittest.TestCase):
@@ -357,7 +357,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertTrue(diagnostic.is_file())
             self.assertEqual(diagnostic.stat().st_mode & 0o777, 0o600)
             private_payload = diagnostic.read_text()
-            self.assertIn("platform_cli/helper/main.py:", private_payload)
+            self.assertIn("openstack_platform/helper/main.py:", private_payload)
             self.assertNotIn("sentinel-secret", private_payload)
             self.assertNotIn("RuntimeError", private_payload)
         response = parse_response(output.getvalue(), expected_request_id=request_id)
@@ -544,7 +544,7 @@ class ProviderCommandTests(unittest.TestCase):
     def test_the_command_follows_the_configured_root_and_namespace(self) -> None:
         # These were fixed strings naming one deployment, so any deployment with
         # a different namespace or root could not build or touch a worker.
-        from platform_cli import app as application
+        from openstack_platform.controller import application_runtime as application
 
         self.assertEqual(
             application.provider_command(self._platform("/srv/61040", "61040"), "builder"),
@@ -556,7 +556,7 @@ class ProviderCommandTests(unittest.TestCase):
         )
 
     def test_a_relative_root_is_refused(self) -> None:
-        from platform_cli import app as application
+        from openstack_platform.controller import application_runtime as application
 
         with self.assertRaises(ValidationError):
             application.provider_command(self._platform("srv/61040", "61040"), "builder")

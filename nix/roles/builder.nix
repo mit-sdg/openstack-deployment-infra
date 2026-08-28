@@ -1,4 +1,5 @@
 {
+  constants,
   lib,
   pkgs,
   platform,
@@ -7,13 +8,14 @@
 let
   packages = import ../pkgs { inherit pkgs platform; };
   namespace = platform.namespace;
+  operatorAccount = constants.accounts.operator;
   builderRoot = "/srv/${namespace}-build";
   caPath = "/usr/local/share/ca-certificates/${namespace}-internal-ca.crt";
   builderExecuteSource = builtins.readFile ../../infra/openstack/builder_execute.py;
   builderRootPlaceholder = "__PLATFORM_BUILD_ROOT__";
   builderExecute = pkgs.writeTextFile {
-    name = "app-platform-builder-execute";
-    destination = "/bin/app-platform-builder-execute";
+    name = constants.executables.builder;
+    destination = "/bin/${constants.executables.builder}";
     executable = true;
     # The fixed builder program takes no host path as an argument, so the
     # deployment build root is bound here. Fail the image build rather than
@@ -32,9 +34,9 @@ let
   '';
 in
 {
-  networking.firewall.allowedTCPPorts = [ 22 ];
+  networking.firewall.allowedTCPPorts = [ constants.ports.ssh ];
 
-  users.users.agentops = {
+  users.users.${operatorAccount.name} = {
     subUidRanges = [
       {
         startUid = 100000;
@@ -133,8 +135,8 @@ in
   };
 
   systemd.tmpfiles.rules = [
-    "d ${builderRoot} 0750 agentops agentops -"
-    "d /home/agentops/.docker 0700 agentops agentops -"
-    "d /home/agentops/.config 0750 agentops agentops -"
+    "d ${builderRoot} 0750 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d /home/${operatorAccount.name}/.docker 0700 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d /home/${operatorAccount.name}/.config 0750 ${operatorAccount.name} ${operatorAccount.name} -"
   ];
 }

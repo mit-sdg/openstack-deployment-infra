@@ -15,12 +15,14 @@ from botocore.config import Config
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.platform_config import load  # noqa: E402
+from lib.platform_contract import CONTRACT  # noqa: E402
 
 CONFIG = load()
 HOST = CONFIG["addresses"]["storage"]
 ROOT = Path(CONFIG["paths"]["root"])
 SECRETS_FILE = Path(os.environ.get("GARAGE_BACKUP_SECRETS", ROOT / "secrets/garage-backup.env"))
 CA_FILE = os.environ.get("GARAGE_CA_FILE", str(ROOT / "secrets/nomad-cli/internal-ca.pem"))
+GARAGE_S3_PORT = CONTRACT["ports"]["garageS3"]
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -46,7 +48,7 @@ def main() -> int:
     creds = read_env(SECRETS_FILE)
     s3 = boto3.client(
         "s3",
-        endpoint_url=f"https://{HOST}:9000",
+        endpoint_url=f"https://{HOST}:{GARAGE_S3_PORT}",
         region_name="garage",
         aws_access_key_id=creds["GARAGE_BACKUP_ACCESS_KEY"],
         aws_secret_access_key=creds["GARAGE_BACKUP_SECRET_KEY"],
@@ -80,7 +82,7 @@ def main() -> int:
                 )
     manifest = {
         "format_version": 1,
-        "endpoint": f"https://{HOST}:9000",
+        "endpoint": f"https://{HOST}:{GARAGE_S3_PORT}",
         "buckets": buckets,
         "objects": objects,
     }

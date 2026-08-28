@@ -21,7 +21,7 @@ The target lets a signed-in user manage a small web application without cloud,
 SSH, Nomad, registry, or storage-administrator credentials. The controller runs
 on the persistent `admin` host; the management application will run there under
 the reserved unprivileged account. Enabled projects will serve at
-`https://<slug>.mit-sdg.dev`.
+`https://<slug>.<configured-domain>`.
 
 ## Decisions
 
@@ -36,7 +36,7 @@ the reserved unprivileged account. Enabled projects will serve at
 | Project lifecycle | New projects start disabled. Projects can be enabled, disabled, deployed, or deleted. Deploying a disabled project reserves quota/capacity and a successful deployment enables it. Disable frees compute but preserves the accepted deployment, environment, storage, and history. Enable does not rebuild. Delete cascades through all attached storage and runtime resources. |
 | Environment | Values are write-only and live only in Nomad Variables. Databases and output contain names, ownership, revisions, and timestamps, never values. |
 | Storage | PostgreSQL, MongoDB, and S3 resources belong to one project. Machine names are immutable; UI display labels are mutable. Project deletion removes all attached storage. |
-| Domains | `domain = mit-sdg.dev` produces `https://<slug>.mit-sdg.dev`; ingress must cover the base and wildcard hostnames. |
+| Domains | The inventory's `domain` produces `https://<slug>.<domain>`; ingress must cover the configured base and wildcard hostnames. |
 | Authentication | A future controlled external application provides one-time login codes and Ed25519-signed JWTs. Full OIDC is not required. Neither that authentication application nor the sync-engine management application is implemented. |
 | Authorization | The authentication application supplies stable subject and global `user`/`admin` role. The management database owns project authorization and per-user quotas. |
 | Hosting | Management web listens on `admin:8080` behind ingress. The controller uses a restricted Unix socket and is not publicly reachable. |
@@ -423,7 +423,7 @@ line/byte limits, and explicit truncation evidence.
 
 Administrator reads cover platform status, hosts, selected images,
 applications, deployments, storage, and incomplete/recovery-required
-operations. Build on the allowlisted models in `platform_cli/status.py`; do not
+operations. Build on the allowlisted models in `openstack_platform/controller/status.py`; do not
 return raw OpenStack/Nomad documents. Provider IDs may be displayed when useful
 for admin diagnosis but cannot become arbitrary mutation input.
 
@@ -452,7 +452,7 @@ The future management application must never invoke or parse CLI output.
 ## State placement, backup, and admin recovery
 
 Controller releases, SQLite, locks, diagnostics, and build logs move from the
-external management host to a private controller directory on the persistent
+external operator host to a private controller directory on the persistent
 admin-state volume. The admin NixOS role must add:
 
 - hardened controller and separate management-web service accounts;
@@ -485,7 +485,7 @@ provenance before mutation. It must not use delete-first or manual volume
 detachment. This procedure must be proven before retiring routine management
 from the external host.
 
-## Database and cutover migration
+## Database and state cutover
 
 Append-only controller migrations add deployment attempts/snapshots, active
 pointers, lifecycle state, idempotency, environment revisions, immutable
@@ -493,10 +493,9 @@ storage IDs/labels, candidate/active worker identity, and slug tombstones. Keep
 deployment-bound identity, private-file checks, unknown-schema rejection,
 foreign keys, integrity checks, and the technical operation journal.
 
-Existing accepted deployments become read-only legacy accepted attempts using
-only commit, image, job, health, recipe, and log evidence already present.
-Unknown UI configuration is marked legacy/unknown, never guessed. A legacy
-project needs explicit desired UI configuration before its next deployment.
+The controller database is deployment-bound and does not adopt product records
+from an older CLI or repository-manifest workflow. Applications are declared
+through the typed controller API after cutover.
 
 Move state through an offline cutover:
 
@@ -524,7 +523,7 @@ state cutover, and the full no-shell user-lifecycle exit condition remain.
 | --- | --- | --- |
 | 0. Baseline | Freeze this target; inventory affected CLI/helper/state/recovery paths; add a test demonstrating current failed-candidate risk. | Current tests pass and the new preservation test fails for the expected current behavior. |
 | 1. Service extraction | Move app/deploy/env/storage/read orchestration out of `argparse` and table rendering into typed services; keep temporary CLI parity. | CLI behavior passes through one service implementation with existing locks, deadlines, checkpoints, and safe errors. |
-| 2. History and UI config | Add schema, immutable attempts/snapshots, idempotency, strict UI config, source validation without `platform.yaml`, recipe generation, and legacy migration. | UI-style service deployment works; all attempts are queryable; malformed input mutates nothing. |
+| 2. History and UI config | Add the deployment-bound schema, immutable attempts/snapshots, idempotency, strict UI config, source validation without `platform.yaml`, and recipe generation. | UI-style service deployment works; all attempts are queryable; malformed input mutates nothing. |
 | 3. Safe candidates | Add candidate worker, canary/explicit candidate job, exact route identity, promotion, predecessor cleanup, registry references, and phase recovery. | Build/worker/scheduler/health/route failures leave the previous deployment serving; restart at every phase converges. |
 | 4. Lifecycle and data | Add enable/disable, environment revisions/batches, storage IDs/labels/removal guard, cascade delete, and slug tombstones. | Disable/enable preserves state correctly; env rollback and interrupted resource deletion are proven. |
 | 5. Controller API | Package versioned Unix-socket API, errors, idempotency, pagination, logs, app/deployment/env/storage/operation endpoints, and admin reads. | Contract/security tests pass; lost responses do not duplicate resources; secrets never enter logs. |
@@ -547,7 +546,7 @@ rehearsal or user rollout.
 The updated acceptance suite must cover:
 
 - strict config/source/storage/env validation and unknown-field rejection;
-- append-only schema and legacy migration;
+- append-only schema, deployment identity, and unknown-schema rejection;
 - idempotency, lost responses, concurrency, lock scopes, deadlines, and every
   durable recovery phase;
 - active deployment availability during build and every candidate failure;
@@ -593,7 +592,7 @@ The goal is complete when:
 - UI-owned typed configuration replaces every supported `platform.yaml` path;
 - every attempt and bounded build log remains queryable;
 - failed candidates leave the prior deployment serving;
-- enabled apps serve at `https://<slug>.mit-sdg.dev`;
+- enabled apps serve at `https://<slug>.<configured-domain>`;
 - environment and storage credential values never enter databases or output;
 - disable frees compute, enable avoids rebuild, and delete resumably removes all
   attached storage/runtime resources while tombstoning the slug;

@@ -4,15 +4,15 @@ For ordinary greenfield creation, use the automated [setup command](SETUP.md).
 Use this expanded procedure to audit or recover an individual setup checkpoint,
 or to operate a deployment after setup. When followed manually, it provisions a
 new OpenStack project from end to end. It assumes a checkout at the reviewed
-commit, an empty management state directory, and no records to migrate. Commands run in three places:
+commit, an empty operator state directory, and no records to migrate. Commands run in three places:
 
-- **Management host / repository root** is the unprivileged owner of `/srv/openstack-platform`.
+- **Operator host / repository root** is the unprivileged owner of `/srv/openstack-platform`.
   It holds the checkout, private inventory, policy, OpenStack wrapper, and
-  management CLI.
+  operator CLI.
 - **Admin host** is the unprivileged `agentops` account reached only through
   the generated `platform-admin` SSH alias. It holds the Nomad/helper state,
   configured backup volume, and the packaged infrastructure scripts.
-- **Storage and ingress bootstrap** runs from the management host and sends a
+- **Storage and ingress bootstrap** runs from the operator host and sends a
   temporary config-drive payload to OpenStack. It does not copy a checkout to a
   guest.
 
@@ -28,7 +28,7 @@ The following inputs cannot be supplied by this repository:
 | --- | --- | --- |
 | OpenStack authentication (`OS_AUTH_URL`, account/credential, domain, and the configured project) | foundation, image publication, and host lifecycle | Keep in a mode-`0600` environment file and a protected wrapper. Verify only the token project ID and project name; never print the credential. |
 | Cloudflare Tunnel token, when `ENABLE_CLOUDFLARED=true` | ingress config-drive payload | Keep in a direct mode-`0600` one-token file. Verify the public hostname and HTTPS health route, never the token. An external ingress provider may be used with `false`. |
-| Backup age identity | decrypting an offline management SQLite backup | Keep the `AGE-SECRET-KEY-...` file outside Git and outside SQLite, in an offline/escrowed operator record. Verify file ownership and mode only. |
+| Backup age identity | decrypting an offline controller SQLite backup | Keep the `AGE-SECRET-KEY-...` file outside Git and outside SQLite, in an offline/escrowed operator record. Verify file ownership and mode only. |
 | Admin managed-data age identity | encrypting and verifying PostgreSQL, MongoDB, and Garage backups | Keep `/paths.root/persistent/secrets/backup-age-key.txt` on admin and escrow a protected copy before relying on the backups. Verify its mode without reading it. |
 
 Replace `<PUBLIC_EXAMPLE>` with a real, non-secret configuration value.
@@ -36,7 +36,7 @@ Generate or obtain `<SECRET>` values privately; never commit, print, or paste
 them into a ticket. The JSON examples are sanitized templates, not deployment
 inputs.
 
-## 1. Prepare the management host and private inputs
+## 1. Prepare the operator host and private inputs
 
 Run the repository checks from a clean checkout. The locked project test
 environment is Python 3.14 (`uv.lock` requires `==3.14.*`) with uv 0.12.2:
@@ -94,7 +94,7 @@ chmod 0600 "$PRIVATE_BOOTSTRAP"/*_ed25519
 chmod 0644 "$PRIVATE_BOOTSTRAP"/*_ed25519.pub
 ```
 
-Use the first key as both `ADMIN_PUBLIC_KEY` and `AGENTOPS_PUBLIC_KEY`. The
+Use the first key as both `ADMIN_PUBLIC_KEY` and `OPERATOR_PUBLIC_KEY`. The
 admin host's disposable-builder SSH client uses the second key. Both halves are
 transferred to admin later: the public half to
 `$PLATFORM_ROOT/secrets/builder_operator_ed25519.pub`, which is injected into
@@ -111,12 +111,12 @@ AGE_STORE="$(nix build --no-link --print-out-paths .#age)"
 export BACKUP_AGE_IDENTITY="$PRIVATE_BOOTSTRAP/backup-age-identity.txt"
 "$AGE_STORE/bin/age-keygen" -o "$BACKUP_AGE_IDENTITY" >/dev/null
 chmod 0600 "$BACKUP_AGE_IDENTITY"
-export M1_AGE_RECIPIENT="$(awk '$1 == "#" && $2 == "public" && $3 == "key:" { print $4; exit }' "$BACKUP_AGE_IDENTITY")"
-case "$M1_AGE_RECIPIENT" in age1*) ;; *) exit 1 ;; esac
+export CONTROLLER_BACKUP_AGE_RECIPIENT="$(awk '$1 == "#" && $2 == "public" && $3 == "key:" { print $4; exit }' "$BACKUP_AGE_IDENTITY")"
+case "$CONTROLLER_BACKUP_AGE_RECIPIENT" in age1*) ;; *) exit 1 ;; esac
 ```
 
 The final `case` checks readability; it does not display a secret. Put
-`M1_AGE_RECIPIENT` in the private policy's `backupAgeRecipient`, then verify
+`CONTROLLER_BACKUP_AGE_RECIPIENT` in the private policy's `backupAgeRecipient`, then verify
 that the identity file remains outside Git. Do not copy the identity into
 `config/`, `/srv/openstack-platform/state`, or the admin helper.
 
@@ -185,7 +185,7 @@ use `export ENABLE_CLOUDFLARED=false` and satisfy the complete contract in
 ## 2. Scope and reconcile the OpenStack foundation
 
 OpenStack credentials are required here but are not supplied by the
-repository. On the management host, provision a protected environment file
+repository. On the operator host, provision a protected environment file
 and a direct wrapper. The following is a **shape-only example**: replace every
 `<PUBLIC_EXAMPLE>` or `<SECRET>` before use, and never commit either file:
 
@@ -241,7 +241,7 @@ verify_openstack_project "$OSC"
 ```
 
 The wrapper is the only provider command later used by the pinned bridge. Its
-mode must be `0500` or `0700`, it must be owned by the management user, and it
+mode must be `0500` or `0700`, it must be owned by the operator user, and it
 must not print credentials. The bridge also accepts an executable symlink only
 when it resolves into a root-owned, non-writable `/nix/store` file; a mutable
 symlink is refused.
@@ -287,12 +287,12 @@ rename, repurpose, detach, or delete it.
 
 ## 3. Boot admin, establish the pinned bridge, and bootstrap ACLs
 
-Set the apply inputs on the management host. The environment variables name
+Set the apply inputs on the operator host. The environment variables name
 files; they do not contain secret values:
 
 ```bash
 export ADMIN_PUBLIC_KEY="$PRIVATE_BOOTSTRAP/id_ed25519.pub"
-export AGENTOPS_PUBLIC_KEY="$PRIVATE_BOOTSTRAP/id_ed25519.pub"
+export OPERATOR_PUBLIC_KEY="$PRIVATE_BOOTSTRAP/id_ed25519.pub"
 export KEYPAIR_NAME="$(uv run python infra/lib/platform_config.py get prefix)-admin"
 ```
 
@@ -303,7 +303,7 @@ the exact serial-console readiness marker:
 
 ```bash
 ADMIN_PUBLIC_KEY="$ADMIN_PUBLIC_KEY" \
-AGENTOPS_PUBLIC_KEY="$AGENTOPS_PUBLIC_KEY" \
+OPERATOR_PUBLIC_KEY="$OPERATOR_PUBLIC_KEY" \
 ADMIN_SECRETS_FILE="$ADMIN_SECRETS_FILE" \
 PKI_DIR="$PKI_DIR" \
 OSC="$OSC" \
@@ -316,9 +316,9 @@ required volumes are attached to the configured server and have
 `delete_on_termination=false`; do not print the secret-bearing config-drive
 payload.
 
-### Bootstrap the management runtime before the bridge
+### Bootstrap the operator runtime before the bridge
 
-Still on the management host, from the repository root and as the unprivileged
+Still on the operator host, from the repository root and as the unprivileged
 `/srv/openstack-platform` owner, bootstrap the pinned Python, uv, age, protected OpenStack
 wrapper, and local bridge prerequisites before generating the bridge. This
 local preflight does not contact OpenStack or SSH; the bridge command below
@@ -326,13 +326,13 @@ performs the authenticated project, console-fingerprint, and key-scan checks.
 
 ```bash
 PLATFORM_AGE_COMMAND="$AGE_STORE/bin/age" \
-deploy/platform-cli/bootstrap_management_runtime.sh
+deploy/releases/bootstrap_operator_runtime.sh
 test "$(/srv/openstack-platform/runtime/python3.14 --version)" = 'Python 3.14.7'
 test "$(/srv/openstack-platform/bin/uv --version)" = 'uv 0.12.2 (x86_64-unknown-linux-gnu)'
 /srv/openstack-platform/bin/age --version >/dev/null
 ```
 
-The script creates or validates the management SSH identity and runs the
+The script creates or validates the operator SSH identity and runs the
 bridge's `--preflight` checks for protected local executables and directories.
 Do not continue with bridge generation if this command fails.
 
@@ -344,9 +344,9 @@ A mismatch or ambiguous provider projection stops without applying user data or
 reusing the host. Existing-host success means only that the verified host
 passed the readiness wait; these scripts do not reapply cloud-init user data.
 
-### Generate and smoke-test the management bridge
+### Generate and smoke-test the operator bridge
 
-Run this on the **management host**, as the `/srv/openstack-platform` owner, after admin has
+Run this on the **operator host**, as the `/srv/openstack-platform` owner, after admin has
 booted. The bridge generator obtains the authenticated project identity from
 the protected wrapper, compares the admin console's ED25519 fingerprint with a
 fresh `ssh-keyscan`, and atomically writes the known-hosts and SSH config
@@ -361,14 +361,14 @@ export KNOWN_HOSTS="$SSH_DIR/known_hosts"
 install -d -m 0700 "$SSH_DIR"
 install -m 0600 "$PRIVATE_BOOTSTRAP/id_ed25519" "$SSH_IDENTITY"
 bridge_output="$(
-  /srv/openstack-platform/runtime/python3.14 deploy/platform-cli/setup_management_bridge.py \
+  /srv/openstack-platform/runtime/python3.14 deploy/releases/setup_operator_bridge.py \
     --platform-config "$PLATFORM_CONFIG" \
     --ssh-identity "$SSH_IDENTITY" \
     --ssh-config "$SSH_CONFIG" \
     --known-hosts "$KNOWN_HOSTS" \
     --provider-command "$OPENSTACK_WRAPPER"
 )"
-test "$bridge_output" = management-bridge=verified
+test "$bridge_output" = operator-bridge=verified
 ```
 
 The resulting `config` defines the `platform-admin` alias with user `agentops`
@@ -426,7 +426,7 @@ NOMAD_CONTROLLER_TOKEN=<SECRET>
 NOMAD_TRAEFIK_TOKEN=<SECRET>
 ```
 
-It must be a direct mode-`0600` file. Transfer it to the management host only
+It must be a direct mode-`0600` file. Transfer it to the operator host only
 for the ingress config-drive, using the pinned bridge; do not print it:
 
 ```bash
@@ -446,11 +446,11 @@ Nomad operations.
 ## 4. Boot storage and ingress with exact transfers
 
 The storage file and PKI files are sent in temporary config-drive payloads and
-must be direct readable files. Boot storage from the management host:
+must be direct readable files. Boot storage from the operator host:
 
 ```bash
 STORAGE_SECRETS_FILE="$STORAGE_SECRETS_FILE" \
-AGENTOPS_PUBLIC_KEY="$AGENTOPS_PUBLIC_KEY" \
+OPERATOR_PUBLIC_KEY="$OPERATOR_PUBLIC_KEY" \
 PKI_DIR="$PKI_DIR" \
 OSC="$OSC" \
 infra/openstack/apply_storage.sh
@@ -518,7 +518,7 @@ provider:
 ENABLE_CLOUDFLARED=true \
 CLOUDFLARE_TUNNEL_TOKEN_FILE="$CLOUDFLARE_TUNNEL_TOKEN_FILE" \
 NOMAD_TOKENS_FILE="$NOMAD_TOKENS_FILE" \
-AGENTOPS_PUBLIC_KEY="$AGENTOPS_PUBLIC_KEY" \
+OPERATOR_PUBLIC_KEY="$OPERATOR_PUBLIC_KEY" \
 PKI_DIR="$PKI_DIR" \
 OSC="$OSC" \
 infra/openstack/apply_ingress.sh
@@ -541,10 +541,10 @@ repository does not create account-specific DNS records.
 
 ## 5. Install releases and verify empty state
 
-### Verify the exact management runtime and age executable
+### Verify the exact operator runtime and age executable
 
-The management runtime was bootstrapped before the bridge in step 3. On the
-management host, from the reviewed checkout and as the `/srv/openstack-platform` owner, verify
+The operator runtime was bootstrapped before the bridge in step 3. On the
+operator host, from the reviewed checkout and as the `/srv/openstack-platform` owner, verify
 the stable paths before installing releases:
 
 ```bash
@@ -561,15 +561,15 @@ packages age and age-keygen at `$PLATFORM_ROOT/bin/age` and
 links, not a checkout copy.
 
 Install the current inventory and policy atomically, then install the matching
-management release and user backup timer:
+operator release and user backup timer:
 
 ```bash
-/srv/openstack-platform/runtime/python3.14 deploy/platform-cli/install_management_config.py \
+/srv/openstack-platform/runtime/python3.14 deploy/releases/install_operator_config.py \
   --platform "$PLATFORM_CONFIG" \
   --policy "$PLATFORM_POLICY"
 commit="$(git rev-parse HEAD)"
-/srv/openstack-platform/runtime/python3.14 deploy/platform-cli/install_release.py \
-  --mode management \
+/srv/openstack-platform/runtime/python3.14 deploy/releases/install_release.py \
+  --mode operator \
   --source "$PWD" \
   --commit "$commit" \
   --python /srv/openstack-platform/runtime/python3.14 \
@@ -578,7 +578,7 @@ commit="$(git rev-parse HEAD)"
   --enable-backup-timer
 ```
 
-The release installer preflights the management state and provider inputs: it
+The release installer preflights the operator state and provider inputs: it
 requires a clean full-commit checkout, direct owner-only configuration files,
 a protected direct `/srv/openstack-platform/bin/platform-openstack`, frozen `uv.lock`, and a
 successful sanitized entrypoint smoke test before selecting a release. The
@@ -589,7 +589,7 @@ wrapper. Credentials never enter the release archive. Verify the selected
 release and timer:
 
 ```bash
-test "$(cat /srv/openstack-platform/platform-cli/current/.complete)" = "$commit"
+test "$(cat /srv/openstack-platform/operator-releases/current/.complete)" = "$commit"
 test -x "$(readlink -e /srv/openstack-platform/bin/openstack-platform)"
 test -x "$(readlink -e /srv/openstack-platform/bin/openstack-platform-restore)"
 /srv/openstack-platform/bin/openstack-platform --help >/dev/null
@@ -600,14 +600,14 @@ systemctl --user is-enabled openstack-platform-backup.timer
 ### Install and smoke-test the helper release
 
 From the same clean checkout, the helper deployment reads project identity and
-all four configured paths from the installed mode-`0600` management inventory.
+all four configured paths from the installed mode-`0600` operator inventory.
 It verifies the live admin inventory, transfers a commit-addressed archive and
 installer through the pinned alias, atomically selects a complete helper
 release, removes temporary remote files, and sends a malformed-envelope smoke
 request:
 
 ```bash
-helper_output="$(deploy/platform-cli/deploy_helper_release.sh "$commit")"
+helper_output="$(deploy/releases/deploy_helper_release.sh "$commit")"
 printf '%s\n' "$helper_output"
 test "$(tail -n1 <<<"$helper_output")" = "helper-release=$commit:verified"
 ```
@@ -667,23 +667,23 @@ backup verification are the supported completion boundary.
 
 ## 6. Back up, restore, and reconcile
 
-### Where management-database backups go
+### Where controller-database backups go
 
-Run this on the **management host** as the unprivileged `/srv/openstack-platform` owner:
+Run this on the **operator host** as the unprivileged `/srv/openstack-platform` owner:
 
 ```bash
-m1_backup_output="$(/srv/openstack-platform/bin/openstack-platform backup)"
-printf '%s\n' "$m1_backup_output"
-grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$' <<<"$m1_backup_output"
+controller_backup_output="$(/srv/openstack-platform/bin/openstack-platform backup)"
+printf '%s\n' "$controller_backup_output"
+grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$' <<<"$controller_backup_output"
 ```
 
-The CLI creates a SQLite online-backup copy under the private management state,
-encrypts it with `backupAgeRecipient` using the verified management age
+The CLI creates a SQLite online-backup copy under the private operator state,
+encrypts it with `backupAgeRecipient` using the verified operator age
 executable, and transfers it through the pinned alias to the configured
 admin-side path:
 
 ```text
-<paths.backups>/m1/.staging/platform-YYYYMMDDTHHMMSSZ.sqlite3.age
+<paths.backups>/controller/.staging/platform-YYYYMMDDTHHMMSSZ.sqlite3.age
 ```
 
 The helper verifies the age-v1 header and ciphertext SHA-256, then publishes an
@@ -695,9 +695,9 @@ preserves a malformed committed set for operator attention. Retention counts
 only complete sets. The accepted paths are:
 
 ```text
-<paths.backups>/m1/platform-YYYYMMDDTHHMMSSZ.sqlite3.age
-<paths.backups>/m1/platform-YYYYMMDDTHHMMSSZ.sqlite3.age.sha256
-<paths.backups>/m1/platform-YYYYMMDDTHHMMSSZ.sqlite3.age.manifest
+<paths.backups>/controller/platform-YYYYMMDDTHHMMSSZ.sqlite3.age
+<paths.backups>/controller/platform-YYYYMMDDTHHMMSSZ.sqlite3.age.sha256
+<paths.backups>/controller/platform-YYYYMMDDTHHMMSSZ.sqlite3.age.manifest
 ```
 
 `<paths.backups>` comes only from the installed inventory; it is not a fixed
@@ -707,7 +707,7 @@ this operation daily at 02:45 UTC with a 30-minute randomized delay. Verify the
 timer and accepted evidence with private file metadata; do not list or print
 credentials.
 
-These backups contain the management database only. They do not contain
+These backups contain the controller database only. They do not contain
 PostgreSQL, MongoDB, Garage objects, registry blobs, or an age identity. Registry blobs are rebuilt
 from source.
 
@@ -719,7 +719,7 @@ its configured root and supplies the immutable age, age-keygen, Podman, and
 service-check dependencies:
 
 ```bash
-# Run the following from the management host through the pinned alias.
+# Run the following from the operator host through the pinned alias.
 ssh -F "$SSH_CONFIG" platform-admin -- env \
   PLATFORM_CONFIG="/etc/$PLATFORM_NAMESPACE/platform.json" \
   python3 "$PLATFORM_ROOT/infra/backup/init_garage_backup_key.py"
@@ -783,7 +783,7 @@ The first command creates encrypted `postgres.age`, `mongodb.age`, and
 and `SHA256SUMS`. The admin role also has its own
 `<namespace>-platform-backup.timer` for this managed-data job (03:15 UTC with a
 30-minute randomized delay). The management
-`openstack-platform-backup.timer` covers only the management database. The
+`openstack-platform-backup.timer` covers only the controller database. The
 restore check decrypts each archive only into temporary storage. The second
 command starts temporary PostgreSQL and MongoDB containers, checks the Garage
 catalog/payload archive, and removes the temporary containers on success or
@@ -791,10 +791,10 @@ failure. It atomically writes mode-`0600` `RESTORE-MANIFEST` only when all
 checks pass and never overwrites live services. The expected final line is
 `latest platform restore=verified .../RESTORE-MANIFEST`.
 
-### Offline management-database restore
+### Offline controller-database restore
 
 The stable CLI has an offline restore operation. Copy an accepted ciphertext
-from admin to a private mode-`0600` file on the management host; do not use the
+from admin to a private mode-`0600` file on the operator host; do not use the
 staging file while an upload is in progress:
 
 ```bash
@@ -802,12 +802,12 @@ export BACKUP_NAME=platform-YYYYMMDDTHHMMSSZ.sqlite3.age
 export BACKUP_COPY="$PRIVATE_BOOTSTRAP/$BACKUP_NAME"
 export BACKUP_ROOT="$(uv run python infra/lib/platform_config.py get paths.backups)"
 scp -F "$SSH_CONFIG" -- \
-  "platform-admin:$BACKUP_ROOT/m1/$BACKUP_NAME" "$BACKUP_COPY"
+  "platform-admin:$BACKUP_ROOT/controller/$BACKUP_NAME" "$BACKUP_COPY"
 chmod 0600 "$BACKUP_COPY"
 test -f "$BACKUP_COPY" && test ! -L "$BACKUP_COPY"
 ```
 
-Stop the management timer and any management command before replacement. The
+Stop the operator timer and any operator command before replacement. The
 installed restore launcher fixes the managed destination at
 `/srv/openstack-platform/state/platform.sqlite3`; do not supply a destination
 or use a release-internal virtualenv path. Deliberately confirm replacement
@@ -876,7 +876,7 @@ install -d -m 0700 /private/path/offline-state
 ```
 
 The destination parent must be a direct current-user-owned mode-`0700`
-directory. Inspect the result with that separate CLI state directory; do not
+directory. Inspect the result with that separate operator state directory; do not
 point a running deployment at an unverified copy.
 
 ## 7. Upgrade safely
@@ -901,9 +901,9 @@ readiness failure it restores the prior host. An ambiguous provider result is
 `recovery-required`: inspect the recorded operation and rerun the same command.
 Never delete the old persistent server first, detach a volume by name, or create
 a replacement manually. Run a fresh managed-data restore check before
-replacing storage and a fresh management-database backup before replacing admin.
+replacing storage and a fresh controller-database backup before replacing admin.
 
-Upgrade management/helper releases with the installer from a clean full commit.
+Upgrade operator/helper releases with the installer from a clean full commit.
 It atomically selects only a complete release; retain the previous complete
 release for executable recovery. A release rollback does not restore SQLite or
 provider state, and a database restore is the separate offline procedure above.
@@ -970,7 +970,7 @@ payloads, and age identities out of tracked evidence.
   operation rows manually.
 - Public platform-health failure: test the exact DNS name, trusted certificate,
   preserved `Host`, provider origin, ingress route, and `/healthz` separately.
-- Management-database backup failure: inspect only safe file metadata and the fixed staging/
+- Controller-database backup failure: inspect only safe file metadata and the fixed staging/
   accepted paths; verify `/srv/openstack-platform/bin/age`, the policy recipient, bridge, and
   backup volume, then emit a new backup. Do not copy a live WAL file.
 - Managed restore failure: run the check again on admin, not management; keep

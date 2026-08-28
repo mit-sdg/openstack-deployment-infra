@@ -4,11 +4,11 @@ ssh_pwauth: false
 disable_root: true
 users:
   - default
-  - name: agentops
+  - name: __OPERATOR_USER__
     lock_passwd: true
     shell: /run/current-system/sw/bin/bash
     ssh_authorized_keys:
-      - __AGENTOPS_PUBLIC_KEY__
+      - __OPERATOR_PUBLIC_KEY__
 bootcmd:
   - |
     set -eu
@@ -46,7 +46,7 @@ write_files:
     encoding: b64
     content: __INTERNAL_CA_B64__
   - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-cli-ca.pem
-    owner: agentops:agentops
+    owner: __OPERATOR_USER__:__OPERATOR_USER__
     permissions: "0644"
     encoding: b64
     content: __INTERNAL_CA_B64__
@@ -61,12 +61,12 @@ write_files:
     encoding: b64
     content: __NOMAD_SERVER_KEY_B64__
   - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-cli.pem
-    owner: agentops:agentops
+    owner: __OPERATOR_USER__:__OPERATOR_USER__
     permissions: "0644"
     encoding: b64
     content: __NOMAD_CLI_CERT_B64__
   - path: /etc/__PLATFORM_NAMESPACE__/pki/nomad-cli-key.pem
-    owner: agentops:agentops
+    owner: __OPERATOR_USER__:__OPERATOR_USER__
     permissions: "0600"
     encoding: b64
     content: __NOMAD_CLI_KEY_B64__

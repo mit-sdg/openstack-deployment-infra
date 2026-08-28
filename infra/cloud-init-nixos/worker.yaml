@@ -34,13 +34,13 @@ write_files:
     content: |
       name = "__WORKER_NAME__"
       advertise {
-        http = "__WORKER_IP__:4646"
-        rpc  = "__WORKER_IP__:4647"
-        serf = "__WORKER_IP__:4648"
+        http = "__WORKER_IP__:__NOMAD_HTTP_PORT__"
+        rpc  = "__WORKER_IP__:__NOMAD_RPC_PORT__"
+        serf = "__WORKER_IP__:__NOMAD_SERF_PORT__"
       }
       client {
         enabled = true
-        servers = ["__ADMIN_IP__:4647"]
+        servers = ["__ADMIN_IP__:__NOMAD_RPC_PORT__"]
         node_class = "__PLATFORM_NAMESPACE__-app"
         network_interface = "ens3"
         cni_path = "/etc/cni/bin"

@@ -41,10 +41,10 @@ jobs:
       - name: Check Python formatting, lint, and types
         run: |
           uv lock --check
-          uv run ruff format --check platform_cli deploy/platform-cli infra tests
-          uv run ruff check platform_cli deploy/platform-cli infra tests
+          uv run ruff format --check openstack_platform deploy/releases infra tests
+          uv run ruff check openstack_platform deploy/releases infra tests
           uv run mypy
-          uv run vulture platform_cli deploy infra tests --min-confidence 80 --sort-by-size
+          uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
 
       - name: Install ShellCheck
         run: |
@@ -64,19 +64,20 @@ jobs:
           ET.parse("docs/architecture-overview.svg")
           print("valid SVG: docs/architecture-overview.svg")
           PY
+          uv run python infra/lib/platform_contract.py
           PLATFORM_CONFIG=config/platform.example.json \
             uv run python infra/lib/platform_config.py validate
 
       - name: Compile Python
-        run: uv run python -m compileall -q platform_cli deploy infra tests
+        run: uv run python -m compileall -q openstack_platform deploy infra tests
 
       - name: Smoke integrated entrypoints
         run: |
-          if [[ -f platform_cli/cli.py && -f platform_cli/helper/actions-v1.txt ]]; then
-            uv run python deploy/platform-cli/release_smoke.py \
+          if [[ -f openstack_platform/operator.py && -f openstack_platform/helper/actions-v1.txt ]]; then
+            uv run python deploy/releases/release_smoke.py \
               helper --source "$PWD"
             uv run openstack-platform --help >/dev/null
-          elif [[ -e platform_cli/cli.py || -e platform_cli/helper/actions-v1.txt ]]; then
+          elif [[ -e openstack_platform/operator.py || -e openstack_platform/helper/actions-v1.txt ]]; then
             echo "CLI composition and helper action manifest must land together" >&2
             exit 1
           else

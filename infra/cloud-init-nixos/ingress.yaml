@@ -4,11 +4,11 @@ ssh_pwauth: false
 disable_root: true
 users:
   - default
-  - name: agentops
+  - name: __OPERATOR_USER__
     lock_passwd: true
     shell: /run/current-system/sw/bin/bash
     ssh_authorized_keys:
-      - __AGENTOPS_PUBLIC_KEY__
+      - __OPERATOR_PUBLIC_KEY__
 write_files:
   - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem
     owner: root:root

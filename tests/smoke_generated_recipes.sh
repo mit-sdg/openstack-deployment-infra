@@ -43,8 +43,8 @@ uv run --no-sync python - <<'PY'
 import os
 from pathlib import Path
 
-from platform_cli.app import Manifest, generate_recipe
-from platform_cli.config import RuntimeImages
+from openstack_platform.controller.application_runtime import Manifest, generate_recipe
+from openstack_platform.config import RuntimeImages
 
 fixtures = Path("tests/fixtures/apps")
 output = Path(".generated-recipes")

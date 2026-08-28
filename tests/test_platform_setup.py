@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import cli, setup
+from openstack_platform import operator, setup
 
 
 class SetupEnvironmentTests(unittest.TestCase):
@@ -115,7 +115,7 @@ class SetupInventoryTests(unittest.TestCase):
             "PLATFORM_ORGANIZATION": "Demo Organization",
             "PLATFORM_DOMAIN": "apps.example.test",
             "PLATFORM_NETWORK": "public",
-            "PLATFORM_MANAGEMENT_CIDR": "192.0.2.10/32",
+            "PLATFORM_OPERATOR_CIDR": "192.0.2.10/32",
             "PLATFORM_ADMIN_ADDRESS": "192.0.2.11",
             "PLATFORM_INGRESS_ADDRESS": "192.0.2.12",
             "PLATFORM_STORAGE_ADDRESS": "192.0.2.13",
@@ -182,14 +182,14 @@ class SetupInventoryTests(unittest.TestCase):
 
 class SetupCliTests(unittest.TestCase):
     def test_setup_dispatch_does_not_load_an_existing_platform_configuration(self) -> None:
-        parser = cli.build_parser()
+        parser = operator.build_parser()
         args = parser.parse_args(["setup", "--env-file", "/private/setup.env"])
         output = io.StringIO()
         with (
-            mock.patch.object(cli, "_load_config") as load_config,
+            mock.patch.object(operator, "_load_config") as load_config,
             mock.patch.object(setup, "run_setup", return_value=None) as run_setup,
         ):
-            cli.dispatch(args, stdin=io.StringIO(), stdout=output)
+            operator.dispatch(args, stdin=io.StringIO(), stdout=output)
         load_config.assert_not_called()
         run_setup.assert_called_once()
         self.assertFalse(run_setup.call_args.kwargs["apply"])
@@ -197,8 +197,8 @@ class SetupCliTests(unittest.TestCase):
     def test_setup_error_uses_normal_cli_error_exit(self) -> None:
         with mock.patch.object(setup, "run_setup", side_effect=setup.SetupError("bounded")):
             with mock.patch("sys.stderr", new=io.StringIO()) as stderr:
-                result = cli.main(["setup", "--env-file", "/missing"])
-        self.assertEqual(result, cli.EXIT_ERROR)
+                result = operator.main(["setup", "--env-file", "/missing"])
+        self.assertEqual(result, operator.EXIT_ERROR)
         self.assertIn("error: bounded", stderr.getvalue())
 
 

@@ -1,6 +1,7 @@
 { pkgs, platform }:
 let
   lib = pkgs.lib;
+  constants = import ../lib/constants.nix;
   namespace = platform.namespace;
   root = platform.paths.root;
   state = platform.paths.adminState;
@@ -77,7 +78,7 @@ let
             (../roles + "/${role}.nix")
           ];
 
-          _module.args = { inherit platform role; };
+          _module.args = { inherit constants platform role; };
 
           virtualisation = {
             memorySize = if role == "storage" then 3072 else 2048;
@@ -137,21 +138,21 @@ let
                 serviceConfig.Type = "oneshot";
                 script = ''
                   install -d -m 0750 -o agentops -g agentops \
-                    ${state}/operator/platform-cli/current/bin
+                    ${state}/operator/helper-releases/current/bin
                   install -m 0600 -o agentops -g agentops \
                     ${../../config/platform-policy.example.json} \
                     ${state}/operator/policy.json
-                  cat > ${state}/operator/platform-cli/current/bin/openstack-platform-helper <<'EOF'
+                  cat > ${state}/operator/helper-releases/current/bin/openstack-platform-helper <<'EOF'
                   #!/bin/sh
                   printf '%s\n' '{"version":1,"requestId":"00000000-0000-0000-0000-000000000000","ok":false,"error":{"code":"INVALID_REQUEST","message":"helper request is invalid"}}'
                   EOF
                   chown agentops:agentops \
-                    ${state}/operator/platform-cli/current/bin/openstack-platform-helper
+                    ${state}/operator/helper-releases/current/bin/openstack-platform-helper
                   chmod 0550 \
-                    ${state}/operator/platform-cli/current/bin/openstack-platform-helper
-                  printf 'vm-test\n' > ${state}/operator/platform-cli/current/.complete
-                  chown agentops:agentops ${state}/operator/platform-cli/current/.complete
-                  chmod 0440 ${state}/operator/platform-cli/current/.complete
+                    ${state}/operator/helper-releases/current/bin/openstack-platform-helper
+                  printf 'vm-test\n' > ${state}/operator/helper-releases/current/.complete
+                  chown agentops:agentops ${state}/operator/helper-releases/current/.complete
+                  chmod 0440 ${state}/operator/helper-releases/current/.complete
                   for credential in \
                     openstack.env nomad-tokens.env storage-bootstrap.env \
                     builder_operator_ed25519 backup-age-key.txt; do
@@ -232,8 +233,8 @@ let
               machine.succeed("systemctl is-active --quiet nomad.service")
               machine.succeed("systemctl is-active --quiet ${namespace}-controller.service")
               machine.succeed("${pkgs.curl}/bin/curl --fail --silent --cacert /etc/${namespace}/pki/internal-ca.pem --cert /etc/${namespace}/pki/nomad-cli.pem --key /etc/${namespace}/pki/nomad-cli-key.pem https://127.0.0.1:4646/v1/status/leader >/dev/null")
-              machine.succeed("${packages.platformCliPython}/bin/python -c 'import sys, yaml; assert sys.version_info[:2] == (3, 14)'")
-              machine.succeed("${packages.platformController}/bin/openstack-platform-controller --help >/dev/null")
+              machine.succeed("${packages.platformPython}/bin/python -c 'import sys, yaml; assert sys.version_info[:2] == (3, 14)'")
+              machine.succeed("${packages.controllerPackage}/bin/openstack-platform-controller --help >/dev/null")
               machine.succeed("openstack-platform-install-release --help >/dev/null")
               machine.succeed("test $(stat -c %a /run/${namespace}-controller/controller.sock) = 660")
               machine.succeed("test $(stat -c %U /run/${namespace}-controller/controller.sock) = platform-controller")
@@ -247,7 +248,7 @@ let
               machine.succeed("id -nG management-web | grep -Fx 'management-web controller-api'")
               machine.succeed("test $(stat -c %U:%G:%a ${state}/controller) = platform-controller:platform-controller:700")
               machine.succeed("test $(stat -c %U:%G:%a ${state}/controller/state) = platform-controller:platform-controller:700")
-              machine.succeed("test $(stat -c %U:%G:%a ${state}/operator/platform-cli) = agentops:agentops:750")
+              machine.succeed("test $(stat -c %U:%G:%a ${state}/operator/helper-releases) = agentops:agentops:750")
               machine.succeed("test $(stat -c %U:%a ${state}/operator/policy.json) = agentops:600")
               machine.succeed("systemctl show ${namespace}-controller.service -p ProtectSystem --value | grep -Fx strict")
               machine.succeed("systemctl show ${namespace}-controller.service -p NoNewPrivileges --value | grep -Fx yes")
@@ -258,23 +259,23 @@ let
               # rule owns it, so it must reach the accepted release rather than
               # run the helper module without PLATFORM_CONFIG.
               machine.succeed(
-                  "install -d -m 0750 ${state}/operator/platform-cli/current/bin"
+                  "install -d -m 0750 ${state}/operator/helper-releases/current/bin"
               )
               machine.succeed(
                   "printf '#!/bin/sh\\necho delegated-to-release\\n' "
-                  "> ${state}/operator/platform-cli/current/bin/openstack-platform-helper"
+                  "> ${state}/operator/helper-releases/current/bin/openstack-platform-helper"
               )
               machine.succeed(
-                  "chmod 0550 ${state}/operator/platform-cli/current/bin/openstack-platform-helper"
+                  "chmod 0550 ${state}/operator/helper-releases/current/bin/openstack-platform-helper"
               )
-              machine.succeed("printf 'commit\\n' > ${state}/operator/platform-cli/current/.complete")
+              machine.succeed("printf 'commit\\n' > ${state}/operator/helper-releases/current/.complete")
               machine.succeed(
                   "${root}/bin/openstack-platform-helper </dev/null | grep -Fx delegated-to-release"
               )
-              machine.succeed("rm -rf ${state}/operator/platform-cli/current")
-              machine.succeed("test -d ${state}/operator/platform-cli/releases")
-              machine.succeed("test -d ${state}/operator/platform-cli/incoming")
-              machine.succeed("test -d ${backups}/m1/.staging")
+              machine.succeed("rm -rf ${state}/operator/helper-releases/current")
+              machine.succeed("test -d ${state}/operator/helper-releases/releases")
+              machine.succeed("test -d ${state}/operator/helper-releases/incoming")
+              machine.succeed("test -d ${backups}/${constants.directories.controllerBackup}/.staging")
               machine.fail("systemctl cat ${namespace}-managed-usage.service")
               machine.fail("systemctl cat ${namespace}-managed-usage.timer")
             ''
@@ -316,4 +317,4 @@ let
       '';
     };
 in
-lib.genAttrs [ "admin" "ingress" "storage" "worker" "builder" ] mkRoleTest
+lib.genAttrs constants.roles mkRoleTest

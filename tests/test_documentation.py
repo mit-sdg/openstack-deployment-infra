@@ -31,6 +31,49 @@ ROUTE_RE = re.compile(r'\("(GET|POST|PUT|PATCH|DELETE)", "(/v1/[^\"]+)", self\.'
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_repository_is_domain_generic_and_has_no_milestone_identifiers(self) -> None:
+        forbidden_domain = bytes.fromhex("6d69742d7364672e646576").decode("ascii")
+        retired_milestone = bytes.fromhex("6d31").decode("ascii")
+        milestone_pattern = re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(retired_milestone)}(?=[A-Za-z_]|[^0-9])",
+            re.IGNORECASE,
+        )
+        roots = (
+            ROOT / "openstack_platform",
+            ROOT / "deploy",
+            ROOT / "infra",
+            ROOT / "nix",
+            ROOT / "docs",
+            ROOT / "config",
+            ROOT / "tests",
+        )
+        paths = [ROOT / "README.md", ROOT / "flake.nix", ROOT / "pyproject.toml"]
+        paths.extend(path for directory in roots for path in directory.rglob("*") if path.is_file())
+        for path in paths:
+            if "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotIn(forbidden_domain, text)
+                self.assertIsNone(milestone_pattern.search(text))
+
+    def test_python_package_names_component_boundaries(self) -> None:
+        self.assertTrue((ROOT / "openstack_platform" / "operator.py").is_file())
+        controller = ROOT / "openstack_platform" / "controller"
+        self.assertTrue((controller / "api.py").is_file())
+        self.assertTrue((controller / "application_models.py").is_file())
+        self.assertTrue((controller / "application_runtime.py").is_file())
+        self.assertTrue((controller / "nomad_jobs.py").is_file())
+        self.assertTrue((controller / "database.py").is_file())
+        self.assertFalse((controller / "app.py").exists())
+        self.assertFalse((controller / "db.py").exists())
+        self.assertTrue((ROOT / "openstack_platform" / "helper" / "main.py").is_file())
+        retired_package = "platform" + "_cli"
+        self.assertFalse((ROOT / retired_package).exists())
+
     def test_relative_links_resolve(self) -> None:
         for document in DOCUMENTS:
             for target in LINK_RE.findall(document.read_text()):
@@ -79,7 +122,7 @@ class DocumentationTests(unittest.TestCase):
                 self.assertNotIn(retired_manifest, text)
 
     def test_documented_controller_routes_match_implementation(self) -> None:
-        implementation = (ROOT / "platform_cli" / "controller_api.py").read_text()
+        implementation = (ROOT / "openstack_platform" / "controller" / "api.py").read_text()
         contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
         routes = set(ROUTE_RE.findall(implementation))
         self.assertEqual(len(routes), 29)
@@ -109,8 +152,8 @@ class DocumentationTests(unittest.TestCase):
         checklist = (ROOT / "docs" / "ACCEPTANCE_CHECKLIST.md").read_text()
         svg = (ROOT / "docs" / "architecture-overview.svg").read_text()
 
-        self.assertIn("setup_management_bridge.py", operations)
-        self.assertIn("management-bridge=verified", operations)
+        self.assertIn("setup_operator_bridge.py", operations)
+        self.assertIn("operator-bridge=verified", operations)
         self.assertIn("EMIT_SCRIPT=", operations)
         self.assertIn("--age-identity", contract)
         self.assertIn("SOURCE_COMMIT", publishing)

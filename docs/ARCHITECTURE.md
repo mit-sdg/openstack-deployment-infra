@@ -113,7 +113,7 @@ backups. Managed-service credentials are scoped per application and
 synchronized through owner-specific Nomad Variable keys; values never enter
 controller SQLite.
 
-The current management SQLite database is backed up separately from PostgreSQL,
+The current controller SQLite database is backed up separately from PostgreSQL,
 MongoDB, and Garage. The future hosted controller database must retain this
 boundary after cutover. Each backup is encrypted to its configured age recipient and
 written below the configured backup root. A management backup counts as
@@ -155,7 +155,7 @@ measurement is installed.
   identity and readiness checks pass.
 - Product mutations are absent from the operator CLI. Do not recover old
   product operations by using an older binary.
-- Management/helper releases are selected atomically; a prior release is an
+- Operator/helper releases are selected atomically; a prior release is an
   executable recovery aid, not a database/provider rollback mechanism.
 
 Use [OPERATIONS.md](OPERATIONS.md) for supported operator actions and

@@ -5,8 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from platform_cli import cli, config, db, restore
-from platform_cli.validation import ValidationError
+from openstack_platform import config, operator, restore
+from openstack_platform.controller import database as db
+from openstack_platform.validation import ValidationError
 
 APP_ID = "11111111-1111-4111-8111-111111111111"
 OPERATION_ID = "22222222-2222-4222-8222-222222222222"
@@ -136,8 +137,8 @@ class OfflineRestoreTests(unittest.TestCase):
         stale = work / "platform-20260101T000000Z.sqlite3.age"
         stale.write_bytes(b"stale")
         stale.chmod(0o600)
-        first = cli._unlinked_backup_temp(work, suffix=".sqlite3.age")
-        second = cli._unlinked_backup_temp(work, suffix=".sqlite3.age")
+        first = operator._unlinked_backup_temp(work, suffix=".sqlite3.age")
+        second = operator._unlinked_backup_temp(work, suffix=".sqlite3.age")
         self.assertNotEqual(first, second)
         self.assertFalse(first.exists())
         self.assertFalse(second.exists())
@@ -150,17 +151,17 @@ class OfflineRestoreTests(unittest.TestCase):
             require_private_policy=False,
         )
         self.assertEqual(
-            cli._configured_backup_staging_path(loaded, "platform-20260101T000000Z.sqlite3.age"),
-            "/srv/app-platform-backups/m1/.staging/platform-20260101T000000Z.sqlite3.age",
+            operator._configured_backup_staging_path(loaded, "platform-20260101T000000Z.sqlite3.age"),
+            "/srv/app-platform-backups/controller/.staging/platform-20260101T000000Z.sqlite3.age",
         )
         with self.assertRaisesRegex(ValidationError, "backup name"):
-            cli._configured_backup_staging_path(loaded, "../backup.sqlite3.age")
+            operator._configured_backup_staging_path(loaded, "../backup.sqlite3.age")
 
     def test_cli_restore_is_offline_and_requires_confirmation(self) -> None:
         example = Path("config/platform.example.json")
         identity = db.deployment_identity(config.load_platform(example))
         self._write_backup(identity=identity)
-        args = cli.build_parser().parse_args(
+        args = operator.build_parser().parse_args(
             [
                 "--platform-config",
                 str(example),
@@ -174,7 +175,7 @@ class OfflineRestoreTests(unittest.TestCase):
         from io import StringIO
 
         output = StringIO()
-        cli.dispatch(args, stdout=output)
+        operator.dispatch(args, stdout=output)
         self.assertIn("restore=verified", output.getvalue())
 
     def test_latest_restore_verifier_compares_the_real_age_v1_header(self) -> None:
