@@ -148,12 +148,14 @@ class ControllerHostingStaticTests(unittest.TestCase):
         ):
             self.assertIn(setting, management)
         controller_activation = source[
-            source.index('systemd.paths."${namespace}-controller"') : source.index(
+            source.index('systemd.services."${namespace}-controller-activate"') : source.index(
                 "# The trusted broker owns authorization/session/project state"
             )
         ]
-        self.assertIn("PathChanged = [", controller_activation)
-        self.assertNotIn("PathExists = [", controller_activation)
+        self.assertIn('systemd.services."${namespace}-controller-activate"', controller_activation)
+        self.assertIn("RemainAfterExit = true;", controller_activation)
+        self.assertIn("PathExists = [", controller_activation)
+        self.assertIn('Unit = "${namespace}-controller-activate.service";', controller_activation)
         self.assertNotIn("controllerPrivilegedSocket", management)
         self.assertNotIn(
             'wantedBy = [ "multi-user.target" ];',

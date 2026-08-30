@@ -535,14 +535,23 @@ in
 
   # Installing the operator-owned helper release or policy after boot starts
   # the controller without granting the operator service-management rights.
+  systemd.services."${namespace}-controller-activate" = {
+    description = "Activate ${platform.displayName} controller after release installation";
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${pkgs.systemd}/bin/systemctl start --no-block ${namespace}-controller.service";
+    };
+  };
+
   systemd.paths."${namespace}-controller" = {
     wantedBy = [ "multi-user.target" ];
     pathConfig = {
-      PathChanged = [
+      PathExists = [
         operatorPolicy
         helperReleaseMarker
       ];
-      Unit = "${namespace}-controller.service";
+      Unit = "${namespace}-controller-activate.service";
     };
   };
 
