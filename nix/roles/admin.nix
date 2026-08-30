@@ -398,6 +398,7 @@ in
       Group = operatorAccount.name;
       SupplementaryGroups = [ controllerGroup ];
       UMask = "0027";
+      TimeoutStartSec = "2h";
       LimitCORE = 0;
       ExecStart = lib.concatStringsSep " " [
         "${packages.controllerPackage}/bin/openstack-platform-hosted-controller-backup"
@@ -765,6 +766,7 @@ in
       Type = "oneshot";
       User = operatorAccount.name;
       Group = operatorAccount.name;
+      TimeoutStartSec = "24h";
       Environment = [
         "AGE=${pkgs.age}/bin/age"
         "AGE_KEYGEN=${pkgs.age}/bin/age-keygen"

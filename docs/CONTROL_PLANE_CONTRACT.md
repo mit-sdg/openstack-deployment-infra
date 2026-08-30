@@ -59,7 +59,7 @@ The environment file must be a direct current-user-owned mode-`0600` file.
 Setup parses literal dotenv/OpenRC assignments without executing them. Missing
 non-secret choices may prompt; password input uses a hidden terminal prompt.
 The default workspace is `/srv/openstack-platform/setup`. Fresh volume defaults
-are 32 GiB for admin state, 500 GiB for managed data, and 200 GiB for backups.
+are 32 GiB for admin state, 500 GiB for managed data, and 600 GiB for backups. Setup rejects a backup volume smaller than managed data.
 
 Cloudflare account and DNS administration remain external. A direct mode-`0600`
 token file enables the reference tunnel during ingress bootstrap. Without one,

@@ -57,7 +57,7 @@
     "backup": {
       "name": "example-backups",
       "label": "example-bak",
-      "sizeGiB": 200,
+      "sizeGiB": 600,
       "type": "production"
     },
     "data": {

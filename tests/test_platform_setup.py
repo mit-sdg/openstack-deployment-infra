@@ -433,7 +433,7 @@ class SetupInventoryTests(unittest.TestCase):
             )
 
         self.assertEqual(document["volumes"]["data"]["sizeGiB"], 500)
-        self.assertEqual(document["volumes"]["backup"]["sizeGiB"], 200)
+        self.assertEqual(document["volumes"]["backup"]["sizeGiB"], 600)
         self.assertEqual(document["volumes"]["adminState"]["sizeGiB"], 32)
         labels = {volume["label"] for volume in document["volumes"].values()}
         self.assertEqual(len(labels), 3)
@@ -443,12 +443,30 @@ class SetupInventoryTests(unittest.TestCase):
         self.assertEqual(document["staticIngressRoutes"], {})
         self.assertEqual(document["publicIngress"], {"mode": "tunnel", "providerCidrs": []})
 
+    def test_backup_volume_cannot_be_smaller_than_managed_data(self) -> None:
+        self.values.update({"PLATFORM_DATA_GIB": "500", "PLATFORM_BACKUP_GIB": "499"})
+        with (
+            mock.patch.object(setup, "_network_default", return_value="ignored"),
+            mock.patch.object(setup, "_flavor_inventory", return_value=[]),
+            mock.patch.object(setup, "_volume_type_default", return_value="ignored"),
+            self.assertRaisesRegex(setup.SetupError, "backup volume"),
+        ):
+            setup._platform_document(
+                self.repository,
+                self.values,
+                setup.ProjectIdentity("00000000-0000-4000-8000-000000000001", "demo-project"),
+                "a" * 40,
+                Path("/nix/store/openstack"),
+                {},
+                lambda _prompt: self.fail("complete environment must not prompt"),
+            )
+
     def test_explicit_volume_sizes_override_fresh_defaults(self) -> None:
         self.values.update(
             {
                 "PLATFORM_ADMIN_STATE_GIB": "64",
                 "PLATFORM_DATA_GIB": "750",
-                "PLATFORM_BACKUP_GIB": "300",
+                "PLATFORM_BACKUP_GIB": "900",
             }
         )
         with (
@@ -467,7 +485,7 @@ class SetupInventoryTests(unittest.TestCase):
             )
         self.assertEqual(document["volumes"]["adminState"]["sizeGiB"], 64)
         self.assertEqual(document["volumes"]["data"]["sizeGiB"], 750)
-        self.assertEqual(document["volumes"]["backup"]["sizeGiB"], 300)
+        self.assertEqual(document["volumes"]["backup"]["sizeGiB"], 900)
 
 
 class SetupControllerVerificationTests(unittest.TestCase):

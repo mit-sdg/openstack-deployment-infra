@@ -50,8 +50,12 @@ python3 -m openstack_platform.release_manifest bundle-create \
 sha256sum /private/releases/"$commit"/release-evidence.tar
 ```
 
-Publish that immutable tar at an HTTPS URL. The protected publication
-environment supplies only its URL, SHA-256, and public Ed25519 trust root. CI
+Publish that immutable tar at an HTTPS URL. Configure protected environment
+variables `RELEASE_EVIDENCE_URL`, `RELEASE_EVIDENCE_SHA256`, and
+`RELEASE_TRUST_ROOT_PEM`; the trust root is public verification material, not a
+signing secret. No manifest, SBOM, provenance, or private signing key belongs in
+CI secrets. The protected publication environment therefore supplies only the
+URL, digest, and public Ed25519 trust root. CI
 refuses redirects, downloads at most 128 MiB, extracts only the eight exact
 bounded regular evidence files into an absent private directory, and verifies
 both signatures and the source commit before building or publishing an image.

@@ -265,7 +265,7 @@ Each volume entry has this structure:
 {
   "name": "example-data",
   "label": "example-data",
-  "sizeGiB": 200,
+  "sizeGiB": 600,
   "type": "production"
 }
 ```

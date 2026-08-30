@@ -158,7 +158,7 @@ class DocumentationTests(unittest.TestCase):
                 self.assertIsNone(stale_boundary.search(document.read_text()))
         self.assertIn("--env-file PATH", contract)
         self.assertIn('"sizeGiB": 500', example)
-        self.assertIn('"sizeGiB": 200', example)
+        self.assertIn('"sizeGiB": 600', example)
 
     def test_repaired_operator_path_is_traceable(self) -> None:
         operations = (ROOT / "docs" / "OPERATIONS.md").read_text()

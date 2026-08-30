@@ -14,7 +14,7 @@ Run setup from a clean, complete commit on an `x86_64-linux` operator host. The 
 - an `openstack` client for the read-only preflight (the apply path still uses the pinned Nix client);
 - `git`, `ssh`, `ssh-keygen`, `openssl`, `curl`, and a user systemd manager;
 - an unprivileged management account that owns an existing mode-`0700` `/srv/openstack-platform`; and
-- OpenStack quota for five private images, three persistent VMs, disposable builders and workers, three fixed ports, and 32 + 500 + 200 GiB of Cinder storage by default.
+- OpenStack quota for five private images, three persistent VMs, disposable builders and workers, three fixed ports, and 32 + 500 + 600 GiB of Cinder storage by default.
 
 Setup refuses root and `sudo`. Creating and assigning `/srv/openstack-platform` is a management-host administration task outside the OpenStack project; perform it before giving the environment file to the unprivileged operator.
 
@@ -56,7 +56,7 @@ PLATFORM_WORKER_FLAVOR='standard.2c4g'
 PLATFORM_BUILDER_FLAVOR='standard.4c8g'
 PLATFORM_ADMIN_STATE_GIB='32'
 PLATFORM_DATA_GIB='500'
-PLATFORM_BACKUP_GIB='200'
+PLATFORM_BACKUP_GIB='600'
 
 # Optional provider-neutral routes and internal names:
 PLATFORM_RECOVERY_DOMAINS='projects.apps.example.org,compute.apps.example.org'
@@ -87,7 +87,7 @@ Use `OS_AUTH_TYPE=v3applicationcredential` with `OS_APPLICATION_CREDENTIAL_ID` a
 | `PLATFORM_VOLUME_TYPE` | Uses `production`, or the only visible type; otherwise prompts. |
 | `PLATFORM_ADMIN_STATE_GIB` | `32`. |
 | `PLATFORM_DATA_GIB` | `500`. |
-| `PLATFORM_BACKUP_GIB` | `200`. |
+| `PLATFORM_BACKUP_GIB` | `600`; must be at least `PLATFORM_DATA_GIB` so one complete recovery set fits without assuming compression. |
 | `PLATFORM_DATACENTER` | Namespace. |
 | `PLATFORM_REGION` | `global`. |
 | `PLATFORM_RECOVERY_DOMAINS` | `projects.<domain>,compute.<domain>`; exactly two hostnames are required. |
@@ -173,7 +173,7 @@ The command performs these ordered checkpoints:
 2. Writes a private inventory and policy; generates management/builder SSH identities, service secrets, backup identity, and PKI.
 3. Creates or verifies security groups and immediately reserves the three fixed ports.
 4. Builds each role image from the exact clean commit, boots the QCOW2 under QEMU with a config drive, and publishes it with commit and compatibility metadata.
-5. Boots admin with its 32 GiB state and 200 GiB backup volumes and waits for the exact readiness marker.
+5. Boots admin with its 32 GiB state and 600 GiB backup volumes and waits for the exact readiness marker.
 6. Creates and verifies the pinned operator bridge and bootstraps Nomad ACLs.
 7. Boots storage with its 500 GiB data volume, transfers only the required private provisioning inputs, and waits for readiness.
 8. Boots ingress and verifies its readiness marker.

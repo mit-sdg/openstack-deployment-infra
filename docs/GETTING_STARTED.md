@@ -23,7 +23,7 @@ future browser workflow and its intended application constraints are defined in
 The OpenStack project needs quota for three persistent roles, disposable
 builders, one worker per future active application, five private Glance images,
 three fixed Neutron ports, and three Cinder volumes. Fresh setup defaults to 32
-GiB of admin state, 500 GiB of managed data, and 200 GiB of encrypted backups.
+GiB of admin state, 500 GiB of managed data, and 600 GiB of encrypted backups. The backup volume must not be smaller than managed data.
 
 ## Prepare the operator host
 

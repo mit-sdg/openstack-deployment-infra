@@ -596,7 +596,9 @@ def _platform_document(
     )
     admin_gib = _positive_integer(values.get("PLATFORM_ADMIN_STATE_GIB", "32"), field="admin state")
     data_gib = _positive_integer(values.get("PLATFORM_DATA_GIB", "500"), field="managed data")
-    backup_gib = _positive_integer(values.get("PLATFORM_BACKUP_GIB", "200"), field="backup")
+    backup_gib = _positive_integer(values.get("PLATFORM_BACKUP_GIB", "600"), field="backup")
+    if backup_gib < data_gib:
+        _fail("backup volume must be at least as large as the managed-data volume")
     names = {role: f"{prefix}-{role}-01" for role in PERSISTENT_ROLES}
     ports = {
         "admin": f"{prefix}-admin-public-v4",
