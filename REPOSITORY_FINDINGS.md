@@ -38,7 +38,7 @@ Audit found and corrected a recovery deadlock in the first implementation: a `re
 
 The stale release-installer test expectations were corrected and the repository was formatted. Local evidence:
 
-- 362 unit/packaging tests pass;
+- 428 unit/packaging/security/recovery tests pass;
 - Ruff format and lint pass;
 - strict mypy passes for 56 source files;
 - vulture, compileall, entrypoint smoke tests, JSON/SVG checks, and shell syntax pass.
@@ -173,7 +173,7 @@ uv run ruff check openstack_platform deploy/releases infra tests
 uv run mypy
 uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
 uv run python -m compileall -q openstack_platform deploy infra tests
-uv run python -m unittest discover -s tests -q   # 362 passed
+uv run python -m unittest discover -s tests -q   # 428 passed
 ```
 
 Shell syntax and packaged entrypoint smoke checks also passed. ShellCheck is unavailable locally. `nix flake check --no-build` could not access `/nix/var/nix/daemon-socket/socket`; Nix evaluation, package smoke, five role VM tests, and QCOW2 boot tests remain CI gates.
