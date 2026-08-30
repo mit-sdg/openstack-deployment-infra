@@ -552,7 +552,6 @@ in
   # reviewed typed Unix integration service.
   systemd.services."${namespace}-management-broker" = {
     description = "Trusted ${platform.displayName} management authorization broker";
-    wantedBy = [ "multi-user.target" ];
     after = [ "${namespace}-controller.service" ];
     requires = [ "${namespace}-controller.service" ];
     unitConfig.ConditionPathIsExecutable = managementBrokerExecutable;
@@ -607,7 +606,6 @@ in
   # authorization/session state.
   systemd.services."${namespace}-management-web" = {
     description = "Browser-facing ${platform.displayName} management application";
-    wantedBy = [ "multi-user.target" ];
     after = [ "${namespace}-management-broker.service" ];
     requires = [ "${namespace}-management-broker.service" ];
     unitConfig.ConditionPathIsExecutable = managementWebExecutable;
@@ -656,6 +654,22 @@ in
       ];
       ReadOnlyPaths = [ managementWebReleaseRoot ];
       ReadWritePaths = [ managementWebState ];
+    };
+  };
+
+  systemd.paths."${namespace}-management-broker" = {
+    wantedBy = [ "multi-user.target" ];
+    pathConfig = {
+      PathExists = managementBrokerExecutable;
+      Unit = "${namespace}-management-broker.service";
+    };
+  };
+
+  systemd.paths."${namespace}-management-web" = {
+    wantedBy = [ "multi-user.target" ];
+    pathConfig = {
+      PathExists = managementWebExecutable;
+      Unit = "${namespace}-management-web.service";
     };
   };
 

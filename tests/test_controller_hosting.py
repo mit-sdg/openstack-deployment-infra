@@ -131,6 +131,7 @@ class ControllerHostingStaticTests(unittest.TestCase):
             )
         ]
         self.assertIn("CONTROLLER_PROJECT_SOCKET = controllerSocket;", broker)
+        self.assertNotIn('wantedBy = [ "multi-user.target" ];', broker)
         self.assertIn('RestrictAddressFamilies = [ "AF_UNIX" ];', broker)
         self.assertIn('IPAddressDeny = "any";', broker)
         self.assertIn("MANAGEMENT_BROKER_SOCKET = managementBrokerSocket;", management)
@@ -147,6 +148,12 @@ class ControllerHostingStaticTests(unittest.TestCase):
         ):
             self.assertIn(setting, management)
         self.assertNotIn("controllerPrivilegedSocket", management)
+        self.assertNotIn(
+            'wantedBy = [ "multi-user.target" ];',
+            management.split('systemd.paths."${namespace}-management-broker"', 1)[0],
+        )
+        self.assertIn("PathExists = managementBrokerExecutable;", management)
+        self.assertIn("PathExists = managementWebExecutable;", management)
 
     def test_nix_uses_named_inventory_validation_and_runtime_constants(self) -> None:
         flake = (ROOT / "flake.nix").read_text(encoding="utf-8")

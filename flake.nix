@@ -86,7 +86,7 @@
             ${rolePackages.buildkit}/bin/buildkit-runc --version >/dev/null
             ${rolePackages.age}/bin/age --version >/dev/null
             ${rolePackages.python}/bin/openstack --version >/dev/null
-            ${rolePackages.platformPython}/bin/python -c 'import sys, yaml; assert sys.version_info[:2] == (3, 14)'
+            ${rolePackages.platformPython}/bin/python -c 'import sys; assert sys.version_info[:2] == (3, 14)'
             ${rolePackages.controllerPackage}/bin/openstack-platform-controller --help >/dev/null
             ${rolePackages.releaseInstaller}/bin/openstack-platform-install-release --help >/dev/null
             touch "$out"

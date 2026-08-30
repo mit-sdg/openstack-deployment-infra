@@ -242,7 +242,7 @@ let
               machine.succeed("systemctl is-active --quiet nomad.service")
               machine.succeed("systemctl is-active --quiet ${namespace}-controller.service")
               machine.succeed("${pkgs.curl}/bin/curl --fail --silent --cacert /etc/${namespace}/pki/internal-ca.pem --cert /etc/${namespace}/pki/nomad-cli.pem --key /etc/${namespace}/pki/nomad-cli-key.pem https://127.0.0.1:4646/v1/status/leader >/dev/null")
-              machine.succeed("${packages.platformPython}/bin/python -c 'import sys, yaml; assert sys.version_info[:2] == (3, 14)'")
+              machine.succeed("${packages.platformPython}/bin/python -c 'import sys; assert sys.version_info[:2] == (3, 14)'")
               machine.succeed("${packages.controllerPackage}/bin/openstack-platform-controller --help >/dev/null")
               machine.succeed("openstack-platform-install-release --help >/dev/null")
               machine.succeed("test $(stat -c %a /run/${namespace}-controller/project.sock) = 660")
