@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import re
+import select
 import socket
 import socketserver
 import stat
@@ -25,6 +26,34 @@ _IDEMPOTENCY_KEY = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 )
 _RESPONSE_HEADERS = {"Location", "Retry-After"}
+
+
+@dataclass(frozen=True, slots=True)
+class TransportLimits:
+    """Fixed resource bounds for the local HTTP transport."""
+
+    global_connections: int = 64
+    peer_connections: int = 16
+    header_seconds: float = 5.0
+    body_seconds: float = 30.0
+    idle_seconds: float = 15.0
+    write_seconds: float = 5.0
+    requests_per_connection: int = 100
+
+    def __post_init__(self) -> None:
+        values = (
+            self.global_connections,
+            self.peer_connections,
+            self.header_seconds,
+            self.body_seconds,
+            self.idle_seconds,
+            self.write_seconds,
+            self.requests_per_connection,
+        )
+        if any(value <= 0 for value in values):
+            raise ValueError("controller transport limits must be positive")
+        if self.peer_connections > self.global_connections:
+            raise ValueError("per-peer connection limit cannot exceed global limit")
 
 
 class HttpError(RuntimeError):
@@ -74,6 +103,7 @@ class Response:
 
 Handler = Callable[[Request], Response]
 PeerCredentialsReader = Callable[[socket.socket], tuple[int, int]]
+_BaseRequest = socket.socket | tuple[bytes, socket.socket]
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,9 +209,12 @@ class Router:
 
 
 class _ThreadingUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    daemon_threads = False
-    block_on_close = True
+    # Connections are explicitly closed during shutdown. Daemon workers and a
+    # non-blocking close are a final safeguard against interpreter hangs.
+    daemon_threads = True
+    block_on_close = False
     allow_reuse_address = False
+    request_queue_size = 64
 
 
 def prepare_socket_path(socket_path: str) -> None:
@@ -229,6 +262,7 @@ class ControllerServer(_ThreadingUnixServer):
         peer_credentials: PeerCredentialsReader = linux_peer_credentials,
         socket_mode: int = 0o660,
         socket_gid: int | None = None,
+        limits: TransportLimits | None = None,
     ) -> None:
         if socket_mode != 0o660:
             raise ValueError("controller socket mode must be 0660")
@@ -236,9 +270,11 @@ class ControllerServer(_ThreadingUnixServer):
         self.router = router
         self.peer_policy = peer_policy or PeerPolicy(frozenset({(os.geteuid(), os.getegid())}))
         self._peer_credentials = peer_credentials
-        self._peer_lock = threading.Lock()
-        self._peer_counts: dict[tuple[int, int], int] = {}
-        self._connection_peers: dict[socket.socket, tuple[int, int]] = {}
+        self.limits = limits or TransportLimits()
+        self._connections_lock = threading.Lock()
+        self._connections: dict[socket.socket, tuple[int, int]] = {}
+        self._peer_connections: dict[tuple[int, int], int] = {}
+        self._stopping = threading.Event()
         try:
             super().__init__(socket_path, ControllerRequestHandler)
             os.chmod(socket_path, socket_mode, follow_symlinks=False)
@@ -256,36 +292,119 @@ class ControllerServer(_ThreadingUnixServer):
                 pass
             raise
 
-    def get_request(self) -> tuple[socket.socket, object]:
-        connection, address = super().get_request()
+    @property
+    def active_connections(self) -> int:
+        with self._connections_lock:
+            return len(self._connections)
+
+    def process_request(self, request: _BaseRequest, client_address: object) -> None:
+        """Authenticate and admit a bounded number of Unix-socket workers."""
+        if not isinstance(request, socket.socket):
+            raise TypeError("controller received a non-Unix socket request")
         try:
-            peer = self._peer_credentials(connection)
-            with self._peer_lock:
-                count = self._peer_counts.get(peer, 0)
-                if peer not in self.peer_policy.allowed:
-                    raise PermissionError("controller peer identity is not allowed")
-                if count >= self.peer_policy.max_connections_per_peer:
-                    raise ConnectionRefusedError("controller peer connection limit reached")
-                self._peer_counts[peer] = count + 1
-                self._connection_peers[connection] = peer
-            return connection, address
+            peer = self._peer_credentials(request)
         except (OSError, ValueError, struct.error):
-            connection.close()
+            self._reject(request, "PEER_CREDENTIALS_UNAVAILABLE")
+            return
+        if peer not in self.peer_policy.allowed:
+            self._reject(request, "PEER_IDENTITY_REJECTED", retryable=False)
+            return
+        admitted = False
+        with self._connections_lock:
+            peer_count = self._peer_connections.get(peer, 0)
+            peer_limit = min(
+                self.limits.peer_connections,
+                self.peer_policy.max_connections_per_peer,
+            )
+            if (
+                not self._stopping.is_set()
+                and len(self._connections) < self.limits.global_connections
+                and peer_count < peer_limit
+            ):
+                self._connections[request] = peer
+                self._peer_connections[peer] = peer_count + 1
+                admitted = True
+        if not admitted:
+            self._reject(request, "CONNECTION_LIMIT")
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._release(request)
+            request.close()
             raise
 
-    def shutdown_request(self, request: Any) -> None:
-        with self._peer_lock:
-            peer = self._connection_peers.pop(request, None)
-            if peer is not None:
-                remaining = self._peer_counts[peer] - 1
-                if remaining:
-                    self._peer_counts[peer] = remaining
-                else:
-                    del self._peer_counts[peer]
-        super().shutdown_request(request)
+    def _reject(self, request: socket.socket, code: str, *, retryable: bool = True) -> None:
+        correlation_id = str(uuid_module.uuid4())
+        payload = json.dumps(
+            {
+                "error": {
+                    "code": code,
+                    "correlationId": correlation_id,
+                    "retryable": retryable,
+                    "summary": "controller connection is not authorized or capacity is unavailable",
+                }
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        response = (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(payload)}\r\n".encode()
+            + b"Cache-Control: no-store\r\nConnection: close\r\nRetry-After: 1\r\n"
+            + f"X-Correlation-ID: {correlation_id}\r\n\r\n".encode()
+            + payload
+        )
+        try:
+            request.settimeout(0.25)
+            request.sendall(response)
+        except OSError:
+            pass
+        finally:
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            request.close()
+
+    def _release(self, request: socket.socket) -> None:
+        with self._connections_lock:
+            peer = self._connections.pop(request, None)
+            if peer is None:
+                return
+            remaining = self._peer_connections[peer] - 1
+            if remaining:
+                self._peer_connections[peer] = remaining
+            else:
+                del self._peer_connections[peer]
+
+    def shutdown_request(self, request: _BaseRequest) -> None:
+        try:
+            super().shutdown_request(request)
+        finally:
+            if isinstance(request, socket.socket):
+                self._release(request)
+
+    def _close_connections(self) -> None:
+        with self._connections_lock:
+            connections = tuple(self._connections)
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+
+    def shutdown(self) -> None:
+        self._stopping.set()
+        super().shutdown()
+        self._close_connections()
 
     def server_close(self) -> None:
         socket_path = self.server_address
+        self._stopping.set()
+        self._close_connections()
         super().server_close()
         if isinstance(socket_path, str):
             try:
@@ -301,6 +420,70 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
     server_version = "openstack-platform-controller"
     sys_version = ""
 
+    def setup(self) -> None:
+        super().setup()
+        self._request_count = 0
+        self._deadline_lock = threading.Lock()
+        self._deadline_generation = 0
+        self._deadline_timer: threading.Timer | None = None
+        self._deadline_expired: str | None = None
+
+    def _arm_deadline(self, phase: str, seconds: float, *, close_write: bool) -> None:
+        self._cancel_deadline()
+        with self._deadline_lock:
+            generation = self._deadline_generation
+
+        def expire() -> None:
+            with self._deadline_lock:
+                if generation != self._deadline_generation:
+                    return
+                self._deadline_expired = phase
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR if close_write else socket.SHUT_RD)
+            except OSError:
+                pass
+
+        timer = threading.Timer(seconds, expire)
+        timer.daemon = True
+        self._deadline_timer = timer
+        self.connection.settimeout(seconds)
+        timer.start()
+
+    def _cancel_deadline(self) -> None:
+        timer = getattr(self, "_deadline_timer", None)
+        with getattr(self, "_deadline_lock", threading.Lock()):
+            self._deadline_generation = getattr(self, "_deadline_generation", 0) + 1
+        if timer is not None:
+            timer.cancel()
+        self._deadline_timer = None
+
+    def handle_one_request(self) -> None:
+        limits = self.controller_server.limits
+        if self._request_count:
+            readable, _, _ = select.select([self.connection], [], [], limits.idle_seconds)
+            if not readable:
+                self.close_connection = True
+                return
+        self._request_count += 1
+        self._deadline_expired = None
+        self._arm_deadline("headers", limits.header_seconds, close_write=True)
+        try:
+            super().handle_one_request()
+        except OSError:
+            self.close_connection = True
+        finally:
+            self._cancel_deadline()
+        if self._request_count >= limits.requests_per_connection:
+            self.close_connection = True
+
+    def finish(self) -> None:
+        self._cancel_deadline()
+        try:
+            super().finish()
+        except OSError:
+            # Deadline and shutdown paths deliberately tear down the stream.
+            pass
+
     @property
     def controller_server(self) -> ControllerServer:
         server = self.server
@@ -312,6 +495,26 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         # Access logging belongs to the service wrapper and must not accidentally
         # include request bodies containing environment values.
         return
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        """Replace the standard library's HTML parser errors with bounded JSON."""
+        del message, explain
+        self.close_connection = True
+        if self.request_version == "HTTP/0.9":
+            self.request_version = "HTTP/1.1"
+        status = 405 if code == 501 else code
+        error_code = "METHOD_NOT_ALLOWED" if code == 501 else "INVALID_REQUEST"
+        summary = (
+            "controller method is not allowed"
+            if code == 501
+            else "controller HTTP request is malformed"
+        )
+        self._error(HttpError(status, error_code, summary), str(uuid_module.uuid4()))
 
     def _body(self) -> object | None:
         transfer = self.headers.get("Transfer-Encoding")
@@ -332,8 +535,15 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             raise HttpError(400, "INVALID_REQUEST", "Content-Length is malformed") from None
         if length < 0 or length > _MAX_BODY:
             raise HttpError(413, "REQUEST_TOO_LARGE", "controller request exceeds its size limit")
-        raw = self.rfile.read(length)
+        try:
+            raw = self.rfile.read(length)
+        except TimeoutError:
+            raise HttpError(
+                408, "REQUEST_TIMEOUT", "controller request body deadline expired"
+            ) from None
         if len(raw) != length:
+            if self._deadline_expired == "body":
+                raise HttpError(408, "REQUEST_TIMEOUT", "controller request body deadline expired")
             raise HttpError(400, "INVALID_REQUEST", "controller request body was incomplete")
         if not raw:
             return None
@@ -387,6 +597,8 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Correlation-ID", correlation_id)
+        if self.close_connection:
+            self.send_header("Connection", "close")
         for key, value in extra_headers.items():
             self.send_header(key, value)
         self.end_headers()
@@ -406,8 +618,21 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
 
     def _handle(self) -> None:
         correlation_id = str(uuid_module.uuid4())
+        self._cancel_deadline()
+        if self._deadline_expired == "headers":
+            self.close_connection = True
+            return
+        if self._request_count >= self.controller_server.limits.requests_per_connection:
+            self.close_connection = True
+        self._arm_deadline(
+            "body",
+            self.controller_server.limits.body_seconds,
+            close_write=False,
+        )
         try:
             body = self._body()
+            self._cancel_deadline()
+            self.connection.settimeout(self.controller_server.limits.write_seconds)
             response = self.controller_server.router.dispatch(
                 self.command,
                 self.path,
@@ -416,9 +641,8 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             )
             self._write(response, correlation_id)
         except HttpError as error:
-            # Framing failures can leave an unread body in the stream. Never
-            # parse it as a pipelined request: BaseHTTPRequestHandler's stock
-            # syntax error includes the request line and could reflect secrets.
+            # Framing failures can leave unread secret-bearing bytes in the
+            # stream. Never parse them as a pipelined request.
             self.close_connection = True
             self._error(error, correlation_id)
         except Exception:
@@ -427,6 +651,8 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 HttpError(500, "INTERNAL_ERROR", "unexpected controller failure"),
                 correlation_id,
             )
+        finally:
+            self._cancel_deadline()
 
     do_GET = _handle
     do_HEAD = _handle

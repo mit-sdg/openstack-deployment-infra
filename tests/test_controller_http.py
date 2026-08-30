@@ -17,6 +17,7 @@ from openstack_platform.controller.http import (
     PeerPolicy,
     Response,
     Router,
+    TransportLimits,
     linux_peer_credentials,
 )
 
@@ -180,6 +181,164 @@ class ControllerTransportTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], "INTERNAL_ERROR")
 
 
+class ControllerResourceLimitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.socket_path = str(Path(self.temporary.name) / "controller.sock")
+        router = Router()
+        router.add("GET", "/v1/ready", lambda _request: Response(200, {"ready": True}))
+        router.add("POST", "/v1/body", lambda request: Response(200, {"body": request.body}))
+        self.server = ControllerServer(
+            self.socket_path,
+            router,
+            limits=TransportLimits(
+                global_connections=2,
+                peer_connections=2,
+                header_seconds=0.15,
+                body_seconds=0.15,
+                idle_seconds=0.15,
+                write_seconds=0.15,
+                requests_per_connection=2,
+            ),
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        self.temporary.cleanup()
+
+    def connect(self) -> socket.socket:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(2)
+        client.connect(self.socket_path)
+        return client
+
+    @staticmethod
+    def response(client: socket.socket) -> tuple[int, dict[str, object], bytes]:
+        received = b""
+        while b"\r\n\r\n" not in received:
+            block = client.recv(4096)
+            if not block:
+                raise AssertionError("connection closed before HTTP response headers")
+            received += block
+        raw_headers, body = received.split(b"\r\n\r\n", 1)
+        header_lines = raw_headers.split(b"\r\n")
+        status = int(header_lines[0].split()[1])
+        headers = {
+            key.decode().lower(): value.decode().strip()
+            for key, value in (line.split(b":", 1) for line in header_lines[1:])
+        }
+        length = int(headers["content-length"])
+        while len(body) < length:
+            block = client.recv(length - len(body))
+            if not block:
+                raise AssertionError("connection closed before HTTP response body")
+            body += block
+        return status, json.loads(body[:length]), raw_headers
+
+    def wait_for_connections(self, expected: int) -> None:
+        deadline = time.monotonic() + 1
+        while self.server.active_connections != expected and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(self.server.active_connections, expected)
+
+    def test_http_parser_errors_remain_strict_json(self) -> None:
+        client = self.connect()
+        client.sendall(b"not-http\r\n\r\n")
+        status, body, headers = self.response(client)
+        self.assertEqual((status, body["error"]["code"]), (400, "INVALID_REQUEST"))
+        self.assertIn(b"Content-Type: application/json", headers)
+        self.assertNotIn(b"text/html", headers)
+        client.close()
+
+    def test_slow_headers_have_an_absolute_deadline(self) -> None:
+        client = self.connect()
+        try:
+            for byte in b"GET /v1/ready HTTP/1.1\r\nHost: local":
+                try:
+                    client.send(bytes([byte]))
+                except BrokenPipeError:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(client.recv(1), b"")
+        finally:
+            client.close()
+
+    def test_incomplete_and_stalled_bodies_are_bounded(self) -> None:
+        incomplete = self.connect()
+        incomplete.sendall(
+            b"POST /v1/body HTTP/1.1\r\nHost: local\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 5\r\n\r\n{}"
+        )
+        incomplete.shutdown(socket.SHUT_WR)
+        status, body, _headers = self.response(incomplete)
+        self.assertEqual((status, body["error"]["code"]), (400, "INVALID_REQUEST"))
+        incomplete.close()
+
+        stalled = self.connect()
+        stalled.sendall(
+            b"POST /v1/body HTTP/1.1\r\nHost: local\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 5\r\n\r\n{"
+        )
+        status, body, headers = self.response(stalled)
+        self.assertEqual((status, body["error"]["code"]), (408, "REQUEST_TIMEOUT"))
+        self.assertIn(b"Connection: close", headers)
+        stalled.close()
+
+    def test_idle_keepalive_and_request_count_close_connections(self) -> None:
+        idle = self.connect()
+        idle.sendall(b"GET /v1/ready HTTP/1.1\r\nHost: local\r\n\r\n")
+        self.assertEqual(self.response(idle)[0], 200)
+        time.sleep(0.25)
+        self.assertEqual(idle.recv(1), b"")
+        idle.close()
+
+        capped = self.connect()
+        request = b"GET /v1/ready HTTP/1.1\r\nHost: local\r\n\r\n"
+        capped.sendall(request)
+        self.assertEqual(self.response(capped)[0], 200)
+        capped.sendall(request)
+        status, _body, headers = self.response(capped)
+        self.assertEqual(status, 200)
+        self.assertIn(b"Connection: close", headers)
+        self.assertEqual(capped.recv(1), b"")
+        capped.close()
+
+    def test_connection_flood_gets_deterministic_json_overload(self) -> None:
+        held = [self.connect(), self.connect()]
+        try:
+            for client in held:
+                client.sendall(b"G")
+            self.wait_for_connections(2)
+            excess_connections = [self.connect() for _ in range(12)]
+            for excess in excess_connections:
+                status, body, headers = self.response(excess)
+                self.assertEqual((status, body["error"]["code"]), (503, "CONNECTION_LIMIT"))
+                self.assertIn(b"Connection: close", headers)
+                excess.close()
+                self.assertLessEqual(self.server.active_connections, 2)
+        finally:
+            for client in held:
+                client.close()
+
+    def test_shutdown_does_not_wait_for_stalled_clients(self) -> None:
+        clients = [self.connect(), self.connect()]
+        for client in clients:
+            client.sendall(b"POST /v1/body HTTP/1.1\r\nHost: local\r\nContent-Length: 100\r\n\r\n{")
+        self.wait_for_connections(2)
+        started = time.monotonic()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertFalse(self.thread.is_alive())
+        for client in clients:
+            client.close()
+
+
 class ControllerSocketSecurityTests(unittest.TestCase):
     def test_linux_peer_credentials_report_exact_process_identity(self) -> None:
         first, second = socket.socketpair(socket.AF_UNIX)
@@ -206,9 +365,14 @@ class ControllerSocketSecurityTests(unittest.TestCase):
                 thread.start()
                 try:
                     connection = UnixHTTPConnection(path)
-                    with self.assertRaises((ConnectionError, http.client.RemoteDisconnected)):
-                        connection.request("GET", "/v1/health")
-                        connection.getresponse()
+                    connection.request("GET", "/v1/health")
+                    response = connection.getresponse()
+                    body = json.loads(response.read())
+                    self.assertEqual(response.status, 503)
+                    self.assertIn(
+                        body["error"]["code"],
+                        {"PEER_IDENTITY_REJECTED", "PEER_CREDENTIALS_UNAVAILABLE"},
+                    )
                     connection.close()
                 finally:
                     server.shutdown()
@@ -242,16 +406,19 @@ class ControllerSocketSecurityTests(unittest.TestCase):
                 self.assertEqual(first_response.status, 200)
                 first_response.read()
                 self.assertTrue(accepted.wait(2))
-                while not server._peer_counts:  # noqa: SLF001 - security invariant probe
+                while not server._peer_connections:  # noqa: SLF001 - security invariant probe
                     time.sleep(0.01)
                 second = UnixHTTPConnection(path)
-                with self.assertRaises((ConnectionError, http.client.RemoteDisconnected)):
-                    second.request("GET", "/v1/health")
-                    second.getresponse()
+                second.request("GET", "/v1/health")
+                second_response = second.getresponse()
+                self.assertEqual(second_response.status, 503)
+                self.assertEqual(
+                    json.loads(second_response.read())["error"]["code"], "CONNECTION_LIMIT"
+                )
                 second.close()
                 first.close()
                 deadline = time.monotonic() + 2
-                while server._peer_counts and time.monotonic() < deadline:  # noqa: SLF001
+                while server._peer_connections and time.monotonic() < deadline:  # noqa: SLF001
                     time.sleep(0.01)
                 third = UnixHTTPConnection(path)
                 third.request("GET", "/v1/health")

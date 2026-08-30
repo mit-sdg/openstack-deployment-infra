@@ -261,6 +261,14 @@ duplicate JSON keys, repeated `Content-Length` or `Idempotency-Key` headers,
 non-finite JSON numbers, unknown mutation fields, and unsupported content types
 are rejected.
 
+The transport admits at most 64 connections globally and 16 per Unix peer UID,
+identified with `SO_PEERCRED`. Excess connections receive a retryable JSON `503
+CONNECTION_LIMIT`, `Retry-After: 1`, and are closed without creating a worker.
+Headers have a 5-second absolute deadline, bodies a 30-second absolute deadline,
+response writes a 5-second deadline, and an idle keep-alive closes after 15
+seconds. A connection serves at most 100 requests. Shutdown closes admitted
+sockets and does not wait for stalled clients.
+
 Every mutation requires `Idempotency-Key` containing a canonical lowercase
 UUID. A repeated key with identical input replays the recorded result; the same
 key with different method, path, or body returns `409 IDEMPOTENCY_CONFLICT`.
