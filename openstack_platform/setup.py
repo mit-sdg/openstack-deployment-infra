@@ -1749,8 +1749,8 @@ def _glance_usage(openstack: Path, resolved: ResolvedSetup) -> Mapping[str, obje
         for row in endpoints
         if _field(row, "interface") == interface and (not region or _field(row, "region") == region)
     ]
-    if len(urls) != 1 or not urls[0].startswith(("https://", "http://")):
-        _fail("OpenStack Glance endpoint does not resolve exactly once")
+    if len(urls) != 1 or not urls[0].startswith("https://"):
+        _fail("OpenStack Glance endpoint must resolve exactly once over HTTPS")
     endpoint = urls[0].rstrip("/")
     url = endpoint + "/info/usage" if endpoint.endswith("/v2") else endpoint + "/v2/info/usage"
     token = _command(
