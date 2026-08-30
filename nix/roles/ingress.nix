@@ -14,6 +14,13 @@ let
     test "$(stat -c %U:%a "$path")" = root:600
     test "$(stat -c %s "$path")" -le 65536
   '';
+  traefikStart = pkgs.writeShellScript "${namespace}-traefik-start" ''
+    set -euo pipefail
+    set -a
+    source "$CREDENTIALS_DIRECTORY/traefik.env"
+    set +a
+    exec ${packages.traefik}/bin/traefik --configFile=/etc/traefik/traefik.yaml
+  '';
   namespace = platform.namespace;
   configRoot = "/etc/${namespace}";
   ingressMode = platform.publicIngress.mode;
@@ -167,9 +174,8 @@ in
       Group = "traefik";
       ExecStartPre = "${credentialGuard} /etc/${namespace}/secrets/traefik.env";
       LoadCredential = "traefik.env:/etc/${namespace}/secrets/traefik.env";
-      EnvironmentFile = "%d/traefik.env";
       LimitCORE = 0;
-      ExecStart = "${packages.traefik}/bin/traefik --configFile=/etc/traefik/traefik.yaml";
+      ExecStart = traefikStart;
       Restart = "on-failure";
       StandardOutput = "journal+console";
       StandardError = "journal+console";
