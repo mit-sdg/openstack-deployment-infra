@@ -27,6 +27,7 @@ from uuid import UUID
 from .config import load_platform, load_policy
 from .contracts import IMAGE_ROLES, OPERATOR_SSH_ALIAS, PERSISTENT_ROLES
 from .installation import OPERATOR_ROOT
+
 _ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 _SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -1092,6 +1093,7 @@ def _bootstrap_roles(
     )
     launcher = OPERATOR_ROOT / "bin/openstack-platform"
     _command((launcher, "status"), environment=child)
+    _verify_controller_boundary(paths, platform, child)
     for role in IMAGE_ROLES:
         _command((launcher, "infra", "image", "set", role, image_ids[role]), environment=child)
     _command(
@@ -1154,6 +1156,77 @@ def _bootstrap_roles(
     return pending
 
 
+def _verify_controller_boundary(
+    paths: SetupPaths, platform: Mapping[str, Any], environment: Mapping[str, str]
+) -> None:
+    """Require the hosted controller service and its restricted API to be ready."""
+    namespace = str(platform["namespace"])
+    expected = f"controller-boundary=verified namespace={namespace}"
+    script = r"""set -euo pipefail
+namespace=$1
+controller="${namespace}-controller.service"
+readiness="${namespace}-controller-readiness.service"
+socket="/run/${namespace}-controller/controller.sock"
+
+for attempt in {1..180}; do
+  if systemctl is-active --quiet "$controller" && \
+     systemctl is-active --quiet "$readiness" && \
+     test "$(systemctl show --property=Result --value "$readiness")" = success && \
+     test -S "$socket"; then
+    break
+  fi
+  sleep 1
+done
+systemctl is-active --quiet "$controller" || {
+  echo "hosted controller service is not active" >&2
+  exit 1
+}
+systemctl is-active --quiet "$readiness" || {
+  echo "hosted controller API readiness service is not active" >&2
+  exit 1
+}
+test "$(systemctl show --property=Result --value "$readiness")" = success || {
+  echo "hosted controller API readiness check did not succeed" >&2
+  exit 1
+}
+test "$(stat -Lc '%F|%U|%G|%a' -- "$socket")" = \
+  'socket|platform-controller|controller-api|660' || {
+  echo "hosted controller socket boundary is invalid" >&2
+  exit 1
+}
+# The operator account must not cross the management-only socket boundary.
+set +e
+curl --fail --silent --show-error --max-time 5 --unix-socket "$socket" \
+  'http://localhost/v1/admin/applications?limit=1' >/dev/null 2>&1
+operator_access_status=$?
+set -e
+test "$operator_access_status" -eq 7 || {
+  echo "operator account unexpectedly crossed the controller API boundary" >&2
+  exit 1
+}
+printf 'controller-boundary=verified namespace=%s\n' "$namespace"
+"""
+    result = _command(
+        (
+            "ssh",
+            "-F",
+            paths.ssh_directory / "config",
+            OPERATOR_SSH_ALIAS,
+            "--",
+            "bash",
+            "-s",
+            "--",
+            namespace,
+        ),
+        environment=environment,
+        capture=True,
+        stdin=script.encode("utf-8"),
+        timeout=200,
+    ).strip()
+    if result != expected:
+        _fail("hosted controller boundary returned unexpected verification evidence")
+
+
 def _paths(repository: Path, workspace: Path) -> SetupPaths:
     return SetupPaths(
         repository=repository,
@@ -1179,7 +1252,7 @@ def _print_plan(output: TextIO) -> None:
     print("  build, QEMU-smoke, and publish five commit-addressed NixOS role images", file=output)
     print("  create three persistent VMs and their volumes", file=output)
     print(
-        "  install the operator bridge, releases, helper, image selections, and backups",
+        "  install the operator bridge, policy and releases; verify the hosted controller and backups",
         file=output,
     )
     print("rerun with --apply to perform these actions", file=output)

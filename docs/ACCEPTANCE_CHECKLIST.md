@@ -113,9 +113,10 @@ exited zero.
     tests.test_controller_http tests.test_controller_api -v
   ```
 
-- [ ] **CTRL-04** No deployment service claims a management UI or authentication
-  application is running. No public listener exposes the controller. Evidence:
-  setup output, active unit inventory, and architecture review.
+- [ ] **CTRL-04** Setup installs the controller policy/helper and succeeds only
+  after the admin controller service, restricted socket, and API readiness unit
+  pass. No public listener exposes the controller. Evidence: setup tests/output,
+  active units, socket metadata, and architecture review.
 
 ## Backups, restore, upgrade, and cleanup
 
@@ -144,7 +145,7 @@ exited zero.
   `openstack-platform infra replace ROLE --yes` retains the old host/volumes
   until readiness. Acceptance re-reads exact image UUID, retained flavor UUID,
   configured name, and operation provenance. No delete-first action is used.
-- [ ] **UPGRADE-02** Management/helper release installation selects a complete
+- [ ] **UPGRADE-02** Operator/helper release installation selects a complete
   full-commit release and retains the prior complete release for executable
   recovery. Evidence: `.complete`, release smoke, helper malformed-envelope
   response, and timer state.

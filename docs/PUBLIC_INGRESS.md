@@ -16,9 +16,9 @@ Automated setup can verify only the platform route:
 https://<domain>/healthz
 ```
 
-The sync-engine management application and authentication application are not
-implemented, and setup does not start the local controller API. Do not treat a
-healthy platform route as evidence that users can sign in or deploy projects.
+The local controller is available only on admin's restricted Unix socket. The
+management and authentication applications are not implemented, so do not treat
+a healthy platform route as evidence that users can sign in or deploy projects.
 Future management/project hostname behavior is specified in
 [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 

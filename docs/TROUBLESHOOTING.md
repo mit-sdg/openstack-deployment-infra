@@ -9,9 +9,10 @@ resource the inventory does not name.
 
 The operator CLI has no application, deployment, environment, or managed-storage
 commands. If an installed binary exposes them, stop using that obsolete release.
-The local controller API is not started by setup, and the management and
-authentication applications do not exist yet; do not launch release-internal
-entry points as a workaround. Future integration follows
+Setup installs the controller policy and helper release; admin then starts the
+controller on its restricted local socket. The management and authentication
+applications do not exist yet; do not launch release-internal entry points as a
+workaround. Future integration follows
 [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 
 When a command below uses variables, initialize them on the operator host

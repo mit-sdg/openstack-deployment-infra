@@ -516,8 +516,9 @@ database with an older release's copy.
 
 Work landed out of the original phase order. Service/configuration/candidate/
 lifecycle/controller work (phases 1–5) and the CLI/manifest retirement portion
-of phase 9 are present. Admin hosting, management/authentication integration,
-state cutover, and the full no-shell user-lifecycle exit condition remain.
+of phase 9 are present. Controller hosting on admin is present; management and
+authentication integration, state cutover, and the full no-shell user-lifecycle
+exit condition remain.
 
 | Phase | Work | Exit condition |
 | --- | --- | --- |

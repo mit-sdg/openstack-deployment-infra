@@ -402,7 +402,7 @@ test "$(ssh -F "$SSH_CONFIG" platform-admin -- printf '%s\n' management-ssh=veri
 
 A console/keyscan mismatch is a stop condition. Do not accept a new key by
 editing `known_hosts`; investigate the selected server and project identity.
-The bridge is the sole SSH path used by management and helper releases.
+The bridge is the sole SSH path used to install operator and helper releases.
 
 Bootstrap Nomad ACLs on the **admin host** through that alias. The script is
 already packaged in the admin image and writes the bootstrap response,
@@ -630,8 +630,8 @@ Record zero accepted applications and zero accepted managed resources. The
 fresh state reports `degraded` with three unavailable observations for admin,
 ingress, and storage until accepted image records are selected. The operator
 CLI intentionally has no product list or mutation commands. If `APPS` or
-`STORAGE` is nonzero, stop and preserve the database for controlled
-management/controller cutover; do not install an older CLI or delete rows.
+`STORAGE` is nonzero, stop and preserve the database for controlled management
+integration or recovery; do not install an older CLI or delete rows.
 
 Select the five accepted image UUIDs from `infra image list`. The image names
 are lookup labels; the CLI records and verifies the provider UUID, full source
@@ -654,10 +654,10 @@ incompatible metadata.
 ## Product management is not yet an operator procedure
 
 The product CLI and repository-owned deployment manifest have been retired.
-The local controller API and typed lifecycle services are implemented, but this
-setup does not run the controller, sync-engine management application, or
-authentication application as services. Do not invoke release-internal entry
-points or install an older CLI to create applications or storage.
+Installing the policy and helper release causes admin to start the local
+controller service, but the management and authentication applications are not
+implemented. Do not invoke release-internal entry points or install an older CLI
+to create applications or storage.
 
 Future operators and UI implementers must use
 [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md) for the management/authentication

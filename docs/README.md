@@ -2,9 +2,9 @@
 
 This repository currently provides OpenStack/NixOS infrastructure, automated
 setup, backup/restore tooling, an operator-only infrastructure CLI, and an
-implemented local controller API. It does not provide a self-service portal or
-authentication application, and setup does not start the controller as a
-service.
+hosted local controller API. Setup installs its policy and helper release, and
+admin starts it on a restricted Unix socket. This repository does not provide a
+self-service portal or authentication application.
 
 The former product CLI and repository deployment manifest are retired. Future
 UI readers should use the
@@ -55,7 +55,7 @@ resources named by the private infrastructure inventory.
   sync-engine UI, external authentication contract, authorization, controller
   requests, reconciliation, and acceptance evidence.
 - [Self-hosted management implementation plan](IMPLEMENTATION_PLAN.md) —
-  completed controller/retirement work and remaining hosting, UI, auth, cutover,
+  completed controller/retirement work and remaining management UI, auth, cutover,
   and recovery phases.
 - [Platform hardening plan](HARDENING_PLAN.md) — remaining verification,
   typed-configuration, supply-chain, isolation, durability, fuzzing, and

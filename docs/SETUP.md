@@ -1,8 +1,8 @@
 # Create a platform from one environment file
 
-Use `openstack-platform setup` to create a new deployment in an empty OpenStack project. The command generates the private inventory, SSH and age keys, service credentials, internal PKI, five NixOS role images, security groups, fixed ports, persistent volumes, three VMs, operator bridge, releases, image selections, and backup initialization.
+Use `openstack-platform setup` to create a new deployment in an empty OpenStack project. The command generates the private inventory and policy, credentials, PKI, five NixOS role images, OpenStack resources, operator bridge, operator/helper releases, image selections, and backup initialization.
 
-The supported result is infrastructure-only: setup does not start the local controller API, a sync-engine management application, or an authentication application. Product lifecycle commands are not part of the operator CLI. Future UI work follows [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
+The admin role starts the controller on its restricted local socket after setup installs the policy and helper release. Setup verifies the service, socket permissions, and API readiness before reporting success. The management and authentication applications are not implemented; see [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 
 The command is resumable: rerun the same command with the same protected environment file and workspace after correcting a failed dependency. It verifies an existing named resource before reusing it and refuses an existing setup inventory that differs from the requested deployment.
 
@@ -139,8 +139,8 @@ The command performs these ordered checkpoints:
 6. Creates and verifies the pinned operator bridge and bootstraps Nomad ACLs.
 7. Boots storage with its 500 GiB data volume, transfers only the required private provisioning inputs, and waits for readiness.
 8. Boots ingress and verifies its readiness marker.
-9. Installs matching operator/helper releases, initializes empty operator state, and selects all five exact image UUIDs.
-10. Initializes managed-backup credentials, verifies the management backup timer, and requires healthy platform status.
+9. Installs the policy and matching operator/helper releases, then requires the hosted controller service, restricted socket, and API readiness check to succeed.
+10. Selects all five exact image UUIDs, initializes managed-backup credentials, verifies the management backup timer, and requires healthy platform status.
 
 Successful output ends with:
 

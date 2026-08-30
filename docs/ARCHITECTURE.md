@@ -53,7 +53,7 @@ specified in [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 ## Fresh deployment flow
 
 The operator reconciles the configured foundation, boots and verifies the
-three persistent roles, and installs matching management and helper releases.
+three persistent roles, and installs matching operator and helper releases.
 The first `openstack-platform status` invocation creates an empty SQLite schema
 bound to the deployment project UUID, namespace, and stable inventory identity.
 There is no import phase. Reconciliation confirms only configured resources and
@@ -113,9 +113,9 @@ backups. Managed-service credentials are scoped per application and
 synchronized through owner-specific Nomad Variable keys; values never enter
 controller SQLite.
 
-The current controller SQLite database is backed up separately from PostgreSQL,
-MongoDB, and Garage. The future hosted controller database must retain this
-boundary after cutover. Each backup is encrypted to its configured age recipient and
+The hosted controller SQLite database is backed up separately from PostgreSQL,
+MongoDB, and Garage. This boundary also applies during future management
+integration and state cutover. Each backup is encrypted to its configured age recipient and
 written below the configured backup root. A management backup counts as
 accepted only when its ciphertext, checksum, and final manifest exist. The
 manifest is the commit marker, so interrupted partial files are not treated as

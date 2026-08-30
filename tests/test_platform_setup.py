@@ -180,6 +180,85 @@ class SetupInventoryTests(unittest.TestCase):
         self.assertEqual(document["volumes"]["backup"]["sizeGiB"], 300)
 
 
+class SetupControllerVerificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.paths = setup.SetupPaths(
+            repository=root,
+            workspace=root / "workspace",
+            platform=root / "platform.json",
+            policy=root / "policy.json",
+            bootstrap=root / "bootstrap",
+            pki=root / "pki",
+            openstack_environment=root / "openstack.env",
+            openstack_wrapper=root / "platform-openstack",
+            ssh_directory=root / "ssh",
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_verification_checks_service_socket_api_and_operator_denial(self) -> None:
+        with mock.patch.object(
+            setup,
+            "_command",
+            return_value="controller-boundary=verified namespace=demo\n",
+        ) as command:
+            setup._verify_controller_boundary(self.paths, {"namespace": "demo"}, {})
+
+        argv = command.call_args.args[0]
+        self.assertEqual(
+            argv,
+            (
+                "ssh",
+                "-F",
+                self.paths.ssh_directory / "config",
+                "platform-admin",
+                "--",
+                "bash",
+                "-s",
+                "--",
+                "demo",
+            ),
+        )
+        script = command.call_args.kwargs["stdin"].decode("utf-8")
+        self.assertIn('systemctl is-active --quiet "$controller"', script)
+        self.assertIn('systemctl is-active --quiet "$readiness"', script)
+        self.assertIn("socket|platform-controller|controller-api|660", script)
+        self.assertIn("--unix-socket", script)
+        self.assertIn('test "$operator_access_status" -eq 7', script)
+        self.assertIn("operator account unexpectedly crossed", script)
+        self.assertTrue(command.call_args.kwargs["capture"])
+
+    def test_verification_rejects_unexpected_remote_evidence(self) -> None:
+        with (
+            mock.patch.object(setup, "_command", return_value=""),
+            self.assertRaisesRegex(setup.SetupError, "unexpected verification evidence"),
+        ):
+            setup._verify_controller_boundary(self.paths, {"namespace": "demo"}, {})
+
+    def test_verification_propagates_remote_failure(self) -> None:
+        with (
+            mock.patch.object(
+                setup,
+                "_command",
+                side_effect=setup.SetupError("setup command failed (ssh): controller not active"),
+            ),
+            self.assertRaisesRegex(setup.SetupError, "controller not active"),
+        ):
+            setup._verify_controller_boundary(self.paths, {"namespace": "demo"}, {})
+
+    def test_bootstrap_verifies_controller_after_helper_install(self) -> None:
+        source = Path(setup.__file__).read_text(encoding="utf-8")
+        bootstrap = source[source.index("def _bootstrap_roles(") : source.index("def _paths(")]
+        helper = bootstrap.index("deploy_helper_release.sh")
+        verification = bootstrap.index("_verify_controller_boundary(paths, platform, child)")
+        final_status = bootstrap.index("status_output = _command", verification)
+        self.assertLess(helper, verification)
+        self.assertLess(verification, final_status)
+
+
 class SetupCliTests(unittest.TestCase):
     def test_setup_dispatch_does_not_load_an_existing_platform_configuration(self) -> None:
         parser = operator.build_parser()

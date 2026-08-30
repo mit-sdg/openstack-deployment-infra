@@ -12,19 +12,22 @@ DOCUMENTS = (
 )
 CURRENT_PRODUCT_DOCUMENTS = (
     ROOT / "README.md",
-    *(ROOT / "docs" / name for name in (
-        "ACCEPTANCE_CHECKLIST.md",
-        "ARCHITECTURE.md",
-        "CONFIGURATION.md",
-        "CONTROL_PLANE_CONTRACT.md",
-        "GETTING_STARTED.md",
-        "OPERATIONS.md",
-        "PUBLIC_INGRESS.md",
-        "README.md",
-        "SETUP.md",
-        "TROUBLESHOOTING.md",
-        "TUTORIAL.md",
-    )),
+    *(
+        ROOT / "docs" / name
+        for name in (
+            "ACCEPTANCE_CHECKLIST.md",
+            "ARCHITECTURE.md",
+            "CONFIGURATION.md",
+            "CONTROL_PLANE_CONTRACT.md",
+            "GETTING_STARTED.md",
+            "OPERATIONS.md",
+            "PUBLIC_INGRESS.md",
+            "README.md",
+            "SETUP.md",
+            "TROUBLESHOOTING.md",
+            "TUTORIAL.md",
+        )
+    ),
 )
 LINK_RE = re.compile(r"\[[^]]*\]\(([^)]+)\)")
 ROUTE_RE = re.compile(r'\("(GET|POST|PUT|PATCH|DELETE)", "(/v1/[^\"]+)", self\.')
@@ -91,7 +94,9 @@ class DocumentationTests(unittest.TestCase):
         tutorial = (ROOT / "docs" / "TUTORIAL.md").read_text()
 
         normalized_readme = " ".join(readme.split())
-        self.assertIn("There is not yet a supported end-user application workflow", normalized_readme)
+        self.assertIn(
+            "There is not yet a supported end-user application workflow", normalized_readme
+        )
         self.assertIn("sync-engine management application", normalized_readme)
         self.assertIn("authentication application do not exist", normalized_readme)
         self.assertIn("no product commands", architecture)
@@ -141,6 +146,16 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("PLATFORM_DATA_GIB", setup)
         self.assertIn("PLATFORM_BACKUP_GIB", setup)
         self.assertIn("Cloudflare account", setup)
+        self.assertIn("Setup verifies the service, socket permissions, and API readiness", setup)
+        self.assertIn("policy and operator/helper releases", contract)
+        self.assertIn("hosted controller\nservice/socket/API boundary", contract)
+        stale_boundary = re.compile(
+            r"setup (?:does not|doesn't) (?:start|run|install)[^.]*controller",
+            re.IGNORECASE,
+        )
+        for document in CURRENT_PRODUCT_DOCUMENTS:
+            with self.subTest(document=document.relative_to(ROOT)):
+                self.assertIsNone(stale_boundary.search(document.read_text()))
         self.assertIn("--env-file PATH", contract)
         self.assertIn('"sizeGiB": 500', example)
         self.assertIn('"sizeGiB": 200', example)

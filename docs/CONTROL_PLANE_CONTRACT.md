@@ -9,9 +9,10 @@ This page defines the two implemented control surfaces:
 
 The CLI has no application, deployment, environment, or managed-storage
 commands. The controller has no public listener, browser authentication, or
-project authorization. Automated setup does not currently install a controller
-service or management application, so there is no supported end-user product
-workflow yet. See [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md) for the
+project authorization. Automated setup installs the policy and helper release;
+the admin role starts and locally exposes the controller service. There is no
+management application or supported end-user product workflow yet. See
+[MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md) for the
 future UI and authentication integration.
 
 ## Operator CLI
@@ -52,7 +53,8 @@ Without `--apply`, setup validates the protected input and prints a
 non-mutating plan. With `--apply`, it verifies the authenticated OpenStack
 project, generates private deployment material, reserves fixed ports, builds
 and tests all five role images, creates the persistent roles and volumes,
-installs operator/helper releases, selects images, and initializes backups.
+installs the policy and operator/helper releases, verifies the hosted controller
+service/socket/API boundary, selects images, and initializes backups.
 
 The environment file must be a direct current-user-owned mode-`0600` file.
 Setup parses literal dotenv/OpenRC assignments without executing them. Missing
@@ -169,7 +171,7 @@ unchanged.
 
 After restore, use `status` and `infra list` to compare aggregate accepted state
 with live observations. If `APPS` or `STORAGE` is nonzero, preserve the database
-for the future management/controller cutover; the operator CLI intentionally
+for controlled management integration or recovery; the operator CLI intentionally
 has no product-state reconciliation commands.
 
 ### CLI recovery and exits
