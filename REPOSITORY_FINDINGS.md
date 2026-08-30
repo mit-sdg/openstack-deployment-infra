@@ -4,14 +4,14 @@ Reviewed 2026-08-30 and re-audited after the independent-finding fixes. This fil
 
 ## Scope and confidence
 
-This is a deployment-readiness ledger, not proof that every branch of the 70,000-line repository has been reviewed. The follow-up audit checked the F/P claims against implementation and tests, reviewed the latest correction diff, ran the complete local Python/static suite, inspected CI publication inputs, searched for unreferenced tracked artifacts, and reconciled current design documentation. It did not execute Nix, VM, QCOW2, ShellCheck, real OpenStack, or protected P-07 workflows locally.
+This is a deployment-readiness ledger, not proof that every branch of the 70,000-line repository has been reviewed. The follow-up audit checked the F/P claims against implementation and tests, reviewed the latest correction diff, ran the complete local Python/static suite, inspected CI publication inputs, searched for unreferenced tracked artifacts, and reconciled current design documentation. It did not execute Nix, VM, QCOW2, ShellCheck, real OpenStack, or protected live acceptance workflows locally.
 
 A green check from an older commit is not evidence for this branch. The latest visible remote CI success predates the commits described here; current-head Nix and live evidence remains outstanding.
 
 ## Current decision
 
 - **Start management UI implementation:** yes. The controller/setup implementation is sufficient to begin, subject to the documented broker authorization responsibilities.
-- **Deploy to production users:** not yet. Known local implementation defects found in both audits are corrected, but current-head Nix/VM/QCOW2 CI, a real-cloud read-only setup check, the disposable full-loss drill, and protected P-07 remain required.
+- **Deploy to production users:** not yet. Known local implementation defects found in both audits are corrected, but current-head Nix/VM/QCOW2 CI, a real-cloud read-only setup check, the disposable full-loss drill, and protected live acceptance remain required.
 - **Run an internal infrastructure deployment:** reasonable only after current-head CI; use the internal deployment to produce the first live acceptance and recovery evidence.
 
 ## Original blockers — fixed on this branch
@@ -67,7 +67,7 @@ Setup now refuses completion unless the admin host confirms:
 
 ## Production gates
 
-An independent clean-worktree audit classified P-01 and P-02 as partial and P-07 as failed. This branch now corrects all three audited implementation defects. Every production gate remains subject to the external Nix/live evidence stated below.
+An independent clean-worktree audit classified P-01 and P-02 as partial and the live-acceptance gate as failed. This branch now corrects all three audited implementation defects. Every production gate remains subject to the external Nix/live evidence stated below.
 
 ### P-01 — Real non-mutating setup preflight — audit defect corrected in code
 
@@ -106,7 +106,7 @@ Implemented by a signed pre-build component manifest plus a signed post-build ar
 
 **Exit gate:** complete. Tamper tests cover component inputs, signatures, evidence, QCOW2 bytes, Nix closure identity, source-manifest binding, and publication metadata while installer tests preserve the previously selected release on failure.
 
-### P-07 — Live release acceptance — corrected in code after two audit passes
+### Live acceptance — corrected in code after two audit passes
 
 The repository now provides an explicit-opt-in, plan-first disposable acceptance
 orchestrator with exact deployment/project scope, bounded driver calls, durable
@@ -141,9 +141,9 @@ The automatic image-publication detector watched `nix/` and `infra/` but omitted
 
 Operation admission checked the closed flag before durable/in-memory enqueue without holding the shutdown lock. A concurrent close could stop all workers in that gap, after which submit could return success for work no thread could execute. Admission, durable dispatch creation, and queue insertion now share the shutdown critical section. A deterministic concurrency regression test covers the former interleaving. The unused `close(wait=...)` option was removed because both branches joined every worker and therefore both blocked.
 
-### A-03 — P-07 observations and post-delete lookup — resolved
+### A-03 — Live-acceptance observations and post-delete lookup — resolved
 
-The three P-07 defects are described under P-07. Regression tests now model the tombstoned project route and falsify interruption and re-enable public observations independently.
+The three driver defects are described under Live acceptance. Regression tests now model the tombstoned project route and falsify interruption and re-enable public observations independently.
 
 ### A-04 — Tracked but unreferenced Nomad samples — removed
 
@@ -201,7 +201,7 @@ uv run ruff check openstack_platform deploy/releases infra tests
 uv run mypy
 uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
 uv run python -m compileall -q openstack_platform deploy infra tests
-uv run python -m unittest discover -s tests -q   # 452 passed
+uv run python -m unittest discover -s tests -q   # 453 passed
 ```
 
-Vulture produced no findings; exact-file hashing found no tracked duplicates. ShellCheck is unavailable locally. `nix flake check --no-build` cannot access `/nix/var/nix/daemon-socket/socket`; Nix evaluation, package smoke, five role VM tests, five QCOW2 boot tests, the real-cloud setup check, disposable full-loss recovery, and protected P-07 remain external gates.
+Vulture produced no findings; exact-file hashing found no tracked duplicates. ShellCheck is unavailable locally. `nix flake check --no-build` cannot access `/nix/var/nix/daemon-socket/socket`; Nix evaluation, package smoke, five role VM tests, five QCOW2 boot tests, the real-cloud setup check, disposable full-loss recovery, and protected live acceptance remain external gates.

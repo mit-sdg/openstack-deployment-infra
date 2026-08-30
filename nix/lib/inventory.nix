@@ -25,13 +25,14 @@ let
       else
         throw "path component is missing";
 
-  hasPath = dotted: document:
-    (builtins.tryEval (getPath (lib.splitString "." dotted) document)).success;
+  hasPath =
+    dotted: document: (builtins.tryEval (getPath (lib.splitString "." dotted) document)).success;
 
   missingPaths = document: lib.filter (dotted: !(hasPath dotted document)) requiredPaths;
 in
 {
-  load = path:
+  load =
+    path:
     let
       document = builtins.fromJSON (builtins.readFile path);
       missing = missingPaths document;

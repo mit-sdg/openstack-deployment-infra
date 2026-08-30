@@ -368,7 +368,7 @@ and Traefik trusted proxies. The browser renderer is denied controller/provider
 access, and the trusted authorization broker is AF_UNIX-only. Source fetch uses
 a fixed GitHub HTTPS origin, no redirects, no inherited proxy/credential helper,
 and exact commit verification. Existing security-group and metadata tests cover
-role paths; the protected P-07 run retains the live Neutron/connectivity matrix
+role paths; the protected live acceptance run retains the live Neutron/connectivity matrix
 evidence.
 
 ## Completion criteria

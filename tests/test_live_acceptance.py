@@ -8,9 +8,10 @@ from uuid import UUID
 
 from openstack_platform import acceptance
 
+ROOT = Path(__file__).resolve().parents[1]
 DEPLOYMENT_ID = "12345678-1234-4234-9234-123456789abc"
 PROJECT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-NAMESPACE = "p07-release-12345678"
+NAMESPACE = "acceptance-release-12345678"
 
 
 class FakeDriver:
@@ -76,6 +77,29 @@ def make_plan(driver: FakeDriver) -> acceptance.Plan:
 
 
 class LiveAcceptanceTests(unittest.TestCase):
+    def test_contract_uses_descriptive_names_instead_of_audit_labels(self) -> None:
+        compact = "".join(("p", "07"))
+        hyphenated = "-".join(("p", "07"))
+        roots = (
+            ROOT / ".github",
+            ROOT / "config",
+            ROOT / "docs",
+            ROOT / "openstack_platform",
+            ROOT / "tests",
+        )
+        for path in (item for root in roots for item in root.rglob("*") if item.is_file()):
+            if "__pycache__" in path.parts:
+                continue
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotIn(compact, path.name.casefold())
+                self.assertNotIn(hyphenated, path.name.casefold())
+                try:
+                    text = path.read_text().casefold()
+                except UnicodeDecodeError:
+                    continue
+                self.assertNotIn(compact, text)
+                self.assertNotIn(hyphenated, text)
+
     def private_directory(self, root: str, name: str) -> Path:
         path = Path(root) / name
         path.mkdir(mode=0o700)

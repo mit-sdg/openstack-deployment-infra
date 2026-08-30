@@ -282,7 +282,7 @@ shared stable job.
 
 The implementation and fake-boundary tests cover exact candidate identity,
 route markers, promotion ordering, predecessor cleanup, and resumable phases.
-A protected P-07 run must still demonstrate these properties against live
+A protected live acceptance run must still demonstrate these properties against live
 Nomad, Traefik, OpenStack, and the public route; unit tests alone are not live
 acceptance evidence.
 

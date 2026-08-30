@@ -565,7 +565,10 @@ in
       Type = "simple";
       User = managementBrokerUser;
       Group = managementBrokerUser;
-      SupplementaryGroups = [ controllerSocketGroup managementWebUser ];
+      SupplementaryGroups = [
+        controllerSocketGroup
+        managementWebUser
+      ];
       RuntimeDirectory = managementBrokerRuntime;
       RuntimeDirectoryMode = "0755";
       ExecStart = managementBrokerExecutable;

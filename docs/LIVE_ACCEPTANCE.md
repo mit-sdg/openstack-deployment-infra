@@ -1,15 +1,15 @@
-# Run the disposable P-07 live release gate
+# Run the disposable live acceptance gate
 
 `openstack-platform-acceptance` runs one reviewed, disposable cloud drill and retains a minimal authenticated evidence bundle. It is intended for a protected CI environment or a manually supervised release gate, not for a production deployment or an ordinary project.
 
-The repository supplies `openstack-platform-acceptance-driver`. It composes only the supported operator CLI, controller Unix HTTP API, packaged backup/restore launchers, SSH recovery boundary, and an exact-name OpenStack teardown. Cloud credentials remain in the setup environment/OpenStack wrapper and are never command arguments. The driver requires a direct mode-`0600` configuration through `P07_DRIVER_CONFIG`; its deployment UUID, project UUID, namespace, application slug, inventory, and replacement images are fixed before planning.
+The repository supplies `openstack-platform-acceptance-driver`. It composes only the supported operator CLI, controller Unix HTTP API, packaged backup/restore launchers, SSH recovery boundary, and an exact-name OpenStack teardown. Cloud credentials remain in the setup environment/OpenStack wrapper and are never command arguments. The driver requires a direct mode-`0600` configuration through `LIVE_ACCEPTANCE_DRIVER_CONFIG`; its deployment UUID, project UUID, namespace, application slug, inventory, and replacement images are fixed before planning.
 
 ## Safety conditions
 
 Do not start a plan until all of these conditions hold:
 
 - the OpenStack project is dedicated to disposable acceptance or the driver can enforce ownership metadata on every mutation;
-- the proposed namespace is `p07-<label>-<first-eight-deployment-UUID-characters>` and does not identify an existing deployment;
+- the proposed namespace is `acceptance-<label>-<first-eight-deployment-UUID-characters>` (with a 1–12 character label) and does not identify an existing deployment;
 - the operator has reviewed the repository driver, protected configuration, non-mutating inventory, replacement image UUIDs, and teardown names;
 - the signing key is a direct, current-user-owned mode-`0600` file with at least 32 random bytes;
 - the state directory is direct, current-user-owned, mode `0700`, and retained across CI retries; and
@@ -25,16 +25,16 @@ Create a random deployment UUID. The namespace suffix must equal the first eight
 
 ```bash
 umask 077
-export P07_DEPLOYMENT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-export P07_NAMESPACE="p07-release-${P07_DEPLOYMENT_ID%%-*}"
-install -d -m 0700 /private/p07-plan /private/p07-state
+export LIVE_ACCEPTANCE_DEPLOYMENT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+export LIVE_ACCEPTANCE_NAMESPACE="acceptance-release-${LIVE_ACCEPTANCE_DEPLOYMENT_ID%%-*}"
+install -d -m 0700 /private/live-acceptance-plan /private/live-acceptance-state
 
 uv run openstack-platform-acceptance plan \
-  --deployment-id "$P07_DEPLOYMENT_ID" \
+  --deployment-id "$LIVE_ACCEPTANCE_DEPLOYMENT_ID" \
   --project-id '<DISPOSABLE_OPENSTACK_PROJECT_UUID>' \
-  --namespace "$P07_NAMESPACE" \
+  --namespace "$LIVE_ACCEPTANCE_NAMESPACE" \
   --driver "$PWD/.venv/bin/openstack-platform-acceptance-driver" \
-  --output /private/p07-plan/plan.json \
+  --output /private/live-acceptance-plan/plan.json \
   --max-minutes 360 \
   --step-timeout-seconds 1800
 ```
@@ -48,14 +48,14 @@ Review `plan.json`, its printed SHA-256, the deployment/project/namespace bindin
 Set the opt-in only in the shell that will perform the destructive drill. `--apply`, the environment opt-in, and the deployment-specific confirmation are all required.
 
 ```bash
-export P07_LIVE_ACCEPTANCE=1
+export LIVE_ACCEPTANCE_APPLY=1
 uv run openstack-platform-acceptance run \
-  --plan /private/p07-plan/plan.json \
+  --plan /private/live-acceptance-plan/plan.json \
   --driver "$PWD/.venv/bin/openstack-platform-acceptance-driver" \
-  --state-directory /private/p07-state \
-  --signing-key /private/p07-evidence-hmac.key \
+  --state-directory /private/live-acceptance-state \
+  --signing-key /private/live-acceptance-evidence-hmac.key \
   --apply \
-  --confirm "P07:$P07_DEPLOYMENT_ID"
+  --confirm "LIVE-ACCEPTANCE:$LIVE_ACCEPTANCE_DEPLOYMENT_ID"
 ```
 
 The run executes and checkpoints these actions in order:
@@ -86,27 +86,27 @@ Provider payloads, resource IDs, command output, credentials, secret values, bac
 
 ```bash
 uv run openstack-platform-acceptance verify \
-  --evidence-directory /private/p07-state \
-  --signing-key /private/p07-evidence-hmac.key
+  --evidence-directory /private/live-acceptance-state \
+  --signing-key /private/live-acceptance-evidence-hmac.key
 ```
 
-The required result is `p07-evidence=verified result=passed`. Store the three evidence files in the private release evidence system. Keep the signing key separately; HMAC proves possession of the shared key, not a public third-party identity. Record the reviewed plan checksum and reviewer identity outside the evidence bundle.
+The required result is `live-acceptance-evidence=verified result=passed`. Store the three evidence files in the private release evidence system. Keep the signing key separately; HMAC proves possession of the shared key, not a public third-party identity. Record the reviewed plan checksum and reviewer identity outside the evidence bundle.
 
 ## Enable the protected CI gate
 
 The normal push, pull-request, schedule, and manual workflows do not run live acceptance. To make a manual run eligible, configure all of the following:
 
-- a repository or organization variable `P07_ACCEPTANCE_ENABLED=true`;
-- a protected GitHub environment named `p07-live-acceptance` with required reviewers;
-- environment secrets `P07_PROJECT_ID`, `P07_DRIVER_CONFIG_BASE64`, and `P07_EVIDENCE_HMAC_KEY_BASE64`;
-- a self-hosted runner carrying both `self-hosted` and `p07-live-acceptance` labels; and
+- a repository or organization variable `LIVE_ACCEPTANCE_ENABLED=true`;
+- a protected GitHub environment named `live-acceptance` with required reviewers;
+- environment secrets `LIVE_ACCEPTANCE_PROJECT_ID`, `LIVE_ACCEPTANCE_DRIVER_CONFIG_BASE64`, and `LIVE_ACCEPTANCE_EVIDENCE_HMAC_KEY_BASE64`;
+- a self-hosted runner carrying both `self-hosted` and `live-acceptance` labels; and
 - direct mode-`0600` setup environment, SSH configuration, age identity, and other paths named by the protected driver configuration.
 
 Dispatch the CI workflow with `live_acceptance=true`. Without both the dispatch input and enable variable, the job is skipped. If the protected environment, secrets, runner, or driver is absent, no execute request can be sent: environment approval and the private-input checks precede plan creation, and apply occurs only after a plan exists. A job retry with the same GitHub run ID uses the external private checkpoint directory and resumes the exact plan. Disable the repository variable after the release window.
 
 ## Protected repository driver configuration
 
-Copy [`config/p07-driver.example.json`](../config/p07-driver.example.json) outside the checkout, replace every example value, set mode `0600`, and set `P07_DRIVER_CONFIG` to that direct current-user-owned file. The schema is version 1 and closed: unknown or missing fields are rejected. It contains these sections:
+Copy [`config/live-acceptance-driver.example.json`](../config/live-acceptance-driver.example.json) outside the checkout, replace every example value, set mode `0600`, and set `LIVE_ACCEPTANCE_DRIVER_CONFIG` to that direct current-user-owned file. The schema is version 1 and closed: unknown or missing fields are rejected. It contains these sections:
 
 - deployment/project/namespace identity;
 - fixed operator executable, inventory, policy, state, setup environment/workspace, and OpenStack wrapper paths;
@@ -133,7 +133,7 @@ Every request contains:
   "scope": {
     "deploymentId": "12345678-1234-4234-9234-123456789abc",
     "projectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "namespace": "p07-release-12345678"
+    "namespace": "acceptance-release-12345678"
   },
   "requiredActions": ["greenfield_setup"],
   "bounds": {"maxMinutes": 360, "stepTimeoutSeconds": 1800}
@@ -148,7 +148,7 @@ The shown `requiredActions` array is abbreviated; the real request contains the 
   "ok": true,
   "deploymentId": "12345678-1234-4234-9234-123456789abc",
   "projectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  "namespace": "p07-release-12345678",
+  "namespace": "acceptance-release-12345678",
   "capabilities": ["greenfield_setup"],
   "driverConfigurationSha256": "<64 lowercase hexadecimal characters>",
   "baselineFingerprint": "<64 lowercase hexadecimal characters>",
@@ -166,7 +166,7 @@ Execute requests use `mode=execute`, one plan action, `planSha256`, `driverConfi
   "ok": true,
   "deploymentId": "12345678-1234-4234-9234-123456789abc",
   "projectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  "namespace": "p07-release-12345678",
+  "namespace": "acceptance-release-12345678",
   "action": "greenfield_setup",
   "checks": {
     "emptyScopeObserved": true,

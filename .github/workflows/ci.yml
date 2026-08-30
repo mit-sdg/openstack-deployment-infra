@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       live_acceptance:
-        description: Run the protected disposable P-07 live release gate
+        description: Run the protected disposable live acceptance gate
         type: boolean
         default: false
   schedule:
@@ -34,7 +34,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3e24 # v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           version: "0.12.2"
           enable-cache: true
@@ -127,7 +127,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3e24 # v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           version: "0.12.2"
           enable-cache: true
@@ -519,20 +519,20 @@ jobs:
         run: rm -f config/platform.json
 
   live-acceptance:
-    name: P-07 disposable live acceptance
+    name: Disposable live acceptance
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.live_acceptance == true &&
-      vars.P07_ACCEPTANCE_ENABLED == 'true'
-    environment: p07-live-acceptance
-    runs-on: [self-hosted, p07-live-acceptance]
+      vars.LIVE_ACCEPTANCE_ENABLED == 'true'
+    environment: live-acceptance
+    runs-on: [self-hosted, live-acceptance]
     timeout-minutes: 720
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3e24 # v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           version: "0.12.2"
           enable-cache: true
@@ -542,79 +542,79 @@ jobs:
 
       - name: Install protected run configuration
         env:
-          P07_DRIVER_CONFIG_BASE64: ${{ secrets.P07_DRIVER_CONFIG_BASE64 }}
-          P07_EVIDENCE_HMAC_KEY_BASE64: ${{ secrets.P07_EVIDENCE_HMAC_KEY_BASE64 }}
-          P07_PROJECT_ID: ${{ secrets.P07_PROJECT_ID }}
+          LIVE_ACCEPTANCE_DRIVER_CONFIG_BASE64: ${{ secrets.LIVE_ACCEPTANCE_DRIVER_CONFIG_BASE64 }}
+          LIVE_ACCEPTANCE_EVIDENCE_HMAC_KEY_BASE64: ${{ secrets.LIVE_ACCEPTANCE_EVIDENCE_HMAC_KEY_BASE64 }}
+          LIVE_ACCEPTANCE_PROJECT_ID: ${{ secrets.LIVE_ACCEPTANCE_PROJECT_ID }}
         run: |
           set -euo pipefail
-          test -n "$P07_DRIVER_CONFIG_BASE64"
-          test -n "$P07_EVIDENCE_HMAC_KEY_BASE64"
-          test -n "$P07_PROJECT_ID"
+          test -n "$LIVE_ACCEPTANCE_DRIVER_CONFIG_BASE64"
+          test -n "$LIVE_ACCEPTANCE_EVIDENCE_HMAC_KEY_BASE64"
+          test -n "$LIVE_ACCEPTANCE_PROJECT_ID"
           root="/srv/openstack-platform-acceptance/runs/$GITHUB_RUN_ID"
           umask 077
           install -d -m 0700 "$root" "$root/state"
-          base64 --decode <<<"$P07_DRIVER_CONFIG_BASE64" > "$root/driver.json"
-          base64 --decode <<<"$P07_EVIDENCE_HMAC_KEY_BASE64" > "$root/signing.key"
+          base64 --decode <<<"$LIVE_ACCEPTANCE_DRIVER_CONFIG_BASE64" > "$root/driver.json"
+          base64 --decode <<<"$LIVE_ACCEPTANCE_EVIDENCE_HMAC_KEY_BASE64" > "$root/signing.key"
           chmod 0600 "$root/driver.json" "$root/signing.key"
-          python3 - "$root/driver.json" "$root/context" "$P07_PROJECT_ID" <<'PY'
+          python3 - "$root/driver.json" "$root/context" "$LIVE_ACCEPTANCE_PROJECT_ID" <<'PY'
           import json, shlex, sys
           config = json.load(open(sys.argv[1], encoding="utf-8"))
           if config["projectId"] != sys.argv[3]:
               raise SystemExit("driver and protected project IDs differ")
           with open(sys.argv[2], "w", encoding="utf-8") as output:
-              for name, key in (("P07_DEPLOYMENT_ID", "deploymentId"), ("P07_NAMESPACE", "namespace")):
+              for name, key in (("LIVE_ACCEPTANCE_DEPLOYMENT_ID", "deploymentId"), ("LIVE_ACCEPTANCE_NAMESPACE", "namespace")):
                   output.write(f"{name}={shlex.quote(config[key])}\n")
           PY
           chmod 0600 "$root/context"
-          printf 'P07_ROOT=%s\nP07_PROJECT_ID=%s\nP07_DRIVER_CONFIG=%s\n' \
-            "$root" "$P07_PROJECT_ID" "$root/driver.json" >> "$GITHUB_ENV"
+          printf 'LIVE_ACCEPTANCE_ROOT=%s\nLIVE_ACCEPTANCE_PROJECT_ID=%s\nLIVE_ACCEPTANCE_DRIVER_CONFIG=%s\n' \
+            "$root" "$LIVE_ACCEPTANCE_PROJECT_ID" "$root/driver.json" >> "$GITHUB_ENV"
 
       - name: Produce the non-mutating plan
         env:
-          P07_DRIVER: ${{ github.workspace }}/.venv/bin/openstack-platform-acceptance-driver
+          LIVE_ACCEPTANCE_DRIVER: ${{ github.workspace }}/.venv/bin/openstack-platform-acceptance-driver
         run: |
           set -euo pipefail
-          source "$P07_ROOT/context"
-          if [[ ! -f $P07_ROOT/plan.json ]]; then
+          source "$LIVE_ACCEPTANCE_ROOT/context"
+          if [[ ! -f $LIVE_ACCEPTANCE_ROOT/plan.json ]]; then
             uv run openstack-platform-acceptance plan \
-              --deployment-id "$P07_DEPLOYMENT_ID" \
-              --project-id "$P07_PROJECT_ID" \
-              --namespace "$P07_NAMESPACE" \
-              --driver "$P07_DRIVER" \
-              --output "$P07_ROOT/plan.json"
+              --deployment-id "$LIVE_ACCEPTANCE_DEPLOYMENT_ID" \
+              --project-id "$LIVE_ACCEPTANCE_PROJECT_ID" \
+              --namespace "$LIVE_ACCEPTANCE_NAMESPACE" \
+              --driver "$LIVE_ACCEPTANCE_DRIVER" \
+              --output "$LIVE_ACCEPTANCE_ROOT/plan.json"
           fi
-          python3 -m json.tool "$P07_ROOT/plan.json"
-          sha256sum "$P07_ROOT/plan.json"
-          transcript=$(python3 -c 'import json,os; print(json.load(open(os.environ["P07_DRIVER_CONFIG"]))["transcript"])')
-          install -m 0600 -- "$transcript" "$P07_ROOT/plan-transcript.json"
+          python3 -m json.tool "$LIVE_ACCEPTANCE_ROOT/plan.json"
+          sha256sum "$LIVE_ACCEPTANCE_ROOT/plan.json"
+          transcript=$(python3 -c 'import json,os; print(json.load(open(os.environ["LIVE_ACCEPTANCE_DRIVER_CONFIG"]))["transcript"])')
+          install -m 0600 -- "$transcript" "$LIVE_ACCEPTANCE_ROOT/plan-transcript.json"
 
       - name: Apply or resume the reviewed plan
         env:
-          P07_DRIVER: ${{ github.workspace }}/.venv/bin/openstack-platform-acceptance-driver
-          P07_LIVE_ACCEPTANCE: "1"
+          LIVE_ACCEPTANCE_DRIVER: ${{ github.workspace }}/.venv/bin/openstack-platform-acceptance-driver
+          LIVE_ACCEPTANCE_APPLY: "1"
         run: |
           set -euo pipefail
-          source "$P07_ROOT/context"
+          source "$LIVE_ACCEPTANCE_ROOT/context"
           uv run openstack-platform-acceptance run \
-            --plan "$P07_ROOT/plan.json" \
-            --driver "$P07_DRIVER" \
-            --state-directory "$P07_ROOT/state" \
-            --signing-key "$P07_ROOT/signing.key" \
+            --plan "$LIVE_ACCEPTANCE_ROOT/plan.json" \
+            --driver "$LIVE_ACCEPTANCE_DRIVER" \
+            --state-directory "$LIVE_ACCEPTANCE_ROOT/state" \
+            --signing-key "$LIVE_ACCEPTANCE_ROOT/signing.key" \
             --apply \
-            --confirm "P07:$P07_DEPLOYMENT_ID"
+            --confirm "LIVE-ACCEPTANCE:$LIVE_ACCEPTANCE_DEPLOYMENT_ID"
           uv run openstack-platform-acceptance verify \
-            --evidence-directory "$P07_ROOT/state" \
-            --signing-key "$P07_ROOT/signing.key"
+            --evidence-directory "$LIVE_ACCEPTANCE_ROOT/state" \
+            --signing-key "$LIVE_ACCEPTANCE_ROOT/signing.key"
 
       - name: Remove local protected inputs
         if: always()
-        run: rm -f "${P07_ROOT:-/nonexistent}/signing.key" "${P07_ROOT:-/nonexistent}/driver.json"
+        run: rm -f "${LIVE_ACCEPTANCE_ROOT:-/nonexistent}/signing.key" "${LIVE_ACCEPTANCE_ROOT:-/nonexistent}/driver.json"
 
       - name: Upload sanitized acceptance evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: p07-live-acceptance-${{ github.run_id }}
+          name: live-acceptance-${{ github.run_id }}
           path: |
             /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/plan.json
             /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/plan-transcript.json

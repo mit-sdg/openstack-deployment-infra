@@ -20,7 +20,7 @@ from openstack_platform.acceptance_live_driver import (
 
 DEPLOYMENT = "12345678-1234-4234-9234-123456789abc"
 PROJECT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-NAMESPACE = "p07-live-12345678"
+NAMESPACE = "acceptance-live-12345678"
 
 
 def config(root: Path, executable: Path) -> DriverConfig:
@@ -78,8 +78,8 @@ def config(root: Path, executable: Path) -> DriverConfig:
         str(ssh_config),
         "admin",
         "recovery",
-        "/run/p07/project.sock",
-        "/run/p07/privileged.sock",
+        "/run/live-acceptance/project.sock",
+        "/run/live-acceptance/privileged.sock",
         str(executable),
         str(executable),
         str(identity),

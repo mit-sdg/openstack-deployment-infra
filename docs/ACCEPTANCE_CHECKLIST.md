@@ -7,39 +7,39 @@ record credentials, provider payloads, or age identities here.
 
 The infrastructure sections below cover the implemented pre-management state.
 The sync-engine management application and authentication application are not
-acceptance claims. The separate P-07 release drill exercises the trusted
+acceptance claims. The separate disposable live acceptance drill exercises the trusted
 controller application lifecycle directly; it does not claim that the future
 browser management or authentication applications exist.
 
 Check a box only when the observable result passed, not merely when a command
 exited zero.
 
-## P-07 disposable live release gate
+## Disposable live acceptance gate
 
-Use [Run the disposable P-07 live release gate](LIVE_ACCEPTANCE.md). A unit-test
+Use [Run the disposable live acceptance gate](LIVE_ACCEPTANCE.md). A unit-test
 result or successful plan is not live acceptance. Sign off only from a completed
 private evidence bundle whose checksum and HMAC signature verify.
 
-- [ ] **P07-01** The reviewed, unexpired plan binds the repository driver and protected-configuration checksums,
+- [ ] **LIVE-01** The reviewed, unexpired plan binds the repository driver and protected-configuration checksums,
   disposable deployment UUID/namespace, exact OpenStack project, unrelated-resource
   baseline fingerprint, ordered actions, and duration limits. The greenfield
   preflight reports no deployment-owned resource.
-- [ ] **P07-02** The run proves greenfield setup and an intentionally interrupted
+- [ ] **LIVE-02** The run proves greenfield setup and an intentionally interrupted
   durable operation resumes under the same identity without duplication or stable
   service impact.
-- [ ] **P07-03** One application is created, deployed at an exact commit, publicly
+- [ ] **LIVE-03** One application is created, deployed at an exact commit, publicly
   verified, disabled, and enabled without rebuild or data loss. PostgreSQL, MongoDB,
   and S3 each pass create, bind, write, and read checks.
-- [ ] **P07-04** External-operator and hosted-controller encrypted SQLite backups
+- [ ] **LIVE-04** External-operator and hosted-controller encrypted SQLite backups
   each pass offline restore; managed PostgreSQL, MongoDB, and S3 pass restore with a
   verified `RESTORE-MANIFEST`.
-- [ ] **P07-05** Persistent-host replacement retains the old host through readiness;
+- [ ] **LIVE-05** Persistent-host replacement retains the old host through readiness;
   external admin recovery retains controller state and reconciles the application.
-- [ ] **P07-06** Application/storage deletion and deployment cleanup leave no owned
+- [ ] **LIVE-06** Application/storage deletion and deployment cleanup leave no owned
   provider resources. A fresh unrelated-resource fingerprint exactly matches the
   plan baseline, and retained backup disposition is recorded.
-- [ ] **P07-07** `openstack-platform-acceptance verify` reports
-  `p07-evidence=verified result=passed`. The private evidence system retains the
+- [ ] **LIVE-07** `openstack-platform-acceptance verify` reports
+  `live-acceptance-evidence=verified result=passed`. The private evidence system retains the
   reviewed plan checksum, sanitized evidence/checksum/signature trio, CI/manual run
   identity, and reviewer approval; it does not retain credentials or provider
   payloads.

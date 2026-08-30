@@ -2,7 +2,7 @@
   "version": 1,
   "deploymentId": "12345678-1234-4234-9234-123456789abc",
   "projectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  "namespace": "p07-release-12345678",
+  "namespace": "acceptance-release-12345678",
   "operator": {
     "executable": "/srv/openstack-platform/bin/openstack-platform",
     "platformConfig": "/srv/openstack-platform/setup/config/platform.json",
@@ -18,12 +18,12 @@
     "sshConfig": "/srv/openstack-platform/.secrets/ssh/config",
     "adminAlias": "platform-admin",
     "recoveryAlias": "platform-admin-recovery",
-    "controllerProjectSocket": "/run/p07-release-12345678-controller/project.sock",
-    "controllerPrivilegedSocket": "/run/p07-release-12345678-controller/privileged.sock",
+    "controllerProjectSocket": "/run/acceptance-release-12345678-controller/project.sock",
+    "controllerPrivilegedSocket": "/run/acceptance-release-12345678-controller/privileged.sock",
     "curl": "/run/current-system/sw/bin/curl",
-    "backupRoot": "/srv/p07-release-12345678-backups",
-    "platformRoot": "/srv/p07-release-12345678",
-    "adminState": "/srv/p07-release-12345678-state"
+    "backupRoot": "/srv/acceptance-release-12345678-backups",
+    "platformRoot": "/srv/acceptance-release-12345678",
+    "adminState": "/srv/acceptance-release-12345678-state"
   },
   "recovery": {
     "age": "/srv/openstack-platform/bin/age",
@@ -33,15 +33,15 @@
   },
   "application": {
     "slug": "acceptance-12345678",
-    "repository": "https://github.com/example/p07-acceptance-app",
+    "repository": "https://github.com/example/live-acceptance-app",
     "commit": "0123456789abcdef0123456789abcdef01234567",
     "requestedRef": "main",
     "verificationPath": "/acceptance/storage",
     "resetPath": "/acceptance/storage/reset",
     "contentProof": {
-      "postgres": {"key": "p07", "value": "12345678"},
-      "mongo": {"key": "p07", "value": "12345678"},
-      "s3": {"key": "p07", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      "postgres": {"key": "acceptance", "value": "12345678"},
+      "mongo": {"key": "acceptance", "value": "12345678"},
+      "s3": {"key": "acceptance", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
     },
     "emptyProof": {"postgres": null, "mongo": null, "s3": null},
     "configuration": {

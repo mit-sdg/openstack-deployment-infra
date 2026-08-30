@@ -47,7 +47,7 @@ platform use:
 - [Release supply-chain evidence](RELEASE_SUPPLY_CHAIN.md)
 - [Role image publication](IMAGE_PUBLISHING.md)
 - [Fresh deployment acceptance checklist](ACCEPTANCE_CHECKLIST.md)
-- [Disposable P-07 live release gate](LIVE_ACCEPTANCE.md)
+- [Disposable live acceptance gate](LIVE_ACCEPTANCE.md)
 
 ## Maintainer-only plans
 

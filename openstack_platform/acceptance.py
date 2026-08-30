@@ -1,4 +1,4 @@
-"""Disposable, deployment-scoped P-07 live acceptance orchestration.
+"""Disposable, deployment-scoped live acceptance orchestration.
 
 The cloud-specific implementation is deliberately outside this repository: a protected
 runner supplies a small JSON driver.  This module owns the safety boundary, plan binding,
@@ -30,7 +30,7 @@ from openstack_platform.runtime import ensure_private_directory
 SCHEMA_VERSION = 1
 MAX_DRIVER_OUTPUT = 256 * 1024
 MAX_EVIDENCE_BYTES = 1024 * 1024
-_NAMESPACE = re.compile(r"p07-[a-z0-9-]{1,31}-[0-9a-f]{8}")
+_NAMESPACE = re.compile(r"acceptance-[a-z0-9](?:[a-z0-9-]{0,10}[a-z0-9])?-[0-9a-f]{8}")
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 
 # The ordering is part of the gate.  In particular, the injected interruption is
@@ -131,7 +131,7 @@ class Plan:
     def document(self) -> dict[str, object]:
         return {
             "schemaVersion": SCHEMA_VERSION,
-            "kind": "p07-live-acceptance-plan",
+            "kind": "live-acceptance-plan",
             "deploymentId": self.deployment_id,
             "projectId": self.project_id,
             "namespace": self.namespace,
@@ -236,7 +236,7 @@ def _validate_identity(deployment_id: str, project_id: str, namespace: str) -> t
         raise AcceptanceError("deployment and project IDs must be canonical UUIDs")
     if not _NAMESPACE.fullmatch(namespace) or not namespace.endswith(deployment[:8]):
         raise AcceptanceError(
-            "namespace must be disposable p07-<label>-<deployment UUID first eight characters>"
+            "namespace must be disposable acceptance-<label>-<deployment UUID first eight characters>"
         )
     return deployment, project
 
@@ -365,7 +365,7 @@ def create_plan(
     ):
         raise AcceptanceError("driver preflight returned a different deployment scope")
     if response.get("capabilities") != list(ACTION_NAMES):
-        raise AcceptanceError("driver does not implement the exact P-07 action set")
+        raise AcceptanceError("driver does not implement the exact live-acceptance action set")
     if response.get("ownedResources") != []:
         raise AcceptanceError("greenfield scope already contains deployment-owned resources")
     configuration_sha = response.get("driverConfigurationSha256")
@@ -413,7 +413,7 @@ def _plan_from_document(document: object, *, allow_expired_resume: bool = False)
     ]
     if (
         document.get("schemaVersion") != SCHEMA_VERSION
-        or document.get("kind") != "p07-live-acceptance-plan"
+        or document.get("kind") != "live-acceptance-plan"
         or document.get("actions") != expected_actions
     ):
         raise AcceptanceError("plan version or action contract is unsupported")
@@ -610,7 +610,7 @@ def run_plan(
 
         evidence = {
             "schemaVersion": SCHEMA_VERSION,
-            "kind": "p07-live-acceptance-evidence",
+            "kind": "live-acceptance-evidence",
             "deploymentId": plan.deployment_id,
             "projectId": plan.project_id,
             "namespace": plan.namespace,
@@ -677,7 +677,7 @@ def verify_evidence(directory: Path, signing_key: bytes) -> None:
         not isinstance(document, dict)
         or set(document) != expected_fields
         or document.get("schemaVersion") != SCHEMA_VERSION
-        or document.get("kind") != "p07-live-acceptance-evidence"
+        or document.get("kind") != "live-acceptance-evidence"
         or document.get("result") != "passed"
         or document.get("sanitization") != "fixed-checks-only-v1"
     ):
@@ -740,7 +740,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "verify":
             key = _private_read(args.signing_key, "signing key")
             verify_evidence(args.evidence_directory, key)
-            print("p07-evidence=verified result=passed")
+            print("live-acceptance-evidence=verified result=passed")
             return 0
         _validate_executable(args.driver)
         driver = SubprocessDriver(args.driver)
@@ -760,17 +760,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             plan_bytes = _canonical(plan.document()) + b"\n"
             _atomic_private_write(output, plan_bytes)
-            print(f"p07-plan={output} sha256={_sha256(plan_bytes)} actions={len(ACTION_NAMES)}")
+            print(
+                f"live-acceptance-plan={output} sha256={_sha256(plan_bytes)} actions={len(ACTION_NAMES)}"
+            )
             return 0
-        if not args.apply or os.environ.get("P07_LIVE_ACCEPTANCE") != "1":
-            raise AcceptanceError("live run requires --apply and P07_LIVE_ACCEPTANCE=1")
+        if not args.apply or os.environ.get("LIVE_ACCEPTANCE_APPLY") != "1":
+            raise AcceptanceError("live run requires --apply and LIVE_ACCEPTANCE_APPLY=1")
         plan_bytes = _private_read(args.plan, "plan")
         checkpoint_exists = (args.state_directory / "checkpoint.json").exists()
         plan = _plan_from_document(
             _load_json(plan_bytes, "plan"), allow_expired_resume=checkpoint_exists
         )
-        if args.confirm != f"P07:{plan.deployment_id}":
-            raise AcceptanceError("confirmation must exactly match P07:<deployment UUID>")
+        if args.confirm != f"LIVE-ACCEPTANCE:{plan.deployment_id}":
+            raise AcceptanceError(
+                "confirmation must exactly match LIVE-ACCEPTANCE:<deployment UUID>"
+            )
         if _file_sha256(args.driver) != plan.driver_sha256:
             raise AcceptanceError("protected driver changed after the reviewed plan")
         key = _private_read(args.signing_key, "signing key")
@@ -781,7 +785,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             state_directory=args.state_directory,
             signing_key=key,
         )
-        print(f"p07-acceptance=passed evidence={result}")
+        print(f"live-acceptance=passed evidence={result}")
         return 0
     except (AcceptanceError, OSError) as error:
         # AcceptanceError messages are fixed; OSError details may contain a private path.

@@ -48,10 +48,13 @@ let
       web = {
         address = "${webAddress}:${toString constants.ports.http}";
         forwardedHeaders.trustedIPs =
-          if directIngress then providerCidrs else [
-            "127.0.0.1/32"
-            "::1/128"
-          ];
+          if directIngress then
+            providerCidrs
+          else
+            [
+              "127.0.0.1/32"
+              "::1/128"
+            ];
         transport.respondingTimeouts = {
           readTimeout = "30s";
           writeTimeout = "0s";

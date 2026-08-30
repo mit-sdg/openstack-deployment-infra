@@ -1,4 +1,4 @@
-"""Reviewed protected-runner implementation of the P-07 driver contract.
+"""Reviewed protected-runner implementation of the live acceptance driver contract.
 
 This module composes the public operator CLI, controller HTTP API, packaged backup/
 restore launchers, SSH recovery boundary, and OpenStack read/delete interface.  It
@@ -114,7 +114,7 @@ class SubprocessTransport:
     def _write_transcript(self) -> None:
         document = {
             "schemaVersion": 1,
-            "kind": "p07-driver-command-transcript",
+            "kind": "live-acceptance-driver-command-transcript",
             "commands": self.records,
             "mutationCount": sum(record["mutating"] is True for record in self.records),
         }
@@ -303,7 +303,10 @@ def load_driver_config(path: Path) -> DriverConfig:
     except ValueError as error:
         raise LiveDriverError("driver scope UUID is invalid") from error
     namespace = str(raw["namespace"])
-    if not namespace.startswith("p07-") or not namespace.endswith(deployment[:8]):
+    if re.fullmatch(
+        r"acceptance-[a-z0-9](?:[a-z0-9-]{0,10}[a-z0-9])?-[0-9a-f]{8}",
+        namespace,
+    ) is None or not namespace.endswith("-" + deployment[:8]):
         raise LiveDriverError("driver namespace is not bound to the deployment UUID")
     for file_field in (operator["setupEnv"], remote["sshConfig"], recovery["ageIdentity"]):
         _private_file(Path(str(file_field)), "driver private input")
@@ -1968,9 +1971,9 @@ class RepositoryLiveDriver:
 
 def main() -> int:
     try:
-        config_path = os.environ.get("P07_DRIVER_CONFIG")
+        config_path = os.environ.get("LIVE_ACCEPTANCE_DRIVER_CONFIG")
         if not config_path:
-            raise LiveDriverError("P07_DRIVER_CONFIG is required")
+            raise LiveDriverError("LIVE_ACCEPTANCE_DRIVER_CONFIG is required")
         config = load_driver_config(Path(config_path))
         raw = sys.stdin.buffer.read(_MAX_OUTPUT + 1)
         if len(raw) > _MAX_OUTPUT:
