@@ -1184,17 +1184,13 @@ class SupportedInterfaces:
             or lifecycle.get("oldServerId") != before["id"]
             or lifecycle.get("selectedImageId") != image
             or not isinstance(lifecycle.get("operationId"), str)
-            or observations
-            != {"oldHostRetainedUntilReady": True, "exactIdentityVerified": True}
+            or observations != {"oldHostRetainedUntilReady": True, "exactIdentityVerified": True}
         ):
             raise LiveDriverError("replacement lifecycle observation is not exact")
         name = str(before["name"])
         after_reference = self._exact_named_reference("server", name)
         after = self._show_projection("server", after_reference, name)
-        if (
-            before["id"] == after["id"]
-            or lifecycle.get("replacementServerId") != after["id"]
-        ):
+        if before["id"] == after["id"] or lifecycle.get("replacementServerId") != after["id"]:
             raise LiveDriverError("host replacement did not change exact server identity")
         transition = {
             "schemaVersion": 1,
@@ -1467,9 +1463,10 @@ class SupportedInterfaces:
                 "projection": expected,
             }
             prior = journal.get(identity)
-            if prior is not None and {
-                key: value for key, value in prior.items() if key != "status"
-            } != intent:
+            if (
+                prior is not None
+                and {key: value for key, value in prior.items() if key != "status"} != intent
+            ):
                 raise LiveDriverError("teardown journal intent differs from immutable ownership")
             if is_backup:
                 backup_identity = identity

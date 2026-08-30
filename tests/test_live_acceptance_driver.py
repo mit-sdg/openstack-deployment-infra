@@ -475,8 +475,9 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
 
                 fake.list_items = missing_candidate_field  # type: ignore[method-assign]
                 driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
-                with self.subTest(field=field), self.assertRaisesRegex(
-                    LiveDriverError, "did not establish"
+                with (
+                    self.subTest(field=field),
+                    self.assertRaisesRegex(LiveDriverError, "did not establish"),
                 ):
                     driver.handle(self._execute_request(value, "application_deploy"))
 
@@ -508,8 +509,9 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
 
                 fake.verify_public_storage = falsified  # type: ignore[method-assign]
                 driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
-                with self.subTest(failed=failed), self.assertRaisesRegex(
-                    LiveDriverError, "did not establish"
+                with (
+                    self.subTest(failed=failed),
+                    self.assertRaisesRegex(LiveDriverError, "did not establish"),
                 ):
                     driver.handle(self._execute_request(value, "persistent_host_replacement"))
 
@@ -650,12 +652,15 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
                 platform.get.return_value = "acceptance-backup"
                 original_record = interfaces._record_teardown
                 if phase == "before_intent":
+
                     def fail_before(*_args: object, **_kwargs: object) -> object:
                         raise RuntimeError("fault before intent")
+
                     interfaces._record_teardown = fail_before  # type: ignore[method-assign]
                 elif phase == "after_intent":
                     transport.fail_delete_once = True
                 elif phase == "after_delete":
+
                     def fail_after_delete(
                         entries: object,
                         intent: object,
@@ -666,8 +671,10 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
                             raise RuntimeError("fault after provider deletion")
                         assert callable(record)
                         return record(entries, intent, status)
+
                     interfaces._record_teardown = fail_after_delete  # type: ignore[method-assign]
                 else:
+
                     def fail_after_confirmation(
                         entries: object,
                         intent: object,
@@ -679,11 +686,15 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
                         if status == "confirmed":
                             raise RuntimeError("fault after confirmation")
                         return result
+
                     interfaces._record_teardown = fail_after_confirmation  # type: ignore[method-assign]
-                with mock.patch(
-                    "openstack_platform.acceptance_live_driver.load_platform",
-                    return_value=platform,
-                ), self.assertRaises(RuntimeError):
+                with (
+                    mock.patch(
+                        "openstack_platform.acceptance_live_driver.load_platform",
+                        return_value=platform,
+                    ),
+                    self.assertRaises(RuntimeError),
+                ):
                     interfaces.teardown(baseline)
                 journal = json.loads(interfaces.teardown_progress_path.read_text())
                 statuses = [entry["status"] for entry in journal["entries"]]
