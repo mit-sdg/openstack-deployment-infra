@@ -36,6 +36,33 @@ Generate or obtain `<SECRET>` values privately; never commit, print, or paste
 them into a ticket. The JSON examples are sanitized templates, not deployment
 inputs.
 
+### Service credential checks
+
+Bootstrap credential sources must remain direct regular files with the owner
+and mode installed by setup (`root:0600`, or `agentops:0600` for the backup age
+identity). Do not replace them with symlinks or environment overrides. At each
+start, the unit rejects ownership, mode, type, and size drift before systemd
+copies the source into that unit's private credential directory. PostgreSQL and
+MongoDB receive password-file paths rather than password values. Services whose
+upstream interface accepts only an environment value read an environment file
+from their private credential directory; unrelated services cannot traverse
+that directory.
+
+After credential rotation, restart only the owning unit. From the root recovery
+console, verify the controls without printing values:
+
+```bash
+systemctl show nomad.service -p LimitCORE -p MainPID
+systemctl show app-platform-controller.service -p LimitCORE -p MainPID
+systemctl status nomad.service app-platform-controller.service --no-pager
+runuser -u management-web -- test ! -r /run/credentials/nomad.service/nomad-gossip-key
+```
+
+Use the configured namespace instead of `app-platform`. A failed source guard
+leaves the service stopped; restore the expected direct-file owner and mode,
+then restart it. Never inspect the credential with `cat`, `/proc`, journald, or
+a diagnostic command.
+
 ## 1. Prepare the operator host and private inputs
 
 Run the repository checks from a clean checkout. The locked project test

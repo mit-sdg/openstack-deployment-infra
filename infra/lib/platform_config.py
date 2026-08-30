@@ -8,7 +8,6 @@ import importlib.util
 import json
 import os
 import re
-import shlex
 import uuid as uuid_module
 from pathlib import Path
 from typing import Any, cast
@@ -31,6 +30,7 @@ ORGANIZATION_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9._-]
 
 REPOSITORY_CONFIG = Path(__file__).resolve().parents[2] / "config" / "platform.json"
 DEFAULT_PATHS = (REPOSITORY_CONFIG,)
+MAXIMUM_TRANSPORT_BYTES = 65_536
 
 
 INVENTORY_CONTRACT = cast(dict[str, Any], CONTRACT["inventory"])
@@ -197,12 +197,27 @@ def shell_values(document: dict[str, Any]) -> dict[str, str | int]:
     }
 
 
+def nul_transport(document: dict[str, Any]) -> bytes:
+    """Return a bounded, non-executable NAME/NUL/VALUE/NUL stream."""
+    parts: list[bytes] = []
+    for name, value in shell_values(document).items():
+        encoded_name = name.encode("ascii")
+        encoded_value = str(value).encode("utf-8")
+        if b"\x00" in encoded_value:
+            raise ValueError(f"platform config value for {name} contains NUL")
+        parts.extend((encoded_name, b"\x00", encoded_value, b"\x00"))
+    payload = b"".join(parts)
+    if len(payload) > MAXIMUM_TRANSPORT_BYTES:
+        raise ValueError("platform config transport exceeds the size limit")
+    return payload
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     get_parser = subparsers.add_parser("get")
     get_parser.add_argument("key")
-    subparsers.add_parser("shell")
+    subparsers.add_parser("shell0")
     subparsers.add_parser("validate")
     args = parser.parse_args()
     document = load()
@@ -213,8 +228,8 @@ def main() -> int:
         value = get(document, args.key)
         print(json.dumps(value) if isinstance(value, (dict, list)) else value)
     else:
-        for name, value in shell_values(document).items():
-            print(f"{name}={shlex.quote(str(value))}")
+        validate(document)
+        os.write(1, nul_transport(document))
     return 0
 
 

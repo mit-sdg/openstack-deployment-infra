@@ -7,6 +7,13 @@
 }:
 let
   packages = import ../pkgs { inherit pkgs platform; };
+  credentialGuard = pkgs.writeShellScript "${namespace}-ingress-credential-guard" ''
+    set -euo pipefail
+    path=$1
+    test -f "$path" && test ! -L "$path"
+    test "$(stat -c %U:%a "$path")" = root:600
+    test "$(stat -c %s "$path")" -le 65536
+  '';
   namespace = platform.namespace;
   configRoot = "/etc/${namespace}";
   yaml = pkgs.formats.yaml { };
@@ -154,7 +161,10 @@ in
     serviceConfig = {
       User = "traefik";
       Group = "traefik";
-      EnvironmentFile = "/etc/${namespace}/secrets/traefik.env";
+      ExecStartPre = "${credentialGuard} /etc/${namespace}/secrets/traefik.env";
+      LoadCredential = "traefik.env:/etc/${namespace}/secrets/traefik.env";
+      EnvironmentFile = "%d/traefik.env";
+      LimitCORE = 0;
       ExecStart = "${packages.traefik}/bin/traefik --configFile=/etc/traefik/traefik.yaml";
       Restart = "on-failure";
       StandardOutput = "journal+console";
@@ -186,7 +196,9 @@ in
   virtualisation.oci-containers.backend = "podman";
   virtualisation.oci-containers.containers."${namespace}-cloudflared" = {
     image = platform.containers.cloudflared;
-    environmentFiles = [ "/etc/${namespace}/secrets/cloudflared.env" ];
+    environmentFiles = [
+      "/run/credentials/podman-${namespace}-cloudflared.service/cloudflared.env"
+    ];
     cmd = [
       "tunnel"
       "--no-autoupdate"
@@ -201,6 +213,11 @@ in
   };
   systemd.services."podman-${namespace}-cloudflared" = {
     unitConfig.ConditionPathExists = "/etc/${namespace}/secrets/cloudflared.env";
+    serviceConfig = {
+      ExecStartPre = [ "${credentialGuard} /etc/${namespace}/secrets/cloudflared.env" ];
+      LoadCredential = "cloudflared.env:/etc/${namespace}/secrets/cloudflared.env";
+      LimitCORE = 0;
+    };
     after = [
       "cloud-final.service"
       "traefik.service"
@@ -230,11 +247,14 @@ in
       RemainAfterExit = true;
       StandardOutput = "journal+console";
       StandardError = "journal+console";
+      ExecStartPre = "${credentialGuard} /etc/${namespace}/secrets/traefik.env";
+      LoadCredential = "traefik.env:/etc/${namespace}/secrets/traefik.env";
+      LimitCORE = 0;
     };
     script = ''
       set -euo pipefail
       set -a
-      source /etc/${namespace}/secrets/traefik.env
+      source "$CREDENTIALS_DIRECTORY/traefik.env"
       set +a
       for attempt in {1..24}; do
         if systemctl is-active --quiet traefik.service && \

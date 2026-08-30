@@ -30,10 +30,10 @@ Every workstream must preserve these invariants:
 | HARD-01 | Typed deployment inventory | Planned | HARD-02 |
 | HARD-02 | Generated implementation contract | Partially implemented | HARD-00 |
 | HARD-03 | Provider and lifecycle module decomposition | Started | HARD-00 |
-| HARD-04 | Remove shell `eval` configuration transport | Planned | HARD-02 |
+| HARD-04 | Remove shell `eval` configuration transport | Implemented (P-08 gate) | HARD-02 |
 | HARD-05 | Release and bootstrap supply-chain evidence | Planned | HARD-02 |
 | HARD-06 | Unix-socket peer authentication | Planned | HARD-00 |
-| HARD-07 | Systemd credential isolation | Planned | HARD-00 |
+| HARD-07 | Systemd credential isolation | Implemented (P-08 gate) | HARD-00 |
 | HARD-08 | Crash-durable filesystem replacement | Implemented for supported critical paths | HARD-00 |
 | HARD-09 | State-machine, property, and parser fuzz tests | Concrete trust-boundary gates implemented | HARD-01, HARD-03 |
 | HARD-10 | Explicit unsupported-state detection | Implemented for migration, provider creation, and restore | HARD-01 |
@@ -163,9 +163,12 @@ The transport must reject duplicate keys, unknown keys, embedded NULs, invalid
 UTF-8, unsafe values, incomplete reads, symlinks, ownership drift, and
 oversized input. Shell callers must fail if any required variable is absent.
 
-**Exit evidence:** no production `eval`, adversarial quoting and newline tests,
-ShellCheck success, and unchanged valid shell projections from the example
-inventory.
+**Implemented evidence:** production callers consume a bounded
+`NAME NUL VALUE NUL` stream through a fixed complete allowlist. The loader
+rejects unknown, duplicate, missing, NUL-bearing, incomplete, and oversized
+records before exporting any value. Unit tests preserve adversarial quoting and
+newlines without execution, and the source scan rejects production `eval`.
+ShellCheck and the Nix checks remain required merge checks.
 
 ## HARD-05: Release and bootstrap supply-chain evidence
 
@@ -224,9 +227,17 @@ Nomad, storage-administrator, builder, backup, and age credentials. Nomad and
 storage services must not gain controller/provider credentials as a side effect
 of this change.
 
-**Exit evidence:** `/proc/<pid>/environ` checks, credential-directory ownership
-checks, child-environment allowlist tests, core-dump policy checks, and secret
-scans across logs, diagnostics, SQLite, and normal output.
+**Implemented evidence:** Nomad gossip, backup age, PostgreSQL, MongoDB,
+Garage, registry, Traefik, and Cloudflare credential sources are loaded into
+per-unit systemd credential directories. PostgreSQL and MongoDB use their
+`*_FILE` interfaces so password values do not enter the container environment;
+services whose upstream interface requires an environment value receive it
+only from their private credential directory. Source guards reject symlinks,
+ownership or mode drift, and oversized files. Secret-bearing units set
+`LimitCORE=0`, host coredump collection is disabled, and VM tests check
+management-web denial (including a child shell), controller `/proc` environment,
+credential ownership, and core limits. Existing bounded-output, diagnostic,
+and database tests provide the secret-scan gate.
 
 ## HARD-08: Crash-durable filesystem replacement
 

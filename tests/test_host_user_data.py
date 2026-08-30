@@ -104,7 +104,9 @@ class HostUserDataTests(unittest.TestCase):
                 self.platform.get("volumes.backup.name"): BACKUP_VOLUME,
             },
         )
-        self.assertIn("NOMAD_GOSSIP_KEY=sentinel-admin-gossip", admin)
+        self.assertIn("path: /etc/app-platform/secrets/nomad-gossip-key", admin)
+        self.assertIn("content: sentinel-admin-gossip", admin)
+        self.assertNotIn("NOMAD_GOSSIP_KEY=", admin)
         self.assertIn(f"ADMIN_VOLUME_ID={ADMIN_VOLUME}", admin)
         self.assertIn(f"BACKUP_VOLUME_ID={BACKUP_VOLUME}", admin)
         self.assertIn(f"/dev/vdb:{self.platform.get('volumes.adminState.label')}", admin)
@@ -150,8 +152,12 @@ class HostUserDataTests(unittest.TestCase):
             self.inputs("storage", storage_secrets),
             {self.platform.get("volumes.data.name"): DATA_VOLUME},
         )
-        self.assertIn("POSTGRES_PASSWORD=sentinel-postgres", storage)
-        self.assertIn("MONGO_INITDB_ROOT_PASSWORD=sentinel-mongo", storage)
+        self.assertIn("path: /etc/app-platform/secrets/postgres-password", storage)
+        self.assertIn("content: sentinel-postgres", storage)
+        self.assertIn("path: /etc/app-platform/secrets/mongodb-password", storage)
+        self.assertIn("content: sentinel-mongo", storage)
+        self.assertNotIn("POSTGRES_PASSWORD=", storage)
+        self.assertNotIn("MONGO_INITDB_ROOT_PASSWORD=", storage)
         self.assertIn(f"DATA_VOLUME_ID={DATA_VOLUME}", storage)
         self.assertIn(f"label={self.platform.get('volumes.data.label')}", storage)
         self.assertIn('mkfs.xfs -f -L "$label" "$device"', storage)

@@ -13,6 +13,13 @@ let
   systemdEscapePath =
     path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   mountUnit = "${systemdEscapePath data}.mount";
+  credentialGuard = pkgs.writeShellScript "${namespace}-storage-credential-guard" ''
+    set -euo pipefail
+    path=$1
+    test -f "$path" && test ! -L "$path"
+    test "$(stat -c %U:%a "$path")" = root:600
+    test "$(stat -c %s "$path")" -le 65536
+  '';
   mkContainerDependencies = name: {
     "podman-${name}" = {
       after = [
@@ -26,6 +33,7 @@ let
       serviceConfig = {
         StandardOutput = "journal+console";
         StandardError = "journal+console";
+        LimitCORE = 0;
       };
     };
   };
@@ -70,9 +78,15 @@ in
   virtualisation.oci-containers.containers = {
     "${namespace}-postgres" = {
       image = platform.containers.postgres;
-      environmentFiles = [ "/etc/${namespace}/postgres.env" ];
+      environment = {
+        POSTGRES_USER = "platform_admin";
+        POSTGRES_PASSWORD_FILE = "/run/secrets/postgres-password";
+        POSTGRES_DB = "platform";
+        POSTGRES_INITDB_ARGS = "--auth-host=scram-sha-256";
+      };
       volumes = [
         "${data}/postgres:/var/lib/postgresql/data"
+        "/run/credentials/podman-${namespace}-postgres.service/postgres-password:/run/secrets/postgres-password:ro"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
         "/etc/${namespace}/pg_hba.conf:/run/${namespace}-pg_hba.conf:ro"
         "/etc/${namespace}/postgres-init:/docker-entrypoint-initdb.d:ro"
@@ -103,9 +117,13 @@ in
     };
     "${namespace}-mongodb" = {
       image = platform.containers.mongodb;
-      environmentFiles = [ "/etc/${namespace}/mongodb.env" ];
+      environment = {
+        MONGO_INITDB_ROOT_USERNAME = "platform_admin";
+        MONGO_INITDB_ROOT_PASSWORD_FILE = "/run/secrets/mongodb-password";
+      };
       volumes = [
         "${data}/mongodb:/data/db"
+        "/run/credentials/podman-${namespace}-mongodb.service/mongodb-password:/run/secrets/mongodb-password:ro"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
       ];
       ports = [ "${toString ports.mongodb}:${toString ports.mongodb}" ];
@@ -124,7 +142,7 @@ in
     "${namespace}-garage" = {
       image = platform.containers.garage;
       volumes = [
-        "/etc/${namespace}/garage.toml:/etc/garage.toml:ro"
+        "/run/credentials/podman-${namespace}-garage.service/garage-config:/etc/garage.toml:ro"
         "${data}/object-storage:/var/lib/garage"
       ];
       ports = [
@@ -139,7 +157,7 @@ in
     };
     "${namespace}-registry" = {
       image = platform.containers.registry;
-      environmentFiles = [ "/etc/${namespace}/registry.env" ];
+      environmentFiles = [ "/run/credentials/podman-${namespace}-registry.service/registry.env" ];
       volumes = [
         "${data}/registry:/var/lib/registry"
         "/etc/${namespace}/registry.htpasswd:/auth/htpasswd:ro"
@@ -163,6 +181,22 @@ in
           StandardOutput = "journal+console";
           StandardError = "journal+console";
         };
+      };
+      "podman-${namespace}-postgres".serviceConfig = {
+        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/secrets/postgres-password" ];
+        LoadCredential = "postgres-password:/etc/${namespace}/secrets/postgres-password";
+      };
+      "podman-${namespace}-mongodb".serviceConfig = {
+        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/secrets/mongodb-password" ];
+        LoadCredential = "mongodb-password:/etc/${namespace}/secrets/mongodb-password";
+      };
+      "podman-${namespace}-garage".serviceConfig = {
+        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/garage.toml" ];
+        LoadCredential = "garage-config:/etc/${namespace}/garage.toml";
+      };
+      "podman-${namespace}-registry".serviceConfig = {
+        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/registry.env" ];
+        LoadCredential = "registry.env:/etc/${namespace}/registry.env";
       };
       "${namespace}-storage-readiness" = {
         description = "Verify ${platform.displayName} storage services after first boot and reboot";

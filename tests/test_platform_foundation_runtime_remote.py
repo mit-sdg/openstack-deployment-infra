@@ -153,12 +153,16 @@ class RuntimeTests(unittest.TestCase):
     def test_child_environment_uses_an_explicit_allowlist(self) -> None:
         os.environ["FOUNDATION_ALLOWED"] = "yes"
         os.environ["FOUNDATION_SECRET"] = "no"
+        os.environ["CREDENTIALS_DIRECTORY"] = "/run/credentials/unrelated.service"
+        os.environ["POSTGRES_PASSWORD"] = "not-for-this-child"
         environment = child_environment(
             inherit=("FOUNDATION_ALLOWED",), overrides={"FIXED": "value"}
         )
         self.assertEqual(environment["FOUNDATION_ALLOWED"], "yes")
         self.assertEqual(environment["FIXED"], "value")
         self.assertNotIn("FOUNDATION_SECRET", environment)
+        self.assertNotIn("CREDENTIALS_DIRECTORY", environment)
+        self.assertNotIn("POSTGRES_PASSWORD", environment)
 
 
 class ProtocolTests(unittest.TestCase):

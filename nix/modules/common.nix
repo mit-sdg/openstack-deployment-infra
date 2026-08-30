@@ -113,6 +113,9 @@ in
 
   services.qemuGuest.enable = true;
   security.auditd.enable = true;
+  # Secret-bearing units also set LimitCORE=0 explicitly. Disable the host
+  # collector and set the kernel guard so crashes cannot persist credentials.
+  systemd.coredump.enable = false;
   security.sudo = {
     enable = true;
     wheelNeedsPassword = false;
@@ -168,6 +171,7 @@ in
 
   boot.kernel.sysctl = {
     "fs.file-max" = 1048576;
+    "fs.suid_dumpable" = 0;
   };
   systemd.settings.Manager.DefaultLimitNOFILE = 1048576;
 }

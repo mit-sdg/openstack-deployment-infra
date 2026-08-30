@@ -41,6 +41,14 @@ let
   controllerSocketDirectory = "${namespace}-controller";
   controllerSocket = "/run/${controllerSocketDirectory}/controller.sock";
   helperReleaseMarker = "${helperReleaseRoot}/current/.complete";
+  credentialGuard = pkgs.writeShellScript "${namespace}-credential-guard" ''
+    set -euo pipefail
+    path=$1
+    owner=$2
+    test -f "$path" && test ! -L "$path"
+    test "$(stat -c %U:%a "$path")" = "$owner:600"
+    test "$(stat -c %s "$path")" -le 65536
+  '';
   controllerBackupRoot = "${backups}/${constants.directories.controllerBackup}";
   hostedControllerBackupRoot = "${backups}/${constants.directories.hostedControllerBackup}";
   hostedControllerRestoreInput = "${controllerRoot}/restore-input.sqlite3";
@@ -156,10 +164,15 @@ let
     # dedicated trusted controller group read/traverse access.
     tree=${lib.escapeShellArg "${operatorRoot}/secrets"}
     if test -d "$tree" && test ! -L "$tree"; then
-      ${pkgs.findutils}/bin/find -P "$tree" -type d \
-        -exec chgrp ${controllerGroup} '{}' + -exec chmod 0750 '{}' +
-      ${pkgs.findutils}/bin/find -P "$tree" -type f \
-        -exec chgrp ${controllerGroup} '{}' + -exec chmod 0640 '{}' +
+      chgrp ${controllerGroup} "$tree"
+      chmod 0750 "$tree"
+      for name in openstack.env nomad-tokens.env storage-bootstrap.env builder_operator_ed25519; do
+        path="$tree/$name"
+        test -f "$path" && test ! -L "$path"
+        test "$(stat -c %U:%a "$path")" = ${operatorAccount.name}:600
+        chgrp ${controllerGroup} "$path"
+        chmod 0640 "$path"
+      done
     fi
   '';
 in
@@ -359,6 +372,7 @@ in
       Group = operatorAccount.name;
       SupplementaryGroups = [ controllerGroup ];
       UMask = "0027";
+      LimitCORE = 0;
       ExecStart = lib.concatStringsSep " " [
         "${packages.controllerPackage}/bin/openstack-platform-hosted-controller-backup"
         "--platform-config /etc/${namespace}/platform.json"
@@ -429,6 +443,7 @@ in
       RuntimeDirectory = controllerSocketDirectory;
       RuntimeDirectoryMode = "0750";
       UMask = "0077";
+      LimitCORE = 0;
       ExecStart = lib.concatStringsSep " " [
         "${packages.controllerPackage}/bin/openstack-platform-controller"
         "--platform-config /etc/${namespace}/platform.json"
@@ -560,13 +575,10 @@ in
     ];
     preStart = ''
       install -d -m 0700 -o nomad -g nomad /run/${namespace}-nomad
-      secret=${root}/secrets/admin-bootstrap.env
-      if [[ ! -r "$secret" ]]; then
-        secret=/etc/${namespace}/secrets/admin-bootstrap.env
-      fi
-      set -a
-      source "$secret"
-      set +a
+      credential="$CREDENTIALS_DIRECTORY/nomad-gossip-key"
+      test -f "$credential" && test ! -L "$credential"
+      NOMAD_GOSSIP_KEY=$(cat -- "$credential")
+      [[ $NOMAD_GOSSIP_KEY =~ ^[A-Za-z0-9+/]{20,128}={0,2}$ ]]
       source /etc/${namespace}/attached-volumes.env
       [[ $ADMIN_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
       umask 077
@@ -582,6 +594,9 @@ in
       Group = "nomad";
       RuntimeDirectory = "${namespace}-nomad";
       RuntimeDirectoryMode = "0700";
+      ExecStartPre = "${credentialGuard} /etc/${namespace}/secrets/nomad-gossip-key root";
+      LoadCredential = "nomad-gossip-key:/etc/${namespace}/secrets/nomad-gossip-key";
+      LimitCORE = 0;
       ExecStart = "${packages.nomad}/bin/nomad agent -config=/etc/${namespace}/nomad -config=/run/${namespace}-nomad/90-runtime.hcl";
       ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
       KillMode = "process";
@@ -612,7 +627,7 @@ in
       Environment = [
         "AGE=${pkgs.age}/bin/age"
         "AGE_KEYGEN=${pkgs.age}/bin/age-keygen"
-        "AGE_KEY=${root}/persistent/secrets/backup-age-key.txt"
+        "AGE_KEY=%d/backup-age-key"
         "PLATFORM_CONFIG=/etc/${namespace}/platform.json"
         "BACKUP_ROOT=${backups}/${namespace}"
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
@@ -628,6 +643,9 @@ in
           ]
         }"
       ];
+      ExecStartPre = "${credentialGuard} ${root}/persistent/secrets/backup-age-key.txt ${operatorAccount.name}";
+      LoadCredential = "backup-age-key:${root}/persistent/secrets/backup-age-key.txt";
+      LimitCORE = 0;
       ExecStart = "${infra}/backup/run_platform_backup.sh";
     };
   };
@@ -661,6 +679,7 @@ in
           ]
         }"
       ];
+      LimitCORE = 0;
       ExecStart = "${packages.python}/bin/python ${infra}/monitor/check_platform.py";
     };
   };
@@ -696,6 +715,7 @@ in
       RemainAfterExit = true;
       StandardOutput = "journal+console";
       StandardError = "journal+console";
+      LimitCORE = 0;
     };
     script = ''
       set -euo pipefail

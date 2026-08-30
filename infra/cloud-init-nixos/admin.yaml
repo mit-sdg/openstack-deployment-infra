@@ -35,11 +35,10 @@ bootcmd:
       systemctl reboot
     fi
 write_files:
-  - path: /etc/__PLATFORM_NAMESPACE__/secrets/admin-bootstrap.env
-    owner: root:nomad
-    permissions: "0640"
-    content: |
-      NOMAD_GOSSIP_KEY=__NOMAD_GOSSIP_KEY__
+  - path: /etc/__PLATFORM_NAMESPACE__/secrets/nomad-gossip-key
+    owner: root:root
+    permissions: "0600"
+    content: __NOMAD_GOSSIP_KEY__
   - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem
     owner: root:root
     permissions: "0644"

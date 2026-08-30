@@ -193,6 +193,12 @@ let
 
           environment.etc = lib.mkMerge [
             pkiEtc
+            (lib.mkIf (role == "admin") {
+              "${namespace}/secrets/nomad-gossip-key" = {
+                text = "dGVzdC1ub21hZC1nb3NzaXAta2V5\n";
+                mode = "0600";
+              };
+            })
             (lib.mkIf (role == "worker") {
               "${namespace}/docker-auth.json".text = ''{"auths":{}}'';
               "nomad.d/90-test.hcl".text = ''
@@ -209,7 +215,10 @@ let
               '';
             })
             (lib.mkIf (role == "ingress") {
-              "${namespace}/secrets/traefik.env".text = "NOMAD_TOKEN=vm-test-token\n";
+              "${namespace}/secrets/traefik.env" = {
+                text = "NOMAD_TOKEN=vm-test-token\n";
+                mode = "0600";
+              };
             })
           ];
         };
@@ -243,6 +252,18 @@ let
               machine.fail("runuser -u management-web -- cat ${state}/controller/policy.json")
               machine.succeed("runuser -u management-web -- sh -c 'for name in openstack.env nomad-tokens.env storage-bootstrap.env builder_operator_ed25519 backup-age-key.txt; do test ! -r ${state}/operator/secrets/\"$name\" || exit 1; done'")
               machine.fail("runuser -u management-web -- cat /etc/${namespace}/pki/nomad-cli-key.pem")
+              machine.fail("runuser -u management-web -- cat /run/credentials/nomad.service/nomad-gossip-key")
+              machine.fail("runuser -u management-web -- sh -c 'cat /run/credentials/nomad.service/nomad-gossip-key'")
+              machine.succeed("pid=$(systemctl show ${namespace}-controller.service -p MainPID --value); ! tr '\\0' '\\n' </proc/$pid/environ | grep -F controller-secret")
+              machine.succeed("! journalctl --boot --output=cat | grep -F controller-secret")
+              machine.succeed("! grep -R -a -F controller-secret ${state}/controller ${backups}/${constants.directories.controllerBackup}")
+              machine.succeed("systemctl show ${namespace}-controller.service nomad.service -p LimitCORE --value | grep -vFx infinity")
+              machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
+              machine.succeed("cp --dereference /etc/${namespace}/secrets/nomad-gossip-key /root/nomad-gossip-key; systemctl stop nomad.service; rm /etc/${namespace}/secrets/nomad-gossip-key; ln -s /root/nomad-gossip-key /etc/${namespace}/secrets/nomad-gossip-key")
+              machine.fail("systemctl start nomad.service")
+              machine.succeed("rm /etc/${namespace}/secrets/nomad-gossip-key; install -m 0600 -o nomad -g root /root/nomad-gossip-key /etc/${namespace}/secrets/nomad-gossip-key")
+              machine.fail("systemctl start nomad.service")
+              machine.succeed("chown root:root /etc/${namespace}/secrets/nomad-gossip-key; systemctl start nomad.service")
               machine.succeed("runuser -u platform-controller -- cat ${state}/operator/secrets/openstack.env >/dev/null")
               machine.fail("runuser -u nomad -- cat ${state}/operator/secrets/openstack.env")
               machine.succeed("id -nG management-web | grep -Fx 'management-web controller-api'")
