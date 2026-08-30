@@ -172,7 +172,7 @@ in
     serviceConfig = {
       User = "traefik";
       Group = "traefik";
-      ExecStartPre = "${credentialGuard} /etc/${namespace}/secrets/traefik.env";
+      ExecStartPre = "+${credentialGuard} /etc/${namespace}/secrets/traefik.env";
       LoadCredential = "traefik.env:/etc/${namespace}/secrets/traefik.env";
       LimitCORE = 0;
       ExecStart = traefikStart;
