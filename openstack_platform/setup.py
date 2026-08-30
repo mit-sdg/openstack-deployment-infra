@@ -1652,13 +1652,21 @@ def _setup_check(
     if cloudflare_token is not None:
         _direct_private_file(cloudflare_token, field="Cloudflare tunnel token")
     repository = _repository_root()
+    values = load_environment_file(env_file)
     resolved = _resolve_setup_inputs(
         repository=repository,
-        values=load_environment_file(env_file),
+        values=values,
         openstack=Path(openstack_command),
         input_reader=input_reader,
         secret_reader=secret_reader,
     )
+    try:
+        component_manifest = verify_from_environment(repository, resolved.commit, values)
+        artifact_manifest = verify_artifact_from_environment(
+            Path(values["PLATFORM_RELEASE_MANIFEST"]), values
+        )
+    except (KeyError, ReleaseVerificationError) as error:
+        raise SetupError(f"release evidence preflight failed: {error}") from error
     choices, flavors = _resolved_provider_choices(Path(openstack_command), resolved)
     collisions = _name_collisions(Path(openstack_command), resolved)
     quotas = _quota_deltas(Path(openstack_command), resolved, flavors)
@@ -1684,14 +1692,34 @@ def _setup_check(
         "nameCollisions": collisions,
         "toolchain": toolchain,
         "ingress": {
-            "choice": "cloudflare-tunnel" if cloudflare_token else "external-provider-pending",
+            "choice": (
+                "authenticated-tunnel"
+                if document["publicIngress"]["mode"] == "tunnel"
+                else "provider-cidr-direct"
+            ),
             "domain": document["domain"],
+            "providerCidrs": document["publicIngress"]["providerCidrs"],
             "tokenFileValidated": cloudflare_token is not None,
         },
         "source": {
             "releaseCommit": resolved.commit,
+            "componentManifestSha256": hashlib.sha256(
+                Path(values["PLATFORM_RELEASE_MANIFEST"]).read_bytes()
+            ).hexdigest(),
+            "artifactManifestSha256": hashlib.sha256(
+                Path(values["PLATFORM_ARTIFACT_MANIFEST"]).read_bytes()
+            ).hexdigest(),
+            "releaseChannel": component_manifest["releaseChannel"],
             "roleImages": {
-                role: {"name": name, "source": "nix-source-build", "commit": resolved.commit}
+                role: {
+                    "name": name,
+                    "source": "signed-reproducible-build",
+                    "commit": resolved.commit,
+                    "qcow2Sha256": artifact_manifest["roleArtifacts"][role]["qcow2Sha256"],
+                    "nixClosureSha256": artifact_manifest["roleArtifacts"][role][
+                        "nixClosureSha256"
+                    ],
+                }
                 for role, name in document["images"].items()
             },
             "runtimeImages": runtime_images,

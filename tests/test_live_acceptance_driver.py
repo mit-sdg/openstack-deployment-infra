@@ -39,13 +39,17 @@ def config(root: Path, executable: Path) -> DriverConfig:
         "repository": "https://github.com/example/acceptance",
         "commit": "1" * 40,
         "requestedRef": "main",
+        "verificationPath": "/acceptance/storage",
         "configuration": {
-            "runtime": "node",
-            "packages": ["."],
-            "buildScript": None,
-            "startScript": "start",
-            "port": 3000,
-            "healthPath": "/health",
+            "schemaVersion": 1,
+            "build": {
+                "runtime": "node",
+                "packages": ["."],
+                "buildScript": None,
+                "startScript": "start",
+            },
+            "runtime": {"port": 3000, "healthPath": "/health"},
+            "storageBindings": [],
         },
     }
     return DriverConfig(
@@ -65,7 +69,8 @@ def config(root: Path, executable: Path) -> DriverConfig:
         str(ssh_config),
         "admin",
         "recovery",
-        "/run/p07/controller.sock",
+        "/run/p07/project.sock",
+        "/run/p07/privileged.sock",
         str(executable),
         str(executable),
         str(identity),
@@ -112,6 +117,7 @@ class FakeInterfaces:
         self.c = value
         self.calls: list[tuple[object, ...]] = []
         self.storage: list[dict[str, object]] = []
+        self.deployments: list[dict[str, object]] = []
         self.deleted = False
         self.app_id = str(uuid5(UUID(DEPLOYMENT), "application"))
 
@@ -136,8 +142,9 @@ class FakeInterfaces:
         key: str,
         *,
         wait: bool = True,
+        privileged: bool = False,
     ) -> object:
-        self.calls.append(("controller", method, path, key, wait))
+        self.calls.append(("controller", method, path, key, wait, privileged))
         if path == "/v1/applications":
             return {"applicationId": self.app_id, "enabled": False}
         if path.endswith("/storage") and isinstance(body, dict):
@@ -151,20 +158,42 @@ class FakeInterfaces:
                         "name": "acceptance",
                     }
                 )
+        if path.endswith("/deployments") and isinstance(body, dict):
+            if not any(item["deploymentId"] == key for item in self.deployments):
+                self.deployments.append(
+                    {
+                        "deploymentId": key,
+                        "repositoryCommit": body["commit"],
+                    }
+                )
         if path.endswith("/delete"):
+            if not privileged:
+                raise AssertionError("delete did not use the privileged socket")
             self.deleted = True
             self.storage.clear()
         return {"status": "succeeded"}
 
     def list_items(self, path: str) -> list[Mapping[str, object]]:
         self.calls.append(("controller-list", path, False))
+        if "/deployments" in path:
+            return list(self.deployments)
         return list(self.storage)
 
     def controller(
         self, method: str, path: str, body: object | None = None, **_options: object
     ) -> tuple[int, object]:
         self.calls.append(("controller-read", method, path, False))
-        return 200, {"applicationId": self.app_id, "enabled": True}
+        return 200, {
+            "applicationId": self.app_id,
+            "enabled": True,
+            "url": "https://acceptance.example.test",
+        }
+
+    def interrupt_controller(self, operation_key: str) -> None:
+        self.calls.append(("interrupt-controller", operation_key, True))
+
+    def verify_public_storage(self, url: str, expected_commit: str) -> None:
+        self.calls.append(("public-storage", url, expected_commit, False))
 
     def operator_backup_restore(self) -> None:
         self.calls.append(("operator-backup-restore", True))

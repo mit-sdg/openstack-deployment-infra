@@ -174,9 +174,15 @@ class SetupPreflightTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.env_file = self.root / "setup.env"
+        self.component_manifest = self.root / "release-manifest.json"
+        self.artifact_manifest = self.root / "role-artifacts.json"
+        self.component_manifest.write_text("{}")
+        self.artifact_manifest.write_text("{}")
         self.env_file.write_text(
             "OS_AUTH_URL=https://identity.test/v3\n"
-            "OS_PROJECT_NAME=demo\nOS_USERNAME=user\nOS_PASSWORD=secret\n",
+            "OS_PROJECT_NAME=demo\nOS_USERNAME=user\nOS_PASSWORD=secret\n"
+            f"PLATFORM_RELEASE_MANIFEST={self.component_manifest}\n"
+            f"PLATFORM_ARTIFACT_MANIFEST={self.artifact_manifest}\n",
             encoding="utf-8",
         )
         self.env_file.chmod(0o600)
@@ -226,6 +232,14 @@ class SetupPreflightTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    @staticmethod
+    def verified_release() -> tuple[dict[str, object], dict[str, object]]:
+        artifacts = {
+            role: {"qcow2Sha256": "a" * 64, "nixClosureSha256": "b" * 64}
+            for role in setup.IMAGE_ROLES
+        }
+        return {"releaseChannel": "production"}, {"roleArtifacts": artifacts}
 
     def provider_json(self, argv: object, **_kwargs: object) -> object:
         command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
@@ -317,6 +331,12 @@ class SetupPreflightTests(unittest.TestCase):
             mock.patch.object(setup.shutil, "which", return_value="/usr/bin/openstack"),
             mock.patch.object(setup, "_source_commit", return_value="a" * 40),
             mock.patch.object(setup, "_platform_document", return_value=self.resolved.document),
+            mock.patch.object(
+                setup, "verify_from_environment", return_value=self.verified_release()[0]
+            ),
+            mock.patch.object(
+                setup, "verify_artifact_from_environment", return_value=self.verified_release()[1]
+            ),
             mock.patch.object(setup, "_command", side_effect=identity_read),
             mock.patch.object(setup, "_json_command", side_effect=spy),
         ):
@@ -356,6 +376,12 @@ class SetupPreflightTests(unittest.TestCase):
             ),
             mock.patch.object(setup.shutil, "which", return_value="/usr/bin/openstack"),
             mock.patch.object(setup, "_resolve_setup_inputs", return_value=self.resolved),
+            mock.patch.object(
+                setup, "verify_from_environment", return_value=self.verified_release()[0]
+            ),
+            mock.patch.object(
+                setup, "verify_artifact_from_environment", return_value=self.verified_release()[1]
+            ),
             mock.patch.object(setup, "_json_command", side_effect=occupied),
         ):
             plan = setup._setup_check(

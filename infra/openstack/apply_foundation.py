@@ -74,10 +74,7 @@ SECURITY_GROUPS: dict[str, tuple[str, list[Rule]]] = {
     ),
     f"{PREFIX}-ingress": (
         "Strict provider ingress or authenticated tunnel with no public origin",
-        [
-            Rule("ingress", "tcp", HTTP_PORT, HTTP_PORT, remote_ip=cidr)
-            for cidr in PROVIDER_CIDRS
-        ]
+        [Rule("ingress", "tcp", HTTP_PORT, HTTP_PORT, remote_ip=cidr) for cidr in PROVIDER_CIDRS]
         if INGRESS_MODE == "direct"
         else [],
     ),

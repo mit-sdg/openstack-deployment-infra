@@ -18,7 +18,8 @@
     "sshConfig": "/srv/openstack-platform/.secrets/ssh/config",
     "adminAlias": "platform-admin",
     "recoveryAlias": "platform-admin-recovery",
-    "controllerSocket": "/run/p07-release-12345678-controller/controller.sock",
+    "controllerProjectSocket": "/run/p07-release-12345678-controller/project.sock",
+    "controllerPrivilegedSocket": "/run/p07-release-12345678-controller/privileged.sock",
     "curl": "/run/current-system/sw/bin/curl",
     "backupRoot": "/srv/p07-release-12345678-backups",
     "platformRoot": "/srv/p07-release-12345678",
@@ -35,13 +36,20 @@
     "repository": "https://github.com/example/p07-acceptance-app",
     "commit": "0123456789abcdef0123456789abcdef01234567",
     "requestedRef": "main",
+    "verificationPath": "/acceptance/storage",
     "configuration": {
-      "runtime": "node",
-      "packages": ["."],
-      "buildScript": null,
-      "startScript": "start",
-      "port": 3000,
-      "healthPath": "/health"
+      "schemaVersion": 1,
+      "build": {
+        "runtime": "node",
+        "packages": ["."],
+        "buildScript": null,
+        "startScript": "start"
+      },
+      "runtime": {
+        "port": 3000,
+        "healthPath": "/health"
+      },
+      "storageBindings": []
     }
   },
   "replacementImages": {

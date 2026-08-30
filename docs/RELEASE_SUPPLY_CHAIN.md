@@ -40,6 +40,22 @@ python3 -m openstack_platform.release_manifest artifact-verify \
 
 The post-build manifest binds each actual QCOW2 SHA-256, normalized Nix output and recursive closure identity, source component-manifest digest, and publication metadata. Its SPDX 2.3 SBOM combines Python packages with every unique Nix closure path/NAR identity; its in-toto/SLSA-style provenance names all QCOW2 and closure digests. Setup recomputes these identities after each build, and the publisher verifies the signed role record before upload. Glance acceptance requires its SHA-256 content hash and artifact metadata to match before setup selects the image.
 
+Package the exact signed evidence for CI or another host; do not put manifests or
+SBOMs in CI secrets:
+
+```sh
+python3 -m openstack_platform.release_manifest bundle-create \
+  --source /private/releases/"$commit" \
+  --output /private/releases/"$commit"/release-evidence.tar
+sha256sum /private/releases/"$commit"/release-evidence.tar
+```
+
+Publish that immutable tar at an HTTPS URL. The protected publication
+environment supplies only its URL, SHA-256, and public Ed25519 trust root. CI
+refuses redirects, downloads at most 128 MiB, extracts only the eight exact
+bounded regular evidence files into an absent private directory, and verifies
+both signatures and the source commit before building or publishing an image.
+
 Set these literal assignments in the private setup environment file:
 
 ```text

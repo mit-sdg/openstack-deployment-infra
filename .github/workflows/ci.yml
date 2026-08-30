@@ -333,15 +333,9 @@ jobs:
           COMMIT_SHA: ${{ needs.publication-context.outputs.commit_sha }}
           OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
           PLATFORM_CONFIG_JSON: ${{ secrets.PLATFORM_CONFIG_JSON }}
-          RELEASE_COMPONENT_MANIFEST_JSON: ${{ secrets.RELEASE_COMPONENT_MANIFEST_JSON }}
-          RELEASE_COMPONENT_SBOM_JSON: ${{ secrets.RELEASE_COMPONENT_SBOM_JSON }}
-          RELEASE_COMPONENT_PROVENANCE_JSON: ${{ secrets.RELEASE_COMPONENT_PROVENANCE_JSON }}
-          RELEASE_ARTIFACT_MANIFEST_JSON: ${{ secrets.RELEASE_ARTIFACT_MANIFEST_JSON }}
-          RELEASE_ARTIFACT_SBOM_JSON: ${{ secrets.RELEASE_ARTIFACT_SBOM_JSON }}
-          RELEASE_ARTIFACT_PROVENANCE_JSON: ${{ secrets.RELEASE_ARTIFACT_PROVENANCE_JSON }}
-          RELEASE_COMPONENT_SIGNATURE_BASE64: ${{ secrets.RELEASE_COMPONENT_SIGNATURE_BASE64 }}
-          RELEASE_ARTIFACT_SIGNATURE_BASE64: ${{ secrets.RELEASE_ARTIFACT_SIGNATURE_BASE64 }}
-          RELEASE_TRUST_ROOT_PEM: ${{ secrets.RELEASE_TRUST_ROOT_PEM }}
+          RELEASE_EVIDENCE_URL: ${{ vars.RELEASE_EVIDENCE_URL }}
+          RELEASE_EVIDENCE_SHA256: ${{ vars.RELEASE_EVIDENCE_SHA256 }}
+          RELEASE_TRUST_ROOT_PEM: ${{ vars.RELEASE_TRUST_ROOT_PEM }}
         run: |
           set -euo pipefail
           test -n "$OS_PROJECT_ID"
@@ -375,42 +369,25 @@ jobs:
           # schema this commit expects. Without this the first symptom is an
           # opaque Nix evaluation error an hour into the publish matrix.
           python3 infra/lib/platform_config.py validate
-          for name in \
-            RELEASE_COMPONENT_MANIFEST_JSON RELEASE_COMPONENT_SBOM_JSON \
-            RELEASE_COMPONENT_PROVENANCE_JSON RELEASE_ARTIFACT_MANIFEST_JSON \
-            RELEASE_ARTIFACT_SBOM_JSON RELEASE_ARTIFACT_PROVENANCE_JSON \
-            RELEASE_COMPONENT_SIGNATURE_BASE64 RELEASE_ARTIFACT_SIGNATURE_BASE64 \
-            RELEASE_TRUST_ROOT_PEM; do
+          for name in RELEASE_EVIDENCE_URL RELEASE_EVIDENCE_SHA256 RELEASE_TRUST_ROOT_PEM; do
             test -n "${!name}"
           done
-          install -d -m 0700 release-evidence/artifacts
-          printf '%s\n' "$RELEASE_COMPONENT_MANIFEST_JSON" > release-evidence/release-manifest.json
-          printf '%s\n' "$RELEASE_COMPONENT_SBOM_JSON" > release-evidence/release.sbom.json
-          printf '%s\n' "$RELEASE_COMPONENT_PROVENANCE_JSON" > release-evidence/release.provenance.json
-          printf '%s\n' "$RELEASE_ARTIFACT_MANIFEST_JSON" > release-evidence/artifacts/role-artifacts.json
-          printf '%s\n' "$RELEASE_ARTIFACT_SBOM_JSON" > release-evidence/artifacts/role-artifacts.sbom.spdx.json
-          printf '%s\n' "$RELEASE_ARTIFACT_PROVENANCE_JSON" > release-evidence/artifacts/role-artifacts.provenance.json
-          printf '%s' "$RELEASE_COMPONENT_SIGNATURE_BASE64" | base64 --decode > release-evidence/release-manifest.sig
-          printf '%s' "$RELEASE_ARTIFACT_SIGNATURE_BASE64" | base64 --decode > release-evidence/artifacts/role-artifacts.sig
-          printf '%s\n' "$RELEASE_TRUST_ROOT_PEM" > release-evidence/trust-root.pem
-          chmod -R go-rwx release-evidence
-          python3 -m openstack_platform.release_manifest verify \
-            --repository . --commit "$COMMIT_SHA" \
-            --manifest release-evidence/release-manifest.json \
-            --signature release-evidence/release-manifest.sig \
-            --trust-root release-evidence/trust-root.pem
-          python3 -m openstack_platform.release_manifest artifact-verify \
-            --component-manifest release-evidence/release-manifest.json \
-            --manifest release-evidence/artifacts/role-artifacts.json \
-            --signature release-evidence/artifacts/role-artifacts.sig \
-            --trust-root release-evidence/trust-root.pem
+          install -d -m 0700 release-evidence-root
+          printf '%s\n' "$RELEASE_TRUST_ROOT_PEM" > release-evidence-root/trust-root.pem
+          chmod 0600 release-evidence-root/trust-root.pem
+          python3 -m openstack_platform.release_manifest bundle-fetch \
+            --url "$RELEASE_EVIDENCE_URL" \
+            --sha256 "$RELEASE_EVIDENCE_SHA256" \
+            --destination release-evidence \
+            --commit "$COMMIT_SHA" \
+            --trust-root release-evidence-root/trust-root.pem
           project=$(python3 infra/lib/platform_config.py get project)
           printf 'OS_PROJECT_NAME=%s\n' "$project" >> "$GITHUB_ENV"
           printf '%s\n' \
             'PLATFORM_RELEASE_MANIFEST=${{ github.workspace }}/release-evidence/release-manifest.json' \
             'PLATFORM_ARTIFACT_MANIFEST=${{ github.workspace }}/release-evidence/artifacts/role-artifacts.json' \
             'PLATFORM_ARTIFACT_SIGNATURE=${{ github.workspace }}/release-evidence/artifacts/role-artifacts.sig' \
-            'PLATFORM_ARTIFACT_TRUST_ROOT=${{ github.workspace }}/release-evidence/trust-root.pem' \
+            'PLATFORM_ARTIFACT_TRUST_ROOT=${{ github.workspace }}/release-evidence-root/trust-root.pem' \
             >> "$GITHUB_ENV"
 
       - name: Build role image

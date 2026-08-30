@@ -14,6 +14,9 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import quote
@@ -27,6 +30,18 @@ ROLES = ("admin", "ingress", "storage", "worker", "builder")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MAX_EVIDENCE = 16 * 1024 * 1024
+_MAX_BUNDLE_FILE = 32 * 1024 * 1024
+_MAX_BUNDLE = 128 * 1024 * 1024
+_BUNDLE_FILES = (
+    "release-manifest.json",
+    "release-manifest.sig",
+    "release.sbom.json",
+    "release.provenance.json",
+    "artifacts/role-artifacts.json",
+    "artifacts/role-artifacts.sig",
+    "artifacts/role-artifacts.sbom.spdx.json",
+    "artifacts/role-artifacts.provenance.json",
+)
 _MAX_CLOSURE_ENTRIES = 10_000
 _MAX_REFERENCES = 2_048
 
@@ -849,6 +864,188 @@ def verify_from_environment(
     )
 
 
+def create_evidence_bundle(source: Path, output: Path) -> Path:
+    """Create a deterministic bounded tar containing only signed release evidence."""
+    if os.path.lexists(output):
+        _fail("release evidence bundle destination already exists")
+    files = [(name, source / name) for name in _BUNDLE_FILES]
+    for _name, path in files:
+        _sha256_file(path)
+    try:
+        with tarfile.open(output, "w", format=tarfile.PAX_FORMAT) as archive:
+            for name, path in files:
+                info = tarfile.TarInfo(name)
+                info.size = path.stat().st_size
+                info.mode = 0o400
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                info.mtime = 0
+                with path.open("rb") as stream:
+                    archive.addfile(info, stream)
+        if output.stat().st_size > _MAX_BUNDLE:
+            output.unlink(missing_ok=True)
+            _fail("release evidence bundle exceeds its size limit")
+        output.chmod(0o600)
+        with output.open("rb") as stream:
+            os.fsync(stream.fileno())
+        descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except (OSError, tarfile.TarError) as error:
+        output.unlink(missing_ok=True)
+        raise ReleaseVerificationError("release evidence bundle could not be created") from error
+    return output
+
+
+def extract_evidence_bundle(bundle: Path, destination: Path) -> Path:
+    """Extract an exact regular-file inventory into an absent private directory."""
+    try:
+        metadata = bundle.lstat()
+    except OSError as error:
+        raise ReleaseVerificationError("release evidence bundle is unavailable") from error
+    if (
+        not bundle.is_file()
+        or bundle.is_symlink()
+        or not 0 < metadata.st_size <= _MAX_BUNDLE
+        or os.path.lexists(destination)
+    ):
+        _fail("release evidence bundle or destination is unsafe")
+    staging = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    if os.path.lexists(staging):
+        _fail("release evidence staging path already exists")
+    try:
+        staging.mkdir(mode=0o700)
+        (staging / "artifacts").mkdir(mode=0o700)
+        with tarfile.open(bundle, "r:") as archive:
+            members = archive.getmembers()
+            names = [member.name for member in members]
+            if (
+                tuple(names) != _BUNDLE_FILES
+                or any(
+                    not member.isfile() or not 0 < member.size <= _MAX_BUNDLE_FILE
+                    for member in members
+                )
+                or sum(member.size for member in members) > _MAX_BUNDLE
+            ):
+                _fail("release evidence bundle inventory is unsafe")
+            for member in members:
+                source = archive.extractfile(member)
+                if source is None:
+                    _fail("release evidence bundle member is unavailable")
+                target = staging / member.name
+                descriptor = os.open(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                )
+                try:
+                    remaining = member.size
+                    while remaining:
+                        block = source.read(min(1024 * 1024, remaining))
+                        if not block:
+                            _fail("release evidence bundle member ended early")
+                        view = memoryview(block)
+                        while view:
+                            view = view[os.write(descriptor, view) :]
+                        remaining -= len(block)
+                    if source.read(1):
+                        _fail("release evidence bundle member exceeded its declared size")
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        os.replace(staging, destination)
+        descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except (OSError, tarfile.TarError, ReleaseVerificationError):
+        import shutil
+
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return destination
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
+def fetch_evidence_bundle(
+    url: str,
+    expected_sha256: str,
+    destination: Path,
+    *,
+    expected_commit: str,
+    trust_root: Path,
+) -> Path:
+    """Fetch one digest-pinned HTTPS bundle, extract it safely, and verify signatures."""
+    if not url.startswith("https://") or not _SHA256.fullmatch(expected_sha256):
+        _fail("release evidence URL or digest is invalid")
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_metadata = destination.parent.lstat()
+    if (
+        destination.parent.is_symlink()
+        or not destination.parent.is_dir()
+        or parent_metadata.st_uid != os.geteuid()
+        or parent_metadata.st_mode & 0o022
+    ):
+        _fail("release evidence destination directory is unsafe")
+    temporary = destination.parent / f".{destination.name}.download-{os.getpid()}.tar"
+    if os.path.lexists(temporary):
+        _fail("release evidence download staging already exists")
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "openstack-platform-release/1"}
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+        with opener.open(request, timeout=60) as response:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+            )
+            try:
+                while block := response.read(1024 * 1024):
+                    total += len(block)
+                    if total > _MAX_BUNDLE:
+                        _fail("release evidence download exceeds its size limit")
+                    digest.update(block)
+                    view = memoryview(block)
+                    while view:
+                        view = view[os.write(descriptor, view) :]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        if digest.hexdigest() != expected_sha256:
+            _fail("release evidence bundle digest does not match")
+        extract_evidence_bundle(temporary, destination)
+        component = destination / "release-manifest.json"
+        verify(
+            Path.cwd(),
+            component,
+            expected_commit=expected_commit,
+            signature=destination / "release-manifest.sig",
+            trust_root=trust_root,
+        )
+        verify_artifact_manifest(
+            component,
+            destination / "artifacts/role-artifacts.json",
+            signature=destination / "artifacts/role-artifacts.sig",
+            trust_root=trust_root,
+        )
+    except (OSError, urllib.error.URLError) as error:
+        raise ReleaseVerificationError("release evidence bundle fetch failed") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate or verify platform release evidence")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -889,6 +1086,15 @@ def main(argv: list[str] | None = None) -> int:
     role_check.add_argument("--output-store-path", type=Path, required=True)
     role_check.add_argument("--platform", type=Path, required=True)
     role_check.add_argument("--commit", required=True)
+    bundle_create = commands.add_parser("bundle-create")
+    bundle_create.add_argument("--source", type=Path, required=True)
+    bundle_create.add_argument("--output", type=Path, required=True)
+    bundle_fetch = commands.add_parser("bundle-fetch")
+    bundle_fetch.add_argument("--url", required=True)
+    bundle_fetch.add_argument("--sha256", required=True)
+    bundle_fetch.add_argument("--destination", type=Path, required=True)
+    bundle_fetch.add_argument("--commit", required=True)
+    bundle_fetch.add_argument("--trust-root", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "generate":
         path = generate(
@@ -909,6 +1115,18 @@ def main(argv: list[str] | None = None) -> int:
             allow_unsigned_development=args.allow_unsigned_development,
         )
         print("release-manifest=verified")
+    elif args.command == "bundle-create":
+        path = create_evidence_bundle(args.source, args.output)
+        print(f"release-evidence-bundle={path} sha256={_artifact_sha256(path)}")
+    elif args.command == "bundle-fetch":
+        path = fetch_evidence_bundle(
+            args.url,
+            args.sha256,
+            args.destination,
+            expected_commit=args.commit,
+            trust_root=args.trust_root,
+        )
+        print(f"release-evidence={path} verified=true")
     elif args.command == "artifact-generate":
         path = generate_artifact_manifest(
             args.component_manifest,

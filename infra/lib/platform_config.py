@@ -80,7 +80,9 @@ def load() -> dict[str, Any]:
         except ValueError as error:
             raise ValueError("publicIngress.providerCidrs contains a malformed CIDR") from error
         if network.version != 4 or network.prefixlen == 0:
-            raise ValueError("publicIngress.providerCidrs must contain exact non-default IPv4 CIDRs")
+            raise ValueError(
+                "publicIngress.providerCidrs must contain exact non-default IPv4 CIDRs"
+            )
         canonical.append(str(network))
     if len(canonical) != len(set(canonical)):
         raise ValueError("publicIngress.providerCidrs contains duplicate CIDRs")

@@ -68,9 +68,7 @@ def main() -> int:
                 response_limit=16,
             )
             if response.strip() != b"OK":
-                raise RuntimeError(
-                    f"public ingress health response is unexpected for {hostname}"
-                )
+                raise RuntimeError(f"public ingress health response is unexpected for {hostname}")
         checks["public_ingress"] = "healthy"
 
         admin_command(SERVICE_CHECK_PYTHON, CHECK_SERVICES)

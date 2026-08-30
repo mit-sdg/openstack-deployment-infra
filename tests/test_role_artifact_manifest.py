@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -197,6 +198,36 @@ class RoleArtifactManifestTests(unittest.TestCase):
                 signature=signature,
                 trust_root=public,
             )
+
+    def test_evidence_bundle_has_exact_safe_inventory(self) -> None:
+        source = self.root / "bundle-source"
+        (source / "artifacts").mkdir(parents=True)
+        for name in release_manifest._BUNDLE_FILES:  # noqa: SLF001 - exact format contract
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"evidence:{name}".encode())
+            path.chmod(0o600)
+        bundle = release_manifest.create_evidence_bundle(source, self.root / "evidence.tar")
+        extracted = release_manifest.extract_evidence_bundle(bundle, self.root / "extracted")
+        self.assertEqual(
+            {
+                path.relative_to(extracted).as_posix()
+                for path in extracted.rglob("*")
+                if path.is_file()
+            },
+            set(release_manifest._BUNDLE_FILES),  # noqa: SLF001
+        )
+
+        hostile = self.root / "hostile.tar"
+        with tarfile.open(hostile, "w") as archive:
+            member = tarfile.TarInfo("release-manifest.json")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "/etc/passwd"
+            archive.addfile(member)
+        hostile.chmod(0o600)
+        with self.assertRaisesRegex(release_manifest.ReleaseVerificationError, "inventory"):
+            release_manifest.extract_evidence_bundle(hostile, self.root / "hostile-output")
+        self.assertFalse((self.root / "hostile-output").exists())
 
     def test_unsigned_artifact_manifest_remains_development_only(self) -> None:
         output = self.root / "unsigned"

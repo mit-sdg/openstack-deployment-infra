@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid5
 
+from openstack_platform import durable
 from openstack_platform.acceptance import ACTION_CHECKS, ACTION_NAMES, AcceptanceError
 from openstack_platform.config import load_platform
 from openstack_platform.setup import load_environment_file
@@ -130,7 +131,8 @@ class DriverConfig:
     ssh_config: str
     admin_alias: str
     recovery_alias: str
-    controller_socket: str
+    controller_project_socket: str
+    controller_privileged_socket: str
     curl: str
     age: str
     age_identity: str
@@ -160,15 +162,18 @@ def _canonical(value: object) -> bytes:
 
 def _atomic_private(path: Path, data: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    metadata = path.parent.lstat()
+    if (
+        path.parent.is_symlink()
+        or not path.parent.is_dir()
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise LiveDriverError("driver state directory must be private and current-user-owned")
     try:
-        os.write(descriptor, data)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    os.replace(temporary, path)
+        durable.atomic_write(path, data, mode=0o600, maximum_bytes=_MAX_OUTPUT)
+    except durable.DurableReplaceError as error:
+        raise LiveDriverError("driver state could not be committed durably") from error
 
 
 def _private_file(path: Path, field: str) -> None:
@@ -238,7 +243,8 @@ def load_driver_config(path: Path) -> DriverConfig:
         "sshConfig",
         "adminAlias",
         "recoveryAlias",
-        "controllerSocket",
+        "controllerProjectSocket",
+        "controllerPrivilegedSocket",
         "curl",
         "backupRoot",
         "platformRoot",
@@ -259,7 +265,14 @@ def load_driver_config(path: Path) -> DriverConfig:
         raise LiveDriverError("driver namespace is not bound to the deployment UUID")
     for file_field in (operator["setupEnv"], remote["sshConfig"], recovery["ageIdentity"]):
         _private_file(Path(str(file_field)), "driver private input")
-    if set(application) != {"slug", "repository", "commit", "requestedRef", "configuration"}:
+    if set(application) != {
+        "slug",
+        "repository",
+        "commit",
+        "requestedRef",
+        "configuration",
+        "verificationPath",
+    }:
         raise LiveDriverError("driver application configuration has an unexpected shape")
     slug = application.get("slug")
     commit = application.get("commit")
@@ -270,10 +283,15 @@ def load_driver_config(path: Path) -> DriverConfig:
         raise LiveDriverError("application commit is invalid")
     if not isinstance(repository, str) or not repository.startswith("https://github.com/"):
         raise LiveDriverError("application repository must be public GitHub HTTPS")
-    if not isinstance(application.get("requestedRef"), str) or not isinstance(
-        application.get("configuration"), Mapping
+    verification_path = application.get("verificationPath")
+    if (
+        not isinstance(application.get("requestedRef"), str)
+        or not isinstance(application.get("configuration"), Mapping)
+        or not isinstance(verification_path, str)
+        or not verification_path.startswith("/")
+        or not _SAFE_REMOTE.fullmatch(verification_path)
     ):
-        raise LiveDriverError("application ref or typed configuration is invalid")
+        raise LiveDriverError("application ref, configuration, or verification path is invalid")
     if set(images) != {"ingress", "admin"}:
         raise LiveDriverError("replacement images must contain ingress and admin")
     for image in images.values():
@@ -298,7 +316,8 @@ def load_driver_config(path: Path) -> DriverConfig:
         _absolute(remote["sshConfig"], "remote.sshConfig"),
         str(remote["adminAlias"]),
         str(remote["recoveryAlias"]),
-        _absolute(remote["controllerSocket"], "remote.controllerSocket"),
+        _absolute(remote["controllerProjectSocket"], "remote.controllerProjectSocket"),
+        _absolute(remote["controllerPrivilegedSocket"], "remote.controllerPrivilegedSocket"),
         _absolute(remote["curl"], "remote.curl"),
         _absolute(recovery["age"], "recovery.age"),
         _absolute(recovery["ageIdentity"], "recovery.ageIdentity"),
@@ -417,33 +436,44 @@ class SupportedInterfaces:
         *,
         key: str | None = None,
         mutating: bool = False,
+        privileged: bool = False,
     ) -> tuple[int, object]:
         if not path.startswith("/v1/") or not _SAFE_REMOTE.fullmatch(path):
             raise LiveDriverError("controller path is unsafe")
-        argv = [
-            "sudo",
-            "-n",
-            "runuser",
-            "-u",
-            "management-web",
-            "--",
-            self.c.curl,
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "300",
-            "--unix-socket",
-            self.c.controller_socket,
-            "-X",
-            method,
-            "-H",
-            "Content-Type:application/json",
-        ]
+        argv = [self.c.curl]
+        alias = self.c.admin_alias
+        socket_path = self.c.controller_privileged_socket
+        if not privileged:
+            alias = self.c.recovery_alias
+            socket_path = self.c.controller_project_socket
+            argv = [
+                "sudo",
+                "-n",
+                "runuser",
+                "-u",
+                "management-web",
+                "--",
+                self.c.curl,
+            ]
+        argv.extend(
+            [
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "300",
+                "--unix-socket",
+                socket_path,
+                "-X",
+                method,
+                "-H",
+                "Content-Type:application/json",
+            ]
+        )
         if key is not None:
             argv.extend(("-H", f"Idempotency-Key:{key}"))
         argv.extend(("--data-binary", "@-", "-w", "\\n%{http_code}", f"http://localhost{path}"))
         raw = self._ssh(
-            self.c.recovery_alias,
+            alias,
             argv,
             stdin=_canonical(body) if body is not None else b"",
             mutating=mutating,
@@ -454,24 +484,91 @@ class SupportedInterfaces:
         except (ValueError, json.JSONDecodeError) as error:
             raise LiveDriverError("controller returned malformed bounded HTTP output") from error
 
+    def operation_status(self, key: str) -> Mapping[str, object]:
+        code, body = self.controller("GET", f"/v1/operations/{key}")
+        if code != 200 or not isinstance(body, dict):
+            raise LiveDriverError("controller operation response is invalid")
+        return body
+
     def operation(self, key: str) -> Mapping[str, object]:
         deadline = time.monotonic() + 1800
         while True:
-            code, body = self.controller("GET", f"/v1/operations/{key}")
-            if code == 200 and isinstance(body, dict):
-                status = body.get("status")
-                if status == "succeeded":
-                    return body
-                if status in {"failed", "recovery_required"}:
-                    raise LiveDriverError("controller operation did not converge")
+            body = self.operation_status(key)
+            status = body.get("status")
+            if status == "succeeded":
+                return body
+            if status in {"failed", "recovery_required"}:
+                raise LiveDriverError("controller operation did not converge")
             if time.monotonic() >= deadline:
                 raise LiveDriverError("controller operation polling timed out")
             time.sleep(2)
 
+    def interrupt_controller(self, operation_key: str) -> None:
+        deadline = time.monotonic() + 120
+        while True:
+            operation = self.operation_status(operation_key)
+            if operation.get("status") == "running" and operation.get("phase") not in {
+                None,
+                "queued",
+            }:
+                break
+            if operation.get("status") in {"succeeded", "failed", "recovery_required"}:
+                raise LiveDriverError("operation became terminal before interruption")
+            if time.monotonic() >= deadline:
+                raise LiveDriverError("operation did not start before interruption deadline")
+            time.sleep(0.2)
+        controller = f"{self.c.namespace}-controller.service"
+        readiness = f"{self.c.namespace}-controller-readiness.service"
+        self._ssh(
+            self.c.recovery_alias,
+            ("sudo", "-n", "systemctl", "kill", "--signal=KILL", controller),
+            mutating=True,
+        )
+        self._ssh(
+            self.c.recovery_alias,
+            ("sudo", "-n", "systemctl", "start", controller, readiness),
+            mutating=True,
+        )
+        self._ssh(
+            self.c.recovery_alias,
+            ("sudo", "-n", "systemctl", "is-active", controller, readiness),
+        )
+
+    def verify_public_storage(self, url: str, expected_commit: str) -> None:
+        output = self.commands.run(
+            (self.c.curl, "--fail", "--silent", "--show-error", "--max-time", "30", url),
+            timeout=60,
+        )
+        try:
+            result = json.loads(output)
+        except json.JSONDecodeError as error:
+            raise LiveDriverError("public storage verification returned malformed JSON") from error
+        if result != {
+            "commit": expected_commit,
+            "mongo": True,
+            "postgres": True,
+            "s3": True,
+        }:
+            raise LiveDriverError("application did not prove managed-storage write/read checks")
+
     def mutate_controller(
-        self, method: str, path: str, body: object, key: str, *, wait: bool = True
+        self,
+        method: str,
+        path: str,
+        body: object,
+        key: str,
+        *,
+        wait: bool = True,
+        privileged: bool = False,
     ) -> object:
-        code, response = self.controller(method, path, body, key=key, mutating=True)
+        code, response = self.controller(
+            method,
+            path,
+            body,
+            key=key,
+            mutating=True,
+            privileged=privileged,
+        )
         if code not in {200, 201, 202}:
             raise LiveDriverError("controller mutation was rejected")
         if code == 202 and wait:
@@ -692,7 +789,7 @@ class SupportedInterfaces:
 
     def inventory(self) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
-        for kind in ("server", "port", "volume", "image", "security group"):
+        for kind in ("server", "port", "volume", "image", "security group", "keypair"):
             visibility = ("--private",) if kind == "image" else ()
             raw = self.commands.run(
                 (self.c.openstack, *kind.split(), "list", *visibility, "-f", "json"),
@@ -739,7 +836,8 @@ class SupportedInterfaces:
         names["security group"] = [
             f"{prefix}-{role}" for role in ("admin", "ingress", "worker", "builder", "storage")
         ]
-        for kind in ("server", "port", "volume", "image", "security group"):
+        names["keypair"] = [f"{prefix}-admin"]
+        for kind in ("server", "port", "volume", "image", "security group", "keypair"):
             for name in names[kind]:
                 self.guard()
                 visibility = ("--private",) if kind == "image" else ()
@@ -782,7 +880,7 @@ class SupportedInterfaces:
                 except json.JSONDecodeError as error:
                     raise LiveDriverError("teardown ownership observation is malformed") from error
                 text = _canonical(item).decode()
-                if self.c.project_id not in text or name not in text:
+                if name not in text or (kind != "keypair" and self.c.project_id not in text):
                     raise LiveDriverError("teardown candidate lacks exact project/name ownership")
                 self.commands.run(
                     (self.c.openstack, *kind.split(), "delete", identifier),
@@ -897,6 +995,42 @@ class RepositoryLiveDriver:
             if item.get("type") == kind
         ]
 
+    def _deployment_body(self, revision: int) -> dict[str, object]:
+        items = self.i.list_items(f"/v1/applications/{self.app_id}/storage?limit=100")
+        configuration = self.c.application.get("configuration")
+        if not isinstance(configuration, Mapping):
+            raise LiveDriverError("application configuration is invalid")
+        targets = {
+            "postgres": {"url": "ACCEPTANCE_POSTGRES_URL"},
+            "mongo": {"uri": "ACCEPTANCE_MONGO_URI"},
+            "s3": {
+                "endpoint": "ACCEPTANCE_S3_ENDPOINT",
+                "region": "ACCEPTANCE_S3_REGION",
+                "access_key_id": "ACCEPTANCE_S3_ACCESS_KEY_ID",
+                "secret_access_key": "ACCEPTANCE_S3_SECRET_ACCESS_KEY",
+                "ca_bundle": "ACCEPTANCE_S3_CA_BUNDLE",
+                "bucket": "ACCEPTANCE_S3_BUCKET",
+                "force_path_style": "ACCEPTANCE_S3_FORCE_PATH_STYLE",
+            },
+        }
+        bindings = [
+            {
+                "resourceId": str(item["resourceId"]),
+                "outputs": targets[str(item["type"])],
+            }
+            for item in items
+        ]
+        return {
+            "repository": self.c.application["repository"],
+            "commit": self.c.application["commit"],
+            "requestedRef": self.c.application.get("requestedRef", "main"),
+            "configurationRevision": revision,
+            "configuration": {
+                **dict(configuration),
+                "storageBindings": bindings,
+            },
+        }
+
     def _execute(self, action: str, baseline: str) -> dict[str, bool]:
         def key(label: str) -> str:
             return str(uuid5(UUID(self.c.deployment_id), label))
@@ -915,19 +1049,22 @@ class RepositoryLiveDriver:
             ):
                 raise LiveDriverError("application identity/state mismatch")
         elif action in {"interrupted_resume_injection", "interrupted_resume"}:
-            postgres = self._storage_items("postgres")
-            if len(postgres) != 1 or not isinstance(postgres[0].get("resourceId"), str):
-                raise LiveDriverError("interruption target ownership is invalid")
-            resource_id = str(postgres[0]["resourceId"])
+            operation_key = key("interrupted-deployment")
             self.i.mutate_controller(
                 "POST",
-                f"/v1/storage/{resource_id}/verify",
-                {},
-                key("interrupted-postgres-verify"),
+                f"/v1/applications/{self.app_id}/deployments",
+                self._deployment_body(2),
+                operation_key,
                 wait=action == "interrupted_resume",
             )
-            if action == "interrupted_resume" and len(self._storage_items("postgres")) != 1:
-                raise LiveDriverError("resume changed the PostgreSQL resource identity")
+            if action == "interrupted_resume_injection":
+                self.i.interrupt_controller(operation_key)
+            else:
+                attempts = self.i.list_items(
+                    f"/v1/applications/{self.app_id}/deployments?limit=100"
+                )
+                if sum(item.get("deploymentId") == operation_key for item in attempts) != 1:
+                    raise LiveDriverError("resume duplicated the interrupted deployment")
         elif action in {"postgres_lifecycle", "mongo_lifecycle", "s3_lifecycle"}:
             kind = action.removesuffix("_lifecycle")
             self.i.mutate_controller(
@@ -944,38 +1081,27 @@ class RepositoryLiveDriver:
                 raise LiveDriverError("storage resource ID missing")
             self.i.mutate_controller("POST", f"/v1/storage/{rid}/verify", {}, key(f"{kind}-verify"))
         elif action == "application_deploy":
-            items = self.i.list_items(f"/v1/applications/{self.app_id}/storage?limit=100")
-            configuration = self.c.application.get("configuration")
-            if not isinstance(configuration, Mapping):
-                raise LiveDriverError("application configuration is invalid")
-            targets = {
-                "postgres": {"url": "ACCEPTANCE_POSTGRES_URL"},
-                "mongo": {"uri": "ACCEPTANCE_MONGO_URI"},
-                "s3": {
-                    "endpoint": "ACCEPTANCE_S3_ENDPOINT",
-                    "bucket": "ACCEPTANCE_S3_BUCKET",
-                },
-            }
-            bindings = [
-                {
-                    "resourceId": str(item["resourceId"]),
-                    "outputs": targets[str(item["type"])],
-                }
-                for item in items
-            ]
-            body = {
-                "repository": self.c.application["repository"],
-                "commit": self.c.application["commit"],
-                "requestedRef": self.c.application.get("requestedRef", "main"),
-                "configurationRevision": 1,
-                "configuration": {
-                    **dict(configuration),
-                    "storageBindings": bindings,
-                },
-            }
             self.i.mutate_controller(
-                "POST", f"/v1/applications/{self.app_id}/deployments", body, key("deployment")
+                "POST",
+                f"/v1/applications/{self.app_id}/deployments",
+                self._deployment_body(1),
+                key("deployment"),
             )
+            attempts = self.i.list_items(f"/v1/applications/{self.app_id}/deployments?limit=100")
+            if (
+                len(attempts) != 1
+                or attempts[0].get("repositoryCommit") != self.c.application["commit"]
+            ):
+                raise LiveDriverError("accepted deployment does not match the exact commit")
+            code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
+            if (
+                code != 200
+                or not isinstance(application, dict)
+                or not isinstance(application.get("url"), str)
+            ):
+                raise LiveDriverError("accepted application URL is unavailable")
+            verification_url = str(application["url"]) + str(self.c.application["verificationPath"])
+            self.i.verify_public_storage(verification_url, str(self.c.application["commit"]))
         elif action == "application_disable_enable":
             before_storage = tuple(
                 sorted(
@@ -1033,6 +1159,7 @@ class RepositoryLiveDriver:
                 f"/v1/applications/{self.app_id}/delete",
                 {"confirmation": self.c.application["slug"]},
                 key("delete"),
+                privileged=True,
             )
             if self.i.list_items(f"/v1/applications/{self.app_id}/storage?limit=100"):
                 raise LiveDriverError("application deletion left managed storage")

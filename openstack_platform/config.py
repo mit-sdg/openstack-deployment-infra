@@ -249,9 +249,13 @@ def _validate_public_ingress(document: Mapping[str, Any]) -> None:
         try:
             network = ipaddress.ip_network(item, strict=True)
         except ValueError as error:
-            raise ValidationError("publicIngress.providerCidrs contains a malformed CIDR") from error
+            raise ValidationError(
+                "publicIngress.providerCidrs contains a malformed CIDR"
+            ) from error
         if network.version != 4 or network.prefixlen == 0:
-            raise ValidationError("publicIngress.providerCidrs must contain exact non-default IPv4 CIDRs")
+            raise ValidationError(
+                "publicIngress.providerCidrs must contain exact non-default IPv4 CIDRs"
+            )
         canonical.append(str(network))
     if len(canonical) != len(set(canonical)):
         raise ValidationError("publicIngress.providerCidrs contains duplicate CIDRs")
