@@ -105,6 +105,29 @@ PLATFORM_DOMAIN='apps.example.test'
                 )
             self.assertFalse(workspace.exists())
 
+    def test_apply_rejects_missing_release_evidence_before_workspace_mutation(self) -> None:
+        path = self.environment(
+            "OS_AUTH_URL=https://identity.example/v3\n"
+            "OS_PROJECT_NAME=demo\n"
+            "OS_USERNAME=operator\n"
+            "OS_PASSWORD=secret\n"
+        )
+        with (
+            mock.patch.object(setup, "_repository_root", return_value=Path(__file__).parents[1]),
+            mock.patch.object(setup, "_source_commit", return_value="a" * 40),
+            mock.patch.object(setup, "_private_directory") as private_directory,
+            self.assertRaisesRegex(setup.SetupError, "PLATFORM_RELEASE_MANIFEST"),
+        ):
+            setup.run_setup(
+                env_file=path,
+                workspace=self.root / "workspace",
+                cloudflare_token=None,
+                apply=True,
+                output=io.StringIO(),
+            )
+        private_directory.assert_not_called()
+        self.assertFalse((self.root / "workspace").exists())
+
     def test_check_is_non_mutating_and_renders_resolved_plan(self) -> None:
         path = self.environment("OS_PROJECT_NAME=demo\n")
         output = io.StringIO()

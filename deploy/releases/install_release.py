@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -697,6 +698,207 @@ def _install_user_units(
         _write_text(destination / name, rendered, 0o600)
 
 
+def _candidate_wheel_inputs_sha256(source: Path) -> str:
+    paths = [source / "pyproject.toml", source / "infra/lib/platform_contract.json"]
+    paths.extend(
+        path
+        for path in (source / "openstack_platform").rglob("*")
+        if path.is_file() and path.suffix in (".py", ".txt")
+    )
+    digest = hashlib.sha256(b"operator-wheel-inputs-v1\0")
+    for path in sorted(paths, key=lambda item: item.relative_to(source).as_posix()):
+        if path.is_symlink():
+            _fail("release wheel input must not be a symlink")
+        relative = path.relative_to(source).as_posix()
+        data = path.read_bytes()
+        digest.update(relative.encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
+    return digest.hexdigest()
+
+
+def _trusted_manifest_preflight(
+    source: Path,
+    manifest: Path,
+    *,
+    signature: Path | None,
+    trust_root: Path | None,
+    allow_unsigned_development: bool,
+) -> None:
+    """Establish trust and verifier integrity without candidate code execution."""
+    try:
+        document = json.loads(manifest.read_bytes(), object_pairs_hook=_reject_duplicate_pairs)
+        trust = document["trust"]
+        channel = document["releaseChannel"]
+        expected_wheel = document["components"]["operatorWheel"]["sha256"]
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise InstallFailure("release compatibility manifest is malformed") from error
+    if not isinstance(trust, dict) or not _SHA256.fullmatch(str(expected_wheel)):
+        _fail("release compatibility manifest trust or wheel identity is malformed")
+    if trust.get("mode") == "production-ed25519" and channel == "production":
+        if signature is None or trust_root is None:
+            _fail("production release requires a signature and explicit trust root")
+        _verify_archive_file(manifest)
+        _verify_archive_file(signature)
+        _verify_archive_file(trust_root)
+        try:
+            public_der = subprocess.run(
+                [
+                    "openssl",
+                    "pkey",
+                    "-pubin",
+                    "-in",
+                    trust_root,
+                    "-pubout",
+                    "-outform",
+                    "DER",
+                ],
+                check=False,
+                capture_output=True,
+            )
+            verified = subprocess.run(
+                [
+                    "openssl",
+                    "pkeyutl",
+                    "-verify",
+                    "-rawin",
+                    "-pubin",
+                    "-inkey",
+                    trust_root,
+                    "-sigfile",
+                    signature,
+                    "-in",
+                    manifest,
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as error:
+            raise InstallFailure(
+                "OpenSSL is required for release signature verification"
+            ) from error
+        if public_der.returncode or hashlib.sha256(public_der.stdout).hexdigest() != trust.get(
+            "publicKeySha256"
+        ):
+            _fail("release trust root does not match the signed manifest")
+        if verified.returncode:
+            _fail("release manifest signature verification failed")
+    elif trust.get("mode") == "development-unsigned" and channel == "development-unsigned":
+        if (
+            not allow_unsigned_development
+            or os.environ.get("PLATFORM_ENVIRONMENT") == "production"
+            or signature is not None
+            or trust_root is not None
+        ):
+            _fail("unsigned development release requires explicit non-production mode")
+    else:
+        _fail("release trust mode and channel are inconsistent")
+    if _candidate_wheel_inputs_sha256(source) != expected_wheel:
+        _fail("release candidate verifier or wheel inputs do not match the trusted manifest")
+
+
+def _verify_release_gate(
+    source: Path,
+    *,
+    commit: str,
+    manifest: Path,
+    signature: Path | None,
+    trust_root: Path | None,
+    allow_unsigned_development: bool,
+) -> None:
+    """Load the candidate's verifier and check evidence before install mutation."""
+    _trusted_manifest_preflight(
+        source,
+        manifest,
+        signature=signature,
+        trust_root=trust_root,
+        allow_unsigned_development=allow_unsigned_development,
+    )
+    verifier_path = source / "openstack_platform/release_manifest.py"
+    if not verifier_path.is_file() or verifier_path.is_symlink():
+        _fail("release candidate is missing its compatibility verifier")
+    spec = importlib.util.spec_from_file_location("_candidate_release_manifest", verifier_path)
+    if spec is None or spec.loader is None:
+        _fail("release compatibility verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        module.verify(
+            source,
+            manifest,
+            expected_commit=commit,
+            signature=signature,
+            trust_root=trust_root,
+            allow_unsigned_development=allow_unsigned_development,
+        )
+    except Exception as error:
+        raise InstallFailure(f"release compatibility verification failed: {error}") from error
+
+
+def _preflight_release_gate(args: argparse.Namespace, commit: str) -> None:
+    manifest = cast(Path | None, args.release_manifest)
+    if manifest is None:
+        _fail("--release-manifest is required before release mutation")
+    source = cast(Path | None, args.source)
+    archive = cast(Path | None, args.archive)
+    signature = cast(Path | None, args.release_signature)
+    trust_root = cast(Path | None, args.release_trust_root)
+    allow_unsigned = cast(bool, args.allow_unsigned_development)
+    if source is not None:
+        _verify_release_gate(
+            source.resolve(strict=True),
+            commit=commit,
+            manifest=manifest.absolute(),
+            signature=signature.absolute() if signature else None,
+            trust_root=trust_root.absolute() if trust_root else None,
+            allow_unsigned_development=allow_unsigned,
+        )
+        return
+    assert archive is not None
+    archive_sha256 = cast(str | None, args.archive_sha256)
+    if archive_sha256 is None:
+        _fail("--archive requires --archive-sha256")
+    _verify_archive_identity(
+        archive.absolute(), expected_commit=commit, expected_sha256=archive_sha256
+    )
+    with tempfile.TemporaryDirectory(prefix="platform-release-preflight-") as temporary:
+        candidate = Path(temporary)
+        _extract_archive(archive.absolute(), candidate)
+        _verify_release_gate(
+            candidate,
+            commit=commit,
+            manifest=manifest.absolute(),
+            signature=signature.absolute() if signature else None,
+            trust_root=trust_root.absolute() if trust_root else None,
+            allow_unsigned_development=allow_unsigned,
+        )
+
+
+def _retain_release_evidence(stage: Path, args: argparse.Namespace) -> None:
+    manifest = cast(Path, args.release_manifest).absolute()
+    try:
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+        names = [document["evidence"][kind]["file"] for kind in ("sbom", "provenance")]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise InstallFailure("release evidence could not be retained") from error
+    if any(not isinstance(name, str) or Path(name).name != name for name in names):
+        _fail("release evidence filename is unsafe")
+    destination = stage / "evidence"
+    destination.mkdir(mode=0o750)
+    copies = [(manifest, "release-manifest.json")]
+    copies.extend((manifest.parent / name, name) for name in names)
+    signature = cast(Path | None, args.release_signature)
+    trust_root = cast(Path | None, args.release_trust_root)
+    if signature is not None:
+        copies.append((signature.absolute(), "release-manifest.sig"))
+    if trust_root is not None:
+        copies.append((trust_root.absolute(), "release-trust-root.pem"))
+    for source, name in copies:
+        if not source.is_file() or source.is_symlink():
+            _fail("release evidence changed before retention")
+        shutil.copyfile(source, destination / name)
+        (destination / name).chmod(0o440)
+
+
 def _build_source_archive(source: Path, commit: str, output: Path) -> None:
     try:
         head = subprocess.run(
@@ -729,6 +931,7 @@ def install(args: argparse.Namespace) -> Path:
     commit: str = args.commit
     if not _COMMIT.fullmatch(commit):
         _fail("commit must be a full lowercase source commit")
+    _preflight_release_gate(args, commit)
 
     defaults = _DEFAULTS.get(mode)
     requested_release_root = cast(Path | None, args.release_root)
@@ -869,6 +1072,7 @@ def install(args: argparse.Namespace) -> Path:
                         ),
                         0o550,
                     )
+                _retain_release_evidence(stage, args)
                 _write_text(stage / ".candidate", f"{commit}\n", 0o400)
                 try:
                     _smoke(mode, stage, runtime)
@@ -935,6 +1139,14 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--archive", type=Path)
     parser.add_argument("--archive-sha256")
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--release-manifest", type=Path)
+    parser.add_argument("--release-signature", type=Path)
+    parser.add_argument("--release-trust-root", type=Path)
+    parser.add_argument(
+        "--allow-unsigned-development",
+        action="store_true",
+        help="accept only a manifest marked development-unsigned (never production)",
+    )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--uv", type=Path, default=Path(shutil.which("uv") or "uv"))
     parser.add_argument("--release-root", type=Path)

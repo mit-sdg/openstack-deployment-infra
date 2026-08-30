@@ -26,11 +26,11 @@ jobs:
     name: Static checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3e24 # v7
         with:
           version: "0.12.2"
           enable-cache: true
@@ -68,6 +68,23 @@ jobs:
           PLATFORM_CONFIG=config/platform.example.json \
             uv run python infra/lib/platform_config.py validate
 
+      - name: Generate and verify development supply-chain evidence
+        run: |
+          uv run python -m openstack_platform.release_manifest generate \
+            --repository . --commit "$GITHUB_SHA" --output release-evidence \
+            --unsigned-development
+          uv run python -m openstack_platform.release_manifest verify \
+            --repository . --commit "$GITHUB_SHA" \
+            --manifest release-evidence/release-manifest.json \
+            --allow-unsigned-development
+
+      - name: Publish development SBOM and provenance evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: development-release-evidence-${{ github.sha }}
+          path: release-evidence
+          if-no-files-found: error
+
       - name: Compile Python
         run: uv run python -m compileall -q openstack_platform deploy infra tests
 
@@ -102,11 +119,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3e24 # v7
         with:
           version: "0.12.2"
           enable-cache: true
@@ -126,8 +143,8 @@ jobs:
     name: Nix evaluation and formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -143,8 +160,8 @@ jobs:
     name: Test packaged binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - run: nix build --print-build-logs .#checks.x86_64-linux.package-smoke
@@ -164,8 +181,8 @@ jobs:
           - worker
           - builder
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Enable KVM when available
@@ -185,7 +202,7 @@ jobs:
       commit_sha: ${{ steps.context.outputs.commit_sha }}
       publish: ${{ steps.context.outputs.publish }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
@@ -237,8 +254,8 @@ jobs:
           - builder
 
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -288,11 +305,11 @@ jobs:
           - builder
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ needs.publication-context.outputs.commit_sha }}
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 

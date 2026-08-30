@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from openstack_platform import release_manifest
 from openstack_platform.helper import production
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -402,6 +403,16 @@ class ReleaseInstallerTests(unittest.TestCase):
             """,
         )
         self._write(repository, "openstack_platform/__init__.py", "")
+        shutil.copy2(
+            ROOT / "openstack_platform/release_manifest.py",
+            repository / "openstack_platform/release_manifest.py",
+        )
+        self._write(
+            repository,
+            "openstack_platform/controller/database.py",
+            "MIGRATIONS = (Migration(1, ()),)\n",
+        )
+        self._write(repository, "openstack_platform/controller/api.py", "API_VERSION = 1\n")
         self._write(
             repository,
             "openstack_platform/restore.py",
@@ -529,6 +540,11 @@ class ReleaseInstallerTests(unittest.TestCase):
         )
         helper_deploy.chmod(0o755)
         shutil.copytree(UNITS, repository / "deploy/releases/systemd")
+        self._write(repository, "flake.nix", "{ outputs = _: {}; }\n")
+        self._write(repository, "flake.lock", "{}\n")
+        for role in release_manifest.ROLES:
+            self._write(repository, f"nix/roles/{role}.nix", "{ ... }: {}\n")
+
         config = repository / "config"
         config.mkdir()
         shutil.copy2(ROOT / "config/platform.example.json", config / "platform.example.json")
@@ -556,6 +572,12 @@ class ReleaseInstallerTests(unittest.TestCase):
         ).stdout.strip()
         return repository, commit
 
+    def _evidence(self, repository: Path, commit: str) -> Path:
+        output = self.root / f"release-evidence-{commit}"
+        if not output.exists():
+            release_manifest.generate(repository, commit, output, signing_key=None, unsigned=True)
+        return output
+
     def _install(
         self,
         repository: Path,
@@ -565,6 +587,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         check: bool = True,
         install_units: bool = False,
         prepare_config: bool = True,
+        evidence_commit: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         installation_root = self.root / f"{mode}-install"
         release_root = installation_root / (
@@ -602,6 +625,9 @@ class ReleaseInstallerTests(unittest.TestCase):
             repository,
             "--commit",
             commit,
+            "--release-manifest",
+            self._evidence(repository, evidence_commit or commit) / "release-manifest.json",
+            "--allow-unsigned-development",
             "--python",
             sys.executable,
             "--uv",
@@ -649,6 +675,10 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertIn(f"commit={commit}", second.stdout)
         self.assertEqual((release / ".complete").read_text(), f"{commit}\n")
         self.assertEqual((release_root / "current").resolve(), release)
+        retained = release / "evidence"
+        self.assertTrue((retained / "release-manifest.json").is_file())
+        self.assertTrue((retained / "release.sbom.json").is_file())
+        self.assertTrue((retained / "release.provenance.json").is_file())
         self.assertEqual(launcher.resolve(), release / "bin/openstack-platform")
         restore_launcher = self.root / "operator-install/bin/openstack-platform-restore"
         self.assertEqual(restore_launcher.resolve(), release / "bin/openstack-platform-restore")
@@ -805,24 +835,46 @@ class ReleaseInstallerTests(unittest.TestCase):
         releases = self.root / "helper-install/helper-releases/releases"
         self.assertEqual(list(releases.iterdir()), [])
 
-    def test_commit_mismatch_does_not_create_a_release(self) -> None:
-        repository, _commit = self._repository()
-        wrong_commit = "0" * 40
-        result = self._install(repository, wrong_commit, "operator", check=False)
+    def test_manifest_bound_tamper_leaves_current_release_unchanged(self) -> None:
+        repository, commit = self._repository()
+        self._install(repository, commit, "operator")
+        current = self.root / "operator-install/operator-releases/current"
+        selected = current.resolve()
+        actions = repository / "openstack_platform/helper/actions-v1.txt"
+        actions.write_text(actions.read_text() + "tampered.action\n")
+
+        result = self._install(repository, commit, "operator", check=False)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not the checkout HEAD", result.stderr)
+        self.assertIn("wheel inputs do not match", result.stderr)
+        self.assertEqual(current.resolve(), selected)
+        self.assertEqual((selected / ".complete").read_text(), f"{commit}\n")
+
+    def test_commit_mismatch_does_not_create_a_release(self) -> None:
+        repository, actual_commit = self._repository()
+        wrong_commit = "0" * 40
+        result = self._install(
+            repository,
+            wrong_commit,
+            "operator",
+            check=False,
+            evidence_commit=actual_commit,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("component set does not match", result.stderr)
         releases = self.root / "operator-install/operator-releases/releases"
-        self.assertEqual(list(releases.iterdir()), [])
+        self.assertFalse(releases.exists())
 
     def test_tracked_changes_must_be_committed(self) -> None:
         repository, commit = self._repository()
+        self._evidence(repository, commit)
         with (repository / "openstack_platform/operator.py").open("a", encoding="utf-8") as output:
             output.write("# dirty\n")
         result = self._install(repository, commit, "operator", check=False)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must be committed", result.stderr)
+        self.assertIn("wheel inputs do not match", result.stderr)
 
     def test_backup_unit_uses_installer_owned_path_placeholders(self) -> None:
         service = (UNITS / "openstack-platform-backup.service").read_text()
@@ -904,6 +956,12 @@ class ReleaseInstallerTests(unittest.TestCase):
         environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
         environment["PLATFORM_CONFIG"] = str(platform)
         environment["PLATFORM_HELPER_CONFIG_ROOT"] = str(helper_config_root)
+        environment["PLATFORM_RELEASE_MANIFEST"] = str(
+            self._evidence(repository, commit) / "release-manifest.json"
+        )
+        environment["PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"] = (
+            release_manifest.UNSIGNED_ACKNOWLEDGEMENT
+        )
         result = subprocess.run(
             [repository / "deploy/releases/deploy_helper_release.sh", commit],
             cwd=repository,
@@ -977,6 +1035,12 @@ class ReleaseInstallerTests(unittest.TestCase):
         environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
         environment["PLATFORM_CONFIG"] = str(platform)
         environment["PLATFORM_HELPER_CONFIG_ROOT"] = str(helper_config_root)
+        environment["PLATFORM_RELEASE_MANIFEST"] = str(
+            self._evidence(repository, commit) / "release-manifest.json"
+        )
+        environment["PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"] = (
+            release_manifest.UNSIGNED_ACKNOWLEDGEMENT
+        )
         result = subprocess.run(
             [repository / "deploy/releases/deploy_helper_release.sh", commit],
             cwd=repository,

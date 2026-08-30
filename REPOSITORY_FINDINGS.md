@@ -100,9 +100,9 @@ Ingress security groups allow ports 80 and 443 from `0.0.0.0/0`. Once the manage
 
 ### P-06 — Release compatibility and supply-chain evidence
 
-Releases are commit-addressed but there is no signed compatibility manifest binding UI, controller, helper, role images, contract, lockfile, and schema. CI Actions use moving major tags; SBOM/provenance/signature checks remain planned.
+Implemented by the deterministic signed release manifest, retained SBOM and provenance evidence, explicit Ed25519 trust root, pre-mutation setup/installer verification, immutable GitHub Action SHAs, and documented forward-only database ordering. The absent UI remains an explicit versioned placeholder in the component set rather than an omitted identity. Unsigned evidence is accepted only as visibly marked development evidence with an exact acknowledgement and is refused when the environment is production.
 
-**Exit gate:** setup and upgrade refuse incompatible or unsigned component sets before mutation; publish and verify provenance/SBOM; pin CI actions; document database-forward-only and rollback ordering.
+**Exit gate:** complete. Tamper tests cover the signature, evidence, contract, lockfile, wheel inputs, helper actions, controller, and role-image inputs while installer tests preserve the previously selected release on failure.
 
 ### P-07 — Live release acceptance
 

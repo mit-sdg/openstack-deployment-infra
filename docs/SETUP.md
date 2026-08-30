@@ -146,6 +146,13 @@ public route to return `OK` before reporting completion.
 
 ## Create the deployment
 
+Before `--apply`, generate and verify the signed compatibility manifest, SBOM,
+and provenance described in [Release supply-chain evidence](RELEASE_SUPPLY_CHAIN.md).
+Add `PLATFORM_RELEASE_MANIFEST`, `PLATFORM_RELEASE_SIGNATURE`, and
+`PLATFORM_RELEASE_TRUST_ROOT` to the private setup environment file. Setup
+verifies the complete component set before creating its workspace or calling
+Nix/OpenStack.
+
 Run from the clean repository root:
 
 ```bash

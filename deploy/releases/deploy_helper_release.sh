@@ -59,6 +59,48 @@ test -z "$(git -C "$root" status --porcelain --untracked-files=no)" || {
   exit 1
 }
 
+release_manifest=${PLATFORM_RELEASE_MANIFEST:-}
+release_signature=${PLATFORM_RELEASE_SIGNATURE:-}
+release_trust_root=${PLATFORM_RELEASE_TRUST_ROOT:-}
+unsigned_ack=${PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT:-}
+[[ -f $release_manifest && ! -L $release_manifest ]] || {
+  echo "PLATFORM_RELEASE_MANIFEST must select verified release evidence" >&2
+  exit 1
+}
+mapfile -t evidence_files < <(python3 - "$release_manifest" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+document = json.loads(manifest.read_text())
+for name in ("sbom", "provenance"):
+    filename = document["evidence"][name]["file"]
+    if not isinstance(filename, str) or Path(filename).name != filename:
+        raise SystemExit("release evidence filename is unsafe")
+    path = manifest.parent / filename
+    if not path.is_file() or path.is_symlink():
+        raise SystemExit(f"release {name} evidence is unavailable")
+    print(path)
+PY
+)
+[[ ${#evidence_files[@]} -eq 2 ]] || {
+  echo "release SBOM/provenance evidence is incomplete" >&2
+  exit 1
+}
+if [[ -n $unsigned_ack ]]; then
+  [[ $unsigned_ack == I_UNDERSTAND_THIS_IS_NOT_PRODUCTION && -z $release_signature && -z $release_trust_root ]] || {
+    echo "unsigned development release evidence is inconsistent" >&2
+    exit 1
+  }
+else
+  [[ -f $release_signature && ! -L $release_signature && -f $release_trust_root && ! -L $release_trust_root ]] || {
+    echo "production helper release requires signature and trust root" >&2
+    exit 1
+  }
+fi
+
 # Read deployment identity and paths from the installed, private operator
 # inventory. Restrict remote arguments to shell-safe canonical values.
 paths_output=$(python3 - "$platform_config" "$helper_config_root" <<'PY'
@@ -159,6 +201,10 @@ incoming="$release_root/incoming"
 bin_root="$admin_root/bin"
 remote_archive="$incoming/${commit}.tar"
 remote_installer="$incoming/${commit}.install_release.py"
+remote_evidence="$incoming/evidence-$commit"
+remote_manifest="$remote_evidence/release-manifest.json"
+remote_signature="$remote_evidence/release-manifest.sig"
+remote_trust_root="$remote_evidence/release-trust-root.pem"
 
 # The live admin inventory is image/configuration state. Verify it in place;
 # deployment never copies the operator host's private config into /etc.
@@ -264,7 +310,7 @@ uploaded=false
 cleanup() {
   rm -f -- "$archive" "$installer"
   if [[ $uploaded == true ]]; then
-    ssh -F "$ssh_config" "$ssh_alias" -- rm -f -- "$remote_archive" "$remote_installer" \
+    ssh -F "$ssh_config" "$ssh_alias" -- rm -rf -- "$remote_archive" "$remote_installer" "$remote_evidence" \
       >/dev/null 2>&1 || true
   fi
 }
@@ -293,17 +339,31 @@ remote_uid=$(ssh -F "$ssh_config" "$ssh_alias" -- id -u)
 }
 ssh -F "$ssh_config" "$ssh_alias" -- install -d -m 0750 \
   "$release_root" "$release_root/releases" "$bin_root"
-ssh -F "$ssh_config" "$ssh_alias" -- install -d -m 0700 "$incoming"
+ssh -F "$ssh_config" "$ssh_alias" -- install -d -m 0700 "$incoming" "$remote_evidence"
 scp -F "$ssh_config" -- "$archive" "${ssh_alias}:$remote_archive"
 uploaded=true
 scp -F "$ssh_config" -- "$installer" "${ssh_alias}:$remote_installer"
-ssh -F "$ssh_config" "$ssh_alias" -- chmod 0600 "$remote_archive" "$remote_installer"
+scp -F "$ssh_config" -- "$release_manifest" "${ssh_alias}:$remote_manifest"
+for evidence in "${evidence_files[@]}"; do
+  scp -F "$ssh_config" -- "$evidence" "${ssh_alias}:$remote_evidence/$(basename "$evidence")"
+done
+release_trust_arguments=()
+if [[ -n $unsigned_ack ]]; then
+  release_trust_arguments+=(--allow-unsigned-development)
+else
+  scp -F "$ssh_config" -- "$release_signature" "${ssh_alias}:$remote_signature"
+  scp -F "$ssh_config" -- "$release_trust_root" "${ssh_alias}:$remote_trust_root"
+  release_trust_arguments+=(--release-signature "$remote_signature" --release-trust-root "$remote_trust_root")
+fi
+ssh -F "$ssh_config" "$ssh_alias" -- chmod -R go-rwx "$remote_archive" "$remote_installer" "$remote_evidence"
 
 ssh -F "$ssh_config" "$ssh_alias" -- "$admin_python" "$remote_installer" \
   --mode helper \
   --archive "$remote_archive" \
   --archive-sha256 "$archive_sha256" \
   --commit "$commit" \
+  --release-manifest "$remote_manifest" \
+  "${release_trust_arguments[@]}" \
   --python "$admin_python" \
   --platform-config "$live_platform_config" \
   --expected-platform-namespace "$platform_namespace" \

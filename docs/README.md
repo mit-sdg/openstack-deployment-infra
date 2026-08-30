@@ -34,6 +34,8 @@ resources named by the private infrastructure inventory.
   forwarding, and original-host preservation.
 - [Release installation](RELEASE_INSTALLER.md) — install committed management
   and helper releases.
+- [Release supply-chain evidence](RELEASE_SUPPLY_CHAIN.md) — generate and verify
+  signed compatibility manifests, SBOMs, provenance, and development evidence.
 - [Image publication](IMAGE_PUBLISHING.md) — publish commit-addressed role
   images through CI.
 

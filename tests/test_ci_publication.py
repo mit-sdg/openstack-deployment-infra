@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,14 @@ WORKFLOW = ROOT / ".github/workflows/ci.yml"
 
 
 class PublicationTriggerTests(unittest.TestCase):
+    def test_every_github_action_is_pinned_to_an_immutable_sha(self) -> None:
+        workflow = WORKFLOW.read_text()
+        uses = re.findall(r"uses:\s+([^\s#]+)", workflow)
+        self.assertTrue(uses)
+        for action in uses:
+            with self.subTest(action=action):
+                self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
+
     def test_generated_recipes_have_an_explicit_rootless_live_smoke_job(self) -> None:
         workflow = WORKFLOW.read_text()
         smoke = (ROOT / "tests" / "smoke_generated_recipes.sh").read_text()

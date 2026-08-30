@@ -11,6 +11,10 @@ Initialize a fresh database; do not copy a database or external declarations fro
 
 - Run operator commands as the unprivileged owner of `/srv/openstack-platform`.
 - Use a clean checkout at the full commit being released.
+- Generate and verify the production compatibility manifest, SBOM, provenance,
+  and detached signature as described in
+  [Release supply-chain evidence](RELEASE_SUPPLY_CHAIN.md). Keep the selected
+  Ed25519 public trust root outside the release repository.
 - Bootstrap the exact Python 3.14.7 and uv 0.12.2 operator runtime once; do
   not substitute the host's Python 3.12.
 - The current admin must provide Python 3.14 and the helper runtime libraries.
@@ -148,13 +152,18 @@ commit=$(git rev-parse HEAD)
   --mode operator \
   --source "$PWD" \
   --commit "$commit" \
+  --release-manifest /private/releases/"$commit"/release-manifest.json \
+  --release-signature /private/releases/"$commit"/release-manifest.sig \
+  --release-trust-root /private/release-trust-root.pem \
   --python /srv/openstack-platform/runtime/python3.14 \
   --uv /srv/openstack-platform/bin/uv \
   --install-user-units \
   --enable-backup-timer
 ```
 
-The installer refuses a non-HEAD commit, tracked changes, an archive without
+Before creating or selecting a release path, the installer verifies the
+signature and every manifest-bound component and evidence hash. The installer
+refuses a missing or mismatched manifest, non-HEAD commit, tracked changes, an archive without
 Git's canonical global pax commit comment, a runtime other than Python 3.14, a
 stale `uv.lock`, an entrypoint smoke failure, or missing persistent
 configuration. It parses the archive marker with the Python standard library.

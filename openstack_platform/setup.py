@@ -29,6 +29,7 @@ from . import durable
 from .config import load_platform, load_policy
 from .contracts import IMAGE_ROLES, OPERATOR_SSH_ALIAS, PERSISTENT_ROLES
 from .installation import OPERATOR_ROOT
+from .release_manifest import ReleaseVerificationError, verify_from_environment
 
 _ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 _SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
@@ -926,6 +927,22 @@ def _apply_foundation(
     )
 
 
+def _release_evidence_arguments(environment: Mapping[str, str]) -> tuple[str | Path, ...]:
+    manifest = environment.get("PLATFORM_RELEASE_MANIFEST")
+    if not manifest:
+        _fail("verified release manifest path was not retained for installation")
+    arguments: tuple[str | Path, ...] = ("--release-manifest", Path(manifest))
+    signature = environment.get("PLATFORM_RELEASE_SIGNATURE")
+    trust_root = environment.get("PLATFORM_RELEASE_TRUST_ROOT")
+    if signature:
+        arguments += ("--release-signature", Path(signature))
+    if trust_root:
+        arguments += ("--release-trust-root", Path(trust_root))
+    if environment.get("PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"):
+        arguments += ("--allow-unsigned-development",)
+    return arguments
+
+
 def _bootstrap_roles(
     paths: SetupPaths,
     platform: Mapping[str, Any],
@@ -1113,6 +1130,7 @@ def _bootstrap_roles(
             OPERATOR_ROOT / "bin/uv",
             "--install-user-units",
             "--enable-backup-timer",
+            *_release_evidence_arguments(environment),
         ),
         environment=child,
         cwd=paths.repository,
@@ -1697,6 +1715,12 @@ def run_setup(
     _credential_requirements(values, input_reader, secret_reader)
     provider_environment = _openstack_environment(values)
     commit = _source_commit(repository, provider_environment)
+    # This is the production gate: verify the complete signed component set
+    # before creating a workspace, generating a key, or calling OpenStack/Nix.
+    try:
+        verify_from_environment(repository, commit, values)
+    except ReleaseVerificationError as error:
+        raise SetupError(str(error)) from error
     _private_directory(OPERATOR_ROOT)
     _private_directory(workspace)
     paths = _paths(repository, workspace)
@@ -1722,6 +1746,14 @@ def run_setup(
     project = resolved.project
     document = resolved.document
     commit = resolved.commit
+    for name in (
+        "PLATFORM_RELEASE_MANIFEST",
+        "PLATFORM_RELEASE_SIGNATURE",
+        "PLATFORM_RELEASE_TRUST_ROOT",
+        "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT",
+    ):
+        if values.get(name):
+            provider_environment[name] = values[name]
     if paths.platform.exists():
         existing = json.loads(paths.platform.read_text(encoding="utf-8"))
         if existing != document:
