@@ -5,7 +5,7 @@ Reviewed 2026-08-30. This file separates work that gates a real deployment from 
 ## Current decision
 
 - **Start management UI implementation:** yes. The controller/setup and P-level implementation gates are complete.
-- **Deploy to production users:** only after this exact commit passes Nix evaluation, five role VM/image tests, and a reviewed protected P-07 live run. Those are evidence gates, not remaining implementation placeholders.
+- **Deploy to production users:** no. An independent audit of commit `17d6cc4` found unresolved P-01, P-02, and P-07 implementation defects in addition to the pending Nix/live evidence gates.
 - **Run an internal infrastructure deployment:** reasonable after CI; use it to produce the first live acceptance evidence.
 
 ## Original blockers — fixed on this branch
@@ -40,7 +40,7 @@ The stale release-installer test expectations were corrected and the repository 
 
 - 428 unit/packaging/security/recovery tests pass;
 - Ruff format and lint pass;
-- strict mypy passes for 56 source files;
+- strict mypy passes for 63 source files;
 - vulture, compileall, entrypoint smoke tests, JSON/SVG checks, and shell syntax pass.
 
 Nix evaluation and VM builds still require CI because this environment cannot access the Nix daemon.
@@ -61,13 +61,13 @@ Setup now refuses completion unless the admin host confirms:
 
 ## Production gates
 
-Implementation work for P-01 through P-08 is complete on this branch. Production remains blocked until the exact Nix/VM/image CI and protected live P-07 evidence pass; code or mocked evidence cannot substitute for those runs.
+An independent clean-worktree audit classifies P-01 and P-02 as partial and P-07 as failed. P-03 through P-06 and P-08 pass code review, subject to the external Nix/live evidence stated below.
 
-### P-01 — Real non-mutating setup preflight — resolved
+### P-01 — Real non-mutating setup preflight — partial
 
-`setup check` now reuses strict setup resolution and produces human or JSON plans covering authenticated project identity, quota deltas, exact network/flavor/volume/address choices, collisions, local tooling, ingress, and commit/digest-pinned release and image sources. Mutation-spy and adversarial tests prove the path does not write files, build outputs, generate credentials, or issue provider mutations.
+`setup check` resolves authenticated identity, compute/Cinder/network quota, choices, collisions, tooling, ingress, and signed image sources without provider mutation. It does not check Glance image-count or image-storage quota before reporting `ready`, despite publishing five images. Real-cloud non-mutation remains unverified.
 
-### P-02 — Off-site backup and full loss recovery — resolved
+### P-02 — Off-site backup and full loss recovery — partial
 
 The admin now creates encrypted managed-data evidence that includes restorable
 OCI manifests and blobs, alongside PostgreSQL, MongoDB, and Garage. The
@@ -79,6 +79,8 @@ Bounded restore tools and the full-loss drill recover both SQLite databases,
 managed services, and an accepted app artifact without GitHub or the original
 registry. Off-site retention remains provider-owned and is applied only after a
 newer verified bundle and drill evidence exist. A guarded daily timer verifies a distinct mounted filesystem, rejects local/bind/stale sinks, discovers only committed sets, post-verifies the copy, and updates a credential-free health receipt.
+
+The packaged “full-loss” drill currently decrypts and integrity-checks both SQLite files but never invokes either production restore path or installs restored databases. Managed restoration is optional. The full-loss completion claim is therefore unproven.
 
 ### P-03 — Browser-to-controller trust boundary — resolved
 
@@ -98,7 +100,7 @@ Implemented by a signed pre-build component manifest plus a signed post-build ar
 
 **Exit gate:** complete. Tamper tests cover component inputs, signatures, evidence, QCOW2 bytes, Nix closure identity, source-manifest binding, and publication metadata while installer tests preserve the previously selected release on failure.
 
-### P-07 — Live release acceptance — orchestrator implemented; live evidence required
+### P-07 — Live release acceptance — failed independent audit
 
 The repository now provides an explicit-opt-in, plan-first disposable acceptance
 orchestrator with exact deployment/project scope, bounded driver calls, durable
@@ -115,8 +117,7 @@ resumes the identical operation, while the deployed fixture proves PostgreSQL,
 MongoDB, and S3 writes/reads through runtime bindings. Contract tests exercise
 every action through fake transports, including a plan transcript with zero
 mutations.
-The gate remains closed until a protected runner executes it and a reviewer accepts
-a verified passing evidence bundle; no live pass is claimed here.
+The gate remains closed. The independent audit found that the driver returns every required check as `true` after broad command success, including outcomes it does not directly observe. Its managed restore action calls the throwaway restore verifier rather than the destructive replacement restore. Host replacement and backup-disposition checks are similarly synthesized. Teardown validates ownership by searching for project/name substrings anywhere in provider JSON, and keypairs skip project validation. These defects can create false acceptance evidence or delete an insufficiently authenticated resource.
 
 ### P-08 — Critical hardening workstreams — resolved in code
 
