@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from . import runtime
+from . import durable, runtime
 from .config import load_platform
 from .controller import database as db
 from .installation import OPERATOR_BIN
@@ -258,6 +258,10 @@ def _unfinished_operations(connection: sqlite3.Connection) -> bool:
 def _verify_candidate(path: Path, *, identity: db.DeploymentIdentity | None = None) -> int:
     try:
         connection = db.connect(path, create=False, identity=identity)
+    except db.UnsupportedPriorStateError as error:
+        raise RestoreError(
+            "UNSUPPORTED_PRIOR_STATE: backup was created by an unsupported control surface"
+        ) from error
     except (OSError, db.DatabaseError, sqlite3.Error) as error:
         raise RestoreError("candidate is not a valid private SQLite database") from error
     try:
@@ -357,6 +361,25 @@ def restore_database(
 
     temporary_path: Path | None = None
     try:
+        for stale in sorted(
+            destination_path.parent.glob(f".{destination_path.name}.restore-*.tmp")
+        ):
+            try:
+                durable.validate_file(stale, mode=0o600, maximum_bytes=maximum_bytes)
+                stale.unlink()
+                for sidecar in _sidecar_paths(stale):
+                    if os.path.lexists(sidecar):
+                        _direct_private_file(
+                            sidecar,
+                            label="stale restore sidecar",
+                            maximum_bytes=maximum_bytes,
+                            require_nonempty=False,
+                        )
+                        sidecar.unlink()
+            except durable.DurableReplaceError as error:
+                raise RestoreError(
+                    "restore directory contains an unsafe stale temporary"
+                ) from error
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination_path.name}.restore-",
             suffix=".tmp",
@@ -379,13 +402,21 @@ def restore_database(
             maximum_bytes=maximum_bytes,
         )
         _remove_sidecars(temporary_path)
-        os.replace(temporary_path, destination_path)
+        try:
+            durable.commit_prepared(
+                temporary_path,
+                destination_path,
+                mode=0o600,
+                maximum_bytes=maximum_bytes,
+            )
+        except durable.DurableReplaceError as error:
+            raise RestoreError("offline SQLite restore could not be committed durably") from error
         temporary_path = None
         for sidecar in old_sidecars:
             sidecar.unlink(missing_ok=True)
         directory_descriptor = os.open(
             destination_path.parent,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
         )
         try:
             os.fsync(directory_descriptor)

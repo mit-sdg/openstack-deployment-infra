@@ -114,8 +114,20 @@ def _check_destination(path: Path) -> None:
 
 def _atomic_write(path: Path, raw: bytes) -> None:
     _check_destination(path)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(f".{path.name}.tmp")
     try:
+        if os.path.lexists(temporary):
+            metadata = _metadata(temporary, directory=False)
+            if stat.S_IMODE(metadata.st_mode) != 0o600:
+                _fail("configuration destination has an unsafe stale temporary")
+            temporary.unlink()
+            stale_directory = os.open(
+                path.parent, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+            try:
+                os.fsync(stale_directory)
+            finally:
+                os.close(stale_directory)
         descriptor = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
@@ -130,7 +142,9 @@ def _atomic_write(path: Path, raw: bytes) -> None:
         finally:
             os.close(descriptor)
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+        directory = os.open(
+            path.parent, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
         try:
             os.fsync(directory)
         finally:

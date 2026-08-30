@@ -95,12 +95,30 @@ def _ensure_directory(path: Path, mode: int) -> None:
     path.chmod(mode)
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_symlink(target: Path, link: Path) -> None:
     _ensure_directory(link.parent, 0o750)
-    temporary = link.parent / f".{link.name}.{os.getpid()}.tmp"
-    temporary.unlink(missing_ok=True)
+    if os.path.lexists(link):
+        metadata = link.lstat()
+        if not stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            _fail("release selector must be a current-user-owned direct symlink")
+    temporary = link.parent / f".{link.name}.tmp"
+    if os.path.lexists(temporary):
+        metadata = temporary.lstat()
+        if not stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            _fail("release selector has an unsafe stale temporary")
+        temporary.unlink()
+        _fsync_directory(link.parent)
     temporary.symlink_to(target)
     os.replace(temporary, link)
+    _fsync_directory(link.parent)
 
 
 def _verify_archive_file(archive: Path) -> None:
@@ -427,13 +445,43 @@ exec "$release/.venv/bin/python" -P -m openstack_platform.restore "$@" \
 
 
 def _write_text(path: Path, text: str, mode: int) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as output:
-        output.write(text)
-        output.flush()
-        os.fsync(output.fileno())
-    temporary.chmod(mode)
+    raw = text.encode("utf-8")
+    if len(raw) > 1_048_576:
+        _fail("release evidence exceeds its size limit")
+    if os.path.lexists(path):
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != mode
+        ):
+            _fail("release evidence destination has an unexpected type, owner, or mode")
+    temporary = path.with_name(f".{path.name}.tmp")
+    if os.path.lexists(temporary):
+        metadata = temporary.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != mode
+        ):
+            _fail("release evidence has an unsafe stale temporary")
+        temporary.unlink()
+        _fsync_directory(path.parent)
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        mode,
+    )
+    try:
+        view = memoryview(raw)
+        while view:
+            view = view[os.write(descriptor, view) :]
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     os.replace(temporary, path)
+    _fsync_directory(path.parent)
 
 
 def _smoke(mode: str, release: Path, python: Path) -> None:

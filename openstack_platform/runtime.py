@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
+from . import durable
+
 
 class RuntimeFailure(RuntimeError):
     """A failure whose string form is safe for operator output."""
@@ -216,19 +218,11 @@ def write_private_stack_diagnostic(
         locations.append("<unavailable>")
 
     path = destination_directory / f"{correlation_id}.trace"
-    descriptor = _private_file(path, create=True)
+    payload = (f"correlation-id={correlation_id}\n" + "\n".join(locations) + "\n").encode("ascii")
     try:
-        payload = (f"correlation-id={correlation_id}\n" + "\n".join(locations) + "\n").encode(
-            "ascii"
-        )
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        os.ftruncate(descriptor, 0)
-        written = 0
-        while written < len(payload):
-            written += os.write(descriptor, payload[written:])
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        durable.atomic_write(path, payload, mode=0o600, maximum_bytes=32_768)
+    except durable.DurableReplaceError as replacement_error:
+        raise RuntimeFailure("could not persist private diagnostic safely") from replacement_error
     return path
 
 

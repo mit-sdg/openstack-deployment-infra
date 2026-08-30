@@ -1042,6 +1042,13 @@ payloads, and age identities out of tracked evidence.
 - Offline restore refusal: leave the destination untouched, resolve the named
   mode/identity/schema/unfinished-operation condition, and rerun with the same
   private files.
+- `UNSUPPORTED_PRIOR_STATE`: stop before migration, restore, or provider
+  reconciliation. Do not edit SQLite migration rows, ownership markers, Nomad
+  metadata, or deterministic provider names to make the state appear current.
+  Preserve and separately archive that state, choose a new deployment namespace
+  and empty state/backup roots, run the documented greenfield setup, and import
+  application data only through a reviewed format-specific procedure. This
+  fresh cutover is not a normal restore and must not adopt old provider objects.
 
 For an unresolved failure, report only the safe phase, correlation/operation
 ID, exact identity arguments, and bounded evidence. Do not report credentials,

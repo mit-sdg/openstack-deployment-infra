@@ -14,7 +14,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import uuid as uuid_module
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -321,8 +320,29 @@ def _scan_host_key(address: str) -> tuple[str, str]:
 
 def _atomic_write(path: Path, value: bytes, *, mode: int) -> None:
     _private_directory(path.parent)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
+    if os.path.lexists(path):
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != mode
+        ):
+            _fail("SSH bridge destination has an unexpected type, owner, or mode")
+    temporary = path.with_name(f".{path.name}.tmp")
+    if os.path.lexists(temporary):
+        metadata = temporary.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != mode
+        ):
+            _fail("SSH bridge has an unsafe stale temporary")
+        temporary.unlink()
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        mode,
+    )
     try:
         os.fchmod(descriptor, mode)
         written = 0
@@ -332,7 +352,9 @@ def _atomic_write(path: Path, value: bytes, *, mode: int) -> None:
         os.close(descriptor)
         descriptor = -1
         os.replace(temporary, path)
-        directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        directory_descriptor = os.open(
+            path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
         try:
             os.fsync(directory_descriptor)
         finally:

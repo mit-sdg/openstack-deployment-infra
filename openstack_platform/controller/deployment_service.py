@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 import time
 import uuid as uuid_module
@@ -12,10 +11,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any, Literal, Protocol
 
-from .. import openstack, remote, runtime
+from .. import durable, openstack, remote, runtime
 from ..config import Config
 from ..contracts import REGISTRY_PORT
 from ..validation import (
@@ -168,16 +166,15 @@ def _write_build_log(
     directory = runtime.ensure_private_directory(root / application_id, create=True)
     name = f"{source_commit}-{operation_id}.log"
     destination = directory / name
-    with NamedTemporaryFile(dir=directory, prefix=f".{name}.", delete=False) as temporary:
-        temporary.write(payload)
-        temporary.flush()
-        os.fsync(temporary.fileno())
-        temporary_path = Path(temporary.name)
     try:
-        os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, destination)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+        durable.atomic_write(
+            destination,
+            payload,
+            mode=0o600,
+            maximum_bytes=104_857_600,
+        )
+    except durable.DurableReplaceError as error:
+        raise app.ApplicationError("build log could not be committed durably") from error
     return destination.relative_to(state_directory).as_posix()
 
 

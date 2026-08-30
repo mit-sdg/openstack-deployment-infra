@@ -13,7 +13,6 @@ import re
 import shlex
 import stat
 import struct
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -282,7 +281,21 @@ def _atomic_replace(path: Path, payload: bytes, expected: os.stat_result) -> Non
     temporary_name: str | None = None
     directory_fd = -1
     try:
-        temporary_fd, temporary_name = tempfile.mkstemp(prefix=".known-hosts-", dir=path.parent)
+        temporary_name = str(path.parent / ".known-hosts.tmp")
+        if os.path.lexists(temporary_name):
+            stale = Path(temporary_name).lstat()
+            if (
+                not stat.S_ISREG(stale.st_mode)
+                or stale.st_uid != os.geteuid()
+                or stat.S_IMODE(stale.st_mode) != 0o600
+            ):
+                raise HostKeyError("known-hosts directory contains an unsafe stale temporary")
+            os.unlink(temporary_name)
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
         os.fchmod(temporary_fd, 0o600)
         written = 0
         while written < len(payload):

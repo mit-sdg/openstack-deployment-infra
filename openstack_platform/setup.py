@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, NoReturn, TextIO
 from uuid import UUID
 
+from . import durable
 from .config import load_platform, load_policy
 from .contracts import IMAGE_ROLES, OPERATOR_SSH_ALIAS, PERSISTENT_ROLES
 from .installation import OPERATOR_ROOT
@@ -89,26 +90,15 @@ def _private_directory(path: Path) -> None:
 
 def _atomic_private_write(path: Path, content: str) -> None:
     _private_directory(path.parent)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-        0o600,
-    )
     try:
-        raw = content.encode("utf-8")
-        view = memoryview(raw)
-        while view:
-            view = view[os.write(descriptor, view) :]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    os.replace(temporary, path)
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+        durable.atomic_write(
+            path,
+            content.encode("utf-8"),
+            mode=0o600,
+            maximum_bytes=1_048_576,
+        )
+    except durable.DurableReplaceError as error:
+        raise SetupError("configuration could not be installed durably") from error
 
 
 def load_environment_file(path: Path) -> dict[str, str]:

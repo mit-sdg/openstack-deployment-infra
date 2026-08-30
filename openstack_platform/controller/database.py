@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .deployment_config import DeploymentConfiguration
 
+from .. import durable
 from ..config import PlatformConfig, platform_config_identity
 from ..contracts import (
     DATABASE_DEPLOYMENT_MARKER_PREFIX,
@@ -71,6 +72,12 @@ class DatabaseError(RuntimeError):
 
 class MigrationError(DatabaseError):
     pass
+
+
+class UnsupportedPriorStateError(MigrationError):
+    """State from an unrecognized control surface or future schema."""
+
+    code = "UNSUPPORTED_PRIOR_STATE"
 
 
 class IdempotencyConflictError(DatabaseError):
@@ -654,7 +661,9 @@ def _validate_greenfield_marker(
     if not objects:
         return
     if objects.get("schema_migrations") != "table":
-        raise MigrationError("SQLite database is not an explicitly marked greenfield database")
+        raise UnsupportedPriorStateError(
+            "UNSUPPORTED_PRIOR_STATE: SQLite database lacks the supported control-plane marker"
+        )
     try:
         rows = connection.execute(
             "SELECT version, checksum FROM schema_migrations WHERE version = ?",
@@ -665,7 +674,9 @@ def _validate_greenfield_marker(
             "SQLite database is not an explicitly marked greenfield database"
         ) from None
     if len(rows) != 1 or not isinstance(rows[0]["checksum"], str):
-        raise MigrationError("SQLite database is not an explicitly marked greenfield database")
+        raise UnsupportedPriorStateError(
+            "UNSUPPORTED_PRIOR_STATE: SQLite database lacks the supported control-plane marker"
+        )
     observed = rows[0]["checksum"]
     if not re.fullmatch(r"[0-9a-f]{64}", observed):
         raise MigrationError("SQLite deployment identity marker is malformed")
@@ -673,6 +684,21 @@ def _validate_greenfield_marker(
         expected = _deployment_marker_checksum(identity)
         if observed != expected:
             raise MigrationError("SQLite database belongs to a different deployment identity")
+    try:
+        versions = [
+            row["version"]
+            for row in connection.execute(
+                "SELECT version FROM schema_migrations WHERE version > 0 ORDER BY version"
+            ).fetchall()
+        ]
+    except sqlite3.DatabaseError:
+        raise MigrationError("SQLite migration history is corrupt") from None
+    if any(not isinstance(version, int) for version in versions):
+        raise MigrationError("SQLite migration history is malformed")
+    if any(version > MIGRATIONS[-1].version for version in versions):
+        raise UnsupportedPriorStateError(
+            "UNSUPPORTED_PRIOR_STATE: database has an unknown future migration"
+        )
     # Low-level callers that do not have the platform inventory can still
     # inspect a bound database. The CLI and restore paths always pass an
     # identity and perform the cross-deployment check above. Validate against
@@ -830,7 +856,9 @@ def migrate(
             continue
         migration = known.get(version)
         if migration is None:
-            raise MigrationError(f"database has unknown future migration {version}")
+            raise UnsupportedPriorStateError(
+                "UNSUPPORTED_PRIOR_STATE: database has an unknown future migration"
+            )
         if row["checksum"] != migration.checksum:
             raise MigrationError(f"migration {version} checksum does not match")
         migration_versions.append(version)
@@ -2521,6 +2549,15 @@ def backup_database(connection: sqlite3.Connection, destination: str | Path) -> 
     ensure_private_directory(destination_path.parent, create=True)
     if destination_path.exists() or destination_path.is_symlink():
         raise DatabaseError("backup destination already exists")
+    stale_pattern = f".{destination_path.name}.*.tmp"
+    for stale in sorted(destination_path.parent.glob(stale_pattern)):
+        try:
+            durable.validate_file(stale, mode=0o600, maximum_bytes=1_073_741_824)
+            stale.unlink()
+        except durable.DurableReplaceError as error:
+            raise DatabaseError(
+                "backup directory contains an unsafe stale temporary file"
+            ) from error
     temporary = destination_path.with_name(
         f".{destination_path.name}.{uuid_module.uuid4().hex}.tmp"
     )
@@ -2540,12 +2577,15 @@ def backup_database(connection: sqlite3.Connection, destination: str | Path) -> 
         target.close()
         target = None
         os.chmod(temporary, 0o600)
-        os.replace(temporary, destination_path)
-        directory_fd = os.open(destination_path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            durable.commit_prepared(
+                temporary,
+                destination_path,
+                mode=0o600,
+                maximum_bytes=1_073_741_824,
+            )
+        except durable.DurableReplaceError as error:
+            raise DatabaseError("SQLite backup could not be committed durably") from error
     finally:
         if target is not None:
             target.close()

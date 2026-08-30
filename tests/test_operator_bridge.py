@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import io
-import stat
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -19,7 +18,7 @@ SPEC.loader.exec_module(bridge)
 
 
 class OperatorBridgeTests(unittest.TestCase):
-    def test_atomic_outputs_are_private_and_replace_symlinks(self) -> None:
+    def test_atomic_outputs_refuse_symlinks_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             root.chmod(0o700)
@@ -29,10 +28,10 @@ class OperatorBridgeTests(unittest.TestCase):
             target = root / "outside"
             target.write_text("keep")
             destination.symlink_to(target)
-            bridge._atomic_write(destination, b"Host platform-admin\n", mode=0o600)
-            self.assertEqual(destination.read_bytes(), b"Host platform-admin\n")
+            with self.assertRaisesRegex(bridge.BridgeError, "unexpected type"):
+                bridge._atomic_write(destination, b"Host platform-admin\n", mode=0o600)
+            self.assertTrue(destination.is_symlink())
             self.assertEqual(target.read_text(), "keep")
-            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
 
     def test_provider_wrapper_requires_a_protected_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

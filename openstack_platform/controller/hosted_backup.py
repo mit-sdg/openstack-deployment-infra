@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
-from .. import runtime
+from .. import durable, runtime
 from ..config import load
 from ..validation import ValidationError
 from . import database as db
@@ -39,9 +39,12 @@ def _fsync_directory(path: Path) -> None:
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1_048_576), b""):
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        while chunk := os.read(descriptor, 1_048_576):
             digest.update(chunk)
+    finally:
+        os.close(descriptor)
     return digest.hexdigest()
 
 
@@ -141,12 +144,31 @@ def backup_hosted_database(
         except OSError as error:
             raise HostedBackupError("age did not produce a readable ciphertext") from error
         os.chmod(staged_ciphertext, 0o640)
-        with staged_ciphertext.open("rb") as handle:
-            os.fsync(handle.fileno())
+        try:
+            durable.validate_file(staged_ciphertext, mode=0o640, maximum_bytes=1_073_741_824)
+        except durable.DurableReplaceError as error:
+            raise HostedBackupError("age ciphertext has unsafe filesystem metadata") from error
+        ciphertext_descriptor = os.open(
+            staged_ciphertext, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
+        try:
+            os.fsync(ciphertext_descriptor)
+        finally:
+            os.close(ciphertext_descriptor)
         digest = _sha256(staged_ciphertext)
 
-        staged_checksum = staging / f".{name}.{os.getpid()}.sha256.tmp"
-        staged_manifest = staging / f".{name}.{os.getpid()}.manifest.tmp"
+        staged_checksum = staging / f".{name}.sha256.tmp"
+        staged_manifest = staging / f".{name}.manifest.tmp"
+        for stale in (staged_checksum, staged_manifest):
+            if os.path.lexists(stale):
+                try:
+                    durable.validate_file(stale, mode=0o640, maximum_bytes=65_536)
+                except durable.DurableReplaceError as error:
+                    raise HostedBackupError(
+                        "backup staging contains unsafe stale evidence"
+                    ) from error
+                stale.unlink()
+        _fsync_directory(staging)
         _write_file(staged_checksum, f"{digest}  {name}\n".encode(), mode=0o640)
         manifest = {
             "format": "openstack-platform-hosted-controller-backup-v1",
@@ -160,13 +182,21 @@ def backup_hosted_database(
             mode=0o640,
         )
         _fsync_directory(staging)
+        if any(
+            os.path.lexists(path) for path in (final_ciphertext, final_checksum, final_manifest)
+        ):
+            _fail("hosted-controller backup name appeared during commit")
         os.replace(staged_ciphertext, final_ciphertext)
         staged_ciphertext = None
+        _fsync_directory(staging)
+        _fsync_directory(root)
         os.replace(staged_checksum, final_checksum)
         staged_checksum = None
+        _fsync_directory(staging)
         _fsync_directory(root)
         os.replace(staged_manifest, final_manifest)
         staged_manifest = None
+        _fsync_directory(staging)
         _fsync_directory(root)
         return name, digest
     except (OSError, db.DatabaseError, runtime.RuntimeFailure) as error:

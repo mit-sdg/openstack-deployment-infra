@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .. import durable
 from ..config import PlatformConfig, RuntimeImages, load_platform
 from ..contracts import (
     CONTROLLER_BACKUP_DIRECTORY,
@@ -258,16 +259,17 @@ def _build_log_paths(runtime: HelperRuntime, app_slug: str, build_id: str) -> tu
 def _write_build_log_state(path: Path, state: str) -> None:
     if state not in {"running", "complete", "failed"}:
         raise ValueError("build log state is invalid")
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
-        with temporary.open("x", encoding="ascii") as stream:
-            os.chmod(temporary, 0o600)
-            stream.write(state + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+        durable.atomic_write(
+            path,
+            (state + "\n").encode("ascii"),
+            mode=0o600,
+            maximum_bytes=16,
+        )
+    except durable.DurableReplaceError as error:
+        raise HelperActionError(
+            "INVALID_STATE", "build log state could not be committed"
+        ) from error
 
 
 def _read_build_log(args: Mapping[str, Any]) -> Mapping[str, Any]:

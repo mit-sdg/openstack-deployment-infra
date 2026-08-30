@@ -391,7 +391,8 @@ def postgres_create(
         or _pg_exists(admin, "SELECT 1 FROM pg_roles WHERE rolname=%s", username)
     ):
         raise HelperActionError(
-            "RESOURCE_EXISTS", "PostgreSQL deterministic provider identity exists"
+            "UNSUPPORTED_PRIOR_STATE",
+            "PostgreSQL deterministic identity contains unsupported prior provider state",
         )
     try:
         _pg_execute(admin, f"CREATE ROLE {_quote_identifier(owner)} NOLOGIN")
@@ -811,7 +812,8 @@ def mongo_create(
     collections = _mongo_collections(database_client)
     if database in database_names or users or collections:
         raise HelperActionError(
-            "RESOURCE_EXISTS", "deterministic MongoDB database already contains provider state"
+            "UNSUPPORTED_PRIOR_STATE",
+            "MongoDB deterministic identity already contains unsupported prior provider state",
         )
     custom_data = {_MONGO_OWNER_FIELD: application_id, _MONGO_GENERATION_FIELD: generation}
     if operation_id is not None:
@@ -1074,7 +1076,10 @@ def s3_create(
     key_name: str | None = None
     try:
         if _s3_bucket_id(admin, bucket) is not None:
-            raise HelperActionError("RESOURCE_EXISTS", "Garage bucket already exists")
+            raise HelperActionError(
+                "UNSUPPORTED_PRIOR_STATE",
+                "Garage deterministic identity contains unsupported prior provider state",
+            )
         bucket_info = admin.request("/CreateBucket", {"globalAlias": bucket})
         if (
             not isinstance(bucket_info, Mapping)
@@ -1126,10 +1131,10 @@ def s3_create(
             access_key_id=key_info["accessKeyId"],
         )
     except Exception as original_error:
-        if (
-            isinstance(original_error, HelperActionError)
-            and original_error.code == "RESOURCE_EXISTS"
-        ):
+        if isinstance(original_error, HelperActionError) and original_error.code in {
+            "RESOURCE_EXISTS",
+            "UNSUPPORTED_PRIOR_STATE",
+        }:
             raise
         candidate_bucket_id = bucket_info.get("id") if isinstance(bucket_info, Mapping) else None
         candidate_id = key_info.get("accessKeyId") if isinstance(key_info, Mapping) else None

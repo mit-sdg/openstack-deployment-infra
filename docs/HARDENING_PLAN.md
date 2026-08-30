@@ -34,9 +34,9 @@ Every workstream must preserve these invariants:
 | HARD-05 | Release and bootstrap supply-chain evidence | Planned | HARD-02 |
 | HARD-06 | Unix-socket peer authentication | Planned | HARD-00 |
 | HARD-07 | Systemd credential isolation | Planned | HARD-00 |
-| HARD-08 | Crash-durable filesystem replacement | Planned | HARD-00 |
-| HARD-09 | State-machine, property, and parser fuzz tests | Planned | HARD-01, HARD-03 |
-| HARD-10 | Explicit unsupported-state detection | Planned | HARD-01 |
+| HARD-08 | Crash-durable filesystem replacement | Implemented for supported critical paths | HARD-00 |
+| HARD-09 | State-machine, property, and parser fuzz tests | Concrete trust-boundary gates implemented | HARD-01, HARD-03 |
+| HARD-10 | Explicit unsupported-state detection | Implemented for migration, provider creation, and restore | HARD-01 |
 | HARD-11 | Runtime network and egress restrictions | Planned | HARD-00 |
 
 HARD-00 is the immediate gate. HARD-02 should finish before HARD-01 and HARD-04
@@ -245,6 +245,20 @@ database backup, restore, diagnostics, manifests, and evidence files for:
 - deterministic stale-temporary cleanup; and
 - refusal to overwrite an unexpected file type.
 
+**Implemented evidence (2026-08-30):** `openstack_platform.durable` now provides
+bounded, no-follow, owner/mode/type-checked replacement with a same-directory
+prepared-file commit path, file and parent-directory `fsync`, deterministic
+private stale-temp reconciliation, and refusal of unexpected destination or
+temporary objects. Configuration generation, private diagnostics, build logs,
+build state, SQLite backup, and offline restore use it. Release selection,
+release evidence, operator configuration, SSH bridge installation, known-hosts,
+hosted backup evidence, and accepted-backup publication have equivalent local
+commit checks; cross-directory hosted-backup moves sync both source and target
+directories. `tests/test_hardening_properties.py` injects interruption before
+write, after write, after file `fsync`, after rename, and after directory
+`fsync`; every state is old-or-new and a retry converges. Symlink stale-temp and
+unexpected destination regressions prove no unrelated object is removed.
+
 **Exit evidence:** fault-injection tests before write, after write, after file
 `fsync`, after rename, and after directory `fsync`, with a documented resulting
 state and retry path for each interruption.
@@ -270,6 +284,15 @@ response does not create a second resource,” and “pre-promotion failure leav
 the accepted deployment referenced.” Fuzz failures must retain a minimized,
 non-secret reproducer.
 
+**Implemented evidence (2026-08-30):** deterministic seeded tests now mutate
+implementation contracts and inventory JSON, generate malformed controller
+routes and HTTP framing, and verify invalid input never reaches a mutation
+handler. Existing database tests plus the new unsupported-state fixtures cover
+idempotency fingerprint conflicts, replay, durable transition legality, and
+invalid-state no-mutation. Seeds are fixed and failing unittest subtests retain
+the minimized input. Diagnostic assertions scan responses and replacement
+errors for injected secret sentinels.
+
 **Exit evidence:** deterministic seeded property tests in CI, parser fuzz corpus,
 state-transition coverage for every durable phase, and retained minimized
 regressions for discovered failures.
@@ -288,6 +311,17 @@ Cover database markers, backup directory shape, Nomad metadata, storage
 ownership markers, installed release layout, and implementation contract
 version. Document the supported fresh-cutover procedure separately from normal
 restore.
+
+**Implemented evidence (2026-08-30):** controller databases without the
+control-plane marker and databases with future migrations raise the stable safe
+`UNSUPPORTED_PRIOR_STATE` classification before WAL setup or migration.
+Offline restore preserves that classification and leaves the accepted database
+unchanged. PostgreSQL, MongoDB, and Garage deterministic identities containing
+pre-existing unowned state return `UNSUPPORTED_PRIOR_STATE` before their first
+create/update call rather than adopting it. Seeded and fixture tests verify
+byte-for-byte no mutation for migration and restore; provider unit tests verify
+no create call. Corruption and deployment-identity mismatch retain separate
+errors.
 
 **Exit evidence:** fixtures for each unsupported state class, zero provider calls,
 a stable safe error code, and documentation directing operators to fresh

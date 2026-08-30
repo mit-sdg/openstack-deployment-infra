@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -47,7 +49,21 @@ def _strings(value: object, field: str) -> tuple[str, ...]:
 
 def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
     try:
-        raw = path.read_bytes()
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1_048_576:
+                raise ContractError("platform contract must be a bounded direct regular file")
+            chunks: list[bytes] = []
+            size = 0
+            while chunk := os.read(descriptor, min(65_536, 1_048_577 - size)):
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > 1_048_576:
+                    raise ContractError("platform contract exceeds its size limit")
+            raw = b"".join(chunks)
+        finally:
+            os.close(descriptor)
     except OSError as error:
         raise ContractError("platform contract is unavailable") from error
     try:

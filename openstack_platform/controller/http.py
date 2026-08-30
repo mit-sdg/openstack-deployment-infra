@@ -350,8 +350,13 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             )
             self._write(response, correlation_id)
         except HttpError as error:
+            # Framing failures can leave an unread body in the stream. Never
+            # parse it as a pipelined request: BaseHTTPRequestHandler's stock
+            # syntax error includes the request line and could reflect secrets.
+            self.close_connection = True
             self._error(error, correlation_id)
         except Exception:
+            self.close_connection = True
             self._error(
                 HttpError(500, "INTERNAL_ERROR", "unexpected controller failure"),
                 correlation_id,

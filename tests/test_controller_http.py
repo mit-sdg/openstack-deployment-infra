@@ -117,6 +117,39 @@ class ControllerTransportTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(body["error"]["code"], "NOT_FOUND")
 
+    def test_seeded_malformed_framing_never_reaches_mutation_or_leaks_body(self) -> None:
+        calls = 0
+
+        def mutate(_request):
+            nonlocal calls
+            calls += 1
+            return Response(202, {})
+
+        self.router.add("POST", "/v1/framing", mutate)
+        secret = "framing-secret-that-must-not-escape"
+        requests = (
+            f"POST /v1/framing HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n{secret}\r\n",
+            f"POST /v1/framing HTTP/1.1\r\nHost: local\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n{secret}",
+            f"POST /v1/framing HTTP/1.1\r\nHost: local\r\nContent-Length: -1\r\n\r\n{secret}",
+            f"POST /v1/framing HTTP/1.1\r\nHost: local\r\nContent-Length: 1048577\r\n\r\n{secret}",
+            f"POST /v1/framing HTTP/1.1\r\nHost: local\r\nContent-Length: nope\r\n\r\n{secret}",
+            "POST /v1/framing HTTP/1.1\r\nHost: local\r\nContent-Length: 8\r\n\r\n{}",
+        )
+        for request in requests:
+            with self.subTest(request=request.split("\r\n")[2]):
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.settimeout(5)
+                client.connect(self.socket_path)
+                client.sendall(request.encode())
+                client.shutdown(socket.SHUT_WR)
+                response = b""
+                while chunk := client.recv(65_536):
+                    response += chunk
+                client.close()
+                self.assertIn(b"HTTP/1.1 4", response)
+                self.assertNotIn(secret.encode(), response)
+        self.assertEqual(calls, 0)
+
     def test_handler_errors_are_bounded_and_unexpected_values_do_not_escape(self) -> None:
         sentinel = "provider-secret-that-must-not-escape"
 

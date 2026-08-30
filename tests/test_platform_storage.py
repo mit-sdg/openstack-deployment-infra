@@ -871,7 +871,7 @@ class HelperStorageTests(unittest.TestCase):
                 self.dropped = True
 
         existing = MongoAdmin([database], MongoDatabase(collections=["records"]))
-        with self.assertRaisesRegex(HelperActionError, "already contains"):
+        with self.assertRaisesRegex(HelperActionError, "already contains") as unsupported:
             mongo_create(
                 existing,
                 application_id=APP_ID,
@@ -880,6 +880,7 @@ class HelperStorageTests(unittest.TestCase):
                 generation="abcdef12",
                 operation_id="44444444-4444-4444-8444-444444444444",
             )
+        self.assertEqual(unsupported.exception.code, "UNSUPPORTED_PRIOR_STATE")
         self.assertFalse(existing.dropped)
         self.assertEqual(existing.database.commands, ["usersInfo"])
 
