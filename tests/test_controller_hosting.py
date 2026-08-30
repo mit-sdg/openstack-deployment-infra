@@ -147,6 +147,13 @@ class ControllerHostingStaticTests(unittest.TestCase):
             '"/etc/${namespace}/pki"',
         ):
             self.assertIn(setting, management)
+        controller_activation = source[
+            source.index('systemd.paths."${namespace}-controller"') : source.index(
+                "# The trusted broker owns authorization/session/project state"
+            )
+        ]
+        self.assertIn("PathChanged = [", controller_activation)
+        self.assertNotIn("PathExists = [", controller_activation)
         self.assertNotIn("controllerPrivilegedSocket", management)
         self.assertNotIn(
             'wantedBy = [ "multi-user.target" ];',

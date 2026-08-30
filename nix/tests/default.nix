@@ -135,7 +135,10 @@ let
                   "${systemdEscapePath state}.mount"
                 ];
                 requires = [ "${systemdEscapePath state}.mount" ];
-                serviceConfig.Type = "oneshot";
+                serviceConfig = {
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                };
                 script = ''
                   install -d -m 0750 -o agentops -g agentops \
                     ${state}/operator/helper-releases/current/bin

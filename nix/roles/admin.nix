@@ -538,7 +538,7 @@ in
   systemd.paths."${namespace}-controller" = {
     wantedBy = [ "multi-user.target" ];
     pathConfig = {
-      PathExists = [
+      PathChanged = [
         operatorPolicy
         helperReleaseMarker
       ];
