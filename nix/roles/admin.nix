@@ -702,6 +702,7 @@ in
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
+        "REGISTRY_ARTIFACT_SCRIPT=${infra}/backup/registry_artifact.py"
         "PATH=${
           lib.makeBinPath [
             pkgs.coreutils

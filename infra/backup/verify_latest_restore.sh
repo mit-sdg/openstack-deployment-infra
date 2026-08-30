@@ -31,24 +31,24 @@ for line in (root / "MANIFEST").read_text().splitlines():
     values[key] = value
 expected = {
     "created_at": root.name,
-    "format_version": "1",
+    "format_version": "2",
     "postgres": "pg_dumpall-clean-if-exists",
     "mongodb": "mongodump-archive-gzip",
     "object_storage": "garage-s3-catalog-tar-gzip",
-    "registry": "not-included-rebuild-from-source",
+    "registry": "distribution-artifacts-tar-gzip",
 }
 if values != expected:
     raise SystemExit("backup manifest does not match the restore contract")
 checksum_lines = (root / "SHA256SUMS").read_text().splitlines()
 checksum_names = []
 for line in checksum_lines:
-    match = re.fullmatch(r"[0-9a-f]{64}  (postgres\.age|mongodb\.age|garage\.age)", line)
+    match = re.fullmatch(r"[0-9a-f]{64}  (postgres\.age|mongodb\.age|garage\.age|registry\.age)", line)
     if match is None:
         raise SystemExit("backup checksums are malformed")
     checksum_names.append(match.group(1))
-if sorted(checksum_names) != ["garage.age", "mongodb.age", "postgres.age"]:
+if sorted(checksum_names) != ["garage.age", "mongodb.age", "postgres.age", "registry.age"]:
     raise SystemExit("backup checksum inventory does not match")
-for name in ("postgres.age", "mongodb.age", "garage.age"):
+for name in ("postgres.age", "mongodb.age", "garage.age", "registry.age"):
     with (root / name).open("rb") as handle:
         if handle.read(22) != b"age-encryption.org/v1\n":
             raise SystemExit(f"{name} is not age v1 ciphertext")
@@ -109,6 +109,9 @@ assert seen==len(manifest["objects"])
 assert isinstance(manifest["buckets"], list)
 '
 echo "garage restore archive=verified"
+"$AGE" --decrypt --identity "$AGE_KEY" "$latest/registry.age" | \
+  "$SERVICE_CHECK_PYTHON" "$PLATFORM_ROOT/infra/backup/registry_artifact.py" verify
+echo "registry recovery artifacts=verified"
 remote_cleanup
 trap - EXIT
 verified_at=$(date -u +%Y%m%dT%H%M%SZ)
@@ -121,6 +124,7 @@ verified_at=$verified_at
 postgres=verified
 mongodb=verified
 garage=verified
+registry=verified
 EOF
 chmod 0600 "$restore_evidence"
 mv "$restore_evidence" "$latest/RESTORE-MANIFEST"

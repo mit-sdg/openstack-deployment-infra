@@ -11,6 +11,8 @@ AGE=${AGE:-$PLATFORM_ROOT/bin/age}
 AGE_KEY=${AGE_KEY:-$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt}
 AGE_KEYGEN=${AGE_KEYGEN:-$PLATFORM_ROOT/bin/age-keygen}
 EMIT_SCRIPT=${EMIT_SCRIPT:-$PLATFORM_ROOT/persistent/platform/infra/backup/emit_logical_backup.sh}
+REGISTRY_ARTIFACT_SCRIPT=${REGISTRY_ARTIFACT_SCRIPT:-$PLATFORM_ROOT/persistent/platform/infra/backup/registry_artifact.py}
+SERVICE_CHECK_PYTHON=${SERVICE_CHECK_PYTHON:-$PLATFORM_ROOT/tools/service-check-venv/bin/python}
 RETENTION_DAYS=${RETENTION_DAYS:-14}
 
 umask 077
@@ -35,16 +37,22 @@ for service in postgres mongodb garage; do
   "$AGE" --decrypt --identity "$AGE_KEY" "$tmp/${service}.age" >/dev/null
   echo "$service backup verified"
 done
+"$SERVICE_CHECK_PYTHON" "$REGISTRY_ARTIFACT_SCRIPT" export | \
+  "$AGE" --encrypt --recipient "$recipient" --output "$tmp/registry.age"
+test -s "$tmp/registry.age"
+"$AGE" --decrypt --identity "$AGE_KEY" "$tmp/registry.age" | \
+  "$SERVICE_CHECK_PYTHON" "$REGISTRY_ARTIFACT_SCRIPT" verify >/dev/null
+echo "registry artifacts verified"
 (
   cd "$tmp"
-  sha256sum postgres.age mongodb.age garage.age >SHA256SUMS
+  sha256sum postgres.age mongodb.age garage.age registry.age >SHA256SUMS
   cat >MANIFEST <<EOF
 created_at=$timestamp
-format_version=1
+format_version=2
 postgres=pg_dumpall-clean-if-exists
 mongodb=mongodump-archive-gzip
 object_storage=garage-s3-catalog-tar-gzip
-registry=not-included-rebuild-from-source
+registry=distribution-artifacts-tar-gzip
 EOF
 )
 mv "$tmp" "$final"

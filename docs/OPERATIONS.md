@@ -798,8 +798,7 @@ credentials.
 
 These backups contain only the external operator CLI database. They do not
 contain the live admin-hosted controller database, PostgreSQL, MongoDB, Garage
-objects, registry blobs, or an age identity. Registry blobs are rebuilt from
-source.
+objects, registry artifacts, or an age identity.
 
 ### Managed-data backup and restore check on admin
 
@@ -852,6 +851,7 @@ managed_backup_output="$(
     EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_logical_backup.sh" \
     SERVICE_CHECK_PYTHON=python3 \
     GARAGE_EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_garage_backup.py" \
+    REGISTRY_ARTIFACT_SCRIPT="$PLATFORM_ROOT/infra/backup/registry_artifact.py" \
     "$PLATFORM_ROOT/infra/backup/run_platform_backup.sh"
 )"
 printf '%s\n' "$managed_backup_output"
@@ -868,18 +868,112 @@ printf '%s\n' "$restore_output"
 grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' <<<"$restore_output"
 ```
 
-The first command creates encrypted `postgres.age`, `mongodb.age`, and
-`garage.age` under `<paths.backups>/<namespace>/<timestamp>/`, plus `MANIFEST`
-and `SHA256SUMS`. The admin role also has its own
+The first command creates encrypted `postgres.age`, `mongodb.age`, `garage.age`,
+and `registry.age` under `<paths.backups>/<namespace>/<timestamp>/`, plus
+`MANIFEST` and `SHA256SUMS`. `registry.age` contains the manifests, configs, and
+layers reachable from every retained registry tag. Its importer can populate a
+fresh Distribution registry without the original registry or GitHub. The
+archive follows registry retention: deleted, unreferenced manifests are absent;
+current and retained accepted manifests remain protected by controller
+retention before the snapshot. The admin role also has its own
 `<namespace>-platform-backup.timer` for this managed-data job (03:15 UTC with a
 30-minute randomized delay). The external operator
 `openstack-platform-backup.timer` covers only its operator-state database. The
 restore check decrypts each archive only into temporary storage. The second
 command starts temporary PostgreSQL and MongoDB containers, checks the Garage
-catalog/payload archive, and removes the temporary containers on success or
-failure. It atomically writes mode-`0600` `RESTORE-MANIFEST` only when all
-checks pass and never overwrites live services. The expected final line is
-`latest platform restore=verified .../RESTORE-MANIFEST`.
+catalog/payload archive and retained registry artifacts, and removes the
+temporary containers on success or failure. It atomically writes mode-`0600`
+`RESTORE-MANIFEST` only when all checks pass and never overwrites live services.
+The expected final line is `latest platform restore=verified
+.../RESTORE-MANIFEST`.
+
+### Export encrypted recovery evidence off site
+
+Run this on **admin** after all three backup jobs have committed. The destination
+must be an operator-selected, mounted off-site filesystem owned by `agentops`,
+mode `0700`, with provider-side versioning, object lock, or WORM retention. The
+platform supplies no storage-provider credential and never accepts one on the
+command line. Keep both age identities in separate escrow; they are not copied
+into the bundle.
+
+```bash
+export OFFSITE_MOUNT=/mnt/institutional-recovery       # operator-selected mount
+export MANAGED_SET="$PLATFORM_BACKUPS/$PLATFORM_NAMESPACE/YYYYMMDDTHHMMSSZ"
+install -d -m 0700 "$OFFSITE_MOUNT"
+openstack-platform-recovery export \
+  --deployment "$PLATFORM_NAMESPACE" \
+  --hosted-controller "$PLATFORM_BACKUPS/hosted-controller" \
+  --operator-state "$PLATFORM_BACKUPS/controller" \
+  --managed-data "$MANAGED_SET" \
+  --destination "$OFFSITE_MOUNT" \
+  --receipt "$PLATFORM_ROOT/persistent/status/offsite-export.json"
+openstack-platform-recovery verify \
+  "$OFFSITE_MOUNT/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ"
+```
+
+Export selects the newest committed SQLite trio in each SQLite backup root and
+requires the explicitly selected managed-data set to contain all four encrypted
+archives. It copies only direct, bounded regular files; rejects symlinks,
+unsafe names, partial evidence, and more than 32 GiB total; verifies every copy;
+and writes canonical `SHA256SUMS`, `MANIFEST.json`, and
+`MANIFEST.json.sha256`. `MANIFEST.json` is the commit marker. Existing bundle
+names are never replaced. Local backup retention remains unchanged and runs
+only against local committed sets; it does not delete off-site bundles. Apply
+retention at the off-site provider only after a newer bundle and its drill
+evidence are retained.
+
+The receipt contains only bundle identity, time, deployment, and manifest
+SHA-256. Platform health fails when the receipt is absent, malformed, or older
+than 36 hours. A receipt proves that local export committed; the `verify`
+command and provider object-lock evidence prove that the selected off-site copy
+is still readable and immutable.
+
+### Import and drill full-loss recovery
+
+Use a fresh recovery host and an absent work directory. Import verifies the
+manifest and every payload before committing a private staging copy, and never
+contacts GitHub, OpenStack, or the original registry:
+
+```bash
+install -d -m 0700 /srv/recovery-imports
+openstack-platform-recovery import \
+  /mnt/recovered/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ \
+  --destination /srv/recovery-imports
+```
+
+Run the packaged drill with escrowed identity **file paths**. Identity contents
+and service passwords remain in mode-`0600` files and are never command-line
+values. The bundle must contain at least one accepted hosted deployment.
+Without `--apply-managed`, the drill is non-mutating: it imports into an empty
+workspace, decrypts both SQLite databases, runs SQLite integrity checks, proves
+an accepted app record exists, and validates Garage and OCI recovery archives
+after the original backup paths are unavailable.
+
+```bash
+infra/backup/full_loss_recovery_drill.sh \
+  /mnt/recovered/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ \
+  /srv/full-loss-drill \
+  /escrow/controller-age-identity.txt \
+  /escrow/managed-age-identity.txt
+cat /srv/full-loss-drill/DRILL-EVIDENCE.json
+```
+
+For a destructive exercise, provision empty replacement storage services first,
+verify their project and deployment inventory, then add `--apply-managed`. This
+runs `restore_managed_data.sh --yes`: PostgreSQL and MongoDB logical restore,
+Garage bucket/object restore, and OCI blob/manifest import. It refuses an
+uncommitted set and verifies checksums before mutation. Do not use this mode on
+healthy or nonempty services; PostgreSQL clean statements and MongoDB `--drop`
+replace matching data.
+
+Restore the hosted and external SQLite files from the imported bundle with the
+offline launchers documented below, start the replacement controller, and use
+the controller's enable operation for the accepted app. Enable reuses the exact
+restored digest now present in the replacement registry; it does not fetch
+source. Finish the drill only after the app health URL and its restored managed
+data pass application-specific reads. Retain `DRILL-EVIDENCE.json`, controller
+operation evidence, the health result, and the off-site provider's immutable
+object/version IDs together.
 
 ### Offline external operator-state restore
 

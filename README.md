@@ -34,7 +34,8 @@ A deployment provides:
 - PostgreSQL, MongoDB, S3-compatible storage, and a private OCI registry;
 - provider-scoped host lifecycle and exact-image selection;
 - public DNS/HTTPS integration through Cloudflare Tunnel or another provider;
-- separate encrypted hosted-controller, operator-state, and managed-data backups; and
+- separate encrypted hosted-controller, operator-state, and managed-data backups,
+  including retained OCI recovery artifacts and provider-neutral off-site export/import; and
 - a local Unix-socket controller contract for future product integration.
 
 Participants receive no SSH keys, OpenStack or scheduler credentials, registry

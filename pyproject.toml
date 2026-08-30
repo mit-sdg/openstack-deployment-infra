@@ -20,6 +20,7 @@ openstack-platform-helper = "openstack_platform.helper.main:main"
 openstack-platform-controller = "openstack_platform.controller.main:main"
 openstack-platform-controller-restore = "openstack_platform.restore:main"
 openstack-platform-hosted-controller-backup = "openstack_platform.controller.hosted_backup:main"
+openstack-platform-recovery = "openstack_platform.recovery_bundle:main"
 openstack-platform-restore = "openstack_platform.restore:main"
 
 [dependency-groups]

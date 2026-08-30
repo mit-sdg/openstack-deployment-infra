@@ -67,11 +67,18 @@ These do **not** prevent UI coding, but they block exposing the finished UI to r
 
 `setup check` now reuses strict setup resolution and produces human or JSON plans covering authenticated project identity, quota deltas, exact network/flavor/volume/address choices, collisions, local tooling, ingress, and commit/digest-pinned release and image sources. Mutation-spy and adversarial tests prove the path does not write files, build outputs, generate credentials, or issue provider mutations.
 
-### P-02 — Off-site backup and full loss recovery
+### P-02 — Off-site backup and full loss recovery — resolved
 
-Hosted-controller and managed-data backups remain in the same OpenStack project. Registry blobs are omitted and recovery assumes the exact public Git commit remains fetchable.
-
-**Exit gate:** encrypted immutable copies leave the cloud project; accepted source bundles or OCI artifacts needed for recovery are retained; a drill recovers controller, managed data, and one accepted app without GitHub or the original registry host.
+The admin now creates encrypted managed-data evidence that includes restorable
+OCI manifests and blobs, alongside PostgreSQL, MongoDB, and Garage. The
+provider-neutral recovery command exports selected committed hosted-controller,
+operator-state, and managed-data sets to operator-mounted off-site storage with
+an append-only canonical manifest and checksums; import verifies into an empty
+private workspace. Monitoring requires a fresh secret-free export receipt.
+Bounded restore tools and the full-loss drill recover both SQLite databases,
+managed services, and an accepted app artifact without GitHub or the original
+registry. Off-site retention remains provider-owned and is applied only after a
+newer verified bundle and drill evidence exist.
 
 ### P-03 — Harden the browser-to-controller trust boundary
 
