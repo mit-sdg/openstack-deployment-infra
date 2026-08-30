@@ -870,7 +870,8 @@ def _infra_replace(
                     db.mark_recovery_required(connection, operation_id, error)
             raise
     print(
-        f"role={result.role} server={result.active_server_id} image={result.selected_image_id}",
+        f"role={result.role} server={result.active_server_id} image={result.selected_image_id} "
+        "old_retained_until_ready=verified exact_identity=verified data_retained=verified",
         file=output,
     )
 

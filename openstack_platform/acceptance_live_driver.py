@@ -29,6 +29,14 @@ from openstack_platform.setup import load_environment_file
 _MAX_OUTPUT = 1024 * 1024
 _SAFE_REMOTE = re.compile(r"[A-Za-z0-9_./:@%?&=+{},-]+")
 _BACKUP = re.compile(r"backup=(platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age) sha256=([0-9a-f]{64})")
+type Observation = dict[str, bool]
+
+
+def _observed(required: Sequence[str], **values: bool) -> Observation:
+    """Build an exact check projection; omitted or non-boolean facts never pass."""
+    if set(values) != set(required) or any(type(value) is not bool for value in values.values()):
+        raise LiveDriverError("typed observation does not match the required check contract")
+    return dict(values)
 
 
 class LiveDriverError(AcceptanceError):
@@ -160,6 +168,40 @@ def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
 
 
+def _create_private(path: Path, data: bytes) -> None:
+    """Create immutable run metadata; an existing byte-different file is refused."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent = path.parent.lstat()
+    if (
+        path.parent.is_symlink()
+        or not path.parent.is_dir()
+        or parent.st_uid != os.geteuid()
+        or stat.S_IMODE(parent.st_mode) != 0o700
+    ):
+        raise LiveDriverError("ownership metadata directory must be private and current-user-owned")
+    if path.exists():
+        _private_file(path, "deployment ownership metadata")
+        if path.read_bytes() != data:
+            raise LiveDriverError("deployment ownership metadata changed after creation")
+        return
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written < 1:
+                raise LiveDriverError("deployment ownership metadata write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _atomic_private(path: Path, data: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     metadata = path.parent.lstat()
@@ -272,6 +314,9 @@ def load_driver_config(path: Path) -> DriverConfig:
         "requestedRef",
         "configuration",
         "verificationPath",
+        "resetPath",
+        "contentProof",
+        "emptyProof",
     }:
         raise LiveDriverError("driver application configuration has an unexpected shape")
     slug = application.get("slug")
@@ -284,14 +329,25 @@ def load_driver_config(path: Path) -> DriverConfig:
     if not isinstance(repository, str) or not repository.startswith("https://github.com/"):
         raise LiveDriverError("application repository must be public GitHub HTTPS")
     verification_path = application.get("verificationPath")
+    reset_path = application.get("resetPath")
     if (
         not isinstance(application.get("requestedRef"), str)
         or not isinstance(application.get("configuration"), Mapping)
         or not isinstance(verification_path, str)
         or not verification_path.startswith("/")
         or not _SAFE_REMOTE.fullmatch(verification_path)
+        or not isinstance(reset_path, str)
+        or not reset_path.startswith("/")
+        or not _SAFE_REMOTE.fullmatch(reset_path)
+        or not isinstance(application.get("contentProof"), Mapping)
+        or set(application["contentProof"]) != {"postgres", "mongo", "s3"}
+        or any(
+            not isinstance(value, Mapping) or not value
+            for value in application["contentProof"].values()
+        )
+        or application.get("emptyProof") != {"postgres": None, "mongo": None, "s3": None}
     ):
-        raise LiveDriverError("application ref, configuration, or verification path is invalid")
+        raise LiveDriverError("application restore proof contract is invalid")
     if set(images) != {"ingress", "admin"}:
         raise LiveDriverError("replacement images must contain ingress and admin")
     for image in images.values():
@@ -393,7 +449,16 @@ class SupportedInterfaces:
             timeout=300,
         )
 
-    def setup_apply(self) -> None:
+    def setup_apply(self) -> Observation:
+        self.guard()
+        # Re-observe greenfield immediately before apply; plan-time emptiness alone
+        # is stale and cannot satisfy the execute check.
+        inventory_text = _canonical(self.inventory()).decode()
+        setup_values = load_environment_file(Path(self.c.setup_env))
+        prefix = setup_values.get("PLATFORM_PREFIX", self.c.namespace)
+        empty = self.c.namespace not in inventory_text and f'"{prefix}-' not in inventory_text
+        if not empty:
+            raise LiveDriverError("greenfield scope changed between plan and apply")
         self.guard()
         self.commands.run(
             (
@@ -408,7 +473,18 @@ class SupportedInterfaces:
             timeout=7200,
             mutating=True,
         )
-        self._operator("status")
+        status = self._operator("status")
+        if not status.strip():
+            raise LiveDriverError("platform status observation is empty")
+        self.guard()
+        self.capture_ownership()
+        return _observed(
+            dict(ACTION_CHECKS)["greenfield_setup"],
+            emptyScopeObserved=empty,
+            planApplied=True,
+            platformHealthy=True,
+            deploymentScoped=True,
+        )
 
     def _ssh(
         self,
@@ -503,7 +579,7 @@ class SupportedInterfaces:
                 raise LiveDriverError("controller operation polling timed out")
             time.sleep(2)
 
-    def interrupt_controller(self, operation_key: str) -> None:
+    def interrupt_controller(self, operation_key: str) -> Observation:
         deadline = time.monotonic() + 120
         while True:
             operation = self.operation_status(operation_key)
@@ -529,27 +605,60 @@ class SupportedInterfaces:
             ("sudo", "-n", "systemctl", "start", controller, readiness),
             mutating=True,
         )
-        self._ssh(
+        active = self._ssh(
             self.c.recovery_alias,
             ("sudo", "-n", "systemctl", "is-active", controller, readiness),
         )
+        if active.decode().split() != ["active", "active"]:
+            raise LiveDriverError("controller did not recover after deliberate interruption")
+        return {"durableOperationStarted": True, "interruptionInjected": True}
 
-    def verify_public_storage(self, url: str, expected_commit: str) -> None:
+    def public_json(self, url: str, *, method: str = "GET") -> Mapping[str, object]:
+        if method not in {"GET", "POST"}:
+            raise LiveDriverError("public proof method is unsupported")
         output = self.commands.run(
-            (self.c.curl, "--fail", "--silent", "--show-error", "--max-time", "30", url),
+            (
+                self.c.curl,
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "30",
+                "-X",
+                method,
+                url,
+            ),
             timeout=60,
+            mutating=method == "POST",
         )
         try:
             result = json.loads(output)
         except json.JSONDecodeError as error:
-            raise LiveDriverError("public storage verification returned malformed JSON") from error
-        if result != {
-            "commit": expected_commit,
-            "mongo": True,
-            "postgres": True,
-            "s3": True,
-        }:
-            raise LiveDriverError("application did not prove managed-storage write/read checks")
+            raise LiveDriverError("public storage proof returned malformed JSON") from error
+        if not isinstance(result, dict):
+            raise LiveDriverError("public storage proof is not an object")
+        return result
+
+    def verify_public_storage(self, url: str, expected: Mapping[str, object]) -> Observation:
+        result = self.public_json(url)
+        if result != expected:
+            raise LiveDriverError("application content proof differs from the exact expected value")
+        return _observed(
+            (
+                "candidateVerified",
+                "publicRouteHealthy",
+                "storageBound",
+                "postgresWriteReadVerified",
+                "mongoWriteReadVerified",
+                "s3WriteReadVerified",
+            ),
+            candidateVerified=True,
+            publicRouteHealthy=True,
+            storageBound=True,
+            postgresWriteReadVerified=True,
+            mongoWriteReadVerified=True,
+            s3WriteReadVerified=True,
+        )
 
     def mutate_controller(
         self,
@@ -581,7 +690,7 @@ class SupportedInterfaces:
             raise LiveDriverError("controller list response is invalid")
         return [item for item in body["items"] if isinstance(item, dict)]
 
-    def operator_backup_restore(self) -> None:
+    def operator_backup_restore(self) -> Observation:
         output = self._operator("backup", mutating=True)
         match = _BACKUP.search(output.decode())
         if match is None:
@@ -606,7 +715,7 @@ class SupportedInterfaces:
             raise LiveDriverError("copied operator backup checksum differs")
         Path(self.c.offline_state).mkdir(mode=0o700, parents=True, exist_ok=True)
         self.guard()
-        self.commands.run(
+        restored = self.commands.run(
             (
                 self.c.operator,
                 "--platform-config",
@@ -624,8 +733,19 @@ class SupportedInterfaces:
             timeout=600,
             mutating=True,
         )
+        if (
+            re.fullmatch(rb"restore=verified schema-version=[1-9][0-9]* integrity=ok\n?", restored)
+            is None
+        ):
+            raise LiveDriverError("offline operator restore typed observation is invalid")
+        return _observed(
+            dict(ACTION_CHECKS)["operator_sqlite_restore"],
+            encryptedBackupVerified=True,
+            offlineRestoreVerified=True,
+            deploymentIdentityMatched=True,
+        )
 
-    def managed_restore(self) -> None:
+    def managed_restore(self, application_url: str) -> Observation:
         env = (
             "env",
             f"PLATFORM_CONFIG=/etc/{self.c.namespace}/platform.json",
@@ -641,16 +761,70 @@ class SupportedInterfaces:
             f"{self.c.platform_root}/infra/backup/run_platform_backup.sh",
         )
         self._ssh(self.c.admin_alias, backup, mutating=True, timeout=1800)
+        latest_raw = self._ssh(
+            self.c.admin_alias,
+            (
+                "find",
+                f"{self.c.backup_root}/{self.c.namespace}",
+                "-mindepth",
+                "1",
+                "-maxdepth",
+                "1",
+                "-type",
+                "d",
+                "-name",
+                "20??????T??????Z",
+                "-printf",
+                "%f\\n",
+            ),
+        )
+        latest = sorted(
+            line
+            for line in latest_raw.decode().splitlines()
+            if re.fullmatch(r"20[0-9]{6}T[0-9]{6}Z", line)
+        )
+        if not latest:
+            raise LiveDriverError("managed backup evidence directory is absent")
+        reset_url = application_url + str(self.c.application["resetPath"])
+        empty = self.public_json(reset_url, method="POST")
+        if empty != self.c.application["emptyProof"]:
+            raise LiveDriverError("disposable managed-data target was not observed exactly empty")
+        evidence = f"{self.c.backup_root}/{self.c.namespace}/{latest[-1]}"
         output = self._ssh(
             self.c.admin_alias,
-            (*env, f"{self.c.platform_root}/infra/backup/verify_latest_restore.sh"),
+            (
+                *env,
+                "SERVICE_CHECK_PYTHON=python3",
+                f"{self.c.platform_root}/infra/backup/restore_managed_data.sh",
+                "--yes",
+                evidence,
+            ),
             mutating=True,
             timeout=1800,
         )
-        if b"latest platform restore=verified" not in output or b"RESTORE-MANIFEST" not in output:
-            raise LiveDriverError("managed restore verification evidence is missing")
+        required_lines = {
+            "postgres managed restore=complete",
+            "mongodb managed restore=complete",
+            "managed-data-restore=verified",
+        }
+        rendered = output.decode()
+        if (
+            any(line not in rendered for line in required_lines)
+            or "garage-restore=verified" not in rendered
+        ):
+            raise LiveDriverError("replacement restore did not report typed service observations")
+        proof_url = application_url + str(self.c.application["verificationPath"])
+        if self.public_json(proof_url) != self.c.application["contentProof"]:
+            raise LiveDriverError("restored PostgreSQL/MongoDB/S3 content differs")
+        return _observed(
+            dict(ACTION_CHECKS)["managed_data_restore"],
+            postgresRestored=True,
+            mongoRestored=True,
+            s3Restored=True,
+            restoreManifestVerified=True,
+        )
 
-    def hosted_restore(self) -> None:
+    def hosted_restore(self) -> Observation:
         # The packaged launcher owns validation and atomic replacement. A protected
         # recovery account performs the documented offline sequence; the escrowed
         # identity never crosses to admin.
@@ -765,7 +939,7 @@ class SupportedInterfaces:
             ("sudo", "-n", "systemctl", "start", controller, timer),
             mutating=True,
         )
-        self._ssh(
+        ready = self._ssh(
             self.c.recovery_alias,
             (
                 "sudo",
@@ -775,17 +949,195 @@ class SupportedInterfaces:
                 f"{self.c.namespace}-controller-readiness.service",
             ),
         )
+        if ready.strip() != b"active":
+            raise LiveDriverError("hosted restore controller readiness observation failed")
         plaintext.unlink(missing_ok=True)
+        return _observed(
+            dict(ACTION_CHECKS)["hosted_sqlite_restore"],
+            encryptedBackupVerified=True,
+            offlineRestoreVerified=True,
+            controllerReady=True,
+        )
 
-    def replace(self, role: str) -> None:
+    def _owned_names(self) -> dict[str, list[str]]:
+        platform = load_platform(Path(self.c.platform_config))
+        names: dict[str, list[str]] = {
+            "server": [
+                str(platform.get(f"hosts.{role}")) for role in ("admin", "ingress", "storage")
+            ],
+            "port": [
+                str(platform.get(f"ports.{role}")) for role in ("admin", "ingress", "storage")
+            ],
+            "volume": [
+                str(platform.get(f"volumes.{name}.name"))
+                for name in ("adminState", "backup", "data")
+            ],
+            "image": [
+                str(platform.get(f"images.{role}"))
+                for role in ("admin", "ingress", "storage", "worker", "builder")
+            ],
+            "security group": [
+                f"{platform.prefix}-{role}"
+                for role in ("admin", "ingress", "worker", "builder", "storage")
+            ],
+            "keypair": [f"{platform.prefix}-admin"],
+        }
+        return names
+
+    @staticmethod
+    def _field_exact(document: Mapping[str, object], *aliases: str) -> object:
+        found = [
+            value
+            for key, value in document.items()
+            if str(key).lower().replace(" ", "_") in aliases
+        ]
+        if len(found) != 1:
+            raise LiveDriverError("provider projection omitted or duplicated a required field")
+        return found[0]
+
+    def _show_projection(self, kind: str, reference: str, expected_name: str) -> dict[str, object]:
+        shown = self.commands.run(
+            (self.c.openstack, *kind.split(), "show", reference, "-f", "json"), timeout=60
+        )
+        try:
+            raw = json.loads(shown)
+        except json.JSONDecodeError as error:
+            raise LiveDriverError("provider ownership projection is malformed") from error
+        if not isinstance(raw, dict):
+            raise LiveDriverError("provider ownership projection is not an object")
+        name = self._field_exact(raw, "name")
+        if name != expected_name:
+            raise LiveDriverError("provider ownership name differs")
+        if kind == "keypair":
+            keypair_projection = {"name": name}
+            for output, aliases in {
+                "fingerprint": ("fingerprint",),
+                "publicKey": ("public_key",),
+                "type": ("type",),
+                "userId": ("user_id",),
+            }.items():
+                value = self._field_exact(raw, *aliases)
+                if not isinstance(value, str) or not value:
+                    raise LiveDriverError("keypair ownership projection is incomplete")
+                keypair_projection[output] = value
+            return keypair_projection
+        identifier = self._field_exact(raw, "id")
+        if not isinstance(identifier, str) or str(UUID(identifier)) != identifier:
+            raise LiveDriverError("provider ownership UUID is invalid")
+        project_aliases = (
+            ("owner", "owner_id", "project_id")
+            if kind == "image"
+            else ("project_id", "tenant_id", "os-vol-tenant-attr:tenant_id")
+        )
+        project = self._field_exact(raw, *project_aliases)
+        if project != self.c.project_id:
+            raise LiveDriverError("provider ownership project differs")
+        projection: dict[str, object] = {"id": identifier, "name": name, "projectId": project}
+        if kind in {"server", "image"}:
+            properties = self._field_exact(raw, "properties")
+            if not isinstance(properties, Mapping):
+                raise LiveDriverError("provider ownership properties are malformed")
+            prefix = self.c.namespace.replace("-", "_")
+            expected = {
+                f"{prefix}_managed_by": "platform",
+                f"{prefix}_namespace": self.c.namespace,
+                f"{prefix}_project_id": self.c.project_id,
+            }
+            if any(properties.get(key) != value for key, value in expected.items()):
+                raise LiveDriverError(
+                    "provider deployment ownership metadata is absent or ambiguous"
+                )
+            projection["deploymentProperties"] = expected
+        return projection
+
+    @property
+    def ownership_path(self) -> Path:
+        return Path(self.c.transcript).with_name("deployment-ownership.json")
+
+    def capture_ownership(self) -> None:
+        resources: list[dict[str, object]] = []
+        for kind, names in self._owned_names().items():
+            visibility = ("--private",) if kind == "image" else ()
+            rows_raw = self.commands.run(
+                (self.c.openstack, *kind.split(), "list", *visibility, "-f", "json"), timeout=60
+            )
+            try:
+                rows = json.loads(rows_raw)
+            except json.JSONDecodeError as error:
+                raise LiveDriverError("provider ownership inventory is malformed") from error
+            if not isinstance(rows, list):
+                raise LiveDriverError("provider ownership inventory is invalid")
+            for name in names:
+                matches = [
+                    row
+                    for row in rows
+                    if isinstance(row, dict) and self._field_exact(row, "name") == name
+                ]
+                if len(matches) != 1:
+                    raise LiveDriverError("deployment resource ownership is absent or ambiguous")
+                reference = name if kind == "keypair" else self._field_exact(matches[0], "id")
+                if not isinstance(reference, str):
+                    raise LiveDriverError("deployment resource reference is invalid")
+                resources.append(
+                    {
+                        "kind": kind,
+                        "name": name,
+                        "deleteReference": reference,
+                        "projection": self._show_projection(kind, reference, name),
+                    }
+                )
+        document = {
+            "schemaVersion": 1,
+            "deploymentId": self.c.deployment_id,
+            "projectId": self.c.project_id,
+            "namespace": self.c.namespace,
+            "resources": resources,
+        }
+        _create_private(self.ownership_path, _canonical(document) + b"\n")
+
+    def replace(self, role: str) -> Observation:
+        before = self._show_projection(
+            "server",
+            self._owned_names()["server"][("admin", "ingress", "storage").index(role)],
+            self._owned_names()["server"][("admin", "ingress", "storage").index(role)],
+        )
         image = self.c.replacement_images[role]
         self._operator("infra", "image", "set", role, image, mutating=True)
         if role == "admin":
-            # Make the controller unavailable first so this is an external recovery
-            # rehearsal rather than a healthy self-observation.
             self._operator("infra", "stop", "admin", "--yes", mutating=True)
-        self._operator("infra", "replace", role, "--yes", mutating=True, timeout=1800)
-        self._operator("infra", "list")
+        output = self._operator("infra", "replace", role, "--yes", mutating=True, timeout=1800)
+        replacement_evidence = {
+            "server=",
+            "old_retained_until_ready=verified",
+            "exact_identity=verified",
+            "data_retained=verified",
+        }
+        rendered_output = output.decode()
+        if any(token not in rendered_output for token in replacement_evidence):
+            raise LiveDriverError("replacement did not report exact typed acceptance observations")
+        name = str(before["name"])
+        after = self._show_projection("server", name, name)
+        if before["id"] == after["id"]:
+            raise LiveDriverError("host replacement did not change exact server identity")
+        transition = {
+            "schemaVersion": 1,
+            "deploymentId": self.c.deployment_id,
+            "projectId": self.c.project_id,
+            "namespace": self.c.namespace,
+            "role": role,
+            "oldProjection": before,
+            "newProjection": after,
+        }
+        transition_path = self.ownership_path.with_name(f"replacement-{role}-ownership.json")
+        _create_private(transition_path, _canonical(transition) + b"\n")
+        status = self._operator("infra", "list")
+        if not status.strip():
+            raise LiveDriverError("replacement role health observation is empty")
+        if role == "ingress":
+            # Data retention is separately observed through the accepted application;
+            # this provider observation establishes only replacement ordering/identity.
+            return {"oldHostRetainedUntilReady": True, "exactIdentityVerified": True}
+        return {"externalRecoveryUsed": True}
 
     def inventory(self) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
@@ -811,90 +1163,155 @@ class SupportedInterfaces:
         self.guard()
         return hashlib.sha256(_canonical(self.inventory())).hexdigest()
 
-    def teardown(self, baseline: str) -> None:
-        # Whole-deployment deletion is intentionally name-exact and reverse-order.
-        # The setup namespace is unique; every candidate is re-read before deletion.
+    def teardown(self, baseline: str) -> Observation:
         self.guard()
-        platform = load_platform(Path(self.c.platform_config))
-        names: dict[str, list[str]] = {
-            "server": [
-                str(platform.get(f"hosts.{role}")) for role in ("admin", "ingress", "storage")
-            ],
-            "port": [
-                str(platform.get(f"ports.{role}")) for role in ("admin", "ingress", "storage")
-            ],
-            "volume": [
-                str(platform.get(f"volumes.{name}.name"))
-                for name in ("adminState", "backup", "data")
-            ],
-            "image": [
-                str(platform.get(f"images.{role}"))
-                for role in ("admin", "ingress", "storage", "worker", "builder")
-            ],
-        }
-        prefix = platform.prefix
-        names["security group"] = [
-            f"{prefix}-{role}" for role in ("admin", "ingress", "worker", "builder", "storage")
-        ]
-        names["keypair"] = [f"{prefix}-admin"]
-        for kind in ("server", "port", "volume", "image", "security group", "keypair"):
-            for name in names[kind]:
-                self.guard()
-                visibility = ("--private",) if kind == "image" else ()
-                listed = self.commands.run(
-                    (self.c.openstack, *kind.split(), "list", *visibility, "-f", "json"),
-                    timeout=60,
+        try:
+            ownership = json.loads(
+                self.ownership_path.read_bytes(), object_pairs_hook=_reject_duplicates
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise LiveDriverError("immutable deployment ownership metadata is absent") from error
+        if (
+            not isinstance(ownership, dict)
+            or ownership.get("schemaVersion") != 1
+            or ownership.get("deploymentId") != self.c.deployment_id
+            or ownership.get("projectId") != self.c.project_id
+            or ownership.get("namespace") != self.c.namespace
+        ):
+            raise LiveDriverError("immutable deployment ownership metadata is ambiguous")
+        resources = ownership.get("resources")
+        if not isinstance(resources, list) or not resources:
+            raise LiveDriverError("immutable deployment ownership inventory is absent")
+        current_resources: list[object] = list(resources)
+        for role in ("ingress", "admin"):
+            transition_path = self.ownership_path.with_name(f"replacement-{role}-ownership.json")
+            if not transition_path.exists():
+                continue
+            _private_file(transition_path, "replacement ownership metadata")
+            try:
+                transition = json.loads(
+                    transition_path.read_bytes(), object_pairs_hook=_reject_duplicates
                 )
-                try:
-                    rows = json.loads(listed)
-                except json.JSONDecodeError as error:
-                    raise LiveDriverError("teardown inventory observation is malformed") from error
-                if not isinstance(rows, list):
-                    raise LiveDriverError("teardown inventory observation is invalid")
-                matches = [
-                    row
-                    for row in rows
-                    if isinstance(row, dict)
-                    and next(
-                        (value for key, value in row.items() if str(key).lower() == "name"),
-                        None,
-                    )
-                    == name
-                ]
-                if not matches:
-                    continue
-                if len(matches) != 1:
-                    raise LiveDriverError("teardown candidate name is ambiguous")
-                identifier = next(
-                    (value for key, value in matches[0].items() if str(key).lower() == "id"),
-                    None,
+            except json.JSONDecodeError as error:
+                raise LiveDriverError("replacement ownership metadata is malformed") from error
+            if (
+                not isinstance(transition, dict)
+                or set(transition)
+                != {
+                    "schemaVersion",
+                    "deploymentId",
+                    "projectId",
+                    "namespace",
+                    "role",
+                    "oldProjection",
+                    "newProjection",
+                }
+                or transition.get("schemaVersion") != 1
+                or transition.get("deploymentId") != self.c.deployment_id
+                or transition.get("projectId") != self.c.project_id
+                or transition.get("namespace") != self.c.namespace
+                or transition.get("role") != role
+                or not isinstance(transition.get("oldProjection"), dict)
+                or not isinstance(transition.get("newProjection"), dict)
+            ):
+                raise LiveDriverError("replacement ownership metadata is ambiguous")
+            transition_matches = [
+                (index, record)
+                for index, record in enumerate(current_resources)
+                if isinstance(record, dict)
+                and record.get("kind") == "server"
+                and record.get("projection") == transition["oldProjection"]
+            ]
+            new_projection = transition["newProjection"]
+            if len(transition_matches) != 1 or not isinstance(new_projection.get("id"), str):
+                raise LiveDriverError("replacement ownership transition has no exact predecessor")
+            index, previous = transition_matches[0]
+            assert isinstance(previous, dict)
+            current_resources[index] = {
+                **previous,
+                "deleteReference": new_projection["id"],
+                "projection": new_projection,
+            }
+        backup_owned = False
+        for record in current_resources:
+            if not isinstance(record, dict) or set(record) != {
+                "kind",
+                "name",
+                "deleteReference",
+                "projection",
+            }:
+                raise LiveDriverError("immutable deployment ownership record is malformed")
+            kind, name, reference, expected = (
+                record.get(key) for key in ("kind", "name", "deleteReference", "projection")
+            )
+            if (
+                kind not in {"server", "port", "volume", "image", "security group", "keypair"}
+                or not isinstance(name, str)
+                or not isinstance(reference, str)
+                or not isinstance(expected, dict)
+            ):
+                raise LiveDriverError("immutable deployment ownership record is untyped")
+            if kind == "volume" and name == str(
+                load_platform(Path(self.c.platform_config)).get("volumes.backup.name")
+            ):
+                backup_owned = True
+            self.guard()
+            visibility = ("--private",) if kind == "image" else ()
+            raw = self.commands.run(
+                (self.c.openstack, *str(kind).split(), "list", *visibility, "-f", "json"),
+                timeout=60,
+            )
+            try:
+                rows = json.loads(raw)
+            except json.JSONDecodeError as error:
+                raise LiveDriverError("teardown inventory observation is malformed") from error
+            if not isinstance(rows, list):
+                raise LiveDriverError("teardown inventory observation is invalid")
+            matches = [
+                row
+                for row in rows
+                if isinstance(row, dict) and self._field_exact(row, "name") == name
+            ]
+            if not matches:
+                continue
+            if len(matches) != 1:
+                raise LiveDriverError("teardown candidate identity is ambiguous")
+            current_reference = name if kind == "keypair" else self._field_exact(matches[0], "id")
+            if current_reference != reference:
+                raise LiveDriverError(
+                    "teardown candidate differs from immutable ownership identity"
                 )
-                if not isinstance(identifier, str) or str(UUID(identifier)) != identifier:
-                    raise LiveDriverError("teardown candidate UUID is invalid")
-                shown = self.commands.run(
-                    (self.c.openstack, *kind.split(), "show", identifier, "-f", "json"),
-                    timeout=60,
-                )
-                try:
-                    item = json.loads(shown)
-                except json.JSONDecodeError as error:
-                    raise LiveDriverError("teardown ownership observation is malformed") from error
-                text = _canonical(item).decode()
-                if name not in text or (kind != "keypair" and self.c.project_id not in text):
-                    raise LiveDriverError("teardown candidate lacks exact project/name ownership")
-                self.commands.run(
-                    (self.c.openstack, *kind.split(), "delete", identifier),
-                    timeout=600,
-                    mutating=True,
-                )
+            if self._show_projection(str(kind), reference, name) != expected:
+                raise LiveDriverError("teardown candidate ownership projection drifted")
+            self.commands.run(
+                (self.c.openstack, *str(kind).split(), "delete", reference),
+                timeout=600,
+                mutating=True,
+            )
+        if not backup_owned or self.c.backup_disposition != "destroy-after-verified-restore":
+            raise LiveDriverError("backup disposition is absent or does not cover the owned backup")
         deadline = time.monotonic() + 300
-        while True:
-            observed = self.baseline()
-            if observed == baseline:
-                break
+        while self.baseline() != baseline:
             if time.monotonic() >= deadline:
                 raise LiveDriverError("unrelated provider inventory changed during acceptance")
             time.sleep(5)
+        # A second exact inventory pass proves every recorded identity absent.
+        for kind, names in self._owned_names().items():
+            visibility = ("--private",) if kind == "image" else ()
+            raw = self.commands.run(
+                (self.c.openstack, *kind.split(), "list", *visibility, "-f", "json"), timeout=60
+            )
+            rows = json.loads(raw)
+            if not isinstance(rows, list) or any(
+                isinstance(row, dict) and self._field_exact(row, "name") in names for row in rows
+            ):
+                raise LiveDriverError("deployment-owned provider resources remain")
+        return _observed(
+            dict(ACTION_CHECKS)["cleanup_verify"],
+            ownedResourcesAbsent=True,
+            unrelatedFingerprintUnchanged=True,
+            backupsDispositionRecorded=True,
+        )
 
 
 class RepositoryLiveDriver:
@@ -1031,41 +1448,28 @@ class RepositoryLiveDriver:
             },
         }
 
-    def _execute(self, action: str, baseline: str) -> dict[str, bool]:
+    def _content_proof(self) -> Mapping[str, object]:
+        proof = self.c.application.get("contentProof")
+        if not isinstance(proof, Mapping):
+            raise LiveDriverError("application content proof is invalid")
+        return proof
+
+    def _execute(self, action: str, baseline: str) -> Observation:
+        required = dict(ACTION_CHECKS)[action]
+
         def key(label: str) -> str:
             return str(uuid5(UUID(self.c.deployment_id), label))
 
         if action == "greenfield_setup":
-            self.i.setup_apply()
-            return {name: True for name in dict(ACTION_CHECKS)[action]}
+            return self.i.setup_apply()
         if action == "application_create":
             body = self.i.mutate_controller(
                 "POST", "/v1/applications", {"slug": self.c.application["slug"]}, key("application")
             )
-            if (
-                not isinstance(body, dict)
-                or body.get("applicationId") != self.app_id
-                or body.get("enabled") is not False
-            ):
-                raise LiveDriverError("application identity/state mismatch")
-        elif action in {"interrupted_resume_injection", "interrupted_resume"}:
-            operation_key = key("interrupted-deployment")
-            self.i.mutate_controller(
-                "POST",
-                f"/v1/applications/{self.app_id}/deployments",
-                self._deployment_body(2),
-                operation_key,
-                wait=action == "interrupted_resume",
-            )
-            if action == "interrupted_resume_injection":
-                self.i.interrupt_controller(operation_key)
-            else:
-                attempts = self.i.list_items(
-                    f"/v1/applications/{self.app_id}/deployments?limit=100"
-                )
-                if sum(item.get("deploymentId") == operation_key for item in attempts) != 1:
-                    raise LiveDriverError("resume duplicated the interrupted deployment")
-        elif action in {"postgres_lifecycle", "mongo_lifecycle", "s3_lifecycle"}:
+            created = isinstance(body, dict) and body.get("applicationId") == self.app_id
+            disabled = isinstance(body, dict) and body.get("enabled") is False
+            return _observed(required, applicationCreated=created, disabledInitially=disabled)
+        if action in {"postgres_lifecycle", "mongo_lifecycle", "s3_lifecycle"}:
             kind = action.removesuffix("_lifecycle")
             self.i.mutate_controller(
                 "POST",
@@ -1074,13 +1478,19 @@ class RepositoryLiveDriver:
                 key(f"{kind}-create"),
             )
             items = self._storage_items(kind)
-            if len(items) != 1 or items[0].get("applicationId") != self.app_id:
-                raise LiveDriverError("storage ownership mismatch")
-            rid = items[0].get("resourceId")
+            created = (
+                len(items) == 1
+                and items[0].get("applicationId") == self.app_id
+                and items[0].get("lifecycleState") == "active"
+            )
+            rid = items[0].get("resourceId") if len(items) == 1 else None
             if not isinstance(rid, str):
                 raise LiveDriverError("storage resource ID missing")
             self.i.mutate_controller("POST", f"/v1/storage/{rid}/verify", {}, key(f"{kind}-verify"))
-        elif action == "application_deploy":
+            refreshed = self._storage_items(kind)
+            verified = len(refreshed) == 1 and isinstance(refreshed[0].get("lastVerifiedAt"), str)
+            return _observed(required, created=created, resourceVerified=verified)
+        if action == "application_deploy":
             self.i.mutate_controller(
                 "POST",
                 f"/v1/applications/{self.app_id}/deployments",
@@ -1088,11 +1498,11 @@ class RepositoryLiveDriver:
                 key("deployment"),
             )
             attempts = self.i.list_items(f"/v1/applications/{self.app_id}/deployments?limit=100")
-            if (
-                len(attempts) != 1
-                or attempts[0].get("repositoryCommit") != self.c.application["commit"]
-            ):
-                raise LiveDriverError("accepted deployment does not match the exact commit")
+            exact = (
+                len(attempts) == 1
+                and attempts[0].get("repositoryCommit") == self.c.application["commit"]
+                and attempts[0].get("status") == "accepted"
+            )
             code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
             if (
                 code != 200
@@ -1100,9 +1510,41 @@ class RepositoryLiveDriver:
                 or not isinstance(application.get("url"), str)
             ):
                 raise LiveDriverError("accepted application URL is unavailable")
-            verification_url = str(application["url"]) + str(self.c.application["verificationPath"])
-            self.i.verify_public_storage(verification_url, str(self.c.application["commit"]))
-        elif action == "application_disable_enable":
+            proof = self.i.verify_public_storage(
+                str(application["url"]) + str(self.c.application["verificationPath"]),
+                self._content_proof(),
+            )
+            return _observed(required, exactCommitDeployed=exact, **proof)
+        if action in {"interrupted_resume_injection", "interrupted_resume"}:
+            operation_key = key("interrupted-deployment")
+            result = self.i.mutate_controller(
+                "POST",
+                f"/v1/applications/{self.app_id}/deployments",
+                self._deployment_body(2),
+                operation_key,
+                wait=action == "interrupted_resume",
+            )
+            if action == "interrupted_resume_injection":
+                observed = self.i.interrupt_controller(operation_key)
+                code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
+                app_url = application.get("url") if isinstance(application, dict) else None
+                stable = code == 200 and isinstance(app_url, str)
+                if isinstance(app_url, str):
+                    self.i.verify_public_storage(
+                        app_url + str(self.c.application["verificationPath"]),
+                        self._content_proof(),
+                    )
+                return _observed(required, **observed, stableServiceUnaffected=stable)
+            attempts = self.i.list_items(f"/v1/applications/{self.app_id}/deployments?limit=100")
+            one = sum(item.get("deploymentId") == operation_key for item in attempts) == 1
+            converged = isinstance(result, Mapping) and result.get("status") == "succeeded"
+            return _observed(
+                required,
+                sameOperationResumed=one,
+                operationConverged=converged,
+                noDuplicateResource=one,
+            )
+        if action == "application_disable_enable":
             before_storage = tuple(
                 sorted(
                     str(item.get("resourceId"))
@@ -1116,6 +1558,23 @@ class RepositoryLiveDriver:
             )
             self.i.mutate_controller(
                 "POST", f"/v1/applications/{self.app_id}/disable", {}, key("disable")
+            )
+            disabled_code, disabled_app = self.i.controller(
+                "GET", f"/v1/applications/{self.app_id}"
+            )
+            disabled_storage = tuple(
+                sorted(
+                    str(item.get("resourceId"))
+                    for item in self.i.list_items(
+                        f"/v1/applications/{self.app_id}/storage?limit=100"
+                    )
+                )
+            )
+            disabled_without_loss = (
+                disabled_code == 200
+                and isinstance(disabled_app, dict)
+                and disabled_app.get("enabled") is False
+                and disabled_storage == before_storage
             )
             self.i.mutate_controller(
                 "POST", f"/v1/applications/{self.app_id}/enable", {}, key("enable")
@@ -1132,28 +1591,68 @@ class RepositoryLiveDriver:
                 self.i.list_items(f"/v1/applications/{self.app_id}/deployments?limit=100")
             )
             code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
-            if (
-                before_storage != after_storage
-                or before_deployments != after_deployments
-                or code != 200
-                or not isinstance(application, dict)
-                or application.get("enabled") is not True
-            ):
-                raise LiveDriverError("disable/enable rebuilt or lost accepted application data")
-        elif action == "operator_sqlite_restore":
-            self.i.operator_backup_restore()
-        elif action == "hosted_sqlite_restore":
-            self.i.hosted_restore()
-        elif action == "managed_data_restore":
-            self.i.managed_restore()
-        elif action == "persistent_host_replacement":
-            self.i.replace("ingress")
-        elif action == "admin_recovery":
-            self.i.replace("admin")
+            app_url = application.get("url") if isinstance(application, dict) else None
+            healthy = (
+                code == 200
+                and isinstance(application, dict)
+                and application.get("enabled") is True
+                and isinstance(app_url, str)
+            )
+            if isinstance(app_url, str):
+                self.i.verify_public_storage(
+                    app_url + str(self.c.application["verificationPath"]),
+                    self._content_proof(),
+                )
+            return _observed(
+                required,
+                disabledWithoutDataLoss=disabled_without_loss and before_storage == after_storage,
+                enabledWithoutRebuild=before_deployments == after_deployments,
+                publicRouteHealthy=healthy,
+            )
+        if action == "operator_sqlite_restore":
+            return self.i.operator_backup_restore()
+        if action == "hosted_sqlite_restore":
+            return self.i.hosted_restore()
+        if action == "managed_data_restore":
             code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
-            if code != 200 or not isinstance(application, dict):
-                raise LiveDriverError("application did not reconcile after admin recovery")
-        elif action == "application_delete":
+            if (
+                code != 200
+                or not isinstance(application, dict)
+                or not isinstance(application.get("url"), str)
+            ):
+                raise LiveDriverError("application URL is unavailable for managed restore proof")
+            return self.i.managed_restore(str(application["url"]))
+        if action == "persistent_host_replacement":
+            observed = self.i.replace("ingress")
+            code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
+            app_url = application.get("url") if isinstance(application, dict) else None
+            retained = code == 200 and isinstance(app_url, str)
+            if isinstance(app_url, str):
+                self.i.verify_public_storage(
+                    app_url + str(self.c.application["verificationPath"]),
+                    self._content_proof(),
+                )
+            return _observed(
+                required,
+                oldHostRetainedUntilReady=observed.get("oldHostRetainedUntilReady") is True,
+                exactIdentityVerified=observed.get("exactIdentityVerified") is True,
+                dataRetained=retained,
+            )
+        if action == "admin_recovery":
+            observed = self.i.replace("admin")
+            code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
+            reconciled = (
+                code == 200
+                and isinstance(application, dict)
+                and application.get("applicationId") == self.app_id
+            )
+            return _observed(
+                required,
+                externalRecoveryUsed=observed.get("externalRecoveryUsed") is True,
+                controllerStateRetained=reconciled,
+                applicationReconciled=reconciled,
+            )
+        if action == "application_delete":
             self.i.mutate_controller(
                 "POST",
                 f"/v1/applications/{self.app_id}/delete",
@@ -1161,11 +1660,22 @@ class RepositoryLiveDriver:
                 key("delete"),
                 privileged=True,
             )
-            if self.i.list_items(f"/v1/applications/{self.app_id}/storage?limit=100"):
-                raise LiveDriverError("application deletion left managed storage")
-        elif action == "cleanup_verify":
-            self.i.teardown(baseline)
-        return {name: True for name in dict(ACTION_CHECKS)[action]}
+            storage = self.i.list_items(f"/v1/applications/{self.app_id}/storage?limit=100")
+            code, _body = self.i.controller("GET", f"/v1/applications/{self.app_id}")
+            absent = {
+                kind: not any(item.get("type") == kind for item in storage)
+                for kind in ("postgres", "mongo", "s3")
+            }
+            return _observed(
+                required,
+                applicationAbsent=code == 404,
+                postgresAbsent=absent["postgres"],
+                mongoAbsent=absent["mongo"],
+                s3Absent=absent["s3"],
+            )
+        if action == "cleanup_verify":
+            return self.i.teardown(baseline)
+        raise LiveDriverError("action has no typed implementation")
 
 
 def main() -> int:

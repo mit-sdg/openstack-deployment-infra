@@ -37,6 +37,13 @@
     "commit": "0123456789abcdef0123456789abcdef01234567",
     "requestedRef": "main",
     "verificationPath": "/acceptance/storage",
+    "resetPath": "/acceptance/storage/reset",
+    "contentProof": {
+      "postgres": {"key": "p07", "value": "12345678"},
+      "mongo": {"key": "p07", "value": "12345678"},
+      "s3": {"key": "p07", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    },
+    "emptyProof": {"postgres": null, "mongo": null, "s3": null},
     "configuration": {
       "schemaVersion": 1,
       "build": {

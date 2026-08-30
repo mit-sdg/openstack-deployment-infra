@@ -11,6 +11,7 @@ from uuid import UUID, uuid5
 from openstack_platform import acceptance
 from openstack_platform.acceptance_live_driver import (
     DriverConfig,
+    LiveDriverError,
     RepositoryLiveDriver,
     SubprocessTransport,
     SupportedInterfaces,
@@ -40,6 +41,13 @@ def config(root: Path, executable: Path) -> DriverConfig:
         "commit": "1" * 40,
         "requestedRef": "main",
         "verificationPath": "/acceptance/storage",
+        "resetPath": "/acceptance/storage/reset",
+        "contentProof": {
+            "postgres": {"value": "12345678"},
+            "mongo": {"value": "12345678"},
+            "s3": {"value": "12345678"},
+        },
+        "emptyProof": {"postgres": None, "mongo": None, "s3": None},
         "configuration": {
             "schemaVersion": 1,
             "build": {
@@ -119,6 +127,7 @@ class FakeInterfaces:
         self.storage: list[dict[str, object]] = []
         self.deployments: list[dict[str, object]] = []
         self.deleted = False
+        self.enabled = True
         self.app_id = str(uuid5(UUID(DEPLOYMENT), "application"))
 
     def setup_plan(self) -> None:
@@ -131,8 +140,9 @@ class FakeInterfaces:
     def inventory(self) -> list[dict[str, object]]:
         return []
 
-    def setup_apply(self) -> None:
+    def setup_apply(self) -> dict[str, bool]:
         self.calls.append(("setup", True))
+        return {name: True for name in dict(acceptance.ACTION_CHECKS)["greenfield_setup"]}
 
     def mutate_controller(
         self,
@@ -156,6 +166,8 @@ class FakeInterfaces:
                         "applicationId": self.app_id,
                         "type": kind,
                         "name": "acceptance",
+                        "lifecycleState": "active",
+                        "lastVerifiedAt": "2026-01-01T00:00:00Z",
                     }
                 )
         if path.endswith("/deployments") and isinstance(body, dict):
@@ -164,8 +176,13 @@ class FakeInterfaces:
                     {
                         "deploymentId": key,
                         "repositoryCommit": body["commit"],
+                        "status": "accepted",
                     }
                 )
+        if path.endswith("/disable"):
+            self.enabled = False
+        if path.endswith("/enable"):
+            self.enabled = True
         if path.endswith("/delete"):
             if not privileged:
                 raise AssertionError("delete did not use the privileged socket")
@@ -183,34 +200,68 @@ class FakeInterfaces:
         self, method: str, path: str, body: object | None = None, **_options: object
     ) -> tuple[int, object]:
         self.calls.append(("controller-read", method, path, False))
+        if self.deleted:
+            return 404, {"error": "not_found"}
         return 200, {
             "applicationId": self.app_id,
-            "enabled": True,
+            "enabled": self.enabled,
             "url": "https://acceptance.example.test",
         }
 
-    def interrupt_controller(self, operation_key: str) -> None:
+    def interrupt_controller(self, operation_key: str) -> dict[str, bool]:
         self.calls.append(("interrupt-controller", operation_key, True))
+        return {"durableOperationStarted": True, "interruptionInjected": True}
 
-    def verify_public_storage(self, url: str, expected_commit: str) -> None:
-        self.calls.append(("public-storage", url, expected_commit, False))
+    def verify_public_storage(self, url: str, expected: Mapping[str, object]) -> dict[str, bool]:
+        self.calls.append(("public-storage", url, expected, False))
+        return {
+            "candidateVerified": True,
+            "publicRouteHealthy": True,
+            "storageBound": True,
+            "postgresWriteReadVerified": True,
+            "mongoWriteReadVerified": True,
+            "s3WriteReadVerified": True,
+        }
 
-    def operator_backup_restore(self) -> None:
+    def operator_backup_restore(self) -> dict[str, bool]:
         self.calls.append(("operator-backup-restore", True))
+        return {name: True for name in dict(acceptance.ACTION_CHECKS)["operator_sqlite_restore"]}
 
-    def hosted_restore(self) -> None:
+    def hosted_restore(self) -> dict[str, bool]:
         self.calls.append(("hosted-backup-restore", True))
+        return {name: True for name in dict(acceptance.ACTION_CHECKS)["hosted_sqlite_restore"]}
 
-    def managed_restore(self) -> None:
-        self.calls.append(("managed-backup-restore", True))
+    def managed_restore(self, url: str) -> dict[str, bool]:
+        self.calls.append(("managed-backup-restore", url, True))
+        return {name: True for name in dict(acceptance.ACTION_CHECKS)["managed_data_restore"]}
 
-    def replace(self, role: str) -> None:
+    def replace(self, role: str) -> dict[str, bool]:
         self.calls.append(("replace", role, True))
+        action = "persistent_host_replacement" if role == "ingress" else "admin_recovery"
+        return {name: True for name in dict(acceptance.ACTION_CHECKS)[action]}
 
-    def teardown(self, baseline: str) -> None:
+    def teardown(self, baseline: str) -> dict[str, bool]:
         if baseline != "b" * 64 or not self.deleted or self.storage:
             raise AssertionError("cleanup did not receive converged scoped state")
         self.calls.append(("teardown", True))
+        return {name: True for name in dict(acceptance.ACTION_CHECKS)["cleanup_verify"]}
+
+
+class StaticOutputTransport(FakeCommandTransport):
+    def __init__(self, output: Mapping[str, object]) -> None:
+        super().__init__()
+        self.output = output
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        stdin: bytes = b"",
+        timeout: int = 1800,
+        mutating: bool = False,
+    ) -> bytes:
+        self.calls.append((tuple(argv), mutating, stdin))
+        return json.dumps(self.output).encode()
 
 
 class LiveAcceptanceDriverTests(unittest.TestCase):
@@ -223,6 +274,7 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
             value = config(root, executable)
             commands = FakeCommandTransport()
             interfaces = SupportedInterfaces(value, commands)
+            interfaces.capture_ownership = lambda: None  # type: ignore[method-assign]
             interfaces.setup_apply()
             interfaces.controller(
                 "POST",
@@ -291,6 +343,100 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
             self.assertIn(("replace", "ingress", True), fake.calls)
             self.assertIn(("replace", "admin", True), fake.calls)
             self.assertEqual(fake.calls[-1], ("teardown", True))
+
+    def test_missing_concrete_observation_fails_instead_of_synthesizing_true(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            fake = FakeInterfaces(value)
+            original = fake.setup_apply
+
+            def incomplete() -> dict[str, bool]:
+                result = original()
+                result["platformHealthy"] = False
+                return result
+
+            fake.setup_apply = incomplete  # type: ignore[method-assign]
+            driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(LiveDriverError, "did not establish"):
+                driver.handle(
+                    {
+                        "schemaVersion": 1,
+                        "mode": "execute",
+                        "action": "greenfield_setup",
+                        "scope": {
+                            "deploymentId": DEPLOYMENT,
+                            "projectId": PROJECT,
+                            "namespace": NAMESPACE,
+                        },
+                        "planSha256": "a" * 64,
+                        "driverConfigurationSha256": hashlib.sha256(
+                            value.path.read_bytes()
+                        ).hexdigest(),
+                        "baselineFingerprint": "b" * 64,
+                    }
+                )
+
+    def test_substring_ownership_adversary_is_rejected_before_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            resource = {
+                "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                "name": "wrong-name",
+                "project_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                "description": f"expected-name {PROJECT}",
+                "properties": {
+                    f"{NAMESPACE.replace('-', '_')}_managed_by": "platform",
+                    f"{NAMESPACE.replace('-', '_')}_namespace": NAMESPACE,
+                    f"{NAMESPACE.replace('-', '_')}_project_id": PROJECT,
+                },
+            }
+            transport = StaticOutputTransport(resource)
+            interfaces = SupportedInterfaces(value, transport)
+            with self.assertRaisesRegex(LiveDriverError, "name differs"):
+                interfaces._show_projection("server", str(resource["id"]), "expected-name")
+            self.assertFalse(any("delete" in call[0] for call in transport.calls))
+
+    def test_keypair_without_exact_user_projection_is_not_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            transport = StaticOutputTransport(
+                {
+                    "name": "example-admin",
+                    "fingerprint": "aa:bb",
+                    "public_key": "ssh-ed25519 AAAA",
+                    "type": "ssh",
+                    "description": f"user_id={PROJECT}",
+                }
+            )
+            with self.assertRaisesRegex(LiveDriverError, "required field"):
+                SupportedInterfaces(value, transport)._show_projection(
+                    "keypair", "example-admin", "example-admin"
+                )
+            self.assertFalse(any("delete" in call[0] for call in transport.calls))
+
+    def test_teardown_refuses_absent_immutable_ownership_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            transport = FakeCommandTransport()
+            with self.assertRaisesRegex(LiveDriverError, "ownership metadata is absent"):
+                SupportedInterfaces(value, transport).teardown("b" * 64)
+            self.assertFalse(any(mutating for _argv, mutating, _stdin in transport.calls))
 
     def test_real_plan_transport_transcript_contains_only_non_mutating_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

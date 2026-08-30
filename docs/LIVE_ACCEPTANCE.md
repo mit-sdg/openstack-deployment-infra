@@ -64,11 +64,13 @@ The run executes and checkpoints these actions in order:
 2. deliberate interruption after a durable operation starts, followed by same-operation resume without a duplicate resource;
 3. one application create, PostgreSQL/MongoDB/S3 create-bind-write-read lifecycle, exact-commit deployment, and disable/enable without rebuild or data loss;
 4. encrypted external-operator SQLite backup/offline restore and hosted-controller SQLite backup/offline restore;
-5. PostgreSQL, MongoDB, and S3 managed-data restore with `RESTORE-MANIFEST` verification;
-6. persistent-host replacement retaining the old host until readiness;
+5. an encrypted managed-data backup, exact application-level reset proof that PostgreSQL, MongoDB, and S3 are empty, destructive `restore_managed_data.sh` replacement restore, and exact post-restore content proof for all three stores;
+6. persistent-host replacement with fresh old/new provider identity and readiness observations;
 7. external admin recovery with controller state and application reconciliation;
 8. application/storage deletion; and
-9. deployment cleanup, zero owned resources, backup-disposition recording, and equality with the pre-run unrelated-resource fingerprint.
+9. deployment cleanup using an immutable, deployment/project-bound inventory of exact typed provider projections (including the keypair), zero owned resources, verified destruction of the owned backup volume under the approved disposition, and equality with the pre-run unrelated-resource fingerprint.
+
+No check is inferred from general command success. Each action returns only its exact typed observations; a missing or false observation fails the step. The reset endpoint is part of the disposable fixture contract and must return the configured `emptyProof` only after all three logical targets are empty. The subsequent read must exactly equal `contentProof`; boolean “storage OK” summaries are not accepted.
 
 If the command stops, run the same command with the same files and confirmation. Completed events are not replayed. The checkpoint hash chain and exact plan hash prevent resuming against another plan.
 
@@ -110,12 +112,12 @@ Copy [`config/p07-driver.example.json`](../config/p07-driver.example.json) outsi
 - fixed operator executable, inventory, policy, state, setup environment/workspace, and OpenStack wrapper paths;
 - fixed SSH/SCP executables, mode-`0600` SSH config, admin/recovery aliases, project/privileged controller socket and curl paths, and admin backup/root/state paths;
 - fixed age executable/identity and private local staging/offline-restore directories;
-- deployment-scoped application slug, public GitHub repository, exact commit/ref, typed controller configuration, and a fixed public verification path whose strict JSON response proves PostgreSQL, MongoDB, and S3 write/read using the deployed commit;
+- deployment-scoped application slug, public GitHub repository, exact commit/ref, typed controller configuration, a fixed POST-only reset path and exact `emptyProof`, plus a fixed verification path and exact `contentProof` for PostgreSQL, MongoDB, and S3;
 - exact ingress/admin replacement image UUIDs; and
 - a private command transcript path; and
 - the exact `destroy-after-verified-restore` backup disposition, acknowledging that disposable backup volumes are removed only after all restore checks pass.
 
-The setup environment must contain the exact `OS_PROJECT_ID` and `PLATFORM_NAMESPACE`. The application slug must end in the deployment UUID's first eight characters. Executable paths and remote paths are absolute; no configurable argv or shell command is accepted. The driver rechecks the OpenStack token project and protected setup/inventory identity before every mutation.
+The setup environment must contain the exact `OS_PROJECT_ID` and `PLATFORM_NAMESPACE`. The application slug must end in the deployment UUID's first eight characters. Executable paths and remote paths are absolute; no configurable argv or shell command is accepted. The driver rechecks the OpenStack token project and protected setup/inventory identity before every mutation. Immediately after setup it creates (never overwrites) private `deployment-ownership.json` beside the transcript. Teardown refuses absent, malformed, duplicate, name-only, substring-matching, project-mismatched, identity-drifted, or ambiguous ownership. Servers and images require exact deployment metadata; all project resources require exact project UUIDs; keypairs require the exact immutable name, fingerprint, public key, type, and user identity captured under the guarded project.
 
 ## Protected driver protocol
 

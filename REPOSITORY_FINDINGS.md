@@ -100,7 +100,7 @@ Implemented by a signed pre-build component manifest plus a signed post-build ar
 
 **Exit gate:** complete. Tamper tests cover component inputs, signatures, evidence, QCOW2 bytes, Nix closure identity, source-manifest binding, and publication metadata while installer tests preserve the previously selected release on failure.
 
-### P-07 — Live release acceptance — failed independent audit
+### P-07 — Live release acceptance — resolved in code after independent audit
 
 The repository now provides an explicit-opt-in, plan-first disposable acceptance
 orchestrator with exact deployment/project scope, bounded driver calls, durable
@@ -117,7 +117,7 @@ resumes the identical operation, while the deployed fixture proves PostgreSQL,
 MongoDB, and S3 writes/reads through runtime bindings. Contract tests exercise
 every action through fake transports, including a plan transcript with zero
 mutations.
-The gate remains closed. The independent audit found that the driver returns every required check as `true` after broad command success, including outcomes it does not directly observe. Its managed restore action calls the throwaway restore verifier rather than the destructive replacement restore. Host replacement and backup-disposition checks are similarly synthesized. Teardown validates ownership by searching for project/name substrings anywhere in provider JSON, and keypairs skip project validation. These defects can create false acceptance evidence or delete an insufficiently authenticated resource.
+The independent-audit defects are corrected. Required checks now come from exact typed observations and any missing/false fact fails. Managed recovery proves an exact empty disposable logical target, invokes the destructive replacement restore, and compares exact PostgreSQL/MongoDB/S3 content afterward. Replacement and backup disposition have explicit identity/readiness/data and owned-backup observations. Setup creates immutable deployment/project ownership metadata with exact typed provider projections, including keypair fingerprint/public-key/type/user identity; teardown refuses absent, drifted, substring-only, project-mismatched, or ambiguous ownership before deletion. Negative false-true and adversarial ownership tests protect these boundaries. The live evidence run remains an external release gate.
 
 ### P-08 — Critical hardening workstreams — resolved in code
 
