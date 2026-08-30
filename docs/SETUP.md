@@ -41,6 +41,8 @@ PLATFORM_DISPLAY_NAME='New Project Platform'
 PLATFORM_ORGANIZATION='Example Organization'
 PLATFORM_DOMAIN='apps.example.org'
 PLATFORM_NETWORK='public'
+# Secure default; no public origin listener.
+PLATFORM_INGRESS_MODE='tunnel'
 PLATFORM_OPERATOR_CIDR='192.0.2.10/32'
 PLATFORM_ADMIN_ADDRESS='192.0.2.11'
 PLATFORM_INGRESS_ADDRESS='192.0.2.12'
@@ -76,6 +78,8 @@ Use `OS_AUTH_TYPE=v3applicationcredential` with `OS_APPLICATION_CREDENTIAL_ID` a
 | `PLATFORM_ORGANIZATION` | Prompts with the display name as its default. |
 | `PLATFORM_DOMAIN` | Prompts with no default. |
 | `PLATFORM_NETWORK` | Uses the only visible network; otherwise prompts. |
+| `PLATFORM_INGRESS_MODE` | `tunnel`, with no public origin listener. |
+| `PLATFORM_PROVIDER_CIDRS` | Must be omitted in tunnel mode. Direct mode requires a comma-separated list of canonical non-default IPv4 CIDRs. |
 | `PLATFORM_OPERATOR_CIDR` | Uses the SSH client address as `/32` when available; otherwise prompts. |
 | `PLATFORM_*_ADDRESS` | Prompts for each stable IPv4 address. Setup never guesses a fixed address. |
 | `PLATFORM_*_FLAVOR` | Selects the smallest visible flavor meeting the role baseline; prompts if none does. |
@@ -106,15 +110,34 @@ It prints the major phases that `--apply` will perform. Keep the environment fil
 
 ## Configure Cloudflare or another ingress provider
 
-Cloudflare account, tunnel, DNS, and certificate ownership remain external to OpenStack. To inject an existing tunnel token during first boot, put exactly the token in a separate direct mode-`0600` file and pass:
+Setup validates ingress mode and provider CIDRs during the non-mutating check,
+before creating its workspace or contacting OpenStack. The generated default is
+an authenticated tunnel with no public origin. Cloudflare account, tunnel, DNS,
+and certificate ownership remain external to OpenStack. To inject an existing
+tunnel token during first boot, put exactly the token in a separate direct
+mode-`0600` file and pass:
 
 ```bash
 --cloudflare-token-file /private/path/cloudflare-tunnel-token
 ```
 
-Without that option, setup boots ingress without `cloudflared` and reports `public-ingress=pending external provider configuration`. Configure a provider satisfying [the public ingress contract](PUBLIC_INGRESS.md), then verify `https://<PLATFORM_DOMAIN>/healthz` returns exactly `OK`.
+Without that option, tunnel mode boots ingress without `cloudflared` and reports
+`public-ingress=pending external provider configuration`; it does not expose an
+origin. Configure an authenticated on-host tunnel satisfying
+[the public ingress contract](PUBLIC_INGRESS.md), then verify
+`https://<PLATFORM_DOMAIN>/healthz` returns exactly `OK`.
 
-Setup with a Cloudflare token requires that route to return `OK` before reporting completion.
+For a provider that must connect directly, set both values in the environment
+file and omit the tunnel-token option:
+
+```dotenv
+PLATFORM_INGRESS_MODE='direct'
+PLATFORM_PROVIDER_CIDRS='203.0.113.0/24,198.51.100.7/32'
+```
+
+Setup rejects missing, malformed, duplicate, IPv6, host-bit, and
+`0.0.0.0/0` entries before mutation. Setup with a Cloudflare token requires the
+public route to return `OK` before reporting completion.
 
 ## Create the deployment
 

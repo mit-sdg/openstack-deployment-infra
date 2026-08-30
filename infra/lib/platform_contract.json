@@ -63,21 +63,21 @@
   "inventory": {
     "allowedTopLevel": [
       "project", "projectId", "displayName", "organization", "prefix", "namespace",
-      "domain", "recoveryDomains", "staticIngressRoutes", "datacenter", "region",
+      "domain", "recoveryDomains", "staticIngressRoutes", "publicIngress", "datacenter", "region",
       "network", "internalNames", "pki", "operatorCidr", "metadataAddress",
       "addresses", "hosts", "ports", "volumes", "images", "flavors", "versions",
       "checksums", "containers", "paths"
     ],
     "requiredTopLevel": [
       "project", "projectId", "displayName", "organization", "prefix", "namespace",
-      "domain", "recoveryDomains", "datacenter", "region", "network", "internalNames",
+      "domain", "recoveryDomains", "publicIngress", "datacenter", "region", "network", "internalNames",
       "pki", "operatorCidr", "metadataAddress", "addresses", "hosts", "ports",
       "volumes", "images", "flavors", "versions", "checksums", "containers", "paths"
     ],
     "requiredPaths": [
       "project", "projectId", "displayName", "organization", "prefix", "namespace",
       "pki.internalCaFile", "domain", "recoveryDomains.0", "recoveryDomains.1",
-      "datacenter", "region", "network", "internalNames.storage",
+      "publicIngress.mode", "publicIngress.providerCidrs", "datacenter", "region", "network", "internalNames.storage",
       "internalNames.objectStorage", "operatorCidr", "metadataAddress",
       "addresses.admin", "addresses.ingress", "addresses.storage", "hosts.admin",
       "hosts.ingress", "hosts.storage", "ports.admin", "ports.ingress", "ports.storage",

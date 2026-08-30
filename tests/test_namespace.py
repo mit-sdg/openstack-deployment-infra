@@ -171,24 +171,39 @@ class PlatformConfigValidationTests(unittest.TestCase):
     def example(self) -> dict[str, object]:
         return json.loads((ROOT / "config" / "platform.example.json").read_text())
 
+    def load_document(self, document: dict[str, object]) -> dict[str, object]:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "platform.json"
+            path.write_text(json.dumps(document))
+            with patch.dict(os.environ, {"PLATFORM_CONFIG": str(path)}):
+                return platform_config.load()
+
     def test_tracked_example_satisfies_every_dereferenced_field(self) -> None:
         platform_config.validate(self.example())
 
-    def test_validate_reports_a_nested_field_that_load_does_not_check(self) -> None:
+    def test_load_rejects_a_missing_nested_field_before_use(self) -> None:
         document = self.example()
         flavors = dict(document["flavors"])  # type: ignore[arg-type]
         del flavors["worker"]
         document["flavors"] = flavors
 
-        # load() only checks top-level keys, so this document passes it.
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "platform.json"
             path.write_text(json.dumps(document))
             with patch.dict(os.environ, {"PLATFORM_CONFIG": str(path)}):
-                platform_config.load()
+                with self.assertRaisesRegex(ValueError, "flavors.worker"):
+                    platform_config.load()
 
-        with self.assertRaisesRegex(ValueError, "flavors.worker"):
-            platform_config.validate(document)
+    def test_standalone_loader_rejects_unsafe_direct_ingress(self) -> None:
+        for ingress in (
+            {"mode": "direct", "providerCidrs": []},
+            {"mode": "direct", "providerCidrs": ["0.0.0.0/0"]},
+            {"mode": "direct", "providerCidrs": ["not-a-cidr"]},
+        ):
+            document = self.example()
+            document["publicIngress"] = ingress
+            with self.subTest(ingress=ingress), self.assertRaises(ValueError):
+                self.load_document(document)
 
     def test_validate_reports_every_missing_path_at_once(self) -> None:
         document = self.example()

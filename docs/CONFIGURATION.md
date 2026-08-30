@@ -64,6 +64,7 @@ This prevents a checkout or management-host config from being used on a guest.
 | `namespace` | Internal name used for services, paths, scheduler metadata, readiness markers, and container names. |
 | `domain` | Base hostname used to form application URLs as `<slug>.<domain>`. |
 | `recoveryDomains` | Two additional hostnames routed to the platform service. Current scripts read the first two entries. |
+| `publicIngress` | Required strict origin policy: authenticated `tunnel`, or `direct` with exact provider IPv4 CIDRs. |
 | `staticIngressRoutes` | Optional named routes from exact public hostnames to trusted HTTP origins outside Nomad. |
 | `datacenter` | Nomad datacenter name. |
 | `region` | Nomad region name. |
@@ -92,10 +93,10 @@ candidate with a different stable identity is rejected before it can be used;
 changing those identity fields means starting from a new database, not copying
 an existing one.
 
-The loader checks most top-level groups, the display and organization names,
-`namespace`, and the internal CA filename, but not every nested field. Keep the
-structure shown in the example. Run the checks at the end of this page after
-every change.
+The loader checks required paths and the strict public-ingress policy in
+addition to top-level groups, names, `namespace`, and the internal CA filename.
+Keep the remaining nested structure shown in the example. Run the checks at the
+end of this page after every change.
 
 ## Private operator policy
 
@@ -196,6 +197,27 @@ group. Set it to the narrowest operator network that needs access.
 
 `metadataAddress` is normally `169.254.169.254`. Change it only if the target
 cloud exposes metadata at another address.
+
+## Public ingress policy
+
+`publicIngress` is required:
+
+```json
+{
+  "publicIngress": {
+    "mode": "tunnel",
+    "providerCidrs": []
+  }
+}
+```
+
+`tunnel` is the secure setup default and requires an empty CIDR list. It binds
+Traefik to loopback and creates no Neutron or host-firewall HTTP/HTTPS opening.
+`direct` requires one or more canonical, unique IPv4 networks; IPv6, host bits,
+duplicates, an empty list, and `0.0.0.0/0` are rejected before provider
+mutation. Direct mode admits port 80 only from those exact sources at both
+network boundaries. See [`PUBLIC_INGRESS.md`](PUBLIC_INGRESS.md) for provider
+behavior and migration order.
 
 ## Public hostnames
 

@@ -34,6 +34,8 @@ PREFIX = CONFIG["prefix"]
 PUBLIC_NETWORK = CONFIG["network"]
 INGRESS_PUBLIC_PORT = CONFIG["ports"]["ingress"]
 OPERATOR_SOURCE = CONFIG["operatorCidr"]
+INGRESS_MODE = CONFIG["publicIngress"]["mode"]
+PROVIDER_CIDRS = tuple(CONFIG["publicIngress"]["providerCidrs"])
 
 CONTRACT_PORTS = CONTRACT["ports"]
 SSH_PORT = CONTRACT_PORTS["ssh"]
@@ -71,11 +73,13 @@ SECURITY_GROUPS: dict[str, tuple[str, list[Rule]]] = {
         ],
     ),
     f"{PREFIX}-ingress": (
-        "Public HTTP(S) ingress and administration from the control plane",
+        "Strict provider ingress or authenticated tunnel with no public origin",
         [
-            Rule("ingress", "tcp", HTTP_PORT, HTTP_PORT, remote_ip="0.0.0.0/0"),
-            Rule("ingress", "tcp", HTTPS_PORT, HTTPS_PORT, remote_ip="0.0.0.0/0"),
-        ],
+            Rule("ingress", "tcp", HTTP_PORT, HTTP_PORT, remote_ip=cidr)
+            for cidr in PROVIDER_CIDRS
+        ]
+        if INGRESS_MODE == "direct"
+        else [],
     ),
     f"{PREFIX}-worker": (
         "Application workers; application traffic arrives only from ingress",
@@ -188,6 +192,7 @@ def ensure_security_groups(conn: Any, apply: bool) -> dict[str, Any]:
             comparable_rule(rule)
             for rule in conn.network.security_group_rules(security_group_id=group.id)
         }
+        wanted_rules = {desired_rule(rule) for rule in rules}
         for rule in rules:
             wanted = desired_rule(rule)
             if wanted in existing:
@@ -206,6 +211,27 @@ def ensure_security_groups(conn: Any, apply: bool) -> dict[str, Any]:
                 ether_type=rule.ethertype,
             )
             print(f"added security rule: {name} {wanted}")
+
+        # These ports are wholly platform-owned. Remove stale provider ranges
+        # and the legacy 0.0.0.0/0 rules only after replacement rules exist.
+        if name == ingress:
+            for rule in conn.network.security_group_rules(security_group_id=group.id):
+                observed = comparable_rule(rule)
+                managed_public_rule = (
+                    rule.direction == "ingress"
+                    and rule.protocol == "tcp"
+                    and rule.port_range_min in {HTTP_PORT, HTTPS_PORT}
+                    and rule.port_range_max == rule.port_range_min
+                    and rule.remote_group_id is None
+                    and rule.ether_type == "IPv4"
+                )
+                if not managed_public_rule or observed in wanted_rules:
+                    continue
+                if not apply:
+                    print(f"would remove stale security rule: {name} {observed}")
+                    continue
+                conn.network.delete_security_group_rule(rule, ignore_missing=False)
+                print(f"removed stale security rule: {name} {observed}")
     return groups
 
 

@@ -16,6 +16,10 @@ let
   '';
   namespace = platform.namespace;
   configRoot = "/etc/${namespace}";
+  ingressMode = platform.publicIngress.mode;
+  providerCidrs = platform.publicIngress.providerCidrs;
+  directIngress = ingressMode == "direct";
+  webAddress = if directIngress then "0.0.0.0" else "127.0.0.1";
   yaml = pkgs.formats.yaml { };
   hostRule = lib.concatMapStringsSep " || " (host: "Host(`${host}`)") (
     [ platform.domain ] ++ platform.recoveryDomains
@@ -42,19 +46,12 @@ let
     };
     entryPoints = {
       web = {
-        address = ":${toString constants.ports.http}";
-        forwardedHeaders.trustedIPs = [
-          "127.0.0.1/32"
-          "::1/128"
-        ];
-        transport.respondingTimeouts = {
-          readTimeout = "30s";
-          writeTimeout = "0s";
-          idleTimeout = "90s";
-        };
-      };
-      websecure = {
-        address = ":${toString constants.ports.https}";
+        address = "${webAddress}:${toString constants.ports.http}";
+        forwardedHeaders.trustedIPs =
+          if directIngress then providerCidrs else [
+            "127.0.0.1/32"
+            "::1/128"
+          ];
         transport.respondingTimeouts = {
           readTimeout = "30s";
           writeTimeout = "0s";
@@ -139,11 +136,15 @@ let
 in
 {
   networking.hostName = platform.hosts.ingress;
-  networking.firewall.allowedTCPPorts = with constants.ports; [
-    ssh
-    http
-    https
-  ];
+  # Tunnel mode has no network-facing HTTP listener. Direct mode admits only
+  # the exact configured provider sources at both Neutron and host boundaries.
+  networking.firewall.allowedTCPPorts = [ constants.ports.ssh ];
+  networking.firewall.extraCommands = lib.optionalString directIngress (
+    lib.concatMapStringsSep "\n" (
+      cidr:
+      "iptables -A nixos-fw -p tcp -s ${lib.escapeShellArg cidr} --dport ${toString constants.ports.http} -j nixos-fw-accept"
+    ) providerCidrs
+  );
 
   environment.systemPackages = [ packages.traefik ];
   environment.etc."traefik/traefik.yaml".source = staticConfig;

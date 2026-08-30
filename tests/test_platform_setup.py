@@ -85,6 +85,25 @@ PLATFORM_DOMAIN='apps.example.test'
         ):
             setup._project_identity(Path("/nix/store/openstack"), environment)
 
+    def test_malformed_or_missing_direct_provider_cidrs_fail_before_mutation(self) -> None:
+        cases = (
+            "PLATFORM_INGRESS_MODE=direct\n",
+            "PLATFORM_INGRESS_MODE=direct\nPLATFORM_PROVIDER_CIDRS=0.0.0.0/0\n",
+            "PLATFORM_INGRESS_MODE=direct\nPLATFORM_PROVIDER_CIDRS=203.0.113.7/24\n",
+        )
+        for index, content in enumerate(cases):
+            path = self.environment(content)
+            workspace = self.root / f"workspace-{index}"
+            with self.subTest(content=content), self.assertRaises(setup.SetupError):
+                setup.run_setup(
+                    env_file=path,
+                    workspace=workspace,
+                    cloudflare_token=None,
+                    apply=False,
+                    output=io.StringIO(),
+                )
+            self.assertFalse(workspace.exists())
+
     def test_plan_is_non_mutating_and_names_every_major_phase(self) -> None:
         path = self.environment("OS_PROJECT_NAME=demo\n")
         output = io.StringIO()
@@ -152,6 +171,7 @@ class SetupInventoryTests(unittest.TestCase):
         self.assertEqual(document["addresses"]["ingress"], "192.0.2.12")
         self.assertEqual(document["images"]["worker"], "demo-nixos-worker-aaaaaaaa")
         self.assertEqual(document["staticIngressRoutes"], {})
+        self.assertEqual(document["publicIngress"], {"mode": "tunnel", "providerCidrs": []})
 
     def test_explicit_volume_sizes_override_fresh_defaults(self) -> None:
         self.values.update(

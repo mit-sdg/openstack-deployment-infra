@@ -10,6 +10,10 @@
     "projects.example.net",
     "compute.example.net"
   ],
+  "publicIngress": {
+    "mode": "tunnel",
+    "providerCidrs": []
+  },
   "staticIngressRoutes": {
     "one-off": {
       "hostname": "one-off.apps.example.com",

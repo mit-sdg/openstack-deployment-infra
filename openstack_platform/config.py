@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -232,11 +233,40 @@ def _freeze(value: Any) -> Any:
     return value
 
 
+def _validate_public_ingress(document: Mapping[str, Any]) -> None:
+    ingress = document.get("publicIngress")
+    if not isinstance(ingress, dict):
+        raise ValidationError("publicIngress must be a JSON object")
+    _keys(ingress, {"mode", "providerCidrs"}, field="publicIngress")
+    mode = ingress["mode"]
+    cidrs = ingress["providerCidrs"]
+    if mode not in {"tunnel", "direct"}:
+        raise ValidationError("publicIngress.mode must be tunnel or direct")
+    if not isinstance(cidrs, list) or any(not isinstance(item, str) for item in cidrs):
+        raise ValidationError("publicIngress.providerCidrs must be a JSON string array")
+    canonical: list[str] = []
+    for item in cidrs:
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError as error:
+            raise ValidationError("publicIngress.providerCidrs contains a malformed CIDR") from error
+        if network.version != 4 or network.prefixlen == 0:
+            raise ValidationError("publicIngress.providerCidrs must contain exact non-default IPv4 CIDRs")
+        canonical.append(str(network))
+    if len(canonical) != len(set(canonical)):
+        raise ValidationError("publicIngress.providerCidrs contains duplicate CIDRs")
+    if mode == "tunnel" and canonical:
+        raise ValidationError("tunnel ingress must not configure provider CIDRs")
+    if mode == "direct" and not canonical:
+        raise ValidationError("direct ingress requires at least one provider CIDR")
+
+
 def load_platform(path: str | Path) -> PlatformConfig:
     """Load the non-secret deployment inventory, including stable project UUID."""
     document = _read_json(Path(path), private=False)
     _keys(document, _PLATFORM_KEYS, field="platform inventory", required=_REQUIRED_PLATFORM_KEYS)
     _required_inventory_paths(document)
+    _validate_public_ingress(document)
 
     project_name = _text(document["project"], field="project")
     project_id = uuid(document["projectId"], field="projectId")

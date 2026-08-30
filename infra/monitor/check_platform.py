@@ -54,17 +54,9 @@ def main() -> int:
             raise RuntimeError("an application worker is not ACTIVE")
         checks["openstack"] = {"core_active": 3, "workers_active": len(workers)}
 
-        if (
-            bounded_request(
-                f"http://{CONFIG['addresses']['ingress']}/healthz",
-                timeout_seconds=10,
-                response_limit=16,
-            ).strip()
-            != b"OK"
-        ):
-            raise RuntimeError("ingress health response is unexpected")
-        checks["ingress"] = "healthy"
-
+        # The origin is deliberately not a health surface in tunnel mode and
+        # is provider-CIDR restricted in direct mode. Exercise only the public
+        # ingress contract from here.
         for hostname in (CONFIG["domain"], f"wildcard-health.{CONFIG['domain']}"):
             response = bounded_request(
                 f"https://{hostname}/healthz",
@@ -74,9 +66,9 @@ def main() -> int:
             )
             if response.strip() != b"OK":
                 raise RuntimeError(
-                    f"Cloudflare Tunnel health response is unexpected for {hostname}"
+                    f"public ingress health response is unexpected for {hostname}"
                 )
-        checks["cloudflare_tunnel"] = "healthy"
+        checks["public_ingress"] = "healthy"
 
         admin_command(SERVICE_CHECK_PYTHON, CHECK_SERVICES)
         checks["managed_services"] = "healthy"

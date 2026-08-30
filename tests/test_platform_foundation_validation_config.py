@@ -206,6 +206,33 @@ class ConfigTests(unittest.TestCase):
             path = self.write_json(Path(temporary), "policy.json", document)
             self.assertEqual(load_policy(path).standard.cpu_mhz, 500)
 
+    def test_public_ingress_is_explicit_and_never_world_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            valid = platform_document()
+            valid["publicIngress"] = {
+                "mode": "direct",
+                "providerCidrs": ["203.0.113.0/24", "198.51.100.7/32"],
+            }
+            path = self.write_json(directory, "direct.json", valid, mode=0o644)
+            self.assertEqual(load_platform(path).get("publicIngress.mode"), "direct")
+
+            invalid = (
+                {"mode": "direct", "providerCidrs": []},
+                {"mode": "direct", "providerCidrs": ["0.0.0.0/0"]},
+                {"mode": "direct", "providerCidrs": ["203.0.113.7/24"]},
+                {"mode": "tunnel", "providerCidrs": ["203.0.113.0/24"]},
+                {"mode": "legacy", "providerCidrs": []},
+            )
+            for index, ingress in enumerate(invalid):
+                document = platform_document()
+                document["publicIngress"] = ingress
+                candidate = self.write_json(
+                    directory, f"invalid-ingress-{index}.json", document, mode=0o644
+                )
+                with self.subTest(ingress=ingress), self.assertRaises(ValidationError):
+                    load_platform(candidate)
+
     def test_json_duplicates_and_inventory_unknown_fields_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

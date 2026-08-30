@@ -440,6 +440,30 @@ def _positive_integer(value: str, *, field: str) -> int:
     return parsed
 
 
+def _public_ingress(values: Mapping[str, str]) -> dict[str, Any]:
+    mode = values.get("PLATFORM_INGRESS_MODE", "tunnel")
+    if mode not in {"tunnel", "direct"}:
+        _fail("PLATFORM_INGRESS_MODE must be tunnel or direct")
+    raw = values.get("PLATFORM_PROVIDER_CIDRS", "")
+    supplied = [item.strip() for item in raw.split(",") if item.strip()]
+    cidrs: list[str] = []
+    for item in supplied:
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError as error:
+            raise SetupError("PLATFORM_PROVIDER_CIDRS contains a malformed CIDR") from error
+        if network.version != 4 or network.prefixlen == 0:
+            _fail("PLATFORM_PROVIDER_CIDRS must contain exact non-default IPv4 CIDRs")
+        cidrs.append(str(network))
+    if len(cidrs) != len(set(cidrs)):
+        _fail("PLATFORM_PROVIDER_CIDRS contains duplicate CIDRs")
+    if mode == "tunnel" and cidrs:
+        _fail("tunnel ingress must not configure PLATFORM_PROVIDER_CIDRS")
+    if mode == "direct" and not cidrs:
+        _fail("direct ingress requires PLATFORM_PROVIDER_CIDRS")
+    return {"mode": mode, "providerCidrs": cidrs}
+
+
 def _platform_document(
     repository: Path,
     values: dict[str, str],
@@ -582,6 +606,7 @@ def _platform_document(
             "namespace": namespace,
             "domain": domain,
             "recoveryDomains": recovery_domains,
+            "publicIngress": _public_ingress(values),
             "staticIngressRoutes": static_routes,
             "datacenter": values.get("PLATFORM_DATACENTER", namespace),
             "region": values.get("PLATFORM_REGION", "global"),
@@ -1269,12 +1294,16 @@ def run_setup(
 ) -> None:
     if os.geteuid() == 0 or os.environ.get("SUDO_USER"):
         _fail("run setup as the unprivileged operator owner")
+    values = load_environment_file(env_file)
+    ingress_policy = _public_ingress(values)
+    if cloudflare_token is not None:
+        _direct_private_file(cloudflare_token, field="Cloudflare tunnel token")
+        if ingress_policy["mode"] != "tunnel":
+            _fail("Cloudflare Tunnel token requires PLATFORM_INGRESS_MODE=tunnel")
     if not apply:
-        load_environment_file(env_file)
         _print_plan(output)
         return None
     repository = _repository_root()
-    values = load_environment_file(env_file)
     _credential_requirements(values, input_reader, secret_reader)
     provider_environment = _openstack_environment(values)
     commit = _source_commit(repository, provider_environment)

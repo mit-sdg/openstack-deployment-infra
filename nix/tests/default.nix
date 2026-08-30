@@ -319,6 +319,10 @@ let
               machine.succeed("grep -F 'one-off.apps.example.com' /etc/traefik/dynamic/platform.yaml")
               machine.succeed("grep -F 'http://${platform.addresses.admin}:8080' /etc/traefik/dynamic/platform.yaml")
               machine.succeed("grep -F 'http://192.0.2.14:4444' /etc/traefik/dynamic/platform.yaml")
+              machine.succeed("grep -F '127.0.0.1:80' /etc/traefik/traefik.yaml")
+              # A hostile client reaching a non-loopback origin address cannot
+              # select the management router merely by supplying its Host.
+              machine.fail("ip=$(hostname -I | awk '{print $1}'); ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --header 'Host: ${platform.domain}' http://$ip/")
             ''
           else if role == "storage" then
             ''

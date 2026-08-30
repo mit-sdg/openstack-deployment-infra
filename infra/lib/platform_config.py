@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -61,6 +62,32 @@ def load() -> dict[str, Any]:
         raise ValueError(f"platform config has unknown keys: {', '.join(sorted(unknown))}")
     if missing:
         raise ValueError(f"platform config is missing keys: {', '.join(sorted(missing))}")
+
+    validate(document)
+    ingress = document.get("publicIngress")
+    if not isinstance(ingress, dict) or set(ingress) != {"mode", "providerCidrs"}:
+        raise ValueError("publicIngress must contain exactly mode and providerCidrs")
+    mode = ingress.get("mode")
+    cidrs = ingress.get("providerCidrs")
+    if mode not in {"tunnel", "direct"}:
+        raise ValueError("publicIngress.mode must be tunnel or direct")
+    if not isinstance(cidrs, list) or any(not isinstance(item, str) for item in cidrs):
+        raise ValueError("publicIngress.providerCidrs must be a string array")
+    canonical: list[str] = []
+    for item in cidrs:
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError as error:
+            raise ValueError("publicIngress.providerCidrs contains a malformed CIDR") from error
+        if network.version != 4 or network.prefixlen == 0:
+            raise ValueError("publicIngress.providerCidrs must contain exact non-default IPv4 CIDRs")
+        canonical.append(str(network))
+    if len(canonical) != len(set(canonical)):
+        raise ValueError("publicIngress.providerCidrs contains duplicate CIDRs")
+    if mode == "tunnel" and canonical:
+        raise ValueError("tunnel ingress must not configure provider CIDRs")
+    if mode == "direct" and not canonical:
+        raise ValueError("direct ingress requires at least one provider CIDR")
 
     project = document["project"]
     if (
@@ -148,6 +175,8 @@ def shell_values(document: dict[str, Any]) -> dict[str, str | int]:
         "PLATFORM_STORAGE_INTERNAL_NAME": document["internalNames"]["storage"],
         "PLATFORM_OBJECT_STORAGE_INTERNAL_NAME": document["internalNames"]["objectStorage"],
         "PLATFORM_OPERATOR_CIDR": document["operatorCidr"],
+        "PLATFORM_INGRESS_MODE": document["publicIngress"]["mode"],
+        "PLATFORM_PROVIDER_CIDRS": ",".join(document["publicIngress"]["providerCidrs"]),
         "PLATFORM_METADATA_ADDRESS": document["metadataAddress"],
         "PLATFORM_ADMIN_IP": document["addresses"]["admin"],
         "PLATFORM_INGRESS_IP": document["addresses"]["ingress"],
