@@ -75,7 +75,7 @@ load_platform_config() {
   done
   for key in "${allowed[@]}"; do
     printf -v "$key" '%s' "${values[$key]}"
-    export "$key"
+    export "${key?}"
   done
 }
 
