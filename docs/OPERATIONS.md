@@ -1030,7 +1030,7 @@ infra/backup/full_loss_recovery_drill.sh --verify-only \
   /private/replacement-platform.json
 ```
 
-Verify-only imports the bundle, decrypts the SQLite files, and validates Garage
+Verify-only imports the bundle, decrypts and read-only integrity/schema-checks the SQLite files, and validates Garage
 and OCI archive structure. It does not invoke any restore launcher, always
 reports `full-loss-drill=verify-only evidence=none`, and cannot create
 `DRILL-EVIDENCE.json`; it is not a completed full-loss drill.

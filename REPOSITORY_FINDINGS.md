@@ -5,7 +5,7 @@ Reviewed 2026-08-30. This file separates work that gates a real deployment from 
 ## Current decision
 
 - **Start management UI implementation:** yes. The controller/setup and P-level implementation gates are complete.
-- **Deploy to production users:** no. The independent-audit P-02 implementation defect is corrected on this branch; P-01 and P-07 defects and the pending Nix/live evidence gates remain unresolved.
+- **Deploy to production users:** not yet. All independent-audit implementation defects are corrected; the remaining blockers are external evidence from Nix/VM/QCOW2 CI and the protected live P-07 run.
 - **Run an internal infrastructure deployment:** reasonable after CI; use it to produce the first live acceptance evidence.
 
 ## Original blockers — fixed on this branch
@@ -38,7 +38,7 @@ Audit found and corrected a recovery deadlock in the first implementation: a `re
 
 The stale release-installer test expectations were corrected and the repository was formatted. Local evidence:
 
-- 431 unit/packaging/security/recovery tests pass;
+- 443 unit/packaging/security/recovery tests pass;
 - Ruff format and lint pass;
 - strict mypy passes for 63 source files;
 - vulture, compileall, entrypoint smoke tests, JSON/SVG checks, and shell syntax pass.
@@ -61,9 +61,9 @@ Setup now refuses completion unless the admin host confirms:
 
 ## Production gates
 
-An independent clean-worktree audit classified P-01 and P-02 as partial and P-07 as failed. This branch corrects the audited P-02 drill defect. P-03 through P-06 and P-08 pass code review, subject to the external Nix/live evidence stated below.
+An independent clean-worktree audit classified P-01 and P-02 as partial and P-07 as failed. This branch now corrects all three audited implementation defects. Every production gate remains subject to the external Nix/live evidence stated below.
 
-### P-01 — Real non-mutating setup preflight — partial
+### P-01 — Real non-mutating setup preflight — audit defect corrected in code
 
 `setup check` now reads and strictly parses Glance image-count and aggregate image-storage quota, using all five byte sizes bound into signed role-artifact evidence. Unlimited, unknown, byte, and GiB formatter variants are covered; missing size evidence and unknown or insufficient capacity cannot report ready. The path remains read-only in mutation-spy coverage. Real-cloud non-mutation evidence remains outstanding.
 
@@ -174,7 +174,7 @@ uv run ruff check openstack_platform deploy/releases infra tests
 uv run mypy
 uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
 uv run python -m compileall -q openstack_platform deploy infra tests
-uv run python -m unittest discover -s tests -q   # 431 passed
+uv run python -m unittest discover -s tests -q   # 443 passed
 ```
 
 Shell syntax and packaged entrypoint smoke checks also passed. ShellCheck is unavailable locally. `nix flake check --no-build` could not access `/nix/var/nix/daemon-socket/socket`; Nix evaluation, package smoke, five role VM tests, and QCOW2 boot tests remain CI gates.
