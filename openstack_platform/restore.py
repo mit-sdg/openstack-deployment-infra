@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import NoReturn
 
 from . import runtime
-from .controller import database as db
 from .config import load_platform
+from .controller import database as db
 from .installation import OPERATOR_BIN
 from .validation import ValidationError
 
@@ -238,6 +238,17 @@ def _unfinished_operations(connection: sqlite3.Connection) -> bool:
     try:
         row = connection.execute(
             "SELECT 1 FROM operations WHERE status IN ('running', 'recovery_required') LIMIT 1"
+        ).fetchone()
+        if row is not None:
+            return True
+        dispatch_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_dispatches'"
+        ).fetchone()
+        if dispatch_table is None:
+            return False
+        row = connection.execute(
+            "SELECT 1 FROM operation_dispatches "
+            "WHERE status IN ('pending', 'running', 'recovery_required') LIMIT 1"
         ).fetchone()
     except sqlite3.OperationalError:
         return False

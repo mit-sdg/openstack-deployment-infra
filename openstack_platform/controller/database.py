@@ -32,10 +32,12 @@ from ..validation import (
     commit,
     env_key,
     oci_digest_pin,
-    resource_name as validate_resource_name,
     sha256_hex,
     slug,
     uuid,
+)
+from ..validation import (
+    resource_name as validate_resource_name,
 )
 
 BUSY_TIMEOUT_MS = 5_000
@@ -72,6 +74,10 @@ class MigrationError(DatabaseError):
 
 
 class IdempotencyConflictError(DatabaseError):
+    pass
+
+
+class DispatchQueueFullError(DatabaseError):
     pass
 
 
@@ -119,6 +125,17 @@ class Operation:
     candidate_digest: str | None
     safe_error: str | None
     cleanup_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class OperationDispatch:
+    operation_id: str
+    kind: str
+    scope: str
+    status: str
+    created_at: str
+    updated_at: str
+    safe_error: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +482,27 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
         ),
     ),
+    Migration(
+        2,
+        (
+            """
+            CREATE TABLE operation_dispatches (
+                            operation_id TEXT PRIMARY KEY REFERENCES idempotency_requests(request_id),
+                            kind TEXT NOT NULL,
+                            scope TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (status IN ('pending','running','finished','recovery_required')),
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            safe_error TEXT CHECK (safe_error IS NULL OR length(safe_error) <= 1024)
+                        ) STRICT
+            """,
+            """
+            CREATE UNIQUE INDEX one_active_dispatch_per_scope
+                        ON operation_dispatches(scope)
+                        WHERE status IN ('pending','running','recovery_required')
+            """,
+        ),
+    ),
 )
 
 _BOOTSTRAP = """
@@ -523,11 +561,8 @@ def _expected_schema_objects(target_version: int | None = None) -> dict[str, str
             break
         for statement in migration.statements:
             changes = [
-                (match.start(), "create", match)
-                for match in _SCHEMA_OBJECT_RE.finditer(statement)
-            ] + [
-                (match.start(), "drop", match) for match in _SCHEMA_DROP_RE.finditer(statement)
-            ]
+                (match.start(), "create", match) for match in _SCHEMA_OBJECT_RE.finditer(statement)
+            ] + [(match.start(), "drop", match) for match in _SCHEMA_DROP_RE.finditer(statement)]
             for _position, action, match in sorted(changes, key=lambda item: item[0]):
                 if action == "create":
                     _unique, kind, name = match.groups()
@@ -988,9 +1023,7 @@ def complete_idempotency_request(
             raise DatabaseError("idempotency request is missing")
         if existing.result_id is not None:
             if (existing.result_kind, existing.result_id) != (kind, result_identifier):
-                raise IdempotencyConflictError(
-                    "idempotency request already has a different result"
-                )
+                raise IdempotencyConflictError("idempotency request already has a different result")
             return existing
         connection.execute(
             "UPDATE idempotency_requests SET result_kind = ?, result_id = ?, completed_at = ? "
@@ -998,6 +1031,115 @@ def complete_idempotency_request(
             (kind, result_identifier, now or utc_now(), identifier),
         )
     result = get_idempotency_request(connection, identifier)
+    assert result is not None
+    return result
+
+
+def _operation_dispatch(row: sqlite3.Row | None) -> OperationDispatch | None:
+    if row is None:
+        return None
+    return OperationDispatch(
+        operation_id=row["operation_id"],
+        kind=row["kind"],
+        scope=row["scope"],
+        status=row["status"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        safe_error=row["safe_error"],
+    )
+
+
+def get_operation_dispatch(
+    connection: sqlite3.Connection, operation_id: str
+) -> OperationDispatch | None:
+    identifier = uuid(operation_id, field="operation_id")
+    return _operation_dispatch(
+        connection.execute(
+            "SELECT * FROM operation_dispatches WHERE operation_id = ?", (identifier,)
+        ).fetchone()
+    )
+
+
+def list_operation_dispatches(connection: sqlite3.Connection) -> tuple[OperationDispatch, ...]:
+    rows = connection.execute(
+        "SELECT * FROM operation_dispatches ORDER BY updated_at DESC, operation_id DESC"
+    ).fetchall()
+    return tuple(dispatch for row in rows if (dispatch := _operation_dispatch(row)) is not None)
+
+
+def enqueue_operation_dispatch(
+    connection: sqlite3.Connection,
+    *,
+    operation_id: str,
+    kind: str,
+    scope: str,
+    now: str | None = None,
+) -> tuple[OperationDispatch, bool]:
+    """Durably reserve a resource scope before asynchronous work is accepted."""
+    identifier = uuid(operation_id, field="operation_id")
+    checked_kind = _operation_token(kind, field="kind")
+    checked_scope = _operation_token(scope, field="scope")
+    timestamp = now or utc_now()
+    with transaction(connection):
+        existing = get_operation_dispatch(connection, identifier)
+        if existing is not None:
+            if (existing.kind, existing.scope) != (checked_kind, checked_scope):
+                raise IdempotencyConflictError("operation dispatch does not match request")
+            return existing, False
+        request = get_idempotency_request(connection, identifier)
+        if request is None:
+            raise DatabaseError("idempotency request is missing")
+        if request.result_id is not None:
+            if (request.result_kind, request.result_id) != ("operation", identifier):
+                raise IdempotencyConflictError(
+                    "idempotency request already has a different result"
+                )
+            raise DatabaseError("idempotency result has no operation dispatch")
+        active = connection.execute(
+            "SELECT operation_id, kind FROM operation_dispatches "
+            "WHERE scope = ? AND status IN ('pending','running','recovery_required')",
+            (checked_scope,),
+        ).fetchone()
+        if active is not None:
+            raise UnfinishedOperationError(checked_scope, active["operation_id"], active["kind"])
+        unfinished = get_unfinished_operation(connection, checked_scope)
+        if unfinished is not None:
+            raise UnfinishedOperationError(checked_scope, unfinished.operation_id, unfinished.kind)
+        connection.execute(
+            "INSERT INTO operation_dispatches VALUES (?, ?, ?, 'pending', ?, ?, NULL)",
+            (identifier, checked_kind, checked_scope, timestamp, timestamp),
+        )
+        connection.execute(
+            "UPDATE idempotency_requests SET result_kind = 'operation', result_id = ?, "
+            "completed_at = ? WHERE request_id = ?",
+            (identifier, timestamp, identifier),
+        )
+    result = get_operation_dispatch(connection, identifier)
+    assert result is not None
+    return result, True
+
+
+def set_operation_dispatch_status(
+    connection: sqlite3.Connection,
+    operation_id: str,
+    status: str,
+    *,
+    error: BaseException | str | None = None,
+    now: str | None = None,
+) -> OperationDispatch:
+    identifier = uuid(operation_id, field="operation_id")
+    if status not in {"running", "finished", "recovery_required"}:
+        raise ValidationError("operation dispatch status is invalid")
+    summary = None if error is None else safe_summary(error)
+    with transaction(connection):
+        cursor = connection.execute(
+            "UPDATE operation_dispatches SET status = ?, updated_at = ?, safe_error = ? "
+            "WHERE operation_id = ?",
+            (status, now or utc_now(), summary, identifier),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("operation dispatch is missing")
+    result = get_operation_dispatch(connection, identifier)
     assert result is not None
     return result
 
@@ -1549,8 +1691,13 @@ def set_application_runtime(
             "worker_server_name = ?, worker_port_id = ?, worker_port_name = ?, updated_at = ? "
             "WHERE application_id = ?",
             (
-                int(running), worker_server_id, worker_server_name, worker_port_id,
-                worker_port_name, timestamp, identifier,
+                int(running),
+                worker_server_id,
+                worker_server_name,
+                worker_port_id,
+                worker_port_name,
+                timestamp,
+                identifier,
             ),
         )
         if cursor.rowcount != 1:
@@ -1642,9 +1789,7 @@ def get_active_deployment(
     )
 
 
-def get_deployment(
-    connection: sqlite3.Connection, application_id: str
-) -> Deployment | None:
+def get_deployment(connection: sqlite3.Connection, application_id: str) -> Deployment | None:
     row = connection.execute(
         """
         SELECT attempt.*
@@ -1727,12 +1872,17 @@ def create_deployment_attempt(
         if request is None:
             raise DatabaseError("idempotency request is missing")
         if request.result_id is not None:
-            if (request.result_kind, request.result_id) != ("deployment", identifier):
+            accepted_results = {
+                ("deployment", identifier),
+                ("operation", identifier),
+            }
+            if (request.result_kind, request.result_id) not in accepted_results:
                 raise IdempotencyConflictError("idempotency request already has a different result")
             existing = get_deployment_attempt(connection, identifier)
-            if existing is None:
+            if existing is not None:
+                return existing
+            if request.result_kind == "deployment":
                 raise DatabaseError("idempotency result deployment is missing")
-            return existing
         current_environment = get_environment_revision(connection, application)
         if current_environment is None or current_environment.revision != environment:
             raise DatabaseError("environment revision is missing or stale")
@@ -1804,9 +1954,7 @@ def checkpoint_deployment_attempt(
     if nomad_job is not None:
         evidence["nomad_job"] = nomad_job
     if nomad_job_sha256 is not None:
-        evidence["nomad_job_sha256"] = sha256_hex(
-            nomad_job_sha256, field="nomad_job_sha256"
-        )
+        evidence["nomad_job_sha256"] = sha256_hex(nomad_job_sha256, field="nomad_job_sha256")
     if nomad_version is not None:
         evidence["nomad_version"] = _revision(nomad_version, field="nomad version")
     if build_log_path is not None:
@@ -1836,8 +1984,7 @@ def checkpoint_deployment_attempt(
         values.append(identifier)
         try:
             connection.execute(
-                f"UPDATE deployment_attempts SET {', '.join(assignments)} "
-                "WHERE deployment_id = ?",
+                f"UPDATE deployment_attempts SET {', '.join(assignments)} WHERE deployment_id = ?",
                 values,
             )
         except sqlite3.IntegrityError as database_error:
@@ -1877,9 +2024,7 @@ def list_deployment_attempts(
     if status is not None:
         query += " AND status = ?"
         parameters += (status,)
-    rows = connection.execute(
-        query + " ORDER BY requested_at DESC, deployment_id DESC", parameters
-    )
+    rows = connection.execute(query + " ORDER BY requested_at DESC, deployment_id DESC", parameters)
     return tuple(attempt for row in rows if (attempt := _deployment_attempt(row)) is not None)
 
 
@@ -2300,21 +2445,21 @@ def complete_application_deletion(
             or operation.phase != "manifest_absent"
         ):
             raise DatabaseError("application deletion operation is not ready to complete")
-        if connection.execute(
-            "SELECT 1 FROM managed_resources WHERE application_id = ? LIMIT 1", (identifier,)
-        ).fetchone() is not None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM managed_resources WHERE application_id = ? LIMIT 1", (identifier,)
+            ).fetchone()
+            is not None
+        ):
             raise DatabaseError("application deletion refuses managed resource rows")
         application = _get_application_including_tombstone(connection, identifier)
         if application is None:
             raise DatabaseError("application is missing")
         connection.execute(
-            "INSERT INTO application_slug_tombstones VALUES (?, ?, ?) "
-            "ON CONFLICT(slug) DO NOTHING",
+            "INSERT INTO application_slug_tombstones VALUES (?, ?, ?) ON CONFLICT(slug) DO NOTHING",
             (application.slug, identifier, timestamp),
         )
-        connection.execute(
-            "DELETE FROM environment_keys WHERE application_id = ?", (identifier,)
-        )
+        connection.execute("DELETE FROM environment_keys WHERE application_id = ?", (identifier,))
         connection.execute(
             "UPDATE applications SET desired_running = 0, url = NULL, "
             "worker_server_id = NULL, worker_server_name = NULL, worker_port_id = NULL, "

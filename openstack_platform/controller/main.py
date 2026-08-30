@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         except BaseException:
             connection.close()
             raise
+    api: ControllerAPI | None = None
     try:
         socket_path = args.socket
         if not socket_path.is_absolute():
@@ -69,9 +70,10 @@ def main(argv: list[str] | None = None) -> int:
         socket_gid = None
         if args.socket_group is not None:
             socket_gid = grp.getgrnam(args.socket_group).gr_gid
+        api = ControllerAPI(connection, config, state_directory)
         server = ControllerServer(
             str(socket_path),
-            ControllerAPI(connection, config, state_directory).router(),
+            api.router(),
             socket_gid=socket_gid,
         )
         stopping = threading.Event()
@@ -82,8 +84,7 @@ def main(argv: list[str] | None = None) -> int:
                 threading.Thread(target=server.shutdown, daemon=True).start()
 
         previous = {
-            selected: signal.signal(selected, stop)
-            for selected in (signal.SIGINT, signal.SIGTERM)
+            selected: signal.signal(selected, stop) for selected in (signal.SIGINT, signal.SIGTERM)
         }
         try:
             server.serve_forever(poll_interval=0.2)
@@ -92,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
                 signal.signal(selected, handler)
             server.server_close()
     finally:
+        if api is not None:
+            api.close()
         connection.close()
     return 0
 

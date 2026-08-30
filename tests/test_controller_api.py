@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform.controller import database as db
 from openstack_platform.config import (
     Config,
     Limits,
@@ -14,6 +15,7 @@ from openstack_platform.config import (
     RuntimeImages,
     StandardProfile,
 )
+from openstack_platform.controller import database as db
 from openstack_platform.controller.api import ControllerAPI
 from openstack_platform.controller.http import HttpError
 
@@ -87,6 +89,7 @@ class ControllerAPITests(unittest.TestCase):
         self.router = self.api.router()
 
     def tearDown(self) -> None:
+        self.api.close()
         self.connection.close()
         self.temporary.cleanup()
 
@@ -154,14 +157,11 @@ class ControllerAPITests(unittest.TestCase):
         secret = "sentinel-value-never-persisted"
         request_key = "00000000-0000-4000-8000-000000000003"
         path = f"/v1/applications/{application_id}/environment/API_TOKEN"
-        first = self.dispatch(
-            "PUT", path, {"value": secret}, self.headers(request_key)
-        )
-        replay = self.dispatch(
-            "PUT", path, {"value": secret}, self.headers(request_key)
-        )
+        first = self.dispatch("PUT", path, {"value": secret}, self.headers(request_key))
+        replay = self.dispatch("PUT", path, {"value": secret}, self.headers(request_key))
         self.assertEqual(first.status, 202)
         self.assertEqual(first.body, replay.body)
+        self.api.wait_for_operations()
         self.assertEqual(len(self.helper_calls), 1)
         operation = db.get_operation(self.connection, request_key)
         self.assertIsNotNone(operation)
@@ -175,19 +175,13 @@ class ControllerAPITests(unittest.TestCase):
         self.assertNotIn(secret, str(first.body))
         self.assertNotIn(secret, repr(operation.refs))
 
-        environment = self.dispatch(
-            "GET", f"/v1/applications/{application_id}/environment"
-        )
+        environment = self.dispatch("GET", f"/v1/applications/{application_id}/environment")
         self.assertEqual(environment.body["revision"], 1)
-        self.assertEqual(
-            environment.body["keys"], [{"name": "API_TOKEN", "owner": "staff"}]
-        )
+        self.assertEqual(environment.body["keys"], [{"name": "API_TOKEN", "owner": "staff"}])
         self.assertNotIn("value", str(environment.body).lower())
 
     @mock.patch("openstack_platform.controller.application_service.openstack.verify_project")
-    def test_cascade_delete_replays_after_application_is_tombstoned(
-        self, verify_project
-    ) -> None:
+    def test_cascade_delete_replays_after_application_is_tombstoned(self, verify_project) -> None:
         verify_project.return_value = None
         application_id = self.create_application().body["applicationId"]
         request_key = "00000000-0000-4000-8000-000000000004"
@@ -198,6 +192,7 @@ class ControllerAPITests(unittest.TestCase):
             {"confirmation": "demo-app"},
             self.headers(request_key),
         )
+        self.api.wait_for_operations()
         self.assertIsNone(db.get_application(self.connection, application_id))
         replay = self.dispatch(
             "POST",
@@ -208,6 +203,130 @@ class ControllerAPITests(unittest.TestCase):
         self.assertEqual(first.body, replay.body)
         self.assertEqual(db.get_operation(self.connection, request_key).status, "succeeded")
         self.assertIsNotNone(db.get_slug_tombstone(self.connection, "demo-app"))
+
+    @mock.patch("openstack_platform.controller.application_service.openstack.verify_project")
+    def test_external_acceptance_is_prompt_reads_stay_responsive_and_scope_conflicts(
+        self, verify_project
+    ) -> None:
+        verify_project.return_value = None
+        application_id = self.create_application().body["applicationId"]
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocking_helper(_config, action, values, *, deadline=None):
+            if action != "app.env.set":
+                raise AssertionError(f"unexpected helper action {action}")
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return {
+                "keys": sorted(values["updates"]),
+                "modifyIndex": 1,
+                "restarted": False,
+                "schedulerHealthy": False,
+                "publicHealthy": False,
+            }
+
+        self.api.helper_caller = blocking_helper
+        started = time.monotonic()
+        first = self.dispatch(
+            "PUT",
+            f"/v1/applications/{application_id}/environment/API_TOKEN",
+            {"value": "transient-secret"},
+            self.headers("00000000-0000-4000-8000-000000000030"),
+        )
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(first.status, 202)
+        self.assertTrue(entered.wait(timeout=2))
+
+        started = time.monotonic()
+        environment = self.dispatch("GET", f"/v1/applications/{application_id}/environment")
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(environment.status, 200)
+        replay = self.dispatch(
+            "PUT",
+            f"/v1/applications/{application_id}/environment/API_TOKEN",
+            {"value": "transient-secret"},
+            self.headers("00000000-0000-4000-8000-000000000030"),
+        )
+        self.assertEqual(replay.body, first.body)
+        with self.assertRaises(HttpError) as raised:
+            self.dispatch(
+                "DELETE",
+                f"/v1/applications/{application_id}/environment/OTHER",
+                None,
+                self.headers("00000000-0000-4000-8000-000000000031"),
+            )
+        self.assertEqual(raised.exception.code, "OPERATION_CONFLICT")
+        release.set()
+        self.api.wait_for_operations()
+
+    def test_startup_marks_an_interrupted_running_dispatch_recovery_required(self) -> None:
+        application_id = self.create_application().body["applicationId"]
+        operation_id = "00000000-0000-4000-8000-000000000040"
+        db.claim_idempotency_request(
+            self.connection,
+            request_id=operation_id,
+            request_fingerprint="a" * 64,
+        )
+        db.enqueue_operation_dispatch(
+            self.connection,
+            operation_id=operation_id,
+            kind="app.env.set",
+            scope=f"app-{application_id}",
+        )
+        db.complete_idempotency_request(
+            self.connection,
+            request_id=operation_id,
+            result_kind="operation",
+            result_id=operation_id,
+        )
+        db.set_operation_dispatch_status(self.connection, operation_id, "running")
+
+        queued_application = self.dispatch(
+            "POST",
+            "/v1/applications",
+            {"slug": "queued-app"},
+            self.headers("00000000-0000-4000-8000-000000000041"),
+        ).body["applicationId"]
+        queued_id = "00000000-0000-4000-8000-000000000042"
+        db.claim_idempotency_request(
+            self.connection,
+            request_id=queued_id,
+            request_fingerprint="b" * 64,
+        )
+        db.enqueue_operation_dispatch(
+            self.connection,
+            operation_id=queued_id,
+            kind="app.env.set",
+            scope=f"app-{queued_application}",
+        )
+        db.complete_idempotency_request(
+            self.connection,
+            request_id=queued_id,
+            result_kind="operation",
+            result_id=queued_id,
+        )
+
+        self.api.close()
+        self.api = ControllerAPI(
+            self.connection,
+            self.config,
+            self.root,
+            helper_caller=lambda *_args, **_kwargs: {},
+        )
+        self.router = self.api.router()
+
+        response = self.dispatch("GET", f"/v1/operations/{operation_id}")
+        self.assertEqual(response.body["status"], "recovery_required")
+        self.assertEqual(response.body["phase"], "startup_interrupted")
+        operation = db.get_operation(self.connection, operation_id)
+        self.assertIsNotNone(operation)
+        self.assertEqual(operation.status, "recovery_required")  # type: ignore[union-attr]
+
+        queued = self.dispatch("GET", f"/v1/operations/{queued_id}")
+        self.assertEqual(queued.body["status"], "failed")
+        self.assertEqual(queued.body["phase"], "startup_interrupted")
+        self.assertEqual(queued.body["cleanupState"], "not_required")
 
     def test_operation_read_omits_refs_and_admin_pagination_is_bounded(self) -> None:
         self.create_application()
@@ -234,9 +353,7 @@ class ControllerAPITests(unittest.TestCase):
         self.assertEqual(len(page.body["items"]), 1)
         self.assertTrue(page.body["truncated"])
         cursor = page.body["nextCursor"]
-        second = self.dispatch(
-            "GET", f"/v1/admin/applications?limit=1&cursor={cursor}"
-        )
+        second = self.dispatch("GET", f"/v1/admin/applications?limit=1&cursor={cursor}")
         self.assertNotEqual(
             page.body["items"][0]["applicationId"],
             second.body["items"][0]["applicationId"],

@@ -260,8 +260,31 @@ Database-only application creation returns `201`. External mutations return
 }
 ```
 
-Work may finish before the `202` response. Callers determine completion from
-the operation resource, not request duration.
+The controller durably records the idempotency result and reserves the
+application scope before returning `202`; external provider, helper, build,
+health-check, and cleanup work runs after acceptance. The current executor runs
+at most four operations concurrently and admits at most 32 running or queued
+operations. When that bound is full, a request that has not been accepted
+returns retryable `503 OPERATION_QUEUE_FULL` and creates no dispatch record.
+
+Only one external mutation for an application scope can be queued, running, or
+recovery-required. A different idempotency key for that scope returns `409
+OPERATION_CONFLICT` with the blocking operation ID. Repeating the accepted key
+and identical input returns the original `202` response and does not enqueue a
+second execution. Reads and operation polling use separate short SQLite
+transactions and remain available while external work runs. Callers determine
+completion from the operation resource, not request duration.
+
+A newly accepted operation can initially report `status: "running"` and
+`phase: "queued"` or `phase: "executing"`. The dispatch journal deliberately
+contains no request body, because environment bodies can contain secrets. On
+startup, the controller does not guess or replay interrupted work. A dispatch
+that never left the durable queue is marked failed with cleanup not required;
+a caller can retry that request with a new idempotency key. A dispatch that had
+started is changed to `recovery_required` with phase `startup_interrupted`,
+preserving its scope and idempotency result for diagnosis. No new mutation for
+that application is accepted until an operator resolves that
+recovery-required operation.
 
 ### Product routes
 
@@ -365,6 +388,7 @@ Every transport response includes `Content-Type: application/json`,
 
 Implemented result classes include invalid request/body/query/JSON/media,
 not-found, method-not-allowed, idempotency conflict, unfinished-operation
-conflict, state conflict, deadline exceeded, dependency unavailable, helper or
-external-operation failure, and bounded internal failure. Provider payloads,
-stack traces, secret values, and operation refs are not returned.
+conflict, operation-queue-full, state conflict, deadline exceeded, dependency
+unavailable, helper or external-operation failure, and bounded internal
+failure. Provider payloads, stack traces, secret values, and operation refs are
+not returned.

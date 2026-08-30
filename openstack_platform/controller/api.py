@@ -10,24 +10,25 @@ from pathlib import Path
 from typing import Any
 
 from .. import openstack, remote
+from ..config import Config
+from ..runtime import safe_summary
+from ..validation import ValidationError, bounded_text, env_key, resource_name, uuid
 from . import application_runtime as app
 from . import database as db
 from . import status, storage
-from ..config import Config
-from .http import HttpError, Request, Response, Router
-from .deployment_config import parse_configuration
 from .application_service import ApplicationService
+from .async_operations import AsyncOperationExecutor
+from .deployment_config import parse_configuration
 from .deployment_service import (
     DeploymentDeadlineError,
     DeploymentRequest,
     DeploymentService,
 )
 from .environment_service import EnvironmentMutationRequest, EnvironmentService
+from .http import HttpError, Request, Response, Router
 from .log_service import LogService
-from ..runtime import safe_summary
 from .service_support import ServiceDeadlineError
 from .storage_service import StorageMutationRequest, StorageService
-from ..validation import ValidationError, bounded_text, env_key, resource_name, uuid
 
 _MAX_PAGE = 100
 _MAX_LOG_LINES = 1_000
@@ -107,6 +108,8 @@ class ControllerAPI:
         *,
         helper_caller: HelperCaller | None = None,
         observer_helper: Callable[..., Mapping[str, object]] | None = None,
+        operation_workers: int = 4,
+        operation_capacity: int = 32,
     ) -> None:
         self.connection = connection
         self.config = config
@@ -135,18 +138,20 @@ class ControllerAPI:
         self.applications = ApplicationService(
             connection, config, state_directory, helper_caller=helper_caller
         )
-        self.deployments = DeploymentService(
-            connection, config, state_directory, helper_caller=helper_caller
+        self.logs = LogService(connection, config, state_directory, helper_caller=helper_caller)
+        database_path = Path(connection.execute("PRAGMA database_list").fetchone()["file"])
+        self.executor = AsyncOperationExecutor(
+            database_path,
+            connection,
+            workers=operation_workers,
+            capacity=operation_capacity,
         )
-        self.environment = EnvironmentService(
-            connection, config, state_directory, helper_caller=helper_caller
-        )
-        self.storage = StorageService(
-            connection, config, state_directory, helper_caller=helper_caller
-        )
-        self.logs = LogService(
-            connection, config, state_directory, helper_caller=helper_caller
-        )
+
+    def close(self) -> None:
+        self.executor.close()
+
+    def wait_for_operations(self) -> None:
+        self.executor.wait()
 
     def router(self) -> Router:
         router = Router()
@@ -194,6 +199,13 @@ class ControllerAPI:
                     raise
                 except ValidationError as error:
                     raise HttpError(400, "INVALID_REQUEST", safe_summary(error)) from None
+                except db.DispatchQueueFullError:
+                    raise HttpError(
+                        503,
+                        "OPERATION_QUEUE_FULL",
+                        "controller operation capacity is exhausted",
+                        retryable=True,
+                    ) from None
                 except db.IdempotencyConflictError:
                     raise HttpError(
                         409,
@@ -227,7 +239,11 @@ class ControllerAPI:
                     raise HttpError(
                         409, "STATE_CONFLICT", "controller state prevented the request"
                     ) from None
-                except (app.ApplicationError, storage.StorageOperationError, openstack.OpenStackError):
+                except (
+                    app.ApplicationError,
+                    storage.StorageOperationError,
+                    openstack.OpenStackError,
+                ):
                     raise HttpError(
                         502,
                         "EXTERNAL_OPERATION_FAILED",
@@ -315,51 +331,23 @@ class ControllerAPI:
     def _external(
         self,
         request: Request,
-        work: Callable[[str], Mapping[str, object] | None],
+        work: Callable[[sqlite3.Connection, str], object],
         *,
+        kind: str,
+        scope: str,
         claimed: db.IdempotencyRequest | None = None,
     ) -> Response:
         claimed = self._claim(request) if claimed is None else claimed
         if claimed.result_id is not None:
             return self._operation_response(claimed.result_id)
-        operation = db.get_operation(self.connection, claimed.request_id)
-        result: Mapping[str, object] | None = None
-        if operation is None:
-            try:
-                result = work(claimed.request_id)
-            except Exception:
-                operation = db.get_operation(self.connection, claimed.request_id)
-                if operation is None:
-                    raise
-                db.complete_idempotency_request(
-                    self.connection,
-                    request_id=claimed.request_id,
-                    result_kind="operation",
-                    result_id=operation.operation_id,
-                )
-                return self._operation_response(operation.operation_id)
-            operation = db.get_operation(self.connection, claimed.request_id)
-        if operation is None:
-            # A semantically complete no-op is still represented by a queryable
-            # operation identity, as required for lost-response reconciliation.
-            operation = db.begin_operation(
-                self.connection,
-                operation_id=claimed.request_id,
-                kind="api.noop",
-                scope=f"request-{claimed.request_id}",
-                phase="accepted",
-                deadline_at=db.utc_now(),
-            )
-            db.mark_succeeded(
-                self.connection, operation.operation_id, cleanup_state="not_required"
-            )
-        db.complete_idempotency_request(
+        self.executor.submit(
             self.connection,
-            request_id=claimed.request_id,
-            result_kind="operation",
-            result_id=operation.operation_id,
+            operation_id=claimed.request_id,
+            kind=kind,
+            scope=scope,
+            work=lambda connection: work(connection, claimed.request_id),
         )
-        return self._operation_response(operation.operation_id, result=result)
+        return self._operation_response(claimed.request_id)
 
     def _create_application(self, request: Request) -> Response:
         self._no_query(request)
@@ -370,9 +358,7 @@ class ControllerAPI:
         else:
             application = db.get_application(self.connection, claimed.request_id)
             if application is None:
-                created = self.applications.declare(
-                    body["slug"], application_id=claimed.request_id
-                )
+                created = self.applications.declare(body["slug"], application_id=claimed.request_id)
                 application = self._application(created.application_id)
             elif application.slug != body["slug"]:
                 raise db.IdempotencyConflictError("application result does not match request")
@@ -413,9 +399,11 @@ class ControllerAPI:
         application = self._application(self._path_uuid(request))
         return self._external(
             request,
-            lambda key: self._lifecycle_result(
-                self.applications.enable(application.application_id, request_id=key)
-            ),
+            lambda connection, key: ApplicationService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).enable(application.application_id, request_id=key),
+            kind="app.enable",
+            scope=f"app-{application.application_id}",
         )
 
     def _disable_application(self, request: Request) -> Response:
@@ -424,29 +412,31 @@ class ControllerAPI:
         application = self._application(self._path_uuid(request))
         return self._external(
             request,
-            lambda key: self._lifecycle_result(
-                self.applications.disable(application.application_id, request_id=key)
-            ),
+            lambda connection, key: ApplicationService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).disable(application.application_id, request_id=key),
+            kind="app.disable",
+            scope=f"app-{application.application_id}",
         )
 
     def _delete_application(self, request: Request) -> Response:
         self._no_query(request)
-        body = self._body(
-            request, allowed={"confirmation"}, required={"confirmation"}
-        )
+        body = self._body(request, allowed={"confirmation"}, required={"confirmation"})
         claimed = self._claim(request)
         if claimed.result_id is not None:
             return self._operation_response(claimed.result_id)
         application = self._application(self._path_uuid(request))
         return self._external(
             request,
-            lambda key: {
-                "applicationId": self.applications.delete(
-                    application.application_id,
-                    confirmation=body["confirmation"],
-                    request_id=key,
-                ).application_id
-            },
+            lambda connection, key: ApplicationService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).delete(
+                application.application_id,
+                confirmation=body["confirmation"],
+                request_id=key,
+            ),
+            kind="app.delete",
+            scope=f"app-{application.application_id}",
             claimed=claimed,
         )
 
@@ -470,31 +460,31 @@ class ControllerAPI:
             },
         )
         application = self._application(self._path_uuid(request))
-        key = request.idempotency_key()
-        try:
-            self.deployments.deploy(
+        configuration = parse_configuration(body["configuration"])
+        return self._external(
+            request,
+            lambda connection, key: DeploymentService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).deploy(
                 DeploymentRequest(
                     application.slug,
                     body["repository"],
                     body["requestedRef"],
                     body["commit"],
                     body["configurationRevision"],
-                    parse_configuration(body["configuration"]),
+                    configuration,
                     key,
                 )
-            )
-        except Exception:
-            if db.get_operation(self.connection, key) is None:
-                raise
-        return self._operation_response(key)
+            ),
+            kind="app.deploy",
+            scope=f"app-{application.application_id}",
+        )
 
     def _list_deployments(self, request: Request) -> Response:
         application = self._application(self._path_uuid(request))
         items = [
             self._deployment_model(item)
-            for item in db.list_deployment_attempts(
-                self.connection, application.application_id
-            )
+            for item in db.list_deployment_attempts(self.connection, application.application_id)
         ]
         return Response(200, self._page(request, items, "deploymentId"))
 
@@ -543,18 +533,14 @@ class ControllerAPI:
         revision = db.get_environment_revision(self.connection, application.application_id)
         if revision is None:
             raise db.DatabaseError("application environment revision is missing")
-        keys = db.list_environment_keys(
-            self.connection, application_id=application.application_id
-        )
+        keys = db.list_environment_keys(self.connection, application_id=application.application_id)
         return Response(
             200,
             {
                 "applicationId": application.application_id,
                 "revision": revision.revision,
                 "updatedAt": revision.updated_at,
-                "keys": [
-                    {"name": item.key_name, "owner": item.owner} for item in keys
-                ],
+                "keys": [{"name": item.key_name, "owner": item.owner} for item in keys],
             },
         )
 
@@ -570,14 +556,15 @@ class ControllerAPI:
         )
         return self._external(
             request,
-            lambda key: self._environment_result(
-                application,
-                self.environment.mutate(
-                    EnvironmentMutationRequest(
-                        "set", application.application_id, {key_name: value}, request_id=key
-                    )
-                ),
+            lambda connection, key: EnvironmentService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).mutate(
+                EnvironmentMutationRequest(
+                    "set", application.application_id, {key_name: value}, request_id=key
+                )
             ),
+            kind="app.env.set",
+            scope=f"app-{application.application_id}",
         )
 
     def _delete_environment(self, request: Request) -> Response:
@@ -587,17 +574,18 @@ class ControllerAPI:
         key_name = env_key(request.path_parameters["key"])
         return self._external(
             request,
-            lambda key: self._environment_result(
-                application,
-                self.environment.mutate(
-                    EnvironmentMutationRequest(
-                        "unset",
-                        application.application_id,
-                        removals=(key_name,),
-                        request_id=key,
-                    )
-                ),
+            lambda connection, key: EnvironmentService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).mutate(
+                EnvironmentMutationRequest(
+                    "unset",
+                    application.application_id,
+                    removals=(key_name,),
+                    request_id=key,
+                )
             ),
+            kind="app.env.unset",
+            scope=f"app-{application.application_id}",
         )
 
     def _import_environment(self, request: Request) -> Response:
@@ -609,19 +597,18 @@ class ControllerAPI:
             field="dotenv input",
             maximum=self.config.policy.limits.dotenv_bytes,
         )
-        updates = app.parse_dotenv(
-            dotenv, maximum_bytes=self.config.policy.limits.dotenv_bytes
-        )
+        updates = app.parse_dotenv(dotenv, maximum_bytes=self.config.policy.limits.dotenv_bytes)
         return self._external(
             request,
-            lambda key: self._environment_result(
-                application,
-                self.environment.mutate(
-                    EnvironmentMutationRequest(
-                        "import", application.application_id, updates, request_id=key
-                    )
-                ),
+            lambda connection, key: EnvironmentService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).mutate(
+                EnvironmentMutationRequest(
+                    "import", application.application_id, updates, request_id=key
+                )
             ),
+            kind="app.env.import",
+            scope=f"app-{application.application_id}",
         )
 
     def _create_storage(self, request: Request) -> Response:
@@ -636,20 +623,19 @@ class ControllerAPI:
         machine_name = resource_name(body.get("name", "default"))
         return self._external(
             request,
-            lambda key: self._storage_result(
-                application,
-                resource_type,
-                machine_name,
-                self.storage.mutate(
-                    StorageMutationRequest(
-                        "create",
-                        application.application_id,
-                        (resource_type,),
-                        resource_name=machine_name,
-                        request_id=key,
-                    )
-                ),
+            lambda connection, key: StorageService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).mutate(
+                StorageMutationRequest(
+                    "create",
+                    application.application_id,
+                    (resource_type,),
+                    resource_name=machine_name,
+                    request_id=key,
+                )
             ),
+            kind=f"storage.{resource_type}.create",
+            scope=f"app-{application.application_id}",
         )
 
     def _list_storage(self, request: Request) -> Response:
@@ -668,9 +654,7 @@ class ControllerAPI:
 
     def _label_storage(self, request: Request) -> Response:
         self._no_query(request)
-        body = self._body(
-            request, allowed={"displayLabel"}, required={"displayLabel"}
-        )
+        body = self._body(request, allowed={"displayLabel"}, required={"displayLabel"})
         resource = self._resource(self._path_uuid(request))
         claimed = self._claim(request)
         if claimed.result_id is not None:
@@ -699,20 +683,19 @@ class ControllerAPI:
         resource = self._resource(self._path_uuid(request))
         return self._external(
             request,
-            lambda key: self._storage_result(
-                self._application(resource.application_id),
-                resource.resource_type,
-                resource.resource_name,
-                self.storage.mutate(
-                    StorageMutationRequest(
-                        action,  # type: ignore[arg-type]
-                        resource.application_id,
-                        (resource.resource_type,),
-                        resource_name=resource.resource_name,
-                        request_id=key,
-                    )
-                ),
+            lambda connection, key: StorageService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).mutate(
+                StorageMutationRequest(
+                    action,  # type: ignore[arg-type]
+                    resource.application_id,
+                    (resource.resource_type,),
+                    resource_name=resource.resource_name,
+                    request_id=key,
+                )
             ),
+            kind=f"storage.{resource.resource_type}.{action}",
+            scope=f"app-{resource.application_id}",
         )
 
     def _delete_storage(self, request: Request) -> Response:
@@ -731,22 +714,21 @@ class ControllerAPI:
             raise HttpError(400, "INVALID_BODY", "purge must be boolean")
         return self._external(
             request,
-            lambda key: self._storage_result(
-                self._application(resource.application_id),
-                resource.resource_type,
-                resource.resource_name,
-                self.storage.mutate(
-                    StorageMutationRequest(
-                        "remove",
-                        resource.application_id,
-                        (resource.resource_type,),
-                        resource_name=resource.resource_name,
-                        confirm_name=body["confirmation"],
-                        purge_s3=purge,
-                        request_id=key,
-                    )
-                ),
+            lambda connection, key: StorageService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).mutate(
+                StorageMutationRequest(
+                    "remove",
+                    resource.application_id,
+                    (resource.resource_type,),
+                    resource_name=resource.resource_name,
+                    confirm_name=body["confirmation"],
+                    purge_s3=purge,
+                    request_id=key,
+                )
             ),
+            kind=f"storage.{resource.resource_type}.remove",
+            scope=f"app-{resource.application_id}",
             claimed=claimed,
         )
 
@@ -754,9 +736,12 @@ class ControllerAPI:
         self._no_query(request)
         identifier = self._path_uuid(request)
         operation = db.get_operation(self.connection, identifier)
-        if operation is None:
+        if operation is not None:
+            return Response(200, self._operation_model(operation))
+        dispatch = db.get_operation_dispatch(self.connection, identifier)
+        if dispatch is None:
             raise HttpError(404, "OPERATION_NOT_FOUND", "operation does not exist")
-        return Response(200, self._operation_model(operation))
+        return Response(200, self._dispatch_model(dispatch))
 
     def _admin_status(self, request: Request) -> Response:
         self._no_query(request)
@@ -834,9 +819,8 @@ class ControllerAPI:
         attempts = [
             attempt
             for row in rows
-            if (attempt := db.get_deployment_attempt(
-                self.connection, row["deployment_id"]
-            )) is not None
+            if (attempt := db.get_deployment_attempt(self.connection, row["deployment_id"]))
+            is not None
         ]
         return Response(
             200,
@@ -863,13 +847,20 @@ class ControllerAPI:
             for row in rows
             if (operation := db.get_operation(self.connection, row["operation_id"])) is not None
         ]
+        known = {item.operation_id for item in operations}
+        queued = [
+            item
+            for item in db.list_operation_dispatches(self.connection)
+            if item.operation_id not in known
+        ]
+        items = [self._operation_model(item) for item in operations]
+        items.extend(self._dispatch_model(item) for item in queued)
+        items.sort(
+            key=lambda item: (str(item["updatedAt"]), str(item["operationId"])), reverse=True
+        )
         return Response(
             200,
-            self._page(
-                request,
-                [self._operation_model(item) for item in operations],
-                "operationId",
-            ),
+            self._page(request, items, "operationId"),
         )
 
     @staticmethod
@@ -881,46 +872,6 @@ class ControllerAPI:
             "enabled": application.desired_running,
             "createdAt": application.created_at,
             "updatedAt": application.updated_at,
-        }
-
-    @staticmethod
-    def _lifecycle_result(result: object) -> Mapping[str, object]:
-        return {
-            "applicationId": getattr(result, "application_id"),
-            "state": getattr(result, "state"),
-        }
-
-    def _environment_result(self, application: db.Application, result: object) -> Mapping[str, object]:
-        revision = db.get_environment_revision(self.connection, application.application_id)
-        return {
-            "applicationId": application.application_id,
-            "revision": None if revision is None else revision.revision,
-            "keyNames": list(getattr(result, "key_names")),
-        }
-
-    def _storage_result(
-        self,
-        application: db.Application,
-        resource_type: str,
-        machine_name: str,
-        result: object,
-    ) -> Mapping[str, object]:
-        resource = next(
-            (
-                item
-                for item in db.list_managed_resources(
-                    self.connection, application_id=application.application_id
-                )
-                if item.resource_type == resource_type
-                and item.resource_name == machine_name
-            ),
-            None,
-        )
-        return {
-            "applicationId": application.application_id,
-            "resourceId": None if resource is None else resource.resource_id,
-            "requested": list(getattr(result, "requested")),
-            "completed": list(getattr(result, "completed")),
         }
 
     @staticmethod
@@ -946,9 +897,7 @@ class ControllerAPI:
         }
 
     @staticmethod
-    def _storage_model(
-        resource: db.ManagedResource, *, admin: bool = False
-    ) -> dict[str, object]:
+    def _storage_model(resource: db.ManagedResource, *, admin: bool = False) -> dict[str, object]:
         quotas: dict[str, object] = {}
         for key, value in (
             ("postgresConnections", resource.postgres_connections),
@@ -988,6 +937,28 @@ class ControllerAPI:
             "deadlineAt": operation.deadline_at,
             "safeError": operation.safe_error,
             "cleanupState": operation.cleanup_state,
+        }
+
+    @staticmethod
+    def _dispatch_model(dispatch: db.OperationDispatch) -> dict[str, object]:
+        status = "recovery_required" if dispatch.status == "recovery_required" else "running"
+        phase = {
+            "pending": "queued",
+            "running": "executing",
+            "recovery_required": "startup_interrupted",
+            "finished": "finishing",
+        }[dispatch.status]
+        return {
+            "operationId": dispatch.operation_id,
+            "kind": dispatch.kind,
+            "scope": dispatch.scope,
+            "status": status,
+            "phase": phase,
+            "startedAt": dispatch.created_at,
+            "updatedAt": dispatch.updated_at,
+            "deadlineAt": None,
+            "safeError": dispatch.safe_error,
+            "cleanupState": "pending",
         }
 
     @staticmethod

@@ -1305,28 +1305,46 @@ class DeploymentService:
 
         if selected_request_id is not None:
             fingerprint, _environment_revision = deployment_fingerprint()
-            claimed = db.claim_idempotency_request(
-                self.connection,
-                request_id=selected_request_id,
-                request_fingerprint=fingerprint,
-            )
+            claimed = db.get_idempotency_request(self.connection, selected_request_id)
+            if not (
+                claimed is not None
+                and claimed.result_kind == "operation"
+                and claimed.result_id == selected_request_id
+            ):
+                claimed = db.claim_idempotency_request(
+                    self.connection,
+                    request_id=selected_request_id,
+                    request_fingerprint=fingerprint,
+                )
+            assert claimed is not None
             if claimed.result_id is not None:
-                if claimed.result_kind != "deployment":
+                if claimed.result_kind == "operation" and claimed.result_id == selected_request_id:
+                    attempt = db.get_deployment_attempt(self.connection, claimed.result_id)
+                    if attempt is not None and attempt.status in {"succeeded", "failed"}:
+                        return DeploymentOutcome(application_slug, image=attempt.image_digest)
+                elif claimed.result_kind == "deployment":
+                    attempt = db.get_deployment_attempt(self.connection, claimed.result_id)
+                    if attempt is None or attempt.application_id != application_id:
+                        raise db.DatabaseError("idempotency result deployment is missing")
+                    return DeploymentOutcome(application_slug, image=attempt.image_digest)
+                else:
                     raise db.IdempotencyConflictError(
                         "idempotency request already has a different result"
                     )
-                attempt = db.get_deployment_attempt(self.connection, claimed.result_id)
-                if attempt is None or attempt.application_id != application_id:
-                    raise db.DatabaseError("idempotency result deployment is missing")
-                return DeploymentOutcome(application_slug, image=attempt.image_digest)
 
         def create_attempt(operation_id: str) -> None:
             fingerprint, environment_revision = deployment_fingerprint()
-            db.claim_idempotency_request(
-                self.connection,
-                request_id=operation_id,
-                request_fingerprint=fingerprint,
-            )
+            claimed = db.get_idempotency_request(self.connection, operation_id)
+            if not (
+                claimed is not None
+                and claimed.result_kind == "operation"
+                and claimed.result_id == operation_id
+            ):
+                db.claim_idempotency_request(
+                    self.connection,
+                    request_id=operation_id,
+                    request_fingerprint=fingerprint,
+                )
             db.create_deployment_attempt(
                 self.connection,
                 deployment_id=operation_id,

@@ -7,8 +7,8 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from openstack_platform.controller import database as db
 from openstack_platform.config import load_platform
+from openstack_platform.controller import database as db
 from openstack_platform.controller.deployment_config import parse_configuration
 from openstack_platform.validation import ValidationError
 from tests.product_fixtures import accept_deployment
@@ -49,7 +49,7 @@ class ControllerDatabaseTests(unittest.TestCase):
 
     def test_fresh_migration_creates_exact_product_schema(self) -> None:
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 1)
+        self.assertEqual(db.schema_version(self.connection), db.MIGRATIONS[-1].version)
         tables = {
             row[0]
             for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -69,6 +69,7 @@ class ControllerDatabaseTests(unittest.TestCase):
                 "idempotency_requests",
                 "environment_revisions",
                 "application_slug_tombstones",
+                "operation_dispatches",
             },
         )
         schema_sql = "\n".join(
@@ -95,7 +96,7 @@ class ControllerDatabaseTests(unittest.TestCase):
 
     def test_explicit_greenfield_marker_is_recorded(self) -> None:
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 1)
+        self.assertEqual(db.schema_version(self.connection), db.MIGRATIONS[-1].version)
         self.assertEqual(
             self.connection.execute(
                 "SELECT checksum FROM schema_migrations WHERE version = 0"
@@ -110,7 +111,7 @@ class ControllerDatabaseTests(unittest.TestCase):
         self.path.unlink()
 
         connection = db.connect(self.path, identity=identity)
-        db.migrate(connection, target_version=1, identity=identity)
+        db.migrate(connection, identity=identity)
         marker = connection.execute(
             "SELECT checksum FROM schema_migrations WHERE version = 0"
         ).fetchone()[0]
@@ -119,7 +120,7 @@ class ControllerDatabaseTests(unittest.TestCase):
 
         same_deployment = db.connect(self.path, identity=identity)
         db.migrate(same_deployment, identity=identity)
-        self.assertEqual(db.schema_version(same_deployment), 1)
+        self.assertEqual(db.schema_version(same_deployment), db.MIGRATIONS[-1].version)
         same_deployment.close()
 
         wrong_project = db.deployment_identity(replace(platform, project_id=IMAGE_ID))
@@ -513,8 +514,9 @@ class ControllerDatabaseTests(unittest.TestCase):
             "idempotency_request_id": SECOND_REQUEST_ID,
         }
         for column, value in immutable_changes.items():
-            with self.subTest(column=column), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "immutable"
+            with (
+                self.subTest(column=column),
+                self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"),
             ):
                 self.connection.execute(
                     f"UPDATE deployment_attempts SET {column} = ? WHERE deployment_id = ?",
@@ -624,7 +626,9 @@ class ControllerDatabaseTests(unittest.TestCase):
             result_id=DEPLOYMENT_ID,
             now="2026-01-01T00:01:00Z",
         )
-        self.assertEqual((completed.result_kind, completed.result_id), ("deployment", DEPLOYMENT_ID))
+        self.assertEqual(
+            (completed.result_kind, completed.result_id), ("deployment", DEPLOYMENT_ID)
+        )
         self.assertEqual(
             db.complete_idempotency_request(
                 self.connection,
@@ -673,9 +677,7 @@ class ControllerDatabaseTests(unittest.TestCase):
             provider_name="app_demo",
             lifecycle_state="active",
         )
-        renamed = db.rename_managed_resource(
-            self.connection, resource.resource_id, "Customer data"
-        )
+        renamed = db.rename_managed_resource(self.connection, resource.resource_id, "Customer data")
         self.assertEqual(renamed.resource_id, resource.resource_id)
         self.assertEqual(renamed.display_label, "Customer data")
         with self.assertRaisesRegex(db.DatabaseError, "immutable"):
