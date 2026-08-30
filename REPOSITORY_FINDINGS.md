@@ -63,11 +63,9 @@ Setup now refuses completion unless the admin host confirms:
 
 These do **not** prevent UI coding, but they block exposing the finished UI to real users.
 
-### P-01 — Real non-mutating setup preflight
+### P-01 — Real non-mutating setup preflight — resolved
 
-Without `--apply`, setup currently parses the environment file and prints fixed phases. It does not authenticate, resolve cloud choices, check quota, detect collisions, or prove tooling/image availability.
-
-**Exit gate:** a no-mutation `setup check` produces resolved human and JSON plans covering project identity, quota deltas, network/flavor/volume/address choices, collisions, toolchain, ingress, and release/image source.
+`setup check` now reuses strict setup resolution and produces human or JSON plans covering authenticated project identity, quota deltas, exact network/flavor/volume/address choices, collisions, local tooling, ingress, and commit/digest-pinned release and image sources. Mutation-spy and adversarial tests prove the path does not write files, build outputs, generate credentials, or issue provider mutations.
 
 ### P-02 — Off-site backup and full loss recovery
 

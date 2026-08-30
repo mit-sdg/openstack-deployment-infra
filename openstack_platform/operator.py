@@ -108,9 +108,17 @@ def build_parser() -> argparse.ArgumentParser:
     setup_command = commands.add_parser(
         "setup", help="create a complete greenfield deployment from a protected environment file"
     )
+    setup_command.add_argument(
+        "setup_action",
+        nargs="?",
+        choices=("check",),
+        default=None,
+        help="resolve a non-mutating deployment plan",
+    )
     setup_command.add_argument("--env-file", type=Path, required=True)
     setup_command.add_argument("--workspace", type=Path, default=OPERATOR_ROOT / "setup")
     setup_command.add_argument("--cloudflare-token-file", type=Path)
+    setup_command.add_argument("--json", action="store_true", help="emit the setup check as JSON")
     setup_command.add_argument(
         "--apply", action="store_true", help="build images and create the deployment"
     )
@@ -1015,6 +1023,8 @@ def dispatch(
         _restore(args, output=stdout)
         return
     if args.command == "setup":
+        if args.apply and args.setup_action == "check":
+            raise setup.SetupError("setup check cannot be combined with --apply")
 
         def setup_input(prompt: str) -> str:
             print(prompt, end="", file=stdout, flush=True)
@@ -1028,6 +1038,7 @@ def dispatch(
             workspace=args.workspace,
             cloudflare_token=args.cloudflare_token_file,
             apply=args.apply,
+            json_output=args.json,
             input_reader=setup_input,
             output=stdout,
         )

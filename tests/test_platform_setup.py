@@ -67,11 +67,12 @@ PLATFORM_DOMAIN='apps.example.test'
     def test_project_identity_uses_scoped_token_without_project_list_permission(self) -> None:
         project_id = "00000000-0000-4000-8000-000000000001"
         environment = {"OS_PROJECT_NAME": "demo", "OS_PROJECT_ID": project_id}
-        with mock.patch.object(setup, "_command", return_value=project_id) as command:
+        with mock.patch.object(setup, "_command", side_effect=(project_id, "demo")) as command:
             identity = setup._project_identity(Path("/nix/store/openstack"), environment)
 
         self.assertEqual(identity, setup.ProjectIdentity(project_id, "demo"))
-        self.assertEqual(command.call_args.args[0][1:3], ("token", "issue"))
+        self.assertEqual(command.call_args_list[0].args[0][1:3], ("token", "issue"))
+        self.assertEqual(command.call_args_list[1].args[0][1:3], ("project", "show"))
 
     def test_project_identity_rejects_a_conflicting_configured_uuid(self) -> None:
         token_project = "00000000-0000-4000-8000-000000000001"
@@ -104,24 +105,244 @@ PLATFORM_DOMAIN='apps.example.test'
                 )
             self.assertFalse(workspace.exists())
 
-    def test_plan_is_non_mutating_and_names_every_major_phase(self) -> None:
+    def test_check_is_non_mutating_and_renders_resolved_plan(self) -> None:
         path = self.environment("OS_PROJECT_NAME=demo\n")
         output = io.StringIO()
-
-        result = setup.run_setup(
-            env_file=path,
-            workspace=self.root / "workspace",
-            cloudflare_token=None,
-            apply=False,
-            output=output,
-        )
+        plan = {
+            "ready": True,
+            "project": {"name": "demo", "id": "00000000-0000-4000-8000-000000000001"},
+            "resolved": {
+                "network": {"name": "public", "id": "00000000-0000-4000-8000-000000000002"},
+                "flavors": {"admin": {"name": "large", "vcpus": 2, "ramMiB": 4096}},
+                "volumeType": {"name": "production"},
+                "fixedAddresses": {"admin": {"address": "192.0.2.11", "available": True}},
+            },
+            "quotaDeltas": {"instances": {"requiredDelta": 5, "available": 10, "shortfall": 0}},
+            "nameCollisions": [],
+            "toolchain": {"requiredHost": "x86_64-linux", "commands": {}},
+            "ingress": {"choice": "external-provider-pending", "domain": "apps.test"},
+            "source": {
+                "releaseCommit": "a" * 40,
+                "roleImages": {},
+                "runtimeImages": {},
+                "containerImages": {},
+            },
+        }
+        with mock.patch.object(setup, "_setup_check", return_value=plan) as check:
+            result = setup.run_setup(
+                env_file=path,
+                workspace=self.root / "workspace",
+                cloudflare_token=None,
+                apply=False,
+                output=output,
+            )
 
         self.assertIsNone(result)
         self.assertFalse((self.root / "workspace").exists())
+        check.assert_called_once()
         rendered = output.getvalue()
-        self.assertIn("five commit-addressed NixOS role images", rendered)
-        self.assertIn("three persistent VMs", rendered)
-        self.assertIn("rerun with --apply", rendered)
+        self.assertIn("setup-check=ready", rendered)
+        self.assertIn("quota.instances=+5", rendered)
+        self.assertIn("no resources or credentials were created", rendered)
+
+
+class SetupPreflightTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.env_file = self.root / "setup.env"
+        self.env_file.write_text(
+            "OS_AUTH_URL=https://identity.test/v3\n"
+            "OS_PROJECT_NAME=demo\nOS_USERNAME=user\nOS_PASSWORD=secret\n",
+            encoding="utf-8",
+        )
+        self.env_file.chmod(0o600)
+        self.project_id = "00000000-0000-4000-8000-000000000001"
+        self.network_id = "00000000-0000-4000-8000-000000000002"
+        repository = Path(__file__).resolve().parents[1]
+        values = {
+            "PLATFORM_PREFIX": "demo",
+            "PLATFORM_NAMESPACE": "demo-platform",
+            "PLATFORM_DISPLAY_NAME": "Demo",
+            "PLATFORM_ORGANIZATION": "Demo",
+            "PLATFORM_DOMAIN": "apps.example.test",
+            "PLATFORM_NETWORK": "public",
+            "PLATFORM_OPERATOR_CIDR": "192.0.2.10/32",
+            "PLATFORM_ADMIN_ADDRESS": "192.0.2.11",
+            "PLATFORM_INGRESS_ADDRESS": "192.0.2.12",
+            "PLATFORM_STORAGE_ADDRESS": "192.0.2.13",
+            "PLATFORM_ADMIN_FLAVOR": "admin-flavor",
+            "PLATFORM_INGRESS_FLAVOR": "ingress-flavor",
+            "PLATFORM_STORAGE_FLAVOR": "storage-flavor",
+            "PLATFORM_WORKER_FLAVOR": "worker-flavor",
+            "PLATFORM_BUILDER_FLAVOR": "builder-flavor",
+            "PLATFORM_VOLUME_TYPE": "production",
+        }
+        with (
+            mock.patch.object(setup, "_network_default"),
+            mock.patch.object(setup, "_flavor_inventory", return_value=[]),
+            mock.patch.object(setup, "_volume_type_default"),
+        ):
+            document = setup._platform_document(
+                repository,
+                values,
+                setup.ProjectIdentity(self.project_id, "demo"),
+                "a" * 40,
+                Path("/usr/bin/openstack"),
+                {},
+                lambda prompt: self.fail(prompt),
+            )
+        self.resolved = setup.ResolvedSetup(
+            repository,
+            values,
+            {},
+            "a" * 40,
+            setup.ProjectIdentity(self.project_id, "demo"),
+            document,
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def provider_json(self, argv: object, **_kwargs: object) -> object:
+        command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+        if command[1:3] == ("network", "list"):
+            return [{"ID": self.network_id, "Name": "public"}]
+        if command[1:3] == ("flavor", "list"):
+            sizes = {
+                "admin-flavor": (2, 4096),
+                "ingress-flavor": (2, 2048),
+                "storage-flavor": (4, 8192),
+                "worker-flavor": (1, 4096),
+                "builder-flavor": (4, 8192),
+            }
+            return [
+                {
+                    "ID": f"00000000-0000-4000-8000-{index:012d}",
+                    "Name": name,
+                    "VCPUs": cpu,
+                    "RAM": ram,
+                }
+                for index, (name, (cpu, ram)) in enumerate(sizes.items(), 10)
+            ]
+        if command[1:4] == ("volume", "type", "list"):
+            return [{"ID": "type-1", "Name": "production"}]
+        if command[1:3] == ("subnet", "list"):
+            return [{"ID": "subnet-1", "CIDR": "192.0.2.0/24"}]
+        if command[1:3] == ("quota", "show"):
+            return {
+                name: {"in_use": 0, "limit": 1000000}
+                for name in (
+                    "instances",
+                    "cores",
+                    "ram",
+                    "volumes",
+                    "gigabytes",
+                    "ports",
+                    "security_groups",
+                    "security_group_rules",
+                    "key_pairs",
+                )
+            }
+        if "list" in command:
+            return []
+        self.fail(f"unexpected provider command: {command}")
+
+    def test_provider_check_uses_only_read_operations_and_never_generates_credentials(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        def spy(argv: object, **kwargs: object) -> object:
+            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+            commands.append(command)
+            return self.provider_json(argv, **kwargs)
+
+        def identity_read(argv: object, **_kwargs: object) -> str:
+            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+            commands.append(command)
+            if command[1:3] == ("token", "issue"):
+                return self.project_id
+            if command[1:3] == ("project", "show"):
+                return "demo"
+            self.fail(f"unexpected identity command: {command}")
+
+        forbidden = (
+            "_atomic_private_write",
+            "_private_directory",
+            "_ensure_key",
+            "_ensure_secret_files",
+            "_ensure_age_identity",
+            "_build_nix_output",
+            "_apply_foundation",
+            "_build_and_publish_images",
+            "_bootstrap_roles",
+        )
+        with (
+            mock.patch.multiple(
+                setup, **{name: mock.DEFAULT for name in forbidden}
+            ) as mutation_spies,
+            mock.patch.object(
+                setup,
+                "_local_toolchain",
+                return_value={
+                    "host": "x86_64-linux",
+                    "requiredHost": "x86_64-linux",
+                    "commands": {},
+                    "missing": [],
+                    "ready": True,
+                },
+            ),
+            mock.patch.object(setup.shutil, "which", return_value="/usr/bin/openstack"),
+            mock.patch.object(setup, "_source_commit", return_value="a" * 40),
+            mock.patch.object(setup, "_platform_document", return_value=self.resolved.document),
+            mock.patch.object(setup, "_command", side_effect=identity_read),
+            mock.patch.object(setup, "_json_command", side_effect=spy),
+        ):
+            for name, spy_function in mutation_spies.items():
+                spy_function.side_effect = AssertionError(name)
+            plan = setup._setup_check(
+                env_file=self.env_file,
+                cloudflare_token=None,
+                input_reader=lambda prompt: self.fail(prompt),
+                secret_reader=lambda prompt: self.fail(prompt),
+            )
+
+        self.assertTrue(plan["ready"])
+        self.assertEqual(plan["project"]["id"], self.project_id)
+        self.assertFalse((self.root / "workspace").exists())
+        mutating = {"create", "delete", "set", "unset", "update", "add", "remove", "rebuild"}
+        self.assertFalse(any(mutating.intersection(command[1:]) for command in commands), commands)
+
+    def test_address_occupancy_is_an_adversarial_failure(self) -> None:
+        def occupied(argv: object, **kwargs: object) -> object:
+            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+            if command[1:3] == ("port", "list") and "ip-address=192.0.2.12" in command:
+                return [{"ID": "hostile-port", "Name": "unrelated"}]
+            return self.provider_json(argv, **kwargs)
+
+        with (
+            mock.patch.object(
+                setup,
+                "_local_toolchain",
+                return_value={
+                    "host": "x86_64-linux",
+                    "requiredHost": "x86_64-linux",
+                    "commands": {},
+                    "missing": [],
+                    "ready": True,
+                },
+            ),
+            mock.patch.object(setup.shutil, "which", return_value="/usr/bin/openstack"),
+            mock.patch.object(setup, "_resolve_setup_inputs", return_value=self.resolved),
+            mock.patch.object(setup, "_json_command", side_effect=occupied),
+        ):
+            plan = setup._setup_check(
+                env_file=self.env_file,
+                cloudflare_token=None,
+                input_reader=lambda prompt: self.fail(prompt),
+                secret_reader=lambda prompt: self.fail(prompt),
+            )
+        self.assertFalse(plan["ready"])
+        self.assertFalse(plan["resolved"]["fixedAddresses"]["ingress"]["available"])
 
 
 class SetupInventoryTests(unittest.TestCase):

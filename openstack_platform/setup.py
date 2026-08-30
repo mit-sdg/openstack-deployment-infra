@@ -18,6 +18,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,16 @@ class SetupPaths:
     openstack_environment: Path
     openstack_wrapper: Path
     ssh_directory: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSetup:
+    repository: Path
+    values: dict[str, str]
+    provider_environment: dict[str, str]
+    commit: str
+    project: ProjectIdentity
+    document: dict[str, Any]
 
 
 def _fail(message: str) -> NoReturn:
@@ -324,9 +335,14 @@ def _project_identity(openstack: Path, environment: Mapping[str, str]) -> Projec
             raise SetupError("configured OpenStack project UUID is malformed") from error
         if canonical_configured != project_id:
             _fail("authenticated OpenStack project does not match the configured project UUID")
-    project_name = environment.get("OS_PROJECT_NAME")
-    if not project_name:
-        _fail("authenticated OpenStack project name is unavailable")
+    project_name = _command(
+        (openstack, "project", "show", project_id, "-f", "value", "-c", "name"),
+        environment=environment,
+        capture=True,
+    ).strip()
+    configured_name = environment.get("OS_PROJECT_NAME")
+    if not project_name or not configured_name or project_name != configured_name:
+        _fail("authenticated OpenStack project name does not match the configured project")
     return ProjectIdentity(project_id, project_name)
 
 
@@ -1265,21 +1281,379 @@ def _paths(repository: Path, workspace: Path) -> SetupPaths:
     )
 
 
-def _print_plan(output: TextIO) -> None:
-    print("setup plan:", file=output)
-    print("  authenticate and discover the configured OpenStack project", file=output)
-    print(
-        "  generate private inventory, keys, service credentials, age identity, and PKI",
-        file=output,
+_TOOLCHAIN = (
+    "nix",
+    "openstack",
+    "git",
+    "ssh",
+    "ssh-keygen",
+    "openssl",
+    "curl",
+    "systemctl",
+)
+
+
+def _local_toolchain() -> dict[str, Any]:
+    commands = {name: shutil.which(name) for name in _TOOLCHAIN}
+    missing = [name for name, path in commands.items() if path is None]
+    machine = os.uname().machine
+    return {
+        "host": f"{machine}-linux"
+        if sys.platform.startswith("linux")
+        else f"{machine}-{sys.platform}",
+        "requiredHost": "x86_64-linux",
+        "commands": commands,
+        "missing": missing,
+        "ready": not missing and machine == "x86_64" and sys.platform.startswith("linux"),
+    }
+
+
+def _exact_named_rows(rows: object, name: str, *, kind: str) -> list[Mapping[str, Any]]:
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        _fail(f"OpenStack {kind} inventory is malformed")
+    return [row for row in rows if str(_field(row, "Name", "name")) == name]
+
+
+def _resolve_setup_inputs(
+    *,
+    repository: Path,
+    values: dict[str, str],
+    openstack: Path,
+    input_reader: Callable[[str], str],
+    secret_reader: Callable[[str], str],
+    commit: str | None = None,
+) -> ResolvedSetup:
+    """Resolve the strict setup inputs shared by check and apply."""
+    _credential_requirements(values, input_reader, secret_reader)
+    provider_environment = _openstack_environment(values)
+    resolved_commit = commit or _source_commit(repository, provider_environment)
+    project = _project_identity(openstack, provider_environment)
+    provider_environment["OS_PROJECT_ID"] = project.project_id
+    provider_environment["OS_PROJECT_NAME"] = project.project_name
+    values["OS_PROJECT_ID"] = project.project_id
+    values["OS_PROJECT_NAME"] = project.project_name
+    document = _platform_document(
+        repository,
+        values,
+        project,
+        resolved_commit,
+        openstack,
+        provider_environment,
+        input_reader,
     )
-    print("  create security groups and reserve the three fixed ports", file=output)
-    print("  build, QEMU-smoke, and publish five commit-addressed NixOS role images", file=output)
-    print("  create three persistent VMs and their volumes", file=output)
-    print(
-        "  install the operator bridge, policy and releases; verify the hosted controller and backups",
-        file=output,
+    return ResolvedSetup(
+        repository, values, provider_environment, resolved_commit, project, document
     )
-    print("rerun with --apply to perform these actions", file=output)
+
+
+def _resolved_provider_choices(
+    openstack: Path, resolved: ResolvedSetup
+) -> tuple[dict[str, Any], dict[str, Mapping[str, Any]]]:
+    environment = resolved.provider_environment
+    document = resolved.document
+    network_rows = _json_command(
+        (openstack, "network", "list", "--name", str(document["network"]), "-f", "json"),
+        environment=environment,
+    )
+    network_matches = _exact_named_rows(network_rows, str(document["network"]), kind="network")
+    if len(network_matches) != 1:
+        _fail("configured OpenStack network does not resolve exactly once")
+    network_id = str(_field(network_matches[0], "ID", "id"))
+    try:
+        network_id = str(UUID(network_id))
+    except ValueError as error:
+        raise SetupError("resolved OpenStack network UUID is malformed") from error
+
+    flavor_rows = _flavor_inventory(openstack, environment)
+    flavor_details: dict[str, Mapping[str, Any]] = {}
+    flavors: dict[str, Any] = {}
+    requirements = {
+        "admin": (2, 4096),
+        "ingress": (2, 2048),
+        "storage": (4, 8192),
+        "worker": (1, 4096),
+        "builder": (4, 8192),
+    }
+    for role, name in document["flavors"].items():
+        matches = _exact_named_rows(flavor_rows, str(name), kind="flavor")
+        if len(matches) != 1:
+            _fail(f"configured {role} flavor does not resolve exactly once: {name}")
+        row = matches[0]
+        try:
+            flavor_id = str(UUID(str(_field(row, "ID", "id"))))
+            vcpus = int(_field(row, "VCPUs", "vcpus"))
+            ram = int(_field(row, "RAM", "ram"))
+        except (TypeError, ValueError) as error:
+            raise SetupError(f"resolved {role} flavor is malformed") from error
+        minimum_cpu, minimum_ram = requirements[role]
+        if vcpus < minimum_cpu or ram < minimum_ram:
+            _fail(f"configured {role} flavor is below the setup baseline")
+        flavors[role] = {"id": flavor_id, "name": str(name), "vcpus": vcpus, "ramMiB": ram}
+        flavor_details[role] = row
+
+    volume_types = _json_command(
+        (openstack, "volume", "type", "list", "-f", "json", "-c", "ID", "-c", "Name"),
+        environment=environment,
+    )
+    volume_name = str(document["volumes"]["data"]["type"])
+    volume_matches = _exact_named_rows(volume_types, volume_name, kind="volume type")
+    if len(volume_matches) != 1:
+        _fail("configured Cinder volume type does not resolve exactly once")
+    volume_id = str(_field(volume_matches[0], "ID", "id"))
+
+    subnets = _json_command(
+        (openstack, "subnet", "list", "--network", network_id, "-f", "json"),
+        environment=environment,
+    )
+    if not isinstance(subnets, list) or any(not isinstance(row, dict) for row in subnets):
+        _fail("OpenStack subnet inventory is malformed")
+    fixed: dict[str, Any] = {}
+    if len(set(document["addresses"].values())) != len(document["addresses"]):
+        _fail("configured fixed addresses must be distinct")
+    for role, address_text in document["addresses"].items():
+        address = ipaddress.IPv4Address(address_text)
+        matching = []
+        for subnet in subnets:
+            cidr = _field(subnet, "Subnet", "CIDR", "cidr")
+            try:
+                if cidr and address in ipaddress.ip_network(str(cidr)):
+                    matching.append(subnet)
+            except ValueError:
+                _fail("OpenStack subnet inventory contains a malformed CIDR")
+        if len(matching) != 1:
+            _fail(f"fixed {role} address does not select exactly one subnet")
+        occupied = _json_command(
+            (openstack, "port", "list", "--fixed-ip", f"ip-address={address}", "-f", "json"),
+            environment=environment,
+        )
+        if not isinstance(occupied, list):
+            _fail("OpenStack fixed-address inventory is malformed")
+        fixed[role] = {
+            "address": str(address),
+            "subnetId": str(_field(matching[0], "ID", "id")),
+            "available": len(occupied) == 0,
+        }
+
+    return {
+        "network": {"id": network_id, "name": document["network"]},
+        "flavors": flavors,
+        "volumeType": {"id": volume_id, "name": volume_name},
+        "fixedAddresses": fixed,
+    }, flavor_details
+
+
+def _name_collisions(openstack: Path, resolved: ResolvedSetup) -> list[dict[str, str]]:
+    document = resolved.document
+    prefix = str(document["prefix"])
+    wanted = {
+        "server": set(document["hosts"].values()),
+        "port": set(document["ports"].values()),
+        "volume": {item["name"] for item in document["volumes"].values()},
+        "image": set(document["images"].values()),
+        "security group": {f"{prefix}-{role}" for role in IMAGE_ROLES},
+        "keypair": {f"{prefix}-admin"},
+    }
+    commands = {
+        "server": ("server", "list", "-f", "json", "-c", "Name"),
+        "port": ("port", "list", "-f", "json", "-c", "Name"),
+        "volume": ("volume", "list", "-f", "json", "-c", "Name"),
+        "image": ("image", "list", "--private", "-f", "json", "-c", "Name"),
+        "security group": ("security", "group", "list", "-f", "json", "-c", "Name"),
+        "keypair": ("keypair", "list", "-f", "json", "-c", "Name"),
+    }
+    collisions: list[dict[str, str]] = []
+    for kind, argv in commands.items():
+        rows = _json_command((openstack, *argv), environment=resolved.provider_environment)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            _fail(f"OpenStack {kind} inventory is malformed")
+        for row in rows:
+            name = str(_field(row, "Name", "name"))
+            if name in wanted[kind]:
+                collisions.append({"kind": kind, "name": name})
+    return sorted(collisions, key=lambda item: (item["kind"], item["name"]))
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _quota_value(raw: object) -> tuple[int | None, int | None]:
+    if isinstance(raw, dict):
+        lowered = {str(key).lower().replace("-", "_"): value for key, value in raw.items()}
+        return _optional_int(lowered.get("in_use", lowered.get("used"))), _optional_int(
+            lowered.get("limit")
+        )
+    return None, None
+
+
+def _quota_deltas(
+    openstack: Path, resolved: ResolvedSetup, flavors: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any]:
+    rows = _json_command(
+        (openstack, "quota", "show", "--usage", "-f", "json"),
+        environment=resolved.provider_environment,
+    )
+    if not isinstance(rows, dict):
+        _fail("OpenStack quota response is malformed")
+    normalized = {
+        str(key).lower().replace(" ", "_").replace("-", "_"): value for key, value in rows.items()
+    }
+    document = resolved.document
+    required = {
+        "instances": len(IMAGE_ROLES),
+        "cores": sum(int(_field(flavors[role], "VCPUs", "vcpus")) for role in IMAGE_ROLES),
+        "ram": sum(int(_field(flavors[role], "RAM", "ram")) for role in IMAGE_ROLES),
+        "volumes": len(document["volumes"]),
+        "gigabytes": sum(int(item["sizeGiB"]) for item in document["volumes"].values()),
+        "ports": len(IMAGE_ROLES),
+        "security_groups": len(IMAGE_ROLES),
+        # Neutron creates two default egress rules per group in addition to
+        # the 21 explicit contract rules.
+        "security_group_rules": 31,
+        "key_pairs": 1,
+    }
+    aliases = {"ram": ("ram",), "key_pairs": ("key_pairs", "keypairs")}
+    result: dict[str, Any] = {}
+    for name, delta in required.items():
+        keys = aliases.get(name, (name,))
+        raw = next((normalized[key] for key in keys if key in normalized), None)
+        used, limit = _quota_value(raw)
+        if limit is None:
+            limit = _optional_int(raw)
+        if used is None:
+            used_raw = next(
+                (normalized[f"{key}_in_use"] for key in keys if f"{key}_in_use" in normalized),
+                None,
+            )
+            used = _optional_int(used_raw)
+        available = None if used is None or limit is None or limit < 0 else limit - used
+        shortfall = None if available is None else max(0, delta - available)
+        result[name] = {
+            "requiredDelta": delta,
+            "inUse": used,
+            "limit": limit,
+            "available": available,
+            "shortfall": shortfall,
+        }
+    return result
+
+
+def _setup_check(
+    *,
+    env_file: Path,
+    cloudflare_token: Path | None,
+    input_reader: Callable[[str], str],
+    secret_reader: Callable[[str], str],
+) -> dict[str, Any]:
+    toolchain = _local_toolchain()
+    if not toolchain["ready"]:
+        detail = ", ".join(toolchain["missing"]) or str(toolchain["host"])
+        _fail("required local setup toolchain is unavailable: " + detail)
+    openstack_command = shutil.which("openstack")
+    if openstack_command is None:
+        _fail(
+            "openstack is required for non-mutating setup check (the apply path builds it with Nix)"
+        )
+    if cloudflare_token is not None:
+        _direct_private_file(cloudflare_token, field="Cloudflare tunnel token")
+    repository = _repository_root()
+    resolved = _resolve_setup_inputs(
+        repository=repository,
+        values=load_environment_file(env_file),
+        openstack=Path(openstack_command),
+        input_reader=input_reader,
+        secret_reader=secret_reader,
+    )
+    choices, flavors = _resolved_provider_choices(Path(openstack_command), resolved)
+    collisions = _name_collisions(Path(openstack_command), resolved)
+    quotas = _quota_deltas(Path(openstack_command), resolved, flavors)
+    fixed_ready = all(item["available"] for item in choices["fixedAddresses"].values())
+    quota_ready = all(item["shortfall"] == 0 for item in quotas.values())
+    document = resolved.document
+    runtime_images = {
+        "bun": resolved.values.get(
+            "PLATFORM_BUN_RUNTIME_IMAGE",
+            "docker.io/oven/bun@sha256:621f249399228db47cf34611ee662585e77e015250ed29d5d0932b2d3282f0b0",
+        ),
+        "node": resolved.values.get(
+            "PLATFORM_NODE_RUNTIME_IMAGE",
+            "docker.io/library/node@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848",
+        ),
+    }
+    plan = {
+        "schemaVersion": 1,
+        "ready": not collisions and fixed_ready and quota_ready,
+        "project": {"id": resolved.project.project_id, "name": resolved.project.project_name},
+        "quotaDeltas": quotas,
+        "resolved": choices,
+        "nameCollisions": collisions,
+        "toolchain": toolchain,
+        "ingress": {
+            "choice": "cloudflare-tunnel" if cloudflare_token else "external-provider-pending",
+            "domain": document["domain"],
+            "tokenFileValidated": cloudflare_token is not None,
+        },
+        "source": {
+            "releaseCommit": resolved.commit,
+            "roleImages": {
+                role: {"name": name, "source": "nix-source-build", "commit": resolved.commit}
+                for role, name in document["images"].items()
+            },
+            "runtimeImages": runtime_images,
+            "containerImages": document["containers"],
+        },
+    }
+    return plan
+
+
+def _print_check(plan: Mapping[str, Any], output: TextIO) -> None:
+    project = plan["project"]
+    resolved = plan["resolved"]
+    status = "ready" if plan["ready"] else "failed"
+    print(f"setup-check={status} project={project['name']} project-id={project['id']}", file=output)
+    print(f"network={resolved['network']['name']} ({resolved['network']['id']})", file=output)
+    for role, flavor in resolved["flavors"].items():
+        print(
+            f"flavor.{role}={flavor['name']} ({flavor['vcpus']} vCPU, {flavor['ramMiB']} MiB)",
+            file=output,
+        )
+    print(f"volume-type={resolved['volumeType']['name']}", file=output)
+    for role, address in resolved["fixedAddresses"].items():
+        availability = "available" if address["available"] else "occupied"
+        print(f"fixed-address.{role}={address['address']} {availability}", file=output)
+    for name, quota in plan["quotaDeltas"].items():
+        print(
+            f"quota.{name}=+{quota['requiredDelta']} available={quota['available']} "
+            f"shortfall={quota['shortfall']}",
+            file=output,
+        )
+    collisions = plan["nameCollisions"]
+    if collisions:
+        for collision in collisions:
+            print(f"name-collision={collision['kind']}:{collision['name']}", file=output)
+    else:
+        print("name-collisions=none", file=output)
+    print(f"toolchain={plan['toolchain']['requiredHost']} ready", file=output)
+    for command, path in plan["toolchain"]["commands"].items():
+        print(f"tool.{command}={path}", file=output)
+    print(f"ingress={plan['ingress']['choice']} domain={plan['ingress']['domain']}", file=output)
+    print(f"release={plan['source']['releaseCommit']}", file=output)
+    for role, image in plan["source"]["roleImages"].items():
+        print(f"image.{role}={image['name']} source={image['source']}", file=output)
+    for runtime, image in plan["source"]["runtimeImages"].items():
+        print(f"runtime-image.{runtime}={image}", file=output)
+    for service, image in plan["source"]["containerImages"].items():
+        print(f"service-image.{service}={image}", file=output)
+    print("no resources or credentials were created", file=output)
 
 
 def run_setup(
@@ -1288,6 +1662,7 @@ def run_setup(
     workspace: Path,
     cloudflare_token: Path | None,
     apply: bool,
+    json_output: bool = False,
     input_reader: Callable[[str], str] = input,
     secret_reader: Callable[[str], str] = getpass.getpass,
     output: TextIO,
@@ -1301,8 +1676,23 @@ def run_setup(
         if ingress_policy["mode"] != "tunnel":
             _fail("Cloudflare Tunnel token requires PLATFORM_INGRESS_MODE=tunnel")
     if not apply:
-        _print_plan(output)
+        plan = _setup_check(
+            env_file=env_file,
+            cloudflare_token=cloudflare_token,
+            input_reader=input_reader,
+            secret_reader=secret_reader,
+        )
+        if json_output:
+            print(json.dumps(plan, indent=2, sort_keys=True), file=output)
+        else:
+            _print_check(plan, output)
+        if not plan["ready"]:
+            _fail(
+                "setup check found collisions, unavailable fixed addresses, or insufficient/unknown quota"
+            )
         return None
+    if json_output:
+        _fail("--json is only valid for setup check")
     repository = _repository_root()
     _credential_requirements(values, input_reader, secret_reader)
     provider_environment = _openstack_environment(values)
@@ -1320,24 +1710,18 @@ def run_setup(
     python_store = _build_nix_output(repository, provider_environment, "python")
     age_store = _build_nix_output(repository, provider_environment, "age")
     openstack = python_store / "bin/openstack"
-    project = _project_identity(openstack, provider_environment)
-    provider_environment = dict(provider_environment)
-    provider_project_id = (
-        values.get("OS_PROJECT_ID") or values.get("OS_TENANT_ID") or project.project_id
+    resolved = _resolve_setup_inputs(
+        repository=repository,
+        values=values,
+        openstack=openstack,
+        input_reader=input_reader,
+        secret_reader=secret_reader,
+        commit=commit,
     )
-    provider_environment["OS_PROJECT_ID"] = provider_project_id
-    provider_environment["OS_PROJECT_NAME"] = project.project_name
-    values["OS_PROJECT_ID"] = provider_project_id
-    values["OS_PROJECT_NAME"] = project.project_name
-    document = _platform_document(
-        repository,
-        values,
-        project,
-        commit,
-        openstack,
-        provider_environment,
-        input_reader,
-    )
+    provider_environment = resolved.provider_environment
+    project = resolved.project
+    document = resolved.document
+    commit = resolved.commit
     if paths.platform.exists():
         existing = json.loads(paths.platform.read_text(encoding="utf-8"))
         if existing != document:

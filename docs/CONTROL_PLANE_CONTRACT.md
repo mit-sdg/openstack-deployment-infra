@@ -44,13 +44,12 @@ is rejected. Accepted records are not imported from provider resources.
 ### Greenfield setup
 
 ```text
-openstack-platform setup --env-file PATH [--workspace PATH]
+openstack-platform setup check --env-file PATH [--cloudflare-token-file PATH] [--json]
 openstack-platform setup --env-file PATH [--workspace PATH]
   [--cloudflare-token-file PATH] --apply
 ```
 
-Without `--apply`, setup validates the protected input and prints a
-non-mutating plan. With `--apply`, it verifies the authenticated OpenStack
+`setup check` (also available by omitting both `check` and `--apply`) authenticates and prints a resolved human or JSON plan. It checks project identity, quota deltas, provider choices, fixed-address availability, reserved-name collisions, host tooling, ingress, and release/image sources using provider reads only. It writes nothing and generates no credentials. With `--apply`, setup verifies the authenticated OpenStack
 project, generates private deployment material, reserves fixed ports, builds
 and tests all five role images, creates the persistent roles and volumes,
 installs the policy and operator/helper releases, verifies the hosted controller

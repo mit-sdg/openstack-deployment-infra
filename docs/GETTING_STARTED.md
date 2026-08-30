@@ -77,14 +77,13 @@ keypairs, VMs, or volumes manually. Setup generates or provisions them.
 
 Create the direct mode-`0600` environment file described in
 [Create a platform from one environment file](SETUP.md#create-the-protected-environment-file).
-Then review the non-mutating summary:
+Then run the authenticated, non-mutating preflight:
 
 ```bash
-uv run openstack-platform setup --env-file /private/path/setup.env
+uv run openstack-platform setup check --env-file /private/path/setup.env
 ```
 
-Create the deployment only after checking the target project, fixed addresses,
-flavor choices, and volume sizes:
+Create the deployment only after the check reports `setup-check=ready` for the target project, quota, fixed addresses, provider choices, names, tooling, ingress, and sources:
 
 ```bash
 uv run openstack-platform setup \

@@ -11,6 +11,7 @@ The command is resumable: rerun the same command with the same protected environ
 Run setup from a clean, complete commit on an `x86_64-linux` operator host. The host must have:
 
 - Nix with flakes enabled; setup builds its OpenStack client, Python SDK, `age`, QEMU, and config-drive smoke tooling from the pinned flake;
+- an `openstack` client for the read-only preflight (the apply path still uses the pinned Nix client);
 - `git`, `ssh`, `ssh-keygen`, `openssl`, `curl`, and a user systemd manager;
 - an unprivileged management account that owns an existing mode-`0700` `/srv/openstack-platform`; and
 - OpenStack quota for five private images, three persistent VMs, disposable builders and workers, three fixed ports, and 32 + 500 + 200 GiB of Cinder storage by default.
@@ -98,15 +99,19 @@ Use `OS_AUTH_TYPE=v3applicationcredential` with `OS_APPLICATION_CREDENTIAL_ID` a
 
 Interactive prompts are for non-secret deployment choices. If `OS_PASSWORD` is absent, setup requests it through a hidden terminal prompt. A non-interactive run must provide every value that cannot be discovered or defaulted.
 
-## Review the operation
+## Run the preflight
 
-The default invocation is non-mutating and does not generate credentials:
+Run the authenticated setup check before applying:
 
 ```bash
-uv run openstack-platform setup --env-file /private/path/setup.env
+uv run openstack-platform setup check --env-file /private/path/setup.env
+# Machine-readable equivalent:
+uv run openstack-platform setup check --env-file /private/path/setup.env --json
 ```
 
-It prints the major phases that `--apply` will perform. Keep the environment file and workspace private.
+`setup check` uses the same strict project, source, and inventory resolution as setup. It reports the authenticated project UUID/name, quota deltas, exact network/flavors/volume type/fixed addresses, all reserved-name collisions, local toolchain, ingress choice, and commit-addressed release/image sources. It fails on ambiguity, collision, occupied addresses, unknown or insufficient required quota, or missing tooling.
+
+The check issues only OpenStack authentication/list/show/quota reads. It does not build Nix outputs, create a workspace, write files, generate credentials or keys, or mutate provider resources. Supplying `--cloudflare-token-file` only validates that it is a direct private file; the token is not read or printed. The shorter `openstack-platform setup --env-file ...` form is retained as an alias for `setup check`.
 
 ## Configure Cloudflare or another ingress provider
 
