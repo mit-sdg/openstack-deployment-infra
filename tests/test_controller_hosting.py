@@ -131,6 +131,9 @@ class ControllerHostingStaticTests(unittest.TestCase):
             )
         ]
         self.assertIn("CONTROLLER_PROJECT_SOCKET = controllerSocket;", broker)
+        self.assertIn("unitConfig.ConditionPathExists = managementBrokerExecutable;", broker)
+        self.assertIn("ExecCondition =", broker)
+        self.assertNotIn("ConditionPathIsExecutable", broker)
         self.assertNotIn('wantedBy = [ "multi-user.target" ];', broker)
         self.assertIn('RestrictAddressFamilies = [ "AF_UNIX" ];', broker)
         self.assertIn('IPAddressDeny = "any";', broker)
@@ -157,6 +160,8 @@ class ControllerHostingStaticTests(unittest.TestCase):
         self.assertIn("PathExists = [", controller_activation)
         self.assertIn('Unit = "${namespace}-controller-activate.service";', controller_activation)
         self.assertNotIn("controllerPrivilegedSocket", management)
+        self.assertIn("unitConfig.ConditionPathExists = managementWebExecutable;", management)
+        self.assertNotIn("ConditionPathIsExecutable", management)
         self.assertNotIn(
             'wantedBy = [ "multi-user.target" ];',
             management.split('systemd.paths."${namespace}-management-broker"', 1)[0],

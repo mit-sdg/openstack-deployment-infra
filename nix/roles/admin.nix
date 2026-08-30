@@ -563,7 +563,7 @@ in
     description = "Trusted ${platform.displayName} management authorization broker";
     after = [ "${namespace}-controller.service" ];
     requires = [ "${namespace}-controller.service" ];
-    unitConfig.ConditionPathIsExecutable = managementBrokerExecutable;
+    unitConfig.ConditionPathExists = managementBrokerExecutable;
     environment = {
       CONTROLLER_PROJECT_SOCKET = controllerSocket;
       MANAGEMENT_BROKER_SOCKET = managementBrokerSocket;
@@ -571,6 +571,7 @@ in
     };
     serviceConfig = {
       Type = "simple";
+      ExecCondition = "${pkgs.coreutils}/bin/test -x ${managementBrokerExecutable}";
       User = managementBrokerUser;
       Group = managementBrokerUser;
       SupplementaryGroups = [
@@ -617,13 +618,14 @@ in
     description = "Browser-facing ${platform.displayName} management application";
     after = [ "${namespace}-management-broker.service" ];
     requires = [ "${namespace}-management-broker.service" ];
-    unitConfig.ConditionPathIsExecutable = managementWebExecutable;
+    unitConfig.ConditionPathExists = managementWebExecutable;
     environment = {
       MANAGEMENT_BROKER_SOCKET = managementBrokerSocket;
       MANAGEMENT_WEB_STATE_DIRECTORY = managementWebState;
     };
     serviceConfig = {
       Type = "simple";
+      ExecCondition = "${pkgs.coreutils}/bin/test -x ${managementWebExecutable}";
       User = managementWebUser;
       Group = managementWebUser;
       ExecStart = managementWebExecutable;
