@@ -328,6 +328,18 @@ class ControllerAPI:
             {"Location": f"/v1/operations/{operation_id}"},
         )
 
+    def _is_recovery_result(self, claimed: db.IdempotencyRequest) -> bool:
+        if claimed.result_id is None:
+            return False
+        dispatch = db.get_operation_dispatch(self.connection, claimed.result_id)
+        operation = db.get_operation(self.connection, claimed.result_id)
+        return (
+            dispatch is not None
+            and operation is not None
+            and dispatch.status == "recovery_required"
+            and operation.status == "recovery_required"
+        )
+
     def _external(
         self,
         request: Request,
@@ -338,14 +350,33 @@ class ControllerAPI:
         claimed: db.IdempotencyRequest | None = None,
     ) -> Response:
         claimed = self._claim(request) if claimed is None else claimed
+
+        def execute(connection: sqlite3.Connection) -> object:
+            return work(connection, claimed.request_id)
+
         if claimed.result_id is not None:
+            dispatch = db.get_operation_dispatch(self.connection, claimed.result_id)
+            operation = db.get_operation(self.connection, claimed.result_id)
+            if (
+                dispatch is not None
+                and operation is not None
+                and dispatch.status == "recovery_required"
+                and operation.status == "recovery_required"
+            ):
+                self.executor.resubmit_recovery(
+                    self.connection,
+                    operation_id=claimed.result_id,
+                    kind=kind,
+                    scope=scope,
+                    work=execute,
+                )
             return self._operation_response(claimed.result_id)
         self.executor.submit(
             self.connection,
             operation_id=claimed.request_id,
             kind=kind,
             scope=scope,
-            work=lambda connection: work(connection, claimed.request_id),
+            work=execute,
         )
         return self._operation_response(claimed.request_id)
 
@@ -423,7 +454,7 @@ class ControllerAPI:
         self._no_query(request)
         body = self._body(request, allowed={"confirmation"}, required={"confirmation"})
         claimed = self._claim(request)
-        if claimed.result_id is not None:
+        if claimed.result_id is not None and not self._is_recovery_result(claimed):
             return self._operation_response(claimed.result_id)
         application = self._application(self._path_uuid(request))
         return self._external(
@@ -706,7 +737,7 @@ class ControllerAPI:
             required={"confirmation"},
         )
         claimed = self._claim(request)
-        if claimed.result_id is not None:
+        if claimed.result_id is not None and not self._is_recovery_result(claimed):
             return self._operation_response(claimed.result_id)
         resource = self._resource(self._path_uuid(request))
         purge = body.get("purge", False)

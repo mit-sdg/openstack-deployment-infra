@@ -1119,6 +1119,42 @@ def enqueue_operation_dispatch(
     return result, True
 
 
+def requeue_recovery_dispatch(
+    connection: sqlite3.Connection,
+    *,
+    operation_id: str,
+    kind: str,
+    scope: str,
+    now: str | None = None,
+) -> OperationDispatch:
+    """Move one matching recovery dispatch back to the in-memory executor."""
+    identifier = uuid(operation_id, field="operation_id")
+    checked_kind = _operation_token(kind, field="kind")
+    checked_scope = _operation_token(scope, field="scope")
+    with transaction(connection):
+        dispatch = get_operation_dispatch(connection, identifier)
+        operation = get_operation(connection, identifier)
+        if (
+            dispatch is None
+            or operation is None
+            or dispatch.status != "recovery_required"
+            or operation.status != "recovery_required"
+            or (dispatch.kind, dispatch.scope) != (checked_kind, checked_scope)
+            or (operation.kind, operation.scope) != (checked_kind, checked_scope)
+        ):
+            raise DatabaseError("operation is not eligible for recovery dispatch")
+        cursor = connection.execute(
+            "UPDATE operation_dispatches SET status = 'pending', updated_at = ?, "
+            "safe_error = NULL WHERE operation_id = ? AND status = 'recovery_required'",
+            (now or utc_now(), identifier),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseError("operation recovery dispatch changed concurrently")
+    result = get_operation_dispatch(connection, identifier)
+    assert result is not None
+    return result
+
+
 def set_operation_dispatch_status(
     connection: sqlite3.Connection,
     operation_id: str,

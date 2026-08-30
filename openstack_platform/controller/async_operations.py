@@ -121,6 +121,34 @@ class AsyncOperationExecutor:
             self._slots.release()
             raise
 
+    def resubmit_recovery(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        operation_id: str,
+        kind: str,
+        scope: str,
+        work: OperationWork,
+    ) -> db.OperationDispatch:
+        """Re-dispatch recovery using only the identical caller-supplied body."""
+        with self._state_lock:
+            if self._closed:
+                raise db.DispatchQueueFullError("operation executor is stopping")
+        if not self._slots.acquire(blocking=False):
+            raise db.DispatchQueueFullError("operation executor is at capacity")
+        try:
+            dispatch = db.requeue_recovery_dispatch(
+                connection,
+                operation_id=operation_id,
+                kind=kind,
+                scope=scope,
+            )
+            self._queue.put_nowait((operation_id, work))
+            return dispatch
+        except BaseException:
+            self._slots.release()
+            raise
+
     def _run(self) -> None:
         connection = db.connect(self.database_path, create=False)
         try:
@@ -172,7 +200,16 @@ class AsyncOperationExecutor:
                         db.mark_recovery_required(connection, operation_id, error)
                 finally:
                     try:
-                        db.set_operation_dispatch_status(connection, operation_id, "finished")
+                        operation = db.get_operation(connection, operation_id)
+                        dispatch_status = (
+                            "recovery_required"
+                            if operation is not None
+                            and operation.status == "recovery_required"
+                            else "finished"
+                        )
+                        db.set_operation_dispatch_status(
+                            connection, operation_id, dispatch_status
+                        )
                     finally:
                         self._slots.release()
                         self._queue.task_done()

@@ -1306,11 +1306,13 @@ class DeploymentService:
         if selected_request_id is not None:
             fingerprint, _environment_revision = deployment_fingerprint()
             claimed = db.get_idempotency_request(self.connection, selected_request_id)
-            if not (
+            dispatch = db.get_operation_dispatch(self.connection, selected_request_id)
+            api_managed = (
                 claimed is not None
-                and claimed.result_kind == "operation"
                 and claimed.result_id == selected_request_id
-            ):
+                and dispatch is not None
+            )
+            if not api_managed:
                 claimed = db.claim_idempotency_request(
                     self.connection,
                     request_id=selected_request_id,
@@ -1318,9 +1320,15 @@ class DeploymentService:
                 )
             assert claimed is not None
             if claimed.result_id is not None:
-                if claimed.result_kind == "operation" and claimed.result_id == selected_request_id:
+                if api_managed:
                     attempt = db.get_deployment_attempt(self.connection, claimed.result_id)
-                    if attempt is not None and attempt.status in {"succeeded", "failed"}:
+                    operation = db.get_operation(self.connection, claimed.result_id)
+                    if (
+                        attempt is not None
+                        and attempt.status in {"succeeded", "failed"}
+                        and operation is not None
+                        and operation.status in {"succeeded", "failed"}
+                    ):
                         return DeploymentOutcome(application_slug, image=attempt.image_digest)
                 elif claimed.result_kind == "deployment":
                     attempt = db.get_deployment_attempt(self.connection, claimed.result_id)
@@ -1337,8 +1345,8 @@ class DeploymentService:
             claimed = db.get_idempotency_request(self.connection, operation_id)
             if not (
                 claimed is not None
-                and claimed.result_kind == "operation"
                 and claimed.result_id == operation_id
+                and db.get_operation_dispatch(self.connection, operation_id) is not None
             ):
                 db.claim_idempotency_request(
                     self.connection,

@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Literal
 
 from .. import openstack, runtime
+from ..config import Config
+from ..validation import ValidationError, env_key, uuid
 from . import application_runtime as app
 from . import database as db
-from ..config import Config
 from .service_support import (
     HelperCaller,
     operation_deadline,
@@ -21,7 +22,6 @@ from .service_support import (
     wall_deadline,
 )
 from .storage_contract import PLATFORM_ENVIRONMENT_KEYS, RESERVED_ENVIRONMENT_PREFIX
-from ..validation import ValidationError, env_key, uuid
 
 EnvironmentAction = Literal["set", "unset", "import"]
 
@@ -82,6 +82,7 @@ class EnvironmentService:
         operation: db.Operation,
         *,
         deadline: float,
+        finish: bool = True,
     ) -> None:
         intended = operation.refs.get("key_names")
         mutation = operation.refs.get("mutation")
@@ -122,12 +123,13 @@ class EnvironmentService:
             owner="staff",
             keys=sorted(recovered),
         )
-        db.mark_failed(
-            self.connection,
-            operation.operation_id,
-            "interrupted environment state was observed before explicit retry",
-            cleanup_state="not_required",
-        )
+        if finish:
+            db.mark_failed(
+                self.connection,
+                operation.operation_id,
+                "interrupted environment state was observed before explicit retry",
+                cleanup_state="not_required",
+            )
 
     def mutate(self, request: EnvironmentMutationRequest) -> EnvironmentMutationResult:
         application = db.get_application(self.connection, request.application)
@@ -167,7 +169,17 @@ class EnvironmentService:
             )
             if environment_revision is None:
                 raise db.DatabaseError("application environment revision is missing")
+            operation_id = (
+                str(uuid_module.uuid4())
+                if request.request_id is None
+                else uuid(request.request_id, field="environment operation ID")
+            )
+            expected_kind = f"app.env.{request.action}"
             unfinished = db.get_unfinished_operation(self.connection, scope)
+            resuming = unfinished is not None and (
+                unfinished.operation_id == operation_id
+                and unfinished.kind == expected_kind
+            )
             if unfinished is not None:
                 if not unfinished.kind.startswith("app.env."):
                     raise db.UnfinishedOperationError(
@@ -180,6 +192,7 @@ class EnvironmentService:
                     ownership,
                     unfinished,
                     deadline=deadline,
+                    finish=not resuming,
                 )
                 ownership = self._ownership(refreshed.application_id)
 
@@ -197,24 +210,30 @@ class EnvironmentService:
                     f"environment key {first!r} is reserved for the platform or storage"
                 )
             mutation = "unset" if removals else "set"
-            operation_id = (
-                str(uuid_module.uuid4())
-                if request.request_id is None
-                else uuid(request.request_id, field="environment operation ID")
-            )
-            db.begin_operation(
-                self.connection,
-                operation_id=operation_id,
-                kind=f"app.env.{request.action}",
-                scope=scope,
-                phase="intent_recorded",
-                deadline_at=wall_deadline(deadline),
-                refs={"key_names": intended_names, "mutation": mutation},
-            )
-            try:
-                helper_caller = lambda action, values, **_bounds: self._helper(
-                    action, values, deadline=deadline
+            if resuming:
+                db.renew_operation_deadline(
+                    self.connection, operation_id, wall_deadline(deadline)
                 )
+                db.checkpoint_operation(
+                    self.connection,
+                    operation_id,
+                    phase="intent_recorded",
+                    refs={"key_names": intended_names, "mutation": mutation},
+                )
+            else:
+                db.begin_operation(
+                    self.connection,
+                    operation_id=operation_id,
+                    kind=expected_kind,
+                    scope=scope,
+                    phase="intent_recorded",
+                    deadline_at=wall_deadline(deadline),
+                    refs={"key_names": intended_names, "mutation": mutation},
+                )
+            try:
+                def helper_caller(action, values, **_bounds):
+                    return self._helper(action, values, deadline=deadline)
+
                 if removals:
                     result = app.remove_environment(
                         refreshed.slug,

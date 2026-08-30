@@ -282,9 +282,14 @@ startup, the controller does not guess or replay interrupted work. A dispatch
 that never left the durable queue is marked failed with cleanup not required;
 a caller can retry that request with a new idempotency key. A dispatch that had
 started is changed to `recovery_required` with phase `startup_interrupted`,
-preserving its scope and idempotency result for diagnosis. No new mutation for
-that application is accepted until an operator resolves that
-recovery-required operation.
+preserving its scope and idempotency result. To resume it, repeat the identical
+method, path, body, and `Idempotency-Key`; the controller verifies the stored
+fingerprint and re-dispatches recovery using the newly supplied body without
+persisting that body. This is required for environment mutations because their
+secret values are intentionally absent from the dispatch journal. A changed
+request with the same key returns `409 IDEMPOTENCY_CONFLICT`, and a different
+key for the application returns `409 OPERATION_CONFLICT` until the original
+operation becomes terminal.
 
 ### Product routes
 

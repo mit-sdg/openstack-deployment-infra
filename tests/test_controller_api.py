@@ -260,13 +260,21 @@ class ControllerAPITests(unittest.TestCase):
         release.set()
         self.api.wait_for_operations()
 
-    def test_startup_marks_an_interrupted_running_dispatch_recovery_required(self) -> None:
+    @mock.patch("openstack_platform.controller.environment_service.openstack.verify_project")
+    def test_restart_allows_identical_recovery_and_blocks_a_competing_key(
+        self, verify_project
+    ) -> None:
+        verify_project.return_value = None
         application_id = self.create_application().body["applicationId"]
         operation_id = "00000000-0000-4000-8000-000000000040"
+        request_path = f"/v1/applications/{application_id}/environment/API_TOKEN"
+        request_body = {"value": "retry-only-secret"}
         db.claim_idempotency_request(
             self.connection,
             request_id=operation_id,
-            request_fingerprint="a" * 64,
+            request_fingerprint=db.request_fingerprint(
+                {"method": "PUT", "path": request_path, "body": request_body}
+            ),
         )
         db.enqueue_operation_dispatch(
             self.connection,
@@ -281,6 +289,15 @@ class ControllerAPITests(unittest.TestCase):
             result_id=operation_id,
         )
         db.set_operation_dispatch_status(self.connection, operation_id, "running")
+        db.begin_operation(
+            self.connection,
+            operation_id=operation_id,
+            kind="app.env.set",
+            scope=f"app-{application_id}",
+            phase="intent_recorded",
+            deadline_at=db.utc_now(),
+            refs={"key_names": ["API_TOKEN"], "mutation": "set"},
+        )
 
         queued_application = self.dispatch(
             "POST",
@@ -308,11 +325,27 @@ class ControllerAPITests(unittest.TestCase):
         )
 
         self.api.close()
+        recovery_calls: list[str] = []
+
+        def recovery_helper(_config, action, values, *, deadline=None):
+            recovery_calls.append(action)
+            if action == "app.env.list":
+                return {"keys": []}
+            if action == "app.env.set":
+                return {
+                    "keys": sorted(values["updates"]),
+                    "modifyIndex": 2,
+                    "restarted": False,
+                    "schedulerHealthy": False,
+                    "publicHealthy": False,
+                }
+            raise AssertionError(f"unexpected recovery helper action {action}")
+
         self.api = ControllerAPI(
             self.connection,
             self.config,
             self.root,
-            helper_caller=lambda *_args, **_kwargs: {},
+            helper_caller=recovery_helper,
         )
         self.router = self.api.router()
 
@@ -322,6 +355,43 @@ class ControllerAPITests(unittest.TestCase):
         operation = db.get_operation(self.connection, operation_id)
         self.assertIsNotNone(operation)
         self.assertEqual(operation.status, "recovery_required")  # type: ignore[union-attr]
+
+        with self.assertRaises(HttpError) as changed:
+            self.dispatch(
+                "PUT",
+                request_path,
+                {"value": "different-secret"},
+                self.headers(operation_id),
+            )
+        self.assertEqual(changed.exception.code, "IDEMPOTENCY_CONFLICT")
+
+        with self.assertRaises(HttpError) as raised:
+            self.dispatch(
+                "DELETE",
+                f"/v1/applications/{application_id}/environment/OTHER",
+                None,
+                self.headers("00000000-0000-4000-8000-000000000043"),
+            )
+        self.assertEqual(raised.exception.code, "OPERATION_CONFLICT")
+        self.assertEqual(raised.exception.operation_id, operation_id)
+
+        retried = self.dispatch(
+            "PUT", request_path, request_body, self.headers(operation_id)
+        )
+        self.assertEqual(retried.status, 202)
+        self.api.wait_for_operations()
+        recovered = db.get_operation(self.connection, operation_id)
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.status, "succeeded")  # type: ignore[union-attr]
+        polled = self.dispatch("GET", f"/v1/operations/{operation_id}")
+        self.assertEqual(polled.body["status"], "succeeded")
+        self.assertEqual(recovery_calls, ["app.env.list", "app.env.set"])
+        self.assertEqual(
+            db.get_environment_revision(self.connection, application_id).revision,  # type: ignore[union-attr]
+            1,
+        )
+        for database_file in self.root.glob("platform.sqlite3*"):
+            self.assertNotIn(b"retry-only-secret", database_file.read_bytes())
 
         queued = self.dispatch("GET", f"/v1/operations/{queued_id}")
         self.assertEqual(queued.body["status"], "failed")
