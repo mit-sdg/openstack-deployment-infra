@@ -268,7 +268,7 @@ let
               machine.succeed("systemctl show ${namespace}-controller.service nomad.service -p LimitCORE --value | grep -vFx infinity")
               machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
               machine.succeed("systemctl cat nomad.service | grep -F 'LoadCredential=nomad-gossip-key:/etc/${namespace}/secrets/nomad-gossip-key'")
-              machine.succeed("systemctl cat nomad.service | grep -F '${namespace}-credential-guard /etc/${namespace}/secrets/nomad-gossip-key nomad'")
+              machine.succeed("systemctl cat nomad.service | grep -F '${namespace}-credential-guard /etc/${namespace}/secrets/nomad-gossip-key root'")
               machine.succeed("runuser -u platform-controller -- cat ${state}/operator/secrets/openstack.env >/dev/null")
               machine.fail("runuser -u nomad -- cat ${state}/operator/secrets/openstack.env")
               machine.succeed("id -nG management-web | grep -Fx 'management-web'")
