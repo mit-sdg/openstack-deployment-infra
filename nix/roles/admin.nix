@@ -705,6 +705,9 @@ in
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
         "REGISTRY_ARTIFACT_SCRIPT=${infra}/backup/registry_artifact.py"
+        "REGISTRY_BACKUP_MAX_FILE_BYTES=1099511627776"
+        "REGISTRY_BACKUP_MAX_TOTAL_BYTES=4398046511104"
+        "REGISTRY_BACKUP_MAX_MANIFEST_BYTES=67108864"
         "PATH=${
           lib.makeBinPath [
             pkgs.coreutils

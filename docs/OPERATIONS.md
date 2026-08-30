@@ -872,10 +872,17 @@ The first command creates encrypted `postgres.age`, `mongodb.age`, `garage.age`,
 and `registry.age` under `<paths.backups>/<namespace>/<timestamp>/`, plus
 `MANIFEST` and `SHA256SUMS`. `registry.age` contains the manifests, configs, and
 layers reachable from every retained registry tag. Its importer can populate a
-fresh Distribution registry without the original registry or GitHub. The
-archive follows registry retention: deleted, unreferenced manifests are absent;
-current and retained accepted manifests remain protected by controller
-retention before the snapshot. The admin role also has its own
+fresh Distribution registry without the original registry or GitHub. Registry
+responses must provide descriptor sizes and matching `Content-Length` values.
+Layers stream directly into the encrypted tar and are SHA-256 checked while
+streaming; they are not retained in process memory. Verify/import spools one
+bounded layer at a time to a private temporary file, hashes it before use, and
+keeps only bounded manifest files until dependency validation completes. The
+configured/default limits are 1 TiB per member, 4 TiB total, and 64 MiB per
+manifest/index; the Nix service sets those values explicitly. The archive
+follows registry retention: deleted, unreferenced manifests are absent; current
+and retained accepted manifests remain protected by controller retention before
+the snapshot. The admin role also has its own
 `<namespace>-platform-backup.timer` for this managed-data job (03:15 UTC with a
 30-minute randomized delay). The external operator
 `openstack-platform-backup.timer` covers only its operator-state database. The
