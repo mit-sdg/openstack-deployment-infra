@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -66,6 +67,54 @@ class RecoveryBundleTests(unittest.TestCase):
             ).encode()
         self._file(root / f"{name}.manifest", content)
 
+    def _scheduled_environment(self) -> tuple[Path, Path, Path]:
+        backups = self.root / "scheduled-backups"
+        backups.mkdir(mode=0o700)
+        for component, directory in (
+            ("hosted-controller", "hosted-controller"),
+            ("operator-state", "controller"),
+        ):
+            target = backups / directory
+            shutil.copytree(self.sources[component], target)
+            (target / ".staging").mkdir(mode=0o700)
+        managed_root = backups / "production"
+        managed_root.mkdir(mode=0o700)
+        shutil.copytree(
+            self.sources["managed-data"],
+            managed_root / "20260830T120000Z",
+        )
+
+        platform = json.loads(
+            (Path(__file__).resolve().parents[1] / "config/platform.example.json").read_text()
+        )
+        platform["namespace"] = "production"
+        platform["paths"]["backups"] = str(backups)
+        platform_path = self.root / "platform.json"
+        self._file(platform_path, (json.dumps(platform) + "\n").encode())
+
+        config = {
+            "destination": str(self.destination),
+            "filesystemType": "fuse.recovery",
+            "format": "openstack-platform-offsite-export-config-v1",
+            "limits": {
+                "maximumFileBytes": 1024**3,
+                "maximumTotalBytes": 2 * 1024**3,
+            },
+            "maximumReceiptAgeHours": 36,
+            "mountSource": "institutional-recovery",
+        }
+        config_path = self.root / "offsite-export.json"
+        self._file(config_path, (json.dumps(config) + "\n").encode())
+        mountinfo = self.root / "mountinfo"
+        mountinfo.write_text(
+            f"42 30 0:99 / {self.destination} rw,nosuid - fuse.recovery institutional-recovery rw\n"
+        )
+        mountinfo.chmod(0o600)
+        return platform_path, config_path, mountinfo
+
+    def _different_devices(self, path: Path) -> int:
+        return 2 if path == self.destination else 1
+
     def export(self) -> Path:
         return recovery_bundle.export_bundle(
             self.destination,
@@ -117,6 +166,126 @@ class RecoveryBundleTests(unittest.TestCase):
         (self.sources["managed-data"] / "registry.age").unlink()
         with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "OCI artifacts"):
             self.export()
+
+    def test_scheduled_export_refuses_same_filesystem_local_destination(self) -> None:
+        platform, config, mountinfo = self._scheduled_environment()
+        receipt = self.root / "status" / "offsite-export.json"
+        receipt.parent.mkdir(mode=0o700)
+        with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "local backup filesystem"):
+            recovery_bundle.scheduled_export(
+                platform,
+                config,
+                receipt,
+                now=datetime(2026, 8, 30, 13, tzinfo=UTC),
+                mountinfo_path=mountinfo,
+            )
+        self.assertFalse(receipt.exists())
+
+    def test_status_refuses_unmounted_and_stale_sink(self) -> None:
+        platform, config, mountinfo = self._scheduled_environment()
+        status = self.root / "status"
+        status.mkdir(mode=0o700)
+        receipt = status / "offsite-export.json"
+        recovery_bundle.scheduled_export(
+            platform,
+            config,
+            receipt,
+            now=datetime(2026, 8, 30, 13, tzinfo=UTC),
+            mountinfo_path=mountinfo,
+            device_resolver=self._different_devices,
+        )
+        mountinfo.write_text("")
+        with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "not a distinct mounted"):
+            recovery_bundle.recovery_status(
+                platform,
+                config,
+                receipt,
+                now=datetime(2026, 8, 30, 14, tzinfo=UTC),
+                mountinfo_path=mountinfo,
+                device_resolver=self._different_devices,
+            )
+        mountinfo.write_text(
+            f"42 30 0:99 / {self.destination} rw,nosuid - fuse.recovery institutional-recovery rw\n"
+        )
+        with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "stale"):
+            recovery_bundle.recovery_status(
+                platform,
+                config,
+                receipt,
+                now=datetime(2026, 9, 1, 14, tzinfo=UTC),
+                mountinfo_path=mountinfo,
+                device_resolver=self._different_devices,
+            )
+
+    def test_schedule_failure_does_not_advance_receipt(self) -> None:
+        platform, config, mountinfo = self._scheduled_environment()
+        receipt = self.root / "status" / "offsite-export.json"
+        receipt.parent.mkdir(mode=0o700)
+        accepted = recovery_bundle.scheduled_export(
+            platform,
+            config,
+            receipt,
+            now=datetime(2026, 8, 30, 13, tzinfo=UTC),
+            mountinfo_path=mountinfo,
+            device_resolver=self._different_devices,
+        )
+        prior_receipt = receipt.read_bytes()
+        broken = self.root / "scheduled-backups" / "production" / "20260831T120000Z"
+        broken.mkdir(mode=0o700)
+        self._file(broken / "MANIFEST", b"format_version=2\n")
+        with self.assertRaises(recovery_bundle.RecoveryBundleError):
+            recovery_bundle.scheduled_export(
+                platform,
+                config,
+                receipt,
+                now=datetime(2026, 8, 31, 13, tzinfo=UTC),
+                mountinfo_path=mountinfo,
+                device_resolver=self._different_devices,
+            )
+        self.assertEqual(receipt.read_bytes(), prior_receipt)
+        self.assertEqual([path for path in self.destination.iterdir()], [accepted])
+
+    def test_successful_recurring_scheduled_export_keeps_existing_bundles(self) -> None:
+        platform, config, mountinfo = self._scheduled_environment()
+        receipt = self.root / "status" / "offsite-export.json"
+        receipt.parent.mkdir(mode=0o700)
+        first = recovery_bundle.scheduled_export(
+            platform,
+            config,
+            receipt,
+            now=datetime(2026, 8, 30, 13, tzinfo=UTC),
+            mountinfo_path=mountinfo,
+            device_resolver=self._different_devices,
+        )
+        second = recovery_bundle.scheduled_export(
+            platform,
+            config,
+            receipt,
+            now=datetime(2026, 8, 31, 13, tzinfo=UTC),
+            mountinfo_path=mountinfo,
+            device_resolver=self._different_devices,
+        )
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+        status = recovery_bundle.recovery_status(
+            platform,
+            config,
+            receipt,
+            now=datetime(2026, 8, 31, 14, tzinfo=UTC),
+            mountinfo_path=mountinfo,
+            device_resolver=self._different_devices,
+        )
+        self.assertEqual(status["bundle"], second.name)
+        self.assertTrue(status["verified"])
+
+    def test_admin_role_supervises_daily_export(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "nix/roles/admin.nix").read_text()
+        self.assertIn('systemd.services."${namespace}-offsite-export"', source)
+        self.assertIn('systemd.timers."${namespace}-offsite-export"', source)
+        self.assertIn('OnCalendar = "*-*-* 05:00:00 UTC"', source)
+        self.assertIn("ConditionPathExists = offsiteExportConfig", source)
+        self.assertIn('TimeoutStartSec = "24h"', source)
 
     def test_receipt_is_secret_free_monitoring_evidence(self) -> None:
         status = self.root / "status"

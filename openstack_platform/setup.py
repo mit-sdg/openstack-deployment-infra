@@ -1279,6 +1279,7 @@ namespace=$1
 controller="${namespace}-controller.service"
 readiness="${namespace}-controller-readiness.service"
 hosted_backup_timer="${namespace}-hosted-controller-backup.timer"
+offsite_export_timer="${namespace}-offsite-export.timer"
 project_socket="/run/${namespace}-controller/project.sock"
 privileged_socket="/run/${namespace}-controller/privileged.sock"
 
@@ -1305,6 +1306,10 @@ test "$(systemctl show --property=Result --value "$readiness")" = success || {
 }
 systemctl is-enabled --quiet "$hosted_backup_timer" || {
   echo "hosted controller backup timer is not enabled" >&2
+  exit 1
+}
+systemctl is-enabled --quiet "$offsite_export_timer" || {
+  echo "off-site recovery export timer is not enabled" >&2
   exit 1
 }
 test "$(stat -Lc '%F|%U|%G|%a' -- "$project_socket")" = \

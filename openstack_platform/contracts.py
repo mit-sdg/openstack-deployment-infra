@@ -128,6 +128,9 @@ BUILDER_EXECUTABLE_NAME = _string(_EXECUTABLES.get("builder"), "executables.buil
 CONTROLLER_BACKUP_DIRECTORY = _string(
     _DIRECTORIES.get("controllerBackup"), "directories.controllerBackup"
 )
+HOSTED_CONTROLLER_BACKUP_DIRECTORY = _string(
+    _DIRECTORIES.get("hostedControllerBackup"), "directories.hostedControllerBackup"
+)
 
 INSTALLATION_OPERATOR_ROOT = _string(_INSTALLATION.get("operatorRoot"), "installation.operatorRoot")
 INSTALLATION_SYSTEM_CONFIG_ROOT = _string(

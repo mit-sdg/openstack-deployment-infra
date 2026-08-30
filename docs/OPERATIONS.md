@@ -889,44 +889,76 @@ The expected final line is `latest platform restore=verified
 
 ### Export encrypted recovery evidence off site
 
-Run this on **admin** after all three backup jobs have committed. The destination
-must be an operator-selected, mounted off-site filesystem owned by `agentops`,
-mode `0700`, with provider-side versioning, object lock, or WORM retention. The
-platform supplies no storage-provider credential and never accepts one on the
-command line. Keep both age identities in separate escrow; they are not copied
-into the bundle.
+Configure this once on **admin** after mounting operator-selected off-site
+storage. The destination mount point must be owned by `agentops`, mode `0700`,
+and backed by provider-side versioning, object lock, or WORM retention. It must
+not be the local backup filesystem or a bind mount of that filesystem. The
+platform stores no storage credential and never accepts one on the command
+line. Keep both age identities in separate escrow; they are not copied into the
+bundle.
+
+Start from `config/offsite-export.example.json` on the operator host. Set
+`destination` to the exact mount point and copy the exact source and filesystem
+type reported by `findmnt`; the scheduled job refuses a stale directory left
+behind after unmount and any changed mount identity.
 
 ```bash
-export OFFSITE_MOUNT=/mnt/institutional-recovery       # operator-selected mount
-export MANAGED_SET="$PLATFORM_BACKUPS/$PLATFORM_NAMESPACE/YYYYMMDDTHHMMSSZ"
-install -d -m 0700 "$OFFSITE_MOUNT"
-openstack-platform-recovery export \
-  --deployment "$PLATFORM_NAMESPACE" \
-  --hosted-controller "$PLATFORM_BACKUPS/hosted-controller" \
-  --operator-state "$PLATFORM_BACKUPS/controller" \
-  --managed-data "$MANAGED_SET" \
-  --destination "$OFFSITE_MOUNT" \
-  --receipt "$PLATFORM_ROOT/persistent/status/offsite-export.json"
-openstack-platform-recovery verify \
-  "$OFFSITE_MOUNT/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ"
+export OFFSITE_MOUNT=/mnt/institutional-recovery
+mountpoint -q "$OFFSITE_MOUNT"
+findmnt -n -o SOURCE,FSTYPE --target "$OFFSITE_MOUNT"
+# Edit a private copy; mountSource and filesystemType must equal that output.
+install -m 0600 config/offsite-export.example.json "$PRIVATE_BOOTSTRAP/offsite-export.json"
+scp -F "$SSH_CONFIG" -- "$PRIVATE_BOOTSTRAP/offsite-export.json" \
+  platform-admin:/home/agentops/offsite-export.json
+ssh -F "$SSH_CONFIG" platform-admin -- install -m 0600 \
+  /home/agentops/offsite-export.json \
+  "$PLATFORM_ROOT/persistent/offsite-export.json"
 ```
 
 Export selects the newest committed SQLite trio in each SQLite backup root and
-requires the explicitly selected managed-data set to contain all four encrypted
-archives. It copies only direct, bounded regular files; rejects symlinks,
-unsafe names, partial evidence, any file above 1 TiB, or a bundle above 4 TiB; verifies every copy;
-and writes canonical `SHA256SUMS`, `MANIFEST.json`, and
-`MANIFEST.json.sha256`. `MANIFEST.json` is the commit marker. Existing bundle
-names are never replaced. Local backup retention remains unchanged and runs
-only against local committed sets; it does not delete off-site bundles. Apply
-retention at the off-site provider only after a newer bundle and its drill
-evidence are retained.
+requires the selected managed-data set to contain all four encrypted archives.
+It copies direct bounded regular files, verifies every copy, and commits
+`SHA256SUMS`, `MANIFEST.json`, and `MANIFEST.json.sha256` without replacing an
+existing bundle. The example permits a 1 TiB individual archive and 4 TiB
+bundle, covering the default 500 GiB managed volume. Validation permits 1 GiB
+through 4 TiB per file and up to 8 TiB total; set lower limits from actual
+capacity and off-site quota. Local retention never deletes off-site bundles;
+apply provider retention only after a newer bundle and drill evidence exist.
 
+The system timer runs daily at 05:00 UTC with a bounded random delay, after the
+three local backup schedules. It discovers only the newest manifest-committed
+hosted-controller trio, operator-state trio, and managed-data directory. Run it
+once immediately and inspect credential-free status:
+
+```bash
+ssh -F "$SSH_CONFIG" platform-admin -- systemctl is-enabled \
+  "$PLATFORM_NAMESPACE-offsite-export.timer"
+ssh -F "$SSH_CONFIG" platform-admin -- openstack-platform-recovery scheduled-export \
+  --platform-config "/etc/$PLATFORM_NAMESPACE/platform.json" \
+  --config "$PLATFORM_ROOT/persistent/offsite-export.json" \
+  --receipt "$PLATFORM_ROOT/persistent/status/offsite-export.json"
+ssh -F "$SSH_CONFIG" platform-admin -- openstack-platform-recovery status \
+  --platform-config "/etc/$PLATFORM_NAMESPACE/platform.json" \
+  --config "$PLATFORM_ROOT/persistent/offsite-export.json" \
+  --receipt "$PLATFORM_ROOT/persistent/status/offsite-export.json"
+```
+
+The service has a 24-hour execution deadline. It verifies destination mount
+source, filesystem type, ownership, mode, and different device identity before
+copying. It rejects symlinks, unsafe names, partial evidence, and configured
+size overruns. It writes canonical `SHA256SUMS`, `MANIFEST.json`, and
+`MANIFEST.json.sha256`, commits a new timestamped directory without replacing
+existing bundles, then reads and verifies the committed copy. Only that
+post-copy verification updates the mode-`0600` receipt. A failed or interrupted
+run leaves the prior receipt unchanged and systemd records the service failure.
+
+Local backup retention does not delete off-site bundles. Apply retention at the
+off-site provider only after a newer bundle and its drill evidence are retained.
 The receipt contains only bundle identity, time, deployment, and manifest
-SHA-256. Platform health fails when the receipt is absent, malformed, or older
-than 36 hours. A receipt proves that local export committed; the `verify`
-command and provider object-lock evidence prove that the selected off-site copy
-is still readable and immutable.
+SHA-256. Platform health and `openstack-platform-recovery status` fail when the
+configured sink is unmounted, has changed identity, the committed manifest no
+longer matches the receipt, or the receipt exceeds `maximumReceiptAgeHours` (36
+in the example). Run `verify` separately for a full payload recheck.
 
 ### Import and drill full-loss recovery
 

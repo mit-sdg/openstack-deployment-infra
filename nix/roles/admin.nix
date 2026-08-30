@@ -55,6 +55,8 @@ let
   '';
   controllerBackupRoot = "${backups}/${constants.directories.controllerBackup}";
   hostedControllerBackupRoot = "${backups}/${constants.directories.hostedControllerBackup}";
+  offsiteExportConfig = "${operatorRoot}/offsite-export.json";
+  offsiteExportReceipt = "${operatorRoot}/status/offsite-export.json";
   hostedControllerRestoreInput = "${controllerRoot}/restore-input.sqlite3";
   hostedControllerRestore = pkgs.writeShellScriptBin "openstack-platform-hosted-controller-restore" ''
     set -euo pipefail
@@ -728,6 +730,46 @@ in
     };
   };
 
+  systemd.services."${namespace}-offsite-export" = {
+    description = "Export latest committed ${platform.displayName} recovery evidence off site";
+    after = [
+      backupMountUnit
+      "${namespace}-hosted-controller-backup.service"
+      "${namespace}-platform-backup.service"
+    ];
+    requires = [ backupMountUnit ];
+    unitConfig.ConditionPathExists = offsiteExportConfig;
+    serviceConfig = {
+      Type = "oneshot";
+      User = operatorAccount.name;
+      Group = operatorAccount.name;
+      UMask = "0077";
+      TimeoutStartSec = "24h";
+      ExecStart = lib.concatStringsSep " " [
+        "${packages.controllerPackage}/bin/openstack-platform-recovery"
+        "scheduled-export"
+        "--platform-config /etc/${namespace}/platform.json"
+        "--config ${offsiteExportConfig}"
+        "--receipt ${offsiteExportReceipt}"
+      ];
+      NoNewPrivileges = true;
+      PrivateDevices = true;
+      PrivateTmp = true;
+      ProtectHome = true;
+      ProtectSystem = "full";
+    };
+  };
+  systemd.timers."${namespace}-offsite-export" = {
+    description = "Daily off-site recovery evidence export";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 05:00:00 UTC";
+      RandomizedDelaySec = "30m";
+      Persistent = true;
+      Unit = "${namespace}-offsite-export.service";
+    };
+  };
+
   systemd.services."${namespace}-platform-health" = {
     description = "Check ${platform.displayName} platform health";
     unitConfig.ConditionPathExists = "${root}/secrets/openstack.env";
@@ -741,6 +783,7 @@ in
         "NOMAD=${nomadCli}/bin/${namespace}-nomad"
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "CHECK_SERVICES=${infra}/monitor/check_services.py"
+        "RECOVERY=${packages.controllerPackage}/bin/openstack-platform-recovery"
         "PATH=${
           lib.makeBinPath [
             openstackClient

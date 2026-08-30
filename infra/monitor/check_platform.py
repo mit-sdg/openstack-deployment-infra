@@ -29,6 +29,8 @@ CHECK_SERVICES = os.environ.get(
 STATUS = ROOT / f"persistent/status/{NAMESPACE}.json"
 BACKUPS = Path(CONFIG["paths"]["backups"]) / NAMESPACE
 OFFSITE_RECEIPT = ROOT / "persistent/status/offsite-export.json"
+OFFSITE_CONFIG = ROOT / "persistent/offsite-export.json"
+RECOVERY = os.environ.get("RECOVERY", "openstack-platform-recovery")
 
 
 def command(*args: str, timeout: int = 45) -> str:
@@ -105,23 +107,21 @@ def main() -> int:
             "registry_artifacts": True,
         }
 
-        receipt = json.loads(OFFSITE_RECEIPT.read_text())
-        if (
-            not isinstance(receipt, dict)
-            or receipt.get("format") != "openstack-platform-offsite-recovery-v1"
-            or not isinstance(receipt.get("exportedAt"), str)
-            or not isinstance(receipt.get("manifestSha256"), str)
-            or len(receipt["manifestSha256"]) != 64
-        ):
-            raise RuntimeError("off-site export receipt is malformed")
-        exported = datetime.strptime(receipt["exportedAt"], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
-        export_age_hours = (datetime.now(UTC) - exported).total_seconds() / 3600
-        if export_age_hours > 36 or export_age_hours < 0:
-            raise RuntimeError("off-site recovery export is stale")
-        checks["offsite_recovery"] = {
-            "age_hours": round(export_age_hours, 2),
-            "manifest_sha256": receipt["manifestSha256"],
-        }
+        offsite = json.loads(
+            admin_command(
+                RECOVERY,
+                "status",
+                "--platform-config",
+                os.environ.get("PLATFORM_CONFIG", "/etc/openstack-platform/platform.json"),
+                "--config",
+                str(OFFSITE_CONFIG),
+                "--receipt",
+                str(OFFSITE_RECEIPT),
+            )
+        )
+        if offsite.get("configured") is not True or offsite.get("verified") is not True:
+            raise RuntimeError("off-site recovery status is not verified")
+        checks["offsite_recovery"] = offsite
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
 

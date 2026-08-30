@@ -314,6 +314,29 @@ must remain in operator custody. The admin managed-data scripts use the packaged
 `<paths.root>/bin/age` and `<paths.root>/bin/age-keygen` with their separate
 `<paths.root>/persistent/secrets/backup-age-key.txt` identity.
 
+### Persistent off-site export configuration
+
+`config/offsite-export.example.json` is a separate, credential-free admin-host
+configuration. Install its private copy at
+`<paths.adminState>/operator/offsite-export.json`, owned by `agentops` and mode
+`0600`. It is not part of `platform.json` because the operator chooses and
+mounts the off-site provider after deployment.
+
+| Entry | Contract |
+| --- | --- |
+| `format` | Exactly `openstack-platform-offsite-export-config-v1` |
+| `destination` | Canonical absolute path of the exact mode-`0700`, `agentops`-owned mount point |
+| `mountSource` | Exact source reported for that mount by `/proc/self/mountinfo`/`findmnt` |
+| `filesystemType` | Exact mounted filesystem type |
+| `limits.maximumFileBytes` | Streaming per-file limit, 1 GiB through 4 TiB |
+| `limits.maximumTotalBytes` | Streaming bundle limit, at least the file limit and at most 8 TiB |
+| `maximumReceiptAgeHours` | Health/status freshness limit, 1 through 168 hours |
+
+The destination must have a different device identity from `paths.backups` and
+must not contain, or be contained by, the local backup path. Configuration does
+not mount storage or carry a provider token. See [Operations](OPERATIONS.md#export-encrypted-recovery-evidence-off-site)
+for installation, timer, and status commands.
+
 ## Images, versions, and checksums
 
 `images` must define `admin`, `ingress`, `storage`, `worker`, and `builder`.

@@ -161,8 +161,8 @@ private evidence bundle whose checksum and HMAC signature verify.
   external operator-state database under `<paths.backups>/controller` with checksum and final
   manifest evidence. Retention counts only complete trios. Evidence: output
   name/SHA-256 and private metadata, not database content.
-- [ ] **BACKUP-02** On admin, managed-data backup emits PostgreSQL, MongoDB, and
-  Garage archives; restore checking writes mode-`0600` `RESTORE-MANIFEST` only
+- [ ] **BACKUP-02** On admin, managed-data backup emits PostgreSQL, MongoDB,
+  Garage, and retained OCI archives; restore checking writes mode-`0600` `RESTORE-MANIFEST` only
   after all temporary checks pass. Evidence:
 
   ```bash
@@ -173,7 +173,13 @@ private evidence bundle whose checksum and HMAC signature verify.
     "$PLATFORM_ROOT/infra/backup/verify_latest_restore.sh"
   ```
 
-- [ ] **BACKUP-03** Offline restore is rehearsed with the operator age identity
+- [ ] **BACKUP-03** The persistent off-site config names an exact mounted
+  filesystem with different device identity from `<paths.backups>`. The daily
+  system timer exports only latest committed sets, preserves an earlier bundle,
+  and updates its secret-free receipt only after full post-copy verification.
+  Evidence: `openstack-platform-recovery status`, two retained bundle names,
+  systemd timer/service results, and a refused same-filesystem/unmounted test.
+- [ ] **BACKUP-04** Offline restore is rehearsed with the operator age identity
   through `openstack-platform-restore ... --yes`. Evidence:
   `restore=verified schema-version=... integrity=ok`, destination mode `0600`,
   and post-restore `status`/`infra list` reconciliation. A backup with a
