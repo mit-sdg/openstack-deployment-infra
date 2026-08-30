@@ -573,8 +573,11 @@ def generate_artifact_manifest(
         if output_identity not in {item["storePath"] for item in projection}:
             _fail(f"Nix output identity for {role} is absent from its closure")
         closures[role] = projection
+        qcow2 = Path(value["qcow2"])
         records[role] = {
-            "qcow2Sha256": _artifact_sha256(Path(value["qcow2"])),
+            "qcow2Sha256": _artifact_sha256(qcow2),
+            # Signed size evidence lets setup establish Glance capacity before upload.
+            "qcow2SizeBytes": qcow2.stat().st_size,
             "nixOutput": output_identity,
             "nixClosureSha256": closure_sha256,
             "publicationMetadata": dict(sorted(value["publicationMetadata"].items())),
@@ -758,9 +761,28 @@ def verify_artifact_manifest(
     for role, record in records.items():
         if (
             not isinstance(record, dict)
+            # Older signed v1 evidence remains verifiable, but setup cannot be
+            # ready without the size-bearing variant.
             or set(record)
-            != {"qcow2Sha256", "nixOutput", "nixClosureSha256", "publicationMetadata"}
+            not in (
+                {"qcow2Sha256", "nixOutput", "nixClosureSha256", "publicationMetadata"},
+                {
+                    "qcow2Sha256",
+                    "qcow2SizeBytes",
+                    "nixOutput",
+                    "nixClosureSha256",
+                    "publicationMetadata",
+                },
+            )
             or not _SHA256.fullmatch(str(record.get("qcow2Sha256")))
+            or (
+                "qcow2SizeBytes" in record
+                and (
+                    isinstance(record["qcow2SizeBytes"], bool)
+                    or not isinstance(record["qcow2SizeBytes"], int)
+                    or record["qcow2SizeBytes"] <= 0
+                )
+            )
             or not _SHA256.fullmatch(str(record.get("nixClosureSha256")))
             or not re.fullmatch(r"[a-z0-9]{32}-[^/]{1,160}", str(record.get("nixOutput")))
             or not isinstance(record.get("publicationMetadata"), dict)
@@ -812,11 +834,15 @@ def verify_role_artifact(
         _fail("built Nix output is absent from closure evidence")
     actual = {
         "qcow2Sha256": _artifact_sha256(qcow2),
+        "qcow2SizeBytes": qcow2.stat().st_size,
         "nixOutput": output_identity,
         "nixClosureSha256": closure_sha256,
         "publicationMetadata": dict(sorted(publication_metadata.items())),
     }
-    if manifest["roleArtifacts"].get(role) != actual:
+    expected = manifest["roleArtifacts"].get(role)
+    if isinstance(expected, dict) and "qcow2SizeBytes" not in expected:
+        actual.pop("qcow2SizeBytes")
+    if expected != actual:
         _fail(f"built {role} artifact or publication metadata does not match signed evidence")
     return actual
 

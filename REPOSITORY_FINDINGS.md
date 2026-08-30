@@ -65,7 +65,7 @@ An independent clean-worktree audit classifies P-01 and P-02 as partial and P-07
 
 ### P-01 — Real non-mutating setup preflight — partial
 
-`setup check` resolves authenticated identity, compute/Cinder/network quota, choices, collisions, tooling, ingress, and signed image sources without provider mutation. It does not check Glance image-count or image-storage quota before reporting `ready`, despite publishing five images. Real-cloud non-mutation remains unverified.
+`setup check` now reads and strictly parses Glance image-count and aggregate image-storage quota, using all five byte sizes bound into signed role-artifact evidence. Unlimited, unknown, byte, and GiB formatter variants are covered; missing size evidence and unknown or insufficient capacity cannot report ready. The path remains read-only in mutation-spy coverage. Real-cloud non-mutation evidence remains outstanding.
 
 ### P-02 — Off-site backup and full loss recovery — partial
 

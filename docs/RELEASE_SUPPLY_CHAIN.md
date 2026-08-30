@@ -38,7 +38,7 @@ python3 -m openstack_platform.release_manifest artifact-verify \
   --trust-root /private/release-trust-root.pem
 ```
 
-The post-build manifest binds each actual QCOW2 SHA-256, normalized Nix output and recursive closure identity, source component-manifest digest, and publication metadata. Its SPDX 2.3 SBOM combines Python packages with every unique Nix closure path/NAR identity; its in-toto/SLSA-style provenance names all QCOW2 and closure digests. Setup recomputes these identities after each build, and the publisher verifies the signed role record before upload. Glance acceptance requires its SHA-256 content hash and artifact metadata to match before setup selects the image.
+The post-build manifest binds each actual QCOW2 SHA-256 and byte size, normalized Nix output and recursive closure identity, source component-manifest digest, and publication metadata. Its SPDX 2.3 SBOM combines Python packages with every unique Nix closure path/NAR identity; its in-toto/SLSA-style provenance names all QCOW2 and closure digests. Setup recomputes these identities after each build, and the publisher verifies the signed role record before upload. Glance acceptance requires its SHA-256 content hash and artifact metadata to match before setup selects the image.
 
 Package the exact signed evidence for CI or another host; do not put manifests or
 SBOMs in CI secrets:

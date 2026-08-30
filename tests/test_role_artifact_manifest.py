@@ -107,6 +107,7 @@ class RoleArtifactManifestTests(unittest.TestCase):
         self.assertEqual(
             record["qcow2Sha256"], hashlib.sha256(worker_qcow.read_bytes()).hexdigest()
         )
+        self.assertEqual(record["qcow2SizeBytes"], worker_qcow.stat().st_size)
 
         sbom = json.loads((manifest_path.parent / "role-artifacts.sbom.spdx.json").read_text())
         self.assertEqual(sbom["spdxVersion"], "SPDX-2.3")

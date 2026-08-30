@@ -1635,6 +1635,220 @@ def _quota_deltas(
     return result
 
 
+_QUOTA_UNLIMITED = {"unlimited", "no limit", "none"}
+_QUOTA_UNKNOWN = {"unknown", "n/a", "not available", "-"}
+
+
+def _quota_scalar(value: object, *, field: str, usage: bool = False) -> int | str | None:
+    """Strictly parse one OpenStack quota scalar without guessing."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        _fail(f"OpenStack Glance {field} quota is malformed")
+    if isinstance(value, int):
+        if value == -1 and not usage:
+            return "unlimited"
+        if value < 0:
+            _fail(f"OpenStack Glance {field} quota is malformed")
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _QUOTA_UNLIMITED and not usage:
+            return "unlimited"
+        if text in _QUOTA_UNKNOWN:
+            return None
+        if re.fullmatch(r"[0-9]+", text):
+            return int(text)
+    _fail(f"OpenStack Glance {field} quota is malformed")
+
+
+def _quota_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+
+
+def _glance_metric(
+    rows: Mapping[str, object],
+    *,
+    names: Sequence[str],
+    default_unit: str,
+) -> tuple[int | str | None, int | None, str]:
+    """Read native API, nested, and formatter-flattened quota projections."""
+    normalized = {_quota_key(key): value for key, value in rows.items()}
+    if "limits" in normalized or "usage" in normalized:
+        limits = normalized.get("limits")
+        usage = normalized.get("usage")
+        if not isinstance(limits, dict) or not isinstance(usage, dict):
+            _fail("OpenStack Glance quota response is malformed")
+        normalized_limits = {_quota_key(key): value for key, value in limits.items()}
+        normalized_usage = {_quota_key(key): value for key, value in usage.items()}
+        selected_name = next(
+            (name for name in names if name in normalized_limits or name in normalized_usage), None
+        )
+        if selected_name is None:
+            return None, None, default_unit
+        normalized = {
+            selected_name: {
+                "limit": normalized_limits.get(selected_name),
+                "usage": normalized_usage.get(selected_name),
+                "unit": default_unit,
+            }
+        }
+    nested_key = next((name for name in names if name in normalized), None)
+    if nested_key is not None and isinstance(normalized[nested_key], dict):
+        raw = normalized[nested_key]
+        assert isinstance(raw, dict)
+        fields = {_quota_key(key): value for key, value in raw.items()}
+        limit_raw = fields.get("limit")
+        usage_raw = next(
+            (fields[key] for key in ("usage", "used", "in_use") if key in fields), None
+        )
+        unit_raw = fields.get("unit", default_unit)
+        unit = _quota_key(unit_raw)
+    else:
+        selected: tuple[object | None, object | None, str] | None = None
+        for name in names:
+            for suffix, unit in (("_bytes", "bytes"), ("_gib", "gib"), ("", default_unit)):
+                limit_key = f"{name}_limit{suffix}"
+                usage_keys = (
+                    f"{name}_usage{suffix}",
+                    f"{name}_used{suffix}",
+                    f"{name}_in_use{suffix}",
+                )
+                if limit_key in normalized or any(key in normalized for key in usage_keys):
+                    usage_raw = next(
+                        (normalized[key] for key in usage_keys if key in normalized), None
+                    )
+                    selected = (normalized.get(limit_key), usage_raw, unit)
+                    break
+            if selected is not None:
+                break
+        if selected is None:
+            return None, None, default_unit
+        limit_raw, usage_raw, unit = selected
+    if unit not in {"images", "bytes", "gib"}:
+        _fail("OpenStack Glance quota unit is malformed")
+    limit = _quota_scalar(limit_raw, field=names[0])
+    used = _quota_scalar(usage_raw, field=names[0], usage=True)
+    assert isinstance(used, int) or used is None
+    return limit, used, unit
+
+
+def _glance_usage(openstack: Path, resolved: ResolvedSetup) -> Mapping[str, object]:
+    """Read Glance's authoritative, non-mutating project usage endpoint."""
+    interface = resolved.provider_environment.get("OS_INTERFACE", "public")
+    catalog = _json_command(
+        (openstack, "catalog", "show", "image", "-f", "json"),
+        environment=resolved.provider_environment,
+    )
+    endpoints = _field(catalog, "endpoints") if isinstance(catalog, dict) else None
+    if not isinstance(endpoints, list) or any(not isinstance(row, dict) for row in endpoints):
+        _fail("OpenStack Glance endpoint inventory is malformed")
+    region = resolved.provider_environment.get("OS_REGION_NAME")
+    urls = [
+        str(_field(row, "URL", "url"))
+        for row in endpoints
+        if _field(row, "interface") == interface and (not region or _field(row, "region") == region)
+    ]
+    if len(urls) != 1 or not urls[0].startswith(("https://", "http://")):
+        _fail("OpenStack Glance endpoint does not resolve exactly once")
+    endpoint = urls[0].rstrip("/")
+    url = endpoint + "/info/usage" if endpoint.endswith("/v2") else endpoint + "/v2/info/usage"
+    token = _command(
+        (openstack, "token", "issue", "-f", "value", "-c", "id"),
+        environment=resolved.provider_environment,
+        capture=True,
+    ).strip()
+    if not token or len(token) > 8192 or "\n" in token or "\r" in token:
+        _fail("OpenStack authentication token is malformed")
+    curl = shutil.which("curl")
+    if curl is None:
+        _fail("curl is required to query Glance quota")
+    raw = _command(
+        (
+            curl,
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "30",
+            "--header",
+            "@-",
+            url,
+        ),
+        environment=resolved.provider_environment,
+        capture=True,
+        stdin=f"X-Auth-Token: {token}\n".encode(),
+        timeout=40,
+    )
+    try:
+        rows = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise SetupError("Glance returned malformed quota JSON") from error
+    if not isinstance(rows, dict):
+        _fail("OpenStack Glance quota response is malformed")
+    return rows
+
+
+def _glance_quota_deltas(
+    openstack: Path, resolved: ResolvedSetup, artifact_manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    rows = _glance_usage(openstack, resolved)
+    count_limit, count_used, count_unit = _glance_metric(
+        rows, names=("image_count", "count"), default_unit="images"
+    )
+    storage_limit, storage_used, storage_unit = _glance_metric(
+        rows, names=("image_size", "image_storage", "bytes"), default_unit="bytes"
+    )
+    if count_unit != "images":
+        _fail("OpenStack Glance image-count quota unit is malformed")
+
+    records = artifact_manifest.get("roleArtifacts")
+    sizes: dict[str, int] = {}
+    if isinstance(records, dict) and set(records) == set(IMAGE_ROLES):
+        for role in IMAGE_ROLES:
+            record = records[role]
+            size = record.get("qcow2SizeBytes") if isinstance(record, dict) else None
+            if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                sizes[role] = size
+    required_storage = sum(sizes.values()) if len(sizes) == len(IMAGE_ROLES) else None
+
+    def projection(
+        required: int | None, limit: int | str | None, used: int | None, unit: str
+    ) -> dict[str, Any]:
+        multiplier = 1024**3 if unit == "gib" else 1
+        canonical_limit = limit if not isinstance(limit, int) else limit * multiplier
+        canonical_used = None if used is None else used * multiplier
+        if limit == "unlimited":
+            available: int | str | None = "unlimited"
+            shortfall = 0 if required is not None else None
+        elif isinstance(canonical_limit, int) and canonical_used is not None:
+            available = max(0, canonical_limit - canonical_used)
+            shortfall = None if required is None else max(0, required - available)
+        else:
+            available = None
+            shortfall = None
+        return {
+            "requiredDelta": required,
+            "inUse": canonical_used,
+            "limit": canonical_limit,
+            "available": available,
+            "shortfall": shortfall,
+        }
+
+    return {
+        "image_count": projection(len(IMAGE_ROLES), count_limit, count_used, "images"),
+        "image_storage_bytes": {
+            **projection(required_storage, storage_limit, storage_used, storage_unit),
+            "artifactSizes": sizes,
+            "providerUnit": storage_unit,
+        },
+    }
+
+
+def _quotas_ready(quotas: Mapping[str, Mapping[str, Any]]) -> bool:
+    return all(item.get("shortfall") == 0 for item in quotas.values())
+
+
 def _setup_check(
     *,
     env_file: Path,
@@ -1672,8 +1886,9 @@ def _setup_check(
     choices, flavors = _resolved_provider_choices(Path(openstack_command), resolved)
     collisions = _name_collisions(Path(openstack_command), resolved)
     quotas = _quota_deltas(Path(openstack_command), resolved, flavors)
+    quotas.update(_glance_quota_deltas(Path(openstack_command), resolved, artifact_manifest))
     fixed_ready = all(item["available"] for item in choices["fixedAddresses"].values())
-    quota_ready = all(item["shortfall"] == 0 for item in quotas.values())
+    quota_ready = _quotas_ready(quotas)
     document = resolved.document
     runtime_images = {
         "bun": resolved.values.get(
@@ -1718,6 +1933,9 @@ def _setup_check(
                     "source": "signed-reproducible-build",
                     "commit": resolved.commit,
                     "qcow2Sha256": artifact_manifest["roleArtifacts"][role]["qcow2Sha256"],
+                    "qcow2SizeBytes": artifact_manifest["roleArtifacts"][role].get(
+                        "qcow2SizeBytes"
+                    ),
                     "nixClosureSha256": artifact_manifest["roleArtifacts"][role][
                         "nixClosureSha256"
                     ],
@@ -1764,7 +1982,11 @@ def _print_check(plan: Mapping[str, Any], output: TextIO) -> None:
     print(f"ingress={plan['ingress']['choice']} domain={plan['ingress']['domain']}", file=output)
     print(f"release={plan['source']['releaseCommit']}", file=output)
     for role, image in plan["source"]["roleImages"].items():
-        print(f"image.{role}={image['name']} source={image['source']}", file=output)
+        print(
+            f"image.{role}={image['name']} source={image['source']} "
+            f"size-bytes={image.get('qcow2SizeBytes')}",
+            file=output,
+        )
     for runtime, image in plan["source"]["runtimeImages"].items():
         print(f"runtime-image.{runtime}={image}", file=output)
     for service, image in plan["source"]["containerImages"].items():

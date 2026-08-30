@@ -1,0 +1,31 @@
+{
+  "native_api": {
+    "usage": {"image_count": 2, "image_size": 1073741824, "image_stage": 0},
+    "limits": {"image_count": 20, "image_size": 42949672960, "image_stage": 42949672960}
+  },
+  "nested_bytes": {
+    "Project ID": "00000000-0000-4000-8000-000000000001",
+    "Image Count": {"limit": 20, "usage": 2},
+    "Image Size": {"limit": 42949672960, "usage": 1073741824, "unit": "bytes"}
+  },
+  "flat_gib": {
+    "image_count_limit": "20",
+    "image_count_usage": "2",
+    "image_size_limit_gib": "40",
+    "image_size_usage_gib": "1"
+  },
+  "unlimited": {
+    "Image Count": {"limit": "unlimited", "usage": 2},
+    "Image Size": {"limit": -1, "usage": 1073741824, "unit": "bytes"}
+  },
+  "unknown": {
+    "Image Count": {"limit": "unknown", "usage": "unknown"},
+    "Image Size": {"limit": "n/a", "usage": "n/a", "unit": "bytes"}
+  },
+  "shortfall": {
+    "Image Count Limit": 6,
+    "Image Count Usage": 2,
+    "Image Size Limit (Bytes)": 10737418240,
+    "Image Size Usage (Bytes)": 1073741824
+  }
+}

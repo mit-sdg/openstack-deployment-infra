@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -140,13 +141,27 @@ PLATFORM_DOMAIN='apps.example.test'
                 "volumeType": {"name": "production"},
                 "fixedAddresses": {"admin": {"address": "192.0.2.11", "available": True}},
             },
-            "quotaDeltas": {"instances": {"requiredDelta": 5, "available": 10, "shortfall": 0}},
+            "quotaDeltas": {
+                "instances": {"requiredDelta": 5, "available": 10, "shortfall": 0},
+                "image_count": {"requiredDelta": 5, "available": 8, "shortfall": 0},
+                "image_storage_bytes": {
+                    "requiredDelta": 12345,
+                    "available": 99999,
+                    "shortfall": 0,
+                },
+            },
             "nameCollisions": [],
             "toolchain": {"requiredHost": "x86_64-linux", "commands": {}},
             "ingress": {"choice": "external-provider-pending", "domain": "apps.test"},
             "source": {
                 "releaseCommit": "a" * 40,
-                "roleImages": {},
+                "roleImages": {
+                    "admin": {
+                        "name": "demo-admin",
+                        "source": "signed-reproducible-build",
+                        "qcow2SizeBytes": 12345,
+                    }
+                },
                 "runtimeImages": {},
                 "containerImages": {},
             },
@@ -166,7 +181,36 @@ PLATFORM_DOMAIN='apps.example.test'
         rendered = output.getvalue()
         self.assertIn("setup-check=ready", rendered)
         self.assertIn("quota.instances=+5", rendered)
+        self.assertIn("quota.image_count=+5", rendered)
+        self.assertIn("quota.image_storage_bytes=+12345", rendered)
+        self.assertIn(
+            "image.admin=demo-admin source=signed-reproducible-build size-bytes=12345", rendered
+        )
         self.assertIn("no resources or credentials were created", rendered)
+
+    def test_json_check_preserves_glance_quota_evidence(self) -> None:
+        path = self.environment("OS_PROJECT_NAME=demo\n")
+        plan = {
+            "ready": False,
+            "quotaDeltas": {
+                "image_count": {"requiredDelta": 5, "shortfall": 1},
+                "image_storage_bytes": {"requiredDelta": None, "shortfall": None},
+            },
+        }
+        output = io.StringIO()
+        with (
+            mock.patch.object(setup, "_setup_check", return_value=plan),
+            self.assertRaisesRegex(setup.SetupError, "insufficient/unknown quota"),
+        ):
+            setup.run_setup(
+                env_file=path,
+                workspace=self.root / "workspace",
+                cloudflare_token=None,
+                apply=False,
+                json_output=True,
+                output=output,
+            )
+        self.assertEqual(json.loads(output.getvalue()), plan)
 
 
 class SetupPreflightTests(unittest.TestCase):
@@ -236,8 +280,12 @@ class SetupPreflightTests(unittest.TestCase):
     @staticmethod
     def verified_release() -> tuple[dict[str, object], dict[str, object]]:
         artifacts = {
-            role: {"qcow2Sha256": "a" * 64, "nixClosureSha256": "b" * 64}
-            for role in setup.IMAGE_ROLES
+            role: {
+                "qcow2Sha256": "a" * 64,
+                "qcow2SizeBytes": (index + 1) * 1024**3,
+                "nixClosureSha256": "b" * 64,
+            }
+            for index, role in enumerate(setup.IMAGE_ROLES)
         }
         return {"releaseChannel": "production"}, {"roleArtifacts": artifacts}
 
@@ -245,6 +293,18 @@ class SetupPreflightTests(unittest.TestCase):
         command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
         if command[1:3] == ("network", "list"):
             return [{"ID": self.network_id, "Name": "public"}]
+        if command[1:3] == ("catalog", "show"):
+            return {
+                "name": "glance",
+                "type": "image",
+                "endpoints": [
+                    {
+                        "interface": "public",
+                        "region": "RegionOne",
+                        "url": "https://images.example.test/v2",
+                    }
+                ],
+            }
         if command[1:3] == ("flavor", "list"):
             sizes = {
                 "admin-flavor": (2, 4096),
@@ -297,10 +357,19 @@ class SetupPreflightTests(unittest.TestCase):
             command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
             commands.append(command)
             if command[1:3] == ("token", "issue"):
+                if "id" in command:
+                    return "opaque-token"
                 return self.project_id
             if command[1:3] == ("project", "show"):
                 return "demo"
-            self.fail(f"unexpected identity command: {command}")
+            if Path(command[0]).name == "openstack":
+                self.fail(f"unexpected identity command: {command}")
+            return json.dumps(
+                {
+                    "usage": {"image_count": 1, "image_size": 1024**3},
+                    "limits": {"image_count": 100, "image_size": 100 * 1024**3},
+                }
+            )
 
         forbidden = (
             "_atomic_private_write",
@@ -328,7 +397,7 @@ class SetupPreflightTests(unittest.TestCase):
                     "ready": True,
                 },
             ),
-            mock.patch.object(setup.shutil, "which", return_value="/usr/bin/openstack"),
+            mock.patch.object(setup.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
             mock.patch.object(setup, "_source_commit", return_value="a" * 40),
             mock.patch.object(setup, "_platform_document", return_value=self.resolved.document),
             mock.patch.object(
@@ -383,6 +452,14 @@ class SetupPreflightTests(unittest.TestCase):
                 setup, "verify_artifact_from_environment", return_value=self.verified_release()[1]
             ),
             mock.patch.object(setup, "_json_command", side_effect=occupied),
+            mock.patch.object(
+                setup,
+                "_glance_usage",
+                return_value={
+                    "usage": {"image_count": 1, "image_size": 1024**3},
+                    "limits": {"image_count": 100, "image_size": 100 * 1024**3},
+                },
+            ),
         ):
             plan = setup._setup_check(
                 env_file=self.env_file,
@@ -392,6 +469,72 @@ class SetupPreflightTests(unittest.TestCase):
             )
         self.assertFalse(plan["ready"])
         self.assertFalse(plan["resolved"]["fixedAddresses"]["ingress"]["available"])
+
+    def test_glance_quota_bytes_and_gib_formatter_variants_are_canonicalized(self) -> None:
+        fixture = json.loads(
+            (
+                Path(__file__).parent / "fixtures/openstack/glance_quota_formatter_outputs.json"
+            ).read_text()
+        )
+        manifest = self.verified_release()[1]
+        for name in ("native_api", "nested_bytes", "flat_gib", "unlimited"):
+            with (
+                self.subTest(name=name),
+                mock.patch.object(setup, "_glance_usage", return_value=fixture[name]),
+            ):
+                quotas = setup._glance_quota_deltas(Path("openstack"), self.resolved, manifest)
+            self.assertEqual(quotas["image_count"]["shortfall"], 0)
+            self.assertEqual(quotas["image_storage_bytes"]["shortfall"], 0)
+            self.assertEqual(quotas["image_storage_bytes"]["requiredDelta"], 15 * 1024**3)
+
+    def test_glance_unknown_and_shortfall_are_not_ready(self) -> None:
+        fixture = json.loads(
+            (
+                Path(__file__).parent / "fixtures/openstack/glance_quota_formatter_outputs.json"
+            ).read_text()
+        )
+        manifest = self.verified_release()[1]
+        with mock.patch.object(setup, "_glance_usage", return_value=fixture["unknown"]):
+            unknown = setup._glance_quota_deltas(Path("openstack"), self.resolved, manifest)
+        self.assertIsNone(unknown["image_count"]["shortfall"])
+        self.assertIsNone(unknown["image_storage_bytes"]["shortfall"])
+        self.assertFalse(setup._quotas_ready(unknown))
+
+        with mock.patch.object(setup, "_glance_usage", return_value=fixture["shortfall"]):
+            short = setup._glance_quota_deltas(Path("openstack"), self.resolved, manifest)
+        self.assertGreater(short["image_count"]["shortfall"], 0)
+        self.assertGreater(short["image_storage_bytes"]["shortfall"], 0)
+        self.assertFalse(setup._quotas_ready(short))
+
+    def test_glance_storage_requirement_without_signed_sizes_is_unknown(self) -> None:
+        legacy = self.verified_release()[1]
+        for record in legacy["roleArtifacts"].values():
+            record.pop("qcow2SizeBytes")
+        with mock.patch.object(
+            setup,
+            "_glance_usage",
+            return_value={
+                "Image Count": {"limit": "unlimited", "usage": 0},
+                "Image Size": {"limit": "unlimited", "usage": 0, "unit": "bytes"},
+            },
+        ):
+            quotas = setup._glance_quota_deltas(Path("openstack"), self.resolved, legacy)
+        self.assertIsNone(quotas["image_storage_bytes"]["requiredDelta"])
+        self.assertIsNone(quotas["image_storage_bytes"]["shortfall"])
+
+    def test_malformed_glance_formatter_value_is_rejected(self) -> None:
+        with (
+            mock.patch.object(
+                setup,
+                "_glance_usage",
+                return_value={
+                    "Image Count": {"limit": True, "usage": 0},
+                    "Image Size": {"limit": 100, "usage": 0, "unit": "bytes"},
+                },
+            ),
+            self.assertRaisesRegex(setup.SetupError, "malformed"),
+        ):
+            setup._glance_quota_deltas(Path("openstack"), self.resolved, self.verified_release()[1])
 
 
 class SetupInventoryTests(unittest.TestCase):

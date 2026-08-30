@@ -109,9 +109,9 @@ uv run openstack-platform setup check --env-file /private/path/setup.env
 uv run openstack-platform setup check --env-file /private/path/setup.env --json
 ```
 
-`setup check` uses the same strict project, source, and inventory resolution as setup. It reports the authenticated project UUID/name, quota deltas, exact network/flavors/volume type/fixed addresses, all reserved-name collisions, local toolchain, ingress choice, and commit-addressed release/image sources. It fails on ambiguity, collision, occupied addresses, unknown or insufficient required quota, or missing tooling.
+`setup check` uses the same strict project, source, and inventory resolution as setup. It reports the authenticated project UUID/name, compute/network/Cinder quota deltas, Glance image-count and aggregate image-storage deltas, exact provider choices and fixed addresses, reserved-name collisions, tooling, ingress, and commit-addressed sources. Each role image's byte estimate is the QCOW2 size bound into the verified signed artifact manifest. Legacy evidence without all five sizes, malformed or unknown quota values, and count/storage shortfalls produce `ready=false`; unlimited and byte- or GiB-formatted Glance limits are handled explicitly rather than guessed.
 
-The check issues only OpenStack authentication/list/show/quota reads. It does not build Nix outputs, create a workspace, write files, generate credentials or keys, or mutate provider resources. Supplying `--cloudflare-token-file` only validates that it is a direct private file; the token is not read or printed. The shorter `openstack-platform setup --env-file ...` form is retained as an alias for `setup check`.
+The check issues only OpenStack authentication/list/show/quota reads and an authenticated `GET /v2/info/usage` against the selected Glance endpoint. It does not build Nix outputs, create a workspace, write files, generate credentials or keys, or mutate provider resources. Supplying `--cloudflare-token-file` only validates that it is a direct private file; the token is not read or printed. The shorter `openstack-platform setup --env-file ...` form is retained as an alias for `setup check`.
 
 ## Configure Cloudflare or another ingress provider
 
