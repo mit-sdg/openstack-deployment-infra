@@ -18,9 +18,11 @@ metadata, managed storage, and operation progress. It will call the local
 controller API; it must never invoke the operator CLI, SSH, Nomad, OpenStack,
 registry, or storage providers.
 
-The application is complete when a user can perform the full project lifecycle
-without shell or infrastructure credentials, administrators can inspect safe
-platform state, and the security and reconciliation scenarios below pass.
+The application is complete when a user can perform the non-destructive project
+lifecycle without shell or infrastructure credentials. Cascade deletion and
+administrator inspection require a separate operator-side privileged client;
+they are not capabilities of the browser-facing process. The UI must not expose
+those workflows until such a client and its authorization protocol are reviewed.
 
 Private repositories, repository webhooks, custom domains, preview products,
 teams, scaling, scheduled jobs, cancellation, shell access, database consoles,
@@ -31,8 +33,10 @@ visible credentials, and persistent runtime-log archives are outside this build.
 ```text
 browser -> HTTPS ingress -> management web :8080
                             |
-                            `-> HTTP over /run/<namespace>-controller/controller.sock
+                            `-> HTTP over /run/<namespace>-controller/project.sock
                                 -> trusted controller and local constrained helper
+
+operator-side client -> /run/<namespace>-controller/privileged.sock
 ```
 
 The management process runs as the dedicated `management-web` account. It can:
@@ -66,7 +70,7 @@ never creates a replacement key for the same intent.
 
 The deployment supplies these required settings:
 
-- `CONTROLLER_SOCKET_PATH`: fixed admin-provided controller socket;
+- `CONTROLLER_PROJECT_SOCKET`: fixed project-capability controller socket;
 - `AUTH_AUTHORIZE_URL`: HTTPS browser authorization endpoint;
 - `AUTH_EXCHANGE_URL`: HTTPS backend code-exchange endpoint;
 - `AUTH_ISSUER`: exact JWT `iss`;
@@ -223,7 +227,7 @@ build logs also accept `offset`.
 | `GET /v1/applications/{id}` | none |
 | `POST /v1/applications/{id}/enable` | absent or `{}` |
 | `POST /v1/applications/{id}/disable` | absent or `{}` |
-| `POST /v1/applications/{id}/delete` | `{"confirmation": exactSlug}` |
+| `POST /v1/applications/{id}/delete` | privileged socket only; unavailable to management-web |
 | `POST /v1/applications/{id}/deployments` | `{"repository": URL, "commit": SHA, "requestedRef": branch, "configurationRevision": integer, "configuration": object}` |
 | `GET /v1/applications/{id}/deployments` | none |
 | `GET /v1/deployments/{id}` | none |
@@ -239,13 +243,12 @@ build logs also accept `offset`.
 | `PATCH /v1/storage/{id}/label` | `{"displayLabel": string}` |
 | `POST /v1/storage/{id}/verify` | absent or `{}` |
 | `POST /v1/storage/{id}/rotate` | absent or `{}` |
-| `DELETE /v1/storage/{id}` | `{"confirmation": exactMachineName, "purge"?: boolean}` |
+| `DELETE /v1/storage/{id}` | privileged socket only; unavailable to management-web |
 | `GET /v1/operations/{id}` | none |
 
-Administrator-only UI reads use `/v1/admin/status`, `/v1/admin/hosts`,
-`/v1/admin/images`, `/v1/admin/applications`, `/v1/admin/deployments`,
-`/v1/admin/storage`, and `/v1/admin/operations`. The management backend—not the
-controller—enforces the global admin role before making these calls.
+The project socket does not expose `/v1/admin/*`, application cascade delete,
+or storage delete. Those routes exist only on the operator-only privileged
+socket. Browser role claims do not upgrade this host capability.
 
 ## User interface
 
@@ -258,9 +261,8 @@ recovery state. Include create-project flow and quota availability.
 ### Project overview and lifecycle
 
 Show stable URL, repository/branch, enabled state, active deployment, storage
-summary, environment-key count, and current operation. Enable, disable, and
-delete are explicit actions. Delete requires typing the exact slug and states
-that all attached storage, including S3 objects, is irreversibly removed.
+summary, environment-key count, and current operation. Enable and disable are
+explicit actions. Do not render a cascade-delete action in the browser UI.
 
 ### Configuration and deployment
 
@@ -287,17 +289,14 @@ to dotenv payloads and authentication JWTs.
 
 List type, immutable machine name, mutable display label, lifecycle, limits,
 and last verification. Never display credentials. Provide create, label,
-verify, rotate, and remove. Removal is disabled while the active deployment
-references the resource; the UI directs the user to remove the desired binding,
-deploy successfully, then remove storage. S3 removal requires explicit purge
-confirmation when applicable.
+verify, and rotate. The browser UI may remove a binding from desired
+configuration, but it must not offer provider-backed storage deletion.
 
 ### Administration
 
-Global admins can view safe platform status, hosts, selected images,
-applications including tombstones, deployment attempts, managed storage with
-provider identities, and incomplete/recovery-required operations. Initial UI
-has no low-level infrastructure mutation controls.
+The browser UI has no administration page. Safe platform reads remain on the
+operator-only privileged socket until a separate privileged client and explicit
+authorization protocol are implemented.
 
 ## Reconciliation rules
 
@@ -326,11 +325,12 @@ The application test suite must prove:
 - idempotent lost responses for create and every external mutation;
 - strict configuration, source URL/branch resolution, and unknown-field
   rejection;
-- project create, deploy, failure/history/log, disable, enable-without-build,
-  and typed-slug cascade delete flows;
+- project create, deploy, failure/history/log, disable, and enable-without-build
+  flows, plus proof that cascade deletion is unavailable;
 - environment add/remove/import without values in management DB, framework
   events, logs, traces, browser storage, or analytics;
-- storage binding/removal guard, rotation, labels, and safe errors;
+- storage binding updates, rotation, labels, safe errors, and proof that storage
+  deletion is unavailable;
 - operation reconciliation after management process restart; and
 - accessible keyboard navigation, labels, focus/error handling, and status
   announcements for all primary flows.

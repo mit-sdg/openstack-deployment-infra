@@ -16,7 +16,7 @@ Automated setup can verify only the platform route:
 https://<domain>/healthz
 ```
 
-The local controller is available only on admin's restricted Unix socket. The
+The local controller is available only on admin's restricted Unix sockets. The
 management and authentication applications are not implemented, so do not treat
 a healthy platform route as evidence that users can sign in or deploy projects.
 Future management/project hostname behavior is specified in

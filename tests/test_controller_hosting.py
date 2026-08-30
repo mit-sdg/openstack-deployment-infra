@@ -34,6 +34,19 @@ class ControllerHostingStaticTests(unittest.TestCase):
         self.assertIn('"--policy ${controllerPolicy}"', admin)
         self.assertIn('"--socket ${controllerSocket}"', admin)
         self.assertIn('helperReleaseRoot = "${operatorRoot}/helper-releases";', admin)
+        self.assertIn('controllerSocket = "/run/${controllerSocketDirectory}/project.sock";', admin)
+        self.assertIn(
+            'controllerPrivilegedSocket = "/run/${controllerSocketDirectory}/privileged.sock";',
+            admin,
+        )
+        self.assertIn(
+            '"--project-peer ${toString managementWebAccount.uid}:${toString managementWebAccount.gid}"',
+            admin,
+        )
+        self.assertIn(
+            '"--privileged-peer ${toString operatorAccount.uid}:${toString operatorAccount.gid}"',
+            admin,
+        )
         self.assertIn(
             "release=${platform.paths.adminState}/operator/helper-releases/current", packages
         )
@@ -99,7 +112,24 @@ class ControllerHostingStaticTests(unittest.TestCase):
             "--dport ${toString constants.ports.managementWeb} -j nixos-fw-accept",
             allowed_ports,
         )
-        self.assertNotIn('systemd.services."management-web"', source)
+        management = source[
+            source.index('systemd.services."${namespace}-management-web"') : source.index(
+                'systemd.services."${namespace}-controller-readiness"'
+            )
+        ]
+        for setting in (
+            "CONTROLLER_PROJECT_SOCKET = controllerSocket;",
+            'IPAddressDeny = "any";',
+            'IPAddressAllow = "${platform.addresses.ingress}/32";',
+            'SocketBindAllow = "tcp:${toString constants.ports.managementWeb}";',
+            'SocketBindDeny = "any";',
+            "InaccessiblePaths = [",
+            "operatorRoot",
+            "controllerRoot",
+            '"/etc/${namespace}/pki"',
+        ):
+            self.assertIn(setting, management)
+        self.assertNotIn("controllerPrivilegedSocket", management)
 
     def test_nix_uses_named_inventory_validation_and_runtime_constants(self) -> None:
         flake = (ROOT / "flake.nix").read_text(encoding="utf-8")

@@ -39,7 +39,11 @@ let
   operatorPolicy = "${operatorRoot}/policy.json";
   helperReleaseRoot = "${operatorRoot}/helper-releases";
   controllerSocketDirectory = "${namespace}-controller";
-  controllerSocket = "/run/${controllerSocketDirectory}/controller.sock";
+  controllerSocket = "/run/${controllerSocketDirectory}/project.sock";
+  controllerPrivilegedSocket = "/run/${controllerSocketDirectory}/privileged.sock";
+  managementWebState = "${state}/management-web";
+  managementWebReleaseRoot = "${state}/management-web-releases";
+  managementWebExecutable = "${managementWebReleaseRoot}/current/bin/management-web";
   helperReleaseMarker = "${helperReleaseRoot}/current/.complete";
   credentialGuard = pkgs.writeShellScript "${namespace}-credential-guard" ''
     set -euo pipefail
@@ -195,7 +199,10 @@ in
   users.groups.${managementWebUser}.gid = managementWebAccount.gid;
   users.groups.${platformAdminAccount.name}.gid = platformAdminAccount.gid;
   users.groups.${nomadAccount.name}.gid = nomadAccount.gid;
-  users.users.${operatorAccount.name}.extraGroups = [ platformAdminAccount.name ];
+  users.users.${operatorAccount.name}.extraGroups = [
+    platformAdminAccount.name
+    controllerSocketGroup
+  ];
   users.users.${controllerUser} = {
     isSystemUser = true;
     uid = controllerAccount.uid;
@@ -306,6 +313,8 @@ in
     "d ${controllerState} 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerRoot}/build-logs 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerRoot}/helper-diagnostics 0700 ${controllerUser} ${controllerGroup} -"
+    "d ${managementWebState} 0700 ${managementWebUser} ${managementWebUser} -"
+    "d ${managementWebReleaseRoot} 0750 ${operatorAccount.name} ${managementWebUser} -"
     "d ${operatorRoot} 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${operatorRoot}/secrets 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${operatorRoot}/status 0750 ${operatorAccount.name} ${operatorAccount.name} -"
@@ -451,6 +460,11 @@ in
         "--policy ${controllerPolicy}"
         "--socket ${controllerSocket}"
         "--socket-group ${controllerSocketGroup}"
+        "--project-peer ${toString managementWebAccount.uid}:${toString managementWebAccount.gid}"
+        "--privileged-socket ${controllerPrivilegedSocket}"
+        "--privileged-socket-group ${platformAdminAccount.name}"
+        "--privileged-peer ${toString operatorAccount.uid}:${toString operatorAccount.gid}"
+        "--max-connections-per-peer 8"
       ];
       Restart = "on-failure";
       RestartSec = 2;
@@ -514,6 +528,61 @@ in
     };
   };
 
+  # Host contract for the future browser-facing process. The unit remains
+  # condition-gated until a reviewed management application is installed.
+  systemd.services."${namespace}-management-web" = {
+    description = "Browser-facing ${platform.displayName} management application";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "${namespace}-controller.service" ];
+    requires = [ "${namespace}-controller.service" ];
+    unitConfig.ConditionPathIsExecutable = managementWebExecutable;
+    environment = {
+      CONTROLLER_PROJECT_SOCKET = controllerSocket;
+      MANAGEMENT_STATE_DIRECTORY = managementWebState;
+    };
+    serviceConfig = {
+      Type = "simple";
+      User = managementWebUser;
+      Group = managementWebUser;
+      SupplementaryGroups = [ controllerSocketGroup ];
+      ExecStart = managementWebExecutable;
+      UMask = "0077";
+      Restart = "on-failure";
+      NoNewPrivileges = true;
+      CapabilityBoundingSet = "";
+      AmbientCapabilities = "";
+      DevicePolicy = "closed";
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      PrivateDevices = true;
+      PrivateMounts = true;
+      PrivateTmp = true;
+      ProcSubset = "pid";
+      ProtectHome = true;
+      ProtectProc = "invisible";
+      ProtectSystem = "strict";
+      RestrictAddressFamilies = [
+        "AF_UNIX"
+        "AF_INET"
+        "AF_INET6"
+      ];
+      RestrictNamespaces = true;
+      RestrictSUIDSGID = true;
+      SocketBindAllow = "tcp:${toString constants.ports.managementWeb}";
+      SocketBindDeny = "any";
+      IPAddressDeny = "any";
+      IPAddressAllow = "${platform.addresses.ingress}/32";
+      InaccessiblePaths = [
+        controllerRoot
+        operatorRoot
+        "/etc/${namespace}/pki"
+        "/etc/${namespace}/secrets"
+      ];
+      ReadOnlyPaths = [ managementWebReleaseRoot ];
+      ReadWritePaths = [ managementWebState ];
+    };
+  };
+
   systemd.services."${namespace}-controller-readiness" = {
     description = "Verify the restricted local ${platform.displayName} controller API";
     after = [ "${namespace}-controller.service" ];
@@ -534,7 +603,7 @@ in
         for attempt in {1..24}; do
           if ${pkgs.curl}/bin/curl --fail --silent --show-error --max-time 5 \
             --unix-socket ${lib.escapeShellArg controllerSocket} \
-            'http://localhost/v1/admin/applications?limit=1' >/dev/null; then
+            'http://localhost/v1/health' >/dev/null; then
             echo "${namespace} controller ready"
             exit 0
           fi

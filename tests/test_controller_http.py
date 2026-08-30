@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import socket
 import stat
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
-from openstack_platform.controller.http import ControllerServer, HttpError, Response, Router
+from openstack_platform.controller.http import (
+    ControllerServer,
+    HttpError,
+    PeerPolicy,
+    Response,
+    Router,
+    linux_peer_credentials,
+)
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -172,6 +181,88 @@ class ControllerTransportTests(unittest.TestCase):
 
 
 class ControllerSocketSecurityTests(unittest.TestCase):
+    def test_linux_peer_credentials_report_exact_process_identity(self) -> None:
+        first, second = socket.socketpair(socket.AF_UNIX)
+        try:
+            self.assertEqual(linux_peer_credentials(first), (os.geteuid(), os.getegid()))
+        finally:
+            first.close()
+            second.close()
+
+    def test_peer_allowlist_rejects_wrong_or_unavailable_identity(self) -> None:
+        for reader in (
+            lambda _connection: (1234, 5678),
+            lambda _connection: (_ for _ in ()).throw(OSError("unavailable")),
+        ):
+            with self.subTest(reader=reader), tempfile.TemporaryDirectory() as temporary:
+                path = str(Path(temporary) / "controller.sock")
+                server = ControllerServer(
+                    path,
+                    Router(),
+                    peer_policy=PeerPolicy(frozenset({(100, 200)})),
+                    peer_credentials=reader,
+                )
+                thread = threading.Thread(target=server.serve_forever)
+                thread.start()
+                try:
+                    connection = UnixHTTPConnection(path)
+                    with self.assertRaises((ConnectionError, http.client.RemoteDisconnected)):
+                        connection.request("GET", "/v1/health")
+                        connection.getresponse()
+                    connection.close()
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+    def test_per_peer_concurrency_is_bounded_and_capacity_is_released(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = str(Path(temporary) / "controller.sock")
+            peer = (100, 200)
+            accepted = threading.Event()
+
+            def credentials(_connection: socket.socket) -> tuple[int, int]:
+                accepted.set()
+                return peer
+
+            router = Router()
+            router.add("GET", "/v1/health", lambda _request: Response(200, {"ok": True}))
+            server = ControllerServer(
+                path,
+                router,
+                peer_policy=PeerPolicy(frozenset({peer}), max_connections_per_peer=1),
+                peer_credentials=credentials,
+            )
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            first = UnixHTTPConnection(path)
+            try:
+                first.request("GET", "/v1/health")
+                first_response = first.getresponse()
+                self.assertEqual(first_response.status, 200)
+                first_response.read()
+                self.assertTrue(accepted.wait(2))
+                while not server._peer_counts:  # noqa: SLF001 - security invariant probe
+                    time.sleep(0.01)
+                second = UnixHTTPConnection(path)
+                with self.assertRaises((ConnectionError, http.client.RemoteDisconnected)):
+                    second.request("GET", "/v1/health")
+                    second.getresponse()
+                second.close()
+                first.close()
+                deadline = time.monotonic() + 2
+                while server._peer_counts and time.monotonic() < deadline:  # noqa: SLF001
+                    time.sleep(0.01)
+                third = UnixHTTPConnection(path)
+                third.request("GET", "/v1/health")
+                self.assertEqual(third.getresponse().status, 200)
+                third.close()
+            finally:
+                first.close()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_owned_stale_socket_is_replaced_with_restricted_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = str(Path(temporary) / "controller.sock")

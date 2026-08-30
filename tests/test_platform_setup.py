@@ -227,9 +227,10 @@ class SetupControllerVerificationTests(unittest.TestCase):
         self.assertIn('systemctl is-active --quiet "$readiness"', script)
         self.assertIn('systemctl is-enabled --quiet "$hosted_backup_timer"', script)
         self.assertIn("socket|platform-controller|controller-api|660", script)
-        self.assertIn("--unix-socket", script)
-        self.assertIn('test "$operator_access_status" -eq 7', script)
-        self.assertIn("operator account unexpectedly crossed", script)
+        self.assertIn("socket|platform-controller|platform-admin|660", script)
+        self.assertIn('--unix-socket "$project_socket"', script)
+        self.assertIn('--unix-socket "$privileged_socket"', script)
+        self.assertIn("operator account unexpectedly crossed the project", script)
         self.assertTrue(command.call_args.kwargs["capture"])
 
     def test_verification_rejects_unexpected_remote_evidence(self) -> None:

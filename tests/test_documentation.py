@@ -107,8 +107,8 @@ class DocumentationTests(unittest.TestCase):
         )
         self.assertIn("The CLI has no application, deployment, environment", contract)
         self.assertIn("implemented, packaged, and run by the admin", contract)
-        self.assertIn("does not authenticate HTTP requests", contract)
-        self.assertIn("socket is mode `0660`", contract)
+        self.assertIn("authenticates the host process, not the browser user", contract)
+        self.assertIn("separate mode-`0660` Unix sockets", contract)
         self.assertIn("Idempotency-Key", contract)
 
     def test_retired_product_cli_and_repository_manifest_are_not_current_instructions(self) -> None:
@@ -130,7 +130,7 @@ class DocumentationTests(unittest.TestCase):
         implementation = (ROOT / "openstack_platform" / "controller" / "api.py").read_text()
         contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
         routes = set(ROUTE_RE.findall(implementation))
-        self.assertEqual(len(routes), 29)
+        self.assertEqual(len(routes), 30)
         for method, path in routes:
             with self.subTest(method=method, path=path):
                 self.assertIn(f"`{method} {path}`", contract)

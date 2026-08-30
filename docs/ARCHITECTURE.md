@@ -36,12 +36,14 @@ and offline restore. It has no product commands. The external CLI database
 still reports aggregate application and storage counts so an operator can detect restored or
 pre-cutover state without exposing product mutation paths.
 
-`openstack-platform-controller` implements bounded HTTP/1.1 JSON over a Unix
-socket. Its services own application declarations, typed deployment snapshots,
+`openstack-platform-controller` implements bounded HTTP/1.1 JSON over two Unix
+sockets. Its services own application declarations, typed deployment snapshots,
 environment metadata, managed-storage lifecycle, operation journals, safe
-reads, and destructive cleanup. The controller invokes a fixed local
-constrained helper. It does not authenticate users or authorize project/admin
-access; socket access is the entire implemented transport boundary.
+reads, and destructive cleanup. The project socket excludes administrator reads
+and cascade deletion; the operator-only privileged socket exposes only those
+routes. Both sockets enforce exact Linux peer UID/GID and bounded per-peer
+concurrency. The controller invokes a fixed local constrained helper. It does
+not authenticate browser users or authorize project ownership.
 
 The admin NixOS role runs that executable under the dedicated trusted
 `platform-controller` account after the retained state mount, Nomad, controller
@@ -100,9 +102,12 @@ capability, and log limits. Deleting a worker does not delete managed data or
 deployment history.
 
 The reserved `management-web` account has access only to its future state and
-the controller socket. It must not read controller SQLite, OpenStack
-credentials, Nomad tokens, provider administrator credentials, builder keys,
-backup keys, age identities, diagnostics, or build logs directly.
+the project-capability controller socket. It cannot open the privileged socket.
+Its condition-gated systemd service denies IP traffic except the ingress peer
+and makes controller, operator, PKI, and secret paths inaccessible. It must not
+read controller SQLite, OpenStack credentials, Nomad tokens, provider
+administrator credentials, builder keys, backup keys, age identities,
+diagnostics, or build logs directly.
 
 ## Persistent data and backups
 

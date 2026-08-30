@@ -1157,13 +1157,14 @@ namespace=$1
 controller="${namespace}-controller.service"
 readiness="${namespace}-controller-readiness.service"
 hosted_backup_timer="${namespace}-hosted-controller-backup.timer"
-socket="/run/${namespace}-controller/controller.sock"
+project_socket="/run/${namespace}-controller/project.sock"
+privileged_socket="/run/${namespace}-controller/privileged.sock"
 
 for attempt in {1..180}; do
   if systemctl is-active --quiet "$controller" && \
      systemctl is-active --quiet "$readiness" && \
      test "$(systemctl show --property=Result --value "$readiness")" = success && \
-     test -S "$socket"; then
+     test -S "$project_socket" && test -S "$privileged_socket"; then
     break
   fi
   sleep 1
@@ -1184,21 +1185,24 @@ systemctl is-enabled --quiet "$hosted_backup_timer" || {
   echo "hosted controller backup timer is not enabled" >&2
   exit 1
 }
-test "$(stat -Lc '%F|%U|%G|%a' -- "$socket")" = \
+test "$(stat -Lc '%F|%U|%G|%a' -- "$project_socket")" = \
   'socket|platform-controller|controller-api|660' || {
-  echo "hosted controller socket boundary is invalid" >&2
+  echo "hosted controller project socket boundary is invalid" >&2
   exit 1
 }
-# The operator account must not cross the management-only socket boundary.
-set +e
-curl --fail --silent --show-error --max-time 5 --unix-socket "$socket" \
-  'http://localhost/v1/admin/applications?limit=1' >/dev/null 2>&1
-operator_access_status=$?
-set -e
-test "$operator_access_status" -eq 7 || {
-  echo "operator account unexpectedly crossed the controller API boundary" >&2
+test "$(stat -Lc '%F|%U|%G|%a' -- "$privileged_socket")" = \
+  'socket|platform-controller|platform-admin|660' || {
+  echo "hosted controller privileged socket boundary is invalid" >&2
   exit 1
 }
+# The operator is authenticated on only the privileged route set.
+if curl --fail --silent --show-error --max-time 5 --unix-socket "$project_socket" \
+  'http://localhost/v1/health' >/dev/null 2>&1; then
+  echo "operator account unexpectedly crossed the project API boundary" >&2
+  exit 1
+fi
+curl --fail --silent --show-error --max-time 5 --unix-socket "$privileged_socket" \
+  'http://localhost/v1/admin/applications?limit=1' >/dev/null
 printf 'controller-boundary=verified namespace=%s\n' "$namespace"
 """
     result = _command(

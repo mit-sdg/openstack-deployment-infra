@@ -3,7 +3,7 @@
 This repository currently provides OpenStack/NixOS infrastructure, automated
 setup, backup/restore tooling, an operator-only infrastructure CLI, and an
 hosted local controller API. Setup installs its policy and helper release, and
-admin starts it on a restricted Unix socket. This repository does not provide a
+admin starts it on restricted project and privileged Unix sockets. This repository does not provide a
 self-service portal or authentication application.
 
 The former product CLI and repository deployment manifest are retired. Future
@@ -44,6 +44,9 @@ resources named by the private infrastructure inventory.
 - [Operator CLI and local controller API](CONTROL_PLANE_CONTRACT.md) — exact
   current commands, Unix transport, routes, idempotency, responses, and
   recovery boundaries.
+- [Management-to-controller boundary](MANAGEMENT_CONTROLLER_BOUNDARY.md) —
+  project and privileged sockets, peer identity, route capabilities, limits,
+  and the future web service's host sandbox contract.
 - [NixOS image reference](../nix/README.md) — image outputs, tests, exact-UUID
   selection, and role acceptance.
 

@@ -108,6 +108,23 @@ class ControllerAPITests(unittest.TestCase):
             self.headers(key),
         )
 
+    def test_socket_capability_routers_separate_project_and_privileged_routes(self) -> None:
+        project = self.api.router("project")
+        privileged = self.api.router("privileged")
+        self.assertEqual(
+            project.dispatch("GET", "/v1/health", {}, None).body,
+            {"status": "ok", "capability": "project"},
+        )
+        for router, method, path in (
+            (project, "GET", "/v1/admin/applications"),
+            (project, "POST", "/v1/applications/00000000-0000-4000-8000-000000000001/delete"),
+            (privileged, "GET", "/v1/health"),
+            (privileged, "POST", "/v1/applications"),
+        ):
+            with self.subTest(method=method, path=path), self.assertRaises(HttpError) as raised:
+                router.dispatch(method, path, {}, None)
+            self.assertEqual(raised.exception.code, "NOT_FOUND")
+
     def test_database_create_replays_and_changed_input_conflicts(self) -> None:
         first = self.create_application()
         replay = self.create_application()

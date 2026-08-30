@@ -197,11 +197,15 @@ bounded diagnostic below the state directory.
 `openstack-platform-controller` is implemented, packaged, and run by the admin
 NixOS role under the dedicated `platform-controller` account. It starts after
 the retained state mount, Nomad, controller policy, and operator-owned helper
-release are available. The socket is mode `0660` for the restricted
-`controller-api` group; the reserved `management-web` account can connect but
-cannot read controller or operator credentials. Browser login, project
-authorization, quota, and the management application remain unimplemented and
-are specified in [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
+release are available. The controller exposes separate mode-`0660` Unix sockets. The project socket is
+grouped to `controller-api` and accepts only the configured `management-web`
+UID/GID. The privileged socket is grouped to `platform-admin` and accepts only
+the configured operator UID/GID. Both sockets authenticate every accepted
+connection with Linux `SO_PEERCRED` and limit each allowed peer to eight active
+connections in the Nix service. Browser login, project authorization, quota,
+and the management application remain unimplemented. The exact host and route
+capability contract is in
+[MANAGEMENT_CONTROLLER_BOUNDARY.md](MANAGEMENT_CONTROLLER_BOUNDARY.md).
 
 The executable syntax is:
 
@@ -212,6 +216,11 @@ openstack-platform-controller
   [--policy PATH]
   [--socket PATH]
   [--socket-group GROUP]
+  [--project-peer UID:GID]...
+  [--privileged-socket PATH]
+  [--privileged-socket-group GROUP]
+  [--privileged-peer UID:GID]...
+  [--max-connections-per-peer COUNT]
 ```
 
 Its defaults are:
@@ -220,24 +229,29 @@ Its defaults are:
 --platform-config  $PLATFORM_CONFIG, or /etc/openstack-platform/platform.json
 --state-directory  /srv/openstack-platform/state/controller
 --policy           <state-directory>/policy.json
---socket           /run/openstack-platform/controller.sock
+--socket                    /run/openstack-platform/controller.sock
+--privileged-socket         <socket-directory>/privileged.sock
+--project-peer              controller effective UID:GID when omitted
+--privileged-peer           controller effective UID:GID when omitted
+--max-connections-per-peer  8
 ```
 
 The admin service supplies deployment-specific values:
 `/etc/<namespace>/platform.json`, `<adminState>/controller/state`, and
-`/run/<namespace>-controller/controller.sock`, with socket group
-`controller-api`.
+`/run/<namespace>-controller/project.sock` and
+`/run/<namespace>-controller/privileged.sock`, with groups `controller-api` and
+`platform-admin`, respectively.
 
 The socket path must be absolute. Its parent must already be owned by the
 controller process and grant no permissions to the `other` class. The server
 creates the socket as mode `0660` and optionally assigns `--socket-group`. It removes only an owned inactive Unix
 socket; it refuses a regular file, foreign socket, or active listener.
 
-The API does not authenticate HTTP requests or enforce user/project/admin
-authorization. Access to the Unix socket grants access to every route,
-including administrator reads and destructive product mutations. The future
-management backend must enforce authentication, project ownership, quota, and
-global administrator role before calling it.
+The transport authenticates the host process, not the browser user. The future
+management backend must still enforce browser authentication, project
+ownership, and quota before calling project routes. Administrator reads and
+cascade-delete routes are absent from the project socket; HTTP input cannot
+select or upgrade a socket capability.
 
 ### HTTP transport
 
@@ -298,6 +312,7 @@ All `{id}` values are canonical UUIDs.
 
 | Method and route | JSON body or query |
 | --- | --- |
+| `GET /v1/health` | none; project-socket readiness only |
 | `POST /v1/applications` | `{"slug": string}` |
 | `GET /v1/applications/{id}` | none |
 | `POST /v1/applications/{id}/enable` | absent or `{}` |
@@ -367,9 +382,10 @@ SQLite and API reads contain names, ownership, revisions, and timestamps only.
 | `GET /v1/admin/storage` | optional `limit`, `cursor` |
 | `GET /v1/admin/operations` | optional `limit`, `cursor` |
 
-The controller does not distinguish these routes by caller. “Administrator” is
-a management-application authorization requirement, not controller-side
-authentication.
+These routes exist only on the privileged socket. The same socket contains
+application cascade delete and storage delete. The browser-facing
+`management-web` identity cannot open that socket; privileged workflows require
+a separately reviewed operator-side client.
 
 Paginated lists default to 50 and accept `limit` from 1 through 100. Log reads
 default to 200 lines and accept 1 through 1,000. Build offsets are additionally

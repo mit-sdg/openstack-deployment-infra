@@ -9,6 +9,8 @@ import re
 import socket
 import socketserver
 import stat
+import struct
+import threading
 import uuid as uuid_module
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -71,6 +73,35 @@ class Response:
 
 
 Handler = Callable[[Request], Response]
+PeerCredentialsReader = Callable[[socket.socket], tuple[int, int]]
+
+
+@dataclass(frozen=True, slots=True)
+class PeerPolicy:
+    """Exact Linux process identities permitted to use one controller socket."""
+
+    allowed: frozenset[tuple[int, int]]
+    max_connections_per_peer: int = 8
+
+    def __post_init__(self) -> None:
+        if not self.allowed or any(uid < 0 or gid < 0 for uid, gid in self.allowed):
+            raise ValueError("controller peer allowlist must contain valid UID/GID pairs")
+        if self.max_connections_per_peer < 1 or self.max_connections_per_peer > 128:
+            raise ValueError("controller per-peer connection limit is invalid")
+
+
+def linux_peer_credentials(connection: socket.socket) -> tuple[int, int]:
+    """Return (uid, gid), failing closed when Linux SO_PEERCRED is unavailable."""
+    option = getattr(socket, "SO_PEERCRED", None)
+    if option is None:
+        raise OSError("SO_PEERCRED is unavailable")
+    raw = connection.getsockopt(socket.SOL_SOCKET, option, struct.calcsize("3i"))
+    if len(raw) != struct.calcsize("3i"):
+        raise OSError("SO_PEERCRED returned malformed credentials")
+    _pid, uid, gid = struct.unpack("3i", raw)
+    if uid < 0 or gid < 0:
+        raise OSError("SO_PEERCRED returned invalid credentials")
+    return uid, gid
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +225,8 @@ class ControllerServer(_ThreadingUnixServer):
         socket_path: str,
         router: Router,
         *,
+        peer_policy: PeerPolicy | None = None,
+        peer_credentials: PeerCredentialsReader = linux_peer_credentials,
         socket_mode: int = 0o660,
         socket_gid: int | None = None,
     ) -> None:
@@ -201,6 +234,11 @@ class ControllerServer(_ThreadingUnixServer):
             raise ValueError("controller socket mode must be 0660")
         prepare_socket_path(socket_path)
         self.router = router
+        self.peer_policy = peer_policy or PeerPolicy(frozenset({(os.geteuid(), os.getegid())}))
+        self._peer_credentials = peer_credentials
+        self._peer_lock = threading.Lock()
+        self._peer_counts: dict[tuple[int, int], int] = {}
+        self._connection_peers: dict[socket.socket, tuple[int, int]] = {}
         try:
             super().__init__(socket_path, ControllerRequestHandler)
             os.chmod(socket_path, socket_mode, follow_symlinks=False)
@@ -217,6 +255,34 @@ class ControllerServer(_ThreadingUnixServer):
             except FileNotFoundError:
                 pass
             raise
+
+    def get_request(self) -> tuple[socket.socket, object]:
+        connection, address = super().get_request()
+        try:
+            peer = self._peer_credentials(connection)
+            with self._peer_lock:
+                count = self._peer_counts.get(peer, 0)
+                if peer not in self.peer_policy.allowed:
+                    raise PermissionError("controller peer identity is not allowed")
+                if count >= self.peer_policy.max_connections_per_peer:
+                    raise ConnectionRefusedError("controller peer connection limit reached")
+                self._peer_counts[peer] = count + 1
+                self._connection_peers[connection] = peer
+            return connection, address
+        except (OSError, ValueError, struct.error):
+            connection.close()
+            raise
+
+    def shutdown_request(self, request: Any) -> None:
+        with self._peer_lock:
+            peer = self._connection_peers.pop(request, None)
+            if peer is not None:
+                remaining = self._peer_counts[peer] - 1
+                if remaining:
+                    self._peer_counts[peer] = remaining
+                else:
+                    del self._peer_counts[peer]
+        super().shutdown_request(request)
 
     def server_close(self) -> None:
         socket_path = self.server_address

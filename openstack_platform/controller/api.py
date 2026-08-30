@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .. import openstack, remote
 from ..config import Config
@@ -153,9 +153,15 @@ class ControllerAPI:
     def wait_for_operations(self) -> None:
         self.executor.wait()
 
-    def router(self) -> Router:
+    def router(self, capability: Literal["all", "project", "privileged"] = "all") -> Router:
+        """Build a route set for one host-enforced socket capability."""
         router = Router()
+        destructive = {
+            ("POST", "/v1/applications/{id}/delete"),
+            ("DELETE", "/v1/storage/{id}"),
+        }
         routes = (
+            ("GET", "/v1/health", self._health),
             ("POST", "/v1/applications", self._create_application),
             ("GET", "/v1/applications/{id}", self._get_application),
             ("POST", "/v1/applications/{id}/enable", self._enable_application),
@@ -187,8 +193,17 @@ class ControllerAPI:
             ("GET", "/v1/admin/operations", self._admin_operations),
         )
         for method, path, handler in routes:
+            is_privileged = path.startswith("/v1/admin/") or (method, path) in destructive
+            if capability == "project" and is_privileged:
+                continue
+            if capability == "privileged" and not is_privileged:
+                continue
             router.add(method, path, self._safe(handler))
         return router
+
+    @staticmethod
+    def _health(_request: Request) -> Response:
+        return Response(200, {"status": "ok", "capability": "project"})
 
     def _safe(self, handler: Callable[[Request], Response]) -> Callable[[Request], Response]:
         def call(request: Request) -> Response:
