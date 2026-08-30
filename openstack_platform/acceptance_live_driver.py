@@ -699,8 +699,8 @@ class SupportedInterfaces:
             return self.operation(key)
         return response
 
-    def list_items(self, path: str) -> list[Mapping[str, object]]:
-        code, body = self.controller("GET", path)
+    def list_items(self, path: str, *, privileged: bool = False) -> list[Mapping[str, object]]:
+        code, body = self.controller("GET", path, privileged=privileged)
         if code != 200 or not isinstance(body, dict) or not isinstance(body.get("items"), list):
             raise LiveDriverError("controller list response is invalid")
         return [item for item in body["items"] if isinstance(item, dict)]
@@ -1796,12 +1796,13 @@ class RepositoryLiveDriver:
                 observed = self.i.interrupt_controller(operation_key)
                 code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
                 app_url = application.get("url") if isinstance(application, dict) else None
-                stable = code == 200 and isinstance(app_url, str)
-                if isinstance(app_url, str):
-                    self.i.verify_public_storage(
+                stable = False
+                if code == 200 and isinstance(app_url, str):
+                    proof = self.i.verify_public_storage(
                         app_url + str(self.c.application["verificationPath"]),
                         self._content_proof(),
                     )
+                    stable = all(proof.values())
                 return _observed(required, **observed, stableServiceUnaffected=stable)
             attempts = self.i.list_items(f"/v1/applications/{self.app_id}/deployments?limit=100")
             one = sum(item.get("deploymentId") == operation_key for item in attempts) == 1
@@ -1866,16 +1867,18 @@ class RepositoryLiveDriver:
                 and application.get("enabled") is True
                 and isinstance(app_url, str)
             )
-            if isinstance(app_url, str):
-                self.i.verify_public_storage(
+            route_healthy = False
+            if healthy and isinstance(app_url, str):
+                proof = self.i.verify_public_storage(
                     app_url + str(self.c.application["verificationPath"]),
                     self._content_proof(),
                 )
+                route_healthy = proof.get("publicRouteHealthy") is True
             return _observed(
                 required,
                 disabledWithoutDataLoss=disabled_without_loss and before_storage == after_storage,
                 enabledWithoutRebuild=before_deployments == after_deployments,
-                publicRouteHealthy=healthy,
+                publicRouteHealthy=route_healthy,
             )
         if action == "operator_sqlite_restore":
             return self.i.operator_backup_restore()
@@ -1938,10 +1941,17 @@ class RepositoryLiveDriver:
                 key("delete"),
                 privileged=True,
             )
-            storage = self.i.list_items(f"/v1/applications/{self.app_id}/storage?limit=100")
+            # The project-scoped storage route is intentionally unavailable
+            # after the application is tombstoned. Verify cascade absence from
+            # the privileged inventory instead of querying through a deleted
+            # parent resource.
+            storage = self.i.list_items("/v1/admin/storage?limit=100", privileged=True)
             code, _body = self.i.controller("GET", f"/v1/applications/{self.app_id}")
             absent = {
-                kind: not any(item.get("type") == kind for item in storage)
+                kind: not any(
+                    item.get("applicationId") == self.app_id and item.get("type") == kind
+                    for item in storage
+                )
                 for kind in ("postgres", "mongo", "s3")
             }
             return _observed(

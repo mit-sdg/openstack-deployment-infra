@@ -10,20 +10,29 @@ import unittest
 from pathlib import Path
 
 from openstack_platform import release_manifest
+from tests.repository_fixtures import clean_repository
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = subprocess.run(
-    ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, capture_output=True, text=True
-).stdout.strip()
 
 
 class RoleArtifactManifestTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.repository_temporary = tempfile.TemporaryDirectory()
+        cls.repository, cls.commit = clean_repository(
+            ROOT, Path(cls.repository_temporary.name) / "repository"
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.repository_temporary.cleanup()
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.component_dir = self.root / "component"
         self.component_manifest = release_manifest.generate(
-            ROOT, COMMIT, self.component_dir, signing_key=None, unsigned=True
+            self.repository, self.commit, self.component_dir, signing_key=None, unsigned=True
         )
         self.inputs: dict[str, dict[str, object]] = {}
         self.files: dict[str, tuple[Path, Path, Path]] = {}
@@ -56,7 +65,7 @@ class RoleArtifactManifestTests(unittest.TestCase):
                 "test_prefix": "test",
                 "test_project_id": "00000000-0000-4000-8000-000000000001",
                 "test_role": role,
-                "test_source_commit": COMMIT,
+                "test_source_commit": self.commit,
             }
             self.inputs[role] = {
                 "qcow2": str(qcow),

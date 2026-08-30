@@ -144,8 +144,9 @@ publishes the ciphertext, checksum, and manifest under
 `<paths.backups>/controller/`. The manifest is the commit marker. Retention counts only
 complete evidence trios. This backup contains only the external operator CLI
 SQLite state. It does not contain the hosted controller database, managed
-PostgreSQL, MongoDB, Garage data, registry blobs, or an age identity. The
-hosted-controller backup and restore procedure is in [Operations](OPERATIONS.md#hosted-controller-database-on-admin).
+PostgreSQL, MongoDB, Garage data, registry blobs, or an age identity. The hosted-controller backup and restore procedures are in
+[Operations](OPERATIONS.md#hosted-controller-backup) and
+[Restore the hosted controller](OPERATIONS.md#restore-the-hosted-controller).
 
 ### Restore operator state offline
 
@@ -205,9 +206,8 @@ grouped to `controller-api` and accepts only the configured
 the configured operator UID/GID. Both sockets authenticate every accepted
 connection with Linux `SO_PEERCRED` and limit each allowed peer to eight active
 connections in the Nix service. Browser login, project authorization, quota,
-and the management application remain unimplemented. The exact host and route
-capability contract is in
-[MANAGEMENT_CONTROLLER_BOUNDARY.md](MANAGEMENT_CONTROLLER_BOUNDARY.md).
+and the management application remain unimplemented. The exact host and route capability contract is in the
+[management application specification](MANAGEMENT_APP_SPEC.md#host-service-contract).
 
 The executable syntax is:
 

@@ -197,10 +197,14 @@ class FakeInterfaces:
             self.storage.clear()
         return {"status": "succeeded"}
 
-    def list_items(self, path: str) -> list[Mapping[str, object]]:
-        self.calls.append(("controller-list", path, False))
+    def list_items(self, path: str, *, privileged: bool = False) -> list[Mapping[str, object]]:
+        self.calls.append(("controller-list", path, privileged))
         if "/deployments" in path:
             return list(self.deployments)
+        if self.deleted and "/applications/" in path:
+            raise AssertionError("tombstoned application storage route was queried")
+        if path.startswith("/v1/admin/") and not privileged:
+            raise AssertionError("admin inventory did not use the privileged socket")
         return list(self.storage)
 
     def controller(
@@ -390,6 +394,44 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
             self.assertIn(("replace", "ingress", True), fake.calls)
             self.assertIn(("replace", "admin", True), fake.calls)
             self.assertEqual(fake.calls[-1], ("teardown", True))
+
+    def test_interruption_requires_the_stable_public_content_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            fake = FakeInterfaces(value)
+            fake.verify_public_storage = lambda _url, _expected: {  # type: ignore[method-assign]
+                "publicRouteHealthy": True,
+                "storageBound": False,
+                "postgresWriteReadVerified": False,
+                "mongoWriteReadVerified": False,
+                "s3WriteReadVerified": False,
+            }
+            driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(LiveDriverError, "did not establish"):
+                driver.handle(self._execute_request(value, "interrupted_resume_injection"))
+
+    def test_reenable_requires_a_live_public_route_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            fake = FakeInterfaces(value)
+            fake.verify_public_storage = lambda _url, _expected: {  # type: ignore[method-assign]
+                "publicRouteHealthy": False,
+                "storageBound": True,
+                "postgresWriteReadVerified": True,
+                "mongoWriteReadVerified": True,
+                "s3WriteReadVerified": True,
+            }
+            driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(LiveDriverError, "did not establish"):
+                driver.handle(self._execute_request(value, "application_disable_enable"))
 
     def test_missing_concrete_observation_fails_instead_of_synthesizing_true(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

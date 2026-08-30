@@ -1,29 +1,20 @@
-# Verify a fresh platform and its backups
+# Verify a fresh platform
 
-This tutorial starts after `openstack-platform setup` reports completion. It
-verifies the supported pre-management state: persistent infrastructure, public
-platform ingress, management-state backup, and managed-data restore checking.
-It does not deploy an application. The application/storage CLI has been
-retired, and the browser management and authentication applications are not
+Use this tutorial after `openstack-platform setup` reports `setup=complete`. It
+verifies the installed operator boundary, hosted controller, public ingress,
+three backup classes, restore checks, and schedules. It does not provide a
+browser workflow; the management and authentication applications are not
 implemented.
 
-A successful run ends with healthy persistent roles, an accepted encrypted
-management backup, and a `RESTORE-MANIFEST` for the latest managed-data backup.
+A successful run ends with five accepted role images, three healthy persistent
+roles, a ready local controller, committed encrypted backup evidence, and a
+managed-data `RESTORE-MANIFEST`.
 
-## What you need
+## Set the installed paths
 
-Run on the operator host as the unprivileged owner of
-`/srv/openstack-platform`. You need:
-
-- setup output ending in `setup=complete`;
-- configured external DNS and HTTPS for the platform hostname;
-- the generated operator bridge at
-  `/srv/openstack-platform/.secrets/ssh/config`; and
-- the managed-data age identity initialized on admin as described in
-  [Operations](OPERATIONS.md#managed-data-backup-and-restore-check-on-admin).
-
-Set the installed paths and derive non-secret values from the private
-inventory:
+Run as the unprivileged owner of `/srv/openstack-platform` on the operator host.
+You need the generated `platform-admin` SSH alias, configured public DNS/HTTPS,
+and the managed-data age identity created by setup.
 
 ```bash
 export PLATFORM_CLI=/srv/openstack-platform/bin/openstack-platform
@@ -37,44 +28,37 @@ export PLATFORM_DOMAIN="$(/srv/openstack-platform/runtime/python3.14 -c \
   'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["domain"])')"
 ```
 
-## 1. Verify the operator boundary
-
-Inspect the installed command tree:
+## 1. Confirm the installed control surfaces
 
 ```bash
 $PLATFORM_CLI --help
-```
-
-The supported top-level commands are `setup`, `status`, `backup`, `restore`,
-and `infra`. Stop if the installed binary exposes product lifecycle commands;
-that indicates an obsolete release. Do not use the obsolete release to modify
-state.
-
-The local controller API exists as an implementation boundary, but setup does
-not start it as a service. Do not run it manually to work around the missing
-management application. Future UI work follows
-[MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
-
-## 2. Verify accepted and live infrastructure
-
-```bash
 $PLATFORM_CLI status
 $PLATFORM_CLI infra list
 $PLATFORM_CLI infra image list
 ```
 
-`status` must report `healthy`, five accepted infrastructure roles, zero
-accepted applications, zero managed-storage resources, and three available
-persistent-role observations. `infra list` must show accepted image metadata
-for admin, ingress, storage, worker, and builder. The worker and builder are not
-persistent live hosts.
+The supported top-level commands are `setup`, `status`, `backup`, `restore`,
+and `infra`. Stop if the binary exposes application or storage product
+commands; that is an obsolete release.
 
-If `APPS` or `STORAGE` is nonzero, stop. The state contains pre-cutover or
-restored product records that the operator CLI intentionally cannot inspect or
-mutate. Preserve the database and plan the controlled management/controller
-cutover; do not install an older CLI.
+`status` must report five accepted infrastructure roles and three available
+persistent-role observations. On a new deployment, `APPS` and `STORAGE` are
+zero. Nonzero values indicate restored controller state; preserve it and follow
+the recovery procedure rather than installing an older CLI.
 
-## 3. Verify public platform ingress
+Setup also starts the controller on admin. Verify the service and readiness
+unit through the pinned alias:
+
+```bash
+ssh -F "$SSH_CONFIG" platform-admin -- systemctl is-active \
+  "$PLATFORM_NAMESPACE-controller.service" \
+  "$PLATFORM_NAMESPACE-controller-readiness.service"
+```
+
+Both lines must be `active`. The controller has no public listener and is not a
+browser application.
+
+## 2. Verify public ingress
 
 ```bash
 test "$(curl --fail --show-error --silent \
@@ -82,14 +66,13 @@ test "$(curl --fail --show-error --silent \
 printf '%s\n' public-platform-health=verified
 ```
 
-The exact body `OK` verifies public DNS, certificate validation, external
-forwarding, original-host preservation, ingress, and the platform route. It
-does not prove that a user-facing application workflow exists.
+The exact `OK` body verifies public DNS, certificate validation, external
+forwarding, original-host preservation, ingress, and the static platform route.
+It does not prove that user login or a management UI exists.
 
-If the request fails, use [Public ingress](PUBLIC_INGRESS.md) to check DNS, TLS,
-origin routing, and `Host` preservation separately.
+If it fails, follow [Public ingress](PUBLIC_INGRESS.md) before continuing.
 
-## 4. Create both SQLite backups
+## 3. Create both SQLite backups
 
 Create the hosted-controller backup on admin:
 
@@ -103,7 +86,7 @@ ssh -F "$SSH_CONFIG" platform-admin -- \
 A successful run reports `hosted-controller-backup=... sha256=...` and commits
 its evidence under `<paths.backups>/hosted-controller`.
 
-Back up the separate external operator CLI state:
+Back up the separate external operator state:
 
 ```bash
 operator_backup="$($PLATFORM_CLI backup)"
@@ -112,13 +95,12 @@ grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$
   <<<"$operator_backup"
 ```
 
-This evidence is accepted under `<paths.backups>/controller`. Neither SQLite
-backup substitutes for the other; both outputs expose only a name and
-ciphertext checksum.
+This commits under `<paths.backups>/controller`. The two SQLite sets are not
+interchangeable, and neither contains its age identity.
 
-## 5. Back up and restore-check managed data
+## 4. Back up and restore-check managed data
 
-Run the packaged managed-data backup on admin through the pinned alias:
+Run the packaged managed-data backup on admin:
 
 ```bash
 managed_backup="$(
@@ -130,13 +112,15 @@ managed_backup="$(
     EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_logical_backup.sh" \
     SERVICE_CHECK_PYTHON=python3 \
     GARAGE_EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_garage_backup.py" \
+    REGISTRY_ARTIFACT_SCRIPT="$PLATFORM_ROOT/infra/backup/registry_artifact.py" \
     "$PLATFORM_ROOT/infra/backup/run_platform_backup.sh"
 )"
 printf '%s\n' "$managed_backup"
 grep -Eq '^platform backup complete: .+$' <<<"$managed_backup"
 ```
 
-Now verify the latest managed backup without overwriting live services:
+The committed set contains encrypted PostgreSQL, MongoDB, Garage, and retained
+OCI registry artifacts. Verify the latest set without replacing live services:
 
 ```bash
 restore_check="$(
@@ -151,16 +135,11 @@ grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' \
   <<<"$restore_check"
 ```
 
-The check decrypts into temporary storage, starts temporary PostgreSQL and
-MongoDB containers, validates the Garage archive, and removes temporary
-resources on success or failure. It writes `RESTORE-MANIFEST` only after every
-check passes. It never replaces live managed data.
+The check uses temporary PostgreSQL and MongoDB containers and validates Garage
+and OCI archives. It removes temporary resources and writes `RESTORE-MANIFEST`
+only after every check passes. It never overwrites live managed data.
 
-Preserve the management-backup age identity and the separate admin managed-data
-age identity outside the deployment. Neither backup class contains its
-identity.
-
-## 6. Confirm scheduled backups
+## 5. Confirm schedules and off-site health
 
 ```bash
 systemctl --user is-enabled openstack-platform-backup.timer
@@ -170,11 +149,16 @@ ssh -F "$SSH_CONFIG" platform-admin -- \
   systemctl is-enabled "$PLATFORM_NAMESPACE-platform-backup.timer"
 ```
 
-The timers cover external operator state, hosted-controller state, and managed
-PostgreSQL/MongoDB/Garage data respectively. Registry blobs are not backed up and are
-rebuilt from source.
+If off-site export is configured, also require a fresh verified receipt:
 
-You have now verified the complete supported pre-management operating result.
-Continue with [Operations](OPERATIONS.md) for offline management restore, image
-upgrades, recovery, and teardown. Use the
-[acceptance checklist](ACCEPTANCE_CHECKLIST.md) to record production evidence.
+```bash
+ssh -F "$SSH_CONFIG" platform-admin -- openstack-platform-recovery status \
+  --platform-config "/etc/$PLATFORM_NAMESPACE/platform.json" \
+  --config "$PLATFORM_ROOT/persistent/offsite-export.json" \
+  --receipt "$PLATFORM_ROOT/persistent/status/offsite-export.json"
+```
+
+You have verified the supported infrastructure result. Use
+[Operations and disaster recovery](OPERATIONS.md) for restore, off-site export,
+role replacement, image pruning, and recovery rules. Record release evidence
+with the [acceptance checklist](ACCEPTANCE_CHECKLIST.md).

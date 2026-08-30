@@ -196,4 +196,4 @@ Keep the generated workspace and `/srv/openstack-platform/.secrets/setup`. Corre
 
 Setup reuses generated private material and verifies commit-addressed images and configured resources before continuing. It refuses a changed inventory in the same workspace. To request different stable names, addresses, volume sizes, or project identity, use an empty workspace and an empty provider resource set.
 
-After completion, use the [fresh-platform tutorial](TUTORIAL.md) to verify public health and both backup classes. For bounded diagnosis after a role exists, use [Troubleshooting](TROUBLESHOOTING.md). The expanded manual procedure in [Operations](OPERATIONS.md) remains the recovery and audit reference for each setup checkpoint.
+After completion, use the [fresh-platform tutorial](TUTORIAL.md) to verify the controller, public health, and all backup classes. For bounded diagnosis, use [Troubleshooting](TROUBLESHOOTING.md). [Operations](OPERATIONS.md) covers routine backup, restore, off-site export, replacement, pruning, and disaster recovery; it is not a second provisioning path.

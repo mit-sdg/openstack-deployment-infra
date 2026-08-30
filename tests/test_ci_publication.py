@@ -33,12 +33,24 @@ class PublicationTriggerTests(unittest.TestCase):
         self.assertNotIn("--privileged", smoke)
         self.assertNotIn("sudo podman", smoke)
 
-    def test_embedded_infra_is_a_publication_input(self) -> None:
+    def test_every_embedded_image_source_is_a_publication_input(self) -> None:
         workflow = WORKFLOW.read_text()
-
-        self.assertIn(
-            "publish_paths=(flake.nix flake.lock nix infra ':(exclude)*.md')",
-            workflow,
+        declaration = re.search(r"publish_paths=\(\s*(.*?)\s*\)", workflow, re.DOTALL)
+        self.assertIsNotNone(declaration)
+        inputs = set(declaration.group(1).split())
+        self.assertTrue(
+            {
+                "flake.nix",
+                "flake.lock",
+                "nix",
+                "infra",
+                "openstack_platform",
+                "deploy",
+                "pyproject.toml",
+                "uv.lock",
+                "LICENSE",
+            }
+            <= inputs
         )
         self.assertIn(
             'git ls-tree -r --name-only "$COMMIT_SHA" -- "${publish_paths[@]}"',

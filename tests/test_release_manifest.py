@@ -10,14 +10,23 @@ from pathlib import Path
 from unittest import mock
 
 from openstack_platform import release_manifest
+from tests.repository_fixtures import clean_repository
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = subprocess.run(
-    ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, capture_output=True, text=True
-).stdout.strip()
 
 
 class ReleaseManifestTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.repository_temporary = tempfile.TemporaryDirectory()
+        cls.repository, cls.commit = clean_repository(
+            ROOT, Path(cls.repository_temporary.name) / "repository"
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.repository_temporary.cleanup()
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -32,13 +41,13 @@ class ReleaseManifestTests(unittest.TestCase):
         subprocess.run(["openssl", "pkey", "-in", key, "-pubout", "-out", public], check=True)
         evidence = self.root / "evidence"
         manifest_path = release_manifest.generate(
-            ROOT, COMMIT, evidence, signing_key=key, unsigned=False
+            self.repository, self.commit, evidence, signing_key=key, unsigned=False
         )
 
         document = release_manifest.verify(
-            ROOT,
+            self.repository,
             manifest_path,
-            expected_commit=COMMIT,
+            expected_commit=self.commit,
             signature=evidence / "release-manifest.sig",
             trust_root=public,
         )
@@ -57,7 +66,7 @@ class ReleaseManifestTests(unittest.TestCase):
         subprocess.run(["openssl", "pkey", "-in", key, "-pubout", "-out", public], check=True)
         evidence = self.root / "evidence"
         manifest = release_manifest.generate(
-            ROOT, COMMIT, evidence, signing_key=key, unsigned=False
+            self.repository, self.commit, evidence, signing_key=key, unsigned=False
         )
         signature = evidence / "release-manifest.sig"
 
@@ -65,7 +74,11 @@ class ReleaseManifestTests(unittest.TestCase):
         manifest.write_bytes(original.replace(b'"apiVersion":1', b'"apiVersion":2'))
         with self.assertRaisesRegex(release_manifest.ReleaseVerificationError, "signature"):
             release_manifest.verify(
-                ROOT, manifest, expected_commit=COMMIT, signature=signature, trust_root=public
+                self.repository,
+                manifest,
+                expected_commit=self.commit,
+                signature=signature,
+                trust_root=public,
             )
         manifest.write_bytes(original)
 
@@ -73,20 +86,24 @@ class ReleaseManifestTests(unittest.TestCase):
         sbom.write_bytes(sbom.read_bytes() + b" ")
         with self.assertRaisesRegex(release_manifest.ReleaseVerificationError, "SBOM|sbom"):
             release_manifest.verify(
-                ROOT, manifest, expected_commit=COMMIT, signature=signature, trust_root=public
+                self.repository,
+                manifest,
+                expected_commit=self.commit,
+                signature=signature,
+                trust_root=public,
             )
 
     def test_each_source_binding_rejects_tampering(self) -> None:
         evidence = self.root / "evidence"
         manifest = release_manifest.generate(
-            ROOT, COMMIT, evidence, signing_key=None, unsigned=True
+            self.repository, self.commit, evidence, signing_key=None, unsigned=True
         )
         fixture = self.root / "source"
         fixture.mkdir()
         for name in ("pyproject.toml", "uv.lock", "flake.nix", "flake.lock"):
-            shutil.copy2(ROOT / name, fixture / name)
+            shutil.copy2(self.repository / name, fixture / name)
         for directory in ("infra", "nix", "openstack_platform"):
-            shutil.copytree(ROOT / directory, fixture / directory)
+            shutil.copytree(self.repository / directory, fixture / directory)
 
         targets = (
             "infra/lib/platform_contract.json",
@@ -105,7 +122,7 @@ class ReleaseManifestTests(unittest.TestCase):
                     release_manifest.verify(
                         fixture,
                         manifest,
-                        expected_commit=COMMIT,
+                        expected_commit=self.commit,
                         signature=None,
                         trust_root=None,
                         allow_unsigned_development=True,
@@ -115,7 +132,7 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_unsigned_mode_is_visibly_development_only_and_never_production(self) -> None:
         evidence = self.root / "evidence"
         manifest = release_manifest.generate(
-            ROOT, COMMIT, evidence, signing_key=None, unsigned=True
+            self.repository, self.commit, evidence, signing_key=None, unsigned=True
         )
         document = json.loads(manifest.read_text())
         self.assertEqual(document["releaseChannel"], "development-unsigned")
@@ -125,16 +142,20 @@ class ReleaseManifestTests(unittest.TestCase):
             release_manifest.ReleaseVerificationError, "explicit non-production"
         ):
             release_manifest.verify(
-                ROOT, manifest, expected_commit=COMMIT, signature=None, trust_root=None
+                self.repository,
+                manifest,
+                expected_commit=self.commit,
+                signature=None,
+                trust_root=None,
             )
         with mock.patch.dict(os.environ, {"PLATFORM_ENVIRONMENT": "production"}):
             with self.assertRaisesRegex(
                 release_manifest.ReleaseVerificationError, "explicit non-production"
             ):
                 release_manifest.verify(
-                    ROOT,
+                    self.repository,
                     manifest,
-                    expected_commit=COMMIT,
+                    expected_commit=self.commit,
                     signature=None,
                     trust_root=None,
                     allow_unsigned_development=True,

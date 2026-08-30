@@ -1,6 +1,6 @@
 # Fresh deployment acceptance checklist
 
-Follow [OPERATIONS.md](OPERATIONS.md) in order. Record command-output paths,
+Run [automated setup](SETUP.md), complete the [fresh-platform verification](TUTORIAL.md), and use [operations and disaster recovery](OPERATIONS.md) for the applicable drills. Record command-output paths,
 timestamps, image UUIDs/checksums, readiness markers, public health,
 `RESTORE-MANIFEST`, and reviewer initials in a private evidence system. Never
 record credentials, provider payloads, or age identities here.
@@ -116,10 +116,10 @@ private evidence bundle whose checksum and HMAC signature verify.
 - [ ] **ROLE-04** Nomad ACL bootstrap returns
   `nomad-acl-and-raft=healthy`. Evidence: private admin output, direct mode
   `0600` token file, and ingress transfer record; never token contents.
-- [ ] **ROLE-05** Admin receives the exact direct mode-`0600`
-  OpenStack/storage inputs, provisioning PKI, and builder SSH identity from
-  [Operations](OPERATIONS.md#4-boot-storage-and-ingress-with-exact-transfers).
-  Evidence: ownership and mode checks only.
+- [ ] **ROLE-05** Setup installs the exact direct mode-`0600` admin
+  OpenStack/storage inputs, provisioning PKI, and builder SSH identity without
+  printing values. Evidence: setup checkpoint output plus ownership and mode
+  checks only.
 - [ ] **ROLE-06** Public platform health passes through external DNS/TLS with
   original `Host` preserved:
 

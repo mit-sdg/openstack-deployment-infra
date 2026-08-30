@@ -329,9 +329,7 @@ class ControllerAPI:
             request_fingerprint=self._fingerprint(request),
         )
 
-    def _operation_response(
-        self, operation_id: str, *, result: Mapping[str, object] | None = None
-    ) -> Response:
+    def _operation_response(self, operation_id: str) -> Response:
         body: dict[str, object] = {
             "operationId": operation_id,
             "statusUrl": f"/v1/operations/{operation_id}",

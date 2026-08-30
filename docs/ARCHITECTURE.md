@@ -56,9 +56,10 @@ specified in [MANAGEMENT_APP_SPEC.md](MANAGEMENT_APP_SPEC.md).
 
 The operator reconciles the configured foundation, boots and verifies the
 three persistent roles, and installs matching operator and helper releases.
-The first `openstack-platform status` invocation creates an empty SQLite schema
-bound to the deployment project UUID, namespace, and stable inventory identity.
-There is no import phase. Reconciliation confirms only configured resources and
+Setup starts the hosted controller, which creates an empty SQLite schema bound
+to the deployment project UUID, namespace, and stable inventory identity. The
+separate external operator database is initialized by its installed CLI. There
+is no import phase. Reconciliation confirms only configured resources and
 accepted image candidates; it never writes a provider row as accepted product
 state. A copied database or restore from another deployment is rejected.
 Normal image, flavor, version, checksum, and container upgrades do not change
@@ -131,8 +132,9 @@ deployment identity, schema, integrity, foreign keys, and operation state before
 atomic replacement, and contacts no provider.
 
 Managed-data restore checks run on admin in throwaway containers and record
-evidence only after restored contents match checksums. Registry blobs are not
-backed up; they are rebuilt from source.
+evidence only after restored contents match checksums. Managed backup includes
+the OCI manifests and blobs reachable from retained registry tags, so full-loss
+recovery does not depend on GitHub or the original registry.
 
 ## Public ingress
 

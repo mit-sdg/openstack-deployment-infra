@@ -1,4 +1,7 @@
-# Platform hardening plan
+# Maintainer-only platform hardening plan
+
+> This page tracks engineering work and historical exit evidence. It is not an
+> operator procedure or a substitute for the current acceptance checklist.
 
 ## Purpose and scope
 

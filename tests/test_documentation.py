@@ -19,7 +19,6 @@ CURRENT_PRODUCT_DOCUMENTS = (
             "ARCHITECTURE.md",
             "CONFIGURATION.md",
             "CONTROL_PLANE_CONTRACT.md",
-            "GETTING_STARTED.md",
             "OPERATIONS.md",
             "PUBLIC_INGRESS.md",
             "README.md",
@@ -86,6 +85,18 @@ class DocumentationTests(unittest.TestCase):
                 if path:
                     with self.subTest(document=document.relative_to(ROOT), target=target):
                         self.assertTrue((document.parent / path).resolve().exists())
+
+    def test_documentation_is_consolidated_around_current_reader_workflows(self) -> None:
+        self.assertFalse((ROOT / "docs" / "GETTING_STARTED.md").exists())
+        self.assertFalse((ROOT / "docs" / "MANAGEMENT_CONTROLLER_BOUNDARY.md").exists())
+        operations = (ROOT / "docs" / "OPERATIONS.md").read_text()
+        management = (ROOT / "docs" / "MANAGEMENT_APP_SPEC.md").read_text()
+        index = (ROOT / "docs" / "README.md").read_text()
+        self.assertLess(len(operations.splitlines()), 500)
+        self.assertIn("## Back up all state classes", operations)
+        self.assertIn("## Drill complete loss recovery", operations)
+        self.assertIn("### Host service contract", management)
+        self.assertIn("## Maintainer-only plans", index)
 
     def test_current_operator_and_pre_management_boundary_is_documented(self) -> None:
         readme = (ROOT / "README.md").read_text()
@@ -162,20 +173,21 @@ class DocumentationTests(unittest.TestCase):
 
     def test_repaired_operator_path_is_traceable(self) -> None:
         operations = (ROOT / "docs" / "OPERATIONS.md").read_text()
+        installer = (ROOT / "docs" / "RELEASE_INSTALLER.md").read_text()
         publishing = (ROOT / "docs" / "IMAGE_PUBLISHING.md").read_text()
         contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
         checklist = (ROOT / "docs" / "ACCEPTANCE_CHECKLIST.md").read_text()
         svg = (ROOT / "docs" / "architecture-overview.svg").read_text()
 
-        self.assertIn("setup_operator_bridge.py", operations)
-        self.assertIn("operator-bridge=verified", operations)
+        self.assertIn("setup_operator_bridge.py", installer)
+        self.assertIn("operator-bridge=verified", installer)
         self.assertIn("EMIT_SCRIPT=", operations)
         self.assertIn("--age-identity", contract)
         self.assertIn("SOURCE_COMMIT", publishing)
         self.assertIn("scope-record entry", checklist)
         self.assertNotIn("rollback", svg.lower())
         self.assertIn("infra replace", operations)
-        self.assertIn("uv run python -m unittest discover", operations)
+        self.assertIn("uv run python -m unittest discover", (ROOT / "README.md").read_text())
 
     def test_retired_repository_name_is_absent(self) -> None:
         retired_name = "".join(("app-platform", "-infra"))

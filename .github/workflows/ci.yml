@@ -223,7 +223,10 @@ jobs:
           # Documentation inside an image-input directory does not change any
           # image, so exclude it. Without this a README edit under nix/ rebuilds
           # and republishes all five role images.
-          publish_paths=(flake.nix flake.lock nix infra ':(exclude)*.md')
+          publish_paths=(
+            flake.nix flake.lock nix infra openstack_platform deploy
+            pyproject.toml uv.lock LICENSE ':(exclude)*.md'
+          )
           if [[ $EVENT_NAME == workflow_dispatch && $MANUAL_PUBLISH == true ]]; then
             publish=true
           elif [[ $BEFORE_SHA =~ ^0+$ ]]; then

@@ -1,12 +1,18 @@
 # Deployment and UI readiness findings
 
-Reviewed 2026-08-30. This file separates work that gates a real deployment from improvements that can follow after UI implementation starts.
+Reviewed 2026-08-30 and re-audited after the independent-finding fixes. This file separates work that gates a real deployment from improvements that can follow after UI implementation starts.
+
+## Scope and confidence
+
+This is a deployment-readiness ledger, not proof that every branch of the 70,000-line repository has been reviewed. The follow-up audit checked the F/P claims against implementation and tests, reviewed the latest correction diff, ran the complete local Python/static suite, inspected CI publication inputs, searched for unreferenced tracked artifacts, and reconciled current design documentation. It did not execute Nix, VM, QCOW2, ShellCheck, real OpenStack, or protected P-07 workflows locally.
+
+A green check from an older commit is not evidence for this branch. The latest visible remote CI success predates the commits described here; current-head Nix and live evidence remains outstanding.
 
 ## Current decision
 
-- **Start management UI implementation:** yes. The controller/setup and P-level implementation gates are complete.
-- **Deploy to production users:** not yet. All independent-audit implementation defects are corrected; the remaining blockers are external evidence from Nix/VM/QCOW2 CI and the protected live P-07 run.
-- **Run an internal infrastructure deployment:** reasonable after CI; use it to produce the first live acceptance evidence.
+- **Start management UI implementation:** yes. The controller/setup implementation is sufficient to begin, subject to the documented broker authorization responsibilities.
+- **Deploy to production users:** not yet. Known local implementation defects found in both audits are corrected, but current-head Nix/VM/QCOW2 CI, a real-cloud read-only setup check, the disposable full-loss drill, and protected P-07 remain required.
+- **Run an internal infrastructure deployment:** reasonable only after current-head CI; use the internal deployment to produce the first live acceptance and recovery evidence.
 
 ## Original blockers — fixed on this branch
 
@@ -45,9 +51,9 @@ The stale release-installer test expectations were corrected and the repository 
 
 Nix evaluation and VM builds still require CI because this environment cannot access the Nix daemon.
 
-### F-04 — Remove contradictory controller documentation — resolved
+### F-04 — Remove contradictory controller documentation — resolved after follow-up
 
-Current docs now consistently state that setup installs the policy/helper release and the admin role starts the hosted controller. Hosted-controller and external operator-state backups are named separately.
+Current docs now consistently state that setup installs the policy/helper release and the admin role starts the hosted controller. Hosted-controller and external operator-state backups are named separately. The follow-up audit also removed stale implementation-plan claims that `management-web` directly joined the controller socket group, that safe candidate deployment was absent, and that off-site export was still unimplemented.
 
 ### F-05 — Make controller readiness a setup gate — resolved
 
@@ -100,7 +106,7 @@ Implemented by a signed pre-build component manifest plus a signed post-build ar
 
 **Exit gate:** complete. Tamper tests cover component inputs, signatures, evidence, QCOW2 bytes, Nix closure identity, source-manifest binding, and publication metadata while installer tests preserve the previously selected release on failure.
 
-### P-07 — Live release acceptance — resolved in code after independent audit
+### P-07 — Live release acceptance — corrected in code after two audit passes
 
 The repository now provides an explicit-opt-in, plan-first disposable acceptance
 orchestrator with exact deployment/project scope, bounded driver calls, durable
@@ -117,7 +123,7 @@ resumes the identical operation, while the deployed fixture proves PostgreSQL,
 MongoDB, and S3 writes/reads through runtime bindings. Contract tests exercise
 every action through fake transports, including a plan transcript with zero
 mutations.
-The independent-audit defects are corrected. Required checks now come from exact typed observations and any missing/false fact fails. Managed recovery proves an exact empty disposable logical target, invokes the destructive replacement restore, and compares exact PostgreSQL/MongoDB/S3 content afterward. Replacement and backup disposition have explicit identity/readiness/data and owned-backup observations. Setup creates immutable deployment/project ownership metadata with exact typed provider projections, including keypair fingerprint/public-key/type/user identity; teardown refuses absent, drifted, substring-only, project-mismatched, or ambiguous ownership before deletion. Negative false-true and adversarial ownership tests protect these boundaries. Teardown now journals exact delete intent before provider mutation and confirmation afterward, so crashes before/after deletion resume without accepting an unowned absence. Replacement evidence comes from completed lifecycle checkpoints, and data-retention checks preserve each exact store observation. The live evidence run remains an external release gate.
+The independent-audit defects are corrected. The follow-up found three additional driver defects: cascade deletion queried storage through an already tombstoned application, interruption evidence ignored a false exact-content result, and disable/enable inferred public health from controller metadata while discarding the public probe. Deletion now checks the privileged global storage inventory, interruption requires every exact stable-content observation, and re-enable health comes from the public probe. Required checks now fail on any missing or false typed fact. Managed recovery proves an exact empty disposable logical target, invokes the destructive replacement restore, and compares exact PostgreSQL/MongoDB/S3 content afterward. Replacement and backup disposition have explicit identity/readiness/data and owned-backup observations. Setup creates immutable deployment/project ownership metadata with exact typed provider projections, including keypair fingerprint/public-key/type/user identity; teardown refuses absent, drifted, substring-only, project-mismatched, or ambiguous ownership before deletion. Negative false-true and adversarial ownership tests protect these boundaries. Teardown now journals exact delete intent before provider mutation and confirmation afterward, so crashes before/after deletion resume without accepting an unowned absence. Replacement evidence comes from completed lifecycle checkpoints, and data-retention checks preserve each exact store observation. The live evidence run remains an external release gate.
 
 ### P-08 — Critical hardening workstreams — resolved in code
 
@@ -125,28 +131,49 @@ Production shell `eval` transport is replaced by a bounded NUL-delimited allowli
 
 Module decomposition and broader typed-inventory cleanup remain non-blocking follow-up work.
 
+## Follow-up repository audit corrections
+
+### A-01 — Image publication omitted embedded source inputs — resolved
+
+The automatic image-publication detector watched `nix/` and `infra/` but omitted `openstack_platform/`, `deploy/`, `pyproject.toml`, and `uv.lock`. A controller or release-installer change could therefore pass CI without publishing updated role images. The detector now includes every embedded source domain, with a regression test that checks the complete set.
+
+### A-02 — Executor shutdown could strand an accepted operation — resolved
+
+Operation admission checked the closed flag before durable/in-memory enqueue without holding the shutdown lock. A concurrent close could stop all workers in that gap, after which submit could return success for work no thread could execute. Admission, durable dispatch creation, and queue insertion now share the shutdown critical section. A deterministic concurrency regression test covers the former interleaving. The unused `close(wait=...)` option was removed because both branches joined every worker and therefore both blocked.
+
+### A-03 — P-07 observations and post-delete lookup — resolved
+
+The three P-07 defects are described under P-07. Regression tests now model the tombstoned project route and falsify interruption and re-enable public observations independently.
+
+### A-04 — Tracked but unreferenced Nomad samples — removed
+
+Two placeholder Nomad jobs under `infra/nomad/examples/` were not referenced by code, tests, Nix, or documentation and duplicated VM-tested privileged-workload and metadata-address controls. They were removed rather than retained as apparent acceptance tooling. The audit also removed an unused API parameter, a redundant shell assignment, and an executor close option whose two branches behaved identically.
+
+### A-05 — Release tests could not run in a normal dirty worktree — resolved
+
+Nine release/supply-chain tests generated evidence directly from the repository root, whose production guard correctly rejects a dirty checkout. The suite therefore failed as soon as a developer edited any tracked file. Test-only repository fixtures now commit the current tracked and non-ignored source into a private temporary Git repository. Production clean-checkout enforcement is unchanged, while the complete suite can exercise edited code before commit.
+
 ## Important but not blocking UI work or an internal deployment
 
 ### N-01 — Signed prebuilt-image fast path
 
 Fresh setup builds and boot-tests five QCOW2 images locally. Keep that auditable path, but add a signed prebuilt release path for ordinary installations. This is important to the ease-of-setup goal, not a correctness prerequisite for an internal source-built deployment.
 
-### N-02 — Documentation compression
+### N-02 — Documentation compression — resolved
 
-Contradictory safety claims are fixed, but tracked Markdown remains large and repetitive. After contracts stabilize, consolidate into:
-
-- README/quick start;
-- setup;
-- operations and disaster recovery;
-- generated configuration/CLI/API reference;
-- architecture/trust boundaries; and
-- UI contract.
-
-Move implementation plans to issue tracking or mark them maintainer-only.
+The documentation now has one reader path: README quick start, automated setup,
+fresh verification, operations/disaster recovery, validated configuration and
+CLI/API references, architecture/trust boundaries, and one management/UI
+contract. The redundant getting-started page and separate management boundary
+page were merged into their owning documents. Operations no longer duplicates
+the full manual provisioning sequence, troubleshooting links to owning
+procedures instead of repeating them, stale controller/registry/publication
+claims were corrected, and implementation/hardening plans are explicitly
+maintainer-only. The documentation corpus excluding this findings ledger was reduced by roughly 1,200 lines (about 20%).
 
 ### N-03 — Provider/lifecycle module decomposition
 
-Several modules remain very large. Split one recovery domain at a time after behavior is protected by tests. Do not combine decomposition with schema or state-machine changes.
+Several modules remain very large: production modules currently reach roughly 3,700, 3,100, 2,600, and 2,200 lines. This is the dominant codebase-hygiene issue; no exact duplicate files or high-confidence vulture findings were found. Split one recovery domain at a time after behavior is protected by tests. Do not combine decomposition with schema or state-machine changes.
 
 ### N-04 — Broader typed inventory cleanup
 
@@ -174,7 +201,7 @@ uv run ruff check openstack_platform deploy/releases infra tests
 uv run mypy
 uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
 uv run python -m compileall -q openstack_platform deploy infra tests
-uv run python -m unittest discover -s tests -q   # 448 passed
+uv run python -m unittest discover -s tests -q   # 452 passed
 ```
 
-Shell syntax and packaged entrypoint smoke checks also passed. ShellCheck is unavailable locally. `nix flake check --no-build` could not access `/nix/var/nix/daemon-socket/socket`; Nix evaluation, package smoke, five role VM tests, and QCOW2 boot tests remain CI gates.
+Vulture produced no findings; exact-file hashing found no tracked duplicates. ShellCheck is unavailable locally. `nix flake check --no-build` cannot access `/nix/var/nix/daemon-socket/socket`; Nix evaluation, package smoke, five role VM tests, five QCOW2 boot tests, the real-cloud setup check, disposable full-loss recovery, and protected P-07 remain external gates.

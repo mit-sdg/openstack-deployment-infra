@@ -1,4 +1,8 @@
-# Self-hosted management platform implementation plan
+# Maintainer-only management implementation plan
+
+> This page tracks engineering work and historical phase exits. It is not an
+> operator procedure or a claim that the management UI exists. Current product
+> contracts are in `CONTROL_PLANE_CONTRACT.md` and `MANAGEMENT_APP_SPEC.md`.
 
 ## Status and goal
 
@@ -74,8 +78,11 @@ external DNS/TLS provider
 ingress / Traefik
   | admin:8080 (security-group restricted to ingress)
   v
-management web application (unprivileged account)
-  | versioned bounded JSON over restricted Unix socket
+management-web renderer (unprivileged account)
+  | bounded Unix request; no controller access
+  v
+management-broker (authorization/session account; AF_UNIX only)
+  | versioned bounded JSON over the project controller socket
   v
 controller (trusted account)
   |-- controller SQLite, locks, diagnostics, bounded build logs
@@ -83,16 +90,18 @@ controller (trusted account)
   `-- protected OpenStack provider adapter
 ```
 
-The admin role reserves port 8080 to the configured ingress address and creates
-the unprivileged `management-web` account without a web service. That account
-is separate from the controller and unable to read OpenStack, Nomad, storage,
-builder, backup, or age credentials; it can access only the restricted
-controller socket group.
+The admin role reserves port 8080 to the configured ingress address and defines
+condition-gated `management-web` and `management-broker` services for future
+release executables. The renderer cannot traverse the controller socket
+directory or read broker state. The broker is the exact `SO_PEERCRED` peer for
+the project socket and cannot use the privileged socket or TCP/IP. The host-service section of the
+[management application specification](MANAGEMENT_APP_SPEC.md#host-service-contract)
+is the authoritative host contract.
 
-The helper remains a strict action boundary even though it becomes local. The
-local transport must preserve the fixed action allowlist, bounded JSON envelope,
-deadlines, safe errors, and prohibition on secret or raw provider output.
-Runtime requests cannot select the helper transport or executable path.
+The helper remains a strict local action boundary. Its transport preserves the
+fixed action allowlist, bounded JSON envelope, deadlines, safe errors, and
+prohibition on secret or raw provider output. Runtime requests cannot select
+the helper transport or executable path.
 
 ### Component ownership
 
@@ -140,9 +149,9 @@ The management cookie must use the `__Host-` prefix, `Secure`, `HttpOnly`,
 receiving it. Cookie-authenticated mutations also require CSRF and origin
 checks.
 
-The controller trusts only the local management service through Unix-socket
-permissions. It does not query the authentication database or implement
-user-to-project authorization again.
+The controller trusts only the local `management-broker` identity through Unix
+socket permissions and exact peer credentials. It does not query the
+authentication database or implement user-to-project authorization again.
 
 ## Project and configuration model
 
@@ -263,32 +272,24 @@ results become recovery-required rather than being guessed.
 
 ### Failure-preserving candidate
 
-The current implementation does not meet the target: it uses no Nomad canary,
-disables auto-revert, and failed cleanup can purge the shared job. Replace it
-with a mechanism that proves these properties:
+The controller now uses distinct stable and candidate Nomad jobs on alternating
+worker identities. A staged deployment exposes only its preview route, whose
+response must carry the exact deployment route marker. Promotion adds the
+stable route at a priority above the predecessor, commits accepted controller
+state, and only then removes the predecessor. Pre-promotion failure targets the
+exact candidate job, worker, port, and unreferenced image rather than purging a
+shared stable job.
 
-1. the accepted allocation and worker remain active;
-2. a distinct candidate worker is created for the deployment attempt;
-3. a non-auto-promoted candidate allocation runs on that worker;
-4. health evidence identifies the candidate, not merely the old stable app;
-5. promotion occurs only after scheduler, application, and route checks;
-6. active deployment/worker pointers are committed before predecessor cleanup;
-7. the old allocation/worker is removed only after candidate acceptance; and
-8. any pre-promotion failure removes only candidate job/allocation, worker,
-   port, and unreferenced image.
+The implementation and fake-boundary tests cover exact candidate identity,
+route markers, promotion ordering, predecessor cleanup, and resumable phases.
+A protected P-07 run must still demonstrate these properties against live
+Nomad, Traefik, OpenStack, and the public route; unit tests alone are not live
+acceptance evidence.
 
-Nomad canary deployment on a candidate worker is the preferred starting point.
-If canary/static-port/routing behavior cannot prove the invariant, use distinct
-active and candidate jobs plus a constrained route-promotion action.
-
-The exact candidate route identity remains an implementation gate. A health
-request that may have reached the old deployment is insufficient. Use a
-candidate-specific route through the same ingress or route/response evidence
-that identifies the deployment, and prove it in live Nomad/Traefik tests.
-
-Promotion spans Nomad, routing, SQLite, and provider state. Journal every phase.
-If predecessor cleanup fails after acceptance, report the new deployment active
-and cleanup recovery-required rather than calling the deployment failed.
+Promotion spans Nomad, routing, SQLite, and provider state, so every phase is
+journaled. If predecessor cleanup fails after acceptance, the new deployment
+remains active and cleanup becomes recovery-required rather than changing the
+accepted deployment to failed.
 
 Registry retention protects the active image, incomplete-operation references,
 and a configured number of prior accepted images. Failed candidates are deleted
@@ -451,23 +452,20 @@ The future management application must never invoke or parse CLI output.
 
 ## State placement, backup, and admin recovery
 
-Controller releases, SQLite, locks, diagnostics, and build logs move from the
-external operator host to a private controller directory on the persistent
-admin-state volume. The admin NixOS role must add:
+Controller releases, SQLite, locks, diagnostics, and build logs now live in a
+private controller directory on the persistent admin-state volume. The admin
+NixOS role defines the hardened controller, separate renderer and broker
+accounts, capability-separated controller sockets, condition-gated future
+management services, local helper/provider transport, and controller readiness.
+The management release must supply the broker and renderer executables before
+those condition-gated services start.
 
-- hardened controller and separate management-web service accounts;
-- controller and web systemd services ordered after the state mount;
-- restricted controller socket;
-- management web on port 8080;
-- local helper/provider transport; and
-- readiness checks for database, helper, controller, and web health.
-
-Moving SQLite changes the failure boundary. Continue encrypted controller
-backups on the admin backup volume, but establish an approved independent copy
-available to the external recovery host when admin cannot boot. The off-host
-transport remains an implementation gate: it must preserve encryption,
-checksums, manifests, private ownership, and retention without placing an age
-identity on the platform.
+Hosted-controller backups are encrypted separately on the admin backup volume.
+The provider-neutral export/import path can copy committed controller,
+operator-state, and managed-data sets to an operator-mounted off-site
+filesystem while leaving the age identity off-platform. A live full-loss drill
+against disposable replacement state and services remains release evidence;
+the repository's fake-tool tests are not a substitute for that run.
 
 The controller cannot replace its own host. For planned admin replacement:
 

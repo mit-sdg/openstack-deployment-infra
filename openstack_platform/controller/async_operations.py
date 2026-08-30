@@ -100,26 +100,30 @@ class AsyncOperationExecutor:
         scope: str,
         work: OperationWork,
     ) -> db.OperationDispatch:
+        # Admission, durable enqueue, and in-memory enqueue are one shutdown
+        # critical section. Otherwise close() can stop every worker after the
+        # closed check but before this item reaches the queue, stranding an
+        # accepted operation forever.
         with self._state_lock:
             if self._closed:
                 raise db.DispatchQueueFullError("operation executor is stopping")
-        if not self._slots.acquire(blocking=False):
-            raise db.DispatchQueueFullError("operation executor is at capacity")
-        try:
-            dispatch, created = db.enqueue_operation_dispatch(
-                connection,
-                operation_id=operation_id,
-                kind=kind,
-                scope=scope,
-            )
-            if not created:
-                self._slots.release()
+            if not self._slots.acquire(blocking=False):
+                raise db.DispatchQueueFullError("operation executor is at capacity")
+            try:
+                dispatch, created = db.enqueue_operation_dispatch(
+                    connection,
+                    operation_id=operation_id,
+                    kind=kind,
+                    scope=scope,
+                )
+                if not created:
+                    self._slots.release()
+                    return dispatch
+                self._queue.put_nowait((operation_id, work))
                 return dispatch
-            self._queue.put_nowait((operation_id, work))
-            return dispatch
-        except BaseException:
-            self._slots.release()
-            raise
+            except BaseException:
+                self._slots.release()
+                raise
 
     def resubmit_recovery(
         self,
@@ -134,20 +138,20 @@ class AsyncOperationExecutor:
         with self._state_lock:
             if self._closed:
                 raise db.DispatchQueueFullError("operation executor is stopping")
-        if not self._slots.acquire(blocking=False):
-            raise db.DispatchQueueFullError("operation executor is at capacity")
-        try:
-            dispatch = db.requeue_recovery_dispatch(
-                connection,
-                operation_id=operation_id,
-                kind=kind,
-                scope=scope,
-            )
-            self._queue.put_nowait((operation_id, work))
-            return dispatch
-        except BaseException:
-            self._slots.release()
-            raise
+            if not self._slots.acquire(blocking=False):
+                raise db.DispatchQueueFullError("operation executor is at capacity")
+            try:
+                dispatch = db.requeue_recovery_dispatch(
+                    connection,
+                    operation_id=operation_id,
+                    kind=kind,
+                    scope=scope,
+                )
+                self._queue.put_nowait((operation_id, work))
+                return dispatch
+            except BaseException:
+                self._slots.release()
+                raise
 
     def _run(self) -> None:
         connection = db.connect(self.database_path, create=False)
@@ -216,13 +220,12 @@ class AsyncOperationExecutor:
     def wait(self) -> None:
         self._queue.join()
 
-    def close(self, *, wait: bool = True) -> None:
+    def close(self) -> None:
         with self._state_lock:
             if self._closed:
                 return
             self._closed = True
-        if wait:
-            self._queue.join()
+        self._queue.join()
         for _thread in self._threads:
             self._queue.put(None)
         for thread in self._threads:

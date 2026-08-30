@@ -277,6 +277,61 @@ class ControllerAPITests(unittest.TestCase):
         release.set()
         self.api.wait_for_operations()
 
+    @mock.patch("openstack_platform.controller.application_service.openstack.verify_project")
+    def test_shutdown_cannot_strand_an_operation_during_admission(self, verify_project) -> None:
+        verify_project.return_value = None
+        application_id = self.create_application().body["applicationId"]
+        executor = self.api.executor
+        original_slots = executor._slots  # noqa: SLF001 - deterministic shutdown race probe
+        admission_entered = threading.Event()
+        release_admission = threading.Event()
+
+        class BlockingSlots:
+            def acquire(self, *, blocking: bool) -> bool:
+                admission_entered.set()
+                self_waited = release_admission.wait(timeout=5)
+                if not self_waited:
+                    raise AssertionError("admission test timed out")
+                return original_slots.acquire(blocking=blocking)
+
+            def release(self) -> None:
+                original_slots.release()
+
+        executor._slots = BlockingSlots()  # type: ignore[assignment]  # noqa: SLF001
+        shutdown_waited_for_admission: list[bool] = []
+        race_finished = threading.Event()
+
+        def race_shutdown() -> None:
+            if not admission_entered.wait(timeout=2):
+                release_admission.set()
+                return
+            close_finished = threading.Event()
+
+            def close() -> None:
+                self.api.close()
+                close_finished.set()
+
+            close_thread = threading.Thread(target=close)
+            close_thread.start()
+            shutdown_waited_for_admission.append(not close_finished.wait(timeout=0.2))
+            release_admission.set()
+            close_thread.join(timeout=5)
+            race_finished.set()
+
+        race_thread = threading.Thread(target=race_shutdown)
+        race_thread.start()
+        response = self.dispatch(
+            "PUT",
+            f"/v1/applications/{application_id}/environment/API_TOKEN",
+            {"value": "shutdown-race-secret"},
+            self.headers("00000000-0000-4000-8000-000000000039"),
+        )
+        race_thread.join(timeout=5)
+        self.assertTrue(race_finished.is_set())
+        self.assertEqual(shutdown_waited_for_admission, [True])
+        self.assertEqual(response.status, 202)
+        self.assertEqual(self.helper_calls[-1][0], "app.env.set")
+
     @mock.patch("openstack_platform.controller.environment_service.openstack.verify_project")
     def test_restart_allows_identical_recovery_and_blocks_a_competing_key(
         self, verify_project

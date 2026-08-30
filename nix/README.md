@@ -93,32 +93,27 @@ Common image requirements include Nova serial output on `ttyS0`, config-drive cl
 
 ## Build and publish a candidate
 
-Use a versioned candidate name in `config/platform.json`, such as `example-nixos-worker-v2`. Build the corresponding output and identify the exact QCOW2 file to publish.
+Use a versioned candidate name in `config/platform.json`, build all required
+role outputs, and retain each exact QCOW2, Nix output path, and recursive
+`nix path-info` document. A candidate cannot be published from its QCOW2 alone.
 
-Publish with a full source commit in the environment. The script refuses a
-missing/partial commit and refuses to overwrite an existing image name:
+Generate the signed component and post-build artifact evidence, then use the
+four-argument publisher with the exact per-role values emitted by
+`release_manifest verify-role`. The publisher re-verifies the QCOW2 SHA-256,
+Nix closure/output identity, source commit, canonical publication metadata,
+configured project, Glance owner/status, and provider checksum before success.
+It refuses an existing image name.
 
-```sh
-uv sync --frozen
-export PLATFORM_CONFIG="$PWD/config/platform.json"
-export PATH="$PWD/.venv/bin:$PATH"
-export OSC=/srv/openstack-platform/bin/platform-openstack
-export SOURCE_COMMIT="$(git rev-parse HEAD)"
-sha256sum /path/to/worker.qcow2
-SOURCE_COMMIT="$SOURCE_COMMIT" OSC="$OSC" \
-  infra/openstack/publish_nixos_image.sh worker /path/to/worker.qcow2
-```
+The complete protected and manual procedures are in
+[`docs/IMAGE_PUBLISHING.md`](../docs/IMAGE_PUBLISHING.md). Do not use the retired
+`ROLE QCOW2` invocation.
 
-Repeat the same command for `admin`, `ingress`, `storage`, and `builder` with
-the corresponding QCOW2 files. The publisher verifies the configured project,
-records the full source commit and complete metadata projection, verifies
-owner/status/checksum evidence, and refuses to overwrite an image with the
-configured name. It compares the local OpenStack-compatible MD5 with Glance's
-returned `checksum` field before reporting success. Record the provider
-checksum, candidate’s SHA-256, Glance ID, size, build status, source commit,
-and log path.
-
-The optional CI publication path enforces the same no-overwrite boundary. For a `main` push that changes `flake.nix`, `flake.lock`, or anything under `nix/` or `infra/`, its protected matrix appends the first eight characters of the commit SHA to every configured base image name, builds once with the private inventory, and publishes that same QCOW2 while recording the full SHA as image metadata. The `infra/` tree is included because it is embedded in the admin image and referenced by the storage image. The workflow skips names that already identify the same commit, rejects suffix collisions, and keeps credentials isolated in the `openstack-images` GitHub environment. Configure it through [`docs/IMAGE_PUBLISHING.md`](../docs/IMAGE_PUBLISHING.md). Automatic upload is not role acceptance or role selection.
+Automatic publication watches the flake, Nix/infrastructure sources, embedded
+Python/controller and release sources, Python packaging locks, and packaged
+license. Its protected matrix appends the commit's first eight characters to
+each configured base image name, builds and smoke-tests once, and publishes
+that same QCOW2 while recording the full SHA. Markdown-only changes are
+excluded. Automatic upload is not role acceptance or role selection.
 
 Nix’s disk-image helper may print repeated `virtiofs` directory traversal messages even when it succeeds. Neither those messages nor a zero exit status is live-boot evidence. Top-level Nix failures remain fatal; the disposable role test is authoritative.
 

@@ -53,6 +53,52 @@ storage administrator credentials, builder keys, backup keys, age identities,
 helper diagnostics, or controller build logs. The renderer cannot read broker
 state. All product reads and mutations use the typed broker/API models below.
 
+### Host service contract
+
+The admin image defines condition-gated services for these future executables:
+
+```text
+<adminState>/management-broker-releases/current/bin/management-broker
+<adminState>/management-web-releases/current/bin/management-web
+```
+
+The broker receives `CONTROLLER_PROJECT_SOCKET`, `MANAGEMENT_BROKER_SOCKET`,
+and `MANAGEMENT_STATE_DIRECTORY`. The renderer receives only
+`MANAGEMENT_BROKER_SOCKET` and its own state directory. The broker runtime
+socket is traversable by the renderer, but broker durable state and the
+controller runtime directory are not.
+
+| Socket | Exact accepted peer | Capability |
+| --- | --- | --- |
+| `/run/<namespace>-controller/project.sock` | `management-broker` UID/GID | Health and non-destructive project routes |
+| `/run/<namespace>-controller/privileged.sock` | Operator UID/GID | Administrator reads, application cascade delete, and storage delete |
+
+Both controller sockets are mode `0660`, authenticate with Linux
+`SO_PEERCRED` before parsing HTTP, and enforce connection/deadline bounds. HTTP
+input cannot select a socket capability. The project socket excludes all
+`/v1/admin/*` routes, `POST /v1/applications/{id}/delete`, and
+`DELETE /v1/storage/{id}`. The broker must never proxy the privileged socket.
+
+Host-boundary verification must exercise deployed identities rather than root:
+
+```sh
+runuser -u management-broker -- curl --fail --silent \
+  --unix-socket /run/<namespace>-controller/project.sock \
+  http://localhost/v1/health
+runuser -u management-web -- curl --fail --silent \
+  --unix-socket /run/<namespace>-controller/project.sock \
+  http://localhost/v1/health
+# must fail
+runuser -u management-broker -- curl --fail --silent \
+  --unix-socket /run/<namespace>-controller/privileged.sock \
+  http://localhost/v1/admin/status
+# must fail
+```
+
+The admin VM test additionally checks groups, socket ownership, denied routes,
+credential isolation, broker/renderer network policy, and absence of a
+controller socket path from the renderer unit.
+
 ## Authoritative ownership
 
 | Owner | Durable facts |
@@ -219,41 +265,20 @@ Errors contain only `code`, bounded `summary`, `correlationId`, `retryable`, and
 an optional conflicting `operationId`. Management displays the safe summary and
 correlation ID without provider payloads or stack traces.
 
-## Controller route contract
+## Controller routes used by management
 
-All `{id}` values are canonical UUIDs. List responses are
-`{"items": [...], "nextCursor": UUID|null, "truncated": boolean}` and accept
-bounded `limit` and `cursor` query fields. Log responses accept bounded `lines`;
-build logs also accept `offset`.
+The exact route, body, pagination, log, response, and error contracts live in
+[Operator CLI and local controller API](CONTROL_PLANE_CONTRACT.md#product-routes).
+The broker uses the project-socket application, deployment, environment,
+storage-read/create/verify/rotate, log, and operation routes described there.
+All IDs are canonical UUIDs, list/log reads are bounded, and environment reads
+never return values.
 
-| Route | Request body |
-| --- | --- |
-| `POST /v1/applications` | `{"slug": string}` |
-| `GET /v1/applications/{id}` | none |
-| `POST /v1/applications/{id}/enable` | absent or `{}` |
-| `POST /v1/applications/{id}/disable` | absent or `{}` |
-| `POST /v1/applications/{id}/delete` | privileged socket only; unavailable to management-web |
-| `POST /v1/applications/{id}/deployments` | `{"repository": URL, "commit": SHA, "requestedRef": branch, "configurationRevision": integer, "configuration": object}` |
-| `GET /v1/applications/{id}/deployments` | none |
-| `GET /v1/deployments/{id}` | none |
-| `GET /v1/deployments/{id}/build-log` | none; query controls bounded chunk |
-| `GET /v1/applications/{id}/runtime-log` | none; query controls bounded tail |
-| `GET /v1/applications/{id}/environment` | none; returns names, owners, revision, timestamps—never values |
-| `PUT /v1/applications/{id}/environment/{key}` | `{"value": string}` |
-| `DELETE /v1/applications/{id}/environment/{key}` | absent or `{}` |
-| `POST /v1/applications/{id}/environment/import` | `{"dotenv": strictBoundedText}` |
-| `POST /v1/applications/{id}/storage` | `{"type": "postgres"|"mongo"|"s3", "name"?: machineName}` |
-| `GET /v1/applications/{id}/storage` | none |
-| `GET /v1/storage/{id}` | none |
-| `PATCH /v1/storage/{id}/label` | `{"displayLabel": string}` |
-| `POST /v1/storage/{id}/verify` | absent or `{}` |
-| `POST /v1/storage/{id}/rotate` | absent or `{}` |
-| `DELETE /v1/storage/{id}` | privileged socket only; unavailable to management-web |
-| `GET /v1/operations/{id}` | none |
-
-The project socket does not expose `/v1/admin/*`, application cascade delete,
-or storage delete. Those routes exist only on the operator-only privileged
-socket. Browser role claims do not upgrade this host capability.
+The broker cannot call `/v1/admin/*`, application cascade delete, or storage
+delete because those routes exist only on the operator peer's privileged
+socket. Browser roles cannot upgrade that host capability. If the controller
+contract changes, update the reference and typed broker client together; do not
+maintain a second route table in the UI specification.
 
 ## User interface
 

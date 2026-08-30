@@ -1,137 +1,113 @@
 # A small application platform for OpenStack
 
-This repository builds and operates the OpenStack infrastructure for hosting
-small HTTP applications. It provides NixOS role images, greenfield setup,
-persistent data services, encrypted backups, a constrained helper, an
-operator-only infrastructure CLI, and a local application controller API.
+This repository builds and operates NixOS infrastructure for hosting small HTTP
+applications in one OpenStack project. It provides automated greenfield setup,
+five role images, PostgreSQL/MongoDB/S3 services, encrypted recovery evidence,
+an operator-only infrastructure CLI, and a local application controller API.
 
 ## Current status
 
-The infrastructure, setup, backup, restore, and infrastructure-operator paths
-are implemented. The repository also contains the typed local controller API
-and application lifecycle services that a future management application will
-call.
+Infrastructure setup, operation, backup, restore, and the local controller are
+implemented. There is not yet a supported end-user application workflow: the
+sync-engine management application and its external authentication application
+do not exist. Do not install an older release to recover the retired
+application/storage CLI or repository deployment manifest.
 
-There is not yet a supported end-user application workflow. The sync-engine
-management application and its external authentication application do not exist
-in this repository. The admin role does run the controller API on a restricted
-local socket once its policy and helper release are installed. The former
-application/storage CLI and repository deployment manifest have been retired.
-Do not use an older `openstack-platform` binary or old instructions to manage
-product state.
+The current supported result is an operator-managed deployment with:
 
-The future browser product is specified in the
-[management application specification](docs/MANAGEMENT_APP_SPEC.md). That
-specification is an implementation target, not a claim that the UI or
-authentication service is available today.
+- persistent `admin`, `ingress`, and `storage` hosts;
+- replaceable workers and single-use builders;
+- exact-image and persistent-host lifecycle controls;
+- separate hosted-controller, operator-state, and managed-data backups,
+  including retained OCI artifacts and off-site export/import; and
+- a controller on capability-separated local Unix sockets for future management
+  integration.
 
-## Implemented infrastructure
+End users receive no SSH, OpenStack, Nomad, registry, or database-administrator
+credentials. Future application input is restricted to public,
+credential-free GitHub source and typed Node or Bun configuration. Private
+repositories and arbitrary build commands are outside the current contract.
 
-A deployment provides:
+## Create the first deployment
 
-- persistent `admin`, `ingress`, and `storage` roles;
-- replaceable application workers and single-use builders for the controller;
-- PostgreSQL, MongoDB, S3-compatible storage, and a private OCI registry;
-- provider-scoped host lifecycle and exact-image selection;
-- public DNS/HTTPS integration through Cloudflare Tunnel or another provider;
-- separate encrypted hosted-controller, operator-state, and managed-data backups,
-  including retained OCI recovery artifacts and provider-neutral off-site export/import; and
-- a local Unix-socket controller contract for future product integration.
+Use an unprivileged account on an `x86_64-linux` host. It must own a mode-`0700`
+`/srv/openstack-platform` and have Nix with flakes, Git, OpenSSH, OpenSSL,
+`curl`, a user systemd manager, and network access to OpenStack, GitHub, the Nix
+cache, OCI registries, and the three persistent-role addresses. Setup refuses
+root and `sudo`.
 
-Participants receive no SSH keys, OpenStack or scheduler credentials, registry
-credentials, or database administrator passwords. Application source remains
-limited to public, credential-free GitHub repositories and typed Node or Bun
-configuration when the future management application is implemented. Private
-repositories are outside the current target.
+Start from a clean full-commit checkout:
 
-Every operator command acts only on resources named by the deployment
-configuration, leaving unrelated resources in the OpenStack project alone.
+```bash
+uv sync --frozen
+uv run python -m unittest discover -s tests -q
+nix flake check --no-build --print-build-logs
+```
 
-## Set up a deployment
+Create the direct mode-`0600` OpenStack/setup environment described in
+[Automated setup](docs/SETUP.md). It names the target project, fixed addresses,
+flavors, volume type, public domain, ingress policy, and signed release
+evidence. Then run the read-only preflight:
 
-To create the infrastructure in your own OpenStack project:
+```bash
+uv run openstack-platform setup check --env-file /private/path/setup.env
+```
 
-1. [Prepare the operator host](docs/GETTING_STARTED.md).
-2. [Run automated setup](docs/SETUP.md) from a protected environment file.
-3. [Verify the fresh platform](docs/TUTORIAL.md).
-4. Use [Operations](docs/OPERATIONS.md) for backup, restore, upgrades, recovery,
-   and individual setup checkpoints.
+Continue only when it reports `setup-check=ready`. Apply the reviewed plan:
 
-Automated setup writes its private source inventory below the protected
-workspace and installs it at
-`/srv/openstack-platform/config/platform.json`. The tracked
-`config/platform.example.json` documents the shape; the
-[configuration reference](docs/CONFIGURATION.md) explains every field.
+```bash
+uv run openstack-platform setup \
+  --env-file /private/path/setup.env \
+  --cloudflare-token-file /private/path/cloudflare-tunnel-token \
+  --apply
+```
 
-Setup requires an external public-ingress account. Cloudflare Tunnel is the
-reference, but an institutional service can be used when it satisfies the
-[public ingress contract](docs/PUBLIC_INGRESS.md).
+Omit the token option when another provider satisfies the
+[public ingress contract](docs/PUBLIC_INGRESS.md). Successful setup ends with
+`setup=complete`, starts and verifies the hosted controller, selects five role
+images, enables backup timers, and reports either configured or pending public
+ingress.
 
-## Operator and controller boundaries
+Follow [Verify a fresh platform](docs/TUTORIAL.md) to check the installed CLI,
+controller, public route, all three backup classes, and scheduled jobs.
 
-`openstack-platform` is now an operator-only command. It supports setup,
-platform status, external operator-state backup/offline restore, image selection
-and pruning, and persistent-host lifecycle. It does not expose application,
-environment, deployment, or managed-storage commands. See the
-[operator CLI and local controller reference](docs/CONTROL_PLANE_CONTRACT.md).
+## Control boundaries
 
-The controller accepts bounded HTTP/1.1 JSON on separate project and privileged
-Unix sockets and owns application, deployment, environment, storage, operation,
-and safe administrator-read routes. Exact Linux peer credentials and route sets
-enforce each host capability. The future trusted `management-broker`—not the
-browser-facing renderer—is the only management peer allowed on the project
-socket; browser authorization and project ownership remain broker obligations. Future UI and authentication behavior belongs in
-[`docs/MANAGEMENT_APP_SPEC.md`](docs/MANAGEMENT_APP_SPEC.md).
+`openstack-platform` manages setup, status, images, persistent hosts, external
+operator-state backup, and offline restore. It has no product commands.
 
-## Code organization
+`openstack-platform-controller` owns application, deployment, environment,
+storage, and operation state over separate project and privileged Unix sockets.
+The future `management-broker`, not the browser renderer, is the only management
+peer accepted on the project socket. Browser authentication, ownership, quota,
+and CSRF enforcement remain management-application responsibilities.
 
-The Python distribution is `openstack_platform`, not a CLI-named package:
-
-- `openstack_platform/operator.py` contains only the operator command adapter;
-- `openstack_platform/controller/` owns product state, lifecycle services, and
-  the local API, with application value objects and Nomad rendering separated
-  from deployment orchestration;
-- `openstack_platform/helper/` is the constrained action boundary; and
-- `openstack_platform/contracts.py` provides typed access to the shared
-  implementation contract; and
-- the remaining top-level modules provide shared configuration, provider,
-  installation, and runtime support.
-
-Cross-component roles, ports, accounts, protocol names, and required inventory
-paths are defined once in `infra/lib/platform_contract.json`. Python packages,
-standalone infrastructure scripts, and Nix load that same contract. Nix
-inventory validation lives in `nix/lib/inventory.nix`; role modules consume the
-validated inventory rather than redefining deployment identity.
-
-## Architecture
-
-![Platform architecture](docs/architecture-overview.svg)
-
-| Role | Responsibility |
-| --- | --- |
-| `admin` | Runs the scheduler control plane, local controller, constrained helper, monitoring, and backup staging |
-| `ingress` | Routes public requests to healthy platform services |
-| `storage` | Runs PostgreSQL, MongoDB, object storage, and the private image registry |
-| `worker` | Runs one application project without durable local state |
-| `builder` | Builds one source snapshot, then is deleted |
-
-The [architecture guide](docs/ARCHITECTURE.md) explains state ownership,
-isolation, and failure boundaries.
+See [Architecture and trust boundaries](docs/ARCHITECTURE.md) for the model and
+[Operator CLI and controller API](docs/CONTROL_PLANE_CONTRACT.md) for the exact
+interfaces.
 
 ## Documentation
 
 - [Automated setup](docs/SETUP.md)
-- [Getting started](docs/GETTING_STARTED.md)
-- [Fresh-platform tutorial](docs/TUTORIAL.md)
-- [Operations](docs/OPERATIONS.md)
+- [Fresh-platform verification](docs/TUTORIAL.md)
+- [Operations and disaster recovery](docs/OPERATIONS.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Configuration reference](docs/CONFIGURATION.md)
-- [Image publication](docs/IMAGE_PUBLISHING.md)
-- [Public ingress](docs/PUBLIC_INGRESS.md)
-- [Operator CLI and local controller API](docs/CONTROL_PLANE_CONTRACT.md)
+- [Operator CLI and controller API reference](docs/CONTROL_PLANE_CONTRACT.md)
+- [Architecture and trust boundaries](docs/ARCHITECTURE.md)
 - [Management application specification](docs/MANAGEMENT_APP_SPEC.md)
-- [Platform hardening plan](docs/HARDENING_PLAN.md)
 - [Documentation index](docs/README.md)
+
+Release, image, acceptance, and maintainer documents are indexed separately in
+[`docs/README.md`](docs/README.md).
+
+## Code organization
+
+- `openstack_platform/controller/` owns product state and lifecycle services.
+- `openstack_platform/helper/` is the constrained action boundary.
+- `openstack_platform/operator.py` adapts the operator CLI.
+- `infra/lib/platform_contract.json` is the shared role, account, port, path,
+  and protocol contract consumed by Python, Nix, and infrastructure scripts.
 
 ## License
 

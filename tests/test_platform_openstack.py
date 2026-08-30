@@ -17,6 +17,7 @@ from openstack_platform import openstack, release_manifest
 from openstack_platform.config import load_platform
 from openstack_platform.runtime import CommandFailure, CommandResult, HttpResult
 from openstack_platform.validation import ValidationError
+from tests.repository_fixtures import clean_repository
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "00000000-0000-4000-8000-000000000000"
@@ -452,16 +453,10 @@ class OpenStackTests(unittest.TestCase):
             log = root / "create.json"
             image = root / "image.qcow2"
             image.write_bytes(b"qcow")
-            commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=ROOT,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
+            repository, commit = clean_repository(ROOT, root / "repository")
             component_dir = root / "component"
             component_manifest = release_manifest.generate(
-                ROOT, commit, component_dir, signing_key=None, unsigned=True
+                repository, commit, component_dir, signing_key=None, unsigned=True
             )
             artifact_inputs: dict[str, object] = {}
             worker_output = Path("/nix/store/00000000000000000000000000000000-worker-image")

@@ -3,11 +3,10 @@
 This procedure publishes role-image candidates. It does not import platform
 state, replace servers, or attach volumes. For automatic runs, the `CI`
 workflow builds and uploads commit-addressed NixOS role images in the same
-matrix job. It runs when a push to `main` changes `flake.nix`, `flake.lock`, or
-anything under `nix/` or `infra/`. The `infra/` tree is an image input because
-the admin image embeds it and the storage image references its registry-GC
-implementation. The workflow only publishes images; it does not select them or
-replace servers.
+matrix job. It runs when a push to `main` changes the flake/lock, Nix or
+infrastructure sources, embedded Python/controller or release sources, Python
+packaging locks, or the packaged license. Markdown-only changes are excluded.
+The workflow only publishes images; it does not select them or replace servers.
 
 Publication remains disabled until the `openstack-images` GitHub environment has OpenStack credentials and the repository variable `OPENSTACK_PUBLISH_ENABLED` is set to `true`.
 
@@ -20,10 +19,16 @@ The workflow processes `admin`, `ingress`, `storage`, `worker`, and `builder` as
 3. checks out the exact commit and installs the private deployment inventory from the protected environment;
 4. appends the first eight characters of the commit SHA to every configured base image name;
 5. builds each role once with that derived private inventory;
-6. locates and hashes the resulting QCOW2 before any OpenStack credentials enter the step environment;
-7. verifies that the authenticated token belongs to the configured OpenStack project ID;
-8. records the full SHA as image metadata and skips an existing role only when that metadata matches; and
-9. publishes that same QCOW2 through `infra/openstack/publish_nixos_image.sh`, which compares the local OpenStack-compatible MD5 checksum with Glance's returned `checksum` field before reporting success.
+6. locates the QCOW2 and records its Nix output and recursive path information;
+7. verifies the signed role record against the exact QCOW2, Nix closure/output,
+   source manifest, private inventory, commit, and publication metadata before
+   any OpenStack credential enters the step environment;
+8. verifies that the authenticated token belongs to the configured OpenStack project ID;
+9. records the full SHA as image metadata and skips an existing role only when that metadata matches; and
+10. publishes that same QCOW2 through `infra/openstack/publish_nixos_image.sh`,
+    which repeats signed role verification and compares the local
+    OpenStack-compatible MD5 checksum with Glance's returned `checksum` field
+    before reporting success.
 
 For example, a configured base name `example-nixos-worker` at commit
 `0123456789abcdef…` becomes `example-nixos-worker-01234567`. All five images
@@ -39,39 +44,49 @@ candidate names without changing the stored inventory.
 
 A successful upload does not make an image ready for deployment. Before selecting it in a fresh control database, complete the disposable live tests and follow the persistent-role safeguards in [`../nix/README.md`](../nix/README.md).
 
-## Publish all five roles from one reviewed commit
+## Publish from a reviewed local build
 
-This is the complete local example. Run it from the repository root after
-`uv sync --frozen`, with a protected `/srv/openstack-platform/bin/platform-openstack` wrapper and
-an unused/versioned image name for every role in the private inventory. The
-wrapper owns the OpenStack credentials; no credential is placed in an argument.
+The protected workflow is the recommended publication path. A manual
+publication must use the same signed evidence and four-argument publisher
+contract; the old `ROLE QCOW2` form is unsupported.
+
+First generate and verify the component and post-build artifact evidence in
+[Release supply-chain evidence](RELEASE_SUPPLY_CHAIN.md). For each role, retain:
+
+- the exact QCOW2 path;
+- its Nix output store path;
+- `nix path-info --json --recursive` output; and
+- the verified artifact manifest/signature/trust root and the four values
+  emitted by `release_manifest verify-role`.
+
+Invoke the publisher only after exporting those verified values. Replace each
+`REPLACE_*` value with the exact output/path for one role:
 
 ```sh
-uv sync --frozen
 export PLATFORM_CONFIG="$PWD/config/platform.json"
-export PATH="$PWD/.venv/bin:$PATH"
 export OSC=/srv/openstack-platform/bin/platform-openstack
 export SOURCE_COMMIT="$(git rev-parse HEAD)"
-test "$SOURCE_COMMIT" = "$(git rev-parse --verify HEAD)"
-for role in admin ingress storage worker builder; do
-  qcow="$(find -L "result-$role" -type f -name '*.qcow2' -print -quit)"
-  test -f "$qcow" && test ! -L "$qcow" && test -r "$qcow"
-  sha256sum "$qcow"
-  SOURCE_COMMIT="$SOURCE_COMMIT" OSC="$OSC" \
-    infra/openstack/publish_nixos_image.sh "$role" "$qcow"
-done
+export PLATFORM_RELEASE_MANIFEST=/private/releases/$SOURCE_COMMIT/release-manifest.json
+export PLATFORM_ARTIFACT_MANIFEST=/private/releases/$SOURCE_COMMIT/artifacts/role-artifacts.json
+export PLATFORM_ARTIFACT_SIGNATURE=/private/releases/$SOURCE_COMMIT/artifacts/role-artifacts.sig
+export PLATFORM_ARTIFACT_TRUST_ROOT=/private/release-trust-root.pem
+# Set these exactly from verify-role output for the selected role:
+export PLATFORM_ARTIFACT_MANIFEST_SHA256='REPLACE_WITH_MANIFEST_SHA256'
+export PLATFORM_ARTIFACT_QCOW2_SHA256='REPLACE_WITH_QCOW2_SHA256'
+export PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256='REPLACE_WITH_CLOSURE_SHA256'
+export PLATFORM_ARTIFACT_NIX_OUTPUT='REPLACE_WITH_STORE_BASENAME'
+
+SOURCE_COMMIT="$SOURCE_COMMIT" OSC="$OSC" \
+  infra/openstack/publish_nixos_image.sh \
+  REPLACE_ROLE /path/to/role.qcow2 /nix/store/REPLACE_ROLE_OUTPUT \
+  /private/role.path-info.json
 ```
 
-The publisher requires `SOURCE_COMMIT` to be the full lowercase 40-character
-SHA. It emits the complete role metadata projection: managed-by, metadata
-version, namespace, prefix, project ID, role, compatibility hash, and
-`<namespace-with-hyphens-replaced-by-underscores>_source_commit`. It refuses to
-overwrite an existing image name, verifies owner/project and `active` status,
-and compares the local OpenStack-compatible MD5 checksum with the Glance
-`checksum` field. It prints the image UUID, `status=active`, provider checksum,
-and full source commit. Record that provider checksum and the separately
-computed QCOW2 SHA-256, then run the live role acceptance procedure before
-`infra image set`.
+The publisher independently reruns signed role verification, checks the Nix
+output/closure and QCOW2, verifies project ownership and active Glance status,
+and refuses to overwrite an existing name. Record its image UUID, provider
+checksum, QCOW2 SHA-256, source commit, and artifact manifest identity before
+live role acceptance and `infra image set`.
 
 ### One build per published role
 
@@ -141,7 +156,8 @@ The workflow writes the private inventory with mode `0600` on an ephemeral hoste
 
 ## Publish a new image set
 
-1. Change `flake.nix`, `flake.lock`, or a file under `nix/` or `infra/`.
+1. Change an image input: `flake.nix`, `flake.lock`, `nix/`, `infra/`,
+   `openstack_platform/`, `deploy/`, `pyproject.toml`, `uv.lock`, or `LICENSE`.
 2. Merge the change to `main` and wait for every CI job to pass.
 3. If the environment has required reviewers, approve the deployment.
 4. Verify that all five reported image names end in the first eight characters of the CI-tested commit SHA and that their `source_commit` properties contain the full SHA.
@@ -165,7 +181,7 @@ commit-suffixed image name before this command and passes the private
    or replacing a persistent host. There is no image rename or manual
    promotion step.
 
-Automatic publication runs inside `CI` for a push from this repository to protected `main` whose complete push range includes an image-input path listed above. Changes limited to documentation, workflows, tests, configuration examples, or other non-image paths use the ordinary example-image build path. Pull requests, scheduled CI, forked runs, and force-push ranges whose prior commit is unavailable do not publish images.
+Automatic publication runs inside `CI` for a push from this repository to protected `main` whose complete push range includes an image-input path listed above. Markdown-only, workflow, test, configuration-example, and other non-image changes use the ordinary example-image build path. Pull requests, scheduled CI, forked runs, and force-push ranges whose prior commit is unavailable do not publish images.
 
 A manual `workflow_dispatch` with `publish` enabled targets the selected commit without requiring Nix change context. Use it only on protected `main` to recover a missing or interrupted publication for a commit that already passed the required review and tests.
 
