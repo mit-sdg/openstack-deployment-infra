@@ -470,6 +470,27 @@ class SetupPreflightTests(unittest.TestCase):
         self.assertFalse(plan["ready"])
         self.assertFalse(plan["resolved"]["fixedAddresses"]["ingress"]["available"])
 
+    def test_glance_quota_refuses_non_https_endpoint_before_token_use(self) -> None:
+        with (
+            mock.patch.object(
+                setup,
+                "_json_command",
+                return_value={
+                    "endpoints": [
+                        {
+                            "interface": "public",
+                            "region": "RegionOne",
+                            "url": "http://images.example.test/v2",
+                        }
+                    ]
+                },
+            ),
+            mock.patch.object(setup, "_command") as command,
+            self.assertRaisesRegex(setup.SetupError, "over HTTPS"),
+        ):
+            setup._glance_usage(Path("openstack"), self.resolved)
+        command.assert_not_called()
+
     def test_glance_quota_bytes_and_gib_formatter_variants_are_canonicalized(self) -> None:
         fixture = json.loads(
             (

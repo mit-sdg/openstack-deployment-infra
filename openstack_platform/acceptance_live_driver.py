@@ -474,16 +474,25 @@ class SupportedInterfaces:
             mutating=True,
         )
         status = self._operator("status")
-        if not status.strip():
-            raise LiveDriverError("platform status observation is empty")
+        lines = [line.split() for line in status.decode().splitlines() if line.strip()]
+        healthy = (
+            len(lines) == 2
+            and lines[0]
+            == ["STATE", "INFRA", "APPS", "STORAGE", "LIVE", "UNAVAILABLE", "UNHEALTHY"]
+            and len(lines[1]) == 7
+            and lines[1][0] == "healthy"
+            and lines[1][-2:] == ["0", "0"]
+        )
+        if not healthy:
+            raise LiveDriverError("platform status did not report exact healthy observations")
         self.guard()
         self.capture_ownership()
         return _observed(
             dict(ACTION_CHECKS)["greenfield_setup"],
             emptyScopeObserved=empty,
-            planApplied=True,
-            platformHealthy=True,
-            deploymentScoped=True,
+            planApplied=healthy,
+            platformHealthy=healthy,
+            deploymentScoped=self.ownership_path.exists(),
         )
 
     def _ssh(
@@ -616,6 +625,8 @@ class SupportedInterfaces:
     def public_json(self, url: str, *, method: str = "GET") -> Mapping[str, object]:
         if method not in {"GET", "POST"}:
             raise LiveDriverError("public proof method is unsupported")
+        if method == "POST":
+            self.guard()
         output = self.commands.run(
             (
                 self.c.curl,
@@ -785,6 +796,20 @@ class SupportedInterfaces:
         )
         if not latest:
             raise LiveDriverError("managed backup evidence directory is absent")
+        verification = self._ssh(
+            self.c.admin_alias,
+            (*env, f"{self.c.platform_root}/infra/backup/verify_latest_restore.sh"),
+            mutating=True,
+            timeout=1800,
+        )
+        if (
+            re.fullmatch(
+                rb"latest platform restore=verified evidence=.+/RESTORE-MANIFEST\n?",
+                verification,
+            )
+            is None
+        ):
+            raise LiveDriverError("managed restore manifest verification is missing")
         reset_url = application_url + str(self.c.application["resetPath"])
         empty = self.public_json(reset_url, method="POST")
         if empty != self.c.application["emptyProof"]:
@@ -811,6 +836,7 @@ class SupportedInterfaces:
         if (
             any(line not in rendered for line in required_lines)
             or "garage-restore=verified" not in rendered
+            or "registry-artifacts=import-verified" not in rendered
         ):
             raise LiveDriverError("replacement restore did not report typed service observations")
         proof_url = application_url + str(self.c.application["verificationPath"])
@@ -995,6 +1021,29 @@ class SupportedInterfaces:
             raise LiveDriverError("provider projection omitted or duplicated a required field")
         return found[0]
 
+    def _exact_named_reference(self, kind: str, name: str) -> str:
+        visibility = ("--private",) if kind == "image" else ()
+        raw = self.commands.run(
+            (self.c.openstack, *kind.split(), "list", *visibility, "-f", "json"), timeout=60
+        )
+        try:
+            rows = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise LiveDriverError("provider identity inventory is malformed") from error
+        if not isinstance(rows, list):
+            raise LiveDriverError("provider identity inventory is invalid")
+        matches = [
+            row for row in rows if isinstance(row, dict) and self._field_exact(row, "name") == name
+        ]
+        if len(matches) != 1:
+            raise LiveDriverError("provider identity is absent or ambiguous")
+        if kind == "keypair":
+            return name
+        identifier = self._field_exact(matches[0], "id")
+        if not isinstance(identifier, str) or str(UUID(identifier)) != identifier:
+            raise LiveDriverError("provider identity UUID is invalid")
+        return identifier
+
     def _show_projection(self, kind: str, reference: str, expected_name: str) -> dict[str, object]:
         shown = self.commands.run(
             (self.c.openstack, *kind.split(), "show", reference, "-f", "json"), timeout=60
@@ -1096,11 +1145,9 @@ class SupportedInterfaces:
         _create_private(self.ownership_path, _canonical(document) + b"\n")
 
     def replace(self, role: str) -> Observation:
-        before = self._show_projection(
-            "server",
-            self._owned_names()["server"][("admin", "ingress", "storage").index(role)],
-            self._owned_names()["server"][("admin", "ingress", "storage").index(role)],
-        )
+        name = self._owned_names()["server"][("admin", "ingress", "storage").index(role)]
+        before_reference = self._exact_named_reference("server", name)
+        before = self._show_projection("server", before_reference, name)
         image = self.c.replacement_images[role]
         self._operator("infra", "image", "set", role, image, mutating=True)
         if role == "admin":
@@ -1116,7 +1163,8 @@ class SupportedInterfaces:
         if any(token not in rendered_output for token in replacement_evidence):
             raise LiveDriverError("replacement did not report exact typed acceptance observations")
         name = str(before["name"])
-        after = self._show_projection("server", name, name)
+        after_reference = self._exact_named_reference("server", name)
+        after = self._show_projection("server", after_reference, name)
         if before["id"] == after["id"]:
             raise LiveDriverError("host replacement did not change exact server identity")
         transition = {
@@ -1163,8 +1211,59 @@ class SupportedInterfaces:
         self.guard()
         return hashlib.sha256(_canonical(self.inventory())).hexdigest()
 
+    @property
+    def teardown_progress_path(self) -> Path:
+        return self.ownership_path.with_name("teardown-progress.json")
+
+    def _teardown_progress(self) -> set[str]:
+        if not self.teardown_progress_path.exists():
+            _atomic_private(
+                self.teardown_progress_path,
+                _canonical(
+                    {
+                        "schemaVersion": 1,
+                        "deploymentId": self.c.deployment_id,
+                        "deleted": [],
+                    }
+                )
+                + b"\n",
+            )
+        _private_file(self.teardown_progress_path, "teardown progress")
+        try:
+            document = json.loads(
+                self.teardown_progress_path.read_bytes(), object_pairs_hook=_reject_duplicates
+            )
+        except json.JSONDecodeError as error:
+            raise LiveDriverError("teardown progress is malformed") from error
+        if (
+            not isinstance(document, dict)
+            or set(document) != {"schemaVersion", "deploymentId", "deleted"}
+            or document.get("schemaVersion") != 1
+            or document.get("deploymentId") != self.c.deployment_id
+            or not isinstance(document.get("deleted"), list)
+            or any(not isinstance(item, str) for item in document["deleted"])
+            or len(document["deleted"]) != len(set(document["deleted"]))
+        ):
+            raise LiveDriverError("teardown progress is invalid")
+        return set(document["deleted"])
+
+    def _record_teardown(self, deleted: set[str], identity: str) -> None:
+        deleted.add(identity)
+        _atomic_private(
+            self.teardown_progress_path,
+            _canonical(
+                {
+                    "schemaVersion": 1,
+                    "deploymentId": self.c.deployment_id,
+                    "deleted": sorted(deleted),
+                }
+            )
+            + b"\n",
+        )
+
     def teardown(self, baseline: str) -> Observation:
         self.guard()
+        deleted = self._teardown_progress()
         try:
             ownership = json.loads(
                 self.ownership_path.read_bytes(), object_pairs_hook=_reject_duplicates
@@ -1233,6 +1332,7 @@ class SupportedInterfaces:
                 "projection": new_projection,
             }
         backup_owned = False
+        backup_identity: str | None = None
         for record in current_resources:
             if not isinstance(record, dict) or set(record) != {
                 "kind",
@@ -1251,9 +1351,10 @@ class SupportedInterfaces:
                 or not isinstance(expected, dict)
             ):
                 raise LiveDriverError("immutable deployment ownership record is untyped")
-            if kind == "volume" and name == str(
+            is_backup = kind == "volume" and name == str(
                 load_platform(Path(self.c.platform_config)).get("volumes.backup.name")
-            ):
+            )
+            if is_backup:
                 backup_owned = True
             self.guard()
             visibility = ("--private",) if kind == "image" else ()
@@ -1272,8 +1373,17 @@ class SupportedInterfaces:
                 for row in rows
                 if isinstance(row, dict) and self._field_exact(row, "name") == name
             ]
+            identity = f"{kind}:{name}:{reference}"
+            if is_backup:
+                backup_identity = identity
             if not matches:
-                continue
+                if identity in deleted:
+                    continue
+                raise LiveDriverError(
+                    "recorded deployment resource disappeared before a checkpointed delete"
+                )
+            if identity in deleted:
+                raise LiveDriverError("checkpointed deletion still has a live provider resource")
             if len(matches) != 1:
                 raise LiveDriverError("teardown candidate identity is ambiguous")
             current_reference = name if kind == "keypair" else self._field_exact(matches[0], "id")
@@ -1288,7 +1398,13 @@ class SupportedInterfaces:
                 timeout=600,
                 mutating=True,
             )
-        if not backup_owned or self.c.backup_disposition != "destroy-after-verified-restore":
+            self._record_teardown(deleted, identity)
+        if (
+            not backup_owned
+            or self.c.backup_disposition != "destroy-after-verified-restore"
+            or backup_identity is None
+            or backup_identity not in deleted
+        ):
             raise LiveDriverError("backup disposition is absent or does not cover the owned backup")
         deadline = time.monotonic() + 300
         while self.baseline() != baseline:
@@ -1501,7 +1617,7 @@ class RepositoryLiveDriver:
             exact = (
                 len(attempts) == 1
                 and attempts[0].get("repositoryCommit") == self.c.application["commit"]
-                and attempts[0].get("status") == "accepted"
+                and attempts[0].get("status") == "succeeded"
             )
             code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
             if (

@@ -46,6 +46,19 @@ for component in hosted-controller operator-state; do
   [[ -n $source ]]
   "$AGE" --decrypt --identity "$CONTROLLER_IDENTITY" --output "$scratch/$component.sqlite3" "$source"
   chmod 0600 "$scratch/$component.sqlite3"
+  python3 - "$scratch/$component.sqlite3" <<'PY'
+import sqlite3,sys
+connection=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True)
+try:
+ if connection.execute("PRAGMA integrity_check").fetchall()!=[("ok",)]:
+  raise SystemExit("decrypted SQLite integrity check failed")
+ required={"schema_migrations","operations","operation_dispatches"}
+ observed={row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+ if not required <= observed:
+  raise SystemExit("decrypted SQLite schema evidence is incomplete")
+finally:
+ connection.close()
+PY
 done
 
 managed="$IMPORTED/managed-data"

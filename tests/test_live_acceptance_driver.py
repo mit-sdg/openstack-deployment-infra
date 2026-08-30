@@ -115,6 +115,8 @@ class FakeCommandTransport:
             return json.dumps({"project_id": PROJECT}).encode()
         if "-F" in encoded and "recovery" in encoded:
             return b'{"applicationId":"ok"}\n201'
+        if "status" in encoded:
+            return b"STATE INFRA APPS STORAGE LIVE UNAVAILABLE UNHEALTHY\nhealthy 5 0 0 5 0 0\n"
         if "list" in encoded:
             return b"[]"
         return b"setup plan"
@@ -176,7 +178,7 @@ class FakeInterfaces:
                     {
                         "deploymentId": key,
                         "repositoryCommit": body["commit"],
-                        "status": "accepted",
+                        "status": "succeeded",
                     }
                 )
         if path.endswith("/disable"):
@@ -380,6 +382,40 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
                     }
                 )
 
+    def test_managed_restore_false_observation_cannot_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            fake = FakeInterfaces(value)
+            fake.managed_restore = lambda _url: {  # type: ignore[method-assign]
+                "postgresRestored": True,
+                "mongoRestored": True,
+                "s3Restored": False,
+                "restoreManifestVerified": True,
+            }
+            driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(LiveDriverError, "did not establish"):
+                driver.handle(
+                    {
+                        "schemaVersion": 1,
+                        "mode": "execute",
+                        "action": "managed_data_restore",
+                        "scope": {
+                            "deploymentId": DEPLOYMENT,
+                            "projectId": PROJECT,
+                            "namespace": NAMESPACE,
+                        },
+                        "planSha256": "a" * 64,
+                        "driverConfigurationSha256": hashlib.sha256(
+                            value.path.read_bytes()
+                        ).hexdigest(),
+                        "baselineFingerprint": "b" * 64,
+                    }
+                )
+
     def test_substring_ownership_adversary_is_rejected_before_delete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -425,6 +461,39 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
                     "keypair", "example-admin", "example-admin"
                 )
             self.assertFalse(any("delete" in call[0] for call in transport.calls))
+
+    def test_teardown_refuses_uncheckpointed_disappeared_resource(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            interfaces = SupportedInterfaces(value, FakeCommandTransport())
+            ownership = {
+                "schemaVersion": 1,
+                "deploymentId": DEPLOYMENT,
+                "projectId": PROJECT,
+                "namespace": NAMESPACE,
+                "resources": [
+                    {
+                        "kind": "keypair",
+                        "name": "demo-admin",
+                        "deleteReference": "demo-admin",
+                        "projection": {
+                            "name": "demo-admin",
+                            "fingerprint": "aa:bb",
+                            "publicKey": "ssh-ed25519 AAAA",
+                            "type": "ssh",
+                            "userId": "user-1",
+                        },
+                    }
+                ],
+            }
+            interfaces.ownership_path.write_text(json.dumps(ownership))
+            interfaces.ownership_path.chmod(0o600)
+            with self.assertRaisesRegex(LiveDriverError, "disappeared"):
+                interfaces.teardown("b" * 64)
 
     def test_teardown_refuses_absent_immutable_ownership_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
