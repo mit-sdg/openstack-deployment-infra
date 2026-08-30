@@ -482,31 +482,38 @@ jobs:
       - name: Install locked acceptance environment
         run: uv sync --frozen
 
-      - name: Create or recover the private run context
+      - name: Install protected run configuration
         env:
+          P07_DRIVER_CONFIG_BASE64: ${{ secrets.P07_DRIVER_CONFIG_BASE64 }}
           P07_EVIDENCE_HMAC_KEY_BASE64: ${{ secrets.P07_EVIDENCE_HMAC_KEY_BASE64 }}
           P07_PROJECT_ID: ${{ secrets.P07_PROJECT_ID }}
         run: |
           set -euo pipefail
+          test -n "$P07_DRIVER_CONFIG_BASE64"
           test -n "$P07_EVIDENCE_HMAC_KEY_BASE64"
           test -n "$P07_PROJECT_ID"
           root="/srv/openstack-platform-acceptance/runs/$GITHUB_RUN_ID"
           umask 077
           install -d -m 0700 "$root" "$root/state"
-          if [[ ! -f $root/context ]]; then
-            deployment_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-            namespace="p07-ci-${deployment_id%%-*}"
-            printf 'P07_DEPLOYMENT_ID=%q\nP07_NAMESPACE=%q\n' \
-              "$deployment_id" "$namespace" > "$root/context"
-            chmod 0600 "$root/context"
-          fi
+          base64 --decode <<<"$P07_DRIVER_CONFIG_BASE64" > "$root/driver.json"
           base64 --decode <<<"$P07_EVIDENCE_HMAC_KEY_BASE64" > "$root/signing.key"
-          chmod 0600 "$root/signing.key"
-          printf 'P07_ROOT=%s\nP07_PROJECT_ID=%s\n' "$root" "$P07_PROJECT_ID" >> "$GITHUB_ENV"
+          chmod 0600 "$root/driver.json" "$root/signing.key"
+          python3 - "$root/driver.json" "$root/context" "$P07_PROJECT_ID" <<'PY'
+          import json, shlex, sys
+          config = json.load(open(sys.argv[1], encoding="utf-8"))
+          if config["projectId"] != sys.argv[3]:
+              raise SystemExit("driver and protected project IDs differ")
+          with open(sys.argv[2], "w", encoding="utf-8") as output:
+              for name, key in (("P07_DEPLOYMENT_ID", "deploymentId"), ("P07_NAMESPACE", "namespace")):
+                  output.write(f"{name}={shlex.quote(config[key])}\n")
+          PY
+          chmod 0600 "$root/context"
+          printf 'P07_ROOT=%s\nP07_PROJECT_ID=%s\nP07_DRIVER_CONFIG=%s\n' \
+            "$root" "$P07_PROJECT_ID" "$root/driver.json" >> "$GITHUB_ENV"
 
       - name: Produce the non-mutating plan
         env:
-          P07_DRIVER: /srv/openstack-platform-acceptance/driver
+          P07_DRIVER: ${{ github.workspace }}/.venv/bin/openstack-platform-acceptance-driver
         run: |
           set -euo pipefail
           source "$P07_ROOT/context"
@@ -520,10 +527,12 @@ jobs:
           fi
           python3 -m json.tool "$P07_ROOT/plan.json"
           sha256sum "$P07_ROOT/plan.json"
+          transcript=$(python3 -c 'import json,os; print(json.load(open(os.environ["P07_DRIVER_CONFIG"]))["transcript"])')
+          install -m 0600 -- "$transcript" "$P07_ROOT/plan-transcript.json"
 
       - name: Apply or resume the reviewed plan
         env:
-          P07_DRIVER: /srv/openstack-platform-acceptance/driver
+          P07_DRIVER: ${{ github.workspace }}/.venv/bin/openstack-platform-acceptance-driver
           P07_LIVE_ACCEPTANCE: "1"
         run: |
           set -euo pipefail
@@ -539,9 +548,9 @@ jobs:
             --evidence-directory "$P07_ROOT/state" \
             --signing-key "$P07_ROOT/signing.key"
 
-      - name: Remove local signing key
+      - name: Remove local protected inputs
         if: always()
-        run: rm -f "${P07_ROOT:-/nonexistent}/signing.key"
+        run: rm -f "${P07_ROOT:-/nonexistent}/signing.key" "${P07_ROOT:-/nonexistent}/driver.json"
 
       - name: Upload sanitized acceptance evidence
         if: always()
@@ -550,6 +559,7 @@ jobs:
           name: p07-live-acceptance-${{ github.run_id }}
           path: |
             /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/plan.json
+            /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/plan-transcript.json
             /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/state/evidence.json
             /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/state/evidence.json.sha256
             /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/state/evidence.json.hmac-sha256

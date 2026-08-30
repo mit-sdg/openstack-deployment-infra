@@ -40,14 +40,6 @@ ACTION_CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "greenfield_setup",
         ("emptyScopeObserved", "planApplied", "platformHealthy", "deploymentScoped"),
     ),
-    (
-        "interrupted_resume_injection",
-        ("durableOperationStarted", "interruptionInjected", "stableServiceUnaffected"),
-    ),
-    (
-        "interrupted_resume",
-        ("sameOperationResumed", "operationConverged", "noDuplicateResource"),
-    ),
     ("application_create", ("applicationCreated", "disabledInitially")),
     ("postgres_lifecycle", ("created", "bound", "writeReadVerified")),
     ("mongo_lifecycle", ("created", "bound", "writeReadVerified")),
@@ -55,6 +47,14 @@ ACTION_CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "application_deploy",
         ("exactCommitDeployed", "candidateVerified", "publicRouteHealthy"),
+    ),
+    (
+        "interrupted_resume_injection",
+        ("durableOperationStarted", "interruptionInjected", "stableServiceUnaffected"),
+    ),
+    (
+        "interrupted_resume",
+        ("sameOperationResumed", "operationConverged", "noDuplicateResource"),
     ),
     (
         "application_disable_enable",
@@ -106,6 +106,7 @@ class Plan:
     project_id: str
     namespace: str
     driver_sha256: str
+    driver_configuration_sha256: str
     baseline_fingerprint: str
     created_at: str
     expires_at: str
@@ -120,6 +121,7 @@ class Plan:
             "projectId": self.project_id,
             "namespace": self.namespace,
             "driverSha256": self.driver_sha256,
+            "driverConfigurationSha256": self.driver_configuration_sha256,
             "baselineFingerprint": self.baseline_fingerprint,
             "createdAt": self.created_at,
             "expiresAt": self.expires_at,
@@ -309,6 +311,7 @@ def create_plan(
         namespace,
         driver_sha256,
         "0" * 64,
+        "0" * 64,
         _timestamp(now),
         _timestamp(now + timedelta(hours=24)),
         max_minutes,
@@ -332,6 +335,7 @@ def create_plan(
         "projectId",
         "namespace",
         "capabilities",
+        "driverConfigurationSha256",
         "baselineFingerprint",
         "ownedResources",
     }
@@ -349,6 +353,9 @@ def create_plan(
         raise AcceptanceError("driver does not implement the exact P-07 action set")
     if response.get("ownedResources") != []:
         raise AcceptanceError("greenfield scope already contains deployment-owned resources")
+    configuration_sha = response.get("driverConfigurationSha256")
+    if not isinstance(configuration_sha, str) or not _FINGERPRINT.fullmatch(configuration_sha):
+        raise AcceptanceError("driver returned an invalid protected configuration checksum")
     baseline = response.get("baselineFingerprint")
     if not isinstance(baseline, str) or not _FINGERPRINT.fullmatch(baseline):
         raise AcceptanceError("driver returned an invalid unrelated-resource fingerprint")
@@ -357,6 +364,7 @@ def create_plan(
         project_id,
         namespace,
         driver_sha256,
+        configuration_sha,
         baseline,
         provisional.created_at,
         provisional.expires_at,
@@ -375,6 +383,7 @@ def _plan_from_document(document: object, *, allow_expired_resume: bool = False)
         "projectId",
         "namespace",
         "driverSha256",
+        "driverConfigurationSha256",
         "baselineFingerprint",
         "createdAt",
         "expiresAt",
@@ -393,7 +402,14 @@ def _plan_from_document(document: object, *, allow_expired_resume: bool = False)
         or document.get("actions") != expected_actions
     ):
         raise AcceptanceError("plan version or action contract is unsupported")
-    fields = ("deploymentId", "projectId", "namespace", "driverSha256", "baselineFingerprint")
+    fields = (
+        "deploymentId",
+        "projectId",
+        "namespace",
+        "driverSha256",
+        "driverConfigurationSha256",
+        "baselineFingerprint",
+    )
     if any(not isinstance(document.get(field), str) for field in fields):
         raise AcceptanceError("plan identity is invalid")
     max_minutes = document.get("maxMinutes")
@@ -407,6 +423,7 @@ def _plan_from_document(document: object, *, allow_expired_resume: bool = False)
         str(document["projectId"]),
         str(document["namespace"]),
         str(document["driverSha256"]),
+        str(document["driverConfigurationSha256"]),
         str(document["baselineFingerprint"]),
         str(document["createdAt"]),
         str(document["expiresAt"]),
@@ -414,8 +431,10 @@ def _plan_from_document(document: object, *, allow_expired_resume: bool = False)
         timeout,
     )
     _validate_identity(plan.deployment_id, plan.project_id, plan.namespace)
-    if not _FINGERPRINT.fullmatch(plan.driver_sha256) or not _FINGERPRINT.fullmatch(
-        plan.baseline_fingerprint
+    if (
+        not _FINGERPRINT.fullmatch(plan.driver_sha256)
+        or not _FINGERPRINT.fullmatch(plan.driver_configuration_sha256)
+        or not _FINGERPRINT.fullmatch(plan.baseline_fingerprint)
     ):
         raise AcceptanceError("plan checksum is invalid")
     if not 15 <= plan.max_minutes <= 720 or not 30 <= plan.step_timeout_seconds <= 3600:
@@ -551,6 +570,7 @@ def run_plan(
                 {
                     **_request_base(plan, "execute", action),
                     "planSha256": plan_sha256,
+                    "driverConfigurationSha256": plan.driver_configuration_sha256,
                     "baselineFingerprint": plan.baseline_fingerprint,
                 },
                 timeout=min(
@@ -581,6 +601,7 @@ def run_plan(
             "namespace": plan.namespace,
             "planSha256": plan_sha256,
             "driverSha256": plan.driver_sha256,
+            "driverConfigurationSha256": plan.driver_configuration_sha256,
             "baselineFingerprint": plan.baseline_fingerprint,
             "startedAt": state["startedAt"],
             "completedAt": _timestamp(_now()),
@@ -629,6 +650,7 @@ def verify_evidence(directory: Path, signing_key: bytes) -> None:
         "namespace",
         "planSha256",
         "driverSha256",
+        "driverConfigurationSha256",
         "baselineFingerprint",
         "startedAt",
         "completedAt",
@@ -655,7 +677,12 @@ def verify_evidence(directory: Path, signing_key: bytes) -> None:
     ):
         raise AcceptanceError("evidence scope is invalid")
     _validate_identity(deployment, project, namespace)
-    for field in ("planSha256", "driverSha256", "baselineFingerprint"):
+    for field in (
+        "planSha256",
+        "driverSha256",
+        "driverConfigurationSha256",
+        "baselineFingerprint",
+    ):
         value = document.get(field)
         if not isinstance(value, str) or not _FINGERPRINT.fullmatch(value):
             raise AcceptanceError("evidence fingerprint is invalid")

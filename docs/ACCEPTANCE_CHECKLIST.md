@@ -20,7 +20,7 @@ Use [Run the disposable P-07 live release gate](LIVE_ACCEPTANCE.md). A unit-test
 result or successful plan is not live acceptance. Sign off only from a completed
 private evidence bundle whose checksum and HMAC signature verify.
 
-- [ ] **P07-01** The reviewed, unexpired plan binds the protected driver checksum,
+- [ ] **P07-01** The reviewed, unexpired plan binds the repository driver and protected-configuration checksums,
   disposable deployment UUID/namespace, exact OpenStack project, unrelated-resource
   baseline fingerprint, ordered actions, and duration limits. The greenfield
   preflight reports no deployment-owned resource.

@@ -35,6 +35,7 @@ class FakeDriver:
                 "ok": True,
                 **scope,
                 "capabilities": list(acceptance.ACTION_NAMES),
+                "driverConfigurationSha256": "c" * 64,
                 "baselineFingerprint": "b" * 64,
                 "ownedResources": [],
             }
@@ -95,6 +96,7 @@ class LiveAcceptanceTests(unittest.TestCase):
                 "namespace": NAMESPACE,
             },
         )
+        self.assertEqual(plan.driver_configuration_sha256, "c" * 64)
         self.assertEqual(plan.baseline_fingerprint, "b" * 64)
         self.assertEqual(
             [item["name"] for item in plan.document()["actions"]], list(acceptance.ACTION_NAMES)
@@ -140,12 +142,7 @@ class LiveAcceptanceTests(unittest.TestCase):
             checkpoint = json.loads((state / "checkpoint.json").read_text())
             self.assertEqual(
                 [event["action"] for event in checkpoint["events"]],
-                [
-                    "greenfield_setup",
-                    "interrupted_resume_injection",
-                    "interrupted_resume",
-                    "application_create",
-                ],
+                ["greenfield_setup", "application_create"],
             )
             acceptance.run_plan(
                 driver,

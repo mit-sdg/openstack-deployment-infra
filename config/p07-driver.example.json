@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "deploymentId": "12345678-1234-4234-9234-123456789abc",
+  "projectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "namespace": "p07-release-12345678",
+  "operator": {
+    "executable": "/srv/openstack-platform/bin/openstack-platform",
+    "platformConfig": "/srv/openstack-platform/setup/config/platform.json",
+    "policy": "/srv/openstack-platform/setup/config/platform-policy.json",
+    "stateDirectory": "/srv/openstack-platform/state",
+    "setupEnv": "/srv/openstack-platform-acceptance/private/setup.env",
+    "setupWorkspace": "/srv/openstack-platform/setup",
+    "openstackWrapper": "/srv/openstack-platform/bin/platform-openstack"
+  },
+  "remote": {
+    "ssh": "/usr/bin/ssh",
+    "scp": "/usr/bin/scp",
+    "sshConfig": "/srv/openstack-platform/.secrets/ssh/config",
+    "adminAlias": "platform-admin",
+    "recoveryAlias": "platform-admin-recovery",
+    "controllerSocket": "/run/p07-release-12345678-controller/controller.sock",
+    "curl": "/run/current-system/sw/bin/curl",
+    "backupRoot": "/srv/p07-release-12345678-backups",
+    "platformRoot": "/srv/p07-release-12345678",
+    "adminState": "/srv/p07-release-12345678-state"
+  },
+  "recovery": {
+    "age": "/srv/openstack-platform/bin/age",
+    "ageIdentity": "/srv/openstack-platform-acceptance/private/backup-age-identity.txt",
+    "offlineState": "/srv/openstack-platform-acceptance/private/offline-state",
+    "localStaging": "/srv/openstack-platform-acceptance/private/staging"
+  },
+  "application": {
+    "slug": "acceptance-12345678",
+    "repository": "https://github.com/example/p07-acceptance-app",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "requestedRef": "main",
+    "configuration": {
+      "runtime": "node",
+      "packages": ["."],
+      "buildScript": null,
+      "startScript": "start",
+      "port": 3000,
+      "healthPath": "/health"
+    }
+  },
+  "replacementImages": {
+    "ingress": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "admin": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  },
+  "transcript": "/srv/openstack-platform-acceptance/private/plan-transcript.json",
+  "backupDisposition": "destroy-after-verified-restore"
+}

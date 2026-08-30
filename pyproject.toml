@@ -23,6 +23,7 @@ openstack-platform-hosted-controller-backup = "openstack_platform.controller.hos
 openstack-platform-recovery = "openstack_platform.recovery_bundle:main"
 openstack-platform-restore = "openstack_platform.restore:main"
 openstack-platform-acceptance = "openstack_platform.acceptance:main"
+openstack-platform-acceptance-driver = "openstack_platform.acceptance_live_driver:main"
 
 [dependency-groups]
 dev = [

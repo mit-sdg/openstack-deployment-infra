@@ -113,11 +113,12 @@ a hash chain/checksum/HMAC signature, and offline fake-driver tests. The protect
 CI job is skipped unless a manual dispatch opts in, the repository enable variable
 is true, and the protected environment is approved.
 
-The gate remains closed until a protected driver implements the documented live
-contract and a reviewer accepts a verified passing evidence bundle. That drill
-covers greenfield setup, interrupted resume, one app lifecycle, all storage types,
-both SQLite restores, managed-data restore, persistent-host replacement, admin
-recovery, and cleanup whose unrelated-resource fingerprint is unchanged.
+The reviewed repository driver now implements the documented live contract by
+composing the supported setup/operator, controller, backup/restore, recovery, host
+replacement, and exact-name teardown interfaces. Contract tests exercise every
+action through fake transports, including a plan transcript with zero mutations.
+The gate remains closed until a protected runner executes it and a reviewer accepts
+a verified passing evidence bundle; no live pass is claimed here.
 
 ### P-08 — Complete critical hardening workstreams
 
