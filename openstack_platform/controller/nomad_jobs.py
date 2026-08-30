@@ -28,6 +28,7 @@ from ..validation import (
 from .application_models import Manifest
 from .storage_contract import canonical_secret_key, canonical_secret_keys
 
+
 def render_nomad_job(
     *,
     application_id: str,
@@ -72,19 +73,15 @@ def render_nomad_job(
     hostname = f"{app_slug}.{platform.domain}"
     preview_hostname = f"{app_slug}-preview.{platform.domain}"
     variable = f"nomad/jobs/{app_slug}"
-    routers = [
-        (f"{job_id}-preview", preview_hostname, 100)
-        if staged
-        else (job_id, hostname, 100)
-    ]
+    routers = [(f"{job_id}-preview", preview_hostname, 100) if staged else (job_id, hostname, 100)]
     if promoted:
         routers.append((f"{job_id}-promoted", hostname, route_priority))
     route_tags = "\n".join(
-        f'''        "traefik.http.routers.{router}.entrypoints=web",
+        f"""        "traefik.http.routers.{router}.entrypoints=web",
         "traefik.http.routers.{router}.rule=Host(`{host}`)",
         "traefik.http.routers.{router}.priority={priority}",
         "traefik.http.routers.{router}.service={job_id}",
-        "traefik.http.routers.{router}.middlewares={job_id}-headers",'''
+        "traefik.http.routers.{router}.middlewares={job_id}-headers","""
         for router, host, priority in routers
     )
     binding_aliases = "\n".join(
@@ -292,9 +289,7 @@ def nomad_route_priority(nomad_job: str) -> int:
 
 def nomad_route_marker(nomad_job: str) -> str:
     job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
-    matches = re.findall(
-        rf'    {re.escape(NOMAD_ROUTE_MARKER_KEY)} = "([0-9a-f-]{{36}})"\n', job
-    )
+    matches = re.findall(rf'    {re.escape(NOMAD_ROUTE_MARKER_KEY)} = "([0-9a-f-]{{36}})"\n', job)
     if len(matches) != 1:
         raise ValidationError("Nomad route marker was missing or ambiguous")
     return uuid(matches[0], field="Nomad route marker")
@@ -316,5 +311,3 @@ def nomad_candidate_identity(nomad_job: str) -> tuple[str, str]:
     if hashlib.sha256(unmarked_job.encode()).hexdigest() != identity:
         raise ValidationError("Nomad job candidate identity does not match the exact job")
     return identity, oci_digest_pin(image, field="Nomad candidate image")
-
-

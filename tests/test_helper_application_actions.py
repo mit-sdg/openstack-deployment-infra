@@ -5,8 +5,12 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from openstack_platform.controller.application_runtime import Manifest, nomad_candidate_identity, render_nomad_job
 from openstack_platform.config import PlatformConfig
+from openstack_platform.controller.application_runtime import (
+    Manifest,
+    nomad_candidate_identity,
+    render_nomad_job,
+)
 from openstack_platform.helper.application_actions import (
     _public_health_from_job,
     _status_or_absent,
@@ -102,9 +106,7 @@ class FakeNomad:
         else:
             output = b""
         stderr = (
-            f'No job(s) with prefix or ID "{argv[-1]}" found\n'.encode()
-            if returncode == 1
-            else b""
+            f'No job(s) with prefix or ID "{argv[-1]}" found\n'.encode() if returncode == 1 else b""
         )
         return SimpleNamespace(
             stdout=output,
@@ -157,7 +159,9 @@ class ApplicationActionTests(unittest.TestCase):
             }
         )
         self.assertEqual(self.nomad.stopped_jobs, {"demo-app-candidate"})
-        self.assertFalse(any(call[0][-1] == "demo-app" for call in self.nomad.calls if "stop" in call[0]))
+        self.assertFalse(
+            any(call[0][-1] == "demo-app" for call in self.nomad.calls if "stop" in call[0])
+        )
         self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
 
     def test_candidate_cleanup_refuses_identity_drift_without_stopping(self) -> None:
@@ -277,9 +281,7 @@ class ApplicationActionTests(unittest.TestCase):
                     "TaskGroups": [
                         {
                             "Name": "app",
-                            "Tasks": [
-                                {"Name": "app", "Config": {"image": promoted_identity[1]}}
-                            ],
+                            "Tasks": [{"Name": "app", "Config": {"image": promoted_identity[1]}}],
                         }
                     ],
                 }
@@ -483,8 +485,8 @@ class ApplicationActionTests(unittest.TestCase):
                             "Checks": [{"Type": "http", "Path": "/health"}],
                         }
                     ],
-                }
-            ]
+                },
+            ],
         }
         calls: list[str] = []
 
@@ -494,9 +496,7 @@ class ApplicationActionTests(unittest.TestCase):
             return SimpleNamespace(
                 stdout=b"" if absent else json.dumps(inspection).encode(),
                 stderr=(
-                    b'No job(s) with prefix or ID "demo-app-candidate" found\n'
-                    if absent
-                    else b""
+                    b'No job(s) with prefix or ID "demo-app-candidate" found\n' if absent else b""
                 ),
                 returncode=1 if absent else 0,
             )

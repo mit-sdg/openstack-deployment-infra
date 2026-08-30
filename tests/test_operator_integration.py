@@ -12,9 +12,9 @@ from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
 from openstack_platform.controller import deployment_service, status
 from openstack_platform.controller.deployment_config import parse_configuration
+from openstack_platform.controller.storage_contract import PLATFORM_ENVIRONMENT_KEYS
 from openstack_platform.helper.main import default_handlers
 from openstack_platform.helper.production import ACTION_MANIFEST
-from openstack_platform.controller.storage_contract import PLATFORM_ENVIRONMENT_KEYS
 from tests.product_fixtures import accept_deployment
 
 APP_ID = "00000000-0000-4000-8000-000000000001"
@@ -208,7 +208,9 @@ class OperatorIntegrationTests(unittest.TestCase):
 
     def test_image_selection_uses_lock_operation_and_accepted_uuid(self) -> None:
         selected = openstack.ImageSelection("worker", IMAGE_ID, "worker-image", "b" * 40, "c" * 64)
-        args = operator.build_parser().parse_args(self.argv("infra", "image", "set", "worker", IMAGE_ID))
+        args = operator.build_parser().parse_args(
+            self.argv("infra", "image", "set", "worker", IMAGE_ID)
+        )
         output = StringIO()
         with mock.patch.object(operator.openstack, "select_image", return_value=selected):
             operator.dispatch(args, stdout=output)
@@ -226,7 +228,9 @@ class OperatorIntegrationTests(unittest.TestCase):
             connection.close()
 
     def test_image_selection_recovers_observed_phase_without_provider_resubmit(self) -> None:
-        args = operator.build_parser().parse_args(self.argv("infra", "image", "set", "worker", IMAGE_ID))
+        args = operator.build_parser().parse_args(
+            self.argv("infra", "image", "set", "worker", IMAGE_ID)
+        )
         configured = operator._load_config(args)
         operation_id = "00000000-0000-4000-8000-000000000099"
         with operator._database(args) as connection:
@@ -545,9 +549,7 @@ class OperatorIntegrationTests(unittest.TestCase):
                     owners,
                     {name: "platform" for name in PLATFORM_ENVIRONMENT_KEYS},
                 )
-                attempts = db.list_deployment_attempts(
-                    connection, application.application_id
-                )
+                attempts = db.list_deployment_attempts(connection, application.application_id)
                 self.assertEqual(
                     (attempts[0].snapshot_kind, attempts[0].status),
                     ("strict", "succeeded"),
@@ -642,7 +644,8 @@ class OperatorIntegrationTests(unittest.TestCase):
                 "main",
                 0,
                 "0" * 64,
-                "one-vcpu",                1000,
+                "one-vcpu",
+                1000,
                 2048,
             )
 
@@ -891,7 +894,9 @@ class OperatorIntegrationTests(unittest.TestCase):
             checkpoint("observed", {"role": "ingress"})  # type: ignore[operator]
             return replaced
 
-        with mock.patch.object(operator.openstack, "replace_host", side_effect=replace) as replace_call:
+        with mock.patch.object(
+            operator.openstack, "replace_host", side_effect=replace
+        ) as replace_call:
             operator.dispatch(replace_args, stdout=StringIO())
         replace_call.assert_called_once()
         self.assertTrue(callable(replace_call.call_args.kwargs["health_check"]))

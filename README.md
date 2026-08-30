@@ -34,7 +34,7 @@ A deployment provides:
 - PostgreSQL, MongoDB, S3-compatible storage, and a private OCI registry;
 - provider-scoped host lifecycle and exact-image selection;
 - public DNS/HTTPS integration through Cloudflare Tunnel or another provider;
-- encrypted controller-state and managed-data backups with restore checks; and
+- separate encrypted hosted-controller, operator-state, and managed-data backups; and
 - a local Unix-socket controller contract for future product integration.
 
 Participants receive no SSH keys, OpenStack or scheduler credentials, registry
@@ -69,8 +69,8 @@ reference, but an institutional service can be used when it satisfies the
 ## Operator and controller boundaries
 
 `openstack-platform` is now an operator-only command. It supports setup,
-platform status, controller-state backup/offline restore, image selection and
-pruning, and persistent-host lifecycle. It does not expose application,
+platform status, external operator-state backup/offline restore, image selection
+and pruning, and persistent-host lifecycle. It does not expose application,
 environment, deployment, or managed-storage commands. See the
 [operator CLI and local controller reference](docs/CONTROL_PLANE_CONTRACT.md).
 

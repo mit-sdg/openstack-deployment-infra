@@ -151,7 +151,9 @@ class OfflineRestoreTests(unittest.TestCase):
             require_private_policy=False,
         )
         self.assertEqual(
-            operator._configured_backup_staging_path(loaded, "platform-20260101T000000Z.sqlite3.age"),
+            operator._configured_backup_staging_path(
+                loaded, "platform-20260101T000000Z.sqlite3.age"
+            ),
             "/srv/app-platform-backups/controller/.staging/platform-20260101T000000Z.sqlite3.age",
         )
         with self.assertRaisesRegex(ValidationError, "backup name"):

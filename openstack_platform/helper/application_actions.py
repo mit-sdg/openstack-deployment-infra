@@ -663,7 +663,11 @@ def _remove_handler(
 
         # Candidate cleanup is authorized by exact immutable identity and can
         # never select the stable job merely because both belong to one app.
-        job_ids = (application_slug, f"{application_slug}-candidate") if deleting_application else (job_id,)
+        job_ids = (
+            (application_slug, f"{application_slug}-candidate")
+            if deleting_application
+            else (job_id,)
+        )
         for selected_job_id in job_ids:
             before = _inspected_candidate(
                 selected_job_id,
@@ -685,13 +689,16 @@ def _remove_handler(
                 stderr_limit=65_536,
                 check=False,
             )
-            if _status_or_absent(
-                selected_job_id,
-                command_runner=command_runner,
-                nomad_command=nomad_command,
-                timeout_seconds=timeout_seconds,
-                response_limit=65_536,
-            ) is not None:
+            if (
+                _status_or_absent(
+                    selected_job_id,
+                    command_runner=command_runner,
+                    nomad_command=nomad_command,
+                    timeout_seconds=timeout_seconds,
+                    response_limit=65_536,
+                )
+                is not None
+            ):
                 raise HelperActionError("JOB_REMAINS", "Nomad job remained after removal")
         variable_absent = False
         if deleting_application:
@@ -758,10 +765,7 @@ def _public_health_from_job(
             if not isinstance(services, list):
                 continue
             for service in services:
-                if (
-                    not isinstance(service, dict)
-                    or service.get("Name") != f"app-{job_id}"
-                ):
+                if not isinstance(service, dict) or service.get("Name") != f"app-{job_id}":
                     continue
                 tags = service.get("Tags")
                 checks = service.get("Checks")
@@ -790,12 +794,8 @@ def _public_health_from_job(
         response_limit=4_096,
         allow_redirects=False,
     )
-    return (
-        200 <= result.status < 300
-        and (
-            route_marker is None
-            or result.headers.get(DEPLOYMENT_ROUTE_HEADER_LOWER) == route_marker
-        )
+    return 200 <= result.status < 300 and (
+        route_marker is None or result.headers.get(DEPLOYMENT_ROUTE_HEADER_LOWER) == route_marker
     )
 
 

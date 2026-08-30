@@ -845,8 +845,8 @@ The first command creates encrypted `postgres.age`, `mongodb.age`, and
 `garage.age` under `<paths.backups>/<namespace>/<timestamp>/`, plus `MANIFEST`
 and `SHA256SUMS`. The admin role also has its own
 `<namespace>-platform-backup.timer` for this managed-data job (03:15 UTC with a
-30-minute randomized delay). The management
-`openstack-platform-backup.timer` covers only the controller database. The
+30-minute randomized delay). The external operator
+`openstack-platform-backup.timer` covers only its operator-state database. The
 restore check decrypts each archive only into temporary storage. The second
 command starts temporary PostgreSQL and MongoDB containers, checks the Garage
 catalog/payload archive, and removes the temporary containers on success or

@@ -20,8 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import PlatformConfig
-from .contracts import GARAGE_RPC_PORT, OPERATOR_ACCOUNT_NAME, PERSISTENT_ROLES
+from .contracts import GARAGE_RPC_PORT, OPERATOR_ACCOUNT_NAME
+from .contracts import PERSISTENT_ROLES as PERSISTENT_ROLES
 from .validation import ValidationError, uuid
+
 _TEMPLATE_PLACEHOLDER = re.compile(r"__[A-Z0-9_]+__")
 _MAX_INPUT_BYTES = 1_048_576
 _MAX_SECRET_FILE_BYTES = 65_536

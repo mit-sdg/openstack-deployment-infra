@@ -375,9 +375,7 @@ class ControllerAPITests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "OPERATION_CONFLICT")
         self.assertEqual(raised.exception.operation_id, operation_id)
 
-        retried = self.dispatch(
-            "PUT", request_path, request_body, self.headers(operation_id)
-        )
+        retried = self.dispatch("PUT", request_path, request_body, self.headers(operation_id))
         self.assertEqual(retried.status, 202)
         self.api.wait_for_operations()
         recovered = db.get_operation(self.connection, operation_id)

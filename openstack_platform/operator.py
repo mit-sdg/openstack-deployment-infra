@@ -26,11 +26,11 @@ from tempfile import mkstemp
 from typing import Any, cast
 
 from . import openstack, remote, restore, runtime, setup
+from .config import Config, load, load_platform
+from .contracts import CONTROLLER_BACKUP_DIRECTORY
 from .controller import application_runtime as app
 from .controller import database as db
 from .controller import status, storage
-from .config import Config, load, load_platform
-from .contracts import CONTROLLER_BACKUP_DIRECTORY
 from .installation import DEFAULT_OPERATOR_INVENTORY, OPERATOR_ROOT, OPERATOR_STATE
 from .validation import ValidationError, bounded_text, commit, sha256_hex, uuid
 
@@ -109,9 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
         "setup", help="create a complete greenfield deployment from a protected environment file"
     )
     setup_command.add_argument("--env-file", type=Path, required=True)
-    setup_command.add_argument(
-        "--workspace", type=Path, default=OPERATOR_ROOT / "setup"
-    )
+    setup_command.add_argument("--workspace", type=Path, default=OPERATOR_ROOT / "setup")
     setup_command.add_argument("--cloudflare-token-file", type=Path)
     setup_command.add_argument(
         "--apply", action="store_true", help="build images and create the deployment"

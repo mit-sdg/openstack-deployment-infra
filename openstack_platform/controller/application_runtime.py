@@ -49,16 +49,16 @@ from ..validation import (
     uuid,
 )
 from . import database as db
-from .application_models import Manifest, Recipe, StorageBinding
-from .nomad_jobs import (
-    deployment_worker_ids,
-    nomad_candidate_identity,
-    nomad_job_id,
-    nomad_placement_id,
-    nomad_route_marker,
-    nomad_route_priority,
-    render_nomad_job,
-)
+from .application_models import Manifest as Manifest
+from .application_models import Recipe as Recipe
+from .application_models import StorageBinding as StorageBinding
+from .nomad_jobs import deployment_worker_ids as deployment_worker_ids
+from .nomad_jobs import nomad_candidate_identity as nomad_candidate_identity
+from .nomad_jobs import nomad_job_id as nomad_job_id
+from .nomad_jobs import nomad_placement_id as nomad_placement_id
+from .nomad_jobs import nomad_route_marker as nomad_route_marker
+from .nomad_jobs import nomad_route_priority as nomad_route_priority
+from .nomad_jobs import render_nomad_job as render_nomad_job
 
 _RECIPE_GENERATOR_VERSION = 2
 _IMAGE_NAME = re.compile(r"[a-z0-9.-]+(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")

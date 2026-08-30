@@ -235,7 +235,9 @@ def _launcher(
     state_root: Path | None = None,
     openstack_command: Path | None = None,
 ) -> str:
-    module = "openstack_platform.operator" if mode == "operator" else "openstack_platform.helper.main"
+    module = (
+        "openstack_platform.operator" if mode == "operator" else "openstack_platform.helper.main"
+    )
     executable = '"$release/.venv/bin/python"' if mode == "operator" else shlex.quote(str(python))
     launcher_environment = ""
     arguments = '"$@"'
@@ -815,7 +817,7 @@ def install(args: argparse.Namespace) -> Path:
                         stage / "bin/openstack-platform-restore",
                         _restore_launcher(
                             cast(Path, state_root),
-                            config_root / "platform.json",
+                            cast(Path, config_root) / "platform.json",
                         ),
                         0o550,
                     )
@@ -831,9 +833,7 @@ def install(args: argparse.Namespace) -> Path:
                 raise
 
         _atomic_symlink(final, release_root / "current")
-        launcher_name = (
-            "openstack-platform" if mode == "operator" else "openstack-platform-helper"
-        )
+        launcher_name = "openstack-platform" if mode == "operator" else "openstack-platform-helper"
         _atomic_symlink(release_root / "current/bin" / launcher_name, bin_root / launcher_name)
         if mode == "operator":
             _atomic_symlink(
@@ -896,9 +896,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--platform-config", type=Path)
     parser.add_argument("--expected-platform-namespace")
     parser.add_argument("--expected-platform-identity-sha256")
-    parser.add_argument(
-        "--openstack-command", type=Path, help=argparse.SUPPRESS
-    )
+    parser.add_argument("--openstack-command", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--remove-archive", action="store_true")
     parser.add_argument("--install-user-units", action="store_true")
     parser.add_argument("--enable-backup-timer", action="store_true")

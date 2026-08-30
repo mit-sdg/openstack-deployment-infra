@@ -18,15 +18,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .. import remote
-from . import database as db
 from ..config import Config
+from ..validation import ValidationError, slug, uuid
+from ..validation import resource_name as validate_resource_name
+from . import database as db
 from .storage_contract import (
     RESOURCE_TYPES,
     canonical_secret_keys,
     storage_owner,
 )
-from ..validation import ValidationError, slug, uuid
-from ..validation import resource_name as validate_resource_name
 
 HelperCaller = Callable[..., Mapping[str, Any]]
 
@@ -837,7 +837,7 @@ def rotate(
                     application,
                     operation,
                     resource_type,
-                        phase=f"rotate_{resource_type}",
+                    phase=f"rotate_{resource_type}",
                     provider_id=resource.provider_id,
                     provider_name=resource.provider_name,
                     message=f"{resource_type} rotation rollback was not confirmed",
@@ -941,9 +941,7 @@ def remove(
         if operation is not None:
             raise StorageOperationError("unfinished storage removal metadata is inconsistent")
         raise ValidationError(f"storage does not exist: {', '.join(missing)}")
-    active_references = set(
-        db.active_storage_resource_ids(connection, application.application_id)
-    )
+    active_references = set(db.active_storage_resource_ids(connection, application.application_id))
     accepted = db.get_deployment(connection, application.application_id)
     referenced = [
         item
@@ -954,8 +952,7 @@ def remove(
             or (
                 accepted is not None
                 and any(
-                    key in accepted.nomad_job
-                    for key in canonical_secret_keys(item, checked_name)
+                    key in accepted.nomad_job for key in canonical_secret_keys(item, checked_name)
                 )
             )
         )

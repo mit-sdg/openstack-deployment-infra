@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import openstack_platform.controller.application_runtime as app_module
+from openstack_platform.config import PlatformConfig, RuntimeImages
 from openstack_platform.controller import database as db
 from openstack_platform.controller.application_runtime import (
     ApplicationError,
@@ -39,7 +40,6 @@ from openstack_platform.controller.application_runtime import (
     render_nomad_job,
     set_environment,
 )
-from openstack_platform.config import PlatformConfig, RuntimeImages
 from openstack_platform.controller.deployment_config import parse_configuration
 from openstack_platform.helper import production
 from openstack_platform.runtime import HttpResult
@@ -452,7 +452,9 @@ class ProviderCommandTests(unittest.TestCase):
             )
 
         with (
-            mock.patch.object(production, "helper_runtime", return_value=SimpleNamespace(platform=platform)),
+            mock.patch.object(
+                production, "helper_runtime", return_value=SimpleNamespace(platform=platform)
+            ),
             mock.patch.object(production.application, "provider_command", return_value=("worker",)),
             mock.patch.object(production.application, "delete_worker", side_effect=delete_worker),
         ):
@@ -463,7 +465,9 @@ class ProviderCommandTests(unittest.TestCase):
         self.assertEqual(observed, [APP_ID, *app_module.deployment_worker_ids(APP_ID)])
         observed.clear()
         with (
-            mock.patch.object(production, "helper_runtime", return_value=SimpleNamespace(platform=platform)),
+            mock.patch.object(
+                production, "helper_runtime", return_value=SimpleNamespace(platform=platform)
+            ),
             mock.patch.object(production.application, "provider_command", return_value=("worker",)),
             mock.patch.object(production.application, "delete_worker", side_effect=delete_worker),
         ):
@@ -939,7 +943,9 @@ class DeploymentTests(unittest.TestCase):
                         "/health",
                         timeout_seconds=5,
                         expected_marker=marker,
-                        http_caller=lambda *_args, **_kwargs: HttpResult(200, observed, b"OK"),
+                        http_caller=lambda *_args, observed=observed, **_kwargs: HttpResult(
+                            200, observed, b"OK"
+                        ),
                     ),
                     expected,
                 )

@@ -158,18 +158,14 @@ def ensure_security_groups(conn: Any, apply: bool) -> dict[str, Any]:
                 APPLICATION_PORT,
                 remote_group=groups[ingress].id,
             ),
-            Rule(
-                "ingress", "tcp", NOMAD_RPC_PORT, NOMAD_RPC_PORT, remote_group=groups[worker].id
-            ),
+            Rule("ingress", "tcp", NOMAD_RPC_PORT, NOMAD_RPC_PORT, remote_group=groups[worker].id),
         ]
     )
     expanded[ingress].append(
         Rule("ingress", "tcp", SSH_PORT, SSH_PORT, remote_group=groups[admin].id)
     )
     expanded[worker].append(
-        Rule(
-            "ingress", "tcp", APPLICATION_PORT, APPLICATION_PORT, remote_group=groups[ingress].id
-        )
+        Rule("ingress", "tcp", APPLICATION_PORT, APPLICATION_PORT, remote_group=groups[ingress].id)
     )
     expanded[builder].append(
         Rule("ingress", "tcp", SSH_PORT, SSH_PORT, remote_group=groups[admin].id)

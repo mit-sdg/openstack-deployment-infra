@@ -81,7 +81,7 @@ This prevents a checkout or management-host config from being used on a guest.
 | `versions` | Nomad, Traefik, and BuildKit versions packaged in role images. |
 | `checksums` | SHA-256 checksums for downloaded Nomad, Traefik, and BuildKit archives; these are separate from the provider checksum verified when publishing a QCOW2. |
 | `containers` | Digest-pinned container images used by storage and ingress. |
-| `paths` | Persistent and runtime paths mounted or used by role services. The configured `backups` path is also the controller-database backup root. |
+| `paths` | Persistent and runtime paths mounted or used by role services. The configured `backups` path holds separate hosted-controller, operator-state, and managed-data backup sets. |
 
 The controller database is deployment-bound. Its deployment marker hashes the
 project UUID, namespace, and a stable inventory projection containing resource
@@ -104,8 +104,7 @@ must be a direct current-user-owned mode-`0600` file. It contains:
 
 - `standard`, including worker flavor and managed-service targets;
 - `runtimeImages.bun` and `runtimeImages.node`, each pinned by OCI digest; and
-- `backupAgeRecipient`, a public `age1...` recipient used only to encrypt
-  controller database backups.
+- `backupAgeRecipient`, a public `age1...` recipient used to encrypt the hosted-controller and external operator-state SQLite backups.
 
 The recipient is not an age identity. Keep the matching
 `AGE-SECRET-KEY-...` file in operator custody, outside Git and the management

@@ -151,6 +151,7 @@ class LogService:
                 not isinstance(text, str)
                 or isinstance(next_offset, bool)
                 or not isinstance(next_offset, int)
+                or not isinstance(state, str)
                 or state not in {"running", "complete", "failed", "unknown"}
             ):
                 raise app.ApplicationError("helper returned invalid build log evidence")

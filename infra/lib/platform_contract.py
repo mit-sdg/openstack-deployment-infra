@@ -129,8 +129,11 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
             raise ContractError(f"platform contract installation {key} must be absolute")
     for key in ("inventoryFilename", "policyFilename", "databaseFilename", "sshAlias"):
         value = installation[key]
-        if not isinstance(value, str) or not value or "/" in value or any(
-            char.isspace() for char in value
+        if (
+            not isinstance(value, str)
+            or not value
+            or "/" in value
+            or any(char.isspace() for char in value)
         ):
             raise ContractError(f"platform contract installation {key} is malformed")
 

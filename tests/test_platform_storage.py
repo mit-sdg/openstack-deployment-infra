@@ -11,9 +11,25 @@ from pathlib import Path
 from unittest import mock
 
 from openstack_platform import remote
+from openstack_platform.config import load
 from openstack_platform.controller import database as db
 from openstack_platform.controller import status
-from openstack_platform.config import load
+from openstack_platform.controller.storage import (
+    StorageOperationError,
+    create,
+    remove,
+    rotate,
+    verify,
+)
+from openstack_platform.controller.storage_contract import (
+    ENVIRONMENT_KEYS,
+    FIXED_PLATFORM_ENVIRONMENT,
+    PLATFORM_ENVIRONMENT_KEYS,
+    canonical_secret_keys,
+    canonicalize_environment,
+    platform_environment_values,
+    storage_owner,
+)
 from openstack_platform.helper import production
 from openstack_platform.helper.main import HelperActionError
 from openstack_platform.helper.nomad import SecretItems, VariableSnapshot
@@ -41,22 +57,6 @@ from openstack_platform.helper.storage import (
     s3_rotate_handler,
     s3_verify,
     s3_verify_handler,
-)
-from openstack_platform.controller.storage import (
-    StorageOperationError,
-    create,
-    remove,
-    rotate,
-    verify,
-)
-from openstack_platform.controller.storage_contract import (
-    ENVIRONMENT_KEYS,
-    FIXED_PLATFORM_ENVIRONMENT,
-    PLATFORM_ENVIRONMENT_KEYS,
-    canonical_secret_keys,
-    canonicalize_environment,
-    platform_environment_values,
-    storage_owner,
 )
 from openstack_platform.validation import ValidationError
 
@@ -253,9 +253,7 @@ class ControllerStorageTests(unittest.TestCase):
                 "modifyIndex": 12,
             }
 
-        with self.assertRaisesRegex(
-            StorageOperationError, "same Idempotency-Key"
-        ):
+        with self.assertRaisesRegex(StorageOperationError, "same Idempotency-Key"):
             create(self.connection, self.config, APP_ID, ["postgres"], helper_caller=caller)
         result = create(self.connection, self.config, APP_ID, ["postgres"], helper_caller=caller)
         self.assertEqual(result.completed, ("postgres",))

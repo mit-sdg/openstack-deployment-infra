@@ -234,9 +234,7 @@ def _prepare_deployment_build(
     refs = dict(operation.refs)
     candidate = operation.candidate_digest
     if candidate is None:
-        db.checkpoint_deployment_attempt(
-            connection, operation.operation_id, status="building"
-        )
+        db.checkpoint_deployment_attempt(connection, operation.operation_id, status="building")
         with runtime.lock(state_directory, "infrastructure", deadline=deadline):
             builder_image = db.get_image_selection(connection, "builder")
             if builder_image is None:
@@ -274,9 +272,7 @@ def _prepare_deployment_build(
         if built.get("builderAbsent") is not True:
             raise app.ApplicationError("builder cleanup was not confirmed")
         candidate = oci_digest_pin(built.get("image"), field="built image")
-        expected_repository = (
-            f"{config.platform.get('addresses.storage')}:{REGISTRY_PORT}/projects/{application_slug}/app@"
-        )
+        expected_repository = f"{config.platform.get('addresses.storage')}:{REGISTRY_PORT}/projects/{application_slug}/app@"
         if not candidate.startswith(expected_repository):
             raise app.ApplicationError(
                 "build helper returned an image outside the application repository"
@@ -463,9 +459,7 @@ def _prepare_deployment_worker(
     else:
         worker_ids = app.deployment_worker_ids(application_id)
         worker_application_id = worker_ids[
-            1
-            if app.nomad_job_id(previous.nomad_job, application_slug) == application_slug
-            else 0
+            1 if app.nomad_job_id(previous.nomad_job, application_slug) == application_slug else 0
         ]
     refs = {**refs, "worker_application_id": worker_application_id}
     db.checkpoint_operation(
@@ -811,9 +805,7 @@ def _deploy_and_accept_application(
                 "predecessor_job_id": previous_job_id,
                 "predecessor_job_sha256": previous.nomad_job_sha256,
                 "predecessor_image": previous.image_digest,
-                "predecessor_worker_application_id": app.nomad_placement_id(
-                    previous.nomad_job
-                ),
+                "predecessor_worker_application_id": app.nomad_placement_id(previous.nomad_job),
             }
         )
     db.checkpoint_operation(
@@ -1135,9 +1127,11 @@ def _recover_app_deployment(
                     predecessor_image,
                 )
             ):
-                raise app.ApplicationError(
-                    "predecessor cleanup recovery evidence was incomplete"
-                )
+                raise app.ApplicationError("predecessor cleanup recovery evidence was incomplete")
+            assert isinstance(predecessor_job_id, str)
+            assert isinstance(predecessor_worker_id, str)
+            assert isinstance(predecessor_hash, str)
+            assert isinstance(predecessor_image, str)
             _cleanup_deployment(
                 config,
                 application_slug,
@@ -1420,9 +1414,7 @@ class DeploymentService:
                 deadline=selected_deadline,
             )
 
-        def prepare_environment(
-            operation_id: str, build: app.DeploymentBuild
-        ) -> dict[str, Any]:
+        def prepare_environment(operation_id: str, build: app.DeploymentBuild) -> dict[str, Any]:
             return _prepare_platform_environment(
                 self.connection,
                 self.config,
@@ -1439,9 +1431,7 @@ class DeploymentService:
             build: app.DeploymentBuild,
             refs: dict[str, Any],
         ) -> app.DeploymentWorker:
-            db.checkpoint_deployment_attempt(
-                self.connection, operation_id, status="deploying"
-            )
+            db.checkpoint_deployment_attempt(self.connection, operation_id, status="deploying")
             return _prepare_deployment_worker(
                 self.connection,
                 self.config,
@@ -1472,6 +1462,15 @@ class DeploymentService:
                 deadline=selected_deadline,
             )
 
+        def verify_project() -> None:
+            openstack.verify_project(
+                self.config.platform,
+                timeout_seconds=_remaining(
+                    selected_deadline,
+                    self.config.policy.limits.process_seconds,
+                ),
+            )
+
         result = app.execute_deployment_workflow(
             self.connection,
             self.config,
@@ -1479,13 +1478,7 @@ class DeploymentService:
             spec,
             deadline_at=_wall_deadline(selected_deadline),
             deadline=selected_deadline,
-            verify_project=lambda: openstack.verify_project(
-                self.config.platform,
-                timeout_seconds=_remaining(
-                    selected_deadline,
-                    self.config.policy.limits.process_seconds,
-                ),
-            ),
+            verify_project=verify_project,
             recover=recover,
             prepare_build=prepare_build,
             prepare_environment=prepare_environment,

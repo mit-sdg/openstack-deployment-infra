@@ -170,10 +170,7 @@ def prepare_socket_path(socket_path: str) -> None:
         socket_metadata = os.lstat(path)
     except FileNotFoundError:
         return
-    if (
-        not stat.S_ISSOCK(socket_metadata.st_mode)
-        or socket_metadata.st_uid != os.geteuid()
-    ):
+    if not stat.S_ISSOCK(socket_metadata.st_mode) or socket_metadata.st_uid != os.geteuid():
         raise FileExistsError("controller socket path is not an owned Unix socket")
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -289,11 +286,12 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("non-finite number")
 
         try:
-            return json.loads(
+            parsed: object = json.loads(
                 raw,
                 object_pairs_hook=pairs,
                 parse_constant=constant,
             )
+            return parsed
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             raise HttpError(400, "INVALID_JSON", "controller request must be strict JSON") from None
 

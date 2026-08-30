@@ -125,7 +125,7 @@ class ControllerAPI:
             def observe(
                 action: str, values: Mapping[str, object], **_bounds: object
             ) -> Mapping[str, object]:
-                return helper_caller(  # type: ignore[misc]
+                return helper_caller(
                     self.config,
                     action,
                     values,
@@ -257,7 +257,7 @@ class ControllerAPI:
         request: Request,
         *,
         allowed: set[str],
-        required: set[str] = frozenset(),
+        required: set[str] | frozenset[str] = frozenset(),
         allow_absent: bool = False,
     ) -> dict[str, Any]:
         if request.body is None and allow_absent:
@@ -387,12 +387,14 @@ class ControllerAPI:
         if claimed.result_id is not None:
             application = self._application(claimed.result_id)
         else:
-            application = db.get_application(self.connection, claimed.request_id)
-            if application is None:
+            existing = db.get_application(self.connection, claimed.request_id)
+            if existing is None:
                 created = self.applications.declare(body["slug"], application_id=claimed.request_id)
                 application = self._application(created.application_id)
-            elif application.slug != body["slug"]:
-                raise db.IdempotencyConflictError("application result does not match request")
+            else:
+                application = existing
+                if application.slug != body["slug"]:
+                    raise db.IdempotencyConflictError("application result does not match request")
             db.complete_idempotency_request(
                 self.connection,
                 request_id=claimed.request_id,

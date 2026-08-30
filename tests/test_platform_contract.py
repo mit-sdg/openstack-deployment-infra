@@ -16,9 +16,7 @@ class PlatformContractTests(unittest.TestCase):
     def test_checked_in_contract_is_the_only_source_for_shared_values(self) -> None:
         document = load_contract()
         self.assertEqual(tuple(document["roles"]["all"]), contracts.IMAGE_ROLES)
-        self.assertEqual(
-            document["ports"]["application"], contracts.APPLICATION_HOST_PORT
-        )
+        self.assertEqual(document["ports"]["application"], contracts.APPLICATION_HOST_PORT)
         self.assertEqual(
             tuple(document["inventory"]["requiredPaths"]),
             contracts.INVENTORY_REQUIRED_PATHS,
@@ -39,9 +37,9 @@ class PlatformContractTests(unittest.TestCase):
         cases.append(json.dumps(invalid_roles))
 
         duplicate_uid = json.loads(json.dumps(base))
-        duplicate_uid["accounts"]["controller"]["uid"] = duplicate_uid["accounts"][
-            "operator"
-        ]["uid"]
+        duplicate_uid["accounts"]["controller"]["uid"] = duplicate_uid["accounts"]["operator"][
+            "uid"
+        ]
         cases.append(json.dumps(duplicate_uid))
 
         with tempfile.TemporaryDirectory() as temporary:

@@ -1166,6 +1166,7 @@ def _verify_controller_boundary(
 namespace=$1
 controller="${namespace}-controller.service"
 readiness="${namespace}-controller-readiness.service"
+hosted_backup_timer="${namespace}-hosted-controller-backup.timer"
 socket="/run/${namespace}-controller/controller.sock"
 
 for attempt in {1..180}; do
@@ -1187,6 +1188,10 @@ systemctl is-active --quiet "$readiness" || {
 }
 test "$(systemctl show --property=Result --value "$readiness")" = success || {
   echo "hosted controller API readiness check did not succeed" >&2
+  exit 1
+}
+systemctl is-enabled --quiet "$hosted_backup_timer" || {
+  echo "hosted controller backup timer is not enabled" >&2
   exit 1
 }
 test "$(stat -Lc '%F|%U|%G|%a' -- "$socket")" = \

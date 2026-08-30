@@ -127,7 +127,7 @@ exited zero.
   `openstack-platform-hosted-controller-restore --yes`, followed by controller
   readiness and a fresh backup. This is not the external operator-state backup.
 - [ ] **BACKUP-01** `openstack-platform backup` produces an age-v1 encrypted
-  controller database under `<paths.backups>/controller` with checksum and final
+  external operator-state database under `<paths.backups>/controller` with checksum and final
   manifest evidence. Retention counts only complete trios. Evidence: output
   name/SHA-256 and private metadata, not database content.
 - [ ] **BACKUP-02** On admin, managed-data backup emits PostgreSQL, MongoDB, and

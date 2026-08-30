@@ -25,9 +25,7 @@ def configuration() -> dict[str, object]:
             "startScript": "start",
         },
         "runtime": {"port": 3000, "healthPath": "/health"},
-        "storageBindings": [
-            {"resourceId": RESOURCE_ID, "outputs": {"url": "DATABASE_URL"}}
-        ],
+        "storageBindings": [{"resourceId": RESOURCE_ID, "outputs": {"url": "DATABASE_URL"}}],
     }
 
 

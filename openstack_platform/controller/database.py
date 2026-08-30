@@ -1091,9 +1091,7 @@ def enqueue_operation_dispatch(
             raise DatabaseError("idempotency request is missing")
         if request.result_id is not None:
             if (request.result_kind, request.result_id) != ("operation", identifier):
-                raise IdempotencyConflictError(
-                    "idempotency request already has a different result"
-                )
+                raise IdempotencyConflictError("idempotency request already has a different result")
             raise DatabaseError("idempotency result has no operation dispatch")
         active = connection.execute(
             "SELECT operation_id, kind FROM operation_dispatches "

@@ -30,8 +30,10 @@ from typing import Any, ParamSpec, TypeVar, cast
 
 from . import host_keys, remote, runtime
 from .config import PlatformConfig, load_platform
-from .contracts import IMAGE_ROLES, PERSISTENT_ROLES
+from .contracts import IMAGE_ROLES as IMAGE_ROLES
+from .contracts import PERSISTENT_ROLES as PERSISTENT_ROLES
 from .validation import ValidationError, commit, openstack_uuid, sha256_hex, uuid
+
 _METADATA_VERSION = "1"
 _IMAGE_INVENTORY_LIMIT = 500
 _IMAGE_DETAIL_CONCURRENCY = 8

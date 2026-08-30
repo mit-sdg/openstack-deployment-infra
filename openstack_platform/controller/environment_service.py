@@ -113,9 +113,7 @@ class EnvironmentService:
         }
         if mutation == "set":
             recovered.update(
-                name
-                for name in intended_names & present
-                if ownership.get(name, "staff") == "staff"
+                name for name in intended_names & present if ownership.get(name, "staff") == "staff"
             )
         db.set_environment_keys(
             self.connection,
@@ -177,8 +175,7 @@ class EnvironmentService:
             expected_kind = f"app.env.{request.action}"
             unfinished = db.get_unfinished_operation(self.connection, scope)
             resuming = unfinished is not None and (
-                unfinished.operation_id == operation_id
-                and unfinished.kind == expected_kind
+                unfinished.operation_id == operation_id and unfinished.kind == expected_kind
             )
             if unfinished is not None:
                 if not unfinished.kind.startswith("app.env."):
@@ -211,9 +208,7 @@ class EnvironmentService:
                 )
             mutation = "unset" if removals else "set"
             if resuming:
-                db.renew_operation_deadline(
-                    self.connection, operation_id, wall_deadline(deadline)
-                )
+                db.renew_operation_deadline(self.connection, operation_id, wall_deadline(deadline))
                 db.checkpoint_operation(
                     self.connection,
                     operation_id,
@@ -231,7 +226,10 @@ class EnvironmentService:
                     refs={"key_names": intended_names, "mutation": mutation},
                 )
             try:
-                def helper_caller(action, values, **_bounds):
+
+                def helper_caller(
+                    action: str, values: Mapping[str, object], **_bounds: object
+                ) -> Mapping[str, object]:
                     return self._helper(action, values, deadline=deadline)
 
                 if removals:
@@ -257,9 +255,7 @@ class EnvironmentService:
                         helper_caller=helper_caller,
                     )
                 names = result.get("keys")
-                if not isinstance(names, list) or any(
-                    not isinstance(item, str) for item in names
-                ):
+                if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
                     raise app.ApplicationError("helper returned invalid environment key evidence")
                 if (
                     refreshed.desired_running

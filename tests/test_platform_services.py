@@ -7,10 +7,12 @@ from pathlib import Path
 from unittest import mock
 
 from openstack_platform import openstack
+from openstack_platform.config import load
 from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
 from openstack_platform.controller import storage
 from openstack_platform.controller.application_service import ApplicationCreated, ApplicationService
+from openstack_platform.controller.deployment_config import parse_configuration
 from openstack_platform.controller.environment_service import (
     EnvironmentMutationRequest,
     EnvironmentMutationResult,
@@ -21,8 +23,6 @@ from openstack_platform.controller.storage_service import (
     StorageMutationResult,
     StorageService,
 )
-from openstack_platform.config import load
-from openstack_platform.controller.deployment_config import parse_configuration
 from openstack_platform.validation import ValidationError
 from tests.product_fixtures import accept_deployment
 
@@ -264,9 +264,10 @@ class ProductServiceTests(unittest.TestCase):
         self.assertIsNone(persisted.worker_server_id)
         self.assertEqual(db.get_deployment(self.connection, application_id).image_digest, image)  # type: ignore[union-attr]
         self.assertEqual(
-            [item.key_name for item in db.list_environment_keys(
-                self.connection, application_id=application_id
-            )],
+            [
+                item.key_name
+                for item in db.list_environment_keys(self.connection, application_id=application_id)
+            ],
             ["API_TOKEN"],
         )
         removal = next(values for action, values in calls if action == "app.remove")
@@ -344,13 +345,16 @@ class ProductServiceTests(unittest.TestCase):
         persisted = db.get_application(self.connection, application_id)
         assert persisted is not None
         self.assertTrue(persisted.desired_running)
-        self.assertEqual((persisted.worker_server_id, persisted.worker_port_id), (server_id, port_id))
+        self.assertEqual(
+            (persisted.worker_server_id, persisted.worker_port_id), (server_id, port_id)
+        )
         self.assertEqual(db.get_deployment(self.connection, application_id).nomad_version, 9)  # type: ignore[union-attr]
         self.assertNotIn("app.build", calls)
         self.assertEqual(
-            [item.key_name for item in db.list_environment_keys(
-                self.connection, application_id=application_id
-            )],
+            [
+                item.key_name
+                for item in db.list_environment_keys(self.connection, application_id=application_id)
+            ],
             ["API_TOKEN"],
         )
 
@@ -406,8 +410,13 @@ class ProductServiceTests(unittest.TestCase):
                 service.delete("demo-app", confirmation="demo-app")
             unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
             assert unfinished is not None
-            self.assertEqual((unfinished.kind, unfinished.phase), ("app.delete", "storage_removing"))
-            self.assertEqual(db.get_managed_resource(self.connection, resource.resource_id).lifecycle_state, "recovery_required")  # type: ignore[union-attr]
+            self.assertEqual(
+                (unfinished.kind, unfinished.phase), ("app.delete", "storage_removing")
+            )
+            self.assertEqual(
+                db.get_managed_resource(self.connection, resource.resource_id).lifecycle_state,
+                "recovery_required",
+            )  # type: ignore[union-attr]
             with self.assertRaises(db.UnfinishedOperationError):
                 EnvironmentService(
                     self.connection,
@@ -422,20 +431,26 @@ class ProductServiceTests(unittest.TestCase):
             service.delete("demo-app", confirmation="demo-app")
 
         self.assertIsNone(db.get_application(self.connection, application_id))
-        self.assertEqual(db.get_slug_tombstone(self.connection, "demo-app").application_id, application_id)  # type: ignore[union-attr]
+        self.assertEqual(
+            db.get_slug_tombstone(self.connection, "demo-app").application_id, application_id
+        )  # type: ignore[union-attr]
         self.assertEqual(len(db.list_deployment_attempts(self.connection, application_id)), 1)
-        self.assertEqual(db.list_managed_resources(self.connection, application_id=application_id), [])
-        self.assertEqual(db.list_environment_keys(self.connection, application_id=application_id), [])
+        self.assertEqual(
+            db.list_managed_resources(self.connection, application_id=application_id), []
+        )
+        self.assertEqual(
+            db.list_environment_keys(self.connection, application_id=application_id), []
+        )
         operation = db.get_operation(self.connection, unfinished.operation_id)
         self.assertEqual((operation.status, operation.phase), ("succeeded", "tombstoned"))  # type: ignore[union-attr]
         destructive_s3 = [
-            values for action, values in calls
+            values
+            for action, values in calls
             if action == "storage.s3.remove" and values["preflight"] is False
         ]
         self.assertEqual([item["recover"] for item in destructive_s3], [False, True])
         first_storage = next(
-            index for index, (action, _values) in enumerate(calls)
-            if action == "storage.s3.remove"
+            index for index, (action, _values) in enumerate(calls) if action == "storage.s3.remove"
         )
         self.assertEqual(calls[0][0], "app.remove")
         self.assertIn("jobId", calls[0][1])

@@ -203,13 +203,10 @@ class AsyncOperationExecutor:
                         operation = db.get_operation(connection, operation_id)
                         dispatch_status = (
                             "recovery_required"
-                            if operation is not None
-                            and operation.status == "recovery_required"
+                            if operation is not None and operation.status == "recovery_required"
                             else "finished"
                         )
-                        db.set_operation_dispatch_status(
-                            connection, operation_id, dispatch_status
-                        )
+                        db.set_operation_dispatch_status(connection, operation_id, dispatch_status)
                     finally:
                         self._slots.release()
                         self._queue.task_done()

@@ -11,12 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .application_models import Manifest, StorageBinding
-from .storage_contract import (
-    PLATFORM_ENVIRONMENT_KEYS,
-    RESERVED_ENVIRONMENT_PREFIX,
-    RESOURCE_OUTPUTS,
-)
 from ..validation import (
     ValidationError,
     env_key,
@@ -26,6 +20,12 @@ from ..validation import (
     resource_name,
     script_name,
     uuid,
+)
+from .application_models import Manifest, StorageBinding
+from .storage_contract import (
+    PLATFORM_ENVIRONMENT_KEYS,
+    RESERVED_ENVIRONMENT_PREFIX,
+    RESOURCE_OUTPUTS,
 )
 
 _SCHEMA_VERSION = 1
@@ -156,9 +156,7 @@ def parse_configuration(payload: bytes | str | Mapping[str, Any]) -> DeploymentC
     if len(packages) != len(set(packages)):
         raise ValidationError("build package paths must be unique")
     raw_build_script = build["buildScript"]
-    build_script = (
-        None if raw_build_script is None else script_name(raw_build_script)
-    )
+    build_script = None if raw_build_script is None else script_name(raw_build_script)
     start = script_name(build["startScript"])
 
     runtime = _object(document["runtime"], {"port", "healthPath"}, "runtime configuration")
@@ -225,9 +223,7 @@ def validate_checkout(
     if not root.is_dir():
         raise ValidationError("source checkout is not a directory")
     lock_names = (
-        ("bun.lock", "bun.lockb")
-        if configuration.runtime == "bun"
-        else ("package-lock.json",)
+        ("bun.lock", "bun.lockb") if configuration.runtime == "bun" else ("package-lock.json",)
     )
     for package in configuration.packages:
         directory = resolve_inside(root, package, field="package path")
@@ -289,11 +285,6 @@ def _direct_file(path: Path, maximum_bytes: int) -> bool:
 def branch_name(value: object) -> str:
     if not isinstance(value, str) or not _BRANCH.fullmatch(value):
         raise ValidationError("repository branch is malformed")
-    if (
-        value.endswith(("/", ".", ".lock"))
-        or ".." in value
-        or "//" in value
-        or "@{" in value
-    ):
+    if value.endswith(("/", ".", ".lock")) or ".." in value or "//" in value or "@{" in value:
         raise ValidationError("repository branch is malformed")
     return value

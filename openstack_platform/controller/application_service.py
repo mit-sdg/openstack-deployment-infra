@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Literal
 
 from .. import openstack, runtime
+from ..config import Config
+from ..validation import ValidationError, bounded_text, slug, uuid
 from . import application_runtime as app
 from . import database as db
-from ..config import Config
 from .service_support import (
     HelperCaller,
     operation_deadline,
@@ -21,7 +22,6 @@ from .service_support import (
     wall_deadline,
 )
 from .storage_contract import storage_owner
-from ..validation import ValidationError, bounded_text, slug, uuid
 
 _RESERVED_APPLICATION_SLUGS = {"admin", "api", "auth", "status", "www"}
 
@@ -93,9 +93,7 @@ class ApplicationService:
         )
         return ApplicationCreated(identifier, checked_slug, url, False)
 
-    def _worker_identity(
-        self, result: Mapping[str, object]
-    ) -> tuple[str, str, str, str]:
+    def _worker_identity(self, result: Mapping[str, object]) -> tuple[str, str, str, str]:
         if result.get("ready") is not True or result.get("absent") is True:
             raise app.ApplicationError("worker readiness was not confirmed")
         return (
@@ -120,9 +118,7 @@ class ApplicationService:
             if unfinished.kind != kind or any(
                 unfinished.refs.get(key) != value for key, value in refs.items()
             ):
-                raise db.UnfinishedOperationError(
-                    scope, unfinished.operation_id, unfinished.kind
-                )
+                raise db.UnfinishedOperationError(scope, unfinished.operation_id, unfinished.kind)
             operation = db.renew_operation_deadline(
                 self.connection, unfinished.operation_id, wall_deadline(deadline)
             )
@@ -156,7 +152,9 @@ class ApplicationService:
         with runtime.lock(self.state_directory, scope, deadline=deadline):
             openstack.verify_project(
                 self.config.platform,
-                timeout_seconds=remaining_seconds(deadline, self.config.policy.limits.process_seconds),
+                timeout_seconds=remaining_seconds(
+                    deadline, self.config.policy.limits.process_seconds
+                ),
             )
             current = db.get_application(self.connection, application.application_id)
             if current is None:
@@ -211,7 +209,10 @@ class ApplicationService:
                 )
                 if observed.get("absent") is not True:
                     identity = self._worker_identity(observed)
-                    if identity[0] != refs["worker_server_id"] or identity[2] != refs["worker_port_id"]:
+                    if (
+                        identity[0] != refs["worker_server_id"]
+                        or identity[2] != refs["worker_port_id"]
+                    ):
                         raise app.ApplicationError("active worker identity did not match SQLite")
                 worker = self.helper_caller(
                     self.config,
@@ -220,7 +221,9 @@ class ApplicationService:
                     deadline=deadline,
                 )
                 if worker.get("absent") is not True:
-                    raise app.ApplicationError("exact worker or fixed-port absence was not confirmed")
+                    raise app.ApplicationError(
+                        "exact worker or fixed-port absence was not confirmed"
+                    )
                 db.set_application_runtime(self.connection, current.application_id, running=False)
                 db.checkpoint_operation(
                     self.connection, operation.operation_id, phase="worker_absent", refs=refs
@@ -245,7 +248,9 @@ class ApplicationService:
         with runtime.lock(self.state_directory, scope, deadline=deadline):
             openstack.verify_project(
                 self.config.platform,
-                timeout_seconds=remaining_seconds(deadline, self.config.policy.limits.process_seconds),
+                timeout_seconds=remaining_seconds(
+                    deadline, self.config.policy.limits.process_seconds
+                ),
             )
             current = db.get_application(self.connection, application.application_id)
             if current is None:
@@ -279,9 +284,7 @@ class ApplicationService:
                     raise ValidationError("select a worker image before enable")
                 image_id = worker_image.image_id
             else:
-                image_id = uuid(
-                    unfinished.refs.get("worker_image_id"), field="worker image UUID"
-                )
+                image_id = uuid(unfinished.refs.get("worker_image_id"), field="worker image UUID")
             refs: dict[str, object] = {
                 "application_id": current.application_id,
                 "slug": current.slug,
@@ -336,8 +339,7 @@ class ApplicationService:
                     "worker_port_name": port_name,
                 }
                 if any(
-                    key in refs and refs[key] != value
-                    for key, value in observed_identity.items()
+                    key in refs and refs[key] != value for key, value in observed_identity.items()
                 ):
                     raise app.ApplicationError("enabling worker identity drifted")
                 refs.update(observed_identity)
@@ -351,7 +353,11 @@ class ApplicationService:
                         1,
                         min(
                             300,
-                            int(remaining_seconds(deadline, self.config.policy.limits.process_seconds))
+                            int(
+                                remaining_seconds(
+                                    deadline, self.config.policy.limits.process_seconds
+                                )
+                            )
                             // self.config.policy.limits.poll_interval_seconds,
                         ),
                     ),
@@ -413,7 +419,9 @@ class ApplicationService:
         with runtime.lock(self.state_directory, scope, deadline=deadline):
             openstack.verify_project(
                 self.config.platform,
-                timeout_seconds=remaining_seconds(deadline, self.config.policy.limits.process_seconds),
+                timeout_seconds=remaining_seconds(
+                    deadline, self.config.policy.limits.process_seconds
+                ),
             )
             current = db.get_application(self.connection, application.application_id)
             if current is None:
@@ -427,9 +435,7 @@ class ApplicationService:
                 current, "app.delete", refs, deadline, operation_id=request_id
             )
             try:
-                deployment = db.get_deployment(
-                    self.connection, current.application_id
-                )
+                deployment = db.get_deployment(self.connection, current.application_id)
                 if deployment is not None:
                     job_id = app.nomad_job_id(deployment.nomad_job, current.slug)
                     db.checkpoint_operation(
@@ -450,9 +456,7 @@ class ApplicationService:
                         deadline=deadline,
                     )
                     if stopped.get("jobAbsent") is not True:
-                        raise app.ApplicationError(
-                            "accepted workload withdrawal was not confirmed"
-                        )
+                        raise app.ApplicationError("accepted workload withdrawal was not confirmed")
                 db.checkpoint_operation(
                     self.connection,
                     operation.operation_id,
@@ -518,9 +522,7 @@ class ApplicationService:
                     db.set_environment_keys(
                         self.connection,
                         application_id=current.application_id,
-                        owner=storage_owner(
-                            resource.resource_type, resource.resource_name
-                        ),
+                        owner=storage_owner(resource.resource_type, resource.resource_name),
                         keys=(),
                     )
                     db.delete_managed_resource(
@@ -548,7 +550,10 @@ class ApplicationService:
                 removed = self.helper_caller(
                     self.config, "app.remove", {"slug": current.slug}, deadline=deadline
                 )
-                if removed.get("jobAbsent") is not True or removed.get("variableAbsent") is not True:
+                if (
+                    removed.get("jobAbsent") is not True
+                    or removed.get("variableAbsent") is not True
+                ):
                     raise app.ApplicationError("job or Variable absence was not confirmed")
                 db.checkpoint_operation(
                     self.connection, operation.operation_id, phase="variable_absent", refs=refs

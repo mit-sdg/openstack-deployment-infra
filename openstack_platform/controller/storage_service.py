@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Literal
 
 from .. import openstack, runtime
+from ..config import Config
+from ..validation import ValidationError, resource_name, uuid
 from . import database as db
 from . import storage
-from ..config import Config
 from .service_support import (
     HelperCaller,
     operation_deadline,
@@ -19,7 +20,6 @@ from .service_support import (
     remaining_seconds,
     wall_deadline,
 )
-from ..validation import ValidationError, resource_name, uuid
 
 StorageAction = Literal["create", "verify", "rotate", "remove"]
 
@@ -97,9 +97,7 @@ class StorageService:
             def call_helper(
                 action: str, values: Mapping[str, object], **_bounds: object
             ) -> Mapping[str, object]:
-                return self.helper_caller(
-                    self.config, action, values, deadline=deadline
-                )
+                return self.helper_caller(self.config, action, values, deadline=deadline)
 
             if request.action == "create":
                 result = storage.create(

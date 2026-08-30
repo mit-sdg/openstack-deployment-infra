@@ -143,9 +143,10 @@ policy `backupAgeRecipient`, and stages it through the pinned admin alias at:
 Helper acceptance verifies the age-v1 header and ciphertext SHA-256, then
 publishes the ciphertext, checksum, and manifest under
 `<paths.backups>/controller/`. The manifest is the commit marker. Retention counts only
-complete evidence trios. This backup contains controller SQLite state only,
-not managed PostgreSQL, MongoDB, Garage data, registry blobs, or an age
-identity.
+complete evidence trios. This backup contains only the external operator CLI
+SQLite state. It does not contain the hosted controller database, managed
+PostgreSQL, MongoDB, Garage data, registry blobs, or an age identity. The
+hosted-controller backup and restore procedure is in [Operations](OPERATIONS.md#hosted-controller-database-on-admin).
 
 ### Restore operator state offline
 

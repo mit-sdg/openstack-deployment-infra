@@ -129,9 +129,7 @@ CONTROLLER_BACKUP_DIRECTORY = _string(
     _DIRECTORIES.get("controllerBackup"), "directories.controllerBackup"
 )
 
-INSTALLATION_OPERATOR_ROOT = _string(
-    _INSTALLATION.get("operatorRoot"), "installation.operatorRoot"
-)
+INSTALLATION_OPERATOR_ROOT = _string(_INSTALLATION.get("operatorRoot"), "installation.operatorRoot")
 INSTALLATION_SYSTEM_CONFIG_ROOT = _string(
     _INSTALLATION.get("systemConfigRoot"), "installation.systemConfigRoot"
 )
@@ -142,14 +140,10 @@ INVENTORY_FILENAME = _string(
     _INSTALLATION.get("inventoryFilename"), "installation.inventoryFilename"
 )
 POLICY_FILENAME = _string(_INSTALLATION.get("policyFilename"), "installation.policyFilename")
-DATABASE_FILENAME = _string(
-    _INSTALLATION.get("databaseFilename"), "installation.databaseFilename"
-)
+DATABASE_FILENAME = _string(_INSTALLATION.get("databaseFilename"), "installation.databaseFilename")
 OPERATOR_SSH_ALIAS = _string(_INSTALLATION.get("sshAlias"), "installation.sshAlias")
 OPERATOR_ACCOUNT_NAME = _string(_OPERATOR_ACCOUNT.get("name"), "accounts.operator.name")
-OPERATOR_ACCOUNT_UID = _positive_id(
-    _OPERATOR_ACCOUNT.get("uid"), "accounts.operator.uid"
-)
+OPERATOR_ACCOUNT_UID = _positive_id(_OPERATOR_ACCOUNT.get("uid"), "accounts.operator.uid")
 
 DEPLOYMENT_ROUTE_HEADER = _string(
     _PROTOCOL.get("deploymentRouteHeader"), "protocol.deploymentRouteHeader"

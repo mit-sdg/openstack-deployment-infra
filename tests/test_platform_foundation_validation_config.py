@@ -134,7 +134,6 @@ class CommonValidationTests(unittest.TestCase):
                 outside.unlink()
 
 
-
 class ConfigTests(unittest.TestCase):
     def test_checked_in_policy_example_loads(self) -> None:
         path = Path(__file__).resolve().parents[1] / "config/platform-policy.example.json"

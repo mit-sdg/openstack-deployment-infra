@@ -89,18 +89,31 @@ does not prove that a user-facing application workflow exists.
 If the request fails, use [Public ingress](PUBLIC_INGRESS.md) to check DNS, TLS,
 origin routing, and `Host` preservation separately.
 
-## 4. Create a management-state backup
+## 4. Create both SQLite backups
+
+Create the hosted-controller backup on admin:
 
 ```bash
-management_backup="$($PLATFORM_CLI backup)"
-printf '%s\n' "$management_backup"
-grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$' \
-  <<<"$management_backup"
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  systemctl start "$PLATFORM_NAMESPACE-hosted-controller-backup.service"
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  journalctl -u "$PLATFORM_NAMESPACE-hosted-controller-backup.service" -n 5 --no-pager
 ```
 
-The backup contains controller SQLite state only. It is encrypted on the
-operator host and accepted under `<paths.backups>/controller` on admin as a
-ciphertext/checksum/manifest trio. The output exposes only the name and
+A successful run reports `hosted-controller-backup=... sha256=...` and commits
+its evidence under `<paths.backups>/hosted-controller`.
+
+Back up the separate external operator CLI state:
+
+```bash
+operator_backup="$($PLATFORM_CLI backup)"
+printf '%s\n' "$operator_backup"
+grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$' \
+  <<<"$operator_backup"
+```
+
+This evidence is accepted under `<paths.backups>/controller`. Neither SQLite
+backup substitutes for the other; both outputs expose only a name and
 ciphertext checksum.
 
 ## 5. Back up and restore-check managed data
@@ -152,11 +165,13 @@ identity.
 ```bash
 systemctl --user is-enabled openstack-platform-backup.timer
 ssh -F "$SSH_CONFIG" platform-admin -- \
+  systemctl is-enabled "$PLATFORM_NAMESPACE-hosted-controller-backup.timer"
+ssh -F "$SSH_CONFIG" platform-admin -- \
   systemctl is-enabled "$PLATFORM_NAMESPACE-platform-backup.timer"
 ```
 
-The operator timer covers controller SQLite only. The admin timer covers
-PostgreSQL, MongoDB, and Garage. Registry blobs are not backed up and are
+The timers cover external operator state, hosted-controller state, and managed
+PostgreSQL/MongoDB/Garage data respectively. Registry blobs are not backed up and are
 rebuilt from source.
 
 You have now verified the complete supported pre-management operating result.

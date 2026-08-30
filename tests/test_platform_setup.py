@@ -225,6 +225,7 @@ class SetupControllerVerificationTests(unittest.TestCase):
         script = command.call_args.kwargs["stdin"].decode("utf-8")
         self.assertIn('systemctl is-active --quiet "$controller"', script)
         self.assertIn('systemctl is-active --quiet "$readiness"', script)
+        self.assertIn('systemctl is-enabled --quiet "$hosted_backup_timer"', script)
         self.assertIn("socket|platform-controller|controller-api|660", script)
         self.assertIn("--unix-socket", script)
         self.assertIn('test "$operator_access_status" -eq 7', script)
