@@ -333,6 +333,15 @@ jobs:
           COMMIT_SHA: ${{ needs.publication-context.outputs.commit_sha }}
           OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
           PLATFORM_CONFIG_JSON: ${{ secrets.PLATFORM_CONFIG_JSON }}
+          RELEASE_COMPONENT_MANIFEST_JSON: ${{ secrets.RELEASE_COMPONENT_MANIFEST_JSON }}
+          RELEASE_COMPONENT_SBOM_JSON: ${{ secrets.RELEASE_COMPONENT_SBOM_JSON }}
+          RELEASE_COMPONENT_PROVENANCE_JSON: ${{ secrets.RELEASE_COMPONENT_PROVENANCE_JSON }}
+          RELEASE_ARTIFACT_MANIFEST_JSON: ${{ secrets.RELEASE_ARTIFACT_MANIFEST_JSON }}
+          RELEASE_ARTIFACT_SBOM_JSON: ${{ secrets.RELEASE_ARTIFACT_SBOM_JSON }}
+          RELEASE_ARTIFACT_PROVENANCE_JSON: ${{ secrets.RELEASE_ARTIFACT_PROVENANCE_JSON }}
+          RELEASE_COMPONENT_SIGNATURE_BASE64: ${{ secrets.RELEASE_COMPONENT_SIGNATURE_BASE64 }}
+          RELEASE_ARTIFACT_SIGNATURE_BASE64: ${{ secrets.RELEASE_ARTIFACT_SIGNATURE_BASE64 }}
+          RELEASE_TRUST_ROOT_PEM: ${{ secrets.RELEASE_TRUST_ROOT_PEM }}
         run: |
           set -euo pipefail
           test -n "$OS_PROJECT_ID"
@@ -366,8 +375,43 @@ jobs:
           # schema this commit expects. Without this the first symptom is an
           # opaque Nix evaluation error an hour into the publish matrix.
           python3 infra/lib/platform_config.py validate
+          for name in \
+            RELEASE_COMPONENT_MANIFEST_JSON RELEASE_COMPONENT_SBOM_JSON \
+            RELEASE_COMPONENT_PROVENANCE_JSON RELEASE_ARTIFACT_MANIFEST_JSON \
+            RELEASE_ARTIFACT_SBOM_JSON RELEASE_ARTIFACT_PROVENANCE_JSON \
+            RELEASE_COMPONENT_SIGNATURE_BASE64 RELEASE_ARTIFACT_SIGNATURE_BASE64 \
+            RELEASE_TRUST_ROOT_PEM; do
+            test -n "${!name}"
+          done
+          install -d -m 0700 release-evidence/artifacts
+          printf '%s\n' "$RELEASE_COMPONENT_MANIFEST_JSON" > release-evidence/release-manifest.json
+          printf '%s\n' "$RELEASE_COMPONENT_SBOM_JSON" > release-evidence/release.sbom.json
+          printf '%s\n' "$RELEASE_COMPONENT_PROVENANCE_JSON" > release-evidence/release.provenance.json
+          printf '%s\n' "$RELEASE_ARTIFACT_MANIFEST_JSON" > release-evidence/artifacts/role-artifacts.json
+          printf '%s\n' "$RELEASE_ARTIFACT_SBOM_JSON" > release-evidence/artifacts/role-artifacts.sbom.spdx.json
+          printf '%s\n' "$RELEASE_ARTIFACT_PROVENANCE_JSON" > release-evidence/artifacts/role-artifacts.provenance.json
+          printf '%s' "$RELEASE_COMPONENT_SIGNATURE_BASE64" | base64 --decode > release-evidence/release-manifest.sig
+          printf '%s' "$RELEASE_ARTIFACT_SIGNATURE_BASE64" | base64 --decode > release-evidence/artifacts/role-artifacts.sig
+          printf '%s\n' "$RELEASE_TRUST_ROOT_PEM" > release-evidence/trust-root.pem
+          chmod -R go-rwx release-evidence
+          python3 -m openstack_platform.release_manifest verify \
+            --repository . --commit "$COMMIT_SHA" \
+            --manifest release-evidence/release-manifest.json \
+            --signature release-evidence/release-manifest.sig \
+            --trust-root release-evidence/trust-root.pem
+          python3 -m openstack_platform.release_manifest artifact-verify \
+            --component-manifest release-evidence/release-manifest.json \
+            --manifest release-evidence/artifacts/role-artifacts.json \
+            --signature release-evidence/artifacts/role-artifacts.sig \
+            --trust-root release-evidence/trust-root.pem
           project=$(python3 infra/lib/platform_config.py get project)
           printf 'OS_PROJECT_NAME=%s\n' "$project" >> "$GITHUB_ENV"
+          printf '%s\n' \
+            'PLATFORM_RELEASE_MANIFEST=${{ github.workspace }}/release-evidence/release-manifest.json' \
+            'PLATFORM_ARTIFACT_MANIFEST=${{ github.workspace }}/release-evidence/artifacts/role-artifacts.json' \
+            'PLATFORM_ARTIFACT_SIGNATURE=${{ github.workspace }}/release-evidence/artifacts/role-artifacts.sig' \
+            'PLATFORM_ARTIFACT_TRUST_ROOT=${{ github.workspace }}/release-evidence/trust-root.pem' \
+            >> "$GITHUB_ENV"
 
       - name: Build role image
         env:
@@ -384,7 +428,39 @@ jobs:
           qcow=$(find -L "result-${{ matrix.role }}" -type f -name '*.qcow2' -print -quit)
           test -n "$qcow"
           sha256sum "$qcow"
-          printf 'qcow=%s\n' "$qcow" >> "$GITHUB_OUTPUT"
+          nix_output=$(readlink -f "result-${{ matrix.role }}")
+          path_info="$RUNNER_TEMP/${{ matrix.role }}.path-info.json"
+          nix path-info --json --recursive "$nix_output" > "$path_info"
+          printf 'qcow=%s\nnix_output=%s\npath_info=%s\n' \
+            "$qcow" "$nix_output" "$path_info" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signed role artifact
+        env:
+          COMMIT_SHA: ${{ needs.publication-context.outputs.commit_sha }}
+          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
+        run: |
+          set -euo pipefail
+          verification=$(python3 -m openstack_platform.release_manifest verify-role \
+            --component-manifest "$PLATFORM_RELEASE_MANIFEST" \
+            --manifest "$PLATFORM_ARTIFACT_MANIFEST" \
+            --signature "$PLATFORM_ARTIFACT_SIGNATURE" \
+            --trust-root "$PLATFORM_ARTIFACT_TRUST_ROOT" \
+            --role "${{ matrix.role }}" \
+            --qcow2 "${{ steps.artifact.outputs.qcow }}" \
+            --path-info "${{ steps.artifact.outputs.path_info }}" \
+            --output-store-path "${{ steps.artifact.outputs.nix_output }}" \
+            --platform "$PLATFORM_CONFIG" \
+            --commit "$COMMIT_SHA")
+          while IFS='=' read -r key value; do
+            case "$key" in
+              artifact_manifest_sha256) name=PLATFORM_ARTIFACT_MANIFEST_SHA256 ;;
+              qcow2_sha256) name=PLATFORM_ARTIFACT_QCOW2_SHA256 ;;
+              nix_closure_sha256) name=PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256 ;;
+              nix_output) name=PLATFORM_ARTIFACT_NIX_OUTPUT ;;
+              *) echo "unexpected artifact verification field" >&2; exit 1 ;;
+            esac
+            printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+          done <<< "$verification"
 
       - name: Boot role image with config drive
         run: tests/smoke_openstack_image.sh "${{ matrix.role }}" "${{ steps.artifact.outputs.qcow }}"
@@ -454,7 +530,9 @@ jobs:
           set -euo pipefail
           infra/openstack/publish_nixos_image.sh \
             "${{ matrix.role }}" \
-            "${{ steps.artifact.outputs.qcow }}"
+            "${{ steps.artifact.outputs.qcow }}" \
+            "${{ steps.artifact.outputs.nix_output }}" \
+            "${{ steps.artifact.outputs.path_info }}"
 
       - name: Remove private deployment configuration
         if: always()

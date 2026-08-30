@@ -148,10 +148,13 @@ public route to return `OK` before reporting completion.
 
 Before `--apply`, generate and verify the signed compatibility manifest, SBOM,
 and provenance described in [Release supply-chain evidence](RELEASE_SUPPLY_CHAIN.md).
-Add `PLATFORM_RELEASE_MANIFEST`, `PLATFORM_RELEASE_SIGNATURE`, and
-`PLATFORM_RELEASE_TRUST_ROOT` to the private setup environment file. Setup
-verifies the complete component set before creating its workspace or calling
-Nix/OpenStack.
+Add the three `PLATFORM_RELEASE_*` paths and the signed post-build
+`PLATFORM_ARTIFACT_MANIFEST`, `PLATFORM_ARTIFACT_SIGNATURE`, and
+`PLATFORM_ARTIFACT_TRUST_ROOT` paths to the private setup environment file.
+Setup verifies both signed manifests and their source binding before creating
+its workspace or calling Nix/OpenStack. Each locally built QCOW2, recursive Nix
+closure, and publication projection must then match its artifact record before
+upload or selection.
 
 Run from the clean repository root:
 

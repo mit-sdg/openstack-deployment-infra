@@ -26,10 +26,16 @@ from typing import Any, NoReturn, TextIO
 from uuid import UUID
 
 from . import durable
+from . import openstack as platform_openstack
 from .config import load_platform, load_policy
 from .contracts import IMAGE_ROLES, OPERATOR_SSH_ALIAS, PERSISTENT_ROLES
 from .installation import OPERATOR_ROOT
-from .release_manifest import ReleaseVerificationError, verify_from_environment
+from .release_manifest import (
+    ReleaseVerificationError,
+    verify_artifact_from_environment,
+    verify_from_environment,
+    verify_role_artifact,
+)
 
 _ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 _SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
@@ -811,6 +817,8 @@ def _existing_image_id(
     role: str,
     commit: str,
     namespace: str,
+    artifact_manifest_sha256: str,
+    artifact: Mapping[str, Any],
 ) -> str | None:
     rows = _json_command(
         (wrapper, "image", "list", "--private", "--name", name, "-f", "json"),
@@ -835,6 +843,13 @@ def _existing_image_id(
         not isinstance(properties, dict)
         or properties.get(f"{key}_source_commit") != commit
         or properties.get(f"{key}_role") != role
+        or properties.get(f"{key}_artifact_manifest_sha256") != artifact_manifest_sha256
+        or properties.get(f"{key}_qcow2_sha256") != artifact.get("qcow2Sha256")
+        or properties.get(f"{key}_nix_closure_sha256") != artifact.get("nixClosureSha256")
+        or properties.get(f"{key}_nix_output") != artifact.get("nixOutput")
+        or (detail.get("os_hash_algo") or detail.get("OS Hash Algo")) != "sha256"
+        or (detail.get("os_hash_value") or detail.get("OS Hash Value"))
+        != artifact.get("qcow2Sha256")
         or (detail.get("status") or detail.get("Status")) != "active"
     ):
         _fail(f"existing image does not match this setup release: {name}")
@@ -850,6 +865,8 @@ def _build_and_publish_images(
     provider_environment: Mapping[str, str],
     python_store: Path,
     commit: str,
+    artifact_manifest: Mapping[str, Any],
+    artifact_manifest_path: Path,
 ) -> dict[str, str]:
     images_directory = paths.workspace / "images"
     _private_directory(images_directory)
@@ -861,8 +878,15 @@ def _build_and_publish_images(
     child["SOURCE_COMMIT"] = commit
     child["PYTHONPATH"] = str(paths.repository)
     child["PATH"] = f"{python_store / 'bin'}:{os.environ.get('PATH', '')}"
+    artifact_manifest_sha256 = hashlib.sha256(artifact_manifest_path.read_bytes()).hexdigest()
+    role_artifacts = artifact_manifest["roleArtifacts"]
     for role in IMAGE_ROLES:
         name = str(platform["images"][role])
+        publication_metadata = dict(
+            platform_openstack.publisher_metadata(load_platform(paths.platform), role, commit)
+        )
+        if role_artifacts[role]["publicationMetadata"] != publication_metadata:
+            _fail(f"signed publication metadata does not match setup inventory for {role}")
         existing = _existing_image_id(
             paths.openstack_wrapper,
             child,
@@ -870,6 +894,8 @@ def _build_and_publish_images(
             role,
             commit,
             str(platform["namespace"]),
+            artifact_manifest_sha256,
+            role_artifacts[role],
         )
         if existing is not None:
             image_ids[role] = existing
@@ -878,13 +904,50 @@ def _build_and_publish_images(
             paths.repository, child, f"{role}-image", platform=paths.platform
         )
         qcow = _qcow_path(output)
+        path_info = images_directory / f"{role}.path-info.json"
+        nix = shutil.which("nix")
+        assert nix is not None
+        path_info_raw = _command(
+            (nix, "path-info", "--json", "--recursive", output),
+            environment=child,
+            cwd=paths.repository,
+            capture=True,
+        )
+        if len(path_info_raw.encode()) > 16 * 1024 * 1024:
+            _fail(f"Nix closure evidence is too large for {role}")
+        _atomic_private_write(path_info, path_info_raw)
+        try:
+            verified_artifact = verify_role_artifact(
+                dict(artifact_manifest),
+                role,
+                qcow2=qcow,
+                path_info=path_info,
+                output_store_path=output,
+                publication_metadata=publication_metadata,
+            )
+        except ReleaseVerificationError as error:
+            raise SetupError(str(error)) from error
+        child.update(
+            {
+                "PLATFORM_ARTIFACT_MANIFEST_SHA256": artifact_manifest_sha256,
+                "PLATFORM_ARTIFACT_QCOW2_SHA256": verified_artifact["qcow2Sha256"],
+                "PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256": verified_artifact["nixClosureSha256"],
+                "PLATFORM_ARTIFACT_NIX_OUTPUT": verified_artifact["nixOutput"],
+            }
+        )
         _command(
             (smoke_store / "bin/openstack-platform-image-smoke", role, qcow),
             environment=child,
             cwd=paths.repository,
         )
         publish = _command(
-            (paths.repository / "infra/openstack/publish_nixos_image.sh", role, qcow),
+            (
+                paths.repository / "infra/openstack/publish_nixos_image.sh",
+                role,
+                qcow,
+                output,
+                path_info,
+            ),
             environment=child,
             cwd=paths.repository,
             capture=True,
@@ -1719,6 +1782,9 @@ def run_setup(
     # before creating a workspace, generating a key, or calling OpenStack/Nix.
     try:
         verify_from_environment(repository, commit, values)
+        artifact_manifest = verify_artifact_from_environment(
+            Path(values["PLATFORM_RELEASE_MANIFEST"]), values
+        )
     except ReleaseVerificationError as error:
         raise SetupError(str(error)) from error
     _private_directory(OPERATOR_ROOT)
@@ -1751,6 +1817,9 @@ def run_setup(
         "PLATFORM_RELEASE_SIGNATURE",
         "PLATFORM_RELEASE_TRUST_ROOT",
         "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT",
+        "PLATFORM_ARTIFACT_MANIFEST",
+        "PLATFORM_ARTIFACT_SIGNATURE",
+        "PLATFORM_ARTIFACT_TRUST_ROOT",
     ):
         if values.get(name):
             provider_environment[name] = values[name]
@@ -1781,7 +1850,13 @@ def run_setup(
     )
     _apply_foundation(paths, child, python_store)
     image_ids = _build_and_publish_images(
-        paths, document, provider_environment, python_store, commit
+        paths,
+        document,
+        provider_environment,
+        python_store,
+        commit,
+        artifact_manifest,
+        Path(values["PLATFORM_ARTIFACT_MANIFEST"]),
     )
     pending = _bootstrap_roles(
         paths,

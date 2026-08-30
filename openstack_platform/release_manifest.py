@@ -16,15 +16,19 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
+from urllib.parse import quote
 
 FORMAT = "openstack-platform-release-v1"
-SBOM_FORMAT = "openstack-platform-sbom-v1"
-PROVENANCE_FORMAT = "openstack-platform-provenance-v1"
+ARTIFACT_FORMAT = "openstack-platform-role-artifacts-v1"
+SBOM_FORMAT = "SPDX-2.3"
+PROVENANCE_FORMAT = "https://in-toto.io/Statement/v1"
 UNSIGNED_ACKNOWLEDGEMENT = "I_UNDERSTAND_THIS_IS_NOT_PRODUCTION"
 ROLES = ("admin", "ingress", "storage", "worker", "builder")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MAX_EVIDENCE = 16 * 1024 * 1024
+_MAX_CLOSURE_ENTRIES = 10_000
+_MAX_REFERENCES = 2_048
 
 
 class ReleaseVerificationError(RuntimeError):
@@ -157,6 +161,115 @@ def _packages(lockfile: Path) -> list[dict[str, str]]:
     return [{"name": name, "version": version} for name, version in sorted(set(packages))]
 
 
+def _spdx_package(name: str, version: str, *, reference: str) -> dict[str, Any]:
+    identifier = _sha256_bytes(reference.encode())[:20]
+    return {
+        "SPDXID": f"SPDXRef-Package-{identifier}",
+        "name": name,
+        "versionInfo": version,
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": False,
+        "licenseConcluded": "NOASSERTION",
+        "licenseDeclared": "NOASSERTION",
+        "copyrightText": "NOASSERTION",
+        "externalRefs": [
+            {
+                "referenceCategory": "PACKAGE-MANAGER",
+                "referenceType": "purl",
+                "referenceLocator": reference,
+            }
+        ],
+    }
+
+
+def _spdx_document(commit: str, packages: list[dict[str, Any]], *, name: str) -> dict[str, Any]:
+    packages = sorted(packages, key=lambda item: str(item["SPDXID"]))
+    return {
+        "spdxVersion": SBOM_FORMAT,
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": name,
+        "documentNamespace": f"https://openstack-platform.invalid/spdx/{commit}/{name}",
+        "creationInfo": {
+            "created": "1970-01-01T00:00:00Z",
+            "creators": ["Tool: openstack-platform-release-manifest-v1"],
+        },
+        "packages": packages,
+        "relationships": [
+            {
+                "spdxElementId": "SPDXRef-DOCUMENT",
+                "relationshipType": "DESCRIBES",
+                "relatedSpdxElement": item["SPDXID"],
+            }
+            for item in packages
+        ],
+    }
+
+
+def _python_spdx_packages(lockfile: Path) -> list[dict[str, Any]]:
+    return [
+        _spdx_package(name, version, reference=f"pkg:pypi/{name}@{version}")
+        for item in _packages(lockfile)
+        for name, version in ((item["name"], item["version"]),)
+    ]
+
+
+def _closure_projection(path: Path) -> tuple[list[dict[str, Any]], str]:
+    document = _load(path)
+    raw_entries: list[tuple[str, Any]]
+    if all(isinstance(key, str) and key.startswith("/nix/store/") for key in document):
+        raw_entries = list(document.items())
+    else:
+        _fail("Nix path-info evidence must be an object keyed by store path")
+    if not raw_entries or len(raw_entries) > _MAX_CLOSURE_ENTRIES:
+        _fail("Nix closure evidence has an invalid entry count")
+    projection: list[dict[str, Any]] = []
+    for store_path, raw in sorted(raw_entries):
+        if not isinstance(raw, dict):
+            _fail("Nix closure entry is malformed")
+        nar_hash = raw.get("narHash")
+        nar_size = raw.get("narSize")
+        references = raw.get("references", [])
+        if (
+            not isinstance(nar_hash, str)
+            or not re.fullmatch(r"sha256-[A-Za-z0-9+/=]{43,48}", nar_hash)
+            or isinstance(nar_size, bool)
+            or not isinstance(nar_size, int)
+            or nar_size < 0
+            or not isinstance(references, list)
+            or len(references) > _MAX_REFERENCES
+            or any(
+                not isinstance(item, str) or not item.startswith("/nix/store/")
+                for item in references
+            )
+        ):
+            _fail("Nix closure entry identity is malformed")
+        projection.append(
+            {
+                "storePath": Path(store_path).name,
+                "narHash": nar_hash,
+                "narSize": nar_size,
+                "references": sorted(Path(item).name for item in references),
+            }
+        )
+    return projection, _sha256_bytes(_canonical(projection))
+
+
+def _nix_spdx_packages(closures: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    unique = {entry["storePath"]: entry for role in sorted(closures) for entry in closures[role]}
+    return [
+        _spdx_package(
+            str(entry["storePath"]).split("-", 1)[-1],
+            "nix-store",
+            reference=(
+                f"pkg:generic/{quote(str(entry['storePath']), safe='')}"
+                f"?narHash={quote(str(entry['narHash']), safe='')}"
+            ),
+        )
+        for entry in unique.values()
+    ]
+
+
 def _openssl(argv: list[str], *, input_bytes: bytes | None = None) -> bytes:
     try:
         result = subprocess.run(argv, input=input_bytes, capture_output=True, check=False)
@@ -203,23 +316,37 @@ def generate(
     _verify_checkout(repository, commit)
     components = component_set(repository, commit)
     output.mkdir(parents=True, exist_ok=True)
-    sbom = {
-        "format": SBOM_FORMAT,
-        "sourceCommit": commit,
-        "packages": _packages(repository / "uv.lock"),
-    }
+    sbom = _spdx_document(
+        commit,
+        _python_spdx_packages(repository / "uv.lock"),
+        name="openstack-platform-python",
+    )
     sbom_path = output / "release.sbom.json"
     sbom_path.write_bytes(_canonical(sbom))
     component_digest = _sha256_bytes(_canonical(components))
     provenance = {
-        "format": PROVENANCE_FORMAT,
-        "sourceCommit": commit,
-        "subject": {"name": "openstack-platform-component-set", "sha256": component_digest},
-        "buildType": "https://openstack-platform.invalid/release/v1",
-        "materials": [
-            {"name": "uv.lock", "sha256": components["lockfile"]["sha256"]},
-            {"name": "platform-contract", "sha256": components["contract"]["sha256"]},
+        "_type": PROVENANCE_FORMAT,
+        "subject": [
+            {
+                "name": "openstack-platform-component-set",
+                "digest": {"sha256": component_digest},
+            }
         ],
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {
+            "buildDefinition": {
+                "buildType": "https://openstack-platform.invalid/release/v1",
+                "externalParameters": {"sourceCommit": commit},
+                "resolvedDependencies": [
+                    {"uri": "file:uv.lock", "digest": {"sha256": components["lockfile"]["sha256"]}},
+                    {
+                        "uri": "file:platform_contract.json",
+                        "digest": {"sha256": components["contract"]["sha256"]},
+                    },
+                ],
+            },
+            "runDetails": {"builder": {"id": "openstack-platform-release-manifest-v1"}},
+        },
     }
     provenance_path = output / "release.provenance.json"
     provenance_path.write_bytes(_canonical(provenance))
@@ -330,21 +457,373 @@ def verify(
         if path.parent != manifest_path.parent or _sha256_file(path) != record["sha256"]:
             _fail(f"release {name} evidence hash does not match")
         loaded_evidence[name] = _load(path)
+    sbom = loaded_evidence["sbom"]
     if (
-        loaded_evidence["sbom"].get("format") != SBOM_FORMAT
-        or loaded_evidence["sbom"].get("sourceCommit") != expected_commit
+        sbom.get("spdxVersion") != SBOM_FORMAT
+        or sbom.get("documentNamespace")
+        != f"https://openstack-platform.invalid/spdx/{expected_commit}/openstack-platform-python"
+        or not isinstance(sbom.get("packages"), list)
     ):
         _fail("release SBOM is incompatible")
     provenance = loaded_evidence["provenance"]
     expected_subject = _sha256_bytes(_canonical(components))
     if (
-        provenance.get("format") != PROVENANCE_FORMAT
-        or provenance.get("sourceCommit") != expected_commit
+        provenance.get("_type") != PROVENANCE_FORMAT
         or provenance.get("subject")
-        != {"name": "openstack-platform-component-set", "sha256": expected_subject}
+        != [{"name": "openstack-platform-component-set", "digest": {"sha256": expected_subject}}]
+        or provenance.get("predicate", {})
+        .get("buildDefinition", {})
+        .get("externalParameters", {})
+        .get("sourceCommit")
+        != expected_commit
     ):
         _fail("release provenance is incompatible")
     return manifest
+
+
+def _artifact_sha256(path: Path) -> str:
+    try:
+        metadata = path.lstat()
+        if not path.is_file() or path.is_symlink() or metadata.st_size < 1:
+            _fail(f"role artifact must be a direct non-empty file: {path}")
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError as error:
+        raise ReleaseVerificationError(f"role artifact is unavailable: {path}") from error
+
+
+def _artifact_input(path: Path) -> dict[str, dict[str, Any]]:
+    document = _load(path)
+    if set(document) != set(ROLES):
+        _fail("artifact input must contain exactly all role images")
+    result: dict[str, dict[str, Any]] = {}
+    for role in ROLES:
+        value = document[role]
+        if not isinstance(value, dict) or set(value) != {
+            "qcow2",
+            "pathInfo",
+            "outputStorePath",
+            "publicationMetadata",
+        }:
+            _fail(f"artifact input for {role} is malformed")
+        metadata = value["publicationMetadata"]
+        if (
+            not isinstance(metadata, dict)
+            or not metadata
+            or len(metadata) > 64
+            or any(
+                not isinstance(key, str)
+                or not isinstance(item, str)
+                or not key
+                or len(key) > 128
+                or len(item) > 512
+                for key, item in metadata.items()
+            )
+        ):
+            _fail(f"publication metadata for {role} is malformed")
+        result[role] = value
+    return result
+
+
+def generate_artifact_manifest(
+    component_manifest: Path,
+    inputs_path: Path,
+    output: Path,
+    *,
+    signing_key: Path | None,
+    unsigned: bool,
+) -> Path:
+    """Generate signed post-build identities for all five concrete role artifacts."""
+    if unsigned == (signing_key is not None):
+        _fail("choose exactly one of a production signing key or unsigned development mode")
+    component = _load(component_manifest)
+    if component.get("format") != FORMAT:
+        _fail("source component manifest format is unsupported")
+    components = component.get("components")
+    if not isinstance(components, dict) or not _COMMIT.fullmatch(
+        str(components.get("sourceCommit"))
+    ):
+        _fail("source component manifest has no canonical commit")
+    commit = str(components["sourceCommit"])
+    inputs = _artifact_input(inputs_path)
+    records: dict[str, dict[str, Any]] = {}
+    closures: dict[str, list[dict[str, Any]]] = {}
+    for role in ROLES:
+        value = inputs[role]
+        projection, closure_sha256 = _closure_projection(Path(value["pathInfo"]))
+        output_identity = Path(str(value["outputStorePath"])).name
+        if output_identity not in {item["storePath"] for item in projection}:
+            _fail(f"Nix output identity for {role} is absent from its closure")
+        closures[role] = projection
+        records[role] = {
+            "qcow2Sha256": _artifact_sha256(Path(value["qcow2"])),
+            "nixOutput": output_identity,
+            "nixClosureSha256": closure_sha256,
+            "publicationMetadata": dict(sorted(value["publicationMetadata"].items())),
+        }
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        source_sbom_record = component["evidence"]["sbom"]
+        source_sbom_path = component_manifest.parent / source_sbom_record["file"]
+        if _sha256_file(source_sbom_path) != source_sbom_record["sha256"]:
+            _fail("source component SBOM hash does not match")
+        source_sbom = _load(source_sbom_path)
+        python_packages = source_sbom["packages"]
+    except (KeyError, TypeError) as error:
+        raise ReleaseVerificationError("source component SBOM is malformed") from error
+    if not isinstance(python_packages, list) or any(
+        not isinstance(item, dict) for item in python_packages
+    ):
+        _fail("source component SBOM packages are malformed")
+    sbom = _spdx_document(
+        commit,
+        [*python_packages, *_nix_spdx_packages(closures)],
+        name="openstack-platform-python-nix",
+    )
+    sbom_path = output / "role-artifacts.sbom.spdx.json"
+    sbom_path.write_bytes(_canonical(sbom))
+    subjects = [
+        {"name": f"{role}.qcow2", "digest": {"sha256": records[role]["qcow2Sha256"]}}
+        for role in ROLES
+    ]
+    subjects.extend(
+        {
+            "name": f"{role}.nix-closure",
+            "digest": {"sha256": records[role]["nixClosureSha256"]},
+        }
+        for role in ROLES
+    )
+    provenance = {
+        "_type": PROVENANCE_FORMAT,
+        "subject": subjects,
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {
+            "buildDefinition": {
+                "buildType": "https://openstack-platform.invalid/nix-role-images/v1",
+                "externalParameters": {"sourceCommit": commit},
+                "resolvedDependencies": [
+                    {
+                        "uri": "file:release-manifest.json",
+                        "digest": {"sha256": _sha256_file(component_manifest)},
+                    }
+                ],
+            },
+            "runDetails": {"builder": {"id": "nix-openstack-role-image-v1"}},
+        },
+    }
+    provenance_path = output / "role-artifacts.provenance.json"
+    provenance_path.write_bytes(_canonical(provenance))
+    if unsigned:
+        trust = {"mode": "development-unsigned", "warning": "NOT FOR PRODUCTION"}
+    else:
+        assert signing_key is not None
+        trust = {
+            "mode": "production-ed25519",
+            "publicKeySha256": _public_key_sha256(signing_key, private=True),
+        }
+    manifest = {
+        "format": ARTIFACT_FORMAT,
+        "releaseChannel": "development-unsigned" if unsigned else "production",
+        "sourceComponentManifest": {
+            "sha256": _sha256_file(component_manifest),
+            "componentSetSha256": _sha256_bytes(_canonical(components)),
+        },
+        "sourceCommit": commit,
+        "roleArtifacts": records,
+        "evidence": {
+            "sbom": {"file": sbom_path.name, "sha256": _sha256_file(sbom_path)},
+            "provenance": {"file": provenance_path.name, "sha256": _sha256_file(provenance_path)},
+        },
+        "trust": trust,
+    }
+    manifest_path = output / "role-artifacts.json"
+    manifest_path.write_bytes(_canonical(manifest))
+    if signing_key is not None:
+        _openssl(
+            [
+                "openssl",
+                "pkeyutl",
+                "-sign",
+                "-rawin",
+                "-inkey",
+                str(signing_key),
+                "-in",
+                str(manifest_path),
+                "-out",
+                str(output / "role-artifacts.sig"),
+            ]
+        )
+    return manifest_path
+
+
+def _verify_artifact_trust(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    *,
+    signature: Path | None,
+    trust_root: Path | None,
+    allow_unsigned_development: bool,
+) -> None:
+    trust = manifest.get("trust")
+    channel = manifest.get("releaseChannel")
+    if not isinstance(trust, dict):
+        _fail("artifact manifest trust policy is malformed")
+    if trust.get("mode") == "production-ed25519" and channel == "production":
+        if signature is None or trust_root is None:
+            _fail("production artifact manifest requires a signature and explicit trust root")
+        _sha256_file(signature)
+        _sha256_file(trust_root)
+        if _public_key_sha256(trust_root, private=False) != trust.get("publicKeySha256"):
+            _fail("artifact trust root does not match the signed manifest")
+        _openssl(
+            [
+                "openssl",
+                "pkeyutl",
+                "-verify",
+                "-rawin",
+                "-pubin",
+                "-inkey",
+                str(trust_root),
+                "-sigfile",
+                str(signature),
+                "-in",
+                str(manifest_path),
+            ]
+        )
+    elif trust.get("mode") == "development-unsigned" and channel == "development-unsigned":
+        if (
+            not allow_unsigned_development
+            or os.environ.get("PLATFORM_ENVIRONMENT") == "production"
+            or signature is not None
+            or trust_root is not None
+        ):
+            _fail("unsigned development artifact evidence requires explicit non-production mode")
+    else:
+        _fail("artifact trust mode and channel are inconsistent")
+
+
+def verify_artifact_manifest(
+    component_manifest: Path,
+    manifest_path: Path,
+    *,
+    signature: Path | None,
+    trust_root: Path | None,
+    allow_unsigned_development: bool = False,
+) -> dict[str, Any]:
+    manifest = _load(manifest_path)
+    if manifest.get("format") != ARTIFACT_FORMAT:
+        _fail("artifact manifest format is unsupported")
+    _verify_artifact_trust(
+        manifest,
+        manifest_path,
+        signature=signature,
+        trust_root=trust_root,
+        allow_unsigned_development=allow_unsigned_development,
+    )
+    component = _load(component_manifest)
+    components = component.get("components")
+    source = manifest.get("sourceComponentManifest")
+    if (
+        component.get("format") != FORMAT
+        or not isinstance(components, dict)
+        or source
+        != {
+            "sha256": _sha256_file(component_manifest),
+            "componentSetSha256": _sha256_bytes(_canonical(components)),
+        }
+        or manifest.get("sourceCommit") != components.get("sourceCommit")
+    ):
+        _fail("artifact manifest does not bind the accepted source component manifest")
+    records = manifest.get("roleArtifacts")
+    if not isinstance(records, dict) or set(records) != set(ROLES):
+        _fail("artifact manifest does not contain exactly all role artifacts")
+    for role, record in records.items():
+        if (
+            not isinstance(record, dict)
+            or set(record)
+            != {"qcow2Sha256", "nixOutput", "nixClosureSha256", "publicationMetadata"}
+            or not _SHA256.fullmatch(str(record.get("qcow2Sha256")))
+            or not _SHA256.fullmatch(str(record.get("nixClosureSha256")))
+            or not re.fullmatch(r"[a-z0-9]{32}-[^/]{1,160}", str(record.get("nixOutput")))
+            or not isinstance(record.get("publicationMetadata"), dict)
+        ):
+            _fail(f"artifact identity for {role} is malformed")
+    evidence = manifest.get("evidence")
+    if not isinstance(evidence, dict) or set(evidence) != {"sbom", "provenance"}:
+        _fail("artifact SBOM/provenance evidence is incomplete")
+    loaded: dict[str, dict[str, Any]] = {}
+    for name in ("sbom", "provenance"):
+        record = evidence[name]
+        if not isinstance(record, dict) or set(record) != {"file", "sha256"}:
+            _fail(f"artifact {name} record is malformed")
+        path = manifest_path.parent / str(record["file"])
+        if path.parent != manifest_path.parent or _sha256_file(path) != record["sha256"]:
+            _fail(f"artifact {name} hash does not match")
+        loaded[name] = _load(path)
+    if loaded["sbom"].get("spdxVersion") != SBOM_FORMAT:
+        _fail("artifact SBOM is not SPDX 2.3")
+    expected_subjects = [
+        {"name": f"{role}.qcow2", "digest": {"sha256": records[role]["qcow2Sha256"]}}
+        for role in ROLES
+    ] + [
+        {"name": f"{role}.nix-closure", "digest": {"sha256": records[role]["nixClosureSha256"]}}
+        for role in ROLES
+    ]
+    if (
+        loaded["provenance"].get("_type") != PROVENANCE_FORMAT
+        or loaded["provenance"].get("subject") != expected_subjects
+    ):
+        _fail("artifact provenance subjects do not match role artifacts")
+    return manifest
+
+
+def verify_role_artifact(
+    manifest: dict[str, Any],
+    role: str,
+    *,
+    qcow2: Path,
+    path_info: Path,
+    output_store_path: Path,
+    publication_metadata: dict[str, str],
+) -> dict[str, Any]:
+    if role not in ROLES:
+        _fail("artifact role is unsupported")
+    projection, closure_sha256 = _closure_projection(path_info)
+    output_identity = output_store_path.name
+    if output_identity not in {item["storePath"] for item in projection}:
+        _fail("built Nix output is absent from closure evidence")
+    actual = {
+        "qcow2Sha256": _artifact_sha256(qcow2),
+        "nixOutput": output_identity,
+        "nixClosureSha256": closure_sha256,
+        "publicationMetadata": dict(sorted(publication_metadata.items())),
+    }
+    if manifest["roleArtifacts"].get(role) != actual:
+        _fail(f"built {role} artifact or publication metadata does not match signed evidence")
+    return actual
+
+
+def verify_artifact_from_environment(
+    component_manifest: Path, values: dict[str, str]
+) -> dict[str, Any]:
+    path = values.get("PLATFORM_ARTIFACT_MANIFEST")
+    if not path:
+        _fail("PLATFORM_ARTIFACT_MANIFEST is required before setup mutation")
+    acknowledgement = values.get("PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT")
+    return verify_artifact_manifest(
+        component_manifest,
+        Path(path),
+        signature=Path(values["PLATFORM_ARTIFACT_SIGNATURE"])
+        if values.get("PLATFORM_ARTIFACT_SIGNATURE")
+        else None,
+        trust_root=Path(values["PLATFORM_ARTIFACT_TRUST_ROOT"])
+        if values.get("PLATFORM_ARTIFACT_TRUST_ROOT")
+        else None,
+        allow_unsigned_development=acknowledgement == UNSIGNED_ACKNOWLEDGEMENT,
+    )
 
 
 def verify_from_environment(
@@ -386,6 +865,30 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--signature", type=Path)
     check.add_argument("--trust-root", type=Path)
     check.add_argument("--allow-unsigned-development", action="store_true")
+    artifact_create = commands.add_parser("artifact-generate")
+    artifact_create.add_argument("--component-manifest", type=Path, required=True)
+    artifact_create.add_argument("--inputs", type=Path, required=True)
+    artifact_create.add_argument("--output", type=Path, required=True)
+    artifact_create.add_argument("--signing-key", type=Path)
+    artifact_create.add_argument("--unsigned-development", action="store_true")
+    artifact_check = commands.add_parser("artifact-verify")
+    artifact_check.add_argument("--component-manifest", type=Path, required=True)
+    artifact_check.add_argument("--manifest", type=Path, required=True)
+    artifact_check.add_argument("--signature", type=Path)
+    artifact_check.add_argument("--trust-root", type=Path)
+    artifact_check.add_argument("--allow-unsigned-development", action="store_true")
+    role_check = commands.add_parser("verify-role")
+    role_check.add_argument("--component-manifest", type=Path, required=True)
+    role_check.add_argument("--manifest", type=Path, required=True)
+    role_check.add_argument("--signature", type=Path)
+    role_check.add_argument("--trust-root", type=Path)
+    role_check.add_argument("--allow-unsigned-development", action="store_true")
+    role_check.add_argument("--role", choices=ROLES, required=True)
+    role_check.add_argument("--qcow2", type=Path, required=True)
+    role_check.add_argument("--path-info", type=Path, required=True)
+    role_check.add_argument("--output-store-path", type=Path, required=True)
+    role_check.add_argument("--platform", type=Path, required=True)
+    role_check.add_argument("--commit", required=True)
     args = parser.parse_args(argv)
     if args.command == "generate":
         path = generate(
@@ -396,7 +899,7 @@ def main(argv: list[str] | None = None) -> int:
             unsigned=args.unsigned_development,
         )
         print(f"release-manifest={path}")
-    else:
+    elif args.command == "verify":
         verify(
             args.repository,
             args.manifest,
@@ -406,6 +909,45 @@ def main(argv: list[str] | None = None) -> int:
             allow_unsigned_development=args.allow_unsigned_development,
         )
         print("release-manifest=verified")
+    elif args.command == "artifact-generate":
+        path = generate_artifact_manifest(
+            args.component_manifest,
+            args.inputs,
+            args.output,
+            signing_key=args.signing_key,
+            unsigned=args.unsigned_development,
+        )
+        print(f"artifact-manifest={path}")
+    else:
+        artifact = verify_artifact_manifest(
+            args.component_manifest,
+            args.manifest,
+            signature=args.signature,
+            trust_root=args.trust_root,
+            allow_unsigned_development=args.allow_unsigned_development,
+        )
+        if args.command == "verify-role":
+            from .config import load_platform
+            from .openstack import publisher_metadata
+
+            metadata = dict(
+                publisher_metadata(load_platform(args.platform), args.role, args.commit)
+            )
+            record = verify_role_artifact(
+                artifact,
+                args.role,
+                qcow2=args.qcow2,
+                path_info=args.path_info,
+                output_store_path=args.output_store_path,
+                publication_metadata=metadata,
+            )
+            manifest_sha = _sha256_file(args.manifest)
+            print(f"artifact_manifest_sha256={manifest_sha}")
+            print(f"qcow2_sha256={record['qcow2Sha256']}")
+            print(f"nix_closure_sha256={record['nixClosureSha256']}")
+            print(f"nix_output={record['nixOutput']}")
+        else:
+            print("artifact-manifest=verified")
     return 0
 
 

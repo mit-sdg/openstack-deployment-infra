@@ -100,9 +100,9 @@ Ingress security groups allow ports 80 and 443 from `0.0.0.0/0`. Once the manage
 
 ### P-06 — Release compatibility and supply-chain evidence
 
-Implemented by the deterministic signed release manifest, retained SBOM and provenance evidence, explicit Ed25519 trust root, pre-mutation setup/installer verification, immutable GitHub Action SHAs, and documented forward-only database ordering. The absent UI remains an explicit versioned placeholder in the component set rather than an omitted identity. Unsigned evidence is accepted only as visibly marked development evidence with an exact acknowledgement and is refused when the environment is production.
+Implemented by a signed pre-build component manifest plus a signed post-build artifact manifest. The latter binds all five concrete QCOW2 SHA-256 values, normalized recursive Nix closures/output references, exact publication metadata, and the source component-manifest digest. Deterministic SPDX 2.3 evidence covers Python and Nix closure packages, and in-toto/SLSA-style provenance names the concrete subjects. Setup and publication verify these records before image acceptance. The explicit Ed25519 trust root, unmistakable unsigned-development channel, immutable GitHub Action SHAs, and forward-only database ordering remain enforced.
 
-**Exit gate:** complete. Tamper tests cover the signature, evidence, contract, lockfile, wheel inputs, helper actions, controller, and role-image inputs while installer tests preserve the previously selected release on failure.
+**Exit gate:** complete. Tamper tests cover component inputs, signatures, evidence, QCOW2 bytes, Nix closure identity, source-manifest binding, and publication metadata while installer tests preserve the previously selected release on failure.
 
 ### P-07 — Live release acceptance — orchestrator implemented; live evidence required
 
