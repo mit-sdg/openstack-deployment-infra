@@ -344,7 +344,9 @@ class HelperPlatformConfigurationVerificationTests(unittest.TestCase):
         with (
             mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()),
             mock.patch.object(INSTALLER_MODULE.os, "access", return_value=False),
-            self.assertRaisesRegex(INSTALLER_MODULE.InstallFailure, "readable by the operator account"),
+            self.assertRaisesRegex(
+                INSTALLER_MODULE.InstallFailure, "readable by the operator account"
+            ),
         ):
             self._verify()
 
@@ -503,9 +505,7 @@ class ReleaseInstallerTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        shutil.copy2(
-            CONFIG_INSTALLER, repository / "deploy/releases/install_operator_config.py"
-        )
+        shutil.copy2(CONFIG_INSTALLER, repository / "deploy/releases/install_operator_config.py")
         contract_target = repository / "infra/lib/platform_contract.json"
         contract_target.parent.mkdir(parents=True)
         shutil.copy2(ROOT / "infra/lib/platform_contract.json", contract_target)
@@ -677,9 +677,17 @@ class ReleaseInstallerTests(unittest.TestCase):
         policy.chmod(0o600)
         self.assertFalse((release / ".candidate").exists())
         self.assertEqual(stat.S_IMODE((self.root / "operator-install/state").stat().st_mode), 0o700)
+        replacements = {
+            "@BIN_ROOT@": str(self.root / "operator-install/bin"),
+            "@CONFIG_ROOT@": str(self.root / "operator-install/config"),
+            "@STATE_ROOT@": str(self.root / "operator-install/state"),
+        }
         for name in ("openstack-platform-backup.service", "openstack-platform-backup.timer"):
             installed = self.root / "operator-install/units" / name
-            self.assertEqual(installed.read_text(), (UNITS / name).read_text())
+            expected = (UNITS / name).read_text()
+            for placeholder, value in replacements.items():
+                expected = expected.replace(placeholder, value)
+            self.assertEqual(installed.read_text(), expected)
             self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o600)
 
     def test_installed_operator_launcher_rejects_fixed_path_overrides(self) -> None:
@@ -767,7 +775,8 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         launcher_text = launcher.resolve().read_text()
         self.assertIn(
-            f"platform_config={self.root / 'helper/etc/test-platform/platform.json'}", launcher_text
+            f"platform_config={self.root / 'helper-install/etc/test-platform/platform.json'}",
+            launcher_text,
         )
         self.assertIn('export PLATFORM_CONFIG="$platform_config"', launcher_text)
         self.assertIn('if test -L "$platform_config"', launcher_text)
@@ -984,8 +993,8 @@ class ReleaseInstallerTests(unittest.TestCase):
 
     def test_helper_deployment_uses_pinned_ssh_and_configured_admin_paths(self) -> None:
         script = HELPER_DEPLOY.read_text()
-        self.assertIn('ssh_config=$operator_root/.secrets/ssh/config', script)
-        self.assertIn('platform_contract.json', script)
+        self.assertIn("ssh_config=$operator_root/.secrets/ssh/config", script)
+        self.assertIn("platform_contract.json", script)
         self.assertNotIn("PLATFORM_SSH_CONFIG", script)
         self.assertIn('paths["root"]', script)
         self.assertIn('paths["adminState"]', script)
