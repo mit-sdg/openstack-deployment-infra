@@ -21,6 +21,7 @@ let
   backups = platform.paths.backups;
   root = platform.paths.root;
   stateMountUnit = "${systemdEscapePath state}.mount";
+  backupMountUnit = "${systemdEscapePath backups}.mount";
   controllerAccount = constants.accounts.controller;
   controllerUser = controllerAccount.name;
   controllerGroup = controllerAccount.name;
@@ -41,6 +42,41 @@ let
   controllerSocket = "/run/${controllerSocketDirectory}/controller.sock";
   helperReleaseMarker = "${helperReleaseRoot}/current/.complete";
   controllerBackupRoot = "${backups}/${constants.directories.controllerBackup}";
+  hostedControllerBackupRoot = "${backups}/${constants.directories.hostedControllerBackup}";
+  hostedControllerRestoreInput = "${controllerRoot}/restore-input.sqlite3";
+  hostedControllerRestore = pkgs.writeShellScriptBin "openstack-platform-hosted-controller-restore" ''
+    set -euo pipefail
+    if [[ $(id -u) != 0 ]]; then
+      echo "hosted controller restore must run as root from the recovery console" >&2
+      exit 77
+    fi
+    if [[ $# != 1 || $1 != --yes ]]; then
+      echo "usage: openstack-platform-hosted-controller-restore --yes" >&2
+      exit 64
+    fi
+    for unit in \
+      ${namespace}-controller.service \
+      ${namespace}-hosted-controller-backup.service \
+      ${namespace}-hosted-controller-backup.timer; do
+      if ${pkgs.systemd}/bin/systemctl is-active --quiet "$unit"; then
+        echo "refusing restore while $unit is active" >&2
+        exit 69
+      fi
+    done
+    input=${lib.escapeShellArg hostedControllerRestoreInput}
+    [[ -f "$input" && ! -L "$input" ]]
+    [[ $(${pkgs.coreutils}/bin/stat -c %U:%a "$input") == ${controllerUser}:600 ]] || {
+      echo "restore input must be a direct ${controllerUser}-owned mode-0600 file" >&2
+      exit 77
+    }
+    ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- \
+      ${packages.controllerPackage}/bin/openstack-platform-controller-restore \
+      "$input" \
+      --destination ${controllerState}/platform.sqlite3 \
+      --platform-config /etc/${namespace}/platform.json \
+      --yes
+    ${pkgs.coreutils}/bin/rm -f -- "$input"
+  '';
 
   openstackClient = pkgs.writeShellScriptBin "platform-openstack" ''
     set -euo pipefail
@@ -203,6 +239,7 @@ in
     builderCli
     pinBuilderHostKeyCli
     setupOperatorBridgeCli
+    hostedControllerRestore
   ];
 
   environment.etc."${namespace}/nomad/10-server.hcl".text = ''
@@ -265,6 +302,8 @@ in
     "d ${backups} 0710 ${operatorAccount.name} ${controllerGroup} -"
     "d ${controllerBackupRoot} 0770 ${operatorAccount.name} ${controllerGroup} -"
     "d ${controllerBackupRoot}/.staging 0770 ${operatorAccount.name} ${controllerGroup} -"
+    "d ${hostedControllerBackupRoot} 0750 ${controllerUser} ${operatorAccount.name} -"
+    "d ${hostedControllerBackupRoot}/.staging 0750 ${controllerUser} ${operatorAccount.name} -"
     "L+ ${root}/persistent - - - - ${operatorRoot}"
     "d ${root}/bin 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "L+ ${root}/infra - - - - ${infra}"
@@ -296,6 +335,62 @@ in
       Type = "oneshot";
       ExecStart = prepareController;
       UMask = "0027";
+    };
+  };
+
+  systemd.services."${namespace}-hosted-controller-backup" = {
+    description = "Encrypted backup of the admin-hosted ${platform.displayName} controller database";
+    after = [
+      "${namespace}-controller.service"
+      backupMountUnit
+      stateMountUnit
+    ];
+    requires = [
+      backupMountUnit
+      stateMountUnit
+    ];
+    unitConfig.ConditionPathExists = [
+      "${controllerState}/platform.sqlite3"
+      controllerPolicy
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = controllerUser;
+      Group = operatorAccount.name;
+      SupplementaryGroups = [ controllerGroup ];
+      UMask = "0027";
+      ExecStart = lib.concatStringsSep " " [
+        "${packages.controllerPackage}/bin/openstack-platform-hosted-controller-backup"
+        "--platform-config /etc/${namespace}/platform.json"
+        "--policy ${controllerPolicy}"
+        "--state-directory ${controllerState}"
+        "--backup-root ${hostedControllerBackupRoot}"
+        "--age-command ${pkgs.age}/bin/age"
+      ];
+      NoNewPrivileges = true;
+      PrivateDevices = true;
+      PrivateTmp = true;
+      ProtectHome = true;
+      ProtectSystem = "strict";
+      ReadOnlyPaths = [
+        "/etc/${namespace}/platform.json"
+        controllerPolicy
+      ];
+      ReadWritePaths = [
+        controllerState
+        hostedControllerBackupRoot
+      ];
+    };
+  };
+
+  systemd.timers."${namespace}-hosted-controller-backup" = {
+    description = "Daily encrypted backup of the admin-hosted controller database";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 02:15:00 UTC";
+      RandomizedDelaySec = "30m";
+      Persistent = true;
+      Unit = "${namespace}-hosted-controller-backup.service";
     };
   };
 

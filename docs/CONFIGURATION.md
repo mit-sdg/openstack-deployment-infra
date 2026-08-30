@@ -277,18 +277,19 @@ by the images. Changing a path does not move existing data.
 Backup placement is derived from `paths.backups`, not from a hard-coded host
 path:
 
-- The CLI stages uploads at `<paths.backups>/controller/.staging/` and accepted encrypted
-  SQLite files and their `.sha256`/`.manifest` evidence live at
-  `<paths.backups>/controller/`. The manifest is the commit marker: ciphertext and
-  checksum are durable before its final rename, and retention counts only
-  complete evidence trios. Interrupted pre-commit leftovers may be reconciled
-  on retry; a malformed set with a manifest is preserved for investigation.
+- The external operator CLI stages uploads at `<paths.backups>/controller/.staging/`
+  and publishes its encrypted operator-state SQLite evidence under
+  `<paths.backups>/controller/`.
+- The admin-hosted controller independently publishes its live SQLite evidence
+  under `<paths.backups>/hosted-controller/`. These two SQLite backup sets are
+  not interchangeable. In each set the manifest is the commit marker;
+  ciphertext and checksum are durable before its final rename.
 - The admin managed-data scripts write timestamped directories at
   `<paths.backups>/<namespace>/`.
 
-The policy's `backupAgeRecipient` encrypts SQLite on the operator host.
-The matching private age identity is not configuration and must remain in
-operator custody. The admin managed-data scripts use the packaged
+The policy's `backupAgeRecipient` encrypts both SQLite backup sets, on their
+respective hosts. The matching private age identity is not configuration and
+must remain in operator custody. The admin managed-data scripts use the packaged
 `<paths.root>/bin/age` and `<paths.root>/bin/age-keygen` with their separate
 `<paths.root>/persistent/secrets/backup-age-key.txt` identity.
 

@@ -31,9 +31,9 @@ recipient.
 ## Current control surfaces
 
 `openstack-platform` is an operator-only interface for setup, status, image
-selection/pruning, persistent-host lifecycle, management-state backup, and
-offline restore. It has no product commands. The CLI database still reports
-aggregate application and storage counts so an operator can detect restored or
+selection/pruning, persistent-host lifecycle, external operator-state backup,
+and offline restore. It has no product commands. The external CLI database
+still reports aggregate application and storage counts so an operator can detect restored or
 pre-cutover state without exposing product mutation paths.
 
 `openstack-platform-controller` implements bounded HTTP/1.1 JSON over a Unix
@@ -113,14 +113,16 @@ backups. Managed-service credentials are scoped per application and
 synchronized through owner-specific Nomad Variable keys; values never enter
 controller SQLite.
 
-The hosted controller SQLite database is backed up separately from PostgreSQL,
-MongoDB, and Garage. This boundary also applies during future management
-integration and state cutover. Each backup is encrypted to its configured age recipient and
-written below the configured backup root. A management backup counts as
-accepted only when its ciphertext, checksum, and final manifest exist. The
-manifest is the commit marker, so interrupted partial files are not treated as
-backups. Restore is offline, checks deployment identity/schema/integrity before
-replacement, and contacts no provider.
+Two SQLite databases have separate backup sets. The live hosted controller at
+`<paths.adminState>/controller/state/platform.sqlite3` is backed up on admin to
+`<paths.backups>/hosted-controller`; the external operator CLI database is
+backed up to `<paths.backups>/controller`. Neither set is a substitute for the
+other. Both use SQLite's online backup API, encrypt to the policy age recipient,
+and commit ciphertext, checksum, and manifest evidence on the backup volume.
+The hosted-controller timer runs as the controller account, while the private
+age identity remains off-platform. Hosted restore is offline, validates the
+deployment identity, schema, integrity, foreign keys, and operation state before
+atomic replacement, and contacts no provider.
 
 Managed-data restore checks run on admin in throwaway containers and record
 evidence only after restored contents match checksums. Registry blobs are not

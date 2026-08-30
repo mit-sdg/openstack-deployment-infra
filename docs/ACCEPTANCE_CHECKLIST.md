@@ -120,6 +120,12 @@ exited zero.
 
 ## Backups, restore, upgrade, and cleanup
 
+- [ ] **BACKUP-00** `<namespace>-hosted-controller-backup.service` produces a
+  committed encrypted trio under `<paths.backups>/hosted-controller`; an
+  off-host decrypted mode-`0600` copy is restored with the controller and
+  hosted-backup units stopped through
+  `openstack-platform-hosted-controller-restore --yes`, followed by controller
+  readiness and a fresh backup. This is not the external operator-state backup.
 - [ ] **BACKUP-01** `openstack-platform backup` produces an age-v1 encrypted
   controller database under `<paths.backups>/controller` with checksum and final
   manifest evidence. Retention counts only complete trios. Evidence: output

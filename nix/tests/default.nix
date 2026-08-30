@@ -276,6 +276,11 @@ let
               machine.succeed("test -d ${state}/operator/helper-releases/releases")
               machine.succeed("test -d ${state}/operator/helper-releases/incoming")
               machine.succeed("test -d ${backups}/${constants.directories.controllerBackup}/.staging")
+              machine.succeed("test $(stat -c %U:%G:%a ${backups}/${constants.directories.hostedControllerBackup}) = platform-controller:agentops:750")
+              machine.succeed("systemctl is-enabled ${namespace}-hosted-controller-backup.timer")
+              machine.succeed("systemctl cat ${namespace}-hosted-controller-backup.service | grep -F -- '--backup-root ${backups}/${constants.directories.hostedControllerBackup}'")
+              machine.succeed("test -x /run/current-system/sw/bin/openstack-platform-hosted-controller-restore")
+              machine.fail("runuser -u agentops -- openstack-platform-hosted-controller-restore --yes")
               machine.fail("systemctl cat ${namespace}-managed-usage.service")
               machine.fail("systemctl cat ${namespace}-managed-usage.timer")
             ''

@@ -34,7 +34,8 @@
     "builder": "openstack-platform-builder"
   },
   "directories": {
-    "controllerBackup": "controller"
+    "controllerBackup": "controller",
+    "hostedControllerBackup": "hosted-controller"
   },
   "installation": {
     "operatorRoot": "/srv/openstack-platform",

@@ -48,6 +48,29 @@ class ControllerHostingStaticTests(unittest.TestCase):
         )
         self.assertNotIn("ssh", admin[admin.index('systemd.services."${namespace}-controller"') :])
 
+    def test_hosted_database_has_distinct_encrypted_backup_and_offline_restore_units(self) -> None:
+        source = ADMIN.read_text(encoding="utf-8")
+        self.assertIn(
+            'hostedControllerBackupRoot = "${backups}/${constants.directories.hostedControllerBackup}";',
+            source,
+        )
+        self.assertIn('systemd.services."${namespace}-hosted-controller-backup"', source)
+        self.assertIn('systemd.timers."${namespace}-hosted-controller-backup"', source)
+        self.assertIn('"--state-directory ${controllerState}"', source)
+        self.assertIn('"--backup-root ${hostedControllerBackupRoot}"', source)
+        self.assertIn('"--age-command ${pkgs.age}/bin/age"', source)
+        self.assertIn("openstack-platform-hosted-controller-restore", source)
+        self.assertIn("openstack-platform-controller-restore", source)
+        self.assertIn("refusing restore while $unit is active", source)
+        self.assertIn("${namespace}-hosted-controller-backup.timer", source)
+        self.assertIn("--destination ${controllerState}/platform.sqlite3", source)
+        self.assertIn(
+            "restore input must be a direct ${controllerUser}-owned mode-0600 file", source
+        )
+        contract = (ROOT / "infra/lib/platform_contract.json").read_text(encoding="utf-8")
+        self.assertIn('"hostedControllerBackup": "hosted-controller"', contract)
+        self.assertIn('"controllerBackup": "controller"', contract)
+
     def test_controller_sandbox_and_ingress_only_web_boundary_are_explicit(self) -> None:
         source = ADMIN.read_text(encoding="utf-8")
         service = source[
@@ -56,10 +79,10 @@ class ControllerHostingStaticTests(unittest.TestCase):
             )
         ]
         for setting in (
-            'NoNewPrivileges = true;',
+            "NoNewPrivileges = true;",
             'ProtectSystem = "strict";',
-            'ProtectHome = true;',
-            'PrivateDevices = true;',
+            "ProtectHome = true;",
+            "PrivateDevices = true;",
             'CapabilityBoundingSet = "";',
             "ReadOnlyPaths = [",
             "ReadWritePaths = [",

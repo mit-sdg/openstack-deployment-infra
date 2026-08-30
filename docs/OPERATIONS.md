@@ -667,7 +667,69 @@ backup verification are the supported completion boundary.
 
 ## 6. Back up, restore, and reconcile
 
-### Where controller-database backups go
+### Hosted controller database on admin
+
+The live controller database is
+`<paths.adminState>/controller/state/platform.sqlite3`. Admin backs it up daily
+with `<namespace>-hosted-controller-backup.timer`; this is separate from the
+external operator-state backup described below. Verify the unit and create an
+on-demand backup through the pinned alias:
+
+```bash
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  systemctl is-enabled "$PLATFORM_NAMESPACE-hosted-controller-backup.timer"
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  systemctl start "$PLATFORM_NAMESPACE-hosted-controller-backup.service"
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  journalctl -u "$PLATFORM_NAMESPACE-hosted-controller-backup.service" -n 5 --no-pager
+```
+
+A successful run reports
+`hosted-controller-backup=hosted-controller-...sqlite3.age sha256=...` and
+commits a ciphertext, `.sha256`, and final `.manifest` below
+`<paths.backups>/hosted-controller/`. It uses SQLite's online backup API and the
+policy `backupAgeRecipient`; plaintext temporary state is removed. The files
+are mode `0640`, owned by the controller account and readable by `agentops`, so
+the pinned alias can copy a committed set off-host. A backup is accepted only
+when the manifest exists. Keep an independently stored ciphertext and evidence
+set; loss of both admin volumes otherwise loses this recovery path.
+
+Hosted restore is deliberately unavailable through the ordinary operator CLI.
+It requires the approval-gated `ubuntu` recovery account and an offline
+controller. First verify the manifest and ciphertext checksum, copy the
+ciphertext off admin, and decrypt it on the operator recovery host with the
+escrowed identity. Do not copy the age identity to admin. Copy the resulting
+mode-`0600` SQLite file through the pinned alias to
+`/home/agentops/hosted-controller-restore.sqlite3`.
+
+In an approval-gated `ubuntu` session on the selected admin host, run:
+
+```bash
+sudo systemctl stop \
+  "$PLATFORM_NAMESPACE-hosted-controller-backup.timer" \
+  "$PLATFORM_NAMESPACE-hosted-controller-backup.service" \
+  "$PLATFORM_NAMESPACE-controller.service"
+sudo install -m 0600 -o platform-controller -g platform-controller \
+  /home/agentops/hosted-controller-restore.sqlite3 \
+  "$PLATFORM_ADMIN_STATE/controller/restore-input.sqlite3"
+sudo rm -f /home/agentops/hosted-controller-restore.sqlite3
+sudo openstack-platform-hosted-controller-restore --yes
+sudo systemctl start \
+  "$PLATFORM_NAMESPACE-controller.service" \
+  "$PLATFORM_NAMESPACE-hosted-controller-backup.timer"
+```
+
+The fixed launcher refuses non-root use, an active controller/backup unit, or
+an unsafe restore input. It runs as `platform-controller`, validates deployment
+identity, known schema, SQLite integrity, foreign keys, and unfinished
+operations, atomically replaces only the hosted database, fsyncs its directory,
+and removes the staged plaintext after success. On refusal the current database
+is unchanged and the input remains for diagnosis. After startup, require
+`<namespace>-controller-readiness.service`, reconcile the management view, and
+create a fresh hosted-controller backup. Restore does not recreate OpenStack,
+Nomad, worker, or managed-data state.
+
+### External operator-state database backup
 
 Run this on the **operator host** as the unprivileged `/srv/openstack-platform` owner:
 
@@ -707,9 +769,10 @@ this operation daily at 02:45 UTC with a 30-minute randomized delay. Verify the
 timer and accepted evidence with private file metadata; do not list or print
 credentials.
 
-These backups contain the controller database only. They do not contain
-PostgreSQL, MongoDB, Garage objects, registry blobs, or an age identity. Registry blobs are rebuilt
-from source.
+These backups contain only the external operator CLI database. They do not
+contain the live admin-hosted controller database, PostgreSQL, MongoDB, Garage
+objects, registry blobs, or an age identity. Registry blobs are rebuilt from
+source.
 
 ### Managed-data backup and restore check on admin
 
@@ -791,10 +854,10 @@ failure. It atomically writes mode-`0600` `RESTORE-MANIFEST` only when all
 checks pass and never overwrites live services. The expected final line is
 `latest platform restore=verified .../RESTORE-MANIFEST`.
 
-### Offline controller-database restore
+### Offline external operator-state restore
 
-The stable CLI has an offline restore operation. Copy an accepted ciphertext
-from admin to a private mode-`0600` file on the operator host; do not use the
+The stable CLI has an offline restore operation for the external operator-state
+database. Copy an accepted ciphertext from admin to a private mode-`0600` file on the operator host; do not use the
 staging file while an upload is in progress:
 
 ```bash
