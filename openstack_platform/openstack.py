@@ -2761,6 +2761,20 @@ def _protected_user_data_copy(source: str | Path, *, maximum_bytes: int) -> Iter
 # Persistent host replacement
 
 
+def _accepted_replacement_refs(
+    refs: Mapping[str, Any], replacement_server_id: str
+) -> dict[str, Any]:
+    """Persist the typed facts established at the pre-delete acceptance boundary."""
+    return {
+        **refs,
+        "replacement_server_id": replacement_server_id,
+        "lifecycle_observations": {
+            "old_host_retained_until_ready": True,
+            "exact_identity_verified": True,
+        },
+    }
+
+
 def _replace_host(
     platform: PlatformConfig,
     role: str,
@@ -3100,10 +3114,8 @@ def _replace_host(
             sleep=sleep,
             checkpoint=checkpoint,
         )
-    checkpoint(
-        "accepted",
-        {**recovery_refs, "replacement_server_id": replacement_id},
-    )
+    accepted_refs = _accepted_replacement_refs(recovery_refs, replacement_id)
+    checkpoint("accepted", accepted_refs)
     cleanup_state = "confirmed"
     old_server_id = old.server_id
     assert old_server_id is not None
@@ -3120,7 +3132,7 @@ def _replace_host(
                 )
             ),
             message="replacement is accepted but retained old-server deletion is ambiguous",
-            refs={**recovery_refs, "replacement_server_id": replacement_id},
+            refs=accepted_refs,
             timeout_seconds=timeout_seconds,
             command_runner=command_runner,
             executable=executable,
@@ -3129,11 +3141,7 @@ def _replace_host(
         cleanup_state = "old_server_retained"
     checkpoint(
         "complete",
-        {
-            **recovery_refs,
-            "replacement_server_id": replacement_id,
-            "cleanup_state": cleanup_state,
-        },
+        {**accepted_refs, "cleanup_state": cleanup_state},
     )
     return ReplacementResult(
         role,
@@ -3635,10 +3643,13 @@ def _recover_host_replacement(
         executable=executable,
     )
     required_health_check(role, replacement_resources.host, remaining)
+    accepted_refs = _accepted_replacement_refs(refs, replacement_id)
     if phase == "replacement_created":
-        checkpoint(
-            "accepted",
-            {**refs, "replacement_server_id": replacement_id},
+        checkpoint("accepted", accepted_refs)
+    elif refs.get("lifecycle_observations") != accepted_refs["lifecycle_observations"]:
+        raise RecoveryRequired(
+            "accepted replacement lacks exact checkpointed lifecycle observations",
+            refs={**resources.operation_refs(), "replacement_server_id": replacement_id},
         )
     if _resource_exists(
         "server",
@@ -3659,14 +3670,14 @@ def _recover_host_replacement(
                 )
             ),
             message="accepted replacement is healthy but old-server cleanup remains ambiguous",
-            refs={**refs, "replacement_server_id": replacement_id},
+            refs=accepted_refs,
             timeout_seconds=timeout_seconds,
             command_runner=command_runner,
             executable=executable,
         )
     checkpoint(
         "complete",
-        {**refs, "replacement_server_id": replacement_id, "cleanup_state": "confirmed"},
+        {**accepted_refs, "cleanup_state": "confirmed"},
     )
     return RecoveryResult(role, action, replacement_id, "confirmed")
 

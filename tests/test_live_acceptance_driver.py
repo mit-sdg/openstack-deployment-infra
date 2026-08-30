@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from unittest import mock
 from uuid import UUID, uuid5
 
 from openstack_platform import acceptance
@@ -179,6 +180,10 @@ class FakeInterfaces:
                         "deploymentId": key,
                         "repositoryCommit": body["commit"],
                         "status": "succeeded",
+                        "imageDigest": "registry.example/app@sha256:" + "a" * 64,
+                        "nomadVersion": 1,
+                        "acceptedAt": "2026-01-01T00:00:00Z",
+                        "lastHealthyAt": "2026-01-01T00:00:01Z",
                     }
                 )
         if path.endswith("/disable"):
@@ -217,7 +222,6 @@ class FakeInterfaces:
     def verify_public_storage(self, url: str, expected: Mapping[str, object]) -> dict[str, bool]:
         self.calls.append(("public-storage", url, expected, False))
         return {
-            "candidateVerified": True,
             "publicRouteHealthy": True,
             "storageBound": True,
             "postgresWriteReadVerified": True,
@@ -247,6 +251,47 @@ class FakeInterfaces:
             raise AssertionError("cleanup did not receive converged scoped state")
         self.calls.append(("teardown", True))
         return {name: True for name in dict(acceptance.ACTION_CHECKS)["cleanup_verify"]}
+
+
+class TeardownTransport(FakeCommandTransport):
+    def __init__(self, name: str, identifier: str) -> None:
+        super().__init__()
+        self.name = name
+        self.identifier = identifier
+        self.live = True
+        self.fail_delete_once = False
+
+    @property
+    def projection(self) -> dict[str, object]:
+        return {"id": self.identifier, "name": self.name, "projectId": PROJECT}
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        stdin: bytes = b"",
+        timeout: int = 1800,
+        mutating: bool = False,
+    ) -> bytes:
+        encoded = tuple(argv)
+        self.calls.append((encoded, mutating, stdin))
+        if "token" in encoded:
+            return json.dumps({"project_id": PROJECT}).encode()
+        if "show" in encoded:
+            return json.dumps(
+                {"id": self.identifier, "name": self.name, "project_id": PROJECT}
+            ).encode()
+        if "delete" in encoded:
+            if self.fail_delete_once:
+                self.fail_delete_once = False
+                raise RuntimeError("fault after intent")
+            self.live = False
+            return b""
+        if "list" in encoded:
+            if "volume" in encoded and self.live:
+                return json.dumps([{"id": self.identifier, "name": self.name}]).encode()
+            return b"[]"
+        raise AssertionError(encoded)
 
 
 class StaticOutputTransport(FakeCommandTransport):
@@ -382,6 +427,108 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
                     }
                 )
 
+    def test_each_exact_content_field_is_independently_falsifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            interfaces = SupportedInterfaces(value, FakeCommandTransport())
+            expected = value.application["contentProof"]
+            assert isinstance(expected, Mapping)
+            check_names = {
+                "postgres": "postgresWriteReadVerified",
+                "mongo": "mongoWriteReadVerified",
+                "s3": "s3WriteReadVerified",
+            }
+            for field, check in check_names.items():
+                observed = dict(expected)
+                observed[field] = {"value": "falsified"}
+                interfaces.public_json = lambda _url, value=observed: value  # type: ignore[method-assign]
+                with self.subTest(field=field):
+                    checks = interfaces.verify_public_storage("https://example.test", expected)
+                    self.assertIs(checks[check], False)
+                    self.assertIs(checks["storageBound"], False)
+                    for other in set(check_names.values()) - {check}:
+                        self.assertIs(checks[other], True)
+
+    def test_candidate_check_fails_for_each_missing_typed_lifecycle_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            for field in ("imageDigest", "nomadVersion", "acceptedAt", "lastHealthyAt"):
+                fake = FakeInterfaces(value)
+                original_list = fake.list_items
+
+                def missing_candidate_field(
+                    path: str, missing: str = field, listing: object = original_list
+                ) -> list[Mapping[str, object]]:
+                    assert callable(listing)
+                    items = [dict(item) for item in listing(path)]
+                    if "/deployments" in path and items:
+                        items[0][missing] = None
+                    return items
+
+                fake.list_items = missing_candidate_field  # type: ignore[method-assign]
+                driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    LiveDriverError, "did not establish"
+                ):
+                    driver.handle(self._execute_request(value, "application_deploy"))
+
+    def test_persistent_retention_fails_for_each_exact_content_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "unused"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+            value = config(root, executable)
+            for failed in (
+                "postgresWriteReadVerified",
+                "mongoWriteReadVerified",
+                "s3WriteReadVerified",
+            ):
+                fake = FakeInterfaces(value)
+                original = fake.verify_public_storage
+
+                def falsified(
+                    url: str,
+                    expected: Mapping[str, object],
+                    field: str = failed,
+                    verify: object = original,
+                ) -> dict[str, bool]:
+                    assert callable(verify)
+                    result = verify(url, expected)
+                    result[field] = False
+                    return result
+
+                fake.verify_public_storage = falsified  # type: ignore[method-assign]
+                driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
+                with self.subTest(failed=failed), self.assertRaisesRegex(
+                    LiveDriverError, "did not establish"
+                ):
+                    driver.handle(self._execute_request(value, "persistent_host_replacement"))
+
+    @staticmethod
+    def _execute_request(value: DriverConfig, action: str) -> dict[str, object]:
+        return {
+            "schemaVersion": 1,
+            "mode": "execute",
+            "action": action,
+            "scope": {
+                "deploymentId": DEPLOYMENT,
+                "projectId": PROJECT,
+                "namespace": NAMESPACE,
+            },
+            "planSha256": "a" * 64,
+            "driverConfigurationSha256": hashlib.sha256(value.path.read_bytes()).hexdigest(),
+            "baselineFingerprint": "b" * 64,
+        }
+
     def test_managed_restore_false_observation_cannot_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -461,6 +608,103 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
                     "keypair", "example-admin", "example-admin"
                 )
             self.assertFalse(any("delete" in call[0] for call in transport.calls))
+
+    def _teardown_fixture(
+        self, root: Path, executable: Path
+    ) -> tuple[SupportedInterfaces, TeardownTransport, str]:
+        value = config(root, executable)
+        name = "acceptance-backup"
+        identifier = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        transport = TeardownTransport(name, identifier)
+        interfaces = SupportedInterfaces(value, transport)
+        interfaces._owned_names = lambda: {"volume": [name]}  # type: ignore[method-assign]
+        ownership = {
+            "schemaVersion": 1,
+            "deploymentId": DEPLOYMENT,
+            "projectId": PROJECT,
+            "namespace": NAMESPACE,
+            "resources": [
+                {
+                    "kind": "volume",
+                    "name": name,
+                    "deleteReference": identifier,
+                    "projection": transport.projection,
+                }
+            ],
+        }
+        interfaces.ownership_path.write_text(json.dumps(ownership))
+        interfaces.ownership_path.chmod(0o600)
+        baseline = hashlib.sha256(b"[]").hexdigest()
+        return interfaces, transport, baseline
+
+    def test_teardown_faults_are_resumable_at_every_journal_boundary(self) -> None:
+        phases = ("before_intent", "after_intent", "after_delete", "after_confirmation")
+        for phase in phases:
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                executable = root / "unused"
+                executable.write_text("#!/bin/sh\nexit 0\n")
+                executable.chmod(0o700)
+                interfaces, transport, baseline = self._teardown_fixture(root, executable)
+                platform = mock.Mock()
+                platform.get.return_value = "acceptance-backup"
+                original_record = interfaces._record_teardown
+                if phase == "before_intent":
+                    def fail_before(*_args: object, **_kwargs: object) -> object:
+                        raise RuntimeError("fault before intent")
+                    interfaces._record_teardown = fail_before  # type: ignore[method-assign]
+                elif phase == "after_intent":
+                    transport.fail_delete_once = True
+                elif phase == "after_delete":
+                    def fail_after_delete(
+                        entries: object,
+                        intent: object,
+                        status: str,
+                        record: object = original_record,
+                    ) -> object:
+                        if status == "confirmed":
+                            raise RuntimeError("fault after provider deletion")
+                        assert callable(record)
+                        return record(entries, intent, status)
+                    interfaces._record_teardown = fail_after_delete  # type: ignore[method-assign]
+                else:
+                    def fail_after_confirmation(
+                        entries: object,
+                        intent: object,
+                        status: str,
+                        record: object = original_record,
+                    ) -> object:
+                        assert callable(record)
+                        result = record(entries, intent, status)
+                        if status == "confirmed":
+                            raise RuntimeError("fault after confirmation")
+                        return result
+                    interfaces._record_teardown = fail_after_confirmation  # type: ignore[method-assign]
+                with mock.patch(
+                    "openstack_platform.acceptance_live_driver.load_platform",
+                    return_value=platform,
+                ), self.assertRaises(RuntimeError):
+                    interfaces.teardown(baseline)
+                journal = json.loads(interfaces.teardown_progress_path.read_text())
+                statuses = [entry["status"] for entry in journal["entries"]]
+                expected_statuses = {
+                    "before_intent": [],
+                    "after_intent": ["intended"],
+                    "after_delete": ["intended"],
+                    "after_confirmation": ["confirmed"],
+                }
+                self.assertEqual(statuses, expected_statuses[phase])
+                self.assertEqual(transport.live, phase in {"before_intent", "after_intent"})
+                interfaces._record_teardown = original_record  # type: ignore[method-assign]
+                with mock.patch(
+                    "openstack_platform.acceptance_live_driver.load_platform",
+                    return_value=platform,
+                ):
+                    result = interfaces.teardown(baseline)
+                self.assertTrue(all(result.values()))
+                self.assertFalse(transport.live)
+                confirmed = json.loads(interfaces.teardown_progress_path.read_text())
+                self.assertEqual(confirmed["entries"][0]["status"], "confirmed")
 
     def test_teardown_refuses_uncheckpointed_disappeared_resource(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

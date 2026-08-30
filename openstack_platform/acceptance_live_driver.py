@@ -651,24 +651,28 @@ class SupportedInterfaces:
         return result
 
     def verify_public_storage(self, url: str, expected: Mapping[str, object]) -> Observation:
+        """Return checks derived independently from each exact application field."""
         result = self.public_json(url)
-        if result != expected:
-            raise LiveDriverError("application content proof differs from the exact expected value")
+        exact_shape = set(result) == {"postgres", "mongo", "s3"} == set(expected)
+        postgres = exact_shape and result.get("postgres") == expected.get("postgres")
+        mongo = exact_shape and result.get("mongo") == expected.get("mongo")
+        s3 = exact_shape and result.get("s3") == expected.get("s3")
+        content_exact = postgres and mongo and s3
         return _observed(
             (
-                "candidateVerified",
                 "publicRouteHealthy",
                 "storageBound",
                 "postgresWriteReadVerified",
                 "mongoWriteReadVerified",
                 "s3WriteReadVerified",
             ),
-            candidateVerified=True,
+            # curl --fail plus strict JSON parsing is the route observation; the
+            # binding observation additionally requires every exact store field.
             publicRouteHealthy=True,
-            storageBound=True,
-            postgresWriteReadVerified=True,
-            mongoWriteReadVerified=True,
-            s3WriteReadVerified=True,
+            storageBound=content_exact,
+            postgresWriteReadVerified=postgres,
+            mongoWriteReadVerified=mongo,
+            s3WriteReadVerified=s3,
         )
 
     def mutate_controller(
@@ -827,27 +831,29 @@ class SupportedInterfaces:
             mutating=True,
             timeout=1800,
         )
-        required_lines = {
-            "postgres managed restore=complete",
-            "mongodb managed restore=complete",
-            "managed-data-restore=verified",
-        }
         rendered = output.decode()
-        if (
-            any(line not in rendered for line in required_lines)
-            or "garage-restore=verified" not in rendered
-            or "registry-artifacts=import-verified" not in rendered
-        ):
-            raise LiveDriverError("replacement restore did not report typed service observations")
+        postgres_service = "postgres managed restore=complete" in rendered
+        mongo_service = "mongodb managed restore=complete" in rendered
+        s3_service = "garage-restore=verified" in rendered
+        manifest = (
+            "managed-data-restore=verified" in rendered
+            and "registry-artifacts=import-verified" in rendered
+        )
         proof_url = application_url + str(self.c.application["verificationPath"])
-        if self.public_json(proof_url) != self.c.application["contentProof"]:
-            raise LiveDriverError("restored PostgreSQL/MongoDB/S3 content differs")
+        expected = self.c.application["contentProof"]
+        if not isinstance(expected, Mapping):
+            raise LiveDriverError("application content proof is invalid")
+        proof = self.public_json(proof_url)
+        exact_shape = set(proof) == {"postgres", "mongo", "s3"} == set(expected)
+        postgres_content = exact_shape and proof.get("postgres") == expected.get("postgres")
+        mongo_content = exact_shape and proof.get("mongo") == expected.get("mongo")
+        s3_content = exact_shape and proof.get("s3") == expected.get("s3")
         return _observed(
             dict(ACTION_CHECKS)["managed_data_restore"],
-            postgresRestored=True,
-            mongoRestored=True,
-            s3Restored=True,
-            restoreManifestVerified=True,
+            postgresRestored=postgres_service and postgres_content,
+            mongoRestored=mongo_service and mongo_content,
+            s3Restored=s3_service and s3_content,
+            restoreManifestVerified=manifest,
         )
 
     def hosted_restore(self) -> Observation:
@@ -1153,19 +1159,42 @@ class SupportedInterfaces:
         if role == "admin":
             self._operator("infra", "stop", "admin", "--yes", mutating=True)
         output = self._operator("infra", "replace", role, "--yes", mutating=True, timeout=1800)
-        replacement_evidence = {
-            "server=",
-            "old_retained_until_ready=verified",
-            "exact_identity=verified",
-            "data_retained=verified",
+        try:
+            lines = output.decode().splitlines()
+            lifecycle = json.loads(lines[-1], object_pairs_hook=_reject_duplicates)
+        except (UnicodeDecodeError, json.JSONDecodeError, IndexError) as error:
+            raise LiveDriverError("replacement lifecycle observation is malformed") from error
+        expected_fields = {
+            "schemaVersion",
+            "kind",
+            "operationId",
+            "role",
+            "oldServerId",
+            "replacementServerId",
+            "selectedImageId",
+            "observations",
         }
-        rendered_output = output.decode()
-        if any(token not in rendered_output for token in replacement_evidence):
-            raise LiveDriverError("replacement did not report exact typed acceptance observations")
+        observations = lifecycle.get("observations") if isinstance(lifecycle, dict) else None
+        if (
+            not isinstance(lifecycle, dict)
+            or set(lifecycle) != expected_fields
+            or lifecycle.get("schemaVersion") != 1
+            or lifecycle.get("kind") != "persistent-host-replacement-observation"
+            or lifecycle.get("role") != role
+            or lifecycle.get("oldServerId") != before["id"]
+            or lifecycle.get("selectedImageId") != image
+            or not isinstance(lifecycle.get("operationId"), str)
+            or observations
+            != {"oldHostRetainedUntilReady": True, "exactIdentityVerified": True}
+        ):
+            raise LiveDriverError("replacement lifecycle observation is not exact")
         name = str(before["name"])
         after_reference = self._exact_named_reference("server", name)
         after = self._show_projection("server", after_reference, name)
-        if before["id"] == after["id"]:
+        if (
+            before["id"] == after["id"]
+            or lifecycle.get("replacementServerId") != after["id"]
+        ):
             raise LiveDriverError("host replacement did not change exact server identity")
         transition = {
             "schemaVersion": 1,
@@ -1184,7 +1213,11 @@ class SupportedInterfaces:
         if role == "ingress":
             # Data retention is separately observed through the accepted application;
             # this provider observation establishes only replacement ordering/identity.
-            return {"oldHostRetainedUntilReady": True, "exactIdentityVerified": True}
+            return _observed(
+                ("oldHostRetainedUntilReady", "exactIdentityVerified"),
+                oldHostRetainedUntilReady=observations["oldHostRetainedUntilReady"],
+                exactIdentityVerified=observations["exactIdentityVerified"],
+            )
         return {"externalRecoveryUsed": True}
 
     def inventory(self) -> list[dict[str, object]]:
@@ -1215,15 +1248,16 @@ class SupportedInterfaces:
     def teardown_progress_path(self) -> Path:
         return self.ownership_path.with_name("teardown-progress.json")
 
-    def _teardown_progress(self) -> set[str]:
+    def _teardown_progress(self) -> dict[str, dict[str, object]]:
+        """Load the durable exact-intent/confirmation journal."""
         if not self.teardown_progress_path.exists():
             _atomic_private(
                 self.teardown_progress_path,
                 _canonical(
                     {
-                        "schemaVersion": 1,
+                        "schemaVersion": 2,
                         "deploymentId": self.c.deployment_id,
-                        "deleted": [],
+                        "entries": [],
                     }
                 )
                 + b"\n",
@@ -1237,33 +1271,71 @@ class SupportedInterfaces:
             raise LiveDriverError("teardown progress is malformed") from error
         if (
             not isinstance(document, dict)
-            or set(document) != {"schemaVersion", "deploymentId", "deleted"}
-            or document.get("schemaVersion") != 1
+            or set(document) != {"schemaVersion", "deploymentId", "entries"}
+            or document.get("schemaVersion") != 2
             or document.get("deploymentId") != self.c.deployment_id
-            or not isinstance(document.get("deleted"), list)
-            or any(not isinstance(item, str) for item in document["deleted"])
-            or len(document["deleted"]) != len(set(document["deleted"]))
+            or not isinstance(document.get("entries"), list)
         ):
             raise LiveDriverError("teardown progress is invalid")
-        return set(document["deleted"])
+        entries: dict[str, dict[str, object]] = {}
+        for raw in document["entries"]:
+            if (
+                not isinstance(raw, dict)
+                or set(raw)
+                != {"identity", "kind", "name", "deleteReference", "projection", "status"}
+                or not isinstance(raw.get("identity"), str)
+                or raw.get("status") not in {"intended", "confirmed"}
+                or not isinstance(raw.get("kind"), str)
+                or not isinstance(raw.get("name"), str)
+                or not isinstance(raw.get("deleteReference"), str)
+                or not isinstance(raw.get("projection"), dict)
+                or raw["identity"] in entries
+            ):
+                raise LiveDriverError("teardown progress is invalid")
+            entries[str(raw["identity"])] = dict(raw)
+        return entries
 
-    def _record_teardown(self, deleted: set[str], identity: str) -> None:
-        deleted.add(identity)
+    def _record_teardown(
+        self,
+        entries: dict[str, dict[str, object]],
+        intent: Mapping[str, object],
+        status: str,
+    ) -> dict[str, dict[str, object]]:
+        """Durably append intent or advance that exact intent to confirmation."""
+        if status not in {"intended", "confirmed"}:
+            raise LiveDriverError("teardown journal transition is invalid")
+        identity = intent.get("identity")
+        if not isinstance(identity, str):
+            raise LiveDriverError("teardown delete intent has no identity")
+        exact = {**dict(intent), "status": status}
+        previous = entries.get(identity)
+        if previous is not None:
+            previous_intent = {key: value for key, value in previous.items() if key != "status"}
+            if previous_intent != dict(intent):
+                raise LiveDriverError("teardown journal intent differs from immutable ownership")
+            if previous["status"] == "confirmed" or (
+                previous["status"] == "intended" and status == "intended"
+            ):
+                return entries
+        elif status != "intended":
+            raise LiveDriverError("teardown confirmation has no exact prior intent")
+        updated = {**entries, identity: exact}
         _atomic_private(
             self.teardown_progress_path,
             _canonical(
                 {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "deploymentId": self.c.deployment_id,
-                    "deleted": sorted(deleted),
+                    "entries": sorted(updated.values(), key=lambda item: str(item["identity"])),
                 }
             )
             + b"\n",
         )
+        return updated
 
     def teardown(self, baseline: str) -> Observation:
         self.guard()
-        deleted = self._teardown_progress()
+        journal = self._teardown_progress()
         try:
             ownership = json.loads(
                 self.ownership_path.read_bytes(), object_pairs_hook=_reject_duplicates
@@ -1333,6 +1405,7 @@ class SupportedInterfaces:
             }
         backup_owned = False
         backup_identity: str | None = None
+        ownership_identities: set[str] = set()
         for record in current_resources:
             if not isinstance(record, dict) or set(record) != {
                 "kind",
@@ -1373,19 +1446,45 @@ class SupportedInterfaces:
                 for row in rows
                 if isinstance(row, dict) and self._field_exact(row, "name") == name
             ]
+            reference_matches = (
+                []
+                if kind == "keypair"
+                else [
+                    row
+                    for row in rows
+                    if isinstance(row, dict) and self._field_exact(row, "id") == reference
+                ]
+            )
+            if not matches and reference_matches:
+                raise LiveDriverError("teardown candidate immutable identity drifted")
             identity = f"{kind}:{name}:{reference}"
+            ownership_identities.add(identity)
+            intent = {
+                "identity": identity,
+                "kind": kind,
+                "name": name,
+                "deleteReference": reference,
+                "projection": expected,
+            }
+            prior = journal.get(identity)
+            if prior is not None and {
+                key: value for key, value in prior.items() if key != "status"
+            } != intent:
+                raise LiveDriverError("teardown journal intent differs from immutable ownership")
             if is_backup:
                 backup_identity = identity
             if not matches:
-                if identity in deleted:
-                    continue
-                raise LiveDriverError(
-                    "recorded deployment resource disappeared before a checkpointed delete"
-                )
-            if identity in deleted:
-                raise LiveDriverError("checkpointed deletion still has a live provider resource")
+                if prior is None:
+                    raise LiveDriverError(
+                        "recorded deployment resource disappeared before an exact delete intent"
+                    )
+                if prior["status"] == "intended":
+                    journal = self._record_teardown(journal, intent, "confirmed")
+                continue
             if len(matches) != 1:
                 raise LiveDriverError("teardown candidate identity is ambiguous")
+            if prior is not None and prior["status"] == "confirmed":
+                raise LiveDriverError("confirmed deletion still has a live provider resource")
             current_reference = name if kind == "keypair" else self._field_exact(matches[0], "id")
             if current_reference != reference:
                 raise LiveDriverError(
@@ -1393,17 +1492,59 @@ class SupportedInterfaces:
                 )
             if self._show_projection(str(kind), reference, name) != expected:
                 raise LiveDriverError("teardown candidate ownership projection drifted")
+            if prior is None:
+                journal = self._record_teardown(journal, intent, "intended")
             self.commands.run(
                 (self.c.openstack, *str(kind).split(), "delete", reference),
                 timeout=600,
                 mutating=True,
             )
-            self._record_teardown(deleted, identity)
+            confirmation_raw = self.commands.run(
+                (self.c.openstack, *str(kind).split(), "list", *visibility, "-f", "json"),
+                timeout=60,
+            )
+            try:
+                confirmation_rows = json.loads(confirmation_raw)
+            except json.JSONDecodeError as error:
+                raise LiveDriverError("teardown deletion confirmation is malformed") from error
+            if not isinstance(confirmation_rows, list):
+                raise LiveDriverError("teardown deletion confirmation is invalid")
+            remaining = [
+                row
+                for row in confirmation_rows
+                if isinstance(row, dict) and self._field_exact(row, "name") == name
+            ]
+            remaining_by_reference = (
+                []
+                if kind == "keypair"
+                else [
+                    row
+                    for row in confirmation_rows
+                    if isinstance(row, dict) and self._field_exact(row, "id") == reference
+                ]
+            )
+            if not remaining and remaining_by_reference:
+                raise LiveDriverError("teardown deletion confirmation identity drifted")
+            if remaining:
+                if len(remaining) != 1:
+                    raise LiveDriverError("teardown deletion confirmation is ambiguous")
+                remaining_reference = (
+                    name if kind == "keypair" else self._field_exact(remaining[0], "id")
+                )
+                if remaining_reference != reference:
+                    raise LiveDriverError("teardown deletion confirmation identity drifted")
+                if self._show_projection(str(kind), reference, name) != expected:
+                    raise LiveDriverError("teardown deletion confirmation projection drifted")
+                raise LiveDriverError("intended provider resource remains live for safe retry")
+            journal = self._record_teardown(journal, intent, "confirmed")
+        if set(journal) - ownership_identities:
+            raise LiveDriverError("teardown journal contains an unknown resource intent")
         if (
             not backup_owned
             or self.c.backup_disposition != "destroy-after-verified-restore"
             or backup_identity is None
-            or backup_identity not in deleted
+            or backup_identity not in journal
+            or journal[backup_identity]["status"] != "confirmed"
         ):
             raise LiveDriverError("backup disposition is absent or does not cover the owned backup")
         deadline = time.monotonic() + 300
@@ -1619,6 +1760,18 @@ class RepositoryLiveDriver:
                 and attempts[0].get("repositoryCommit") == self.c.application["commit"]
                 and attempts[0].get("status") == "succeeded"
             )
+            candidate = (
+                exact
+                and isinstance(attempts[0].get("imageDigest"), str)
+                and re.fullmatch(
+                    r"[^@\s]+@sha256:[0-9a-f]{64}", str(attempts[0].get("imageDigest"))
+                )
+                is not None
+                and isinstance(attempts[0].get("nomadVersion"), int)
+                and not isinstance(attempts[0].get("nomadVersion"), bool)
+                and isinstance(attempts[0].get("acceptedAt"), str)
+                and isinstance(attempts[0].get("lastHealthyAt"), str)
+            )
             code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
             if (
                 code != 200
@@ -1630,7 +1783,9 @@ class RepositoryLiveDriver:
                 str(application["url"]) + str(self.c.application["verificationPath"]),
                 self._content_proof(),
             )
-            return _observed(required, exactCommitDeployed=exact, **proof)
+            return _observed(
+                required, exactCommitDeployed=exact, candidateVerified=candidate, **proof
+            )
         if action in {"interrupted_resume_injection", "interrupted_resume"}:
             operation_key = key("interrupted-deployment")
             result = self.i.mutate_controller(
@@ -1742,17 +1897,27 @@ class RepositoryLiveDriver:
             observed = self.i.replace("ingress")
             code, application = self.i.controller("GET", f"/v1/applications/{self.app_id}")
             app_url = application.get("url") if isinstance(application, dict) else None
-            retained = code == 200 and isinstance(app_url, str)
-            if isinstance(app_url, str):
-                self.i.verify_public_storage(
+            retention_proof: Observation = {
+                "postgresWriteReadVerified": False,
+                "mongoWriteReadVerified": False,
+                "s3WriteReadVerified": False,
+            }
+            if code == 200 and isinstance(app_url, str):
+                retention_proof = self.i.verify_public_storage(
                     app_url + str(self.c.application["verificationPath"]),
                     self._content_proof(),
                 )
+            postgres = retention_proof.get("postgresWriteReadVerified") is True
+            mongo = retention_proof.get("mongoWriteReadVerified") is True
+            s3 = retention_proof.get("s3WriteReadVerified") is True
             return _observed(
                 required,
                 oldHostRetainedUntilReady=observed.get("oldHostRetainedUntilReady") is True,
                 exactIdentityVerified=observed.get("exactIdentityVerified") is True,
-                dataRetained=retained,
+                postgresContentRetained=postgres,
+                mongoContentRetained=mongo,
+                s3ContentRetained=s3,
+                dataRetained=postgres and mongo and s3,
             )
         if action == "admin_recovery":
             observed = self.i.replace("admin")

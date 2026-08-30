@@ -891,15 +891,65 @@ class OperatorIntegrationTests(unittest.TestCase):
         def replace(*_args: object, **kwargs: object) -> openstack.ReplacementResult:
             self.assertIsNone(kwargs["user_data_path"])
             checkpoint = kwargs["checkpoint"]
-            checkpoint("observed", {"role": "ingress"})  # type: ignore[operator]
+            refs = {
+                "role": "ingress",
+                "old_server_id": "00000000-0000-4000-8000-000000000006",
+                "replacement_server_id": replaced.active_server_id,
+                "selected_image_id": replaced.selected_image_id,
+                "lifecycle_observations": {
+                    "old_host_retained_until_ready": True,
+                    "exact_identity_verified": True,
+                },
+                "cleanup_state": "confirmed",
+            }
+            checkpoint("accepted", refs)  # type: ignore[operator]
+            checkpoint("complete", refs)  # type: ignore[operator]
             return replaced
 
+        output = StringIO()
         with mock.patch.object(
             operator.openstack, "replace_host", side_effect=replace
         ) as replace_call:
-            operator.dispatch(replace_args, stdout=StringIO())
+            operator.dispatch(replace_args, stdout=output)
         replace_call.assert_called_once()
+        evidence = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(
+            evidence["observations"],
+            {"oldHostRetainedUntilReady": True, "exactIdentityVerified": True},
+        )
+        self.assertNotIn("dataRetained", evidence["observations"])
         self.assertTrue(callable(replace_call.call_args.kwargs["health_check"]))
+
+    def test_replacement_lifecycle_evidence_rejects_each_falsified_observation(self) -> None:
+        refs = {
+            "role": "ingress",
+            "old_server_id": "00000000-0000-4000-8000-000000000006",
+            "replacement_server_id": "00000000-0000-4000-8000-000000000008",
+            "selected_image_id": "00000000-0000-4000-8000-000000000007",
+            "lifecycle_observations": {
+                "old_host_retained_until_ready": True,
+                "exact_identity_verified": True,
+            },
+        }
+        for field in ("old_host_retained_until_ready", "exact_identity_verified"):
+            falsified = json.loads(json.dumps(refs))
+            falsified["lifecycle_observations"][field] = False
+            operation = db.Operation(
+                "00000000-0000-4000-8000-000000000099",
+                "infra.replace",
+                "infrastructure",
+                "succeeded",
+                "complete",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:01:00Z",
+                "2026-01-01T01:00:00Z",
+                falsified,
+                None,
+                None,
+                "confirmed",
+            )
+            with self.subTest(field=field), self.assertRaises(openstack.RecoveryRequired):
+                operator._replacement_observation(operation, "ingress")
 
     def test_interrupted_reboot_recovers_by_observation_without_replaying_action(self) -> None:
         args = operator.build_parser().parse_args(self.argv("infra", "reboot", "ingress", "--yes"))

@@ -82,7 +82,14 @@ ACTION_CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "persistent_host_replacement",
-        ("oldHostRetainedUntilReady", "exactIdentityVerified", "dataRetained"),
+        (
+            "oldHostRetainedUntilReady",
+            "exactIdentityVerified",
+            "postgresContentRetained",
+            "mongoContentRetained",
+            "s3ContentRetained",
+            "dataRetained",
+        ),
     ),
     (
         "admin_recovery",

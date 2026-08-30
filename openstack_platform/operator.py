@@ -715,6 +715,47 @@ def _infra_power(
     print(f"role={result.role} server={result.server_id} status={result.status}", file=output)
 
 
+def _replacement_observation(operation: db.Operation, role: str) -> dict[str, object]:
+    """Project only durable typed lifecycle facts from the completed operation."""
+    observations = operation.refs.get("lifecycle_observations")
+    old_server_id = operation.refs.get("old_server_id")
+    replacement_server_id = operation.refs.get("replacement_server_id")
+    selected_image_id = operation.refs.get("selected_image_id")
+    expected_observations = {
+        "old_host_retained_until_ready": True,
+        "exact_identity_verified": True,
+    }
+    if (
+        operation.kind != "infra.replace"
+        or operation.status != "succeeded"
+        or operation.phase != "complete"
+        or operation.cleanup_state != "confirmed"
+        or operation.refs.get("role") != role
+        or observations != expected_observations
+        or not all(
+            isinstance(value, str) and value
+            for value in (old_server_id, replacement_server_id, selected_image_id)
+        )
+    ):
+        raise openstack.RecoveryRequired(
+            "completed replacement lacks checkpointed typed lifecycle evidence",
+            refs={"operation_id": operation.operation_id, "role": role},
+        )
+    return {
+        "schemaVersion": 1,
+        "kind": "persistent-host-replacement-observation",
+        "operationId": operation.operation_id,
+        "role": role,
+        "oldServerId": old_server_id,
+        "replacementServerId": replacement_server_id,
+        "selectedImageId": selected_image_id,
+        "observations": {
+            "oldHostRetainedUntilReady": observations["old_host_retained_until_ready"],
+            "exactIdentityVerified": observations["exact_identity_verified"],
+        },
+    }
+
+
 def _infra_replace(
     args: argparse.Namespace,
     connection: sqlite3.Connection,
@@ -792,9 +833,11 @@ def _infra_replace(
                         deadline, min(60, config.policy.limits.process_seconds)
                     ),
                 )
-                db.mark_succeeded(connection, operation_id, cleanup_state=recovered.cleanup_state)
+                completed = db.mark_succeeded(
+                    connection, operation_id, cleanup_state=recovered.cleanup_state
+                )
                 print(
-                    f"role={recovered.role} recovered={recovered.action} active={recovered.active_server_id}",
+                    json.dumps(_replacement_observation(completed, args.host), sort_keys=True),
                     file=output,
                 )
                 return
@@ -848,7 +891,9 @@ def _infra_replace(
                 )
                 db.mark_recovery_required(connection, operation_id, error)
                 raise error
-            db.mark_succeeded(connection, operation_id, cleanup_state=result.cleanup_state)
+            completed = db.mark_succeeded(
+                connection, operation_id, cleanup_state=result.cleanup_state
+            )
         except openstack.RecoveryRequired as error:
             current = db.get_operation(connection, operation_id)
             if current is not None and current.status == "running":
@@ -869,11 +914,7 @@ def _infra_replace(
                 else:
                     db.mark_recovery_required(connection, operation_id, error)
             raise
-    print(
-        f"role={result.role} server={result.active_server_id} image={result.selected_image_id} "
-        "old_retained_until_ready=verified exact_identity=verified data_retained=verified",
-        file=output,
-    )
+    print(json.dumps(_replacement_observation(completed, args.host), sort_keys=True), file=output)
 
 
 def _sha256_file(path: Path) -> str:
