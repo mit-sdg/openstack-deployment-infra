@@ -424,24 +424,44 @@ release=$(dirname "$(dirname "$launcher")")
 test -f "$release/.complete" || test -f "$release/.candidate" || {{ echo "no accepted operator release" >&2; exit 69; }}
 state_directory={shlex.quote(str(state_root))}
 platform_config={shlex.quote(str(platform_config))}
-test -d "$state_directory" && test ! -L "$state_directory" || {{ echo "operator state is unavailable" >&2; exit 78; }}
 test -f "$platform_config" && test ! -L "$platform_config" || {{ echo "operator platform configuration is unavailable" >&2; exit 78; }}
-test "$(stat -c %u -- "$state_directory")" = "$(id -u)" && test "$(stat -c %a -- "$state_directory")" = 700 || {{
-  echo "operator state ownership or mode is invalid" >&2
-  exit 78
-}}
+# A drill may select only an explicitly absent database below a private
+# replacement directory. Ordinary restore retains the fixed live destination.
+destination={shlex.quote(str(destination))}
+if test "${{1:-}}" = --replacement-state-directory; then
+  test "$#" -ge 3 || {{ echo "operator replacement restore directory is missing" >&2; exit 64; }}
+  replacement_state_directory=$2
+  shift 2
+  case "$replacement_state_directory" in /*) ;; *) echo "operator replacement restore directory must be absolute" >&2; exit 78 ;; esac
+  test -d "$replacement_state_directory" && test ! -L "$replacement_state_directory" || {{ echo "operator replacement state is unavailable" >&2; exit 78; }}
+  replacement_state_directory=$(readlink -f -- "$replacement_state_directory") || {{ echo "operator replacement state is unavailable" >&2; exit 78; }}
+  live_state_directory=$(readlink -f -- "$state_directory") || {{ echo "operator state is unavailable" >&2; exit 78; }}
+  test "$replacement_state_directory" != "$live_state_directory" || {{ echo "operator replacement state must not be the live state directory" >&2; exit 78; }}
+  test "$(stat -c %u -- "$replacement_state_directory")" = "$(id -u)" && test "$(stat -c %a -- "$replacement_state_directory")" = 700 || {{
+    echo "operator replacement state ownership or mode is invalid" >&2
+    exit 78
+  }}
+  destination="$replacement_state_directory/platform.sqlite3"
+  test ! -e "$destination" && test ! -L "$destination" || {{ echo "operator replacement destination must be absent" >&2; exit 78; }}
+else
+  test -d "$state_directory" && test ! -L "$state_directory" || {{ echo "operator state is unavailable" >&2; exit 78; }}
+  test "$(stat -c %u -- "$state_directory")" = "$(id -u)" && test "$(stat -c %a -- "$state_directory")" = 700 || {{
+    echo "operator state ownership or mode is invalid" >&2
+    exit 78
+  }}
+fi
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$release/source"
 for argument in "$@"; do
   case "$argument" in
-    --destination|--destination=*|--platform-config|--platform-config=*)
+    --destination|--destination=*|--platform-config|--platform-config=*|--replacement-state-directory|--replacement-state-directory=*)
       echo "operator restore launcher refuses a fixed-path override" >&2
       exit 78
       ;;
   esac
 done
 exec "$release/.venv/bin/python" -P -m openstack_platform.restore "$@" \
-  --platform-config "$platform_config" --destination {shlex.quote(str(destination))}
+  --platform-config "$platform_config" --destination "$destination"
 """
 
 

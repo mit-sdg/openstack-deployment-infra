@@ -5,7 +5,7 @@ Reviewed 2026-08-30. This file separates work that gates a real deployment from 
 ## Current decision
 
 - **Start management UI implementation:** yes. The controller/setup and P-level implementation gates are complete.
-- **Deploy to production users:** no. An independent audit of commit `17d6cc4` found unresolved P-01, P-02, and P-07 implementation defects in addition to the pending Nix/live evidence gates.
+- **Deploy to production users:** no. The independent-audit P-02 implementation defect is corrected on this branch; P-01 and P-07 defects and the pending Nix/live evidence gates remain unresolved.
 - **Run an internal infrastructure deployment:** reasonable after CI; use it to produce the first live acceptance evidence.
 
 ## Original blockers — fixed on this branch
@@ -38,7 +38,7 @@ Audit found and corrected a recovery deadlock in the first implementation: a `re
 
 The stale release-installer test expectations were corrected and the repository was formatted. Local evidence:
 
-- 428 unit/packaging/security/recovery tests pass;
+- 431 unit/packaging/security/recovery tests pass;
 - Ruff format and lint pass;
 - strict mypy passes for 63 source files;
 - vulture, compileall, entrypoint smoke tests, JSON/SVG checks, and shell syntax pass.
@@ -61,13 +61,13 @@ Setup now refuses completion unless the admin host confirms:
 
 ## Production gates
 
-An independent clean-worktree audit classifies P-01 and P-02 as partial and P-07 as failed. P-03 through P-06 and P-08 pass code review, subject to the external Nix/live evidence stated below.
+An independent clean-worktree audit classified P-01 and P-02 as partial and P-07 as failed. This branch corrects the audited P-02 drill defect. P-03 through P-06 and P-08 pass code review, subject to the external Nix/live evidence stated below.
 
 ### P-01 — Real non-mutating setup preflight — partial
 
 `setup check` now reads and strictly parses Glance image-count and aggregate image-storage quota, using all five byte sizes bound into signed role-artifact evidence. Unlimited, unknown, byte, and GiB formatter variants are covered; missing size evidence and unknown or insufficient capacity cannot report ready. The path remains read-only in mutation-spy coverage. Real-cloud non-mutation evidence remains outstanding.
 
-### P-02 — Off-site backup and full loss recovery — partial
+### P-02 — Off-site backup and full loss recovery — audit defect corrected in code
 
 The admin now creates encrypted managed-data evidence that includes restorable
 OCI manifests and blobs, alongside PostgreSQL, MongoDB, and Garage. The
@@ -80,7 +80,7 @@ managed services, and an accepted app artifact without GitHub or the original
 registry. Off-site retention remains provider-owned and is applied only after a
 newer verified bundle and drill evidence exist. A guarded daily timer verifies a distinct mounted filesystem, rejects local/bind/stale sinks, discovers only committed sets, post-verifies the copy, and updates a credential-free health receipt.
 
-The packaged “full-loss” drill currently decrypts and integrity-checks both SQLite files but never invokes either production restore path or installs restored databases. Managed restoration is optional. The full-loss completion claim is therefore unproven.
+The corrected packaged drill has separate `--full` and `--verify-only` modes. Full mode invokes the supported external operator and hosted-controller restore launchers against explicit absent mode-`0700` replacement directories, never their live destinations. The launchers enforce deployment identity, schema, integrity, foreign-key, and unfinished-operation rules; the drill then proves restored image-selection, application, and accepted-deployment records. Managed restoration is mandatory in full mode, and complete evidence is emitted only after both SQLite restores, record checks, archive checks, and every managed restore pass. Verify-only mode invokes no restore launcher and cannot emit `DRILL-EVIDENCE.json`. Fake-tool integration tests prove launcher arguments and prove operator, hosted, or managed restore failures cannot produce completion evidence. Live execution against disposable replacement services remains an external evidence gate.
 
 ### P-03 — Browser-to-controller trust boundary — resolved
 
@@ -174,7 +174,7 @@ uv run ruff check openstack_platform deploy/releases infra tests
 uv run mypy
 uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
 uv run python -m compileall -q openstack_platform deploy infra tests
-uv run python -m unittest discover -s tests -q   # 428 passed
+uv run python -m unittest discover -s tests -q   # 431 passed
 ```
 
 Shell syntax and packaged entrypoint smoke checks also passed. ShellCheck is unavailable locally. `nix flake check --no-build` could not access `/nix/var/nix/daemon-socket/socket`; Nix evaluation, package smoke, five role VM tests, and QCOW2 boot tests remain CI gates.

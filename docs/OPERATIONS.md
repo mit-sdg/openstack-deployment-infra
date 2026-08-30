@@ -980,37 +980,66 @@ openstack-platform-recovery import \
   --destination /srv/recovery-imports
 ```
 
-Run the packaged drill with escrowed identity **file paths**. Identity contents
-and service passwords remain in mode-`0600` files and are never command-line
-values. The bundle must contain at least one accepted hosted deployment.
-Without `--apply-managed`, the drill is non-mutating: it imports into an empty
-workspace, decrypts both SQLite databases, runs SQLite integrity checks, proves
-an accepted app record exists, and validates Garage and OCI recovery archives
-after the original backup paths are unavailable.
+Run the packaged **full** drill with escrowed identity **file paths** and the
+private platform configuration for the replacement deployment. Identity
+contents and service passwords remain in mode-`0600` files and are never
+command-line values. The bundle must contain an operator image selection and at
+least one accepted hosted deployment. Provision empty replacement PostgreSQL,
+MongoDB, Garage, and registry services first; the supplied platform
+configuration and protected service files must address only those replacement
+services.
 
 ```bash
-infra/backup/full_loss_recovery_drill.sh \
+infra/backup/full_loss_recovery_drill.sh --full \
   /mnt/recovered/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ \
   /srv/full-loss-drill \
   /escrow/controller-age-identity.txt \
-  /escrow/managed-age-identity.txt
+  /escrow/managed-age-identity.txt \
+  /private/replacement-platform.json
 cat /srv/full-loss-drill/DRILL-EVIDENCE.json
 ```
 
-For a destructive exercise, provision empty replacement storage services first,
-verify their project and deployment inventory, then add `--apply-managed`. This
-runs `restore_managed_data.sh --yes`: PostgreSQL and MongoDB logical restore,
-Garage bucket/object restore, and OCI blob/manifest import. It refuses an
-uncommitted set and verifies checksums before mutation. Do not use this mode on
-healthy or nonempty services; PostgreSQL clean statements and MongoDB `--drop`
-replace matching data.
+The work path must be absent. The drill creates mode-`0700` replacement state
+directories beneath it and invokes the supported `openstack-platform-restore`
+and `openstack-platform-controller-restore` launchers with explicit absent
+SQLite destinations there. It never passes either live SQLite destination to a
+launcher. Both launchers enforce deployment identity, supported and complete
+schema, SQLite and foreign-key integrity, and no unfinished operation before
+committing a mode-`0600` replacement file. The drill then proves restored
+operator image-selection and hosted accepted-deployment records from those
+replacement files.
 
-Restore the hosted and external SQLite files from the imported bundle with the
-offline launchers documented below, start the replacement controller, and use
-the controller's enable operation for the accepted app. Enable reuses the exact
-restored digest now present in the replacement registry; it does not fetch
-source. Finish the drill only after the app health URL and its restored managed
-data pass application-specific reads. Retain `DRILL-EVIDENCE.json`, controller
+Full mode always runs `restore_managed_data.sh --yes`: PostgreSQL and MongoDB
+logical restore, Garage bucket/object restore, and OCI blob/manifest import. It
+refuses an uncommitted set and verifies checksums before mutation. Do not run
+full mode against healthy or nonempty services; PostgreSQL clean statements and
+MongoDB `--drop` replace matching data. `DRILL-EVIDENCE.json` is written only
+after both SQLite launchers, restored-record checks, archive checks, and every
+managed restore report success. A launcher failure leaves no complete drill
+evidence.
+
+For inspection that cannot mutate replacement services, use the clearly
+limited verify-only mode:
+
+```bash
+infra/backup/full_loss_recovery_drill.sh --verify-only \
+  /mnt/recovered/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ \
+  /srv/full-loss-verification \
+  /escrow/controller-age-identity.txt \
+  /escrow/managed-age-identity.txt \
+  /private/replacement-platform.json
+```
+
+Verify-only imports the bundle, decrypts the SQLite files, and validates Garage
+and OCI archive structure. It does not invoke any restore launcher, always
+reports `full-loss-drill=verify-only evidence=none`, and cannot create
+`DRILL-EVIDENCE.json`; it is not a completed full-loss drill.
+
+After full mode, start the replacement controller and use the controller's
+enable operation for the accepted app. Enable reuses the exact restored digest
+now present in the replacement registry; it does not fetch source. Finish the
+operational exercise only after the app health URL and restored managed data
+pass application-specific reads. Retain `DRILL-EVIDENCE.json`, controller
 operation evidence, the health result, and the off-site provider's immutable
 object/version IDs together.
 
@@ -1085,22 +1114,25 @@ identity, stop mutations and preserve the database, evidence, and operation
 IDs for controlled controller/management recovery. Never edit SQLite, invoke
 an obsolete product CLI, or change a provider by hand.
 
-For a disposable offline destination rather than the live state path, use
-the installed CLI with a separate private state directory. The directory is
-the destination parent, so this command does not touch the managed database:
+For a disposable offline destination rather than the live state path, use the
+installed restore launcher's dedicated replacement option. The directory must
+already be a direct, current-user-owned mode-`0700` directory and
+`platform.sqlite3` beneath it must be absent. This command does not touch the
+managed database:
 
 ```bash
 install -d -m 0700 /private/path/offline-state
-/srv/openstack-platform/bin/openstack-platform \
-  --state-directory /private/path/offline-state \
-  restore "$BACKUP_COPY" \
+/srv/openstack-platform/bin/openstack-platform-restore \
+  --replacement-state-directory /private/path/offline-state \
+  "$BACKUP_COPY" \
   --age-identity "$BACKUP_AGE_IDENTITY" \
   --yes
 ```
 
-The destination parent must be a direct current-user-owned mode-`0700`
-directory. Inspect the result with that separate operator state directory; do not
-point a running deployment at an unverified copy.
+The launcher rejects a replacement path supplied anywhere except the dedicated
+leading option and still uses the installed deployment configuration for
+identity validation. Inspect the result from the separate state directory; do
+not point a running deployment at an unverified copy.
 
 ## 7. Upgrade safely
 

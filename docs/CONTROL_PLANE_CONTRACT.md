@@ -161,8 +161,11 @@ The installed fixed-destination launcher is preferred for live state:
   [--age-identity IDENTITY] --yes
 ```
 
-The launcher always targets
-`/srv/openstack-platform/state/platform.sqlite3`. Restore contacts no provider,
+The launcher targets `/srv/openstack-platform/state/platform.sqlite3` by
+default. For a disposable recovery drill, the supported leading
+`--replacement-state-directory PATH` option targets the absent
+`PATH/platform.sqlite3`; `PATH` must already be a private mode-`0700` direct
+directory. Restore contacts no provider,
 helper, SSH, Nomad, or network service. It requires private direct files and a
 private destination directory; verifies deployment identity, known schema,
 SQLite integrity, foreign keys, and unfinished operations; then atomically

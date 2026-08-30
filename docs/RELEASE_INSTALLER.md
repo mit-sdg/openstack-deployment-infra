@@ -180,9 +180,13 @@ The stable launchers are `/srv/openstack-platform/bin/openstack-platform`,
 `/srv/openstack-platform/bin/openstack-platform-restore`, and
 `/srv/openstack-platform/bin/openstack-platform-install-config`. They are atomic symlinks into the
 selected complete release; callers must use these fixed paths rather than a
-release-internal virtualenv or `current` path. The restore launcher fixes the
-managed destination at `/srv/openstack-platform/state/platform.sqlite3` and
-rejects destination/configuration overrides. The command launcher defaults to
+release-internal virtualenv or `current` path. The restore launcher uses the
+managed destination at `/srv/openstack-platform/state/platform.sqlite3` by
+default and rejects generic destination/configuration overrides. Its dedicated
+leading `--replacement-state-directory PATH` option instead permits only an
+existing direct current-user-owned mode-`0700` directory whose
+`platform.sqlite3` child is absent; this is the supported disposable drill path.
+The command launcher defaults to
 `/srv/openstack-platform/config/platform.json` and the mode-`0600` policy under private state,
 and verifies both files before each invocation. It also verifies and explicitly
 selects the protected `/srv/openstack-platform/bin/platform-openstack` wrapper; it never assumes an

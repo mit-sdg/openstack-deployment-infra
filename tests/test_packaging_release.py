@@ -418,10 +418,22 @@ class ReleaseInstallerTests(unittest.TestCase):
             "openstack_platform/restore.py",
             """
             import argparse
+            import shutil
 
             def main():
-                argparse.ArgumentParser().parse_args()
+                parser = argparse.ArgumentParser()
+                parser.add_argument("backup")
+                parser.add_argument("--destination", required=True)
+                parser.add_argument("--platform-config", required=True)
+                parser.add_argument("--yes", action="store_true")
+                args = parser.parse_args()
+                assert args.yes
+                shutil.copyfile(args.backup, args.destination)
+                print("restore=verified schema-version=2 integrity=ok")
                 return 0
+
+            if __name__ == "__main__":
+                raise SystemExit(main())
             """,
         )
         self._write(
@@ -685,6 +697,43 @@ class ReleaseInstallerTests(unittest.TestCase):
         restore_text = restore_launcher.resolve().read_text()
         self.assertIn("openstack_platform.restore", restore_text)
         self.assertIn(str(self.root / "operator-install/state/platform.sqlite3"), restore_text)
+        self.assertIn("--replacement-state-directory", restore_text)
+        self.assertIn("operator replacement destination must be absent", restore_text)
+        replacement_state = self.root / "replacement-operator-state"
+        replacement_state.mkdir(mode=0o700)
+        replacement_backup = self.root / "replacement-backup.sqlite3"
+        replacement_backup.write_bytes(b"replacement state")
+        replacement_backup.chmod(0o600)
+        restored = subprocess.run(
+            (
+                restore_launcher,
+                "--replacement-state-directory",
+                replacement_state,
+                replacement_backup,
+                "--yes",
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("restore=verified", restored.stdout)
+        self.assertEqual(
+            (replacement_state / "platform.sqlite3").read_bytes(), b"replacement state"
+        )
+        self.assertFalse((self.root / "operator-install/state/platform.sqlite3").exists())
+        repeated = subprocess.run(
+            (
+                restore_launcher,
+                "--replacement-state-directory",
+                replacement_state,
+                replacement_backup,
+                "--yes",
+            ),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(repeated.returncode, 78)
+        self.assertIn("must be absent", repeated.stderr)
         launcher_text = launcher.resolve().read_text()
         self.assertIn(str(self.root / "operator-install/config/platform.json"), launcher_text)
         self.assertIn(f"openstack_command={self.openstack_command}", launcher_text)
