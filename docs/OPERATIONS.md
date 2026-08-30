@@ -914,7 +914,7 @@ openstack-platform-recovery verify \
 Export selects the newest committed SQLite trio in each SQLite backup root and
 requires the explicitly selected managed-data set to contain all four encrypted
 archives. It copies only direct, bounded regular files; rejects symlinks,
-unsafe names, partial evidence, and more than 32 GiB total; verifies every copy;
+unsafe names, partial evidence, any file above 1 TiB, or a bundle above 4 TiB; verifies every copy;
 and writes canonical `SHA256SUMS`, `MANIFEST.json`, and
 `MANIFEST.json.sha256`. `MANIFEST.json` is the commit marker. Existing bundle
 names are never replaced. Local backup retention remains unchanged and runs

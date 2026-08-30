@@ -24,8 +24,11 @@ from typing import Any, NoReturn
 
 _FORMAT = "openstack-platform-offsite-recovery-v1"
 _COMPONENTS = ("hosted-controller", "operator-state", "managed-data")
-_MAX_FILE_BYTES = 8 * 1024**3
-_MAX_TOTAL_BYTES = 32 * 1024**3
+# Fresh managed-data volumes default to 500 GiB, so recovery bounds must allow a
+# full logical archive rather than silently making mature deployments
+# unexportable. They remain finite to reject runaway mounts and malformed input.
+_MAX_FILE_BYTES = 1024 * 1024**3
+_MAX_TOTAL_BYTES = 4 * 1024 * 1024**3
 _MAX_FILES = 64
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{64}")
