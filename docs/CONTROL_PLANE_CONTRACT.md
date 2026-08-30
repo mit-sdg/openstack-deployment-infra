@@ -197,8 +197,8 @@ bounded diagnostic below the state directory.
 NixOS role under the dedicated `platform-controller` account. It starts after
 the retained state mount, Nomad, controller policy, and operator-owned helper
 release are available. The controller exposes separate mode-`0660` Unix sockets. The project socket is
-grouped to `controller-api` and accepts only the configured `management-web`
-UID/GID. The privileged socket is grouped to `platform-admin` and accepts only
+grouped to `controller-api` and accepts only the configured
+`management-broker` UID/GID. The privileged socket is grouped to `platform-admin` and accepts only
 the configured operator UID/GID. Both sockets authenticate every accepted
 connection with Linux `SO_PEERCRED` and limit each allowed peer to eight active
 connections in the Nix service. Browser login, project authorization, quota,
@@ -391,7 +391,7 @@ SQLite and API reads contain names, ownership, revisions, and timestamps only.
 
 These routes exist only on the privileged socket. The same socket contains
 application cascade delete and storage delete. The browser-facing
-`management-web` identity cannot open that socket; privileged workflows require
+management identities cannot open that socket; privileged workflows require
 a separately reviewed operator-side client.
 
 Paginated lists default to 50 and accept `limit` from 1 through 100. Log reads

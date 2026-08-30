@@ -101,13 +101,14 @@ volumes, use a read-only root by default, and apply CPU, memory, PID,
 capability, and log limits. Deleting a worker does not delete managed data or
 deployment history.
 
-The reserved `management-web` account has access only to its future state and
-the project-capability controller socket. It cannot open the privileged socket.
-Its condition-gated systemd service denies IP traffic except the ingress peer
-and makes controller, operator, PKI, and secret paths inaccessible. It must not
-read controller SQLite, OpenStack credentials, Nomad tokens, provider
-administrator credentials, builder keys, backup keys, age identities,
-diagnostics, or build logs directly.
+The reserved `management-web` renderer cannot open either controller socket or
+read authoritative management state. Its condition-gated service accepts IP
+traffic only from ingress and can call only the management broker Unix socket.
+The separate `management-broker` identity owns sessions/project authorization
+and is the exact peer accepted on the project controller socket; it has no TCP/IP
+access and cannot open the privileged socket. Neither identity can read
+controller SQLite, OpenStack credentials, Nomad tokens, provider administrator
+credentials, builder/backup keys, age identities, diagnostics, or build logs.
 
 ## Persistent data and backups
 

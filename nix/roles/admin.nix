@@ -29,6 +29,8 @@ let
   controllerSocketGroup = controllerSocketAccount.name;
   managementWebAccount = constants.accounts.managementWeb;
   managementWebUser = managementWebAccount.name;
+  managementBrokerAccount = constants.accounts.managementBroker;
+  managementBrokerUser = managementBrokerAccount.name;
   operatorAccount = constants.accounts.operator;
   platformAdminAccount = constants.accounts.platformAdmin;
   nomadAccount = constants.accounts.nomad;
@@ -44,6 +46,11 @@ let
   managementWebState = "${state}/management-web";
   managementWebReleaseRoot = "${state}/management-web-releases";
   managementWebExecutable = "${managementWebReleaseRoot}/current/bin/management-web";
+  managementBrokerState = "${state}/management-broker";
+  managementBrokerReleaseRoot = "${state}/management-broker-releases";
+  managementBrokerExecutable = "${managementBrokerReleaseRoot}/current/bin/management-broker";
+  managementBrokerRuntime = "${namespace}-management-broker";
+  managementBrokerSocket = "/run/${managementBrokerRuntime}/broker.sock";
   helperReleaseMarker = "${helperReleaseRoot}/current/.complete";
   credentialGuard = pkgs.writeShellScript "${namespace}-credential-guard" ''
     set -euo pipefail
@@ -199,6 +206,7 @@ in
   users.groups.${controllerSocketGroup}.gid = controllerSocketAccount.gid;
   users.groups.${controllerGroup}.gid = controllerAccount.gid;
   users.groups.${managementWebUser}.gid = managementWebAccount.gid;
+  users.groups.${managementBrokerUser}.gid = managementBrokerAccount.gid;
   users.groups.${platformAdminAccount.name}.gid = platformAdminAccount.gid;
   users.groups.${nomadAccount.name}.gid = nomadAccount.gid;
   users.users.${operatorAccount.name}.extraGroups = [
@@ -219,6 +227,11 @@ in
     isSystemUser = true;
     uid = managementWebAccount.uid;
     group = managementWebUser;
+  };
+  users.users.${managementBrokerUser} = {
+    isSystemUser = true;
+    uid = managementBrokerAccount.uid;
+    group = managementBrokerUser;
     extraGroups = [ controllerSocketGroup ];
   };
   users.users.${nomadAccount.name} = {
@@ -317,6 +330,8 @@ in
     "d ${controllerRoot}/helper-diagnostics 0700 ${controllerUser} ${controllerGroup} -"
     "d ${managementWebState} 0700 ${managementWebUser} ${managementWebUser} -"
     "d ${managementWebReleaseRoot} 0750 ${operatorAccount.name} ${managementWebUser} -"
+    "d ${managementBrokerState} 0700 ${managementBrokerUser} ${managementBrokerUser} -"
+    "d ${managementBrokerReleaseRoot} 0750 ${operatorAccount.name} ${managementBrokerUser} -"
     "d ${operatorRoot} 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${operatorRoot}/secrets 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${operatorRoot}/status 0750 ${operatorAccount.name} ${operatorAccount.name} -"
@@ -462,7 +477,7 @@ in
         "--policy ${controllerPolicy}"
         "--socket ${controllerSocket}"
         "--socket-group ${controllerSocketGroup}"
-        "--project-peer ${toString managementWebAccount.uid}:${toString managementWebAccount.gid}"
+        "--project-peer ${toString managementBrokerAccount.uid}:${toString managementBrokerAccount.gid}"
         "--privileged-socket ${controllerPrivilegedSocket}"
         "--privileged-socket-group ${platformAdminAccount.name}"
         "--privileged-peer ${toString operatorAccount.uid}:${toString operatorAccount.gid}"
@@ -530,23 +545,76 @@ in
     };
   };
 
-  # Host contract for the future browser-facing process. The unit remains
-  # condition-gated until a reviewed management application is installed.
-  systemd.services."${namespace}-management-web" = {
-    description = "Browser-facing ${platform.displayName} management application";
+  # The trusted broker owns authorization/session/project state and is the only
+  # future management component permitted to reach the controller. It has no
+  # TCP access; authentication and source resolution require a separately
+  # reviewed typed Unix integration service.
+  systemd.services."${namespace}-management-broker" = {
+    description = "Trusted ${platform.displayName} management authorization broker";
     wantedBy = [ "multi-user.target" ];
     after = [ "${namespace}-controller.service" ];
     requires = [ "${namespace}-controller.service" ];
-    unitConfig.ConditionPathIsExecutable = managementWebExecutable;
+    unitConfig.ConditionPathIsExecutable = managementBrokerExecutable;
     environment = {
       CONTROLLER_PROJECT_SOCKET = controllerSocket;
-      MANAGEMENT_STATE_DIRECTORY = managementWebState;
+      MANAGEMENT_BROKER_SOCKET = managementBrokerSocket;
+      MANAGEMENT_STATE_DIRECTORY = managementBrokerState;
+    };
+    serviceConfig = {
+      Type = "simple";
+      User = managementBrokerUser;
+      Group = managementBrokerUser;
+      SupplementaryGroups = [ controllerSocketGroup managementWebUser ];
+      RuntimeDirectory = managementBrokerRuntime;
+      RuntimeDirectoryMode = "0755";
+      ExecStart = managementBrokerExecutable;
+      UMask = "0007";
+      Restart = "on-failure";
+      NoNewPrivileges = true;
+      CapabilityBoundingSet = "";
+      AmbientCapabilities = "";
+      DevicePolicy = "closed";
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      PrivateDevices = true;
+      PrivateMounts = true;
+      PrivateTmp = true;
+      ProcSubset = "pid";
+      ProtectHome = true;
+      ProtectProc = "invisible";
+      ProtectSystem = "strict";
+      RestrictAddressFamilies = [ "AF_UNIX" ];
+      RestrictNamespaces = true;
+      RestrictSUIDSGID = true;
+      IPAddressDeny = "any";
+      InaccessiblePaths = [
+        operatorRoot
+        "/etc/${namespace}/pki"
+        "/etc/${namespace}/secrets"
+        controllerPrivilegedSocket
+      ];
+      ReadOnlyPaths = [ managementBrokerReleaseRoot ];
+      ReadWritePaths = [ managementBrokerState ];
+    };
+  };
+
+  # Browser rendering is intentionally a separate, disposable process. A web
+  # compromise cannot connect to either controller socket or read durable
+  # authorization/session state.
+  systemd.services."${namespace}-management-web" = {
+    description = "Browser-facing ${platform.displayName} management application";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "${namespace}-management-broker.service" ];
+    requires = [ "${namespace}-management-broker.service" ];
+    unitConfig.ConditionPathIsExecutable = managementWebExecutable;
+    environment = {
+      MANAGEMENT_BROKER_SOCKET = managementBrokerSocket;
+      MANAGEMENT_WEB_STATE_DIRECTORY = managementWebState;
     };
     serviceConfig = {
       Type = "simple";
       User = managementWebUser;
       Group = managementWebUser;
-      SupplementaryGroups = [ controllerSocketGroup ];
       ExecStart = managementWebExecutable;
       UMask = "0077";
       Restart = "on-failure";
@@ -577,6 +645,8 @@ in
       InaccessiblePaths = [
         controllerRoot
         operatorRoot
+        "/run/${controllerSocketDirectory}"
+        managementBrokerState
         "/etc/${namespace}/pki"
         "/etc/${namespace}/secrets"
       ];
@@ -597,8 +667,8 @@ in
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      User = managementWebUser;
-      Group = managementWebUser;
+      User = managementBrokerUser;
+      Group = managementBrokerUser;
       SupplementaryGroups = [ controllerSocketGroup ];
       ExecStart = pkgs.writeShellScript "${namespace}-controller-readiness" ''
         set -euo pipefail

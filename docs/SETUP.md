@@ -146,7 +146,7 @@ public route to return `OK` before reporting completion.
 
 ## Create the deployment
 
-Before `--apply`, generate and verify the signed compatibility manifest, SBOM,
+Before `setup check` or `--apply`, generate and verify the signed compatibility manifest, SBOM,
 and provenance described in [Release supply-chain evidence](RELEASE_SUPPLY_CHAIN.md).
 Add the three `PLATFORM_RELEASE_*` paths and the signed post-build
 `PLATFORM_ARTIFACT_MANIFEST`, `PLATFORM_ARTIFACT_SIGNATURE`, and

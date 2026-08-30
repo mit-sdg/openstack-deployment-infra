@@ -75,13 +75,12 @@ and pruning, and persistent-host lifecycle. It does not expose application,
 environment, deployment, or managed-storage commands. See the
 [operator CLI and local controller reference](docs/CONTROL_PLANE_CONTRACT.md).
 
-The controller implementation accepts bounded HTTP/1.1 JSON on a restricted
-Unix socket and owns application, deployment, environment, storage, operation,
-and safe administrator-read routes. It has no browser authentication or
-project authorization layer; filesystem access to the socket is its only
-transport boundary. The admin NixOS role starts it under a dedicated trusted
-account and grants only the reserved `management-web` account access to its
-socket. Future UI and authentication behavior belongs in
+The controller accepts bounded HTTP/1.1 JSON on separate project and privileged
+Unix sockets and owns application, deployment, environment, storage, operation,
+and safe administrator-read routes. Exact Linux peer credentials and route sets
+enforce each host capability. The future trusted `management-broker`—not the
+browser-facing renderer—is the only management peer allowed on the project
+socket; browser authorization and project ownership remain broker obligations. Future UI and authentication behavior belongs in
 [`docs/MANAGEMENT_APP_SPEC.md`](docs/MANAGEMENT_APP_SPEC.md).
 
 ## Code organization

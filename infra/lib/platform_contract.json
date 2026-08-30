@@ -27,6 +27,7 @@
     "controller": {"name": "platform-controller", "uid": 997, "gid": 985},
     "controllerSocket": {"name": "controller-api", "gid": 984},
     "managementWeb": {"name": "management-web", "uid": 998, "gid": 986},
+    "managementBroker": {"name": "management-broker", "uid": 996, "gid": 983},
     "platformAdmin": {"name": "platform-admin", "gid": 987},
     "nomad": {"name": "nomad", "uid": 999, "gid": 988}
   },

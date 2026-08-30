@@ -970,7 +970,9 @@ def extract_evidence_bundle(bundle: Path, destination: Path) -> Path:
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+    def redirect_request(  # type: ignore[no-untyped-def]
+        self, req, fp, code, _msg, headers, _newurl
+    ):
         raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
 
 

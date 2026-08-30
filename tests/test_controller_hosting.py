@@ -11,7 +11,7 @@ HELPER_DEPLOY = ROOT / "deploy/releases/deploy_helper_release.sh"
 
 
 class ControllerHostingStaticTests(unittest.TestCase):
-    def test_web_identity_has_only_its_private_and_socket_groups(self) -> None:
+    def test_web_identity_is_separate_from_controller_authorization_broker(self) -> None:
         source = ADMIN.read_text(encoding="utf-8")
         match = re.search(
             r"users\.users\.\$\{managementWebUser\} = \{(?P<body>.*?)\n  \};",
@@ -21,7 +21,15 @@ class ControllerHostingStaticTests(unittest.TestCase):
         self.assertIsNotNone(match)
         body = match.group("body")
         self.assertIn("group = managementWebUser;", body)
-        self.assertIn("extraGroups = [ controllerSocketGroup ];", body)
+        self.assertNotIn("extraGroups", body)
+        broker = re.search(
+            r"users\.users\.\$\{managementBrokerUser\} = \{(?P<body>.*?)\n  \};",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(broker)
+        assert broker is not None
+        self.assertIn("extraGroups = [ controllerSocketGroup ];", broker.group("body"))
         for trusted_group in ("agentops", "platform-admin", "nomad", "platform-controller"):
             self.assertNotIn(f'"{trusted_group}"', body)
 
@@ -40,7 +48,7 @@ class ControllerHostingStaticTests(unittest.TestCase):
             admin,
         )
         self.assertIn(
-            '"--project-peer ${toString managementWebAccount.uid}:${toString managementWebAccount.gid}"',
+            '"--project-peer ${toString managementBrokerAccount.uid}:${toString managementBrokerAccount.gid}"',
             admin,
         )
         self.assertIn(
@@ -112,13 +120,22 @@ class ControllerHostingStaticTests(unittest.TestCase):
             "--dport ${toString constants.ports.managementWeb} -j nixos-fw-accept",
             allowed_ports,
         )
+        broker = source[
+            source.index('systemd.services."${namespace}-management-broker"') : source.index(
+                'systemd.services."${namespace}-management-web"'
+            )
+        ]
         management = source[
             source.index('systemd.services."${namespace}-management-web"') : source.index(
                 'systemd.services."${namespace}-controller-readiness"'
             )
         ]
+        self.assertIn("CONTROLLER_PROJECT_SOCKET = controllerSocket;", broker)
+        self.assertIn('RestrictAddressFamilies = [ "AF_UNIX" ];', broker)
+        self.assertIn('IPAddressDeny = "any";', broker)
+        self.assertIn("MANAGEMENT_BROKER_SOCKET = managementBrokerSocket;", management)
+        self.assertNotIn("CONTROLLER_PROJECT_SOCKET", management)
         for setting in (
-            "CONTROLLER_PROJECT_SOCKET = controllerSocket;",
             'IPAddressDeny = "any";',
             'IPAddressAllow = "${platform.addresses.ingress}/32";',
             'SocketBindAllow = "tcp:${toString constants.ports.managementWeb}";',

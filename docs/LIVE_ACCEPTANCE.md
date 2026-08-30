@@ -108,9 +108,9 @@ Copy [`config/p07-driver.example.json`](../config/p07-driver.example.json) outsi
 
 - deployment/project/namespace identity;
 - fixed operator executable, inventory, policy, state, setup environment/workspace, and OpenStack wrapper paths;
-- fixed SSH/SCP executables, mode-`0600` SSH config, admin/recovery aliases, controller socket/curl paths, and admin backup/root/state paths;
+- fixed SSH/SCP executables, mode-`0600` SSH config, admin/recovery aliases, project/privileged controller socket and curl paths, and admin backup/root/state paths;
 - fixed age executable/identity and private local staging/offline-restore directories;
-- deployment-scoped application slug, public GitHub repository, exact commit/ref, and typed controller configuration;
+- deployment-scoped application slug, public GitHub repository, exact commit/ref, typed controller configuration, and a fixed public verification path whose strict JSON response proves PostgreSQL, MongoDB, and S3 write/read using the deployed commit;
 - exact ingress/admin replacement image UUIDs; and
 - a private command transcript path; and
 - the exact `destroy-after-verified-restore` backup disposition, acknowledging that disposable backup volumes are removed only after all restore checks pass.

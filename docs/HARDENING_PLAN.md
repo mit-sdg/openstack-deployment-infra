@@ -31,13 +31,13 @@ Every workstream must preserve these invariants:
 | HARD-02 | Generated implementation contract | Partially implemented | HARD-00 |
 | HARD-03 | Provider and lifecycle module decomposition | Started | HARD-00 |
 | HARD-04 | Remove shell `eval` configuration transport | Implemented (P-08 gate) | HARD-02 |
-| HARD-05 | Release and bootstrap supply-chain evidence | Planned | HARD-02 |
-| HARD-06 | Unix-socket peer authentication | Planned | HARD-00 |
+| HARD-05 | Release and bootstrap supply-chain evidence | Signed component/artifact gates implemented; target build evidence required | HARD-02 |
+| HARD-06 | Unix-socket peer authentication | Implemented with capability-separated sockets | HARD-00 |
 | HARD-07 | Systemd credential isolation | Implemented (P-08 gate) | HARD-00 |
 | HARD-08 | Crash-durable filesystem replacement | Implemented for supported critical paths | HARD-00 |
 | HARD-09 | State-machine, property, and parser fuzz tests | Concrete trust-boundary gates implemented | HARD-01, HARD-03 |
 | HARD-10 | Explicit unsupported-state detection | Implemented for migration, provider creation, and restore | HARD-01 |
-| HARD-11 | Runtime network and egress restrictions | Planned | HARD-00 |
+| HARD-11 | Runtime network and egress restrictions | Public management/ingress gates implemented; live matrix required | HARD-00 |
 
 HARD-00 is the immediate gate. HARD-02 should finish before HARD-01 and HARD-04
 so generated types and transport fields have one source. Module decomposition
@@ -198,8 +198,8 @@ installer test proving that `current` remains unchanged after each failure.
 **Goal:** Supplement filesystem socket permissions with process identity checks.
 
 The server must obtain peer credentials with `SO_PEERCRED` on supported Linux
-systems and compare the UID/GID against the contract-selected management-web
-identity. It must reject a connection when credentials are absent, malformed,
+systems and compare the UID/GID against the contract-selected management-broker or operator
+identity for the socket capability. It must reject a connection when credentials are absent, malformed,
 or outside policy. Add bounded per-peer connection concurrency and preserve the
 existing request-size and deadline limits.
 
@@ -207,9 +207,12 @@ Evaluate systemd socket activation so systemd owns socket creation, mode,
 group, backlog, and cleanup. If socket activation is not adopted, retain tests
 for stale socket replacement and refusal to unlink non-sockets.
 
-**Exit evidence:** accepted and rejected UID/GID tests, unavailable-peer-identity
-test, connection-limit test, reboot/stale-socket test, and proof that the
-controller has no TCP listener.
+**Implemented evidence:** project and privileged sockets have disjoint route
+sets and exact `SO_PEERCRED` UID/GID policies. The browser renderer cannot reach
+either socket; only the no-network authorization broker reaches the project
+socket. Tests cover accepted/rejected/unavailable peer identity, global and
+per-peer limits, stale sockets, slow framing, shutdown, and absence of a
+controller TCP listener.
 
 ## HARD-07: Systemd credential isolation
 
@@ -356,9 +359,14 @@ Required controls and tests:
 - public ingress preserving `Host` while exposing no controller socket or
   storage administration route.
 
-**Exit evidence:** role-to-role connectivity matrix, denied-path tests, DNS and
-redirect tests for source acquisition, metadata guard tests, and live Neutron
-security-group verification.
+**Implemented evidence:** authenticated-tunnel mode exposes no origin listener;
+direct mode accepts only canonical provider CIDRs at Neutron, the host firewall,
+and Traefik trusted proxies. The browser renderer is denied controller/provider
+access, and the trusted authorization broker is AF_UNIX-only. Source fetch uses
+a fixed GitHub HTTPS origin, no redirects, no inherited proxy/credential helper,
+and exact commit verification. Existing security-group and metadata tests cover
+role paths; the protected P-07 run retains the live Neutron/connectivity matrix
+evidence.
 
 ## Completion criteria
 

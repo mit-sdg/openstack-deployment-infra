@@ -451,7 +451,7 @@ class SupportedInterfaces:
                 "-n",
                 "runuser",
                 "-u",
-                "management-web",
+                "management-broker",
                 "--",
                 self.c.curl,
             ]

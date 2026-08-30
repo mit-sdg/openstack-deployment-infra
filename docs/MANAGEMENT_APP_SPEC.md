@@ -5,8 +5,8 @@
 This document is the implementation brief for a future sync-engine management
 application. The management application and its external authentication
 application are not implemented. The admin role already runs the local
-controller under a restricted service account and reserves the unprivileged
-`management-web` identity for this application. Nothing on this page is a claim
+controller under a restricted service account and reserves separate
+`management-web` renderer and `management-broker` authorization identities. Nothing on this page is a claim
 that browser login, user authorization, quota enforcement, or a hosted UI exists
 today. Current
 operator and controller behavior is documented in
@@ -31,32 +31,34 @@ visible credentials, and persistent runtime-log archives are outside this build.
 ## Process and trust boundary
 
 ```text
-browser -> HTTPS ingress -> management web :8080
+browser -> HTTPS ingress -> management-web renderer :8080
                             |
-                            `-> HTTP over /run/<namespace>-controller/project.sock
-                                -> trusted controller and local constrained helper
+                            `-> typed Unix request -> management-broker
+                                                     |
+                                                     `-> controller project.sock
 
-operator-side client -> /run/<namespace>-controller/privileged.sock
+operator-side client -> controller privileged.sock
 ```
 
-The management process runs as the dedicated `management-web` account. It can:
+The `management-web` renderer listens on port 8080, owns no authoritative
+session/project state, has no controller group, and can connect only to the
+broker socket. The `management-broker` owns durable application/session state,
+authentication verification, ownership, quota, audit, and reconciliation. Only
+the broker can connect to `project.sock`; it has no TCP/IP access and must use a
+separately reviewed typed Unix integration service for authentication exchange
+and source lookup.
 
-- listen on port 8080;
-- read its non-secret configuration and authentication public keys;
-- write only its own durable application/session state; and
-- connect to the controller socket through the restricted API group.
-
-It cannot read controller SQLite, OpenStack credentials, Nomad tokens, storage
-administrator credentials, builder keys, backup keys, age identities, helper
-diagnostics, or controller build logs directly. All product reads and mutations
-use the API models below.
+Neither process can read controller SQLite, OpenStack credentials, Nomad tokens,
+storage administrator credentials, builder keys, backup keys, age identities,
+helper diagnostics, or controller build logs. The renderer cannot read broker
+state. All product reads and mutations use the typed broker/API models below.
 
 ## Authoritative ownership
 
 | Owner | Durable facts |
 | --- | --- |
 | Authentication application | Login interaction, one-time codes, Ed25519 signing keys, stable subject, global `user` or `admin` role |
-| Management application | User profile, server session, project ownership, display name, repository, preferred branch, desired typed configuration and revision, desired enabled state, per-user quota reservation, confirmations, product audit, controller IDs, idempotency keys, and observed operation state |
+| Management broker | User profile, server session, project ownership, display name, repository, preferred branch, desired typed configuration and revision, desired enabled state, per-user quota reservation, confirmations, product audit, controller IDs, idempotency keys, and observed operation state |
 | Controller | Application UUID/slug, lifecycle execution, immutable deployment attempts and snapshots, active deployment and worker, environment key metadata/revision, storage lifecycle, provider-safe evidence, operation journals, and slug tombstones |
 | Nomad Variables and providers | Environment and storage credential values |
 
@@ -70,7 +72,9 @@ never creates a replacement key for the same intent.
 
 The deployment supplies these required settings:
 
-- `CONTROLLER_PROJECT_SOCKET`: fixed project-capability controller socket;
+- `CONTROLLER_PROJECT_SOCKET`: broker-only project-capability controller socket;
+- `MANAGEMENT_BROKER_SOCKET`: renderer-to-broker Unix socket;
+- `MANAGEMENT_INTEGRATION_SOCKET`: broker-to-integration Unix socket for strict `auth.exchange` and `git.resolve` operations;
 - `AUTH_AUTHORIZE_URL`: HTTPS browser authorization endpoint;
 - `AUTH_EXCHANGE_URL`: HTTPS backend code-exchange endpoint;
 - `AUTH_ISSUER`: exact JWT `iss`;
@@ -87,8 +91,9 @@ The deployment supplies these required settings:
    `redirect_uri` query fields.
 3. The authentication application redirects to
    `${PUBLIC_ORIGIN}/auth/callback?code=...&state=...`.
-4. The backend consumes the state once and sends a backend JSON `POST` to
-   `AUTH_EXCHANGE_URL` with exactly `code` and `redirectUri`.
+4. The broker consumes the state once and sends exactly `code` and `redirectUri`
+   through `auth.exchange` on `MANAGEMENT_INTEGRATION_SOCKET`; the integration
+   service performs the bounded JSON `POST` to `AUTH_EXCHANGE_URL`.
 5. A successful exchange returns exactly `{"token":"<JWT>"}`. The code is
    short-lived and single-use; replay is rejected.
 6. Management accepts only JWT `alg=EdDSA` with a configured `kid`, valid
@@ -182,10 +187,10 @@ build arguments, environment values, provider IDs, host paths, resource
 selection, or unknown fields. Saving increments the configuration revision but
 does not deploy.
 
-The backend resolves the preferred branch with fixed credential-free
-`git ls-remote --refs <canonical-repository> refs/heads/<branch>`, bounded time
-and output, no shell, no redirects selected by user input, and
-`GIT_TERMINAL_PROMPT=0`. Deployment sends the resulting exact lowercase
+The broker requests strict `git.resolve` through the integration socket. The
+integration service runs fixed credential-free
+`git ls-remote --refs <canonical-repository> refs/heads/<branch>` with bounded
+time/output, no shell, no user-selected redirects, and `GIT_TERMINAL_PROMPT=0`. Deployment sends the resulting exact lowercase
 40-character commit. An omitted branch means literal `main`, not GitHub API
 default-branch discovery.
 

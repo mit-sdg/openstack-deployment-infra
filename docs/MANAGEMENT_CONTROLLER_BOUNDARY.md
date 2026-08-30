@@ -1,96 +1,66 @@
 # Management-to-controller host and API contract
 
-The browser-facing management application is not implemented. This contract is
-the boundary an implementation must consume; it does not grant browser-user
-authorization by itself.
+The future management application uses two processes. The browser-facing renderer never reaches the controller. A trusted authorization broker owns sessions, project ownership, quota, and controller idempotency intent.
 
-## Host identity
+## Process identities
 
-The process runs as the contract-defined `management-web` UID and primary GID.
-Its systemd unit supplies:
+| Process | Network | Durable state | Unix access |
+| --- | --- | --- | --- |
+| `management-web` | Listens on admin port 8080 only for ingress; all other IP traffic denied | Its own non-authoritative renderer state | Broker socket only |
+| `management-broker` | No TCP/IP access | Sessions, users, project ownership, quota, audit, and reconciliation state | Controller project socket and its broker socket |
 
-```text
-CONTROLLER_PROJECT_SOCKET=/run/<namespace>-controller/project.sock
-MANAGEMENT_STATE_DIRECTORY=<adminState>/management-web
-```
+The controller project socket accepts only the exact `management-broker` UID and primary GID through Linux `SO_PEERCRED`. The browser renderer is not in `controller-api`, cannot traverse the controller runtime directory, and cannot read broker state. Authentication exchange and source lookup must use a separately reviewed typed Unix integration service; neither process may gain general provider/admin network access.
 
-The unit may bind TCP port 8080 and accept traffic only from the configured
-ingress host. Its cgroup denies all other IP traffic. It can use `AF_UNIX` to
-open the project socket. The unit has no credentials and makes the controller,
-operator, PKI, and secret trees inaccessible. A deployment that needs an
-authentication exchange or source lookup must add reviewed destination-specific
-network allowances; it must not remove the deny-by-default policy.
-
-The executable is condition-gated at:
+Both future executables are condition-gated below operator-owned release trees:
 
 ```text
+<adminState>/management-broker-releases/current/bin/management-broker
 <adminState>/management-web-releases/current/bin/management-web
 ```
 
-The release tree is operator-owned and read-only to the service; management-web
-owns only its state directory. Until that direct executable exists, systemd
-skips the unit.
+The broker receives:
 
-## Unix socket capabilities
-
-| Socket | Filesystem group | Accepted `SO_PEERCRED` identity | Routes |
-| --- | --- | --- | --- |
-| `project.sock` | `controller-api` | exact `management-web` UID and primary GID | health and ordinary project routes |
-| `privileged.sock` | `platform-admin` | exact operator UID and primary GID | `/v1/admin/*`, application cascade delete, storage delete |
-
-The controller rejects missing, malformed, or non-allowlisted Linux peer
-credentials before parsing HTTP. Each socket admits at most eight active
-connections per allowed UID/GID in the Nix service. The limit is per process
-identity and capacity is released when the connection closes. Socket group
-membership alone is insufficient.
-
-The project socket returns `404 NOT_FOUND` for privileged paths. An HTTP header,
-browser role, request body, or route parameter cannot select the privileged
-capability. A future management application must not receive the privileged
-socket path or join `platform-admin`.
-
-## Project API
-
-`GET /v1/health` is the non-mutating readiness request:
-
-```json
-{"capability":"project","status":"ok"}
+```text
+CONTROLLER_PROJECT_SOCKET=/run/<namespace>-controller/project.sock
+MANAGEMENT_BROKER_SOCKET=/run/<namespace>-management-broker/broker.sock
+MANAGEMENT_STATE_DIRECTORY=<adminState>/management-broker
 ```
 
-The project socket exposes the product routes in
-[CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md), except:
+The renderer receives only `MANAGEMENT_BROKER_SOCKET` and its own state path.
+
+## Controller socket capabilities
+
+| Socket | Accepted peer | Routes |
+| --- | --- | --- |
+| `project.sock` | exact `management-broker` UID/GID | health and non-destructive project routes |
+| `privileged.sock` | exact operator UID/GID | `/v1/admin/*`, application cascade delete, and storage delete |
+
+Both sockets are mode `0660`, authenticate every connection before parsing HTTP, and apply global/per-peer connection limits and deadlines. HTTP input cannot upgrade a socket capability. The broker must enforce browser authentication, ownership, quota, and CSRF before project calls. Privileged routes must never be proxied to either management process.
+
+The project socket excludes:
 
 - `POST /v1/applications/{id}/delete`;
 - `DELETE /v1/storage/{id}`; and
 - every `/v1/admin/*` route.
 
-Browser authentication, project ownership, quota, CSRF protection, and
-idempotency-intent persistence remain management-application obligations. The
-controller authenticates only the local process identity.
-
-## Privileged API
-
-The privileged socket exposes only application cascade delete, storage delete,
-and `/v1/admin/*` reads. It does not expose ordinary project creation,
-deployment, environment, or operation-polling routes. Today it is an
-operator-side API. Do not proxy it through the browser-facing process.
-
 ## Verification
 
-On an admin host, use the deployed identities rather than root so `SO_PEERCRED`
-is exercised:
+On admin, exercise deployed identities rather than root:
 
 ```sh
-runuser -u management-web -- curl --fail --silent \
+runuser -u management-broker -- curl --fail --silent \
   --unix-socket /run/<namespace>-controller/project.sock \
   http://localhost/v1/health
 
 runuser -u management-web -- curl --fail --silent \
+  --unix-socket /run/<namespace>-controller/project.sock \
+  http://localhost/v1/health
+# must fail
+
+runuser -u management-broker -- curl --fail --silent \
   --unix-socket /run/<namespace>-controller/privileged.sock \
   http://localhost/v1/admin/status
 # must fail
 ```
 
-The NixOS admin VM test also verifies socket ownership, both positive and denied
-routes, credential-file denial, and the management unit's network and filesystem
-sandbox properties.
+The admin VM test also checks process groups, socket ownership, denied routes, credential isolation, broker/web network policy, and that the renderer unit contains no controller socket path.

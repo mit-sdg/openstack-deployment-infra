@@ -4,9 +4,9 @@ Reviewed 2026-08-30. This file separates work that gates a real deployment from 
 
 ## Current decision
 
-- **Start management UI implementation:** yes, after this branch passes CI/Nix gates. The five controller/setup blockers found in the first review are fixed here.
-- **Deploy to production users:** not yet. The remaining production gates are listed below.
-- **Run an internal infrastructure deployment:** reasonable after CI and one live acceptance run; do not treat it as production-ready.
+- **Start management UI implementation:** yes. The controller/setup and P-level implementation gates are complete.
+- **Deploy to production users:** only after this exact commit passes Nix evaluation, five role VM/image tests, and a reviewed protected P-07 live run. Those are evidence gates, not remaining implementation placeholders.
+- **Run an internal infrastructure deployment:** reasonable after CI; use it to produce the first live acceptance evidence.
 
 ## Original blockers — fixed on this branch
 
@@ -59,9 +59,9 @@ Setup now refuses completion unless the admin host confirms:
 - the unprivileged operator cannot cross the management-only socket boundary; and
 - the hosted-controller backup timer is enabled.
 
-## Production deployment blockers
+## Production gates
 
-These do **not** prevent UI coding, but they block exposing the finished UI to real users.
+Implementation work for P-01 through P-08 is complete on this branch. Production remains blocked until the exact Nix/VM/image CI and protected live P-07 evidence pass; code or mocked evidence cannot substitute for those runs.
 
 ### P-01 — Real non-mutating setup preflight — resolved
 
@@ -78,29 +78,23 @@ private workspace. Monitoring requires a fresh secret-free export receipt.
 Bounded restore tools and the full-loss drill recover both SQLite databases,
 managed services, and an accepted app artifact without GitHub or the original
 registry. Off-site retention remains provider-owned and is applied only after a
-newer verified bundle and drill evidence exist.
+newer verified bundle and drill evidence exist. A guarded daily timer verifies a distinct mounted filesystem, rejects local/bind/stale sinks, discovers only committed sets, post-verifies the copy, and updates a credential-free health receipt.
 
-### P-03 — Harden the browser-to-controller trust boundary
+### P-03 — Browser-to-controller trust boundary — resolved
 
-Socket access still grants every product mutation and admin read. A compromise of the internet-facing `management-web` process therefore grants full product control. Linux peer credentials, per-peer connection limits, and management-web network egress restrictions remain planned rather than implemented.
+The browser renderer and trusted authorization broker now have separate fixed identities. `management-web` cannot open either controller socket or read broker state. The AF_UNIX-only `management-broker` is the exact `SO_PEERCRED` peer for ordinary project routes; the operator-only privileged socket contains admin reads and destructive deletion. Browser authentication, ownership, quota, and CSRF enforcement remain implementation requirements for the broker/UI, not host-boundary gaps.
 
-**Exit gate:** implement the selected containment model before public launch. At minimum require `SO_PEERCRED`, bounded peer concurrency, strict web-process filesystem/network isolation, separate ordinary/admin authorization paths, and tests proving the web identity cannot access provider/admin credentials or endpoints.
+### P-04 — Bounded Unix HTTP transport — resolved
 
-### P-04 — Bound Unix HTTP connection resources
+The transport enforces exact peer identity, global/per-peer connection limits, deterministic overload responses, absolute header/body/write and idle deadlines, a request-per-connection cap, strict JSON parser failures, and shutdown that closes stalled clients. Real socket tests cover slow headers, incomplete bodies, keep-alive, floods, peer rejection, and shutdown.
 
-The Unix server still creates an unbounded thread per connection and has no header/read/idle timeout or request-per-connection cap.
+### P-05 — Direct origin bypass — resolved
 
-**Exit gate:** add connection limits and deadlines; test slow headers, short bodies, idle keep-alive, floods, overload behavior, and shutdown with stalled clients.
-
-### P-05 — Prevent direct origin bypass
-
-Ingress security groups allow ports 80 and 443 from `0.0.0.0/0`. Once the management route exists, direct clients can supply its `Host` header and bypass provider-layer filtering/rate limiting.
-
-**Exit gate:** use an authenticated tunnel/no public listener or restrict origin traffic to configured provider ranges. If direct ingress remains supported, provision origin TLS before routing management traffic.
+`publicIngress.mode=tunnel` is the secure default: Traefik binds loopback and Neutron/NixOS expose no public origin port. `direct` requires exact canonical provider IPv4 CIDRs and applies the same set to Neutron, host firewall, and trusted forwarded headers. World-open, malformed, missing, duplicate, IPv6, and host-bit CIDRs fail before mutation.
 
 ### P-06 — Release compatibility and supply-chain evidence
 
-Implemented by a signed pre-build component manifest plus a signed post-build artifact manifest. The latter binds all five concrete QCOW2 SHA-256 values, normalized recursive Nix closures/output references, exact publication metadata, and the source component-manifest digest. Deterministic SPDX 2.3 evidence covers Python and Nix closure packages, and in-toto/SLSA-style provenance names the concrete subjects. Setup and publication verify these records before image acceptance. The explicit Ed25519 trust root, unmistakable unsigned-development channel, immutable GitHub Action SHAs, and forward-only database ordering remain enforced.
+Implemented by a signed pre-build component manifest plus a signed post-build artifact manifest. The latter binds all five concrete QCOW2 SHA-256 values, normalized recursive Nix closures/output references, exact publication metadata, and the source component-manifest digest. Deterministic SPDX 2.3 evidence covers Python and Nix closure packages, and in-toto/SLSA-style provenance names the concrete subjects. Setup and publication verify these records before image acceptance. CI fetches an immutable digest-pinned HTTPS evidence bundle, safely extracts only the exact bounded inventory, and verifies both signatures against the protected Ed25519 trust root; large SBOMs are not transported as CI secrets.
 
 **Exit gate:** complete. Tamper tests cover component inputs, signatures, evidence, QCOW2 bytes, Nix closure identity, source-manifest binding, and publication metadata while installer tests preserve the previously selected release on failure.
 
@@ -114,17 +108,21 @@ CI job is skipped unless a manual dispatch opts in, the repository enable variab
 is true, and the protected environment is approved.
 
 The reviewed repository driver now implements the documented live contract by
-composing the supported setup/operator, controller, backup/restore, recovery, host
-replacement, and exact-name teardown interfaces. Contract tests exercise every
-action through fake transports, including a plan transcript with zero mutations.
+composing the supported setup/operator, capability-separated controller,
+backup/restore, recovery, host replacement, and exact-name teardown interfaces.
+It kills/restarts the controller during an in-flight candidate deployment and
+resumes the identical operation, while the deployed fixture proves PostgreSQL,
+MongoDB, and S3 writes/reads through runtime bindings. Contract tests exercise
+every action through fake transports, including a plan transcript with zero
+mutations.
 The gate remains closed until a protected runner executes it and a reviewer accepts
 a verified passing evidence bundle; no live pass is claimed here.
 
-### P-08 — Complete critical hardening workstreams
+### P-08 — Critical hardening workstreams — resolved in code
 
-The following items in `docs/HARDENING_PLAN.md` are production gates: remove shell `eval` transport, credential isolation, crash-durable replacements, unsupported-state rejection, secret/egress tests, and parser/state-machine fuzzing at trust boundaries.
+Production shell `eval` transport is replaced by a bounded NUL-delimited allowlist. Secret-bearing services use guarded systemd credentials and no core dumps. Critical replacements use no-follow/type/owner/mode checks, file and directory `fsync`, deterministic stale handling, and fault-injection tests. Unsupported prior state fails before migration/provider mutation/restore. Seeded parser/state/idempotency tests and secret scans cover trust boundaries. Management egress and public origin policy are deny-by-default; protected live acceptance supplies the remaining role-to-role evidence.
 
-Module decomposition and full typed-inventory cleanup can proceed independently unless they block one of those controls.
+Module decomposition and broader typed-inventory cleanup remain non-blocking follow-up work.
 
 ## Important but not blocking UI work or an internal deployment
 
