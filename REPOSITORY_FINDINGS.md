@@ -104,11 +104,20 @@ Implemented by the deterministic signed release manifest, retained SBOM and prov
 
 **Exit gate:** complete. Tamper tests cover the signature, evidence, contract, lockfile, wheel inputs, helper actions, controller, and role-image inputs while installer tests preserve the previously selected release on failure.
 
-### P-07 — Live release acceptance
+### P-07 — Live release acceptance — orchestrator implemented; live evidence required
 
-The repository has strong unit and Nix tests, but the acceptance checklist has no retained live evidence for a full cloud lifecycle.
+The repository now provides an explicit-opt-in, plan-first disposable acceptance
+orchestrator with exact deployment/project scope, bounded driver calls, durable
+resume checkpoints, deliberate interruption injection, fixed sanitized evidence,
+a hash chain/checksum/HMAC signature, and offline fake-driver tests. The protected
+CI job is skipped unless a manual dispatch opts in, the repository enable variable
+is true, and the protected environment is approved.
 
-**Exit gate:** automate a disposable release drill covering greenfield setup, interrupted resume, one app lifecycle, all storage types, both SQLite restores, managed-data restore, persistent-host replacement, admin recovery, and cleanup without touching unrelated resources.
+The gate remains closed until a protected driver implements the documented live
+contract and a reviewer accepts a verified passing evidence bundle. That drill
+covers greenfield setup, interrupted resume, one app lifecycle, all storage types,
+both SQLite restores, managed-data restore, persistent-host replacement, admin
+recovery, and cleanup whose unrelated-resource fingerprint is unchanged.
 
 ### P-08 — Complete critical hardening workstreams
 

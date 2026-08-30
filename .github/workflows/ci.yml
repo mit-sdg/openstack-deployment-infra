@@ -11,6 +11,10 @@ on:
         description: Build and publish deployment images from the selected commit
         type: boolean
         default: false
+      live_acceptance:
+        description: Run the protected disposable P-07 live release gate
+        type: boolean
+        default: false
   schedule:
     - cron: "17 4 * * 6"
 
@@ -455,3 +459,99 @@ jobs:
       - name: Remove private deployment configuration
         if: always()
         run: rm -f config/platform.json
+
+  live-acceptance:
+    name: P-07 disposable live acceptance
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.live_acceptance == true &&
+      vars.P07_ACCEPTANCE_ENABLED == 'true'
+    environment: p07-live-acceptance
+    runs-on: [self-hosted, p07-live-acceptance]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.2"
+          enable-cache: true
+
+      - name: Install locked acceptance environment
+        run: uv sync --frozen
+
+      - name: Create or recover the private run context
+        env:
+          P07_EVIDENCE_HMAC_KEY_BASE64: ${{ secrets.P07_EVIDENCE_HMAC_KEY_BASE64 }}
+          P07_PROJECT_ID: ${{ secrets.P07_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$P07_EVIDENCE_HMAC_KEY_BASE64"
+          test -n "$P07_PROJECT_ID"
+          root="/srv/openstack-platform-acceptance/runs/$GITHUB_RUN_ID"
+          umask 077
+          install -d -m 0700 "$root" "$root/state"
+          if [[ ! -f $root/context ]]; then
+            deployment_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+            namespace="p07-ci-${deployment_id%%-*}"
+            printf 'P07_DEPLOYMENT_ID=%q\nP07_NAMESPACE=%q\n' \
+              "$deployment_id" "$namespace" > "$root/context"
+            chmod 0600 "$root/context"
+          fi
+          base64 --decode <<<"$P07_EVIDENCE_HMAC_KEY_BASE64" > "$root/signing.key"
+          chmod 0600 "$root/signing.key"
+          printf 'P07_ROOT=%s\nP07_PROJECT_ID=%s\n' "$root" "$P07_PROJECT_ID" >> "$GITHUB_ENV"
+
+      - name: Produce the non-mutating plan
+        env:
+          P07_DRIVER: /srv/openstack-platform-acceptance/driver
+        run: |
+          set -euo pipefail
+          source "$P07_ROOT/context"
+          if [[ ! -f $P07_ROOT/plan.json ]]; then
+            uv run openstack-platform-acceptance plan \
+              --deployment-id "$P07_DEPLOYMENT_ID" \
+              --project-id "$P07_PROJECT_ID" \
+              --namespace "$P07_NAMESPACE" \
+              --driver "$P07_DRIVER" \
+              --output "$P07_ROOT/plan.json"
+          fi
+          python3 -m json.tool "$P07_ROOT/plan.json"
+          sha256sum "$P07_ROOT/plan.json"
+
+      - name: Apply or resume the reviewed plan
+        env:
+          P07_DRIVER: /srv/openstack-platform-acceptance/driver
+          P07_LIVE_ACCEPTANCE: "1"
+        run: |
+          set -euo pipefail
+          source "$P07_ROOT/context"
+          uv run openstack-platform-acceptance run \
+            --plan "$P07_ROOT/plan.json" \
+            --driver "$P07_DRIVER" \
+            --state-directory "$P07_ROOT/state" \
+            --signing-key "$P07_ROOT/signing.key" \
+            --apply \
+            --confirm "P07:$P07_DEPLOYMENT_ID"
+          uv run openstack-platform-acceptance verify \
+            --evidence-directory "$P07_ROOT/state" \
+            --signing-key "$P07_ROOT/signing.key"
+
+      - name: Remove local signing key
+        if: always()
+        run: rm -f "${P07_ROOT:-/nonexistent}/signing.key"
+
+      - name: Upload sanitized acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p07-live-acceptance-${{ github.run_id }}
+          path: |
+            /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/plan.json
+            /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/state/evidence.json
+            /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/state/evidence.json.sha256
+            /srv/openstack-platform-acceptance/runs/${{ github.run_id }}/state/evidence.json.hmac-sha256
+          if-no-files-found: warn
+          retention-days: 30

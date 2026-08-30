@@ -71,6 +71,8 @@ resources named by the private infrastructure inventory.
 - [Traceable acceptance checklist](ACCEPTANCE_CHECKLIST.md) — current
   infrastructure, operator/controller boundary, backups, restore, upgrade, and
   cleanup evidence.
+- [Disposable P-07 live release gate](LIVE_ACCEPTANCE.md) — plan, protected
+  driver contract, resumable execution, and sanitized authenticated evidence.
 
 Keep live identifiers, credentials, incident notes, and handoff records out of
 tracked documentation. Store them in the deployment's private operations
