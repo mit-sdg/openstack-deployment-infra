@@ -1,32 +1,15 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCUMENTS = (
-    ROOT / "README.md",
-    ROOT / "nix/README.md",
-    *sorted((ROOT / "docs").glob("*.md")),
-)
+DOCUMENTS = (ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md")))
 CURRENT_PRODUCT_DOCUMENTS = (
     ROOT / "README.md",
-    *(
-        ROOT / "docs" / name
-        for name in (
-            "ACCEPTANCE_CHECKLIST.md",
-            "ARCHITECTURE.md",
-            "CONFIGURATION.md",
-            "CONTROL_PLANE_CONTRACT.md",
-            "OPERATIONS.md",
-            "PUBLIC_INGRESS.md",
-            "README.md",
-            "SETUP.md",
-            "TROUBLESHOOTING.md",
-            "TUTORIAL.md",
-        )
-    ),
+    *(ROOT / "docs" / name for name in ("DEPLOYMENT.md", "INTERNALS.md", "OPERATIONS.md")),
 )
 LINK_RE = re.compile(r"\[[^]]*\]\(([^)]+)\)")
 ROUTE_RE = re.compile(r'\("(GET|POST|PUT|PATCH|DELETE)", "(/v1/[^\"]+)", self\.')
@@ -86,41 +69,63 @@ class DocumentationTests(unittest.TestCase):
                     with self.subTest(document=document.relative_to(ROOT), target=target):
                         self.assertTrue((document.parent / path).resolve().exists())
 
-    def test_documentation_is_consolidated_around_current_reader_workflows(self) -> None:
-        self.assertFalse((ROOT / "docs" / "GETTING_STARTED.md").exists())
-        self.assertFalse((ROOT / "docs" / "MANAGEMENT_CONTROLLER_BOUNDARY.md").exists())
-        operations = (ROOT / "docs" / "OPERATIONS.md").read_text()
-        management = (ROOT / "docs" / "MANAGEMENT_APP_SPEC.md").read_text()
-        index = (ROOT / "docs" / "README.md").read_text()
-        self.assertLess(len(operations.splitlines()), 500)
-        self.assertIn("## Back up all state classes", operations)
-        self.assertIn("## Drill complete loss recovery", operations)
-        self.assertIn("### Host service contract", management)
-        self.assertIn("## Maintainer-only plans", index)
+    def test_tracked_file_guide_covers_every_existing_git_path(self) -> None:
+        guide = (ROOT / "docs" / "REPOSITORY_GUIDE.md").read_text()
+        entries = re.findall(r"^- `([^`]+)` —", guide, re.MULTILINE)
+        listed = set(entries)
+        git_paths = subprocess.run(
+            ["git", "ls-files"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        tracked = {path for path in git_paths if (ROOT / path).is_file()}
+        self.assertEqual(len(entries), len(listed), "tracked-file guide has duplicate paths")
+        self.assertFalse(tracked - listed, f"unlisted tracked paths: {sorted(tracked - listed)}")
+        stale = {path for path in listed - tracked if not (ROOT / path).is_file()}
+        self.assertFalse(stale, f"tracked-file guide has missing paths: {sorted(stale)}")
+
+    def test_documentation_is_consolidated_into_six_reader_documents(self) -> None:
+        names = {path.name for path in (ROOT / "docs").glob("*.md")}
+        self.assertEqual(
+            names,
+            {
+                "DEPLOYMENT.md",
+                "DEVELOPMENT.md",
+                "INTERNALS.md",
+                "MAINTENANCE.md",
+                "OPERATIONS.md",
+                "REPOSITORY_GUIDE.md",
+            },
+        )
+        self.assertFalse((ROOT / "REPOSITORY_FINDINGS.md").exists())
+        self.assertFalse((ROOT / "nix" / "README.md").exists())
+
+    def test_deployment_guide_is_human_facing_and_states_current_limits(self) -> None:
+        deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text()
+        normalized = " ".join(deployment.split())
+
+        self.assertIn(
+            "browser management UI and its authentication service do not exist", normalized
+        )
+        self.assertIn("What appears in OpenStack", deployment)
+        self.assertIn("Why the deployment boundary is safer", deployment)
+        self.assertIn("Future management application", (ROOT / "docs" / "INTERNALS.md").read_text())
+        self.assertIn("TODO", deployment)
+        self.assertNotIn("`GET /v1/", deployment)
+        self.assertNotIn("`POST /v1/", deployment)
 
     def test_current_operator_and_pre_management_boundary_is_documented(self) -> None:
-        readme = (ROOT / "README.md").read_text()
-        architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
-        contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
-        tutorial = (ROOT / "docs" / "TUTORIAL.md").read_text()
+        readme = " ".join((ROOT / "README.md").read_text().split())
+        internals = " ".join((ROOT / "docs" / "INTERNALS.md").read_text().split())
 
-        normalized_readme = " ".join(readme.split())
-        self.assertIn(
-            "There is not yet a supported end-user application workflow", normalized_readme
-        )
-        self.assertIn("sync-engine management application", normalized_readme)
-        self.assertIn("authentication application do not exist", normalized_readme)
-        self.assertIn("no product commands", architecture)
-        self.assertIn("admin NixOS role runs that executable", architecture)
-        self.assertIn(
-            "setup`, `status`, `backup`, `restore`, and `infra`",
-            " ".join(tutorial.split()),
-        )
-        self.assertIn("The CLI has no application, deployment, environment", contract)
-        self.assertIn("implemented, packaged, and run by the admin", contract)
-        self.assertIn("authenticates the host process, not the browser user", contract)
-        self.assertIn("separate mode-`0660` Unix sockets", contract)
-        self.assertIn("Idempotency-Key", contract)
+        self.assertIn("there is not yet a supported workflow for application owners", readme)
+        self.assertIn("has no application, deployment, environment", internals)
+        self.assertIn("runs as `platform-controller`", internals)
+        self.assertIn("authenticates the local host process, not a browser user", internals)
+        self.assertIn("two mode-`0660` Unix sockets", internals)
+        self.assertIn("Idempotency-Key", internals)
 
     def test_retired_product_cli_and_repository_manifest_are_not_current_instructions(self) -> None:
         retired_commands = (
@@ -139,55 +144,43 @@ class DocumentationTests(unittest.TestCase):
 
     def test_documented_controller_routes_match_implementation(self) -> None:
         implementation = (ROOT / "openstack_platform" / "controller" / "api.py").read_text()
-        contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
+        internals = (ROOT / "docs" / "INTERNALS.md").read_text()
         routes = set(ROUTE_RE.findall(implementation))
         self.assertEqual(len(routes), 30)
         for method, path in routes:
             with self.subTest(method=method, path=path):
-                self.assertIn(f"`{method} {path}`", contract)
+                self.assertIn(f"`{method} {path}`", internals)
 
     def test_automated_setup_contract_is_documented(self) -> None:
-        readme = (ROOT / "README.md").read_text()
-        setup = (ROOT / "docs" / "SETUP.md").read_text()
-        contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
+        deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text()
+        internals = (ROOT / "docs" / "INTERNALS.md").read_text()
         example = (ROOT / "config" / "platform.example.json").read_text()
 
-        self.assertIn("automated setup", readme.lower())
-        self.assertIn("PLATFORM_INGRESS_ADDRESS", setup)
-        self.assertIn("PLATFORM_DATA_GIB", setup)
-        self.assertIn("PLATFORM_BACKUP_GIB", setup)
-        self.assertIn("Cloudflare account", setup)
-        self.assertIn("Setup verifies the service, socket permissions, and API readiness", setup)
-        self.assertIn("policy and operator/helper releases", contract)
-        self.assertIn("hosted controller\nservice/socket/API boundary", contract)
-        stale_boundary = re.compile(
-            r"setup (?:does not|doesn't) (?:start|run|install)[^.]*controller",
-            re.IGNORECASE,
-        )
-        for document in CURRENT_PRODUCT_DOCUMENTS:
-            with self.subTest(document=document.relative_to(ROOT)):
-                self.assertIsNone(stale_boundary.search(document.read_text()))
-        self.assertIn("--env-file PATH", contract)
+        self.assertIn("PLATFORM_INGRESS_ADDRESS", deployment)
+        self.assertIn("PLATFORM_DATA_GIB", deployment)
+        self.assertIn("PLATFORM_BACKUP_GIB", deployment)
+        self.assertIn("Cloudflare", deployment)
+        self.assertIn("controller service, readiness unit, socket", internals)
+        self.assertIn("--env-file PATH", internals)
         self.assertIn('"sizeGiB": 500', example)
         self.assertIn('"sizeGiB": 600', example)
 
-    def test_repaired_operator_path_is_traceable(self) -> None:
+    def test_release_operator_and_recovery_paths_remain_traceable(self) -> None:
         operations = (ROOT / "docs" / "OPERATIONS.md").read_text()
-        installer = (ROOT / "docs" / "RELEASE_INSTALLER.md").read_text()
-        publishing = (ROOT / "docs" / "IMAGE_PUBLISHING.md").read_text()
-        contract = (ROOT / "docs" / "CONTROL_PLANE_CONTRACT.md").read_text()
-        checklist = (ROOT / "docs" / "ACCEPTANCE_CHECKLIST.md").read_text()
+        maintenance = (ROOT / "docs" / "MAINTENANCE.md").read_text()
+        internals = (ROOT / "docs" / "INTERNALS.md").read_text()
         svg = (ROOT / "docs" / "architecture-overview.svg").read_text()
 
-        self.assertIn("setup_operator_bridge.py", installer)
-        self.assertIn("operator-bridge=verified", installer)
+        self.assertIn("setup_operator_bridge.py", maintenance)
+        self.assertIn("operator-bridge=verified", maintenance)
         self.assertIn("EMIT_SCRIPT=", operations)
-        self.assertIn("--age-identity", contract)
-        self.assertIn("SOURCE_COMMIT", publishing)
-        self.assertIn("scope-record entry", checklist)
+        self.assertIn("--age-identity", internals)
+        self.assertIn("SOURCE_COMMIT", maintenance)
+        self.assertIn("baseline", maintenance)
         self.assertNotIn("rollback", svg.lower())
         self.assertIn("infra replace", operations)
-        self.assertIn("uv run python -m unittest discover", (ROOT / "README.md").read_text())
+        development = (ROOT / "docs" / "DEVELOPMENT.md").read_text()
+        self.assertIn("uv run python -m unittest discover", development)
 
     def test_retired_repository_name_is_absent(self) -> None:
         retired_name = "".join(("app-platform", "-infra"))

@@ -62,9 +62,9 @@ class PublicationTriggerTests(unittest.TestCase):
         )
 
     def test_documentation_under_an_image_input_does_not_publish(self) -> None:
-        # nix/README.md lives inside an image-input directory but changes no
-        # image. Without the exclusion a README edit rebuilds and republishes
-        # every role image.
+        # A Markdown file can live inside an image-input directory without
+        # changing an image. Without the exclusion, such an edit would rebuild
+        # and republish every role image.
         workflow = WORKFLOW.read_text()
         self.assertIn("':(exclude)*.md'", workflow)
 

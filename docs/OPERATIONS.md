@@ -2,9 +2,9 @@
 
 Use this guide after automated setup completes. It covers routine health,
 backup and restore, off-site recovery evidence, persistent-host replacement,
-image pruning, and teardown boundaries. Greenfield provisioning belongs in
-[Automated setup](SETUP.md); release packaging belongs in
-[Release installation](RELEASE_INSTALLER.md).
+image pruning, troubleshooting, and teardown boundaries. Greenfield
+provisioning belongs in [Deploy the platform](DEPLOYMENT.md); release packaging
+belongs in [Release and platform maintenance](MAINTENANCE.md).
 
 Run ordinary commands as the unprivileged owner of
 `/srv/openstack-platform`. Use only the generated `platform-admin` SSH alias for
@@ -338,10 +338,11 @@ host. An ambiguous provider result becomes recovery-required; restore the named
 dependency and rerun the same command. Never delete the old server or detach a
 volume manually.
 
-Release updates follow [Release installation](RELEASE_INSTALLER.md). Executable
+Release updates follow [Install releases outside automated
+setup](MAINTENANCE.md#install-releases-outside-automated-setup). Executable
 rollback does not restore database or provider state. Before a schema migration,
-take and verify backups and follow the ordering in
-[Release supply-chain evidence](RELEASE_SUPPLY_CHAIN.md#database-migration-and-rollback-order).
+take and verify backups and follow the [database migration
+order](MAINTENANCE.md#database-migration-order).
 
 ## Prune images
 
@@ -374,27 +375,67 @@ The operator CLI intentionally has no whole-deployment or product teardown
 command. Do not use an older binary, substring name matching, or project-wide
 delete command.
 
-## Recovery rules
+## Troubleshooting and recovery rules
 
+Start with the symptom and preserve the operation or correlation ID. Do not
+clear SQLite rows, bypass the helper, detach provider resources, or print
+credentials while diagnosing a failure.
+
+- **Setup preflight is not ready:** rerun `openstack-platform setup check
+  --env-file ... --json` and inspect quota deltas, fixed-address availability,
+  reserved-name collisions, tooling, ingress, and release evidence. Correct the
+  protected input or provider quota; the check has not mutated OpenStack.
+- **Setup stopped after mutation:** keep its workspace and rerun the identical
+  apply after fixing the named dependency. Setup re-observes each checkpoint.
+  Do not edit a partial server, port, volume, keypair, image, database row, or
+  generated secret.
 - **Project or deployment identity mismatch:** load the intended credential and
-  inventory; stop before mutation.
-- **Unexpected server, port, volume, image, or host key:** reconcile ownership;
-  do not rename, detach, adopt, or delete it.
-- **Role is `ACTIVE` but not ready:** inspect bounded console/unit evidence.
-  Use the supported replacement path after correcting the image or dependency;
-  rerunning bootstrap does not reapply cloud-init to an existing host.
-- **Unfinished or recovery-required operation:** preserve its operation ID and
-  rerun the same current command after restoring the named dependency. Never
-  clear operation rows manually.
-- **Backup or restore failure:** retain the failed evidence, correct the named
-  identity/mount/schema/integrity dependency, and rerun the same bounded tool.
-  Never overwrite live data with an unverified archive.
+  inventory; stop before mutation. Never substitute example IDs or make compact
+  and canonical UUID strings match by hand.
+- **Unexpected server, port, volume, image, or host key:** reconcile exact
+  ownership. Do not rename, detach, adopt, or delete the object merely because
+  its name resembles the inventory.
+- **A role is `ACTIVE` but not ready:** use `status`, `infra list`, and bounded
+  `infra logs ROLE --lines 200`. Compare selected image, flavor, fixed port,
+  volumes, metadata, and the role readiness marker. Correct the dependency or
+  publish a fixed image, then use the supported replacement path; cloud-init is
+  not reapplied to an existing host.
+- **The operator bridge is unavailable:** check metadata only for the private
+  SSH config and known-hosts files, then require
+  `ssh -F "$SSH_CONFIG" platform-admin -- id -un` to return `agentops`.
+  Regenerate the bridge through the matching reviewed release. Do not hand-edit
+  host keys or choose a remote host from request input.
+- **The hosted controller is not ready:** inspect the controller and readiness
+  units through the pinned alias. Restore the matching policy/helper release or
+  retained-state dependency, then restart those units. The controller has no
+  public listener; a missing management UI is unrelated to controller
+  readiness.
+- **Public health fails:** check the exact hostname, browser-trusted
+  certificate, tunnel or provider CIDRs, preserved `Host`, ingress service, and
+  exact `/healthz` body in that order. A request to the ingress IP is not an
+  equivalent test. Never add `0.0.0.0/0` for diagnosis.
+- **Image selection or pruning is refused:** correct incomplete provenance,
+  compatibility, provider ownership/status, or server image projection and
+  create a new plan. Do not overwrite a tested image name or broaden the delete
+  set manually.
+- **A backup or restore check fails:** identify which of the three backup
+  classes failed, retain its evidence, and correct the named executable,
+  identity, mount, checksum, archive, schema, or integrity dependency. Rerun the
+  same bounded tool; never publish staged ciphertext manually or overwrite live
+  data with an unverified archive.
+- **Offline restore is refused:** leave the destination unchanged. Correct the
+  reported owner/mode/type, identity, deployment binding, schema, integrity,
+  foreign-key, sidecar, unfinished-operation, lock, or size condition in a
+  private directory and rerun the installed launcher.
+- **An operation is unfinished or recovery-required:** preserve its ID, scope,
+  phase, and safe error. Restore the dependency, then repeat the identical
+  current command or controller request. Controller recovery requires the same
+  method, path, body, and idempotency key.
 - **`UNSUPPORTED_PRIOR_STATE`:** preserve and archive the state. Use a new
   namespace and empty state/backup roots; do not edit migration rows, ownership
   markers, or provider metadata to force adoption.
-- **Public health failure:** check DNS, certificate, provider origin, preserved
-  `Host`, ingress, and `/healthz` in that order.
 
-For symptom-specific evidence and correction, use
-[Troubleshooting](TROUBLESHOOTING.md). Record only bounded safe evidence in the
-private operations system.
+Record only bounded safe evidence in the private operations system: exact
+non-secret identities, operation/correlation ID, phase, failed check, checksum,
+and readiness result. Keep provider payloads, credentials, secret values, and
+age identity contents out of logs and tickets.
