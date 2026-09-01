@@ -549,6 +549,7 @@ else:
                     "PLATFORM_RELEASE_MANIFEST": str(component_manifest),
                     "PLATFORM_ARTIFACT_MANIFEST": str(artifact_manifest_path),
                     "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT": release_manifest.UNSIGNED_ACKNOWLEDGEMENT,
+                    "OS_PROJECT_NAME": "example-project",
                     "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
                         artifact_manifest_path.read_bytes()
                     ).hexdigest(),

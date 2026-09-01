@@ -74,12 +74,16 @@ def _sha256_file(path: Path) -> str:
         raise ReleaseVerificationError(f"release evidence is unavailable: {path}") from error
 
 
-def _load(path: Path) -> dict[str, Any]:
+def _load_json(path: Path) -> Any:
     _sha256_file(path)
     try:
-        value = json.loads(path.read_bytes(), object_pairs_hook=_pairs)
+        return json.loads(path.read_bytes(), object_pairs_hook=_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise ReleaseVerificationError(f"release evidence is invalid JSON: {path}") from error
+
+
+def _load(path: Path) -> dict[str, Any]:
+    value = _load_json(path)
     if not isinstance(value, dict):
         _fail(f"release evidence must be a JSON object: {path}")
     return value
@@ -230,12 +234,27 @@ def _python_spdx_packages(lockfile: Path) -> list[dict[str, Any]]:
 
 
 def _closure_projection(path: Path) -> tuple[list[dict[str, Any]], str]:
-    document = _load(path)
+    document = _load_json(path)
     raw_entries: list[tuple[str, Any]]
-    if all(isinstance(key, str) and key.startswith("/nix/store/") for key in document):
+    if isinstance(document, dict) and all(
+        isinstance(key, str) and key.startswith("/nix/store/") for key in document
+    ):
         raw_entries = list(document.items())
+    elif isinstance(document, list) and all(isinstance(item, dict) for item in document):
+        raw_entries = []
+        seen: set[str] = set()
+        for item in document:
+            store_path = item.get("path")
+            if (
+                not isinstance(store_path, str)
+                or not store_path.startswith("/nix/store/")
+                or store_path in seen
+            ):
+                _fail("Nix path-info list contains an invalid or duplicate store path")
+            seen.add(store_path)
+            raw_entries.append((store_path, item))
     else:
-        _fail("Nix path-info evidence must be an object keyed by store path")
+        _fail("Nix path-info evidence must be keyed by store path or contain path entries")
     if not raw_entries or len(raw_entries) > _MAX_CLOSURE_ENTRIES:
         _fail("Nix closure evidence has an invalid entry count")
     projection: list[dict[str, Any]] = []

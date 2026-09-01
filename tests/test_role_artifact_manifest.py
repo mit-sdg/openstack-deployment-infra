@@ -128,6 +128,30 @@ class RoleArtifactManifestTests(unittest.TestCase):
         self.assertTrue(any(value.startswith("pkg:pypi/") for value in references))
         self.assertTrue(any(value.startswith("pkg:generic/") for value in references))
 
+    def test_nix_path_info_list_format_is_supported(self) -> None:
+        for _role, path_info, _output in self.files.values():
+            keyed = json.loads(path_info.read_text())
+            path_info.write_text(
+                json.dumps([{"path": store_path, **record} for store_path, record in keyed.items()])
+            )
+
+        manifest_path, signature, public = self._signed()
+        manifest = release_manifest.verify_artifact_manifest(
+            self.component_manifest,
+            manifest_path,
+            signature=signature,
+            trust_root=public,
+        )
+        worker_qcow, worker_info, worker_output = self.files["worker"]
+        release_manifest.verify_role_artifact(
+            manifest,
+            "worker",
+            qcow2=worker_qcow,
+            path_info=worker_info,
+            output_store_path=worker_output,
+            publication_metadata=self.inputs["worker"]["publicationMetadata"],
+        )
+
     def test_qcow_closure_metadata_source_and_evidence_tampering_are_rejected(self) -> None:
         manifest_path, signature, public = self._signed()
         manifest = release_manifest.verify_artifact_manifest(

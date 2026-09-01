@@ -129,13 +129,11 @@ token_project_id=$(canonical_uuid "$token_project_id_raw") || {
   echo "OpenStack token returned an invalid project UUID" >&2
   exit 2
 }
-observed_project=$("$OSC" project show "$token_project_id_raw" -f value -c id -c name)
-mapfile -t observed_project_fields <<<"$observed_project"
-observed_project_id=$(canonical_uuid "${observed_project_fields[0]:-}") || {
-  echo "OpenStack project lookup returned an invalid project UUID" >&2
-  exit 2
-}
-if [[ $token_project_id != "$project_id" || $observed_project_id != "$project_id" || ${observed_project_fields[1]:-} != "$project" ]]; then
+# Authentication was scoped with OS_PROJECT_NAME. The resulting token UUID is
+# the authoritative provider observation; avoid `project show`, which
+# openstackclient implements through a project-list API unavailable to common
+# project-scoped publication credentials.
+if [[ $token_project_id != "$project_id" || ${OS_PROJECT_NAME:-} != "$project" ]]; then
   echo "refusing to publish outside configured OpenStack project $project ($project_id)" >&2
   exit 2
 fi
