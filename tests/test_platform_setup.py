@@ -96,6 +96,31 @@ PLATFORM_DOMAIN='apps.example.test'
         ):
             setup._project_identity(Path("/nix/store/openstack"), environment)
 
+    def test_resolved_inputs_preserve_provider_project_id_spelling(self) -> None:
+        compact = "00000000000040008000000000000001"
+        canonical = "00000000-0000-4000-8000-000000000001"
+        values = {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"}
+        with (
+            mock.patch.object(setup, "_credential_requirements"),
+            mock.patch.object(setup, "_source_commit", return_value="a" * 40),
+            mock.patch.object(
+                setup,
+                "_project_identity",
+                return_value=setup.ProjectIdentity(canonical, "demo"),
+            ),
+            mock.patch.object(setup, "_platform_document", return_value={}),
+        ):
+            resolved = setup._resolve_setup_inputs(
+                repository=Path(__file__).resolve().parents[1],
+                values=values,
+                openstack=Path("/nix/store/openstack"),
+                input_reader=lambda prompt: self.fail(prompt),
+                secret_reader=lambda prompt: self.fail(prompt),
+            )
+
+        self.assertEqual(resolved.provider_environment["OS_PROJECT_ID"], compact)
+        self.assertEqual(resolved.project.project_id, canonical)
+
     def test_malformed_or_missing_direct_provider_cidrs_fail_before_mutation(self) -> None:
         cases = (
             "PLATFORM_INGRESS_MODE=direct\n",

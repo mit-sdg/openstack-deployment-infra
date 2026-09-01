@@ -1424,7 +1424,10 @@ def _resolve_setup_inputs(
     provider_environment = _openstack_environment(values)
     resolved_commit = commit or _source_commit(repository, provider_environment)
     project = _project_identity(openstack, provider_environment)
-    provider_environment["OS_PROJECT_ID"] = project.project_id
+    # Preserve the provider-issued project ID spelling used for authentication.
+    # Some Keystone deployments accept their compact UUID form but reject the
+    # equivalent hyphenated form on subsequent service authentication.
+    provider_environment.setdefault("OS_PROJECT_ID", project.project_id)
     provider_environment["OS_PROJECT_NAME"] = project.project_name
     values["OS_PROJECT_ID"] = project.project_id
     values["OS_PROJECT_NAME"] = project.project_name
