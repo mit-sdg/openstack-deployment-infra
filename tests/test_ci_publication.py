@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,14 @@ WORKFLOW = ROOT / ".github/workflows/ci.yml"
 
 
 class PublicationTriggerTests(unittest.TestCase):
+    def test_every_github_action_is_pinned_to_an_immutable_sha(self) -> None:
+        workflow = WORKFLOW.read_text()
+        uses = re.findall(r"uses:\s+([^\s#]+)", workflow)
+        self.assertTrue(uses)
+        for action in uses:
+            with self.subTest(action=action):
+                self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
+
     def test_generated_recipes_have_an_explicit_rootless_live_smoke_job(self) -> None:
         workflow = WORKFLOW.read_text()
         smoke = (ROOT / "tests" / "smoke_generated_recipes.sh").read_text()
@@ -24,12 +33,24 @@ class PublicationTriggerTests(unittest.TestCase):
         self.assertNotIn("--privileged", smoke)
         self.assertNotIn("sudo podman", smoke)
 
-    def test_embedded_infra_is_a_publication_input(self) -> None:
+    def test_every_embedded_image_source_is_a_publication_input(self) -> None:
         workflow = WORKFLOW.read_text()
-
-        self.assertIn(
-            "publish_paths=(flake.nix flake.lock nix infra ':(exclude)*.md')",
-            workflow,
+        declaration = re.search(r"publish_paths=\(\s*(.*?)\s*\)", workflow, re.DOTALL)
+        self.assertIsNotNone(declaration)
+        inputs = set(declaration.group(1).split())
+        self.assertTrue(
+            {
+                "flake.nix",
+                "flake.lock",
+                "nix",
+                "infra",
+                "openstack_platform",
+                "deploy",
+                "pyproject.toml",
+                "uv.lock",
+                "LICENSE",
+            }
+            <= inputs
         )
         self.assertIn(
             'git ls-tree -r --name-only "$COMMIT_SHA" -- "${publish_paths[@]}"',
@@ -41,9 +62,9 @@ class PublicationTriggerTests(unittest.TestCase):
         )
 
     def test_documentation_under_an_image_input_does_not_publish(self) -> None:
-        # nix/README.md lives inside an image-input directory but changes no
-        # image. Without the exclusion a README edit rebuilds and republishes
-        # every role image.
+        # A Markdown file can live inside an image-input directory without
+        # changing an image. Without the exclusion, such an edit would rebuild
+        # and republish every role image.
         workflow = WORKFLOW.read_text()
         self.assertIn("':(exclude)*.md'", workflow)
 
@@ -58,10 +79,21 @@ class PublicationTriggerTests(unittest.TestCase):
         workflow = WORKFLOW.read_text()
         installer = (ROOT / "tests" / "install_ci_apt_packages.sh").read_text()
 
-        self.assertEqual(workflow.count("tests/install_ci_apt_packages.sh"), 2)
+        self.assertEqual(workflow.count("tests/install_ci_apt_packages.sh"), 3)
         self.assertIn("for attempt in 1 2", installer)
         self.assertIn("timeout --foreground --kill-after=30s 5m sudo apt-get update", installer)
         self.assertIn("timeout --foreground --kill-after=30s 10m sudo apt-get install", installer)
+
+    def test_development_publication_is_manual_protected_and_explicitly_unsigned(self) -> None:
+        workflow = WORKFLOW.read_text()
+
+        self.assertIn("development-publish:", workflow)
+        self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
+        self.assertIn("inputs.development_publish == true", workflow)
+        self.assertIn("environment: openstack-images", workflow)
+        self.assertIn("DEVELOPMENT_PLATFORM_CONFIG_JSON", workflow)
+        self.assertIn("I_UNDERSTAND_THIS_IS_NOT_PRODUCTION", workflow)
+        self.assertIn("development-published-evidence-${{ github.sha }}", workflow)
 
 
 if __name__ == "__main__":

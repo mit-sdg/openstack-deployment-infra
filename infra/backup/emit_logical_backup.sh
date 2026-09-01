@@ -30,10 +30,10 @@ case "$SERVICE" in
       --volume "$CA_FILE:/run/internal-ca.pem:ro" \
       "$POSTGRES_IMAGE" \
       pg_dumpall --clean --if-exists \
-        --host="$STORAGE_HOST" --port=5432 --username=platform_admin
+        --host="$STORAGE_HOST" --port="$PLATFORM_POSTGRES_PORT" --username=platform_admin
     ;;
   mongodb)
-    export MONGODB_URI="mongodb://platform_admin:${MONGO_PASSWORD}@${STORAGE_HOST}:27017/?authSource=admin&tls=true&tlsCAFile=/run/internal-ca.pem"
+    export MONGODB_URI="mongodb://platform_admin:${MONGO_PASSWORD}@${STORAGE_HOST}:${PLATFORM_MONGODB_PORT}/?authSource=admin&tls=true&tlsCAFile=/run/internal-ca.pem"
     exec podman run --rm --network=host \
       --env MONGODB_URI \
       --volume "$CA_FILE:/run/internal-ca.pem:ro" \

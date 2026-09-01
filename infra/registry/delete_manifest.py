@@ -15,10 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.platform_config import load  # noqa: E402
+from lib.platform_contract import CONTRACT  # noqa: E402
 from lib.tls import internal_ca_context  # noqa: E402
 
 CONFIG = load()
-HOST = f"{CONFIG['addresses']['storage']}:5000"
+HOST = f"{CONFIG['addresses']['storage']}:{CONTRACT['ports']['registry']}"
 ROOT = Path(CONFIG["paths"]["root"])
 CA = str(ROOT / "secrets/nomad-cli/internal-ca.pem")
 SECRETS = ROOT / "secrets/storage-bootstrap.env"

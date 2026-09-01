@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.http import bounded_json  # noqa: E402
 from lib.platform_config import load  # noqa: E402
+from lib.platform_contract import CONTRACT  # noqa: E402
 from lib.tls import internal_ca_context  # noqa: E402
 
 CONFIG = load()
@@ -19,6 +20,7 @@ ROOT = Path(CONFIG["paths"]["root"])
 STORAGE_SECRETS = Path(os.environ.get("STORAGE_SECRETS", ROOT / "secrets/storage-bootstrap.env"))
 OUTPUT = Path(os.environ.get("GARAGE_BACKUP_SECRETS", ROOT / "secrets/garage-backup.env"))
 CA_FILE = os.environ.get("GARAGE_CA_FILE", str(ROOT / "secrets/nomad-cli/internal-ca.pem"))
+GARAGE_RPC_PORT = CONTRACT["ports"]["garageRpc"]
 
 
 def env(path: Path) -> dict[str, str]:
@@ -38,7 +40,7 @@ def main() -> int:
         return 0
     token = env(STORAGE_SECRETS)["GARAGE_ADMIN_TOKEN"]
     key = bounded_json(
-        f"https://{HOST}:3903/v2/CreateKey",
+        f"https://{HOST}:{GARAGE_RPC_PORT}/v2/CreateKey",
         data=json.dumps({"name": "platform-backup", "neverExpires": True}).encode(),
         method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},

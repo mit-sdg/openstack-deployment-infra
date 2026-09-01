@@ -1,4 +1,5 @@
 {
+  constants,
   lib,
   pkgs,
   platform,
@@ -6,11 +7,19 @@
 }:
 let
   namespace = platform.namespace;
+  ports = constants.ports;
   data = platform.paths.data;
   infra = ../../infra;
   systemdEscapePath =
     path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   mountUnit = "${systemdEscapePath data}.mount";
+  credentialGuard = pkgs.writeShellScript "${namespace}-storage-credential-guard" ''
+    set -euo pipefail
+    path=$1
+    test -f "$path" && test ! -L "$path"
+    test "$(stat -c %U:%a "$path")" = root:600
+    test "$(stat -c %s "$path")" -le 65536
+  '';
   mkContainerDependencies = name: {
     "podman-${name}" = {
       after = [
@@ -24,19 +33,20 @@ let
       serviceConfig = {
         StandardOutput = "journal+console";
         StandardError = "journal+console";
+        LimitCORE = 0;
       };
     };
   };
 in
 {
   networking.hostName = platform.hosts.storage;
-  networking.firewall.allowedTCPPorts = [
-    22
-    3903
-    5000
-    5432
-    9000
-    27017
+  networking.firewall.allowedTCPPorts = with constants.ports; [
+    ssh
+    garageRpc
+    registry
+    postgres
+    garageS3
+    mongodb
   ];
 
   # The pinned PostgreSQL and MongoDB containers both persist data as UID/GID
@@ -68,14 +78,20 @@ in
   virtualisation.oci-containers.containers = {
     "${namespace}-postgres" = {
       image = platform.containers.postgres;
-      environmentFiles = [ "/etc/${namespace}/postgres.env" ];
+      environment = {
+        POSTGRES_USER = "platform_admin";
+        POSTGRES_PASSWORD_FILE = "/run/secrets/postgres-password";
+        POSTGRES_DB = "platform";
+        POSTGRES_INITDB_ARGS = "--auth-host=scram-sha-256";
+      };
       volumes = [
         "${data}/postgres:/var/lib/postgresql/data"
+        "/run/credentials/podman-${namespace}-postgres.service/postgres-password:/run/secrets/postgres-password:ro"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
         "/etc/${namespace}/pg_hba.conf:/run/${namespace}-pg_hba.conf:ro"
         "/etc/${namespace}/postgres-init:/docker-entrypoint-initdb.d:ro"
       ];
-      ports = [ "5432:5432" ];
+      ports = [ "${toString ports.postgres}:${toString ports.postgres}" ];
       cmd = [
         "postgres"
         "-c"
@@ -101,12 +117,16 @@ in
     };
     "${namespace}-mongodb" = {
       image = platform.containers.mongodb;
-      environmentFiles = [ "/etc/${namespace}/mongodb.env" ];
+      environment = {
+        MONGO_INITDB_ROOT_USERNAME = "platform_admin";
+        MONGO_INITDB_ROOT_PASSWORD_FILE = "/run/secrets/mongodb-password";
+      };
       volumes = [
         "${data}/mongodb:/data/db"
+        "/run/credentials/podman-${namespace}-mongodb.service/mongodb-password:/run/secrets/mongodb-password:ro"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
       ];
-      ports = [ "27017:27017" ];
+      ports = [ "${toString ports.mongodb}:${toString ports.mongodb}" ];
       cmd = [
         "mongod"
         "--bind_ip_all"
@@ -122,12 +142,12 @@ in
     "${namespace}-garage" = {
       image = platform.containers.garage;
       volumes = [
-        "/etc/${namespace}/garage.toml:/etc/garage.toml:ro"
+        "/run/credentials/podman-${namespace}-garage.service/garage-config:/etc/garage.toml:ro"
         "${data}/object-storage:/var/lib/garage"
       ];
       ports = [
         "127.0.0.1:19000:3900"
-        "127.0.0.1:13903:3903"
+        "127.0.0.1:${toString ports.garageAdminProxy}:${toString ports.garageRpc}"
       ];
       cmd = [
         "/garage"
@@ -137,13 +157,13 @@ in
     };
     "${namespace}-registry" = {
       image = platform.containers.registry;
-      environmentFiles = [ "/etc/${namespace}/registry.env" ];
+      environmentFiles = [ "/run/credentials/podman-${namespace}-registry.service/registry.env" ];
       volumes = [
         "${data}/registry:/var/lib/registry"
         "/etc/${namespace}/registry.htpasswd:/auth/htpasswd:ro"
         "/etc/${namespace}/pki:/pki:ro"
       ];
-      ports = [ "5000:5000" ];
+      ports = [ "${toString ports.registry}:${toString ports.registry}" ];
     };
   };
 
@@ -161,6 +181,22 @@ in
           StandardOutput = "journal+console";
           StandardError = "journal+console";
         };
+      };
+      "podman-${namespace}-postgres".serviceConfig = {
+        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/secrets/postgres-password" ];
+        LoadCredential = "postgres-password:/etc/${namespace}/secrets/postgres-password";
+      };
+      "podman-${namespace}-mongodb".serviceConfig = {
+        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/secrets/mongodb-password" ];
+        LoadCredential = "mongodb-password:/etc/${namespace}/secrets/mongodb-password";
+      };
+      "podman-${namespace}-garage".serviceConfig = {
+        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/garage.toml" ];
+        LoadCredential = "garage-config:/etc/${namespace}/garage.toml";
+      };
+      "podman-${namespace}-registry".serviceConfig = {
+        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/registry.env" ];
+        LoadCredential = "registry.env:/etc/${namespace}/registry.env";
       };
       "${namespace}-storage-readiness" = {
         description = "Verify ${platform.displayName} storage services after first boot and reboot";
@@ -300,7 +336,7 @@ in
         listen = [
           {
             addr = "0.0.0.0";
-            port = 9000;
+            port = ports.garageS3;
             ssl = true;
           }
         ];
@@ -325,17 +361,17 @@ in
         listen = [
           {
             addr = "0.0.0.0";
-            port = 3903;
+            port = ports.garageRpc;
             ssl = true;
           }
         ];
         sslCertificate = "/etc/${namespace}/pki/storage.pem";
         sslCertificateKey = "/etc/${namespace}/pki/storage-key.pem";
         locations."/" = {
-          proxyPass = "http://127.0.0.1:13903";
+          proxyPass = "http://127.0.0.1:${toString ports.garageAdminProxy}";
           extraConfig = ''
             proxy_http_version 1.1;
-            proxy_set_header Host ${platform.internalNames.storage}:3903;
+            proxy_set_header Host ${platform.internalNames.storage}:${toString ports.garageRpc};
             proxy_set_header X-Forwarded-Proto https;
             client_max_body_size 1m;
           '';

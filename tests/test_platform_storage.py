@@ -10,12 +10,30 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import db, remote, status
-from platform_cli.config import load
-from platform_cli.helper import production
-from platform_cli.helper.main import HelperActionError
-from platform_cli.helper.nomad import SecretItems, VariableSnapshot
-from platform_cli.helper.storage import (
+from openstack_platform import remote
+from openstack_platform.config import load
+from openstack_platform.controller import database as db
+from openstack_platform.controller import status
+from openstack_platform.controller.storage import (
+    StorageOperationError,
+    create,
+    remove,
+    rotate,
+    verify,
+)
+from openstack_platform.controller.storage_contract import (
+    ENVIRONMENT_KEYS,
+    FIXED_PLATFORM_ENVIRONMENT,
+    PLATFORM_ENVIRONMENT_KEYS,
+    canonical_secret_keys,
+    canonicalize_environment,
+    platform_environment_values,
+    storage_owner,
+)
+from openstack_platform.helper import production
+from openstack_platform.helper.main import HelperActionError
+from openstack_platform.helper.nomad import SecretItems, VariableSnapshot
+from openstack_platform.helper.storage import (
     ProviderCredential,
     RotationEvidence,
     handlers,
@@ -40,42 +58,16 @@ from platform_cli.helper.storage import (
     s3_verify,
     s3_verify_handler,
 )
-from platform_cli.storage import (
-    StorageOperationError,
-    create,
-    remove,
-    rotate,
-    verify,
-)
-from platform_cli.storage_contract import (
-    ENVIRONMENT_KEYS,
-    FIXED_PLATFORM_ENVIRONMENT,
-    PLATFORM_ENVIRONMENT_KEYS,
-    canonical_secret_keys,
-    canonicalize_environment,
-    platform_environment_values,
-    storage_owner,
-)
-from platform_cli.validation import ValidationError
+from openstack_platform.validation import ValidationError
 
 APP_ID = "11111111-1111-4111-8111-111111111111"
 SENTINEL = "sentinel-storage-secret"
 
 
 def config_fixture(directory: Path):
-    platform = {
-        "project": "example-project",
-        "projectId": "00000000-0000-4000-8000-000000000000",
-        "prefix": "example",
-        "namespace": "app-platform",
-        "domain": "apps.example.com",
-        "datacenter": "example-dc",
-        "region": "global",
-        "network": "example-network",
-        "hosts": {"admin": "example-admin"},
-        "ports": {"admin": "example-admin-port"},
-        "paths": {"root": "/srv/app-platform"},
-    }
+    platform = json.loads(
+        (Path(__file__).resolve().parents[1] / "config/platform.example.json").read_text()
+    )
     policy = {
         "standard": {
             "workerFlavor": "example.1c2g",
@@ -102,14 +94,14 @@ def config_fixture(directory: Path):
     return load(platform_path, policy_path)
 
 
-class ManagementStorageTests(unittest.TestCase):
+class ControllerStorageTests(unittest.TestCase):
     def test_storage_type_aliases_are_not_accepted(self) -> None:
-        from platform_cli import storage as management_storage
+        from openstack_platform.controller import storage as controller_storage
 
         with self.assertRaises(ValidationError):
-            management_storage._selected(["mongodb"])
+            controller_storage._selected(["mongodb"])
         with self.assertRaises(ValidationError):
-            management_storage._selected(["object-storage"])
+            controller_storage._selected(["object-storage"])
 
     def test_canonical_platform_environment_has_exact_node_runtime_mode(self) -> None:
         values = platform_environment_values(APP_ID, "demo-app", 8080)
@@ -261,9 +253,7 @@ class ManagementStorageTests(unittest.TestCase):
                 "modifyIndex": 12,
             }
 
-        with self.assertRaisesRegex(
-            StorageOperationError, "exact action: run openstack-platform storage create"
-        ):
+        with self.assertRaisesRegex(StorageOperationError, "same Idempotency-Key"):
             create(self.connection, self.config, APP_ID, ["postgres"], helper_caller=caller)
         result = create(self.connection, self.config, APP_ID, ["postgres"], helper_caller=caller)
         self.assertEqual(result.completed, ("postgres",))
@@ -690,7 +680,7 @@ class ManagementStorageTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual((operation["status"], operation["cleanup_state"]), ("failed", "confirmed"))
 
-    def test_management_protocol_and_lazy_production_compose_for_create(self) -> None:
+    def test_controller_protocol_and_lazy_production_compose_for_create(self) -> None:
         events: list[str] = []
         garage = Garage(events)
         nomad = MemoryNomad({"PORT": "3000"})
@@ -881,7 +871,7 @@ class HelperStorageTests(unittest.TestCase):
                 self.dropped = True
 
         existing = MongoAdmin([database], MongoDatabase(collections=["records"]))
-        with self.assertRaisesRegex(HelperActionError, "already contains"):
+        with self.assertRaisesRegex(HelperActionError, "already contains") as unsupported:
             mongo_create(
                 existing,
                 application_id=APP_ID,
@@ -890,6 +880,7 @@ class HelperStorageTests(unittest.TestCase):
                 generation="abcdef12",
                 operation_id="44444444-4444-4444-8444-444444444444",
             )
+        self.assertEqual(unsupported.exception.code, "UNSUPPORTED_PRIOR_STATE")
         self.assertFalse(existing.dropped)
         self.assertEqual(existing.database.commands, ["usersInfo"])
 
@@ -1075,7 +1066,7 @@ class HelperStorageTests(unittest.TestCase):
         generation = hashlib.sha256(f"{operation_id}:storage.s3.create".encode()).hexdigest()[:8]
         events: list[str] = []
         garage = Garage(events)
-        from platform_cli.helper import storage as helper_storage
+        from openstack_platform.helper import storage as helper_storage
 
         expected_bucket = helper_storage._s3_bucket_name(APP_ID, "demo-app", "example")
         garage.alias = expected_bucket
@@ -1113,9 +1104,9 @@ class HelperStorageTests(unittest.TestCase):
                             {
                                 "user": candidate,
                                 "customData": {
-                                    "m1PlatformOwner": APP_ID,
-                                    "m1OperationId": operation_id,
-                                    "m1CredentialGeneration": "abcdef12",
+                                    "platformControllerOwner": APP_ID,
+                                    "platformOperationId": operation_id,
+                                    "platformCredentialGeneration": "abcdef12",
                                 },
                             }
                         ]

@@ -28,6 +28,9 @@ CHECK_SERVICES = os.environ.get(
 )
 STATUS = ROOT / f"persistent/status/{NAMESPACE}.json"
 BACKUPS = Path(CONFIG["paths"]["backups"]) / NAMESPACE
+OFFSITE_RECEIPT = ROOT / "persistent/status/offsite-export.json"
+OFFSITE_CONFIG = ROOT / "persistent/offsite-export.json"
+RECOVERY = os.environ.get("RECOVERY", "openstack-platform-recovery")
 
 
 def command(*args: str, timeout: int = 45) -> str:
@@ -54,17 +57,9 @@ def main() -> int:
             raise RuntimeError("an application worker is not ACTIVE")
         checks["openstack"] = {"core_active": 3, "workers_active": len(workers)}
 
-        if (
-            bounded_request(
-                f"http://{CONFIG['addresses']['ingress']}/healthz",
-                timeout_seconds=10,
-                response_limit=16,
-            ).strip()
-            != b"OK"
-        ):
-            raise RuntimeError("ingress health response is unexpected")
-        checks["ingress"] = "healthy"
-
+        # The origin is deliberately not a health surface in tunnel mode and
+        # is provider-CIDR restricted in direct mode. Exercise only the public
+        # ingress contract from here.
         for hostname in (CONFIG["domain"], f"wildcard-health.{CONFIG['domain']}"):
             response = bounded_request(
                 f"https://{hostname}/healthz",
@@ -73,10 +68,8 @@ def main() -> int:
                 response_limit=16,
             )
             if response.strip() != b"OK":
-                raise RuntimeError(
-                    f"Cloudflare Tunnel health response is unexpected for {hostname}"
-                )
-        checks["cloudflare_tunnel"] = "healthy"
+                raise RuntimeError(f"public ingress health response is unexpected for {hostname}")
+        checks["public_ingress"] = "healthy"
 
         admin_command(SERVICE_CHECK_PYTHON, CHECK_SERVICES)
         checks["managed_services"] = "healthy"
@@ -96,10 +89,37 @@ def main() -> int:
         age_hours = (datetime.now(UTC) - created).total_seconds() / 3600
         if age_hours > 36:
             raise RuntimeError("latest encrypted platform backup is stale")
-        required = {"postgres.age", "mongodb.age", "garage.age", "SHA256SUMS", "MANIFEST"}
+        required = {
+            "postgres.age",
+            "mongodb.age",
+            "garage.age",
+            "registry.age",
+            "SHA256SUMS",
+            "MANIFEST",
+        }
         if not required <= {path.name for path in latest.iterdir()}:
             raise RuntimeError("latest platform backup is incomplete")
-        checks["backup"] = {"age_hours": round(age_hours, 2), "encrypted": True}
+        checks["backup"] = {
+            "age_hours": round(age_hours, 2),
+            "encrypted": True,
+            "registry_artifacts": True,
+        }
+
+        offsite = json.loads(
+            admin_command(
+                RECOVERY,
+                "status",
+                "--platform-config",
+                os.environ.get("PLATFORM_CONFIG", "/etc/openstack-platform/platform.json"),
+                "--config",
+                str(OFFSITE_CONFIG),
+                "--receipt",
+                str(OFFSITE_RECEIPT),
+            )
+        )
+        if offsite.get("configured") is not True or offsite.get("verified") is not True:
+            raise RuntimeError("off-site recovery status is not verified")
+        checks["offsite_recovery"] = offsite
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
 

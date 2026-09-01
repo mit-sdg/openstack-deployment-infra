@@ -39,7 +39,7 @@ nomad acl policy apply \
   traefik "$POLICY_FILE" >/dev/null
 
 if [[ ! -s $SECRETS_DIR/nomad-tokens.env ]]; then
-  controller=$(nomad acl token create -name platform-controller -type management -json | \
+  controller=$(nomad acl token create -name "$PLATFORM_CONTROLLER_USER" -type management -json | \
     python3 -c 'import json,sys; print(json.load(sys.stdin)["SecretID"])')
   traefik=$(nomad acl token create -name ingress-traefik -policy traefik -type client -json | \
     python3 -c 'import json,sys; print(json.load(sys.stdin)["SecretID"])')

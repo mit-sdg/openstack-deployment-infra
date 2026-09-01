@@ -5,13 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from platform_cli.config import load, load_platform, load_policy
-from platform_cli.validation import (
+from openstack_platform.config import load, load_platform, load_policy
+from openstack_platform.validation import (
     ValidationError,
     commit,
     env_key,
     health_path,
-    load_strict_yaml,
     openstack_uuid,
     relative_path,
     repository_url,
@@ -21,6 +20,7 @@ from platform_cli.validation import (
     uuid,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
 DIGEST = "registry.example/image@sha256:" + "a" * 64
 RECIPIENT = "age1" + "q" * 58
 
@@ -43,19 +43,14 @@ def policy_document() -> dict[str, object]:
 
 
 def platform_document() -> dict[str, object]:
-    return {
-        "project": "example-project",
-        "projectId": "00000000-0000-4000-8000-000000000000",
-        "prefix": "example",
-        "namespace": "app-platform",
-        "domain": "apps.example.com",
-        "datacenter": "example-dc",
-        "region": "global",
-        "network": "example-network",
-        "hosts": {"admin": "example-admin"},
-        "ports": {"admin": "example-admin-port"},
-        "paths": {"root": "/srv/app-platform"},
+    document: dict[str, object] = json.loads(
+        (ROOT / "config/platform.example.json").read_text(encoding="utf-8")
+    )
+    document["hosts"] = {
+        **document["hosts"],  # type: ignore[dict-item]
+        "admin": "example-admin",
     }
+    return document
 
 
 class CommonValidationTests(unittest.TestCase):
@@ -138,21 +133,6 @@ class CommonValidationTests(unittest.TestCase):
             finally:
                 outside.unlink()
 
-    def test_yaml_rejects_duplicates_aliases_tags_and_multiple_documents(self) -> None:
-        self.assertEqual(
-            load_strict_yaml("version: 1\nruntime: bun\n"), {"version": 1, "runtime": "bun"}
-        )
-        for invalid in (
-            "version: 1\nversion: 1\n",
-            "base: &base {a: 1}\ncopy: *base\n",
-            "value: !!python/object/apply:os.system [id]\n",
-            "a: 1\n---\nb: 2\n",
-        ):
-            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
-                load_strict_yaml(invalid)
-        with self.assertRaisesRegex(ValidationError, "byte limit"):
-            load_strict_yaml("x" * 20, maximum_bytes=10)
-
 
 class ConfigTests(unittest.TestCase):
     def test_checked_in_policy_example_loads(self) -> None:
@@ -204,7 +184,7 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValidationError, "unknown keys"):
                 load_policy(policy_path)
 
-    def test_policy_rejects_classes_unpinned_images_and_nonstandard_cpu(self) -> None:
+    def test_policy_rejects_classes_and_unpinned_images(self) -> None:
         cases: list[dict[str, object]] = []
         with_class = policy_document()
         with_class["standard"]["class"] = "personal"  # type: ignore[index]
@@ -212,15 +192,46 @@ class ConfigTests(unittest.TestCase):
         no_pin = policy_document()
         no_pin["runtimeImages"]["bun"] = "registry.example/image:latest"  # type: ignore[index]
         cases.append(no_pin)
-        wrong_cpu = policy_document()
-        wrong_cpu["standard"]["cpuMHz"] = 500  # type: ignore[index]
-        cases.append(wrong_cpu)
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for index, document in enumerate(cases):
                 path = self.write_json(directory, f"policy-{index}.json", document)
                 with self.subTest(index=index), self.assertRaises(ValidationError):
                     load_policy(path)
+
+    def test_policy_cpu_is_configurable_within_safe_bounds(self) -> None:
+        document = policy_document()
+        document["standard"]["cpuMHz"] = 500  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_json(Path(temporary), "policy.json", document)
+            self.assertEqual(load_policy(path).standard.cpu_mhz, 500)
+
+    def test_public_ingress_is_explicit_and_never_world_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            valid = platform_document()
+            valid["publicIngress"] = {
+                "mode": "direct",
+                "providerCidrs": ["203.0.113.0/24", "198.51.100.7/32"],
+            }
+            path = self.write_json(directory, "direct.json", valid, mode=0o644)
+            self.assertEqual(load_platform(path).get("publicIngress.mode"), "direct")
+
+            invalid = (
+                {"mode": "direct", "providerCidrs": []},
+                {"mode": "direct", "providerCidrs": ["0.0.0.0/0"]},
+                {"mode": "direct", "providerCidrs": ["203.0.113.7/24"]},
+                {"mode": "tunnel", "providerCidrs": ["203.0.113.0/24"]},
+                {"mode": "legacy", "providerCidrs": []},
+            )
+            for index, ingress in enumerate(invalid):
+                document = platform_document()
+                document["publicIngress"] = ingress
+                candidate = self.write_json(
+                    directory, f"invalid-ingress-{index}.json", document, mode=0o644
+                )
+                with self.subTest(ingress=ingress), self.assertRaises(ValidationError):
+                    load_platform(candidate)
 
     def test_json_duplicates_and_inventory_unknown_fields_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

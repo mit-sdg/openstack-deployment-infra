@@ -1,820 +1,109 @@
-# Provision, operate, back up, restore, and remove a fresh deployment
+# Operate and recover a deployment
 
-For ordinary greenfield creation, use the automated [setup command](SETUP.md).
-Use this expanded procedure to audit or recover an individual setup checkpoint,
-or to operate a deployment after setup. When followed manually, it provisions a
-new OpenStack project from end to end. It assumes a checkout at the reviewed
-commit, an empty management state directory, and no records to migrate. Commands run in three places:
+Use this guide after automated setup completes. It covers routine health,
+backup and restore, off-site recovery evidence, persistent-host replacement,
+image pruning, troubleshooting, and teardown boundaries. Greenfield
+provisioning belongs in [Deploy the platform](DEPLOYMENT.md); release packaging
+belongs in [Release and platform maintenance](MAINTENANCE.md).
 
-- **Management host / repository root** is the unprivileged owner of `/srv/openstack-platform`.
-  It holds the checkout, private inventory, policy, OpenStack wrapper, and
-  management CLI.
-- **Admin host** is the unprivileged `agentops` account reached only through
-  the generated `platform-admin` SSH alias. It holds the Nomad/helper state,
-  configured backup volume, and the packaged infrastructure scripts.
-- **Storage and ingress bootstrap** runs from the management host and sends a
-  temporary config-drive payload to OpenStack. It does not copy a checkout to a
-  guest.
+Run ordinary commands as the unprivileged owner of
+`/srv/openstack-platform`. Use only the generated `platform-admin` SSH alias for
+admin-host operations. Root is required only for the explicitly marked offline
+hosted-controller restore. Every provider operation is limited to resources
+named by the installed inventory.
 
-Do not use root or `sudo` for management, bridge, release, or CLI commands.
-Only resources named by the private inventory are in scope; never inspect,
-change, stop, replace, or delete anything else in the OpenStack project.
-
-## External inputs and safe notation
-
-The following inputs cannot be supplied by this repository:
-
-| Input | Where it is used | Custody and safe verification |
-| --- | --- | --- |
-| OpenStack authentication (`OS_AUTH_URL`, account/credential, domain, and the configured project) | foundation, image publication, and host lifecycle | Keep in a mode-`0600` environment file and a protected wrapper. Verify only the token project ID and project name; never print the credential. |
-| Cloudflare Tunnel token, when `ENABLE_CLOUDFLARED=true` | ingress config-drive payload | Keep in a direct mode-`0600` one-token file. Verify the public hostname and HTTPS health route, never the token. An external ingress provider may be used with `false`. |
-| Backup age identity | decrypting an offline management SQLite backup | Keep the `AGE-SECRET-KEY-...` file outside Git and outside SQLite, in an offline/escrowed operator record. Verify file ownership and mode only. |
-| Admin managed-data age identity | encrypting and verifying PostgreSQL, MongoDB, and Garage backups | Keep `/paths.root/persistent/secrets/backup-age-key.txt` on admin and escrow a protected copy before relying on the backups. Verify its mode without reading it. |
-
-Replace `<PUBLIC_EXAMPLE>` with a real, non-secret configuration value.
-Generate or obtain `<SECRET>` values privately; never commit, print, or paste
-them into a ticket. The JSON examples are sanitized templates, not deployment
-inputs.
-
-## 1. Prepare the management host and private inputs
-
-Run the repository checks from a clean checkout. The locked project test
-environment is Python 3.14 (`uv.lock` requires `==3.14.*`) with uv 0.12.2:
+## Initialize operator variables
 
 ```bash
-cd /path/to/checkout                 # replace this public path
-uv --version                         # must be uv 0.12.2
-uv sync --frozen
-uv run python --version              # must report Python 3.14.x
-uv run python -m unittest discover -s tests -v
+export PLATFORM_CLI=/srv/openstack-platform/bin/openstack-platform
+export PLATFORM_CONFIG=/srv/openstack-platform/config/platform.json
+export SSH_CONFIG=/srv/openstack-platform/.secrets/ssh/config
+export PLATFORM_NAMESPACE="$(/srv/openstack-platform/runtime/python3.14 -c \
+  'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["namespace"])')"
+export PLATFORM_ROOT="$(/srv/openstack-platform/runtime/python3.14 -c \
+  'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["paths"]["root"])')"
+export PLATFORM_BACKUPS="$(/srv/openstack-platform/runtime/python3.14 -c \
+  'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["paths"]["backups"])')"
+export PLATFORM_ADMIN_STATE="$(/srv/openstack-platform/runtime/python3.14 -c \
+  'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["paths"]["adminState"])')"
+export PLATFORM_DOMAIN="$(/srv/openstack-platform/runtime/python3.14 -c \
+  'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["domain"])')"
 ```
 
-The OpenStack SDK used by `apply_foundation.py` is a separate operator
-prerequisite. Use an approved Python 3.14 interpreter that provides that SDK
-for that script; do not use it as a substitute for the locked `uv` test
-commands.
+Do not print inventory, credential files, age identities, unrestricted provider
+output, or controller operation refs. Safe evidence consists of bounded status,
+resource identities already exposed by the CLI, checksums, manifests,
+readiness results, and operation/correlation IDs.
 
-Create the private copies, then set the checkout variables for this shell:
+## Check routine health
 
 ```bash
-cp -n config/platform.example.json config/platform.json
-cp -n config/platform-policy.example.json config/platform-policy.json
-chmod 0600 config/platform.json config/platform-policy.json
-export PLATFORM_CONFIG="$PWD/config/platform.json"
-export PLATFORM_POLICY="$PWD/config/platform-policy.json"
+$PLATFORM_CLI status
+$PLATFORM_CLI infra list
+ssh -F "$SSH_CONFIG" platform-admin -- systemctl is-active \
+  "$PLATFORM_NAMESPACE-controller.service" \
+  "$PLATFORM_NAMESPACE-controller-readiness.service"
+test "$(curl --fail --show-error --silent \
+  "https://$PLATFORM_DOMAIN/healthz")" = OK
 ```
 
-Edit both private JSON files. Replace every example project, UUID, network,
-address, host, resource name, flavor, domain, path, runtime digest, and age
-recipient. `platform.json` contains deployment identity and paths, not
-credentials. `platform-policy.json` contains the public backup age recipient and
-runtime image digests, not the private age identity or service credentials.
-The project name and UUID must identify the same authenticated OpenStack
-project. See [CONFIGURATION.md](CONFIGURATION.md) for the field contract.
-Derive configuration-dependent shell values only after saving those edits:
+A healthy infrastructure deployment has five accepted image roles, three
+available persistent-role observations, active controller/readiness units, and
+an exact public `OK` response. `APPS` and `STORAGE` are aggregate controller
+counts; the operator CLI cannot inspect or mutate those records.
+
+An unavailable live observation does not erase accepted state. Diagnose the
+named dependency before mutation; do not edit SQLite or provider resources to
+make status appear healthy.
+
+## Back up all state classes
+
+The deployment has three independent backup classes:
+
+| Backup | Source | Accepted location | Identity custody |
+| --- | --- | --- | --- |
+| Hosted controller | Admin controller SQLite | `<paths.backups>/hosted-controller` | Operator escrow; not admin |
+| External operator state | Operator CLI SQLite | `<paths.backups>/controller` | Operator escrow |
+| Managed data | PostgreSQL, MongoDB, Garage, retained OCI artifacts | `<paths.backups>/<namespace>/<timestamp>` | Admin plus separate operator escrow |
+
+One class does not substitute for another.
+
+### Hosted-controller backup
 
 ```bash
-export PLATFORM_NAMESPACE="$(uv run python infra/lib/platform_config.py get namespace)"
-export PLATFORM_ROOT="$(uv run python infra/lib/platform_config.py get paths.root)"
-export PLATFORM_DOMAIN="$(uv run python infra/lib/platform_config.py get domain)"
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  systemctl start "$PLATFORM_NAMESPACE-hosted-controller-backup.service"
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  journalctl -u "$PLATFORM_NAMESPACE-hosted-controller-backup.service" -n 5 --no-pager
 ```
 
-### Generate operator keys, age identity, and bootstrap files
+Success reports `hosted-controller-backup=... sha256=...`. A committed set has
+ciphertext, checksum, and final manifest. The daily timer runs as the controller
+account; the private age identity remains off-platform.
 
-Keep this directory outside the checkout. Existing institutional keys may be
-used instead of generating new ones, but the files must meet the modes below:
+### External operator-state backup
 
 ```bash
-export PRIVATE_BOOTSTRAP=/private/path/platform-bootstrap
-umask 077
-install -d -m 0700 "$PRIVATE_BOOTSTRAP"
-ssh-keygen -q -t ed25519 -f "$PRIVATE_BOOTSTRAP/id_ed25519" -N ''
-ssh-keygen -q -t ed25519 -f "$PRIVATE_BOOTSTRAP/builder_operator_ed25519" -N ''
-chmod 0600 "$PRIVATE_BOOTSTRAP"/*_ed25519
-chmod 0644 "$PRIVATE_BOOTSTRAP"/*_ed25519.pub
+operator_backup="$($PLATFORM_CLI backup)"
+printf '%s\n' "$operator_backup"
+grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$' \
+  <<<"$operator_backup"
 ```
 
-Use the first key as both `ADMIN_PUBLIC_KEY` and `AGENTOPS_PUBLIC_KEY`. The
-admin host's disposable-builder SSH client uses the second key. Both halves are
-transferred to admin later: the public half to
-`$PLATFORM_ROOT/secrets/builder_operator_ed25519.pub`, which is injected into
-each builder, and the private half to
-`$PLATFORM_ROOT/secrets/builder_operator_ed25519`, mode `0600`, which the
-client passes to `ssh -i`.
-
-Generate the backup age identity with the packaged Nix age derivation before
-installing management. The identity file is private; only its recipient
-belongs in the policy:
-
-```bash
-AGE_STORE="$(nix build --no-link --print-out-paths .#age)"
-export BACKUP_AGE_IDENTITY="$PRIVATE_BOOTSTRAP/backup-age-identity.txt"
-"$AGE_STORE/bin/age-keygen" -o "$BACKUP_AGE_IDENTITY" >/dev/null
-chmod 0600 "$BACKUP_AGE_IDENTITY"
-export M1_AGE_RECIPIENT="$(awk '$1 == "#" && $2 == "public" && $3 == "key:" { print $4; exit }' "$BACKUP_AGE_IDENTITY")"
-case "$M1_AGE_RECIPIENT" in age1*) ;; *) exit 1 ;; esac
-```
-
-The final `case` checks readability; it does not display a secret. Put
-`M1_AGE_RECIPIENT` in the private policy's `backupAgeRecipient`, then verify
-that the identity file remains outside Git. Do not copy the identity into
-`config/`, `/srv/openstack-platform/state`, or the admin helper.
-
-Create the exact role secret files. These are dotenv-like `KEY=value` files;
-values must be non-empty, and each file must contain exactly the listed keys.
-Do not quote values or add unrelated keys:
-
-```bash
-export ADMIN_SECRETS_FILE="$PRIVATE_BOOTSTRAP/admin-bootstrap.env"
-export STORAGE_SECRETS_FILE="$PRIVATE_BOOTSTRAP/storage-bootstrap.env"
-
-cat >"$ADMIN_SECRETS_FILE" <<EOF
-NOMAD_GOSSIP_KEY=$(openssl rand -base64 32 | tr -d '\n')
-EOF
-
-cat >"$STORAGE_SECRETS_FILE" <<EOF
-POSTGRES_PASSWORD=$(openssl rand -hex 32)
-MONGO_PASSWORD=$(openssl rand -hex 32)
-GARAGE_RPC_SECRET=$(openssl rand -hex 32)
-GARAGE_ADMIN_TOKEN=$(openssl rand -hex 32)
-GARAGE_METRICS_TOKEN=$(openssl rand -hex 32)
-REGISTRY_HTTP_SECRET=$(openssl rand -hex 32)
-REGISTRY_BUILDER_PASSWORD=$(openssl rand -hex 32)
-REGISTRY_RUNTIME_PASSWORD=$(openssl rand -hex 32)
-EOF
-chmod 0600 "$ADMIN_SECRETS_FILE" "$STORAGE_SECRETS_FILE"
-for file in "$ADMIN_SECRETS_FILE" "$STORAGE_SECRETS_FILE"; do
-  test -f "$file" && test ! -L "$file" && test "$(stat -c '%a' "$file")" = 600
-done
-```
-
-The builder and runtime registry passwords are used to create an htpasswd
-file; their plaintext values are not put in the storage config-drive payload.
-Do not use these generated values as application credentials.
-
-Generate internal PKI once and retain the directory privately for future
-replacement. The script creates a mode-`0700` directory, a mode-`0600` CA
-private key and leaf private keys, and readable certificates:
-
-```bash
-export PKI_DIR="$PRIVATE_BOOTSTRAP/pki"
-infra/pki/generate_internal_pki.sh "$PKI_DIR"
-test "$(stat -c '%a' "$PKI_DIR")" = 700
-```
-
-The generated directory must contain the configured CA filename plus
-`nomad-server.pem`, `nomad-server-key.pem`, `nomad-cli.pem`,
-`nomad-cli-key.pem`, `nomad-ingress.pem`, `nomad-ingress-key.pem`,
-`nomad-worker.pem`, `nomad-worker-key.pem`, `storage.pem`, and
-`storage-key.pem`. The apply scripts reject symlinks and missing direct files.
-
-Cloudflare is an external input. If using it, obtain a tunnel token from the
-Cloudflare account, put exactly that token (one line, no whitespace) in a
-private direct file, and set:
-
-```bash
-export CLOUDFLARE_TUNNEL_TOKEN_FILE="$PRIVATE_BOOTSTRAP/cloudflare-tunnel-token"
-chmod 0600 "$CLOUDFLARE_TUNNEL_TOKEN_FILE"
-test -f "$CLOUDFLARE_TUNNEL_TOKEN_FILE" && test ! -L "$CLOUDFLARE_TUNNEL_TOKEN_FILE"
-```
-
-Do not generate a fake token. If using an institutional or other provider,
-use `export ENABLE_CLOUDFLARED=false` and satisfy the complete contract in
-[PUBLIC_INGRESS.md](PUBLIC_INGRESS.md).
-
-## 2. Scope and reconcile the OpenStack foundation
-
-OpenStack credentials are required here but are not supplied by the
-repository. On the management host, provision a protected environment file
-and a direct wrapper. The following is a **shape-only example**: replace every
-`<PUBLIC_EXAMPLE>` or `<SECRET>` before use, and never commit either file:
-
-```bash
-export OPENSTACK_ENV=/srv/openstack-platform/.secrets/openstack.env
-export OPENSTACK_WRAPPER=/srv/openstack-platform/bin/platform-openstack
-umask 077
-install -d -m 0700 /srv/openstack-platform/.secrets /srv/openstack-platform/bin
-cat >"$OPENSTACK_ENV" <<'EOF'
-OS_AUTH_URL='<PUBLIC_EXAMPLE_IDENTITY_V3_URL>'
-OS_USERNAME='<PUBLIC_EXAMPLE_AUTOMATION_ACCOUNT>'
-OS_PASSWORD='<SECRET_OPENSTACK_PASSWORD>'
-OS_PROJECT_NAME='<PUBLIC_EXAMPLE_PROJECT_NAME>'
-OS_PROJECT_ID='<PUBLIC_EXAMPLE_PROJECT_UUID>'
-OS_AUTH_TYPE='password'
-OS_USER_DOMAIN_NAME='Default'
-OS_PROJECT_DOMAIN_NAME='Default'
-OS_IDENTITY_API_VERSION='3'
-OS_INTERFACE='public'
-EOF
-chmod 0600 "$OPENSTACK_ENV"
-cat >"$OPENSTACK_WRAPPER" <<'EOF'
-#!/bin/sh
-set -eu
-set -a
-. "/srv/openstack-platform/.secrets/openstack.env"
-set +a
-exec openstack "$@"
-EOF
-chmod 0500 "$OPENSTACK_WRAPPER"
-test -f "$OPENSTACK_WRAPPER" && test ! -L "$OPENSTACK_WRAPPER"
-```
-
-Replace each placeholder in this shape-only file with a shell-quoted value,
-using a protected editor or secret manager. Do not put a password in a command
-argument or unquoted assignment. Keep the file at mode `0600`; the quoted
-wrapper argument list passes provider commands without exposing credentials.
-
-Use the configured project identity for this shell without printing a token or
-credential. Run this from the repository root; the supported helper accepts
-both compact and canonical UUID representations from OpenStack:
-
-```bash
-set -a
-. "$OPENSTACK_ENV"
-set +a
-export OS_PROJECT_NAME="$(uv run python infra/lib/platform_config.py get project)"
-export OS_PROJECT_ID="$(uv run python infra/lib/platform_config.py get projectId)"
-export OSC="$OPENSTACK_WRAPPER"
-source infra/lib/platform-config.sh
-load_platform_config
-verify_openstack_project "$OSC"
-```
-
-The wrapper is the only provider command later used by the pinned bridge. Its
-mode must be `0500` or `0700`, it must be owned by the management user, and it
-must not print credentials. The bridge also accepts an executable symlink only
-when it resolves into a root-owned, non-writable `/nix/store` file; a mutable
-symlink is refused.
-
-From the repository root, first review the non-deleting plan:
-
-```bash
-python3 infra/openstack/apply_foundation.py
-```
-
-This command must run in the approved Python 3.14 environment containing the
-OpenStack SDK, with `PLATFORM_CONFIG`, `OS_PROJECT_NAME`, and `OS_PROJECT_ID`
-set as above. Review every security-group and port action. Apply only the
-reviewed plan:
-
-```bash
-python3 infra/openstack/apply_foundation.py --apply
-```
-
-The script creates or updates only the configured foundation security groups
-and fixed ports. It never deletes a resource. Verify the configured network,
-fixed address, and security-group identity for all three ports without
-inspecting unrelated servers:
-
-```bash
-network_id="$("$OSC" network show "$PLATFORM_NETWORK" -f value -c id)"
-for role in admin ingress storage; do
-  port="$(uv run python infra/lib/platform_config.py get "ports.$role")"
-  address="$(uv run python infra/lib/platform_config.py get "addresses.$role")"
-  security_group_id="$("$OSC" security group show "$PLATFORM_PREFIX-$role" -f value -c id)"
-  test "$("$OSC" port show "$port" -f value -c name)" = "$port"
-  test "$("$OSC" port show "$port" -f value -c network_id)" = "$network_id"
-  fixed_ips="$("$OSC" port show "$port" -f value -c fixed_ips)"
-  grep -Fq "$address" <<<"$fixed_ips"
-  security_groups="$("$OSC" port show "$port" -f value -c security_group_ids)"
-  grep -Fq "$security_group_id" <<<"$security_groups"
-  printf 'foundation-port=%s:verified\n' "$role"
-done
-```
-
-If a configured name is already owned by an unexpected resource, stop. Do not
-rename, repurpose, detach, or delete it.
-
-## 3. Boot admin, establish the pinned bridge, and bootstrap ACLs
-
-Set the apply inputs on the management host. The environment variables name
-files; they do not contain secret values:
-
-```bash
-export ADMIN_PUBLIC_KEY="$PRIVATE_BOOTSTRAP/id_ed25519.pub"
-export AGENTOPS_PUBLIC_KEY="$PRIVATE_BOOTSTRAP/id_ed25519.pub"
-export KEYPAIR_NAME="$(uv run python infra/lib/platform_config.py get prefix)-admin"
-```
-
-Boot admin first. The command renders a mode-`0600` temporary config-drive
-payload and removes it on exit. It creates missing configured admin and backup
-volumes, checks the size and type of existing ones, attaches them, and waits for
-the exact serial-console readiness marker:
-
-```bash
-ADMIN_PUBLIC_KEY="$ADMIN_PUBLIC_KEY" \
-AGENTOPS_PUBLIC_KEY="$AGENTOPS_PUBLIC_KEY" \
-ADMIN_SECRETS_FILE="$ADMIN_SECRETS_FILE" \
-PKI_DIR="$PKI_DIR" \
-OSC="$OSC" \
-infra/openstack/apply_admin.sh
-```
-
-`ACTIVE` is not readiness. Record the server/volume IDs and the marker
-`<namespace> NixOS admin services ready` in private evidence. Verify that the
-required volumes are attached to the configured server and have
-`delete_on_termination=false`; do not print the secret-bearing config-drive
-payload.
-
-### Bootstrap the management runtime before the bridge
-
-Still on the management host, from the repository root and as the unprivileged
-`/srv/openstack-platform` owner, bootstrap the pinned Python, uv, age, protected OpenStack
-wrapper, and local bridge prerequisites before generating the bridge. This
-local preflight does not contact OpenStack or SSH; the bridge command below
-performs the authenticated project, console-fingerprint, and key-scan checks.
-
-```bash
-PLATFORM_AGE_COMMAND="$AGE_STORE/bin/age" \
-deploy/platform-cli/bootstrap_management_runtime.sh
-test "$(/srv/openstack-platform/runtime/python3.14 --version)" = 'Python 3.14.7'
-test "$(/srv/openstack-platform/bin/uv --version)" = 'uv 0.12.2 (x86_64-unknown-linux-gnu)'
-/srv/openstack-platform/bin/age --version >/dev/null
-```
-
-The script creates or validates the management SSH identity and runs the
-bridge's `--preflight` checks for protected local executables and directories.
-Do not continue with bridge generation if this command fails.
-
-Each `apply_admin.sh`, `apply_storage.sh`, and `apply_ingress.sh` invocation is
-fail-closed for an existing server. Before it waits for readiness, it verifies
-the exact configured server UUID/name, image and flavor UUID/name, deployment
-metadata, fixed port/address, attached volumes, and non-deleting volume flags.
-A mismatch or ambiguous provider projection stops without applying user data or
-reusing the host. Existing-host success means only that the verified host
-passed the readiness wait; these scripts do not reapply cloud-init user data.
-
-### Generate and smoke-test the management bridge
-
-Run this on the **management host**, as the `/srv/openstack-platform` owner, after admin has
-booted. The bridge generator obtains the authenticated project identity from
-the protected wrapper, compares the admin console's ED25519 fingerprint with a
-fresh `ssh-keyscan`, and atomically writes the known-hosts and SSH config
-files. It does not accept a host, key, or SSH configuration override from the
-CLI after generation.
-
-```bash
-export SSH_DIR=/srv/openstack-platform/.secrets/ssh
-export SSH_IDENTITY="$SSH_DIR/id_ed25519"
-export SSH_CONFIG="$SSH_DIR/config"
-export KNOWN_HOSTS="$SSH_DIR/known_hosts"
-install -d -m 0700 "$SSH_DIR"
-install -m 0600 "$PRIVATE_BOOTSTRAP/id_ed25519" "$SSH_IDENTITY"
-bridge_output="$(
-  /srv/openstack-platform/runtime/python3.14 deploy/platform-cli/setup_management_bridge.py \
-    --platform-config "$PLATFORM_CONFIG" \
-    --ssh-identity "$SSH_IDENTITY" \
-    --ssh-config "$SSH_CONFIG" \
-    --known-hosts "$KNOWN_HOSTS" \
-    --provider-command "$OPENSTACK_WRAPPER"
-)"
-test "$bridge_output" = management-bridge=verified
-```
-
-The resulting `config` defines the `platform-admin` alias with user `agentops`
-and the configured admin address. It sets `IdentitiesOnly yes`, allows only
-ED25519 host keys, uses strict host-key checking, disables password and agent
-forwarding, sets a ten-second connect timeout, and makes one connection
-attempt. Verify ownership and modes, then exercise the alias without printing a
-secret:
-
-```bash
-test "$(stat -c '%a' "$SSH_DIR")" = 700
-test "$(stat -c '%a' "$SSH_CONFIG")" = 600
-test "$(stat -c '%a' "$KNOWN_HOSTS")" = 600
-PLATFORM_ADMIN_ADDRESS="$(uv run python infra/lib/platform_config.py get addresses.admin)"
-bridge_options="$(ssh -F "$SSH_CONFIG" -G platform-admin)"
-for expected in \
-  "hostname $PLATFORM_ADMIN_ADDRESS" \
-  'user agentops' \
-  'identitiesonly yes' \
-  'stricthostkeychecking true' \
-  'hostkeyalgorithms ssh-ed25519' \
-  'forwardagent no' \
-  'connecttimeout 10' \
-  'connectionattempts 1'; do
-  grep -Fqx "$expected" <<<"$bridge_options"
-done
-test "$(ssh -F "$SSH_CONFIG" platform-admin -- id -un)" = agentops
-test "$(ssh -F "$SSH_CONFIG" platform-admin -- id -u)" -gt 0
-test "$(ssh -F "$SSH_CONFIG" platform-admin -- printf '%s\n' management-ssh=verified)" = management-ssh=verified
-```
-
-A console/keyscan mismatch is a stop condition. Do not accept a new key by
-editing `known_hosts`; investigate the selected server and project identity.
-The bridge is the sole SSH path used by management and helper releases.
-
-Bootstrap Nomad ACLs on the **admin host** through that alias. The script is
-already packaged in the admin image and writes the bootstrap response,
-read-only Traefik policy, and controller/Traefik token file below the
-configured root. It is idempotent and prints no token:
-
-```bash
-acl_output="$(
-  ssh -F "$SSH_CONFIG" platform-admin -- env \
-    PLATFORM_CONFIG="/etc/$PLATFORM_NAMESPACE/platform.json" \
-    "$PLATFORM_ROOT/infra/nomad/bootstrap_acl.sh"
-)"
-test "$acl_output" = nomad-acl-and-raft=healthy
-```
-
-The generated admin file is:
-
-```text
-$PLATFORM_ROOT/secrets/nomad-tokens.env
-NOMAD_CONTROLLER_TOKEN=<SECRET>
-NOMAD_TRAEFIK_TOKEN=<SECRET>
-```
-
-It must be a direct mode-`0600` file. Transfer it to the management host only
-for the ingress config-drive, using the pinned bridge; do not print it:
-
-```bash
-export NOMAD_TOKENS_FILE="$PRIVATE_BOOTSTRAP/nomad-tokens.env"
-scp -F "$SSH_CONFIG" -- \
-  "platform-admin:$PLATFORM_ROOT/secrets/nomad-tokens.env" \
-  "$NOMAD_TOKENS_FILE"
-chmod 0600 "$NOMAD_TOKENS_FILE"
-test -f "$NOMAD_TOKENS_FILE" && test ! -L "$NOMAD_TOKENS_FILE"
-test "$(grep -c '^NOMAD_.*_TOKEN=.' "$NOMAD_TOKENS_FILE")" = 2
-```
-
-The local copy is temporary; retain an approved private recovery copy only if
-its custody is documented. The admin copy must remain for the helper and
-Nomad operations.
-
-## 4. Boot storage and ingress with exact transfers
-
-The storage file and PKI files are sent in temporary config-drive payloads and
-must be direct readable files. Boot storage from the management host:
-
-```bash
-STORAGE_SECRETS_FILE="$STORAGE_SECRETS_FILE" \
-AGENTOPS_PUBLIC_KEY="$AGENTOPS_PUBLIC_KEY" \
-PKI_DIR="$PKI_DIR" \
-OSC="$OSC" \
-infra/openstack/apply_storage.sh
-```
-
-After the storage readiness marker
-`<namespace> NixOS storage services ready`, transfer the private inputs that
-admin-side lifecycle and helper scripts require. The storage host does not
-receive the admin's OpenStack credentials; the admin host receives a separate
-copy for its constrained tools:
-
-```bash
-ssh -F "$SSH_CONFIG" platform-admin -- install -d -m 0700 \
-  "$PLATFORM_ROOT/secrets" \
-  "$PLATFORM_ROOT/persistent/secrets/provisioning-pki"
-scp -F "$SSH_CONFIG" -- "$OPENSTACK_ENV" \
-  "platform-admin:$PLATFORM_ROOT/secrets/openstack.env"
-scp -F "$SSH_CONFIG" -- "$STORAGE_SECRETS_FILE" \
-  "platform-admin:$PLATFORM_ROOT/secrets/storage-bootstrap.env"
-scp -F "$SSH_CONFIG" -- "$PRIVATE_BOOTSTRAP/builder_operator_ed25519.pub" \
-  "platform-admin:$PLATFORM_ROOT/secrets/builder_operator_ed25519.pub"
-scp -F "$SSH_CONFIG" -- \
-  "$PRIVATE_BOOTSTRAP/builder_operator_ed25519" \
-  "platform-admin:$PLATFORM_ROOT/secrets/builder_operator_ed25519"
-scp -F "$SSH_CONFIG" -- \
-  "$PKI_DIR/$(uv run python infra/lib/platform_config.py get pki.internalCaFile)" \
-  "$PKI_DIR/nomad-worker.pem" "$PKI_DIR/nomad-worker-key.pem" \
-  "platform-admin:$PLATFORM_ROOT/persistent/secrets/provisioning-pki/"
-ssh -F "$SSH_CONFIG" platform-admin -- chmod 0600 \
-  "$PLATFORM_ROOT/secrets/openstack.env" \
-  "$PLATFORM_ROOT/secrets/storage-bootstrap.env" \
-  "$PLATFORM_ROOT/secrets/builder_operator_ed25519.pub" \
-  "$PLATFORM_ROOT/secrets/builder_operator_ed25519" \
-  "$PLATFORM_ROOT/persistent/secrets/provisioning-pki/nomad-worker-key.pem"
-ssh -F "$SSH_CONFIG" platform-admin -- chmod 0644 \
-  "$PLATFORM_ROOT/persistent/secrets/provisioning-pki/$(uv run python infra/lib/platform_config.py get pki.internalCaFile)" \
-  "$PLATFORM_ROOT/persistent/secrets/provisioning-pki/nomad-worker.pem"
-```
-
-The admin-local `openstack.env` must contain the OpenStack credentials needed
-by its packaged wrapper; it must also have the configured project identity
-available to the wrapper. The admin-local storage file has the same eight keys
-as the management `STORAGE_SECRETS_FILE`. The private builder key is used only
-by admin-side disposable builder SSH. Verify only modes, direct-file status,
-and the token project ID through the wrapper; do not `cat` any of these files.
-
-`$PLATFORM_ROOT/secrets` is a symlink onto the admin state volume, so these
-inputs survive admin replacement. Files in the admin home directory do not.
-The platform reads the builder SSH key only when a deployment reaches its build
-step, so a missing copy appears later as an authentication failure rather than
-at replacement time.
-
-All guest-side services and health checks load the guest inventory at
-`/etc/$PLATFORM_NAMESPACE/platform.json`. Commands sent through the bridge set
-`PLATFORM_CONFIG` to that path; the storage health checker uses a fixed Python
-wrapper so the assignment is applied before its module imports configuration.
-Do not substitute the management checkout's `PLATFORM_CONFIG` for a guest
-health check.
-
-Boot ingress only after the ACL token file exists. The default is Cloudflare;
-set `ENABLE_CLOUDFLARED=false` and omit the token variable for another
-provider:
-
-```bash
-ENABLE_CLOUDFLARED=true \
-CLOUDFLARE_TUNNEL_TOKEN_FILE="$CLOUDFLARE_TUNNEL_TOKEN_FILE" \
-NOMAD_TOKENS_FILE="$NOMAD_TOKENS_FILE" \
-AGENTOPS_PUBLIC_KEY="$AGENTOPS_PUBLIC_KEY" \
-PKI_DIR="$PKI_DIR" \
-OSC="$OSC" \
-infra/openstack/apply_ingress.sh
-```
-
-The script removes its temporary user-data file. Configure the external DNS,
-TLS, and forwarding service to preserve the original `Host` header and forward
-HTTP to ingress port 80. Then verify the first public result:
-
-```bash
-export PLATFORM_HOSTNAME="$PLATFORM_DOMAIN"
-test "$(curl --fail --show-error --silent "https://$PLATFORM_HOSTNAME/healthz")" = OK
-printf '\npublic-platform-health=verified\n'
-```
-
-The response body must be `OK`. This verifies DNS, certificate validation,
-provider forwarding, host preservation, ingress, and Traefik's platform route.
-The Cloudflare token, DNS account, and certificate are external inputs; this
-repository does not create account-specific DNS records.
-
-## 5. Install releases and verify empty state
-
-### Verify the exact management runtime and age executable
-
-The management runtime was bootstrapped before the bridge in step 3. On the
-management host, from the reviewed checkout and as the `/srv/openstack-platform` owner, verify
-the stable paths before installing releases:
-
-```bash
-test "$(/srv/openstack-platform/runtime/python3.14 --version)" = 'Python 3.14.7'
-test "$(/srv/openstack-platform/bin/uv --version)" = 'uv 0.12.2 (x86_64-unknown-linux-gnu)'
-/srv/openstack-platform/bin/age --version >/dev/null
-```
-
-The expected versions are Python 3.14.7 and uv 0.12.2. Management backup
-searches `/srv/openstack-platform/bin/age`, then `/usr/bin/age` and `/bin/age`, and refuses an
-unowned or group/world-writable executable. The admin image separately
-packages age and age-keygen at `$PLATFORM_ROOT/bin/age` and
-`$PLATFORM_ROOT/bin/age-keygen`; managed-data scripts use those immutable
-links, not a checkout copy.
-
-Install the current inventory and policy atomically, then install the matching
-management release and user backup timer:
-
-```bash
-/srv/openstack-platform/runtime/python3.14 deploy/platform-cli/install_management_config.py \
-  --platform "$PLATFORM_CONFIG" \
-  --policy "$PLATFORM_POLICY"
-commit="$(git rev-parse HEAD)"
-/srv/openstack-platform/runtime/python3.14 deploy/platform-cli/install_release.py \
-  --mode management \
-  --source "$PWD" \
-  --commit "$commit" \
-  --python /srv/openstack-platform/runtime/python3.14 \
-  --uv /srv/openstack-platform/bin/uv \
-  --install-user-units \
-  --enable-backup-timer
-```
-
-The release installer preflights the management state and provider inputs: it
-requires a clean full-commit checkout, direct owner-only configuration files,
-a protected direct `/srv/openstack-platform/bin/platform-openstack`, frozen `uv.lock`, and a
-successful sanitized entrypoint smoke test before selecting a release. The
-helper deployment separately preflights the installed inventory and live admin
-project/namespace/path identity before uploading anything. These checks are
-automated; do not manually copy state into a release or bypass the protected
-wrapper. Credentials never enter the release archive. Verify the selected
-release and timer:
-
-```bash
-test "$(cat /srv/openstack-platform/platform-cli/current/.complete)" = "$commit"
-test -x "$(readlink -e /srv/openstack-platform/bin/openstack-platform)"
-test -x "$(readlink -e /srv/openstack-platform/bin/openstack-platform-restore)"
-/srv/openstack-platform/bin/openstack-platform --help >/dev/null
-/srv/openstack-platform/bin/openstack-platform-restore --help >/dev/null
-systemctl --user is-enabled openstack-platform-backup.timer
-```
-
-### Install and smoke-test the helper release
-
-From the same clean checkout, the helper deployment reads project identity and
-all four configured paths from the installed mode-`0600` management inventory.
-It verifies the live admin inventory, transfers a commit-addressed archive and
-installer through the pinned alias, atomically selects a complete helper
-release, removes temporary remote files, and sends a malformed-envelope smoke
-request:
-
-```bash
-helper_output="$(deploy/platform-cli/deploy_helper_release.sh "$commit")"
-printf '%s\n' "$helper_output"
-test "$(tail -n1 <<<"$helper_output")" = "helper-release=$commit:verified"
-```
-
-A live admin `/etc/<namespace>/platform.json` may be the NixOS symlink to a root-owned,
-non-writable regular file under `/nix/store`; never replace it with the
-management copy.
-
-The first CLI invocation creates the empty schema. Verify it
-before selecting images or creating an application:
-
-```bash
-status_output="$(/srv/openstack-platform/bin/openstack-platform status)"
-printf '%s\n' "$status_output"
-grep -Eq '^degraded +0 +0 +0 +0 +3 +0$' <<<"$status_output"
-app_output="$(/srv/openstack-platform/bin/openstack-platform app list)"
-storage_output="$(/srv/openstack-platform/bin/openstack-platform storage list)"
-grep -Eq '^SLUG +RUNNING +COMMIT +DIGEST +CPU +MEMORY +LIVE$' <<<"$app_output"
-grep -Eq '^SLUG +TYPE +PROVIDER_ID +PROVIDER_NAME +STATE +QUOTA +VERIFIED +HEALTH$' <<<"$storage_output"
-```
-
-Record zero accepted applications and zero accepted managed resources. The
-fresh state reports `degraded` with three unavailable observations for the
-persistent admin, ingress, and storage hosts. The disposable builder is
-observed only while a durable build operation is unfinished, and worker
-observations begin with an accepted application. This is not an accepted
-application or storage row. If unexpected rows exist,
-stop: do not delete rows or import external declarations.
-
-Select the five accepted image UUIDs from `infra image list`. The image names
-are lookup labels; the CLI records and verifies the provider UUID, full source
-commit, and compatibility metadata:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform infra image list
-/srv/openstack-platform/bin/openstack-platform infra image set admin ADMIN_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra image set ingress INGRESS_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra image set storage STORAGE_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra image set builder BUILDER_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra image set worker WORKER_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra list
-```
-
-Replace each `*_IMAGE_UUID` with the exact UUID from the accepted, active,
-configured-project image record. Do not select an image with missing or
-incompatible metadata.
-
-## 6. Deploy the first application and create storage
-
-The application source must be public, credential-free GitHub HTTPS. Its
-selected full lowercase commit must contain `platform.yaml` and the runtime
-lockfile. A minimal Node example is:
-
-```yaml
-version: 1
-runtime: node
-packages: [.]                 # package-lock.json must be in the repository
-scripts:
-  build: build
-  start: start
-port: 8080
-health:
-  path: /health
-```
-
-The `build` value may be `null`; script values are package-script names, not
-shell commands. Dockerfiles, repository-controlled environment, build
-arguments, and host mounts are not part of this manifest.
-
-Deploy one exact commit and inspect the accepted record:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform app deploy demo \
-  --repo https://github.com/OWNER/REPOSITORY \
-  --commit FULL_LOWERCASE_40_CHARACTER_COMMIT
-/srv/openstack-platform/bin/openstack-platform app show demo
-test "$(curl --fail --show-error --silent --output /dev/null \
-  --write-out '%{http_code}' "https://demo.$PLATFORM_DOMAIN/health")" = 200
-printf '\nfirst-application-health=verified\n'
-```
-
-Acceptance requires the builder and fixed port to be absent, the worker to be
-ready, scheduler health to pass, the public route to pass, and `app show` to
-contain the exact commit, recipe identity, and immutable image digest. The
-whole command is bounded by the policy process deadline: lock waits, source
-acquisition, helper calls, builder create/build/cleanup, and health probes each
-receive only the remaining time. The builder records the same wall-clock
-deadline and passes it to the admin-side source receiver and BuildKit. Use bounded logs only when diagnosing. Build logs select the newest attempt by default, including an active attempt. The header reports its build UUID; select any retained attempt with `--id`, or follow the active build as it is persisted on the admin state volume:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform app logs demo --build --list
-/srv/openstack-platform/bin/openstack-platform app logs demo --build --lines 200
-/srv/openstack-platform/bin/openstack-platform app logs demo --build --follow --lines 200
-/srv/openstack-platform/bin/openstack-platform app logs demo --build --id BUILD_UUID --lines 200
-/srv/openstack-platform/bin/openstack-platform app logs demo --runtime --lines 200
-```
-
-Only after the application is accepted, create and verify managed storage:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform storage create demo postgres --name default
-/srv/openstack-platform/bin/openstack-platform storage verify demo postgres --name default
-/srv/openstack-platform/bin/openstack-platform storage show demo postgres --name default
-```
-
-Use `mongo` or `s3` instead/as well when required. SQLite stores only the
-non-secret provider identity, ownership, limits, and checkpoints. Credentials
-remain in the helper and owner-specific Nomad Variables. Rotate only through
-the same control surface:
-
-```bash
-/srv/openstack-platform/bin/openstack-platform storage rotate demo postgres --name default
-/srv/openstack-platform/bin/openstack-platform storage verify demo postgres --name default
-```
-
-PostgreSQL and MongoDB measured-byte values are configured targets, not usage
-observations; no periodic usage collector is installed.
-
-## 7. Back up, restore, and reconcile
-
-### Where management-database backups go
-
-Run this on the **management host** as the unprivileged `/srv/openstack-platform` owner:
-
-```bash
-m1_backup_output="$(/srv/openstack-platform/bin/openstack-platform backup)"
-printf '%s\n' "$m1_backup_output"
-grep -Eq '^backup=platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age sha256=[0-9a-f]{64}$' <<<"$m1_backup_output"
-```
-
-The CLI creates a SQLite online-backup copy under the private management state,
-encrypts it with `backupAgeRecipient` using the verified management age
-executable, and transfers it through the pinned alias to the configured
-admin-side path:
-
-```text
-<paths.backups>/m1/.staging/platform-YYYYMMDDTHHMMSSZ.sqlite3.age
-```
-
-The helper verifies the age-v1 header and ciphertext SHA-256, then publishes an
-evidence set on the same backup filesystem. It fsyncs the ciphertext and
-checksum before the final manifest rename. The manifest is the commit marker,
-so readers and retention never accept a partial trio. A retry reconciles a
-ciphertext or evidence move interrupted before that marker. The helper
-preserves a malformed committed set for operator attention. Retention counts
-only complete sets. The accepted paths are:
-
-```text
-<paths.backups>/m1/platform-YYYYMMDDTHHMMSSZ.sqlite3.age
-<paths.backups>/m1/platform-YYYYMMDDTHHMMSSZ.sqlite3.age.sha256
-<paths.backups>/m1/platform-YYYYMMDDTHHMMSSZ.sqlite3.age.manifest
-```
-
-`<paths.backups>` comes only from the installed inventory; it is not a fixed
-`/srv/openstack-platform` or checkout path. The output contains the backup name
-and ciphertext checksum, not database or credential content. The timer runs
-this operation daily at 02:45 UTC with a 30-minute randomized delay. Verify the
-timer and accepted evidence with private file metadata; do not list or print
-credentials.
-
-These backups contain the management database only. They do not contain
-PostgreSQL, MongoDB, Garage objects, registry blobs, or an age identity. Registry blobs are rebuilt
-from source.
+The command uses SQLite's online backup API, encrypts locally, and transfers the
+ciphertext through the pinned alias. Admin accepts only a complete age-v1
+ciphertext/checksum/manifest trio. It never copies a live WAL file.
 
 ### Managed-data backup and restore check on admin
 
-These commands must run on the **admin host**, not from the management checkout
-and not through `openstack-platform`. The admin image packages the scripts below
-its configured root and supplies the immutable age, age-keygen, Podman, and
-service-check dependencies:
+The admin managed-data identity is
+`$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt`. Do not overwrite it
+while backups depend on it. Keep an escrow copy outside the deployment.
+
+Run the packaged backup with its fixed dependency paths:
 
 ```bash
-# Run the following from the management host through the pinned alias.
-ssh -F "$SSH_CONFIG" platform-admin -- env \
-  PLATFORM_CONFIG="/etc/$PLATFORM_NAMESPACE/platform.json" \
-  python3 "$PLATFORM_ROOT/infra/backup/init_garage_backup_key.py"
-```
-
-Run the initialization once after the storage host is healthy. It writes the
-non-expiring Garage backup key to
-`$PLATFORM_ROOT/secrets/garage-backup.env` with mode `0600`; it prints only
-`garage-backup-key=created` or `garage-backup-key=existing`. The admin
-`storage-bootstrap.env` must already be present and mode `0600`.
-
-Create the admin managed-data age identity once, only when the file does not
-already exist, and escrow it without printing it:
-
-```bash
-ssh -F "$SSH_CONFIG" platform-admin -- \
-  "$PLATFORM_ROOT/bin/age-keygen" \
-  -o "$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt" >/dev/null
-ssh -F "$SSH_CONFIG" platform-admin -- \
-  chmod 0600 "$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt"
-test "$(ssh -F "$SSH_CONFIG" platform-admin -- \
-  stat -c '%a' "$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt")" = 600
-```
-
-Do not overwrite this identity while backups depend on it. Keep a protected
-operator escrow copy outside the deployment; the live admin copy is required
-for verification.
-
-Run and verify the managed-data backup from admin through the same alias. The
-explicit overrides below are the admin image's packaged paths; preserve them
-when rerunning after a failed attempt and do not substitute checkout paths:
-
-```bash
-managed_backup_output="$(
+managed_backup="$(
   ssh -F "$SSH_CONFIG" platform-admin -- env \
     PLATFORM_CONFIG="/etc/$PLATFORM_NAMESPACE/platform.json" \
     AGE="$PLATFORM_ROOT/bin/age" \
@@ -823,227 +112,330 @@ managed_backup_output="$(
     EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_logical_backup.sh" \
     SERVICE_CHECK_PYTHON=python3 \
     GARAGE_EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_garage_backup.py" \
+    REGISTRY_ARTIFACT_SCRIPT="$PLATFORM_ROOT/infra/backup/registry_artifact.py" \
     "$PLATFORM_ROOT/infra/backup/run_platform_backup.sh"
 )"
-printf '%s\n' "$managed_backup_output"
-grep -Eq '^platform backup complete: .+$' <<<"$managed_backup_output"
+printf '%s\n' "$managed_backup"
+grep -Eq '^platform backup complete: .+$' <<<"$managed_backup"
+```
 
-restore_output="$(
+The set contains encrypted `postgres.age`, `mongodb.age`, `garage.age`, and
+`registry.age`, plus `MANIFEST` and `SHA256SUMS`. OCI blobs stream through
+bounded verification and are retained according to controller registry
+retention.
+
+Restore-check the newest set without touching live services:
+
+```bash
+restore_check="$(
   ssh -F "$SSH_CONFIG" platform-admin -- env \
     PLATFORM_CONFIG="/etc/$PLATFORM_NAMESPACE/platform.json" \
     AGE="$PLATFORM_ROOT/bin/age" \
     AGE_KEY="$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt" \
     "$PLATFORM_ROOT/infra/backup/verify_latest_restore.sh"
 )"
-printf '%s\n' "$restore_output"
-grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' <<<"$restore_output"
+printf '%s\n' "$restore_check"
+grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' \
+  <<<"$restore_check"
 ```
 
-The first command creates encrypted `postgres.age`, `mongodb.age`, and
-`garage.age` under `<paths.backups>/<namespace>/<timestamp>/`, plus `MANIFEST`
-and `SHA256SUMS`. The admin role also has its own
-`<namespace>-platform-backup.timer` for this managed-data job (03:15 UTC with a
-30-minute randomized delay). The management
-`openstack-platform-backup.timer` covers only the management database. The
-restore check decrypts each archive only into temporary storage. The second
-command starts temporary PostgreSQL and MongoDB containers, checks the Garage
-catalog/payload archive, and removes the temporary containers on success or
-failure. It atomically writes mode-`0600` `RESTORE-MANIFEST` only when all
-checks pass and never overwrites live services. The expected final line is
-`latest platform restore=verified .../RESTORE-MANIFEST`.
+The check starts temporary PostgreSQL and MongoDB containers and validates the
+Garage and OCI archives. It writes `RESTORE-MANIFEST` only after all checks pass
+and removes temporary resources on success or failure.
 
-### Offline management-database restore
-
-The stable CLI has an offline restore operation. Copy an accepted ciphertext
-from admin to a private mode-`0600` file on the management host; do not use the
-staging file while an upload is in progress:
+### Verify backup schedules
 
 ```bash
-export BACKUP_NAME=platform-YYYYMMDDTHHMMSSZ.sqlite3.age
-export BACKUP_COPY="$PRIVATE_BOOTSTRAP/$BACKUP_NAME"
-export BACKUP_ROOT="$(uv run python infra/lib/platform_config.py get paths.backups)"
-scp -F "$SSH_CONFIG" -- \
-  "platform-admin:$BACKUP_ROOT/m1/$BACKUP_NAME" "$BACKUP_COPY"
-chmod 0600 "$BACKUP_COPY"
-test -f "$BACKUP_COPY" && test ! -L "$BACKUP_COPY"
+systemctl --user is-enabled openstack-platform-backup.timer
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  systemctl is-enabled "$PLATFORM_NAMESPACE-hosted-controller-backup.timer"
+ssh -F "$SSH_CONFIG" platform-admin -- \
+  systemctl is-enabled "$PLATFORM_NAMESPACE-platform-backup.timer"
 ```
 
-Stop the management timer and any management command before replacement. The
-installed restore launcher fixes the managed destination at
-`/srv/openstack-platform/state/platform.sqlite3`; do not supply a destination
-or use a release-internal virtualenv path. Deliberately confirm replacement
-with `--yes`, and assert the tool's verified result:
+## Export encrypted recovery evidence off site
+
+Mount operator-selected off-site storage on admin before installing
+`config/offsite-export.example.json`. The mount point must be direct,
+`agentops`-owned, mode `0700`, on a different device from
+`<paths.backups>`, and protected by provider versioning, object lock, or WORM
+retention. The configuration contains no provider credential.
+
+Record the exact source and filesystem type:
+
+```bash
+export OFFSITE_MOUNT=/mnt/institutional-recovery
+mountpoint -q "$OFFSITE_MOUNT"
+findmnt -n -o SOURCE,FSTYPE --target "$OFFSITE_MOUNT"
+```
+
+Create a private copy, edit `destination`, `mountSource`, and `filesystemType`
+to match, and then install it on admin:
+
+```bash
+install -m 0600 config/offsite-export.example.json \
+  /private/path/offsite-export.json
+${EDITOR:?set EDITOR} /private/path/offsite-export.json
+scp -F "$SSH_CONFIG" -- /private/path/offsite-export.json \
+  platform-admin:/home/agentops/offsite-export.json
+ssh -F "$SSH_CONFIG" platform-admin -- install -m 0600 \
+  /home/agentops/offsite-export.json \
+  "$PLATFORM_ROOT/persistent/offsite-export.json"
+```
+
+Run and verify one export:
+
+```bash
+ssh -F "$SSH_CONFIG" platform-admin -- openstack-platform-recovery scheduled-export \
+  --platform-config "/etc/$PLATFORM_NAMESPACE/platform.json" \
+  --config "$PLATFORM_ROOT/persistent/offsite-export.json" \
+  --receipt "$PLATFORM_ROOT/persistent/status/offsite-export.json"
+ssh -F "$SSH_CONFIG" platform-admin -- openstack-platform-recovery status \
+  --platform-config "/etc/$PLATFORM_NAMESPACE/platform.json" \
+  --config "$PLATFORM_ROOT/persistent/offsite-export.json" \
+  --receipt "$PLATFORM_ROOT/persistent/status/offsite-export.json"
+```
+
+Export selects only the newest committed set from each backup class, verifies
+bounded direct files after copying, and then updates the credential-free
+receipt. An unmounted, bind-mounted, same-device, changed, or stale destination
+fails without replacing the previous receipt. Apply provider retention only
+after a newer bundle and its full drill evidence are retained.
+
+## Restore the hosted controller
+
+This operation replaces the live hosted-controller SQLite database. Before
+starting, verify the selected manifest/checksum, decrypt the ciphertext on the
+operator recovery host, and stage a direct mode-`0600` SQLite file on admin as
+`/home/agentops/hosted-controller-restore.sqlite3`. Never copy the age identity
+to admin.
+
+In an approval-gated root recovery session on the selected admin host:
+
+```bash
+sudo systemctl stop \
+  "$PLATFORM_NAMESPACE-hosted-controller-backup.timer" \
+  "$PLATFORM_NAMESPACE-hosted-controller-backup.service" \
+  "$PLATFORM_NAMESPACE-controller.service"
+sudo install -m 0600 -o platform-controller -g platform-controller \
+  /home/agentops/hosted-controller-restore.sqlite3 \
+  "$PLATFORM_ADMIN_STATE/controller/restore-input.sqlite3"
+sudo rm -f /home/agentops/hosted-controller-restore.sqlite3
+sudo openstack-platform-hosted-controller-restore --yes
+sudo systemctl start \
+  "$PLATFORM_NAMESPACE-controller.service" \
+  "$PLATFORM_NAMESPACE-hosted-controller-backup.timer"
+```
+
+The launcher refuses active controller/backup units and unsafe input. It
+validates deployment identity, complete known schema, SQLite integrity, foreign
+keys, and unfinished operations before atomic replacement. On refusal, the
+current database remains unchanged.
+
+Verify readiness and create a fresh hosted backup:
+
+```bash
+sudo systemctl is-active "$PLATFORM_NAMESPACE-controller-readiness.service"
+sudo systemctl start "$PLATFORM_NAMESPACE-hosted-controller-backup.service"
+```
+
+Hosted restore does not recreate OpenStack, Nomad, workers, or managed data.
+
+## Restore external operator state offline
+
+Stop the user backup timer and every operator command. Copy an accepted
+ciphertext and the escrowed identity to direct current-user-owned mode-`0600`
+files on the operator host.
 
 ```bash
 systemctl --user stop openstack-platform-backup.timer openstack-platform-backup.service
 restore_output="$(
   /srv/openstack-platform/bin/openstack-platform-restore \
-    "$BACKUP_COPY" \
-    --age-identity "$BACKUP_AGE_IDENTITY" \
+    /private/path/platform-YYYYMMDDTHHMMSSZ.sqlite3.age \
+    --age-identity /private/path/backup-age-identity.txt \
     --yes
 )"
 printf '%s\n' "$restore_output"
 grep -Eq '^restore=verified schema-version=[0-9]+ integrity=ok$' <<<"$restore_output"
-```
-
-The operation is offline: it contacts no OpenStack, SSH helper, Nomad,
-provider, or network service. It accepts an age-v1 ciphertext (or a private,
-mode-`0600` SQLite file for controlled offline testing), decrypts to a private
-temporary file, checks that its deployment-bound marker matches the installed
-project/namespace/stable inventory identity, migrates only known older
-schemas, checks schema shape, SQLite integrity, foreign keys, and unfinished
-operations, then uses `os.replace` and a directory `fsync` for the destination.
-A copied backup from another deployment or an older unbound backup is refused
-before replacement. A failed verification removes only its temporary files and
-leaves the existing database unchanged. Image/flavor/version upgrades do not
-change the marker, but changing
-stable resource names, paths, namespace, or project identity does.
-
-It refuses a missing/unsafe identity, symlink or wrong-owner/mode source,
-future, unknown, or corrupt state, a deployment-identity mismatch, an
-unfinished operation in either source or current database, a busy database
-lock, source equal to destination, unsafe state directory, or a file over the
-configured 1 GiB limit. It also refuses unsafe WAL/SHM sidecars. Do not bypass
-a refusal by deleting SQLite rows or sidecars.
-
-Re-enable the timer and reconcile accepted records with live observations:
-
-```bash
 systemctl --user start openstack-platform-backup.timer
-/srv/openstack-platform/bin/openstack-platform status
-/srv/openstack-platform/bin/openstack-platform infra list
-/srv/openstack-platform/bin/openstack-platform app list
-/srv/openstack-platform/bin/openstack-platform storage list
+$PLATFORM_CLI status
+$PLATFORM_CLI infra list
 ```
 
-Restore changes accepted SQLite state only. It does not recreate providers,
-workers, Nomad jobs, variables, or managed data, and it never imports an
-external row. If restored records and live provider identities differ, stop
-mutations, preserve the evidence and operation IDs, and use the owning
-checkpointed CLI operation or recovery procedure; never edit SQLite or a
-provider by hand.
+Restore is offline and contacts no provider, SSH helper, Nomad, or network
+service. It validates deployment identity, schema, integrity, foreign keys,
+sidecars, locks, and unfinished operations before replacing
+`/srv/openstack-platform/state/platform.sqlite3`. Failure leaves the existing
+database unchanged.
 
-For a disposable offline destination rather than the live state path, use
-the installed CLI with a separate private state directory. The directory is
-the destination parent, so this command does not touch the managed database:
+For a drill that must not touch live operator state, use an absent child in a
+private replacement directory:
 
 ```bash
 install -d -m 0700 /private/path/offline-state
-/srv/openstack-platform/bin/openstack-platform \
-  --state-directory /private/path/offline-state \
-  restore "$BACKUP_COPY" \
-  --age-identity "$BACKUP_AGE_IDENTITY" \
+/srv/openstack-platform/bin/openstack-platform-restore \
+  --replacement-state-directory /private/path/offline-state \
+  /private/path/platform-YYYYMMDDTHHMMSSZ.sqlite3.age \
+  --age-identity /private/path/backup-age-identity.txt \
   --yes
 ```
 
-The destination parent must be a direct current-user-owned mode-`0700`
-directory. Inspect the result with that separate CLI state directory; do not
-point a running deployment at an unverified copy.
+## Drill complete loss recovery
 
-## 8. Upgrade safely
-
-Publish and live-test a new commit-addressed role image before selecting it.
-For a persistent role, select the new UUID and use the CLI replacement command;
-it is the only supported persistent-host replacement path:
+Full mode is destructive to the services named by its replacement inventory.
+Provision empty replacement PostgreSQL, MongoDB, Garage, and registry services.
+Do not point the replacement configuration at healthy or nonempty services.
+The off-site bundle must contain both SQLite classes, all four managed archives,
+an operator image selection, and at least one accepted hosted deployment.
 
 ```bash
-/srv/openstack-platform/bin/openstack-platform infra image set ingress NEW_INGRESS_IMAGE_UUID
-/srv/openstack-platform/bin/openstack-platform infra replace ingress --yes
-/srv/openstack-platform/bin/openstack-platform infra logs ingress --lines 200
+infra/backup/full_loss_recovery_drill.sh --full \
+  /mnt/recovered/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ \
+  /srv/full-loss-drill \
+  /escrow/controller-age-identity.txt \
+  /escrow/managed-age-identity.txt \
+  /private/replacement-platform.json
+test -f /srv/full-loss-drill/DRILL-EVIDENCE.json
 ```
 
-Use `admin`, `ingress`, or `storage` as the role. The command retains the
-current server, fixed port, and required volumes until the replacement passes
-role readiness. Before that readiness can be accepted, it re-reads the
-replacement and requires the exact selected image UUID, retained flavor UUID,
-configured server name, and operation-provenance metadata. A healthy server
-with the wrong image, flavor, name, or operation identity is rejected. On a
-readiness failure it restores the prior host. An ambiguous provider result is
-`recovery-required`: inspect the recorded operation and rerun the same command.
-Never delete the old persistent server first, detach a volume by name, or create
-a replacement manually. Run a fresh managed-data restore check before
-replacing storage and a fresh management-database backup before replacing admin.
+The work path must be absent. The drill imports and verifies the bundle,
+restores both SQLite databases to private replacement directories, verifies
+restored image/application/accepted-deployment records, and runs destructive
+managed replacement restore. `DRILL-EVIDENCE.json` is committed only after all
+SQLite and managed restore checks succeed.
 
-Upgrade management/helper releases with the installer from a clean full commit.
-It atomically selects only a complete release; retain the previous complete
-release for executable recovery. A release rollback does not restore SQLite or
-provider state, and a database restore is the separate offline procedure above.
-
-## 9. Clean up and preserve evidence
-
-Remove managed storage before its application, using exact-slug confirmation.
-S3 removal additionally requires explicit `--purge-s3` when non-empty:
+For archive and SQLite inspection without service mutation:
 
 ```bash
-/srv/openstack-platform/bin/openstack-platform storage remove demo postgres --name default --confirm default
-/srv/openstack-platform/bin/openstack-platform app remove demo --confirm demo
-/srv/openstack-platform/bin/openstack-platform app list
-/srv/openstack-platform/bin/openstack-platform storage list
+infra/backup/full_loss_recovery_drill.sh --verify-only \
+  /mnt/recovered/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ \
+  /srv/full-loss-verification \
+  /escrow/controller-age-identity.txt \
+  /escrow/managed-age-identity.txt \
+  /private/replacement-platform.json
 ```
 
-Application removal proves the Nomad job and variables, worker and fixed port,
-and every tracked current/prior/failed-candidate registry manifest are absent.
-Keep accepted encrypted backups, both age identities, and restore evidence
-until the retention decision is recorded. Use image pruning only as a reviewed
-plan/apply pair. The plan protects selected images, images referenced by
-servers or unfinished operations, and the newest complete images per role;
-incomplete metadata-bearing images are review-only. Apply re-observes exact
-UUIDs, fingerprints, inventory, and protections under the infrastructure lock.
-A missing or malformed server image projection fails closed rather than being
-assumed to mean boot-from-volume. If a deletion is interrupted, inspect or
-continue only through the recorded checkpointed recovery operation:
+Verify-only cannot create `DRILL-EVIDENCE.json` and is not a completed
+full-loss drill.
+
+## Replace a persistent host
+
+Before replacing storage, require a fresh managed-data `RESTORE-MANIFEST`.
+Before replacing admin, require fresh hosted-controller and operator-state
+backups. Publish and live-test the replacement role image before selecting its
+exact UUID.
 
 ```bash
-/srv/openstack-platform/bin/openstack-platform infra image prune
-/srv/openstack-platform/bin/openstack-platform infra image prune --apply --yes
+$PLATFORM_CLI infra image set ingress NEW_INGRESS_IMAGE_UUID
+$PLATFORM_CLI infra replace ingress --yes
+$PLATFORM_CLI infra logs ingress --lines 200
 ```
 
-For whole-deployment teardown, first complete application/storage cleanup,
-copy/verify the backups and private evidence, stop the two platform backup
-timers, and obtain a separate reviewed provider teardown for only the configured
-prefix and project. Do not use the teardown as a persistent-role replacement
-procedure. Remove temporary management copies of ACL, storage, and Cloudflare
-files only after their required escrow/replacement copies are confirmed; do
-not remove the admin copies while the deployment is live.
+Use `admin`, `ingress`, or `storage`. Replacement retains the current host,
+fixed port, and volumes until the candidate passes readiness and exact
+image/flavor/name/provenance checks. On readiness failure it restores the old
+host. An ambiguous provider result becomes recovery-required; restore the named
+dependency and rerun the same command. Never delete the old server or detach a
+volume manually.
 
-Use [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) to record command output
-paths, timestamps, image UUID/checksums, readiness markers, public health,
-`RESTORE-MANIFEST`, and operation IDs. Keep credentials, unrestricted provider
-payloads, and age identities out of tracked evidence.
+Release updates follow [Install releases outside automated
+setup](MAINTENANCE.md#install-releases-outside-automated-setup). Executable
+rollback does not restore database or provider state. Before a schema migration,
+take and verify backups and follow the [database migration
+order](MAINTENANCE.md#database-migration-order).
 
-## Recovery rules
+## Prune images
 
-- Project name or UUID mismatch: stop, load the intended OpenStack credential
-  file and inventory, and rerun the non-mutating identity check.
-- Unexpected foundation resource, port, volume, or host-key identity: stop and
-  reconcile ownership; do not rename, detach, or delete it.
-- `ACTIVE` without the exact readiness marker: inspect bounded serial output and
-  failed units, then stop using that host as a recovery target. Correct the
-  private input, build and live-test a replacement role image, and use the
-  supported `openstack-platform infra replace ROLE --yes` path once the control
-  surface is installed. For a pre-control-surface bootstrap failure, obtain a
-  reviewed rebuild/replacement of only the configured role; rerunning an
-  `apply_*` script does not reapply user data to an existing server.
-- Missing/malformed bootstrap file: compare the exact role key set and mode
-  `0600`; regenerate the file without printing its values.
-- Helper, SSH, Nomad, provider, or storage dependency unavailable: restore the
-  named dependency and rerun the same command with the same identity arguments.
-- Unfinished or recovery-required operation: preserve the database and
-  correlation/operation ID and rerun the owning command. Never clear SQLite
-  operation rows manually.
-- Public health failure: test the exact DNS name, trusted certificate,
-  preserved `Host`, ingress route, Nomad allocation, and application health
-  path separately.
-- Management-database backup failure: inspect only safe file metadata and the fixed staging/
-  accepted paths; verify `/srv/openstack-platform/bin/age`, the policy recipient, bridge, and
-  backup volume, then emit a new backup. Do not copy a live WAL file.
-- Managed restore failure: run the check again on admin, not management; keep
-  the failed archive and temporary-container evidence, fix the packaged age
-  key, storage service, or source archive, and do not overwrite live services.
-- Offline restore refusal: leave the destination untouched, resolve the named
-  mode/identity/schema/unfinished-operation condition, and rerun with the same
-  private files.
+Image pruning is plan-first:
 
-For an unresolved failure, report only the safe phase, correlation/operation
-ID, exact identity arguments, and bounded evidence. Do not report credentials,
-provider payloads, or age identity contents.
+```bash
+$PLATFORM_CLI infra image prune
+$PLATFORM_CLI infra image prune --apply --yes
+```
+
+The plan protects selected images, server references, unfinished-operation
+references, and configured retained history. Apply re-observes every UUID and
+fingerprint under the infrastructure lock. Missing or malformed provider image
+projections fail closed.
+
+## Teardown boundary
+
+Whole-deployment teardown requires separate human authorization and a reviewed
+provider plan scoped to the exact project, prefix, and immutable ownership
+evidence. Before provider deletion:
+
+1. confirm through the deployed management boundary that no product resources
+   remain; nonzero `APPS` or `STORAGE` is a stop condition;
+2. retain and verify all three backup classes, both age identities, off-site
+   bundle IDs, and full-loss drill evidence;
+3. stop operator, hosted-controller, managed-data, and off-site timers; and
+4. record unrelated resources that are explicitly out of scope.
+
+The operator CLI intentionally has no whole-deployment or product teardown
+command. Do not use an older binary, substring name matching, or project-wide
+delete command.
+
+## Troubleshooting and recovery rules
+
+Start with the symptom and preserve the operation or correlation ID. Do not
+clear SQLite rows, bypass the helper, detach provider resources, or print
+credentials while diagnosing a failure.
+
+- **Setup preflight is not ready:** rerun `openstack-platform setup check
+  --env-file ... --json` and inspect quota deltas, fixed-address availability,
+  reserved-name collisions, tooling, ingress, and release evidence. Correct the
+  protected input or provider quota; the check has not mutated OpenStack.
+- **Setup stopped after mutation:** keep its workspace and rerun the identical
+  apply after fixing the named dependency. Setup re-observes each checkpoint.
+  Do not edit a partial server, port, volume, keypair, image, database row, or
+  generated secret.
+- **Project or deployment identity mismatch:** load the intended credential and
+  inventory; stop before mutation. Never substitute example IDs or make compact
+  and canonical UUID strings match by hand.
+- **Unexpected server, port, volume, image, or host key:** reconcile exact
+  ownership. Do not rename, detach, adopt, or delete the object merely because
+  its name resembles the inventory.
+- **A role is `ACTIVE` but not ready:** use `status`, `infra list`, and bounded
+  `infra logs ROLE --lines 200`. Compare selected image, flavor, fixed port,
+  volumes, metadata, and the role readiness marker. Correct the dependency or
+  publish a fixed image, then use the supported replacement path; cloud-init is
+  not reapplied to an existing host.
+- **The operator bridge is unavailable:** check metadata only for the private
+  SSH config and known-hosts files, then require
+  `ssh -F "$SSH_CONFIG" platform-admin -- id -un` to return `agentops`.
+  Regenerate the bridge through the matching reviewed release. Do not hand-edit
+  host keys or choose a remote host from request input.
+- **The hosted controller is not ready:** inspect the controller and readiness
+  units through the pinned alias. Restore the matching policy/helper release or
+  retained-state dependency, then restart those units. The controller has no
+  public listener; a missing management UI is unrelated to controller
+  readiness.
+- **Public health fails:** check the exact hostname, browser-trusted
+  certificate, tunnel or provider CIDRs, preserved `Host`, ingress service, and
+  exact `/healthz` body in that order. A request to the ingress IP is not an
+  equivalent test. Never add `0.0.0.0/0` for diagnosis.
+- **Image selection or pruning is refused:** correct incomplete provenance,
+  compatibility, provider ownership/status, or server image projection and
+  create a new plan. Do not overwrite a tested image name or broaden the delete
+  set manually.
+- **A backup or restore check fails:** identify which of the three backup
+  classes failed, retain its evidence, and correct the named executable,
+  identity, mount, checksum, archive, schema, or integrity dependency. Rerun the
+  same bounded tool; never publish staged ciphertext manually or overwrite live
+  data with an unverified archive.
+- **Offline restore is refused:** leave the destination unchanged. Correct the
+  reported owner/mode/type, identity, deployment binding, schema, integrity,
+  foreign-key, sidecar, unfinished-operation, lock, or size condition in a
+  private directory and rerun the installed launcher.
+- **An operation is unfinished or recovery-required:** preserve its ID, scope,
+  phase, and safe error. Restore the dependency, then repeat the identical
+  current command or controller request. Controller recovery requires the same
+  method, path, body, and idempotency key.
+- **`UNSUPPORTED_PRIOR_STATE`:** preserve and archive the state. Use a new
+  namespace and empty state/backup roots; do not edit migration rows, ownership
+  markers, or provider metadata to force adoption.
+
+Record only bounded safe evidence in the private operations system: exact
+non-secret identities, operation/correlation ID, phase, failed check, checksum,
+and readiness result. Keep provider payloads, credentials, secret values, and
+age identity contents out of logs and tickets.

@@ -10,6 +10,10 @@
     "projects.example.net",
     "compute.example.net"
   ],
+  "publicIngress": {
+    "mode": "tunnel",
+    "providerCidrs": []
+  },
   "staticIngressRoutes": {
     "one-off": {
       "hostname": "one-off.apps.example.com",
@@ -26,7 +30,7 @@
   "pki": {
     "internalCaFile": "internal-ca.pem"
   },
-  "managementCidr": "192.0.2.10/32",
+  "operatorCidr": "192.0.2.10/32",
   "metadataAddress": "169.254.169.254",
   "addresses": {
     "admin": "192.0.2.11",
@@ -53,7 +57,7 @@
     "backup": {
       "name": "example-backups",
       "label": "example-bak",
-      "sizeGiB": 200,
+      "sizeGiB": 600,
       "type": "production"
     },
     "data": {

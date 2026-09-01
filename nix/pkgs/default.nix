@@ -75,22 +75,42 @@ let
     ]
   );
 
-  platformCliPython = pkgs.python314.withPackages (ps: [
+  platformPython = pkgs.python314.withPackages (ps: [
     ps.boto3
     ps.psycopg
     ps.pymongo
-    ps.pyyaml
   ]);
 
-  platformCliInstaller = pkgs.writeShellApplication {
+  controllerPackage = pkgs.python314Packages.buildPythonApplication {
+    pname = "openstack-platform-controller";
+    version = "0.1.0";
+    pyproject = true;
+    src = pkgs.lib.cleanSource ../..;
+    build-system = [ pkgs.python314Packages.hatchling ];
+    dependencies = with pkgs.python314Packages; [
+      bcrypt
+      boto3
+      psycopg
+      pymongo
+    ];
+    doCheck = false;
+    postInstall = ''
+      rm "$out/bin/openstack-platform" \
+        "$out/bin/openstack-platform-helper" \
+        "$out/bin/openstack-platform-restore"
+    '';
+    pythonImportsCheck = [ "openstack_platform.controller.main" ];
+  };
+
+  releaseInstaller = pkgs.writeShellApplication {
     name = "openstack-platform-install-release";
     runtimeInputs = [
       pkgs.git
       pkgs.uv
-      platformCliPython
+      platformPython
     ];
     text = ''
-      exec ${platformCliPython}/bin/python ${../../deploy/platform-cli/install_release.py} "$@"
+      exec ${platformPython}/bin/python ${../../deploy/releases/install_release.py} "$@"
     '';
   };
 
@@ -99,9 +119,9 @@ let
   # module from here would drop PLATFORM_CONFIG, which the helper requires, so
   # every helper call would fail after any admin replacement. Hand over to the
   # accepted release's own launcher, which validates and exports it.
-  platformCliHelperLauncher = pkgs.writeShellScriptBin "openstack-platform-helper" ''
+  helperLauncher = pkgs.writeShellScriptBin "openstack-platform-helper" ''
     set -eu
-    release=${platform.paths.adminState}/controller/platform-cli/current
+    release=${platform.paths.adminState}/operator/helper-releases/current
     if [[ ! -f "$release/.complete" ]]; then
       echo "no accepted helper release" >&2
       exit 69
@@ -132,9 +152,10 @@ in
     traefik
     buildkit
     python
-    platformCliPython
-    platformCliInstaller
-    platformCliHelperLauncher
+    platformPython
+    controllerPackage
+    releaseInstaller
+    helperLauncher
     imageSmoke
     ;
 }

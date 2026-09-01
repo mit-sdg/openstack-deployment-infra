@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Create the idempotent OpenStack network foundation for the platform.
 
-CSAIL OpenStack places instances directly on the shared, publicly routed `inet`
-network. Isolation is therefore enforced with Neutron security groups. This
-script creates or updates named foundation resources and never deletes them.
+The configured OpenStack network may be shared and publicly routed, so
+isolation is enforced with Neutron security groups. This script creates or
+updates named foundation resources and never deletes them.
 Authentication is read from the standard OS_* environment variables.
 """
 
@@ -24,6 +24,7 @@ from openstack import exceptions  # type: ignore[attr-defined]
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.platform_config import load  # noqa: E402
+from lib.platform_contract import CONTRACT  # noqa: E402
 
 CONFIG = load()
 PROJECT_NAME = CONFIG["project"]
@@ -32,7 +33,24 @@ PLATFORM_NAME = CONFIG["displayName"]
 PREFIX = CONFIG["prefix"]
 PUBLIC_NETWORK = CONFIG["network"]
 INGRESS_PUBLIC_PORT = CONFIG["ports"]["ingress"]
-MANAGEMENT_SOURCE = CONFIG["managementCidr"]
+OPERATOR_SOURCE = CONFIG["operatorCidr"]
+INGRESS_MODE = CONFIG["publicIngress"]["mode"]
+PROVIDER_CIDRS = tuple(CONFIG["publicIngress"]["providerCidrs"])
+
+CONTRACT_PORTS = CONTRACT["ports"]
+SSH_PORT = CONTRACT_PORTS["ssh"]
+HTTP_PORT = CONTRACT_PORTS["http"]
+HTTPS_PORT = CONTRACT_PORTS["https"]
+NOMAD_HTTP_PORT = CONTRACT_PORTS["nomadHttp"]
+NOMAD_RPC_PORT = CONTRACT_PORTS["nomadRpc"]
+APPLICATION_PORT = CONTRACT_PORTS["application"]
+POSTGRES_PORT = CONTRACT_PORTS["postgres"]
+MONGODB_PORT = CONTRACT_PORTS["mongodb"]
+REGISTRY_PORT = CONTRACT_PORTS["registry"]
+GARAGE_RPC_PORT = CONTRACT_PORTS["garageRpc"]
+GARAGE_S3_PORT = CONTRACT_PORTS["garageS3"]
+STORAGE_CLIENT_PORTS = (POSTGRES_PORT, MONGODB_PORT, REGISTRY_PORT, GARAGE_S3_PORT)
+STORAGE_ADMIN_PORTS = (SSH_PORT, GARAGE_RPC_PORT, *STORAGE_CLIENT_PORTS)
 
 
 @dataclass(frozen=True)
@@ -48,25 +66,24 @@ class Rule:
 
 SECURITY_GROUPS: dict[str, tuple[str, list[Rule]]] = {
     f"{PREFIX}-admin": (
-        "Course control plane; SSH is restricted to the existing management host",
+        "Platform control plane; SSH is restricted to the existing operator host",
         [
-            Rule("ingress", "tcp", 22, 22, remote_ip=MANAGEMENT_SOURCE),
-            Rule("ingress", "icmp", remote_ip=MANAGEMENT_SOURCE),
+            Rule("ingress", "tcp", SSH_PORT, SSH_PORT, remote_ip=OPERATOR_SOURCE),
+            Rule("ingress", "icmp", remote_ip=OPERATOR_SOURCE),
         ],
     ),
     f"{PREFIX}-ingress": (
-        "Public HTTP(S) ingress and administration from the control plane",
-        [
-            Rule("ingress", "tcp", 80, 80, remote_ip="0.0.0.0/0"),
-            Rule("ingress", "tcp", 443, 443, remote_ip="0.0.0.0/0"),
-        ],
+        "Strict provider ingress or authenticated tunnel with no public origin",
+        [Rule("ingress", "tcp", HTTP_PORT, HTTP_PORT, remote_ip=cidr) for cidr in PROVIDER_CIDRS]
+        if INGRESS_MODE == "direct"
+        else [],
     ),
     f"{PREFIX}-worker": (
-        "Student application workers; application traffic arrives only from ingress",
+        "Application workers; application traffic arrives only from ingress",
         [],
     ),
     f"{PREFIX}-builder": (
-        "Disposable isolated Dockerfile builders; SSH is restricted to the control plane",
+        "Disposable isolated builders; SSH is restricted to the control plane",
         [],
     ),
     f"{PREFIX}-storage": (
@@ -132,23 +149,39 @@ def ensure_security_groups(conn: Any, apply: bool) -> dict[str, Any]:
     storage = f"{PREFIX}-storage"
     expanded[admin].extend(
         [
-            Rule("ingress", "tcp", 4646, 4646, remote_group=groups[ingress].id),
-            Rule("ingress", "tcp", 8080, 8080, remote_group=groups[ingress].id),
-            Rule("ingress", "tcp", 4647, 4647, remote_group=groups[worker].id),
+            Rule(
+                "ingress", "tcp", NOMAD_HTTP_PORT, NOMAD_HTTP_PORT, remote_group=groups[ingress].id
+            ),
+            Rule(
+                "ingress",
+                "tcp",
+                APPLICATION_PORT,
+                APPLICATION_PORT,
+                remote_group=groups[ingress].id,
+            ),
+            Rule("ingress", "tcp", NOMAD_RPC_PORT, NOMAD_RPC_PORT, remote_group=groups[worker].id),
         ]
     )
-    expanded[ingress].append(Rule("ingress", "tcp", 22, 22, remote_group=groups[admin].id))
-    expanded[worker].append(Rule("ingress", "tcp", 8080, 8080, remote_group=groups[ingress].id))
-    expanded[builder].append(Rule("ingress", "tcp", 22, 22, remote_group=groups[admin].id))
+    expanded[ingress].append(
+        Rule("ingress", "tcp", SSH_PORT, SSH_PORT, remote_group=groups[admin].id)
+    )
+    expanded[worker].append(
+        Rule("ingress", "tcp", APPLICATION_PORT, APPLICATION_PORT, remote_group=groups[ingress].id)
+    )
+    expanded[builder].append(
+        Rule("ingress", "tcp", SSH_PORT, SSH_PORT, remote_group=groups[admin].id)
+    )
     expanded[storage].extend(
         Rule("ingress", "tcp", port, port, remote_group=groups[worker].id)
-        for port in (5432, 27017, 5000, 9000)
+        for port in STORAGE_CLIENT_PORTS
     )
     expanded[storage].extend(
         Rule("ingress", "tcp", port, port, remote_group=groups[admin].id)
-        for port in (22, 3903, 5432, 27017, 5000, 9000)
+        for port in STORAGE_ADMIN_PORTS
     )
-    expanded[storage].append(Rule("ingress", "tcp", 5000, 5000, remote_group=groups[builder].id))
+    expanded[storage].append(
+        Rule("ingress", "tcp", REGISTRY_PORT, REGISTRY_PORT, remote_group=groups[builder].id)
+    )
 
     for name, rules in expanded.items():
         group = groups[name]
@@ -156,6 +189,7 @@ def ensure_security_groups(conn: Any, apply: bool) -> dict[str, Any]:
             comparable_rule(rule)
             for rule in conn.network.security_group_rules(security_group_id=group.id)
         }
+        wanted_rules = {desired_rule(rule) for rule in rules}
         for rule in rules:
             wanted = desired_rule(rule)
             if wanted in existing:
@@ -174,6 +208,27 @@ def ensure_security_groups(conn: Any, apply: bool) -> dict[str, Any]:
                 ether_type=rule.ethertype,
             )
             print(f"added security rule: {name} {wanted}")
+
+        # These ports are wholly platform-owned. Remove stale provider ranges
+        # and the legacy 0.0.0.0/0 rules only after replacement rules exist.
+        if name == ingress:
+            for rule in conn.network.security_group_rules(security_group_id=group.id):
+                observed = comparable_rule(rule)
+                managed_public_rule = (
+                    rule.direction == "ingress"
+                    and rule.protocol == "tcp"
+                    and rule.port_range_min in {HTTP_PORT, HTTPS_PORT}
+                    and rule.port_range_max == rule.port_range_min
+                    and rule.remote_group_id is None
+                    and rule.ether_type == "IPv4"
+                )
+                if not managed_public_rule or observed in wanted_rules:
+                    continue
+                if not apply:
+                    print(f"would remove stale security rule: {name} {observed}")
+                    continue
+                conn.network.delete_security_group_rule(rule, ignore_missing=False)
+                print(f"removed stale security rule: {name} {observed}")
     return groups
 
 
@@ -269,7 +324,7 @@ def run(apply: bool) -> None:
         configured_environment_id, field="environment UUID"
     ) != _canonical_provider_uuid(PROJECT_ID, field="UUID configuration"):
         raise RuntimeError("refusing to run outside the configured OpenStack project")
-    ipaddress.ip_network(MANAGEMENT_SOURCE)
+    ipaddress.ip_network(OPERATOR_SOURCE)
 
     conn = openstack.connect()  # type: ignore[attr-defined]
     conn.authorize()

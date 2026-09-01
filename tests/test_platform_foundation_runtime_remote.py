@@ -11,17 +11,18 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import remote as runtime_remote
-from platform_cli import runtime
-from platform_cli.helper.main import (
+from openstack_platform import remote as runtime_remote
+from openstack_platform import runtime
+from openstack_platform.helper.main import (
     HelperActionError,
     accept_staged_backup,
     serve_once,
 )
-from platform_cli.remote import (
+from openstack_platform.remote import (
     DependencyUnavailable,
     ProtocolError,
     call_helper,
+    call_local_helper,
     encode_failure,
     encode_request,
     encode_success,
@@ -29,7 +30,7 @@ from platform_cli.remote import (
     parse_response,
     pinned_admin_scp,
 )
-from platform_cli.runtime import (
+from openstack_platform.runtime import (
     CommandFailure,
     CommandTimedOut,
     LockBusy,
@@ -38,7 +39,7 @@ from platform_cli.runtime import (
     run,
     write_private_stack_diagnostic,
 )
-from platform_cli.validation import ValidationError
+from openstack_platform.validation import ValidationError
 
 
 class RuntimeTests(unittest.TestCase):
@@ -152,12 +153,16 @@ class RuntimeTests(unittest.TestCase):
     def test_child_environment_uses_an_explicit_allowlist(self) -> None:
         os.environ["FOUNDATION_ALLOWED"] = "yes"
         os.environ["FOUNDATION_SECRET"] = "no"
+        os.environ["CREDENTIALS_DIRECTORY"] = "/run/credentials/unrelated.service"
+        os.environ["POSTGRES_PASSWORD"] = "not-for-this-child"
         environment = child_environment(
             inherit=("FOUNDATION_ALLOWED",), overrides={"FIXED": "value"}
         )
         self.assertEqual(environment["FOUNDATION_ALLOWED"], "yes")
         self.assertEqual(environment["FIXED"], "value")
         self.assertNotIn("FOUNDATION_SECRET", environment)
+        self.assertNotIn("CREDENTIALS_DIRECTORY", environment)
+        self.assertNotIn("POSTGRES_PASSWORD", environment)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -269,6 +274,42 @@ class ProtocolTests(unittest.TestCase):
             ),
         )
 
+    def test_local_helper_uses_one_fixed_absolute_argv_and_stdin(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Completed:
+            stdout = encode_success(self.REQUEST_ID, {"state": "ready"})
+
+        def runner(argv: object, **kwargs: object) -> Completed:
+            captured["argv"] = argv
+            captured.update(kwargs)
+            return Completed()
+
+        result = call_local_helper(
+            "app.observe",
+            {"slug": "demo-app"},
+            timeout_seconds=5,
+            helper_command="/srv/openstack-platform/bin/openstack-platform-helper",
+            request_id=self.REQUEST_ID,
+            command_runner=runner,
+        )
+        self.assertEqual(
+            captured["argv"],
+            ("/srv/openstack-platform/bin/openstack-platform-helper",),
+        )
+        self.assertNotIn("demo-app", captured["argv"])
+        self.assertIn(b"demo-app", captured["stdin"])
+        self.assertEqual(result, {"state": "ready"})
+        for command in ("relative-helper", "/srv/../unsafe-helper"):
+            with self.subTest(command=command), self.assertRaises(ValidationError):
+                call_local_helper(
+                    "app.observe",
+                    {},
+                    timeout_seconds=5,
+                    helper_command=command,
+                    command_runner=runner,
+                )
+
     def test_call_helper_types_ssh_and_helper_dependency_outages(self) -> None:
         def unavailable_runner(_argv: object, **_kwargs: object) -> None:
             raise CommandFailure("private SSH diagnostic")
@@ -320,7 +361,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertTrue(diagnostic.is_file())
             self.assertEqual(diagnostic.stat().st_mode & 0o777, 0o600)
             private_payload = diagnostic.read_text()
-            self.assertIn("platform_cli/helper/main.py:", private_payload)
+            self.assertIn("openstack_platform/helper/main.py:", private_payload)
             self.assertNotIn("sentinel-secret", private_payload)
             self.assertNotIn("RuntimeError", private_payload)
         response = parse_response(output.getvalue(), expected_request_id=request_id)
@@ -507,7 +548,7 @@ class ProviderCommandTests(unittest.TestCase):
     def test_the_command_follows_the_configured_root_and_namespace(self) -> None:
         # These were fixed strings naming one deployment, so any deployment with
         # a different namespace or root could not build or touch a worker.
-        from platform_cli import app as application
+        from openstack_platform.controller import application_runtime as application
 
         self.assertEqual(
             application.provider_command(self._platform("/srv/61040", "61040"), "builder"),
@@ -519,7 +560,7 @@ class ProviderCommandTests(unittest.TestCase):
         )
 
     def test_a_relative_root_is_refused(self) -> None:
-        from platform_cli import app as application
+        from openstack_platform.controller import application_runtime as application
 
         with self.assertRaises(ValidationError):
             application.provider_command(self._platform("srv/61040", "61040"), "builder")

@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from platform_cli import host_keys, runtime
-from platform_cli.runtime import CommandResult
+from openstack_platform import host_keys, runtime
+from openstack_platform.runtime import CommandResult
 
 ADDRESS = "192.0.2.11"
 

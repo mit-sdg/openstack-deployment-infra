@@ -8,26 +8,22 @@
     let
       system = "x86_64-linux";
       lib = nixpkgs.lib;
+      constants = import ./nix/lib/constants.nix;
+      inventory = import ./nix/lib/inventory.nix { inherit lib constants; };
       platformConfigOverride = builtins.getEnv "PLATFORM_CONFIG";
       platformConfigPath =
         if platformConfigOverride == "" then
           ./config/platform.example.json
         else
           builtins.toPath platformConfigOverride;
-      platform = builtins.fromJSON (builtins.readFile platformConfigPath);
-      roles = [
-        "admin"
-        "ingress"
-        "storage"
-        "worker"
-        "builder"
-      ];
+      platform = inventory.load platformConfigPath;
+      roles = constants.roles;
 
       mkConfiguration =
         role:
         lib.nixosSystem {
           inherit system;
-          specialArgs = { inherit platform role; };
+          specialArgs = { inherit constants platform role; };
           modules = [
             "${nixpkgs}/nixos/maintainers/scripts/openstack/openstack-image.nix"
             {
@@ -69,9 +65,10 @@
           nomad
           traefik
           buildkit
-          platformCliPython
-          platformCliInstaller
-          platformCliHelperLauncher
+          platformPython
+          controllerPackage
+          releaseInstaller
+          helperLauncher
           imageSmoke
           ;
         default = configurations.admin.config.system.build.openstackImage;
@@ -89,8 +86,9 @@
             ${rolePackages.buildkit}/bin/buildkit-runc --version >/dev/null
             ${rolePackages.age}/bin/age --version >/dev/null
             ${rolePackages.python}/bin/openstack --version >/dev/null
-            ${rolePackages.platformCliPython}/bin/python -c 'import sys, yaml; assert sys.version_info[:2] == (3, 14)'
-            ${rolePackages.platformCliInstaller}/bin/openstack-platform-install-release --help >/dev/null
+            ${rolePackages.platformPython}/bin/python -c 'import sys; assert sys.version_info[:2] == (3, 14)'
+            ${rolePackages.controllerPackage}/bin/openstack-platform-controller --help >/dev/null
+            ${rolePackages.releaseInstaller}/bin/openstack-platform-install-release --help >/dev/null
             touch "$out"
           '';
         };

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from platform_cli.helper.nomad import (
+from openstack_platform.helper.nomad import (
     CasConflict,
     SecretItems,
     VariableSnapshot,
@@ -10,7 +10,7 @@ from platform_cli.helper.nomad import (
     update_owned_items,
     variable_path,
 )
-from platform_cli.validation import ValidationError
+from openstack_platform.validation import ValidationError
 
 SENTINEL = "sentinel-database-password"
 

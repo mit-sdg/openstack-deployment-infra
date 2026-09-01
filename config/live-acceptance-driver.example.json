@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "deploymentId": "12345678-1234-4234-9234-123456789abc",
+  "projectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "namespace": "acceptance-release-12345678",
+  "operator": {
+    "executable": "/srv/openstack-platform/bin/openstack-platform",
+    "platformConfig": "/srv/openstack-platform/setup/config/platform.json",
+    "policy": "/srv/openstack-platform/setup/config/platform-policy.json",
+    "stateDirectory": "/srv/openstack-platform/state",
+    "setupEnv": "/srv/openstack-platform-acceptance/private/setup.env",
+    "setupWorkspace": "/srv/openstack-platform/setup",
+    "openstackWrapper": "/srv/openstack-platform/bin/platform-openstack"
+  },
+  "remote": {
+    "ssh": "/usr/bin/ssh",
+    "scp": "/usr/bin/scp",
+    "sshConfig": "/srv/openstack-platform/.secrets/ssh/config",
+    "adminAlias": "platform-admin",
+    "recoveryAlias": "platform-admin-recovery",
+    "controllerProjectSocket": "/run/acceptance-release-12345678-controller/project.sock",
+    "controllerPrivilegedSocket": "/run/acceptance-release-12345678-controller/privileged.sock",
+    "curl": "/run/current-system/sw/bin/curl",
+    "backupRoot": "/srv/acceptance-release-12345678-backups",
+    "platformRoot": "/srv/acceptance-release-12345678",
+    "adminState": "/srv/acceptance-release-12345678-state"
+  },
+  "recovery": {
+    "age": "/srv/openstack-platform/bin/age",
+    "ageIdentity": "/srv/openstack-platform-acceptance/private/backup-age-identity.txt",
+    "offlineState": "/srv/openstack-platform-acceptance/private/offline-state",
+    "localStaging": "/srv/openstack-platform-acceptance/private/staging"
+  },
+  "application": {
+    "slug": "acceptance-12345678",
+    "repository": "https://github.com/example/live-acceptance-app",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "requestedRef": "main",
+    "verificationPath": "/acceptance/storage",
+    "resetPath": "/acceptance/storage/reset",
+    "contentProof": {
+      "postgres": {"key": "acceptance", "value": "12345678"},
+      "mongo": {"key": "acceptance", "value": "12345678"},
+      "s3": {"key": "acceptance", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    },
+    "emptyProof": {"postgres": null, "mongo": null, "s3": null},
+    "configuration": {
+      "schemaVersion": 1,
+      "build": {
+        "runtime": "node",
+        "packages": ["."],
+        "buildScript": null,
+        "startScript": "start"
+      },
+      "runtime": {
+        "port": 3000,
+        "healthPath": "/health"
+      },
+      "storageBindings": []
+    }
+  },
+  "replacementImages": {
+    "ingress": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "admin": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  },
+  "transcript": "/srv/openstack-platform-acceptance/private/plan-transcript.json",
+  "backupDisposition": "destroy-after-verified-restore"
+}

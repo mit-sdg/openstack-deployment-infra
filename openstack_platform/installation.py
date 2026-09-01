@@ -1,0 +1,33 @@
+"""Named filesystem locations used by installed platform entry points.
+
+Deployment-specific guest paths come from ``platform.json``. These constants
+cover only the stable bootstrap layout needed before that inventory is loaded.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from .contracts import (
+    INSTALLATION_OPERATOR_ROOT,
+    INSTALLATION_SYSTEM_CONFIG_ROOT,
+    INSTALLATION_SYSTEM_RUNTIME_ROOT,
+    INVENTORY_FILENAME,
+    POLICY_FILENAME,
+)
+
+OPERATOR_ROOT = Path(INSTALLATION_OPERATOR_ROOT)
+OPERATOR_BIN = OPERATOR_ROOT / "bin"
+OPERATOR_CONFIG = OPERATOR_ROOT / "config"
+OPERATOR_STATE = OPERATOR_ROOT / "state"
+OPERATOR_SSH = OPERATOR_ROOT / ".secrets" / "ssh"
+
+SYSTEM_CONFIG = Path(INSTALLATION_SYSTEM_CONFIG_ROOT)
+SYSTEM_RUNTIME = Path(INSTALLATION_SYSTEM_RUNTIME_ROOT)
+
+DEFAULT_OPERATOR_INVENTORY = OPERATOR_CONFIG / INVENTORY_FILENAME
+DEFAULT_OPERATOR_POLICY = OPERATOR_STATE / POLICY_FILENAME
+DEFAULT_OPERATOR_SSH_CONFIG = OPERATOR_SSH / "config"
+DEFAULT_CONTROLLER_INVENTORY = SYSTEM_CONFIG / INVENTORY_FILENAME
+DEFAULT_CONTROLLER_STATE = OPERATOR_STATE / "controller"
+DEFAULT_CONTROLLER_SOCKET = SYSTEM_RUNTIME / "controller.sock"

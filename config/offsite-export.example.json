@@ -1,0 +1,11 @@
+{
+  "format": "openstack-platform-offsite-export-config-v1",
+  "destination": "/mnt/institutional-recovery",
+  "mountSource": "institutional-recovery",
+  "filesystemType": "fuse.s3fs",
+  "limits": {
+    "maximumFileBytes": 1099511627776,
+    "maximumTotalBytes": 4398046511104
+  },
+  "maximumReceiptAgeHours": 36
+}

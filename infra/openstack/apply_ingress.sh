@@ -10,7 +10,7 @@ source "$SCRIPT_DIR/persistent-host.sh"
 
 OSC=${OSC:-openstack}
 TEMPLATE=${TEMPLATE:-$SCRIPT_DIR/../cloud-init-nixos/ingress.yaml}
-AGENTOPS_PUBLIC_KEY=${AGENTOPS_PUBLIC_KEY:?set AGENTOPS_PUBLIC_KEY to the agentops public-key path}
+OPERATOR_PUBLIC_KEY=${OPERATOR_PUBLIC_KEY:?set OPERATOR_PUBLIC_KEY to the operator public-key path}
 NOMAD_TOKENS_FILE=${NOMAD_TOKENS_FILE:?set NOMAD_TOKENS_FILE to the Nomad tokens file}
 CLOUDFLARE_TUNNEL_TOKEN_FILE=${CLOUDFLARE_TUNNEL_TOKEN_FILE:-}
 PKI_DIR=${PKI_DIR:?set PKI_DIR to the internal PKI directory}
@@ -30,7 +30,7 @@ if [[ $ENABLE_CLOUDFLARED != true && $ENABLE_CLOUDFLARED != false ]]; then
 fi
 verify_openstack_project "$OSC" || exit 2
 required_files=(
-  "$TEMPLATE" "$AGENTOPS_PUBLIC_KEY" "$NOMAD_TOKENS_FILE"
+  "$TEMPLATE" "$OPERATOR_PUBLIC_KEY" "$NOMAD_TOKENS_FILE"
   "$PKI_DIR/$PLATFORM_INTERNAL_CA_FILE"
   "$PKI_DIR/nomad-ingress.pem" "$PKI_DIR/nomad-ingress-key.pem"
 )
@@ -56,7 +56,7 @@ cloudflared_args=()
 )
 python3 "$SCRIPT_DIR/render_host_user_data.py" \
   --role ingress --template "$TEMPLATE" \
-  --agentops-public-key "$AGENTOPS_PUBLIC_KEY" \
+  --operator-public-key "$OPERATOR_PUBLIC_KEY" \
   --secret-file "$NOMAD_TOKENS_FILE" --pki-directory "$PKI_DIR" \
   "${cloudflared_args[@]}" --output "$tmp"
 

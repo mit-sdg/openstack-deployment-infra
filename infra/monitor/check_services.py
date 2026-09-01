@@ -14,12 +14,14 @@ from pymongo import MongoClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.http import bounded_json  # noqa: E402
 from lib.platform_config import load  # noqa: E402
+from lib.platform_contract import CONTRACT  # noqa: E402
 from lib.tls import internal_ca_context  # noqa: E402
 
 CONFIG = load()
 HOST = CONFIG["addresses"]["storage"]
 ROOT = Path(CONFIG["paths"]["root"])
 CA = str(ROOT / "secrets/nomad-cli/internal-ca.pem")
+PORTS = CONTRACT["ports"]
 
 
 def env(path: str) -> dict[str, str]:
@@ -35,7 +37,7 @@ def main() -> int:
     values = env(str(ROOT / "secrets/storage-bootstrap.env"))
     with psycopg.connect(
         host=HOST,
-        port=5432,
+        port=PORTS["postgres"],
         dbname="platform",
         user="platform_admin",
         password=values["POSTGRES_PASSWORD"],
@@ -47,7 +49,7 @@ def main() -> int:
             raise RuntimeError("PostgreSQL query failed")
     mongo: MongoClient[dict[str, Any]] = MongoClient(
         HOST,
-        27017,
+        PORTS["mongodb"],
         username="platform_admin",
         password=values["MONGO_PASSWORD"],
         authSource="admin",
@@ -62,7 +64,7 @@ def main() -> int:
         mongo.close()
     context = internal_ca_context(CA)
     garage = bounded_json(
-        f"https://{HOST}:3903/v2/GetClusterHealth",
+        f"https://{HOST}:{PORTS['garageRpc']}/v2/GetClusterHealth",
         headers={"Authorization": f"Bearer {values['GARAGE_ADMIN_TOKEN']}"},
         ssl_context=context,
         timeout_seconds=8,
@@ -72,7 +74,7 @@ def main() -> int:
         raise RuntimeError("Garage health failed")
     basic = base64.b64encode(f"builder:{values['REGISTRY_BUILDER_PASSWORD']}".encode()).decode()
     registry = bounded_json(
-        f"https://{HOST}:5000/v2/",
+        f"https://{HOST}:{PORTS['registry']}/v2/",
         headers={"Authorization": f"Basic {basic}"},
         ssl_context=context,
         timeout_seconds=8,

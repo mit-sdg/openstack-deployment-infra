@@ -13,10 +13,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from platform_cli import openstack
-from platform_cli.config import load_platform
-from platform_cli.runtime import CommandFailure, CommandResult, HttpResult
-from platform_cli.validation import ValidationError
+from openstack_platform import openstack, release_manifest
+from openstack_platform.config import load_platform
+from openstack_platform.runtime import CommandFailure, CommandResult, HttpResult
+from openstack_platform.validation import ValidationError
+from tests.repository_fixtures import clean_repository
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "00000000-0000-4000-8000-000000000000"
@@ -452,6 +453,54 @@ class OpenStackTests(unittest.TestCase):
             log = root / "create.json"
             image = root / "image.qcow2"
             image.write_bytes(b"qcow")
+            repository, commit = clean_repository(ROOT, root / "repository")
+            component_dir = root / "component"
+            component_manifest = release_manifest.generate(
+                repository, commit, component_dir, signing_key=None, unsigned=True
+            )
+            artifact_inputs: dict[str, object] = {}
+            worker_output = Path("/nix/store/00000000000000000000000000000000-worker-image")
+            worker_path_info = root / "worker.path-info.json"
+            for index, role in enumerate(release_manifest.ROLES):
+                output = (
+                    worker_output
+                    if role == "worker"
+                    else Path("/nix/store") / f"{index + 1:032x}-{role}-image"
+                )
+                path_info = (
+                    worker_path_info if role == "worker" else root / f"{role}.path-info.json"
+                )
+                path_info.write_text(
+                    json.dumps(
+                        {
+                            str(output): {
+                                "narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                                "narSize": 4,
+                                "references": [],
+                            }
+                        }
+                    )
+                )
+                artifact_inputs[role] = {
+                    "qcow2": str(image),
+                    "pathInfo": str(path_info),
+                    "outputStorePath": str(output),
+                    "publicationMetadata": dict(
+                        openstack.publisher_metadata(self.platform, role, commit)
+                    ),
+                }
+            inputs_path = root / "artifact-inputs.json"
+            inputs_path.write_text(json.dumps(artifact_inputs))
+            artifact_dir = root / "artifact-evidence"
+            artifact_manifest_path = release_manifest.generate_artifact_manifest(
+                component_manifest,
+                inputs_path,
+                artifact_dir,
+                signing_key=None,
+                unsigned=True,
+            )
+            artifact_manifest = json.loads(artifact_manifest_path.read_text())
+            worker_artifact = artifact_manifest["roleArtifacts"]["worker"]
             fake.write_text(
                 """#!/usr/bin/env python3
 import hashlib, json, os, pathlib, sys
@@ -478,6 +527,8 @@ elif args[:2] == ["image", "show"]:
         "status": "active",
         "owner": "00000000000040008000000000000000",
         "checksum": digest,
+        "os_hash_algo": "sha256",
+        "os_hash_value": hashlib.sha256(pathlib.Path(image_file).read_bytes()).hexdigest(),
         "properties": properties,
     }))
 elif args[:2] == ["image", "create"]:
@@ -493,12 +544,28 @@ else:
                 {
                     "OSC": str(fake),
                     "PLATFORM_CONFIG": str(ROOT / "config/platform.example.json"),
-                    "SOURCE_COMMIT": "a" * 40,
+                    "SOURCE_COMMIT": commit,
                     "FAKE_LOG": str(log),
+                    "PLATFORM_RELEASE_MANIFEST": str(component_manifest),
+                    "PLATFORM_ARTIFACT_MANIFEST": str(artifact_manifest_path),
+                    "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT": release_manifest.UNSIGNED_ACKNOWLEDGEMENT,
+                    "OS_PROJECT_NAME": "example-project",
+                    "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
+                        artifact_manifest_path.read_bytes()
+                    ).hexdigest(),
+                    "PLATFORM_ARTIFACT_QCOW2_SHA256": worker_artifact["qcow2Sha256"],
+                    "PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256": worker_artifact["nixClosureSha256"],
+                    "PLATFORM_ARTIFACT_NIX_OUTPUT": worker_artifact["nixOutput"],
                 }
             )
             completed = subprocess.run(
-                [str(ROOT / "infra/openstack/publish_nixos_image.sh"), "worker", str(image)],
+                [
+                    str(ROOT / "infra/openstack/publish_nixos_image.sh"),
+                    "worker",
+                    str(image),
+                    str(worker_output),
+                    str(worker_path_info),
+                ],
                 cwd=ROOT,
                 env=environment,
                 stdout=subprocess.PIPE,
@@ -512,7 +579,7 @@ else:
             properties = [
                 create[index + 1] for index, item in enumerate(create) if item == "--property"
             ]
-            expected = openstack.publisher_metadata(self.platform, "worker", "a" * 40)
+            expected = openstack.publisher_metadata(self.platform, "worker", commit)
             for key, value in expected.items():
                 self.assertIn(f"{key}={value}", properties)
             self.assertIn("hw_qemu_guest_agent=yes", properties)
@@ -1093,7 +1160,7 @@ else:
             )
             tokens.chmod(0o600)
             environment = {
-                "AGENTOPS_PUBLIC_KEY": str(public_key),
+                "OPERATOR_PUBLIC_KEY": str(public_key),
                 "NOMAD_TOKENS_FILE": str(tokens),
                 "PKI_DIR": str(pki),
                 "ENABLE_CLOUDFLARED": "false",

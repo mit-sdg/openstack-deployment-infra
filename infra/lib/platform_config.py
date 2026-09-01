@@ -4,13 +4,24 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import ipaddress
 import json
 import os
 import re
-import shlex
 import uuid as uuid_module
 from pathlib import Path
 from typing import Any, cast
+
+LIB_DIRECTORY = Path(__file__).resolve().parent
+_CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "platform_implementation_contract", LIB_DIRECTORY / "platform_contract.py"
+)
+if _CONTRACT_SPEC is None or _CONTRACT_SPEC.loader is None:
+    raise RuntimeError("platform contract loader is unavailable")
+_CONTRACT_MODULE = importlib.util.module_from_spec(_CONTRACT_SPEC)
+_CONTRACT_SPEC.loader.exec_module(_CONTRACT_MODULE)
+CONTRACT = cast(dict[str, Any], _CONTRACT_MODULE.CONTRACT)
 
 NAMESPACE_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
 FILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}")
@@ -19,65 +30,14 @@ PROJECT_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,126}[A-Za-z0-9._-])?")
 ORGANIZATION_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9._-])?")
 
 REPOSITORY_CONFIG = Path(__file__).resolve().parents[2] / "config" / "platform.json"
-DEFAULT_PATHS = (
-    Path("/etc/app-platform/platform.json"),
-    Path("/srv/app-platform/config/platform.json"),
-    REPOSITORY_CONFIG,
-)
+DEFAULT_PATHS = (REPOSITORY_CONFIG,)
+MAXIMUM_TRANSPORT_BYTES = 65_536
 
 
-REQUIRED_PATHS = (
-    "project",
-    "projectId",
-    "displayName",
-    "organization",
-    "prefix",
-    "namespace",
-    "pki.internalCaFile",
-    "domain",
-    "recoveryDomains.0",
-    "recoveryDomains.1",
-    "datacenter",
-    "region",
-    "network",
-    "internalNames.storage",
-    "internalNames.objectStorage",
-    "managementCidr",
-    "metadataAddress",
-    "addresses.admin",
-    "addresses.ingress",
-    "addresses.storage",
-    "hosts.admin",
-    "hosts.ingress",
-    "hosts.storage",
-    "ports.admin",
-    "ports.ingress",
-    "ports.storage",
-    "volumes.adminState.name",
-    "volumes.adminState.sizeGiB",
-    "volumes.backup.name",
-    "volumes.backup.sizeGiB",
-    "volumes.data.name",
-    "volumes.data.sizeGiB",
-    "volumes.data.type",
-    "images.admin",
-    "images.ingress",
-    "images.storage",
-    "images.worker",
-    "images.builder",
-    "flavors.admin",
-    "flavors.ingress",
-    "flavors.storage",
-    "flavors.worker",
-    "flavors.builder",
-    "containers.postgres",
-    "containers.mongodb",
-    "containers.registry",
-    "paths.root",
-    "paths.adminState",
-    "paths.backups",
-    "paths.data",
-)
+INVENTORY_CONTRACT = cast(dict[str, Any], CONTRACT["inventory"])
+ALLOWED_TOP_LEVEL = frozenset(cast(list[str], INVENTORY_CONTRACT["allowedTopLevel"]))
+REQUIRED_TOP_LEVEL = frozenset(cast(list[str], INVENTORY_CONTRACT["requiredTopLevel"]))
+REQUIRED_PATHS = tuple(cast(list[str], INVENTORY_CONTRACT["requiredPaths"]))
 
 
 def config_path() -> Path:
@@ -96,35 +56,40 @@ def load() -> dict[str, Any]:
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValueError("platform config must be a JSON object with string keys")
     document = cast(dict[str, Any], value)
-    required = {
-        "project",
-        "projectId",
-        "displayName",
-        "organization",
-        "prefix",
-        "namespace",
-        "domain",
-        "datacenter",
-        "region",
-        "network",
-        "internalNames",
-        "pki",
-        "managementCidr",
-        "metadataAddress",
-        "addresses",
-        "hosts",
-        "ports",
-        "volumes",
-        "images",
-        "flavors",
-        "versions",
-        "checksums",
-        "containers",
-        "paths",
-    }
-    missing = required - document.keys()
+    unknown = document.keys() - ALLOWED_TOP_LEVEL
+    missing = REQUIRED_TOP_LEVEL - document.keys()
+    if unknown:
+        raise ValueError(f"platform config has unknown keys: {', '.join(sorted(unknown))}")
     if missing:
         raise ValueError(f"platform config is missing keys: {', '.join(sorted(missing))}")
+
+    validate(document)
+    ingress = document.get("publicIngress")
+    if not isinstance(ingress, dict) or set(ingress) != {"mode", "providerCidrs"}:
+        raise ValueError("publicIngress must contain exactly mode and providerCidrs")
+    mode = ingress.get("mode")
+    cidrs = ingress.get("providerCidrs")
+    if mode not in {"tunnel", "direct"}:
+        raise ValueError("publicIngress.mode must be tunnel or direct")
+    if not isinstance(cidrs, list) or any(not isinstance(item, str) for item in cidrs):
+        raise ValueError("publicIngress.providerCidrs must be a string array")
+    canonical: list[str] = []
+    for item in cidrs:
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError as error:
+            raise ValueError("publicIngress.providerCidrs contains a malformed CIDR") from error
+        if network.version != 4 or network.prefixlen == 0:
+            raise ValueError(
+                "publicIngress.providerCidrs must contain exact non-default IPv4 CIDRs"
+            )
+        canonical.append(str(network))
+    if len(canonical) != len(set(canonical)):
+        raise ValueError("publicIngress.providerCidrs contains duplicate CIDRs")
+    if mode == "tunnel" and canonical:
+        raise ValueError("tunnel ingress must not configure provider CIDRs")
+    if mode == "direct" and not canonical:
+        raise ValueError("direct ingress requires at least one provider CIDR")
 
     project = document["project"]
     if (
@@ -190,6 +155,10 @@ def validate(document: dict[str, Any]) -> None:
 
 
 def shell_values(document: dict[str, Any]) -> dict[str, str | int]:
+    contract_ports = cast(dict[str, int], CONTRACT["ports"])
+    contract_accounts = cast(dict[str, dict[str, str | int]], CONTRACT["accounts"])
+    operator_account = contract_accounts["operator"]
+    controller_account = contract_accounts["controller"]
     return {
         "PLATFORM_PROJECT": document["project"],
         "PLATFORM_PROJECT_ID": document["projectId"],
@@ -207,7 +176,9 @@ def shell_values(document: dict[str, Any]) -> dict[str, str | int]:
         "PLATFORM_NETWORK": document["network"],
         "PLATFORM_STORAGE_INTERNAL_NAME": document["internalNames"]["storage"],
         "PLATFORM_OBJECT_STORAGE_INTERNAL_NAME": document["internalNames"]["objectStorage"],
-        "PLATFORM_MANAGEMENT_CIDR": document["managementCidr"],
+        "PLATFORM_OPERATOR_CIDR": document["operatorCidr"],
+        "PLATFORM_INGRESS_MODE": document["publicIngress"]["mode"],
+        "PLATFORM_PROVIDER_CIDRS": ",".join(document["publicIngress"]["providerCidrs"]),
         "PLATFORM_METADATA_ADDRESS": document["metadataAddress"],
         "PLATFORM_ADMIN_IP": document["addresses"]["admin"],
         "PLATFORM_INGRESS_IP": document["addresses"]["ingress"],
@@ -242,7 +213,34 @@ def shell_values(document: dict[str, Any]) -> dict[str, str | int]:
         "PLATFORM_ADMIN_STATE": document["paths"]["adminState"],
         "PLATFORM_BACKUPS": document["paths"]["backups"],
         "PLATFORM_DATA": document["paths"]["data"],
+        "PLATFORM_APPLICATION_PORT": contract_ports["application"],
+        "PLATFORM_NOMAD_HTTP_PORT": contract_ports["nomadHttp"],
+        "PLATFORM_NOMAD_RPC_PORT": contract_ports["nomadRpc"],
+        "PLATFORM_NOMAD_SERF_PORT": contract_ports["nomadSerf"],
+        "PLATFORM_REGISTRY_PORT": contract_ports["registry"],
+        "PLATFORM_POSTGRES_PORT": contract_ports["postgres"],
+        "PLATFORM_MONGODB_PORT": contract_ports["mongodb"],
+        "PLATFORM_GARAGE_RPC_PORT": contract_ports["garageRpc"],
+        "PLATFORM_GARAGE_S3_PORT": contract_ports["garageS3"],
+        "PLATFORM_OPERATOR_USER": operator_account["name"],
+        "PLATFORM_OPERATOR_UID": operator_account["uid"],
+        "PLATFORM_CONTROLLER_USER": controller_account["name"],
     }
+
+
+def nul_transport(document: dict[str, Any]) -> bytes:
+    """Return a bounded, non-executable NAME/NUL/VALUE/NUL stream."""
+    parts: list[bytes] = []
+    for name, value in shell_values(document).items():
+        encoded_name = name.encode("ascii")
+        encoded_value = str(value).encode("utf-8")
+        if b"\x00" in encoded_value:
+            raise ValueError(f"platform config value for {name} contains NUL")
+        parts.extend((encoded_name, b"\x00", encoded_value, b"\x00"))
+    payload = b"".join(parts)
+    if len(payload) > MAXIMUM_TRANSPORT_BYTES:
+        raise ValueError("platform config transport exceeds the size limit")
+    return payload
 
 
 def main() -> int:
@@ -250,7 +248,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     get_parser = subparsers.add_parser("get")
     get_parser.add_argument("key")
-    subparsers.add_parser("shell")
+    subparsers.add_parser("shell0")
     subparsers.add_parser("validate")
     args = parser.parse_args()
     document = load()
@@ -261,8 +259,8 @@ def main() -> int:
         value = get(document, args.key)
         print(json.dumps(value) if isinstance(value, (dict, list)) else value)
     else:
-        for name, value in shell_values(document).items():
-            print(f"{name}={shlex.quote(str(value))}")
+        validate(document)
+        os.write(1, nul_transport(document))
     return 0
 
 

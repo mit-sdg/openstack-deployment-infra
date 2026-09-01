@@ -8,9 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from platform_cli import host_user_data
-from platform_cli.config import load_platform
-from platform_cli.validation import ValidationError
+from openstack_platform import host_user_data
+from openstack_platform.config import load_platform
+from openstack_platform.validation import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN_VOLUME = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -74,7 +74,7 @@ class HostUserDataTests(unittest.TestCase):
             tunnel.chmod(0o600)
         return host_user_data.HostUserDataInputs(
             template=ROOT / "infra" / "cloud-init-nixos" / f"{role}.yaml",
-            agentops_public_key=self.public_key,
+            operator_public_key=self.public_key,
             secret_file=self.secret_file(f"{role}.env", secrets),
             pki_directory=self.pki,
             cloudflare_tunnel_token_file=tunnel,
@@ -104,7 +104,9 @@ class HostUserDataTests(unittest.TestCase):
                 self.platform.get("volumes.backup.name"): BACKUP_VOLUME,
             },
         )
-        self.assertIn("NOMAD_GOSSIP_KEY=sentinel-admin-gossip", admin)
+        self.assertIn("path: /etc/app-platform/secrets/nomad-gossip-key", admin)
+        self.assertIn("content: sentinel-admin-gossip", admin)
+        self.assertNotIn("NOMAD_GOSSIP_KEY=", admin)
         self.assertIn(f"ADMIN_VOLUME_ID={ADMIN_VOLUME}", admin)
         self.assertIn(f"BACKUP_VOLUME_ID={BACKUP_VOLUME}", admin)
         self.assertIn(f"/dev/vdb:{self.platform.get('volumes.adminState.label')}", admin)
@@ -150,8 +152,12 @@ class HostUserDataTests(unittest.TestCase):
             self.inputs("storage", storage_secrets),
             {self.platform.get("volumes.data.name"): DATA_VOLUME},
         )
-        self.assertIn("POSTGRES_PASSWORD=sentinel-postgres", storage)
-        self.assertIn("MONGO_INITDB_ROOT_PASSWORD=sentinel-mongo", storage)
+        self.assertIn("path: /etc/app-platform/secrets/postgres-password", storage)
+        self.assertIn("content: sentinel-postgres", storage)
+        self.assertIn("path: /etc/app-platform/secrets/mongodb-password", storage)
+        self.assertIn("content: sentinel-mongo", storage)
+        self.assertNotIn("POSTGRES_PASSWORD=", storage)
+        self.assertNotIn("MONGO_INITDB_ROOT_PASSWORD=", storage)
         self.assertIn(f"DATA_VOLUME_ID={DATA_VOLUME}", storage)
         self.assertIn(f"label={self.platform.get('volumes.data.label')}", storage)
         self.assertIn('mkfs.xfs -f -L "$label" "$device"', storage)
@@ -181,8 +187,8 @@ class HostUserDataTests(unittest.TestCase):
                 str(ROOT / "config" / "platform.example.json"),
                 "--template",
                 str(inputs.template),
-                "--agentops-public-key",
-                str(inputs.agentops_public_key),
+                "--operator-public-key",
+                str(inputs.operator_public_key),
                 "--secret-file",
                 str(inputs.secret_file),
                 "--pki-directory",
@@ -212,7 +218,7 @@ class HostUserDataTests(unittest.TestCase):
         changed.write_text(inputs.template.read_text() + "\n# __ADMIN_HOST__\n")
         changed_inputs = host_user_data.HostUserDataInputs(
             template=changed,
-            agentops_public_key=inputs.agentops_public_key,
+            operator_public_key=inputs.operator_public_key,
             secret_file=inputs.secret_file,
             pki_directory=inputs.pki_directory,
         )
@@ -275,7 +281,7 @@ class HostUserDataTests(unittest.TestCase):
             },
         )
         environment = {
-            "AGENTOPS_PUBLIC_KEY": str(self.public_key),
+            "OPERATOR_PUBLIC_KEY": str(self.public_key),
             "NOMAD_TOKENS_FILE": str(secret),
             "PKI_DIR": str(self.pki),
             "ENABLE_CLOUDFLARED": "false",
