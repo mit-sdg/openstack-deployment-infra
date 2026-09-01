@@ -15,6 +15,10 @@ on:
         description: Run the protected disposable live acceptance gate
         type: boolean
         default: false
+      development_publish:
+        description: Build, smoke-test, and publish all roles with unsigned development evidence
+        type: boolean
+        default: false
   schedule:
     - cron: "17 4 * * 6"
 
@@ -245,6 +249,7 @@ jobs:
     needs: publication-context
     if: >-
       always() &&
+      inputs.development_publish != true &&
       (needs.publication-context.outputs.publish != 'true' ||
        vars.OPENSTACK_PUBLISH_ENABLED != 'true')
     runs-on: ubuntu-latest
@@ -513,6 +518,215 @@ jobs:
             "${{ steps.artifact.outputs.qcow }}" \
             "${{ steps.artifact.outputs.nix_output }}" \
             "${{ steps.artifact.outputs.path_info }}"
+
+      - name: Remove private deployment configuration
+        if: always()
+        run: rm -f config/platform.json
+
+  development-publish:
+    name: Publish development role images
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.development_publish == true &&
+      vars.OPENSTACK_PUBLISH_ENABLED == 'true'
+    environment: openstack-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install publication and smoke-test tools
+        run: |
+          tests/install_ci_apt_packages.sh \
+            genisoimage \
+            python3-openstackclient \
+            qemu-system-x86 \
+            qemu-utils
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+
+      - name: Install isolated development inventory
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
+          PLATFORM_CONFIG_JSON: ${{ secrets.DEVELOPMENT_PLATFORM_CONFIG_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$OS_PROJECT_ID"
+          test -n "$PLATFORM_CONFIG_JSON"
+          umask 077
+          printf '%s\n' "$PLATFORM_CONFIG_JSON" > config/platform.json
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+          from uuid import UUID
+
+          path = Path("config/platform.json")
+          document = json.loads(path.read_text())
+          commit = os.environ["COMMIT_SHA"]
+          if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+              raise SystemExit("invalid development publication commit")
+          document["projectId"] = str(UUID(os.environ["OS_PROJECT_ID"]))
+          document["images"] = {
+              role: f"{re.sub(r'-[0-9a-f]{8}$', '', name)}-{commit[:8]}"
+              for role, name in document["images"].items()
+          }
+          path.write_text(json.dumps(document, indent=2) + "\n")
+          PY
+          python3 infra/lib/platform_config.py validate
+          project=$(python3 infra/lib/platform_config.py get project)
+          printf 'OS_PROJECT_NAME=%s\n' "$project" >> "$GITHUB_ENV"
+
+      - name: Generate unsigned component evidence
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 -m openstack_platform.release_manifest generate \
+            --repository "$PWD" --commit "$COMMIT_SHA" \
+            --output development-release-evidence \
+            --unsigned-development
+          python3 -m openstack_platform.release_manifest verify \
+            --repository "$PWD" --commit "$COMMIT_SHA" \
+            --manifest development-release-evidence/release-manifest.json \
+            --allow-unsigned-development
+
+      - name: Build all five role images
+        env:
+          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
+        run: |
+          set -euo pipefail
+          roles=(admin ingress storage worker builder)
+          declare -A pids=()
+          for role in "${roles[@]}"; do
+            nix build --impure --print-build-logs \
+              --out-link "result-$role" ".#${role}-image" \
+              >"$RUNNER_TEMP/build-$role.log" 2>&1 &
+            pids[$role]=$!
+          done
+          failed=0
+          for role in "${roles[@]}"; do
+            if ! wait "${pids[$role]}"; then
+              echo "role image build failed: $role" >&2
+              tail -n 200 "$RUNNER_TEMP/build-$role.log" >&2
+              failed=1
+            else
+              echo "role image build passed: $role"
+            fi
+          done
+          test "$failed" = 0
+
+      - name: Generate shared development artifact evidence
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
+        run: |
+          set -euo pipefail
+          install -d -m 0700 development-build-evidence
+          for role in admin ingress storage worker builder; do
+            output=$(readlink -f "result-$role")
+            nix path-info --json --recursive "$output" \
+              >"development-build-evidence/$role.path-info.json"
+          done
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from openstack_platform.config import load_platform
+          from openstack_platform.openstack import publisher_metadata
+
+          root = Path.cwd()
+          platform = load_platform(Path(os.environ["PLATFORM_CONFIG"]))
+          commit = os.environ["COMMIT_SHA"]
+          inputs = {}
+          for role in ("admin", "ingress", "storage", "worker", "builder"):
+              output = (root / f"result-{role}").resolve(strict=True)
+              qcows = list(output.rglob("*.qcow2"))
+              if len(qcows) != 1:
+                  raise SystemExit(f"{role} QCOW2 count differs: {len(qcows)}")
+              inputs[role] = {
+                  "qcow2": str(qcows[0]),
+                  "pathInfo": str(root / "development-build-evidence" / f"{role}.path-info.json"),
+                  "outputStorePath": str(output),
+                  "publicationMetadata": dict(publisher_metadata(platform, role, commit)),
+              }
+          path = root / "development-build-evidence" / "artifact-inputs.json"
+          path.write_text(json.dumps(inputs, indent=2, sort_keys=True) + "\n")
+          PY
+          python3 -m openstack_platform.release_manifest artifact-generate \
+            --component-manifest development-release-evidence/release-manifest.json \
+            --inputs development-build-evidence/artifact-inputs.json \
+            --output development-release-evidence/artifacts \
+            --unsigned-development
+          python3 -m openstack_platform.release_manifest artifact-verify \
+            --component-manifest development-release-evidence/release-manifest.json \
+            --manifest development-release-evidence/artifacts/role-artifacts.json \
+            --allow-unsigned-development
+
+      - name: Boot, verify, and publish all roles
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          OS_AUTH_TYPE: password
+          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+          OS_IDENTITY_API_VERSION: "3"
+          OS_INTERFACE: public
+          OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
+          OS_PROJECT_DOMAIN_NAME: Default
+          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
+          OS_USER_DOMAIN_NAME: Default
+          OS_USERNAME: ${{ secrets.OS_USERNAME }}
+          PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT: I_UNDERSTAND_THIS_IS_NOT_PRODUCTION
+          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
+          PLATFORM_RELEASE_MANIFEST: ${{ github.workspace }}/development-release-evidence/release-manifest.json
+          PLATFORM_ARTIFACT_MANIFEST: ${{ github.workspace }}/development-release-evidence/artifacts/role-artifacts.json
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for name in OS_AUTH_URL OS_PASSWORD OS_PROJECT_ID OS_USERNAME; do
+            test -n "${!name}"
+          done
+          for role in admin ingress storage worker builder; do
+            output=$(readlink -f "result-$role")
+            qcow=$(find -L "result-$role" -type f -name '*.qcow2' -print -quit)
+            path_info="$PWD/development-build-evidence/$role.path-info.json"
+            test -n "$qcow"
+            verification=$(python3 -m openstack_platform.release_manifest verify-role \
+              --component-manifest "$PLATFORM_RELEASE_MANIFEST" \
+              --manifest "$PLATFORM_ARTIFACT_MANIFEST" \
+              --allow-unsigned-development \
+              --role "$role" --qcow2 "$qcow" --path-info "$path_info" \
+              --output-store-path "$output" --platform "$PLATFORM_CONFIG" \
+              --commit "$COMMIT_SHA")
+            while IFS='=' read -r key value; do
+              case "$key" in
+                artifact_manifest_sha256) export PLATFORM_ARTIFACT_MANIFEST_SHA256=$value ;;
+                qcow2_sha256) export PLATFORM_ARTIFACT_QCOW2_SHA256=$value ;;
+                nix_closure_sha256) export PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256=$value ;;
+                nix_output) export PLATFORM_ARTIFACT_NIX_OUTPUT=$value ;;
+                *) echo "unexpected artifact verification field" >&2; exit 1 ;;
+              esac
+            done <<< "$verification"
+            tests/smoke_openstack_image.sh "$role" "$qcow"
+            infra/openstack/publish_nixos_image.sh "$role" "$qcow" "$output" "$path_info"
+          done
+
+      - name: Upload development publication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: development-published-evidence-${{ github.sha }}
+          path: development-release-evidence
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Remove private deployment configuration
         if: always()
