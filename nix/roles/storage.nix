@@ -13,6 +13,7 @@ let
   systemdEscapePath =
     path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   mountUnit = "${systemdEscapePath data}.mount";
+  dataLayoutUnit = "${namespace}-storage-data-layout.service";
   credentialGuard = pkgs.writeShellScript "${namespace}-storage-credential-guard" ''
     set -euo pipefail
     path=$1
@@ -34,10 +35,12 @@ let
       after = [
         "cloud-final.service"
         mountUnit
+        dataLayoutUnit
       ];
       requires = [
         "cloud-final.service"
         mountUnit
+        dataLayoutUnit
       ];
       serviceConfig = {
         StandardOutput = "journal+console";
@@ -182,6 +185,31 @@ in
     (mkContainerDependencies "${namespace}-garage")
     (mkContainerDependencies "${namespace}-registry")
     {
+      "${namespace}-storage-data-layout" = {
+        description = "Prepare ${platform.displayName} mounted storage layout";
+        after = [ mountUnit ];
+        requires = [ mountUnit ];
+        before = [
+          "podman-${namespace}-postgres.service"
+          "podman-${namespace}-mongodb.service"
+          "podman-${namespace}-garage.service"
+          "podman-${namespace}-registry.service"
+        ];
+        path = [
+          pkgs.coreutils
+          pkgs.util-linux
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          set -euo pipefail
+          mountpoint -q ${data}
+          install -d -m 0700 -o 999 -g 999 ${data}/postgres ${data}/mongodb
+          install -d -m 0750 -o root -g root ${data}/object-storage ${data}/registry
+        '';
+      };
       nginx = {
         after = [ "cloud-final.service" ];
         requires = [ "cloud-final.service" ];
@@ -395,9 +423,5 @@ in
   systemd.tmpfiles.rules = [
     "z /etc/${namespace} 0750 root storage-service -"
     "z /etc/${namespace}/pki 0750 root storage-service -"
-    "d ${data}/postgres 0700 999 999 -"
-    "d ${data}/mongodb 0700 999 999 -"
-    "d ${data}/object-storage 0750 root root -"
-    "d ${data}/registry 0750 root root -"
   ];
 }

@@ -285,6 +285,10 @@ class ImageFirstBootProperties(unittest.TestCase):
         self.assertNotIn(
             '"/run/credentials/podman-${namespace}-mongodb.service/mongodb-password:', storage
         )
+        self.assertIn('dataLayoutUnit = "${namespace}-storage-data-layout.service"', storage)
+        self.assertIn("mountpoint -q ${data}", storage)
+        self.assertIn("install -d -m 0700 -o 999 -g 999", storage)
+        self.assertIn("dataLayoutUnit\n      ];", storage)
 
 
 if __name__ == "__main__":
