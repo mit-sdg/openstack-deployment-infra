@@ -114,26 +114,16 @@ in
 
   # make-disk-image boots the target once without platform provisioning data,
   # leaving a complete cached no-datasource cloud-init instance in the QCOW2.
-  # Before every cloud-init stage, remove that cache only while the real
-  # ConfigDrive sentinel is absent. Successful provisioning writes the
-  # sentinel, so later reboots retain state and never replay bootstrap secrets.
-  systemd.services."${namespace}-cloud-init-image-state-reset" = {
-    description = "Reset image-build cloud-init state before first provisioning";
-    requiredBy = [ "cloud-init-local.service" ];
-    before = [
-      "cloud-init-local.service"
-      "cloud-init.service"
-      "cloud-config.service"
-      "cloud-final.service"
-    ];
-    after = [ "local-fs.target" ];
-    serviceConfig.Type = "oneshot";
-    script = ''
+  # Clean it in cloud-init-local's own pre-start while the real ConfigDrive
+  # sentinel is absent. Successful provisioning writes the sentinel, so later
+  # reboots retain state and never replay bootstrap secrets.
+  systemd.services.cloud-init-local.serviceConfig.ExecStartPre = [
+    (pkgs.writeShellScript "${namespace}-cloud-init-image-state-reset" ''
       if [[ ! -e ${configRoot}/.provisioned ]]; then
         ${pkgs.findutils}/bin/find /var/lib/cloud -mindepth 1 -delete
       fi
-    '';
-  };
+    '')
+  ];
 
   services.qemuGuest.enable = true;
   security.auditd.enable = true;

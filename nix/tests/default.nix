@@ -121,8 +121,7 @@ let
             {
               # This harness keeps its synthetic None-datasource fixture under
               # /var/lib/cloud. Production images retain the pre-provisioning reset.
-              "${platform.namespace}-cloud-init-image-state-reset".enable =
-                lib.mkForce false;
+              cloud-init-local.serviceConfig.ExecStartPre = lib.mkForce [ ];
             }
             (lib.mkIf (role == "admin") {
               nomad.preStart = lib.mkForce ''

@@ -262,14 +262,7 @@ class ImageFirstBootProperties(unittest.TestCase):
         self.assertNotIn('"None"', datasource_block)
         self.assertIn("preserve_hostname = true;", common)
         self.assertIn("cloud-init-image-state-reset", common)
-        self.assertIn('requiredBy = [ "cloud-init-local.service" ];', common)
-        for unit in (
-            "cloud-init-local.service",
-            "cloud-init.service",
-            "cloud-config.service",
-            "cloud-final.service",
-        ):
-            self.assertIn(unit, common)
+        self.assertIn("systemd.services.cloud-init-local.serviceConfig.ExecStartPre", common)
         self.assertIn("! -e ${configRoot}/.provisioned", common)
         self.assertIn("/var/lib/cloud -mindepth 1 -delete", common)
         for role in ("admin", "ingress", "storage", "worker", "builder"):
