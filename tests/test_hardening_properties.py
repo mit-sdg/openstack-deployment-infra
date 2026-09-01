@@ -265,7 +265,9 @@ class ImageFirstBootProperties(unittest.TestCase):
         self.assertIn("systemd.services.cloud-init-local.serviceConfig.ExecStartPre", common)
         self.assertIn("! -e ${configRoot}/.provisioned", common)
         self.assertIn("rm -rf /var/lib/cloud", common)
-        self.assertIn('systemd.services.cloud-init.requires = [ "cloud-init-local.service" ];', common)
+        self.assertIn(
+            'systemd.services.cloud-init.requires = [ "cloud-init-local.service" ];', common
+        )
         for role in ("admin", "ingress", "storage", "worker", "builder"):
             template = Path(f"infra/cloud-init-nixos/{role}.yaml").read_text()
             self.assertIn("/etc/__PLATFORM_NAMESPACE__/.provisioned", template)
