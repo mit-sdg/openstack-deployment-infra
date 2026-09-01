@@ -135,7 +135,7 @@ in
       };
       volumes = [
         "${data}/mongodb:/data/db"
-        "${mongodbRuntimeSecret}:/run/secrets/mongodb-password:ro"
+        "${mongodbRuntimeSecret}:/run/secrets/mongodb-password:ro,U"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
       ];
       ports = [ "${toString ports.mongodb}:${toString ports.mongodb}" ];
