@@ -277,7 +277,8 @@ class ImageFirstBootProperties(unittest.TestCase):
         storage = Path("nix/roles/storage.nix").read_text()
 
         self.assertIn(
-            'mongodbRuntimeSecret = "/run/${namespace}-mongodb/mongodb-password"', storage
+            'mongodbRuntimeSecret = "/run/${namespace}-mongodb-credential/mongodb-password"',
+            storage,
         )
         self.assertIn("''${CREDENTIALS_DIRECTORY:?}/mongodb-password", storage)
         self.assertIn("-m 0400 -o storage-service -g storage-service", storage)

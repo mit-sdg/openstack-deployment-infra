@@ -21,7 +21,7 @@ let
     test "$(stat -c %U:%a "$path")" = root:600
     test "$(stat -c %s "$path")" -le 65536
   '';
-  mongodbRuntimeSecret = "/run/${namespace}-mongodb/mongodb-password";
+  mongodbRuntimeSecret = "/run/${namespace}-mongodb-credential/mongodb-password";
   stageMongoCredential = pkgs.writeShellScript "${namespace}-mongodb-credential-stage" ''
     set -euo pipefail
     source="''${CREDENTIALS_DIRECTORY:?}/mongodb-password"
