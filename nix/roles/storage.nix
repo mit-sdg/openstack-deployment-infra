@@ -20,6 +20,15 @@ let
     test "$(stat -c %U:%a "$path")" = root:600
     test "$(stat -c %s "$path")" -le 65536
   '';
+  mongodbRuntimeSecret = "/run/${namespace}-mongodb/mongodb-password";
+  stageMongoCredential = pkgs.writeShellScript "${namespace}-mongodb-credential-stage" ''
+    set -euo pipefail
+    source="''${CREDENTIALS_DIRECTORY:?}/mongodb-password"
+    ${pkgs.coreutils}/bin/install -d -m 0710 -o root -g storage-service \
+      ${lib.escapeShellArg (builtins.dirOf mongodbRuntimeSecret)}
+    ${pkgs.coreutils}/bin/install -m 0400 -o storage-service -g storage-service \
+      "$source" ${lib.escapeShellArg mongodbRuntimeSecret}
+  '';
   mkContainerDependencies = name: {
     "podman-${name}" = {
       after = [
@@ -123,7 +132,7 @@ in
       };
       volumes = [
         "${data}/mongodb:/data/db"
-        "/run/credentials/podman-${namespace}-mongodb.service/mongodb-password:/run/secrets/mongodb-password:ro"
+        "${mongodbRuntimeSecret}:/run/secrets/mongodb-password:ro"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
       ];
       ports = [ "${toString ports.mongodb}:${toString ports.mongodb}" ];
@@ -187,7 +196,10 @@ in
         LoadCredential = "postgres-password:/etc/${namespace}/secrets/postgres-password";
       };
       "podman-${namespace}-mongodb".serviceConfig = {
-        ExecStartPre = [ "${credentialGuard} /etc/${namespace}/secrets/mongodb-password" ];
+        ExecStartPre = [
+          "${credentialGuard} /etc/${namespace}/secrets/mongodb-password"
+          stageMongoCredential
+        ];
         LoadCredential = "mongodb-password:/etc/${namespace}/secrets/mongodb-password";
       };
       "podman-${namespace}-garage".serviceConfig = {
