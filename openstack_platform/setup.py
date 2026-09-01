@@ -342,13 +342,21 @@ def _project_identity(openstack: Path, environment: Mapping[str, str]) -> Projec
             raise SetupError("configured OpenStack project UUID is malformed") from error
         if canonical_configured != project_id:
             _fail("authenticated OpenStack project does not match the configured project UUID")
+    configured_name = environment.get("OS_PROJECT_NAME")
+    if not configured_name:
+        _fail("configured OpenStack project name is unavailable")
+    if configured_id:
+        # Authentication was scoped with OS_PROJECT_NAME, and the resulting token
+        # UUID was checked against OS_PROJECT_ID above. Avoid a redundant project
+        # lookup: restricted project credentials commonly cannot list projects,
+        # and openstackclient implements `project show <uuid>` through that API.
+        return ProjectIdentity(project_id, configured_name)
     project_name = _command(
         (openstack, "project", "show", project_id, "-f", "value", "-c", "name"),
         environment=environment,
         capture=True,
     ).strip()
-    configured_name = environment.get("OS_PROJECT_NAME")
-    if not project_name or not configured_name or project_name != configured_name:
+    if not project_name or project_name != configured_name:
         _fail("authenticated OpenStack project name does not match the configured project")
     return ProjectIdentity(project_id, project_name)
 

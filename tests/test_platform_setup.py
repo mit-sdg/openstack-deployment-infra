@@ -68,11 +68,20 @@ PLATFORM_DOMAIN='apps.example.test'
     def test_project_identity_uses_scoped_token_without_project_list_permission(self) -> None:
         project_id = "00000000-0000-4000-8000-000000000001"
         environment = {"OS_PROJECT_NAME": "demo", "OS_PROJECT_ID": project_id}
+        with mock.patch.object(setup, "_command", return_value=project_id) as command:
+            identity = setup._project_identity(Path("/nix/store/openstack"), environment)
+
+        self.assertEqual(identity, setup.ProjectIdentity(project_id, "demo"))
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[0][1:3], ("token", "issue"))
+
+    def test_project_identity_resolves_name_when_project_id_is_omitted(self) -> None:
+        project_id = "00000000-0000-4000-8000-000000000001"
+        environment = {"OS_PROJECT_NAME": "demo"}
         with mock.patch.object(setup, "_command", side_effect=(project_id, "demo")) as command:
             identity = setup._project_identity(Path("/nix/store/openstack"), environment)
 
         self.assertEqual(identity, setup.ProjectIdentity(project_id, "demo"))
-        self.assertEqual(command.call_args_list[0].args[0][1:3], ("token", "issue"))
         self.assertEqual(command.call_args_list[1].args[0][1:3], ("project", "show"))
 
     def test_project_identity_rejects_a_conflicting_configured_uuid(self) -> None:
