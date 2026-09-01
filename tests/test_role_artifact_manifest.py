@@ -152,6 +152,44 @@ class RoleArtifactManifestTests(unittest.TestCase):
             publication_metadata=self.inputs["worker"]["publicationMetadata"],
         )
 
+    def test_unsigned_manifest_accepts_recorded_matrix_artifact_identities(self) -> None:
+        for role, (qcow, _path_info, _output) in self.files.items():
+            self.inputs[role].pop("qcow2")
+            self.inputs[role]["qcow2Sha256"] = hashlib.sha256(qcow.read_bytes()).hexdigest()
+            self.inputs[role]["qcow2SizeBytes"] = qcow.stat().st_size
+        self.inputs_path.write_text(json.dumps(self.inputs))
+
+        output = self.root / "recorded-artifacts"
+        manifest_path = release_manifest.generate_artifact_manifest(
+            self.component_manifest,
+            self.inputs_path,
+            output,
+            signing_key=None,
+            unsigned=True,
+        )
+        manifest = release_manifest.verify_artifact_manifest(
+            self.component_manifest,
+            manifest_path,
+            signature=None,
+            trust_root=None,
+            allow_unsigned_development=True,
+        )
+        self.assertEqual(
+            manifest["roleArtifacts"]["admin"]["qcow2Sha256"],
+            self.inputs["admin"]["qcow2Sha256"],
+        )
+
+        key = self.root / "recorded-key.pem"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", key], check=True)
+        with self.assertRaisesRegex(release_manifest.ReleaseVerificationError, "direct QCOW2"):
+            release_manifest.generate_artifact_manifest(
+                self.component_manifest,
+                self.inputs_path,
+                self.root / "signed-recorded-artifacts",
+                signing_key=key,
+                unsigned=False,
+            )
+
     def test_qcow_closure_metadata_source_and_evidence_tampering_are_rejected(self) -> None:
         manifest_path, signature, public = self._signed()
         manifest = release_manifest.verify_artifact_manifest(

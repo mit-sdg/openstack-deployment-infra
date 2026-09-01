@@ -142,25 +142,54 @@ config drive. Lifecycle calls must enable config-drive use.
 
 ## Publish image candidates
 
-The `CI` workflow publishes only when a protected `main` push changes an image
-input and `OPENSTACK_PUBLISH_ENABLED=true`, or when an authorized manual
-dispatch requests publication. Image inputs are `flake.nix`, `flake.lock`,
-`nix/`, `infra/`, `openstack_platform/`, `deploy/`, `pyproject.toml`, `uv.lock`,
-and `LICENSE`; Markdown-only changes are excluded.
+The `CI` workflow publishes production candidates only when a protected `main`
+push changes an image input and `OPENSTACK_PUBLISH_ENABLED=true`, or when an
+authorized manual dispatch requests signed publication from `main`. Image
+inputs are `flake.nix`, `flake.lock`, `nix/`, `infra/`, `openstack_platform/`,
+`deploy/`, `pyproject.toml`, `uv.lock`, and `LICENSE`; Markdown-only changes are
+excluded.
 
 The protected matrix checks out one exact commit, installs private inventory,
 derives a commit-suffixed name for all roles, builds each role once, verifies
 signed artifact evidence, QEMU-boots that QCOW2, authenticates to the exact
 project, and publishes the same file. The publisher verifies content,
 closure/output identity, commit, metadata, owner/status, and provider checksum.
-It never overwrites an existing image name.
+It waits for asynchronous uploads to become active. When Glance does not expose
+a provider SHA-256, it downloads the accepted image and verifies SHA-256 before
+reporting publication success. It never overwrites an existing image name.
 
-Configure an `openstack-images` GitHub environment restricted to protected
-branches. Store `PLATFORM_CONFIG_JSON`, `OS_AUTH_URL`, `OS_USERNAME`,
-`OS_PASSWORD`, and `OS_PROJECT_ID` as environment secrets. Prefer a restricted
-Keystone application credential when the cloud supports one. Require human
-review if publication must not be unattended, protect `main` from direct/force
-push, and keep `.github/CODEOWNERS` on the workflow/Nix/infrastructure boundary.
+For real-cloud testing before merge, manually dispatch the workflow against the
+exact same-repository PR branch:
+
+```sh
+gh workflow run CI --ref '<open-pr-branch>' \
+  -f publish=false \
+  -f live_acceptance=false \
+  -f development_publish=true
+```
+
+Development publication is refused on `main`, on a fork, when the branch is not
+the exact head of one open PR targeting `main`, or without the protected
+environment. Five preparation jobs build the roles in parallel and upload
+compact hashes, sizes, and closure projections plus one exact QCOW2 artifact per
+role. The QCOW2 artifacts use no additional compression and expire after one
+day. An aggregation job downloads only compact evidence and emits the shared
+unsigned manifest. Five dependent jobs each download one exact QCOW2, QEMU-boot,
+verify, and publish it in parallel; they do not rebuild an independently varying
+QCOW2. Success requires all five publish jobs and the
+`development-role-evidence-<commit>` artifact. Never expose these
+secrets through `pull_request_target` or trigger development publication
+automatically.
+
+Configure an `openstack-images` GitHub environment whose deployment policies
+allow `main` and only the selected same-repository PR branch patterns. Store
+`PLATFORM_CONFIG_JSON`, `DEVELOPMENT_PLATFORM_CONFIG_JSON`, `OS_AUTH_URL`,
+`OS_USERNAME`, `OS_PASSWORD`, and `OS_PROJECT_ID` as environment secrets. The
+development inventory must use an isolated namespace, prefix, addresses, and
+volumes. Prefer a restricted Keystone application credential when the cloud
+supports one. Require human review if publication must not be unattended,
+protect `main` from direct/force push, and keep `.github/CODEOWNERS` on the
+workflow/Nix/infrastructure boundary.
 
 A reviewed manual publication uses the same four-argument contract:
 
