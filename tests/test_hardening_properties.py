@@ -276,14 +276,14 @@ class ImageFirstBootProperties(unittest.TestCase):
     def test_mongodb_receives_a_uid_scoped_runtime_credential(self) -> None:
         storage = Path("nix/roles/storage.nix").read_text()
 
+        self.assertIn('mongodbRuntimeDirectory = "/run/${namespace}-mongodb-credential"', storage)
         self.assertIn(
-            'mongodbRuntimeSecret = "/run/${namespace}-mongodb-credential/mongodb-password"',
-            storage,
+            'mongodbRuntimeSecret = "${mongodbRuntimeDirectory}/mongodb-password"', storage
         )
         self.assertIn("''${CREDENTIALS_DIRECTORY:?}/mongodb-password", storage)
         self.assertIn("-m 0400 -o storage-service -g storage-service", storage)
         self.assertIn("stageMongoCredential\n        ];", storage)
-        self.assertIn("mongodbRuntimeSecret}:/run/secrets/mongodb-password:ro,U", storage)
+        self.assertIn("mongodbRuntimeDirectory}:/run/secrets:ro,U", storage)
         self.assertNotIn(
             '"/run/credentials/podman-${namespace}-mongodb.service/mongodb-password:', storage
         )

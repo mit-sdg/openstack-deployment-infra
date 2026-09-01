@@ -21,12 +21,13 @@ let
     test "$(stat -c %U:%a "$path")" = root:600
     test "$(stat -c %s "$path")" -le 65536
   '';
-  mongodbRuntimeSecret = "/run/${namespace}-mongodb-credential/mongodb-password";
+  mongodbRuntimeDirectory = "/run/${namespace}-mongodb-credential";
+  mongodbRuntimeSecret = "${mongodbRuntimeDirectory}/mongodb-password";
   stageMongoCredential = pkgs.writeShellScript "${namespace}-mongodb-credential-stage" ''
     set -euo pipefail
     source="''${CREDENTIALS_DIRECTORY:?}/mongodb-password"
     ${pkgs.coreutils}/bin/install -d -m 0710 -o root -g storage-service \
-      ${lib.escapeShellArg (builtins.dirOf mongodbRuntimeSecret)}
+      ${lib.escapeShellArg mongodbRuntimeDirectory}
     ${pkgs.coreutils}/bin/install -m 0400 -o storage-service -g storage-service \
       "$source" ${lib.escapeShellArg mongodbRuntimeSecret}
   '';
@@ -135,7 +136,7 @@ in
       };
       volumes = [
         "${data}/mongodb:/data/db"
-        "${mongodbRuntimeSecret}:/run/secrets/mongodb-password:ro,U"
+        "${mongodbRuntimeDirectory}:/run/secrets:ro,U"
         "/etc/${namespace}/pki:/run/${namespace}-pki:ro"
       ];
       ports = [ "${toString ports.mongodb}:${toString ports.mongodb}" ];
