@@ -87,13 +87,17 @@ class PublicationTriggerTests(unittest.TestCase):
     def test_development_publication_is_manual_protected_and_explicitly_unsigned(self) -> None:
         workflow = WORKFLOW.read_text()
 
+        self.assertIn("development-role-evidence:", workflow)
         self.assertIn("development-evidence:", workflow)
         self.assertIn("development-publish:", workflow)
         self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
         self.assertIn("inputs.development_publish == true", workflow)
         self.assertIn("github.ref_name != 'main'", workflow)
         self.assertIn("Require an exact open same-repository PR head", workflow)
+        self.assertIn("needs: development-role-evidence", workflow)
         self.assertIn("needs: development-evidence", workflow)
+        self.assertIn("Upload compact role evidence", workflow)
+        self.assertIn("merge-multiple: true", workflow)
         self.assertIn("role:\n          - admin", workflow)
         self.assertIn("environment: openstack-images", workflow)
         self.assertIn("DEVELOPMENT_PLATFORM_CONFIG_JSON", workflow)

@@ -534,15 +534,25 @@ def _artifact_input(path: Path) -> dict[str, dict[str, Any]]:
     if set(document) != set(ROLES):
         _fail("artifact input must contain exactly all role images")
     result: dict[str, dict[str, Any]] = {}
+    direct_fields = {"qcow2", "pathInfo", "outputStorePath", "publicationMetadata"}
+    recorded_fields = {
+        "qcow2Sha256",
+        "qcow2SizeBytes",
+        "pathInfo",
+        "outputStorePath",
+        "publicationMetadata",
+    }
     for role in ROLES:
         value = document[role]
-        if not isinstance(value, dict) or set(value) != {
-            "qcow2",
-            "pathInfo",
-            "outputStorePath",
-            "publicationMetadata",
-        }:
+        if not isinstance(value, dict) or set(value) not in (direct_fields, recorded_fields):
             _fail(f"artifact input for {role} is malformed")
+        if set(value) == recorded_fields and (
+            not _SHA256.fullmatch(str(value["qcow2Sha256"]))
+            or isinstance(value["qcow2SizeBytes"], bool)
+            or not isinstance(value["qcow2SizeBytes"], int)
+            or value["qcow2SizeBytes"] <= 0
+        ):
+            _fail(f"recorded QCOW2 identity for {role} is malformed")
         metadata = value["publicationMetadata"]
         if (
             not isinstance(metadata, dict)
@@ -570,7 +580,12 @@ def generate_artifact_manifest(
     signing_key: Path | None,
     unsigned: bool,
 ) -> Path:
-    """Generate signed post-build identities for all five concrete role artifacts."""
+    """Generate identities for all five concrete role artifacts.
+
+    Unsigned development evidence may aggregate QCOW2 hashes and sizes recorded
+    by isolated role-build jobs. Signed production evidence must hash every
+    direct QCOW2 itself.
+    """
     if unsigned == (signing_key is not None):
         _fail("choose exactly one of a production signing key or unsigned development mode")
     component = _load(component_manifest)
@@ -592,11 +607,19 @@ def generate_artifact_manifest(
         if output_identity not in {item["storePath"] for item in projection}:
             _fail(f"Nix output identity for {role} is absent from its closure")
         closures[role] = projection
-        qcow2 = Path(value["qcow2"])
+        if "qcow2" in value:
+            qcow2 = Path(value["qcow2"])
+            qcow2_sha256 = _artifact_sha256(qcow2)
+            qcow2_size = qcow2.stat().st_size
+        else:
+            if not unsigned:
+                _fail("signed artifact evidence requires direct QCOW2 inputs")
+            qcow2_sha256 = str(value["qcow2Sha256"])
+            qcow2_size = int(value["qcow2SizeBytes"])
         records[role] = {
-            "qcow2Sha256": _artifact_sha256(qcow2),
-            # Signed size evidence lets setup establish Glance capacity before upload.
-            "qcow2SizeBytes": qcow2.stat().st_size,
+            "qcow2Sha256": qcow2_sha256,
+            # Size evidence lets setup establish Glance capacity before upload.
+            "qcow2SizeBytes": qcow2_size,
             "nixOutput": output_identity,
             "nixClosureSha256": closure_sha256,
             "publicationMetadata": dict(sorted(value["publicationMetadata"].items())),

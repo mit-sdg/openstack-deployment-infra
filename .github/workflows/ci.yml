@@ -524,8 +524,8 @@ jobs:
         if: always()
         run: rm -f config/platform.json
 
-  development-evidence:
-    name: Prepare development role evidence
+  development-role-evidence:
+    name: Build development ${{ matrix.role }} evidence
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.development_publish == true &&
@@ -533,7 +533,16 @@ jobs:
       vars.OPENSTACK_PUBLISH_ENABLED == 'true'
     environment: openstack-images
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - admin
+          - ingress
+          - storage
+          - worker
+          - builder
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -601,7 +610,93 @@ jobs:
           project=$(python3 infra/lib/platform_config.py get project)
           printf 'OS_PROJECT_NAME=%s\n' "$project" >> "$GITHUB_ENV"
 
-      - name: Generate unsigned component evidence
+      - name: Build role image
+        env:
+          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
+        run: |
+          nix build --impure --print-build-logs \
+            --out-link "result-${{ matrix.role }}" \
+            ".#${{ matrix.role }}-image"
+
+      - name: Record compact role evidence
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
+          ROLE: ${{ matrix.role }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 development-role-input
+          output=$(readlink -f "result-$ROLE")
+          qcow=$(find -L "result-$ROLE" -type f -name '*.qcow2' -print -quit)
+          test -n "$qcow"
+          nix path-info --json --recursive "$output" \
+            >"development-role-input/$ROLE.path-info.json"
+          QCOW2="$qcow" NIX_OUTPUT="$output" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          from openstack_platform.config import load_platform
+          from openstack_platform.openstack import publisher_metadata
+
+          role = os.environ["ROLE"]
+          qcow = Path(os.environ["QCOW2"])
+          digest = hashlib.sha256()
+          with qcow.open("rb") as stream:
+              for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                  digest.update(chunk)
+          record = {
+              "role": role,
+              "qcow2Sha256": digest.hexdigest(),
+              "qcow2SizeBytes": qcow.stat().st_size,
+              "pathInfo": f"{role}.path-info.json",
+              "outputStorePath": os.environ["NIX_OUTPUT"],
+              "publicationMetadata": dict(
+                  publisher_metadata(
+                      load_platform(Path(os.environ["PLATFORM_CONFIG"])),
+                      role,
+                      os.environ["COMMIT_SHA"],
+                  )
+              ),
+          }
+          Path(f"development-role-input/{role}.json").write_text(
+              json.dumps(record, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+
+      - name: Upload compact role evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: development-role-input-${{ github.sha }}-${{ matrix.role }}
+          path: development-role-input
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Remove private deployment configuration
+        if: always()
+        run: rm -f config/platform.json
+
+  development-evidence:
+    name: Aggregate development role evidence
+    needs: development-role-evidence
+    if: needs.development-role-evidence.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
+      - name: Download compact role evidence
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: development-role-input-${{ github.sha }}-*
+          path: development-recorded-inputs
+          merge-multiple: true
+
+      - name: Generate shared unsigned development evidence
         env:
           COMMIT_SHA: ${{ github.sha }}
         run: |
@@ -614,72 +709,43 @@ jobs:
             --repository "$PWD" --commit "$COMMIT_SHA" \
             --manifest development-release-evidence/release-manifest.json \
             --allow-unsigned-development
-
-      - name: Build all five role images
-        env:
-          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
-        run: |
-          set -euo pipefail
-          roles=(admin ingress storage worker builder)
-          declare -A pids=()
-          for role in "${roles[@]}"; do
-            nix build --impure --print-build-logs \
-              --out-link "result-$role" ".#${role}-image" \
-              >"$RUNNER_TEMP/build-$role.log" 2>&1 &
-            pids[$role]=$!
-          done
-          failed=0
-          for role in "${roles[@]}"; do
-            if ! wait "${pids[$role]}"; then
-              echo "role image build failed: $role" >&2
-              tail -n 200 "$RUNNER_TEMP/build-$role.log" >&2
-              failed=1
-            else
-              echo "role image build passed: $role"
-            fi
-          done
-          test "$failed" = 0
-
-      - name: Generate shared development artifact evidence
-        env:
-          COMMIT_SHA: ${{ github.sha }}
-          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
-        run: |
-          set -euo pipefail
-          install -d -m 0700 development-build-evidence
-          for role in admin ingress storage worker builder; do
-            output=$(readlink -f "result-$role")
-            nix path-info --json --recursive "$output" \
-              >"development-build-evidence/$role.path-info.json"
-          done
           python3 - <<'PY'
           import json
-          import os
           from pathlib import Path
-          from openstack_platform.config import load_platform
-          from openstack_platform.openstack import publisher_metadata
 
-          root = Path.cwd()
-          platform = load_platform(Path(os.environ["PLATFORM_CONFIG"]))
-          commit = os.environ["COMMIT_SHA"]
+          roles = ("admin", "ingress", "storage", "worker", "builder")
+          root = Path("development-recorded-inputs")
+          expected = {
+              *(f"{role}.json" for role in roles),
+              *(f"{role}.path-info.json" for role in roles),
+          }
+          observed = {path.name for path in root.iterdir() if path.is_file()}
+          if observed != expected:
+              raise SystemExit("recorded role evidence set is incomplete or ambiguous")
           inputs = {}
-          for role in ("admin", "ingress", "storage", "worker", "builder"):
-              output = (root / f"result-{role}").resolve(strict=True)
-              qcows = list(output.rglob("*.qcow2"))
-              if len(qcows) != 1:
-                  raise SystemExit(f"{role} QCOW2 count differs: {len(qcows)}")
-              inputs[role] = {
-                  "qcow2": str(qcows[0]),
-                  "pathInfo": str(root / "development-build-evidence" / f"{role}.path-info.json"),
-                  "outputStorePath": str(output),
-                  "publicationMetadata": dict(publisher_metadata(platform, role, commit)),
-              }
-          path = root / "development-build-evidence" / "artifact-inputs.json"
+          required = {
+              "role",
+              "qcow2Sha256",
+              "qcow2SizeBytes",
+              "pathInfo",
+              "outputStorePath",
+              "publicationMetadata",
+          }
+          for role in roles:
+              record = json.loads((root / f"{role}.json").read_text())
+              if set(record) != required or record["role"] != role:
+                  raise SystemExit(f"recorded role evidence is malformed: {role}")
+              if record.pop("pathInfo") != f"{role}.path-info.json":
+                  raise SystemExit(f"recorded path-info identity differs: {role}")
+              record.pop("role")
+              record["pathInfo"] = str((root / f"{role}.path-info.json").resolve())
+              inputs[role] = record
+          path = Path("development-recorded-inputs/artifact-inputs.json")
           path.write_text(json.dumps(inputs, indent=2, sort_keys=True) + "\n")
           PY
           python3 -m openstack_platform.release_manifest artifact-generate \
             --component-manifest development-release-evidence/release-manifest.json \
-            --inputs development-build-evidence/artifact-inputs.json \
+            --inputs development-recorded-inputs/artifact-inputs.json \
             --output development-release-evidence/artifacts \
             --unsigned-development
           python3 -m openstack_platform.release_manifest artifact-verify \
@@ -688,17 +754,12 @@ jobs:
             --allow-unsigned-development
 
       - name: Upload shared development evidence
-        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: development-role-evidence-${{ github.sha }}
           path: development-release-evidence
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
-
-      - name: Remove private deployment configuration
-        if: always()
-        run: rm -f config/platform.json
 
   development-publish:
     name: Publish development ${{ matrix.role }} image
