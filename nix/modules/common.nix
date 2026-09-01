@@ -112,26 +112,6 @@ in
     };
   };
 
-  # make-disk-image boots the target once without platform provisioning data,
-  # leaving a complete cached no-datasource cloud-init instance in the QCOW2.
-  # Clean it in cloud-init-local's own pre-start when the cached cloud-init
-  # instance differs from the VM's DMI product UUID. ConfigDrive records that
-  # UUID, so later reboots match and never replay bootstrap secrets.
-  systemd.services.cloud-init-local.serviceConfig.ExecStartPre = [
-    (pkgs.writeShellScript "${namespace}-cloud-init-image-state-reset" ''
-      current=$(${pkgs.coreutils}/bin/tr -d '-' < /sys/class/dmi/id/product_uuid | \
-        ${pkgs.coreutils}/bin/tr '[:upper:]' '[:lower:]')
-      cached=$(${pkgs.coreutils}/bin/cat /var/lib/cloud/data/instance-id 2>/dev/null || true)
-      cached=$(printf '%s' "$cached" | ${pkgs.coreutils}/bin/tr -d '-' | \
-        ${pkgs.coreutils}/bin/tr '[:upper:]' '[:lower:]')
-      if [[ ! $current =~ ^[0-9a-f]{32}$ || $cached != "$current" ]]; then
-        ${pkgs.coreutils}/bin/rm -rf /var/lib/cloud
-        ${pkgs.coreutils}/bin/install -d -m 0755 /var/lib/cloud
-      fi
-    '')
-  ];
-  systemd.services.cloud-init.requires = [ "cloud-init-local.service" ];
-
   services.qemuGuest.enable = true;
   security.auditd.enable = true;
   # Secret-bearing units also set LimitCORE=0 explicitly. Disable the host

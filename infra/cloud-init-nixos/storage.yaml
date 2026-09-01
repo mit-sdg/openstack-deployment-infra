@@ -12,6 +12,13 @@ users:
 bootcmd:
   - |
     set -eu
+    marker=/var/lib/__PLATFORM_NAMESPACE__-config-drive-v1
+    if [ ! -e "$marker" ]; then
+      find /var/lib/cloud -type f -path '*/sem/config_write_files' -delete
+      : > "$marker"
+    fi
+  - |
+    set -eu
     initialized=0
     device=/dev/vdb
     label=__DATA_VOLUME_LABEL__

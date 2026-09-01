@@ -9,6 +9,14 @@ users:
     shell: /run/current-system/sw/bin/bash
     ssh_authorized_keys:
       - __OPERATOR_PUBLIC_KEY__
+bootcmd:
+  - |
+    set -eu
+    marker=/var/lib/__PLATFORM_NAMESPACE__-config-drive-v1
+    if [ ! -e "$marker" ]; then
+      find /var/lib/cloud -type f -path '*/sem/config_write_files' -delete
+      : > "$marker"
+    fi
 write_files:
   - path: /etc/__PLATFORM_NAMESPACE__/.provisioned
     permissions: "0600"

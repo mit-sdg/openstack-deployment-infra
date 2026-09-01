@@ -118,11 +118,6 @@ let
             ];
 
           systemd.services = lib.mkMerge [
-            {
-              # This harness keeps its synthetic None-datasource fixture under
-              # /var/lib/cloud. Production images retain the pre-provisioning reset.
-              cloud-init-local.serviceConfig.ExecStartPre = lib.mkForce [ ];
-            }
             (lib.mkIf (role == "admin") {
               nomad.preStart = lib.mkForce ''
                 install -d -m 0750 -o nomad -g nomad ${platform.paths.adminState}/nomad

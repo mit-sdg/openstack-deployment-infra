@@ -261,19 +261,13 @@ class ImageFirstBootProperties(unittest.TestCase):
         self.assertNotIn('"OpenStack"', datasource_block)
         self.assertNotIn('"None"', datasource_block)
         self.assertIn("preserve_hostname = true;", common)
-        self.assertIn("cloud-init-image-state-reset", common)
-        self.assertIn("systemd.services.cloud-init-local.serviceConfig.ExecStartPre", common)
-        self.assertIn("/sys/class/dmi/id/product_uuid", common)
-        self.assertIn("/var/lib/cloud/data/instance-id", common)
-        self.assertIn('cached != "$current"', common)
-        self.assertIn("rm -rf /var/lib/cloud", common)
-        self.assertIn(
-            'systemd.services.cloud-init.requires = [ "cloud-init-local.service" ];', common
-        )
+        self.assertNotIn("cloud-init-local.serviceConfig.ExecStartPre", common)
         for role in ("admin", "ingress", "storage", "worker", "builder"):
             template = Path(f"infra/cloud-init-nixos/{role}.yaml").read_text()
             self.assertIn("/etc/__PLATFORM_NAMESPACE__/.provisioned", template)
             self.assertIn("config-drive-v1", template)
+            self.assertIn("*/sem/config_write_files", template)
+            self.assertIn("-config-drive-v1", template)
         smoke = Path("tests/smoke_openstack_image.sh").read_text()
         self.assertIn('-uuid "$instance_uuid"', smoke)
         self.assertIn('{"uuid":"$instance_uuid"', smoke)
