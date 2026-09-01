@@ -32,9 +32,10 @@ cleanup() {
 trap cleanup EXIT
 
 marker="platform-${role}-qcow-smoke-passed"
+instance_uuid=00000000-0000-4000-8000-000000000001
 mkdir -p "$work/config/openstack/latest"
 cat > "$work/config/openstack/latest/meta_data.json" <<EOF
-{"uuid":"00000000-0000-4000-8000-000000000001","hostname":"${role}-qcow-smoke","name":"${role}-qcow-smoke"}
+{"uuid":"$instance_uuid","hostname":"${role}-qcow-smoke","name":"${role}-qcow-smoke"}
 EOF
 cat > "$work/config/openstack/latest/user_data" <<EOF
 #cloud-config
@@ -58,6 +59,7 @@ qemu-system-x86_64 \
   -cpu "$cpu" \
   -smp 2 \
   -m 3072 \
+  -uuid "$instance_uuid" \
   -drive "file=$work/root.qcow2,if=virtio,format=qcow2" \
   -drive "file=$work/config.iso,media=cdrom,readonly=on" \
   -nic user,model=virtio-net-pci \

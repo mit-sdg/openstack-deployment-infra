@@ -114,12 +114,17 @@ in
 
   # make-disk-image boots the target once without platform provisioning data,
   # leaving a complete cached no-datasource cloud-init instance in the QCOW2.
-  # Clean it in cloud-init-local's own pre-start while the real ConfigDrive
-  # sentinel is absent. Successful provisioning writes the sentinel, so later
-  # reboots retain state and never replay bootstrap secrets.
+  # Clean it in cloud-init-local's own pre-start when the cached cloud-init
+  # instance differs from the VM's DMI product UUID. ConfigDrive records that
+  # UUID, so later reboots match and never replay bootstrap secrets.
   systemd.services.cloud-init-local.serviceConfig.ExecStartPre = [
     (pkgs.writeShellScript "${namespace}-cloud-init-image-state-reset" ''
-      if [[ ! -e ${configRoot}/.provisioned ]]; then
+      current=$(${pkgs.coreutils}/bin/tr -d '-' < /sys/class/dmi/id/product_uuid | \
+        ${pkgs.coreutils}/bin/tr '[:upper:]' '[:lower:]')
+      cached=$(${pkgs.coreutils}/bin/cat /var/lib/cloud/data/instance-id 2>/dev/null || true)
+      cached=$(printf '%s' "$cached" | ${pkgs.coreutils}/bin/tr -d '-' | \
+        ${pkgs.coreutils}/bin/tr '[:upper:]' '[:lower:]')
+      if [[ ! $current =~ ^[0-9a-f]{32}$ || $cached != "$current" ]]; then
         ${pkgs.coreutils}/bin/rm -rf /var/lib/cloud
         ${pkgs.coreutils}/bin/install -d -m 0755 /var/lib/cloud
       fi
