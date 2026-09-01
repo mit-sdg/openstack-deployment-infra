@@ -191,8 +191,35 @@ except (ValueError, AttributeError):
 if value != sys.argv[1]:
     raise SystemExit("OpenStack image create returned a non-canonical UUID")
 PY
-observed=$("$OSC" image show "$image_id" -f json -c id -c name -c status -c owner -c checksum -c os_hash_algo -c os_hash_value -c properties)
-OBSERVED_IMAGE="$observed" EXPECTED_METADATA="$metadata_output" EXPECTED_CHECKSUM="$local_checksum" python3 - "$image_id" "$image_name" "$project_id" <<'PY'
+deadline=$((SECONDS + 900))
+while :; do
+  observed=$("$OSC" image show "$image_id" -f json -c id -c name -c status -c owner -c checksum -c os_hash_algo -c os_hash_value -c properties)
+  observed_status=$(OBSERVED_IMAGE="$observed" python3 - <<'PY'
+import json
+import os
+
+try:
+    print(json.loads(os.environ["OBSERVED_IMAGE"])["status"])
+except (KeyError, TypeError, json.JSONDecodeError) as error:
+    raise SystemExit("published image status is malformed") from error
+PY
+  )
+  case "$observed_status" in
+    active) break ;;
+    queued|saving|uploading|importing|pending_import)
+      (( SECONDS < deadline )) || {
+        echo "published image did not become active before the deadline" >&2
+        exit 1
+      }
+      sleep 5
+      ;;
+    *)
+      echo "published image entered unexpected status: $observed_status" >&2
+      exit 1
+      ;;
+  esac
+done
+hash_verification=$(OBSERVED_IMAGE="$observed" EXPECTED_METADATA="$metadata_output" EXPECTED_CHECKSUM="$local_checksum" python3 - "$image_id" "$image_name" "$project_id" <<'PY'
 import json
 import os
 import re
@@ -212,8 +239,8 @@ try:
     observed_name = image["name"]
     observed_status = image["status"]
     observed_checksum = image["checksum"]
-    observed_hash_algorithm = image["os_hash_algo"]
-    observed_hash_value = image["os_hash_value"]
+    observed_hash_algorithm = image.get("os_hash_algo")
+    observed_hash_value = image.get("os_hash_value")
     properties = image["properties"]
     if not isinstance(properties, dict) or not isinstance(observed_checksum, str):
         raise ValueError("properties or checksum is malformed")
@@ -226,8 +253,6 @@ if (
     or observed_owner != project_id
     or not re.fullmatch(r"[0-9a-f]{32}", observed_checksum)
     or observed_checksum != os.environ["EXPECTED_CHECKSUM"]
-    or observed_hash_algorithm != "sha256"
-    or observed_hash_value != os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
     or any(properties.get(key) != value for key, value in expected.items())
     or properties.get(next(key for key in properties if key.endswith("_artifact_manifest_sha256")), "") != os.environ["PLATFORM_ARTIFACT_MANIFEST_SHA256"]
     or properties.get(next(key for key in properties if key.endswith("_qcow2_sha256")), "") != os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
@@ -235,5 +260,27 @@ if (
     or properties.get(next(key for key in properties if key.endswith("_nix_output")), "") != os.environ["PLATFORM_ARTIFACT_NIX_OUTPUT"]
 ):
     raise SystemExit("published image identity, owner, active status, checksum, or metadata could not be verified")
+if observed_hash_algorithm is None and observed_hash_value is None:
+    print("download")
+elif (
+    observed_hash_algorithm == "sha256"
+    and observed_hash_value == os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
+):
+    print("provider")
+else:
+    raise SystemExit("published image provider hash is incomplete or differs")
 PY
-echo "published role=$role image=$image_id status=active checksum=$local_checksum source_commit=$SOURCE_COMMIT"
+)
+if [[ $hash_verification == download ]]; then
+  downloaded=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/published-image.XXXXXX.qcow2")
+  trap 'rm -f "$downloaded"' EXIT
+  "$OSC" image save --file "$downloaded" "$image_id"
+  downloaded_sha256=$(sha256sum "$downloaded" | cut -d' ' -f1)
+  [[ $downloaded_sha256 == "$PLATFORM_ARTIFACT_QCOW2_SHA256" ]] || {
+    echo "downloaded published image SHA-256 differs" >&2
+    exit 1
+  }
+  rm -f "$downloaded"
+  trap - EXIT
+fi
+echo "published role=$role image=$image_id status=active checksum=$local_checksum sha256=$hash_verification source_commit=$SOURCE_COMMIT"

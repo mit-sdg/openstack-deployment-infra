@@ -503,7 +503,7 @@ class OpenStackTests(unittest.TestCase):
             worker_artifact = artifact_manifest["roleArtifacts"]["worker"]
             fake.write_text(
                 """#!/usr/bin/env python3
-import hashlib, json, os, pathlib, sys
+import hashlib, json, os, pathlib, shutil, sys
 args = sys.argv[1:]
 if args[:2] == ["token", "issue"]:
     print("00000000000040008000000000000000")
@@ -527,10 +527,13 @@ elif args[:2] == ["image", "show"]:
         "status": "active",
         "owner": "00000000000040008000000000000000",
         "checksum": digest,
-        "os_hash_algo": "sha256",
-        "os_hash_value": hashlib.sha256(pathlib.Path(image_file).read_bytes()).hexdigest(),
         "properties": properties,
     }))
+elif args[:2] == ["image", "save"]:
+    created = json.loads(pathlib.Path(os.environ["FAKE_LOG"]).read_text())
+    source = created[created.index("--file") + 1]
+    destination = args[args.index("--file") + 1]
+    shutil.copyfile(source, destination)
 elif args[:2] == ["image", "create"]:
     pathlib.Path(os.environ["FAKE_LOG"]).write_text(json.dumps(args))
     print("11111111-1111-4111-8111-111111111111")
@@ -575,6 +578,7 @@ else:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             expected_checksum = hashlib.md5(image.read_bytes(), usedforsecurity=False).hexdigest()
             self.assertIn(f"checksum={expected_checksum}", completed.stdout.decode())
+            self.assertIn("sha256=download", completed.stdout.decode())
             create = json.loads(log.read_text())
             properties = [
                 create[index + 1] for index, item in enumerate(create) if item == "--property"

@@ -154,7 +154,9 @@ derives a commit-suffixed name for all roles, builds each role once, verifies
 signed artifact evidence, QEMU-boots that QCOW2, authenticates to the exact
 project, and publishes the same file. The publisher verifies content,
 closure/output identity, commit, metadata, owner/status, and provider checksum.
-It never overwrites an existing image name.
+It waits for asynchronous uploads to become active. When Glance does not expose
+a provider SHA-256, it downloads the accepted image and verifies SHA-256 before
+reporting publication success. It never overwrites an existing image name.
 
 For real-cloud testing before merge, manually dispatch the workflow against the
 exact same-repository PR branch:
