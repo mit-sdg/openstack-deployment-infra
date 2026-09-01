@@ -142,11 +142,12 @@ config drive. Lifecycle calls must enable config-drive use.
 
 ## Publish image candidates
 
-The `CI` workflow publishes only when a protected `main` push changes an image
-input and `OPENSTACK_PUBLISH_ENABLED=true`, or when an authorized manual
-dispatch requests publication. Image inputs are `flake.nix`, `flake.lock`,
-`nix/`, `infra/`, `openstack_platform/`, `deploy/`, `pyproject.toml`, `uv.lock`,
-and `LICENSE`; Markdown-only changes are excluded.
+The `CI` workflow publishes production candidates only when a protected `main`
+push changes an image input and `OPENSTACK_PUBLISH_ENABLED=true`, or when an
+authorized manual dispatch requests signed publication from `main`. Image
+inputs are `flake.nix`, `flake.lock`, `nix/`, `infra/`, `openstack_platform/`,
+`deploy/`, `pyproject.toml`, `uv.lock`, and `LICENSE`; Markdown-only changes are
+excluded.
 
 The protected matrix checks out one exact commit, installs private inventory,
 derives a commit-suffixed name for all roles, builds each role once, verifies
@@ -155,12 +156,34 @@ project, and publishes the same file. The publisher verifies content,
 closure/output identity, commit, metadata, owner/status, and provider checksum.
 It never overwrites an existing image name.
 
-Configure an `openstack-images` GitHub environment restricted to protected
-branches. Store `PLATFORM_CONFIG_JSON`, `OS_AUTH_URL`, `OS_USERNAME`,
-`OS_PASSWORD`, and `OS_PROJECT_ID` as environment secrets. Prefer a restricted
-Keystone application credential when the cloud supports one. Require human
-review if publication must not be unattended, protect `main` from direct/force
-push, and keep `.github/CODEOWNERS` on the workflow/Nix/infrastructure boundary.
+For real-cloud testing before merge, manually dispatch the workflow against the
+exact same-repository PR branch:
+
+```sh
+gh workflow run CI --ref '<open-pr-branch>' \
+  -f publish=false \
+  -f live_acceptance=false \
+  -f development_publish=true
+```
+
+Development publication is refused on `main`, on a fork, when the branch is not
+the exact head of one open PR targeting `main`, or without the protected
+environment. One preparation job builds all five roles and emits shared unsigned
+development evidence. Five dependent jobs independently reproduce, QEMU-boot,
+verify, and publish one role each in parallel. Success requires all five publish
+jobs and the `development-role-evidence-<commit>` artifact. Never expose these
+secrets through `pull_request_target` or trigger development publication
+automatically.
+
+Configure an `openstack-images` GitHub environment whose deployment policies
+allow `main` and only the selected same-repository PR branch patterns. Store
+`PLATFORM_CONFIG_JSON`, `DEVELOPMENT_PLATFORM_CONFIG_JSON`, `OS_AUTH_URL`,
+`OS_USERNAME`, `OS_PASSWORD`, and `OS_PROJECT_ID` as environment secrets. The
+development inventory must use an isolated namespace, prefix, addresses, and
+volumes. Prefer a restricted Keystone application credential when the cloud
+supports one. Require human review if publication must not be unattended,
+protect `main` from direct/force push, and keep `.github/CODEOWNERS` on the
+workflow/Nix/infrastructure boundary.
 
 A reviewed manual publication uses the same four-argument contract:
 
