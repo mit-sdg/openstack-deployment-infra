@@ -283,7 +283,8 @@ class ImageFirstBootProperties(unittest.TestCase):
         self.assertIn("''${CREDENTIALS_DIRECTORY:?}/mongodb-password", storage)
         self.assertIn("-m 0400 -o storage-service -g storage-service", storage)
         self.assertIn("stageMongoCredential\n        ];", storage)
-        self.assertIn("mongodbRuntimeDirectory}:/run/secrets:ro,U", storage)
+        self.assertIn("mongodbRuntimeDirectory}:/run/secrets:ro", storage)
+        self.assertNotIn("mongodbRuntimeDirectory}:/run/secrets:ro,U", storage)
         self.assertNotIn(
             '"/run/credentials/podman-${namespace}-mongodb.service/mongodb-password:', storage
         )
