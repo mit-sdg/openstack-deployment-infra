@@ -625,10 +625,11 @@ jobs:
           ROLE: ${{ matrix.role }}
         run: |
           set -euo pipefail
-          install -d -m 0700 development-role-input
+          install -d -m 0700 development-role-input development-role-qcow
           output=$(readlink -f "result-$ROLE")
           qcow=$(find -L "result-$ROLE" -type f -name '*.qcow2' -print -quit)
           test -n "$qcow"
+          cp --reflink=auto --sparse=always -- "$qcow" "development-role-qcow/$ROLE.qcow2"
           nix path-info --json --recursive "$output" \
             >"development-role-input/$ROLE.path-info.json"
           QCOW2="$qcow" NIX_OUTPUT="$output" python3 - <<'PY'
@@ -671,7 +672,17 @@ jobs:
           name: development-role-input-${{ github.sha }}-${{ matrix.role }}
           path: development-role-input
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 1
+
+      - name: Upload exact role QCOW2
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: development-role-qcow-${{ github.sha }}-${{ matrix.role }}
+          path: development-role-qcow/${{ matrix.role }}.qcow2
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
       - name: Remove private deployment configuration
         if: always()
@@ -782,9 +793,6 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install publication and smoke-test tools
         run: |
@@ -837,13 +845,17 @@ jobs:
           name: development-role-evidence-${{ github.sha }}
           path: development-release-evidence
 
-      - name: Build role image
-        env:
-          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
-        run: |
-          nix build --impure --print-build-logs \
-            --out-link "result-${{ matrix.role }}" \
-            ".#${{ matrix.role }}-image"
+      - name: Download compact role evidence
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: development-role-input-${{ github.sha }}-${{ matrix.role }}
+          path: development-role-input
+
+      - name: Download exact role QCOW2
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: development-role-qcow-${{ github.sha }}-${{ matrix.role }}
+          path: development-role-qcow
 
       - name: Verify, boot, and publish role image
         env:
@@ -868,11 +880,35 @@ jobs:
             test -n "${!name}"
           done
           role=${{ matrix.role }}
-          output=$(readlink -f "result-$role")
-          qcow=$(find -L "result-$role" -type f -name '*.qcow2' -print -quit)
-          path_info="$RUNNER_TEMP/$role.path-info.json"
-          test -n "$qcow"
-          nix path-info --json --recursive "$output" > "$path_info"
+          record="$PWD/development-role-input/$role.json"
+          qcow="$PWD/development-role-qcow/$role.qcow2"
+          path_info="$PWD/development-role-input/$role.path-info.json"
+          test -f "$record" && test -f "$qcow" && test -f "$path_info"
+          output=$(RECORD="$record" ROLE="$role" python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          record = json.load(open(os.environ["RECORD"], encoding="utf-8"))
+          if (
+              set(record)
+              != {
+                  "role",
+                  "qcow2Sha256",
+                  "qcow2SizeBytes",
+                  "pathInfo",
+                  "outputStorePath",
+                  "publicationMetadata",
+              }
+              or record["role"] != os.environ["ROLE"]
+              or record["pathInfo"] != f"{os.environ['ROLE']}.path-info.json"
+              or re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/]+", record["outputStorePath"])
+              is None
+          ):
+              raise SystemExit("downloaded role evidence is malformed")
+          print(record["outputStorePath"])
+          PY
+          )
           verification=$(python3 -m openstack_platform.release_manifest verify-role \
             --component-manifest "$PLATFORM_RELEASE_MANIFEST" \
             --manifest "$PLATFORM_ARTIFACT_MANIFEST" \
