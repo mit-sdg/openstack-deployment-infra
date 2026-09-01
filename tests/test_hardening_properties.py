@@ -252,5 +252,15 @@ class SecretDiagnosticProperty(unittest.TestCase):
             self.assertNotIn(str(destination), rendered)
 
 
+class ImageFirstBootProperties(unittest.TestCase):
+    def test_production_cloud_init_runs_only_with_config_drive(self) -> None:
+        common = Path("nix/modules/common.nix").read_text()
+        datasource_block = common.split("datasource_list = [", 1)[1].split("];", 1)[0]
+
+        self.assertIn('"ConfigDrive"', datasource_block)
+        self.assertNotIn('"OpenStack"', datasource_block)
+        self.assertNotIn('"None"', datasource_block)
+
+
 if __name__ == "__main__":
     unittest.main()

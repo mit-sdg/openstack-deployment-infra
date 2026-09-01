@@ -79,11 +79,10 @@ in
     enable = true;
     network.enable = false;
     settings = {
-      datasource_list = [
-        "ConfigDrive"
-        "OpenStack"
-        "None"
-      ];
+      # Do not fall back to None: make-disk-image boots the target once while
+      # assembling it. The None datasource would consume once-per-instance
+      # write_files state in the published QCOW2 before Nova first boot.
+      datasource_list = [ "ConfigDrive" ];
       preserve_hostname = false;
       disable_root = true;
       ssh_pwauth = false;
