@@ -261,6 +261,13 @@ class ImageFirstBootProperties(unittest.TestCase):
         self.assertNotIn('"OpenStack"', datasource_block)
         self.assertNotIn('"None"', datasource_block)
         self.assertIn("preserve_hostname = true;", common)
+        self.assertIn("cloud-init-write-files-reset", common)
+        self.assertIn("!${configRoot}/.provisioned", common)
+        self.assertIn("*/sem/config_write_files", common)
+        for role in ("admin", "ingress", "storage", "worker", "builder"):
+            template = Path(f"infra/cloud-init-nixos/{role}.yaml").read_text()
+            self.assertIn("/etc/__PLATFORM_NAMESPACE__/.provisioned", template)
+            self.assertIn("config-drive-v1", template)
 
 
 if __name__ == "__main__":

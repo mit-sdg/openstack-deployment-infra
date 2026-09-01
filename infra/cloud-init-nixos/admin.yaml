@@ -35,6 +35,11 @@ bootcmd:
       systemctl reboot
     fi
 write_files:
+  - path: /etc/__PLATFORM_NAMESPACE__/.provisioned
+    permissions: "0600"
+    owner: root:root
+    content: |
+      config-drive-v1
   - path: /etc/__PLATFORM_NAMESPACE__/secrets/nomad-gossip-key
     owner: root:root
     permissions: "0600"

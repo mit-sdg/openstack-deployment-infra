@@ -10,6 +10,11 @@ users:
     ssh_authorized_keys:
       - __OPERATOR_PUBLIC_KEY__
 write_files:
+  - path: /etc/__PLATFORM_NAMESPACE__/.provisioned
+    permissions: "0600"
+    owner: root:root
+    content: |
+      config-drive-v1
   - path: /etc/__PLATFORM_NAMESPACE__/pki/internal-ca.pem
     owner: root:root
     permissions: "0644"

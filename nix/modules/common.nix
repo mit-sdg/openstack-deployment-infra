@@ -112,6 +112,22 @@ in
     };
   };
 
+  # make-disk-image boots the target once without platform provisioning data.
+  # cloud-init records the empty write_files run in the resulting QCOW2. Remove
+  # only that baked semaphore until a real ConfigDrive writes the durable
+  # provisioning sentinel; never reset it on later instance reboots.
+  systemd.services."${namespace}-cloud-init-write-files-reset" = {
+    description = "Reset image-build cloud-init write_files state before provisioning";
+    requiredBy = [ "cloud-init-local.service" ];
+    before = [ "cloud-init-local.service" ];
+    unitConfig.ConditionPathExists = "!${configRoot}/.provisioned";
+    serviceConfig.Type = "oneshot";
+    script = ''
+      ${pkgs.findutils}/bin/find /var/lib/cloud -type f \
+        -path '*/sem/config_write_files' -delete
+    '';
+  };
+
   services.qemuGuest.enable = true;
   security.auditd.enable = true;
   # Secret-bearing units also set LimitCORE=0 explicitly. Disable the host
