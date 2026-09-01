@@ -120,10 +120,12 @@ in
   systemd.services.cloud-init-local.serviceConfig.ExecStartPre = [
     (pkgs.writeShellScript "${namespace}-cloud-init-image-state-reset" ''
       if [[ ! -e ${configRoot}/.provisioned ]]; then
-        ${pkgs.findutils}/bin/find /var/lib/cloud -mindepth 1 -delete
+        ${pkgs.coreutils}/bin/rm -rf /var/lib/cloud
+        ${pkgs.coreutils}/bin/install -d -m 0755 /var/lib/cloud
       fi
     '')
   ];
+  systemd.services.cloud-init.requires = [ "cloud-init-local.service" ];
 
   services.qemuGuest.enable = true;
   security.auditd.enable = true;
