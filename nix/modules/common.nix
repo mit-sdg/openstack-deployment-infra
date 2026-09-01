@@ -112,18 +112,21 @@ in
     };
   };
 
-  # make-disk-image boots and shuts down the target once without platform
-  # provisioning data. Remove that build-time cloud-init state before the disk
-  # is finalized. A real ConfigDrive writes the sentinel, so later instance
-  # shutdowns preserve cloud-init state and never replay bootstrap secrets.
-  systemd.services."${namespace}-cloud-init-image-clean" = {
-    description = "Remove image-build cloud-init state before final shutdown";
-    wantedBy = [ "shutdown.target" ];
+  # make-disk-image boots the target once without platform provisioning data,
+  # leaving a complete cached no-datasource cloud-init instance in the QCOW2.
+  # Before every cloud-init stage, remove that cache only while the real
+  # ConfigDrive sentinel is absent. Successful provisioning writes the
+  # sentinel, so later reboots retain state and never replay bootstrap secrets.
+  systemd.services."${namespace}-cloud-init-image-state-reset" = {
+    description = "Reset image-build cloud-init state before first provisioning";
+    requiredBy = [ "cloud-init-local.service" ];
     before = [
-      "shutdown.target"
-      "umount.target"
+      "cloud-init-local.service"
+      "cloud-init.service"
+      "cloud-config.service"
+      "cloud-final.service"
     ];
-    unitConfig.DefaultDependencies = false;
+    after = [ "local-fs.target" ];
     serviceConfig.Type = "oneshot";
     script = ''
       if [[ ! -e ${configRoot}/.provisioned ]]; then
