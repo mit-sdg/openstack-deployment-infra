@@ -267,6 +267,7 @@ class ImageFirstBootProperties(unittest.TestCase):
             self.assertIn("/etc/__PLATFORM_NAMESPACE__/.provisioned", template)
             self.assertIn("config-drive-v1", template)
             self.assertIn("*/sem/config_write_files", template)
+            self.assertIn("cloud-init single --name write-files --frequency always", template)
             self.assertIn("-config-drive-v1", template)
         smoke = Path("tests/smoke_openstack_image.sh").read_text()
         self.assertIn('-uuid "$instance_uuid"', smoke)

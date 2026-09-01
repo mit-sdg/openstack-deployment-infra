@@ -15,6 +15,7 @@ bootcmd:
     marker=/var/lib/__PLATFORM_NAMESPACE__-config-drive-v1
     if [ ! -e "$marker" ]; then
       find /var/lib/cloud -type f -path '*/sem/config_write_files' -delete
+      cloud-init single --name write-files --frequency always
       : > "$marker"
     fi
 write_files:
