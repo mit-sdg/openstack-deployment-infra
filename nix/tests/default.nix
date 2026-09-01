@@ -86,6 +86,10 @@ let
           };
 
           services.cloud-init.settings.datasource_list = lib.mkForce [ "None" ];
+          # This harness keeps its synthetic None-datasource fixture under
+          # /var/lib/cloud. Production images retain the pre-provisioning reset.
+          systemd.services."${platform.namespace}-cloud-init-image-state-reset".enable =
+            lib.mkForce false;
 
           # The test VM supplies disposable local mounts in place of
           # deployment-owned Cinder volumes. Use explicit mount units because
