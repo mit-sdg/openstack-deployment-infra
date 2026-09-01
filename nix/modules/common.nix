@@ -83,7 +83,9 @@ in
       # assembling it. The None datasource would consume once-per-instance
       # write_files state in the published QCOW2 before Nova first boot.
       datasource_list = [ "ConfigDrive" ];
-      preserve_hostname = false;
+      # NixOS owns /etc/hostname in the immutable system closure. Asking
+      # cloud-init to replace it aborts the config stage before write_files.
+      preserve_hostname = true;
       disable_root = true;
       ssh_pwauth = false;
       # NixOS sshd-keygen owns first-boot host key generation. Prevent

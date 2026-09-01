@@ -260,6 +260,7 @@ class ImageFirstBootProperties(unittest.TestCase):
         self.assertIn('"ConfigDrive"', datasource_block)
         self.assertNotIn('"OpenStack"', datasource_block)
         self.assertNotIn('"None"', datasource_block)
+        self.assertIn("preserve_hostname = true;", common)
 
 
 if __name__ == "__main__":
