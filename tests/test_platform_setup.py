@@ -433,6 +433,54 @@ class SetupPreflightTests(unittest.TestCase):
         mutating = {"create", "delete", "set", "unset", "update", "add", "remove", "rebuild"}
         self.assertFalse(any(mutating.intersection(command[1:]) for command in commands), commands)
 
+    def test_quota_falls_back_when_detail_policy_is_denied(self) -> None:
+        flavors = {
+            role: row
+            for role, row in zip(
+                ("admin", "ingress", "storage", "worker", "builder"),
+                self.provider_json(("openstack", "flavor", "list")),
+                strict=True,
+            )
+        }
+
+        def provider(argv: object, **_kwargs: object) -> object:
+            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+            if command[1:3] == ("quota", "show") and "--usage" in command:
+                raise setup.SetupError("quota detail forbidden")
+            if command[1:3] == ("limits", "show"):
+                return [
+                    {"Name": "instances_used", "Value": 5},
+                    {"Name": "total_cores_used", "Value": 25},
+                    {"Name": "total_ram_used", "Value": 51200},
+                    {"Name": "total_volumes_used", "Value": 5},
+                    {"Name": "total_gigabytes_used", "Value": 812},
+                ]
+            if command[1:3] == ("quota", "show"):
+                return [
+                    {"Resource": name, "Limit": limit}
+                    for name, limit in (
+                        ("instances", 128),
+                        ("cores", 128),
+                        ("ram", 262144),
+                        ("volumes", 10),
+                        ("gigabytes", 3000),
+                        ("ports", -1),
+                        ("security_groups", -1),
+                        ("security_group_rules", -1),
+                        ("key_pairs", 100),
+                    )
+                ]
+            if command[1:3] == ("keypair", "list"):
+                return [{"Name": "existing"}]
+            self.fail(f"unexpected fallback quota command: {command}")
+
+        with mock.patch.object(setup, "_json_command", side_effect=provider):
+            quotas = setup._quota_deltas(Path("openstack"), self.resolved, flavors)
+
+        self.assertTrue(setup._quotas_ready(quotas))
+        self.assertEqual(quotas["ports"]["available"], "unlimited")
+        self.assertEqual(quotas["key_pairs"]["inUse"], 1)
+
     def test_address_occupancy_is_an_adversarial_failure(self) -> None:
         def occupied(argv: object, **kwargs: object) -> object:
             command = tuple(str(item) for item in argv)  # type: ignore[arg-type]

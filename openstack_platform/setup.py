@@ -1591,13 +1591,85 @@ def _quota_value(raw: object) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _quota_rows_without_detail(
+    openstack: Path, resolved: ResolvedSetup
+) -> dict[str, dict[str, int | None]]:
+    """Compose bounded quota evidence when provider policy denies detail APIs."""
+    absolute = _json_command(
+        (openstack, "limits", "show", "--absolute", "-f", "json"),
+        environment=resolved.provider_environment,
+    )
+    basic = _json_command(
+        (openstack, "quota", "show", "-f", "json"),
+        environment=resolved.provider_environment,
+    )
+    if not isinstance(absolute, list) or not isinstance(basic, list):
+        _fail("OpenStack fallback quota response is malformed")
+    absolute_values = {
+        _quota_key(_field(row, "Name", "name")): _optional_int(_field(row, "Value", "value"))
+        for row in absolute
+        if isinstance(row, dict)
+    }
+    basic_values = {
+        _quota_key(_field(row, "Resource", "resource")): _optional_int(
+            _field(row, "Limit", "limit")
+        )
+        for row in basic
+        if isinstance(row, dict)
+    }
+    names = {
+        "instances": ("instances", "instances_used"),
+        "cores": ("cores", "total_cores_used"),
+        "ram": ("ram", "total_ram_used"),
+        "volumes": ("volumes", "total_volumes_used"),
+        "gigabytes": ("gigabytes", "total_gigabytes_used"),
+        "ports": ("ports", None),
+        "security_groups": ("security_groups", "security_groups_used"),
+        "security_group_rules": ("security_group_rules", None),
+        "key_pairs": ("key_pairs", None),
+    }
+    result: dict[str, dict[str, int | None]] = {}
+    inventory_commands = {
+        "ports": ("port", "list", "-f", "json", "-c", "ID"),
+        "security_group_rules": (
+            "security",
+            "group",
+            "rule",
+            "list",
+            "-f",
+            "json",
+            "-c",
+            "ID",
+        ),
+        "key_pairs": ("keypair", "list", "-f", "json", "-c", "Name"),
+    }
+    for name, (limit_key, used_key) in names.items():
+        limit = basic_values.get(limit_key)
+        if limit is None:
+            limit = absolute_values.get(limit_key) or absolute_values.get(f"max_total_{limit_key}")
+        used = absolute_values.get(used_key) if used_key else None
+        if used is None and limit is not None and limit >= 0 and name in inventory_commands:
+            inventory = _json_command(
+                (openstack, *inventory_commands[name]),
+                environment=resolved.provider_environment,
+            )
+            if not isinstance(inventory, list):
+                _fail(f"OpenStack {name} usage response is malformed")
+            used = len(inventory)
+        result[name] = {"in_use": used, "limit": limit}
+    return result
+
+
 def _quota_deltas(
     openstack: Path, resolved: ResolvedSetup, flavors: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, Any]:
-    rows = _json_command(
-        (openstack, "quota", "show", "--usage", "-f", "json"),
-        environment=resolved.provider_environment,
-    )
+    try:
+        rows = _json_command(
+            (openstack, "quota", "show", "--usage", "-f", "json"),
+            environment=resolved.provider_environment,
+        )
+    except SetupError:
+        rows = _quota_rows_without_detail(openstack, resolved)
     if not isinstance(rows, dict):
         _fail("OpenStack quota response is malformed")
     normalized = {
@@ -1631,8 +1703,14 @@ def _quota_deltas(
                 None,
             )
             used = _optional_int(used_raw)
-        available = None if used is None or limit is None or limit < 0 else limit - used
-        shortfall = None if available is None else max(0, delta - available)
+        available: int | str | None
+        shortfall: int | None
+        if limit is not None and limit < 0:
+            available = "unlimited"
+            shortfall = 0
+        else:
+            available = None if used is None or limit is None else limit - used
+            shortfall = None if available is None else max(0, delta - available)
         result[name] = {
             "requiredDelta": delta,
             "inUse": used,
