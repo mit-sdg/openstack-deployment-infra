@@ -212,8 +212,13 @@ def _repository_root() -> Path:
     return root
 
 
-def _source_commit(repository: Path, environment: Mapping[str, str]) -> str:
-    supplied = environment.get("PLATFORM_SOURCE_COMMIT")
+def _source_commit(
+    repository: Path,
+    environment: Mapping[str, str],
+    *,
+    supplied: str | None = None,
+) -> str:
+    supplied = supplied or environment.get("PLATFORM_SOURCE_COMMIT")
     if supplied:
         if not _FULL_COMMIT.fullmatch(supplied):
             _fail("PLATFORM_SOURCE_COMMIT must be a full lowercase commit")
@@ -1491,7 +1496,11 @@ def _resolve_setup_inputs(
     """Resolve the strict setup inputs shared by check and apply."""
     _credential_requirements(values, input_reader, secret_reader)
     provider_environment = _openstack_environment(values)
-    resolved_commit = commit or _source_commit(repository, provider_environment)
+    resolved_commit = commit or _source_commit(
+        repository,
+        provider_environment,
+        supplied=values.get("PLATFORM_SOURCE_COMMIT"),
+    )
     project = _project_identity(openstack, provider_environment)
     # Preserve the provider-issued project ID spelling used for authentication.
     # Some Keystone deployments accept their compact UUID form but reject the
@@ -2262,7 +2271,11 @@ def run_setup(
     repository = _repository_root()
     _credential_requirements(values, input_reader, secret_reader)
     provider_environment = _openstack_environment(values)
-    commit = _source_commit(repository, provider_environment)
+    commit = _source_commit(
+        repository,
+        provider_environment,
+        supplied=values.get("PLATFORM_SOURCE_COMMIT"),
+    )
     # This is the production gate: verify the complete signed component set
     # before creating a workspace, generating a key, or calling OpenStack/Nix.
     try:

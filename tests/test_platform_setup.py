@@ -66,6 +66,13 @@ PLATFORM_DOMAIN='apps.example.test'
             private_key.with_suffix(".pub").read_text(encoding="utf-8").startswith("ssh-rsa ")
         )
 
+    def test_source_commit_accepts_setup_environment_value(self) -> None:
+        commit = "a" * 40
+
+        resolved = setup._source_commit(self.root, {}, supplied=commit)
+
+        self.assertEqual(resolved, commit)
+
     def test_project_identity_uses_scoped_token_without_project_list_permission(self) -> None:
         project_id = "00000000-0000-4000-8000-000000000001"
         environment = {"OS_PROJECT_NAME": "demo", "OS_PROJECT_ID": project_id}
@@ -100,10 +107,15 @@ PLATFORM_DOMAIN='apps.example.test'
     def test_resolved_inputs_preserve_provider_project_id_spelling(self) -> None:
         compact = "00000000000040008000000000000001"
         canonical = "00000000-0000-4000-8000-000000000001"
-        values = {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"}
+        commit = "a" * 40
+        values = {
+            "OS_PROJECT_ID": compact,
+            "OS_PROJECT_NAME": "demo",
+            "PLATFORM_SOURCE_COMMIT": commit,
+        }
         with (
             mock.patch.object(setup, "_credential_requirements"),
-            mock.patch.object(setup, "_source_commit", return_value="a" * 40),
+            mock.patch.object(setup, "_source_commit", return_value=commit) as source_commit,
             mock.patch.object(
                 setup,
                 "_project_identity",
@@ -121,6 +133,7 @@ PLATFORM_DOMAIN='apps.example.test'
 
         self.assertEqual(resolved.provider_environment["OS_PROJECT_ID"], compact)
         self.assertEqual(resolved.project.project_id, canonical)
+        self.assertEqual(source_commit.call_args.kwargs["supplied"], commit)
         source = (Path(__file__).resolve().parents[1] / "openstack_platform/setup.py").read_text()
         self.assertIn("_write_openstack_wrapper(paths, provider_environment, openstack)", source)
 
@@ -189,10 +202,11 @@ PLATFORM_DOMAIN='apps.example.test'
             "OS_PROJECT_NAME=demo\n"
             "OS_USERNAME=operator\n"
             "OS_PASSWORD=secret\n"
+            f"PLATFORM_SOURCE_COMMIT={'a' * 40}\n"
         )
         with (
             mock.patch.object(setup, "_repository_root", return_value=Path(__file__).parents[1]),
-            mock.patch.object(setup, "_source_commit", return_value="a" * 40),
+            mock.patch.object(setup, "_source_commit", return_value="a" * 40) as source_commit,
             mock.patch.object(setup, "_private_directory") as private_directory,
             self.assertRaisesRegex(setup.SetupError, "PLATFORM_RELEASE_MANIFEST"),
         ):
@@ -204,6 +218,7 @@ PLATFORM_DOMAIN='apps.example.test'
                 output=io.StringIO(),
             )
         private_directory.assert_not_called()
+        self.assertEqual(source_commit.call_args.kwargs["supplied"], "a" * 40)
         self.assertFalse((self.root / "workspace").exists())
 
     def test_check_is_non_mutating_and_renders_resolved_plan(self) -> None:

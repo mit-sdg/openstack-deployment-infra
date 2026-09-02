@@ -232,6 +232,7 @@ PLATFORM_ADMIN_STATE_GIB='32'
 PLATFORM_DATA_GIB='500'
 PLATFORM_BACKUP_GIB='600'
 
+PLATFORM_SOURCE_COMMIT='<full-lowercase-commit>'
 PLATFORM_RELEASE_MANIFEST='/private/releases/<commit>/release-manifest.json'
 PLATFORM_RELEASE_SIGNATURE='/private/releases/<commit>/release-manifest.sig'
 PLATFORM_RELEASE_TRUST_ROOT='/private/release-trust-root.pem'
