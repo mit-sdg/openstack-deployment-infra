@@ -652,7 +652,12 @@ class SetupPreflightTests(unittest.TestCase):
                                 "interface": "public",
                                 "region": "RegionOne",
                                 "url": "http://images.example.test/v2",
-                            }
+                            },
+                            {
+                                "interface": "public",
+                                "region": "RegionOne",
+                                "url": "http://images.example.test/v2",
+                            },
                         ]
                     },
                 ),

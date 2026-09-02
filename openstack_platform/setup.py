@@ -1888,11 +1888,16 @@ def _glance_usage(openstack: Path, resolved: ResolvedSetup) -> Mapping[str, obje
     if not isinstance(endpoints, list) or any(not isinstance(row, dict) for row in endpoints):
         _fail("OpenStack Glance endpoint inventory is malformed")
     region = resolved.provider_environment.get("OS_REGION_NAME")
-    urls = [
-        str(_field(row, "URL", "url"))
-        for row in endpoints
-        if _field(row, "interface") == interface and (not region or _field(row, "region") == region)
-    ]
+    # Some older service catalogs repeat the same endpoint record under
+    # different IDs. Require one unique URL rather than one catalog row.
+    urls = sorted(
+        {
+            str(_field(row, "URL", "url"))
+            for row in endpoints
+            if _field(row, "interface") == interface
+            and (not region or _field(row, "region") == region)
+        }
+    )
     if len(urls) != 1:
         _fail("OpenStack Glance endpoint must resolve exactly once")
     parsed = urlsplit(urls[0])
