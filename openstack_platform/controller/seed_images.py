@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from .. import openstack, runtime
-from ..config import load_platform
+from ..config import PlatformConfig, load_platform
 from ..contracts import IMAGE_ROLES
-from ..validation import ValidationError, uuid
+from ..validation import ValidationError, bounded_text, commit, sha256_hex, uuid
 from . import database as db
 
 _MAXIMUM_BYTES = 65_536
@@ -37,7 +37,11 @@ def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _manifest(path: Path, *, project_id: str, namespace: str) -> dict[str, str]:
+def _manifest(
+    path: Path,
+    *,
+    platform: PlatformConfig,
+) -> dict[str, openstack.ImageSelection]:
     try:
         metadata = path.lstat()
     except OSError as error:
@@ -59,56 +63,65 @@ def _manifest(path: Path, *, project_id: str, namespace: str) -> dict[str, str]:
         not isinstance(document, dict)
         or set(document) != {"schemaVersion", "projectId", "namespace", "images"}
         or document.get("schemaVersion") != 1
-        or document.get("projectId") != project_id
-        or document.get("namespace") != namespace
+        or document.get("projectId") != platform.project_id
+        or document.get("namespace") != platform.namespace
     ):
         _fail("hosted image seed identity does not match the deployment")
     images = document.get("images")
     if not isinstance(images, Mapping) or set(images) != set(IMAGE_ROLES):
         _fail("hosted image seed does not contain every platform role")
-    return {role: uuid(images[role], field=f"{role} image UUID") for role in IMAGE_ROLES}
+    expected_compatibility = openstack.image_compatibility_hash(platform)
+    result: dict[str, openstack.ImageSelection] = {}
+    for role in IMAGE_ROLES:
+        raw_item = images[role]
+        if not isinstance(raw_item, Mapping) or set(raw_item) != {
+            "imageId",
+            "displayName",
+            "sourceCommit",
+            "compatibilityHash",
+        }:
+            _fail("hosted image seed role record is malformed")
+        display_name = bounded_text(
+            raw_item["displayName"], field="image display name", maximum=256
+        )
+        compatibility_hash = sha256_hex(
+            raw_item["compatibilityHash"], field="image compatibility hash"
+        )
+        if display_name != platform.get(f"images.{role}"):
+            _fail("hosted image seed name does not match platform inventory")
+        if compatibility_hash != expected_compatibility:
+            _fail("hosted image seed compatibility does not match platform inventory")
+        result[role] = openstack.ImageSelection(
+            role=role,
+            image_id=uuid(raw_item["imageId"], field=f"{role} image UUID"),
+            display_name=display_name,
+            source_commit=commit(raw_item["sourceCommit"]),
+            compatibility_hash=compatibility_hash,
+        )
+    return result
 
 
-def seed(
-    *,
-    platform_config: Path,
-    state_directory: Path,
-    manifest: Path,
-    openstack_command: str,
-    timeout_seconds: float,
-) -> None:
+def seed(*, platform_config: Path, state_directory: Path, manifest: Path) -> None:
     if os.geteuid() == 0 or os.environ.get("SUDO_USER"):
         _fail("hosted image seeding must run as the controller account")
     platform = load_platform(platform_config.resolve(strict=True))
     state = runtime.ensure_private_directory(state_directory, create=True)
-    references = _manifest(
-        manifest,
-        project_id=platform.project_id,
-        namespace=platform.namespace,
-    )
+    selections = _manifest(manifest, platform=platform)
     identity = db.deployment_identity(platform)
     with runtime.lock(state, "database-maintenance", wait=True):
         connection = db.connect(state / "platform.sqlite3", identity=identity)
         try:
             db.migrate(connection, identity=identity)
-            missing: dict[str, str] = {}
-            for role, image_id in references.items():
+            for role, item in selections.items():
                 existing = db.get_image_selection(connection, role)
-                if existing is None:
-                    missing[role] = image_id
-                elif existing.image_id != image_id:
+                if existing is not None and (
+                    existing.image_id != item.image_id
+                    or existing.display_name != item.display_name
+                    or existing.source_commit != item.source_commit
+                    or existing.compatibility_hash != item.compatibility_hash
+                ):
                     _fail("hosted controller already selected a different role image")
-            if missing:
-                selected = openstack.select_images(
-                    platform,
-                    missing,
-                    timeout_seconds=timeout_seconds,
-                    executable=openstack_command,
-                )
-                for role in IMAGE_ROLES:
-                    item = selected.get(role)
-                    if item is None:
-                        continue
+                if existing is None:
                     db.put_image_selection(
                         connection,
                         role=item.role,
@@ -126,25 +139,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--platform-config", type=Path, required=True)
     parser.add_argument("--state-directory", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--openstack-command", required=True)
-    parser.add_argument("--timeout-seconds", type=float, default=120)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.timeout_seconds <= 0 or args.timeout_seconds > 900:
-        print("hosted image seeding failed: timeout is invalid", file=sys.stderr)
-        return 1
     try:
         seed(
             platform_config=args.platform_config,
             state_directory=args.state_directory,
             manifest=args.manifest,
-            openstack_command=args.openstack_command,
-            timeout_seconds=args.timeout_seconds,
         )
-    except (SeedFailure, ValidationError, openstack.OpenStackError, OSError):
+    except (SeedFailure, ValidationError, OSError):
         print("hosted image seeding failed safely", file=sys.stderr)
         return 1
     print("hosted-image-selections=ready")

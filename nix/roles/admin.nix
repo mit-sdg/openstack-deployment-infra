@@ -231,8 +231,7 @@ let
       ${packages.controllerPackage}/bin/openstack-platform-controller-seed-images \
       --platform-config /etc/${namespace}/platform.json \
       --state-directory ${controllerState} \
-      --manifest "$image_seed" \
-      --openstack-command ${openstackClient}/bin/platform-openstack
+      --manifest "$image_seed"
   '';
 in
 {

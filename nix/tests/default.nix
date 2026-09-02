@@ -7,6 +7,13 @@ let
   state = platform.paths.adminState;
   backups = platform.paths.backups;
   packages = import ../pkgs { inherit pkgs platform; };
+  imageCompatibilityHash = builtins.hashString "sha256" (builtins.toJSON {
+    format = 1;
+    inherit namespace;
+    pkiInternalCaFile = platform.pki.internalCaFile;
+    prefix = platform.prefix;
+    projectId = platform.projectId;
+  });
   systemdEscapePath =
     path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   testPki = pkgs.runCommand "${namespace}-test-pki" { nativeBuildInputs = [ pkgs.openssl ]; } ''
@@ -145,6 +152,22 @@ let
                   install -m 0600 -o agentops -g agentops \
                     ${../../config/platform-policy.example.json} \
                     ${state}/operator/policy.json
+                  cat > ${state}/operator/image-selections.json <<'EOF'
+                  {
+                    "schemaVersion": 1,
+                    "projectId": "${platform.projectId}",
+                    "namespace": "${namespace}",
+                    "images": {
+                      "admin": {"imageId":"00000000-0000-4000-8000-000000000001","displayName":"${platform.images.admin}","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","compatibilityHash":"${imageCompatibilityHash}"},
+                      "ingress": {"imageId":"00000000-0000-4000-8000-000000000002","displayName":"${platform.images.ingress}","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","compatibilityHash":"${imageCompatibilityHash}"},
+                      "storage": {"imageId":"00000000-0000-4000-8000-000000000003","displayName":"${platform.images.storage}","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","compatibilityHash":"${imageCompatibilityHash}"},
+                      "worker": {"imageId":"00000000-0000-4000-8000-000000000004","displayName":"${platform.images.worker}","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","compatibilityHash":"${imageCompatibilityHash}"},
+                      "builder": {"imageId":"00000000-0000-4000-8000-000000000005","displayName":"${platform.images.builder}","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","compatibilityHash":"${imageCompatibilityHash}"}
+                    }
+                  }
+                  EOF
+                  chown agentops:agentops ${state}/operator/image-selections.json
+                  chmod 0600 ${state}/operator/image-selections.json
                   cat > ${state}/operator/helper-releases/current/bin/openstack-platform-helper <<'EOF'
                   #!/bin/sh
                   printf '%s\n' '{"version":1,"requestId":"00000000-0000-0000-0000-000000000000","ok":false,"error":{"code":"INVALID_REQUEST","message":"helper request is invalid"}}'
@@ -162,6 +185,21 @@ let
                     printf 'controller-secret\n' > ${state}/operator/secrets/$credential
                     chown agentops:agentops ${state}/operator/secrets/$credential
                     chmod 0600 ${state}/operator/secrets/$credential
+                  done
+                  printf 'ssh-ed25519 vm-test\n' \
+                    > ${state}/operator/secrets/builder_operator_ed25519.pub
+                  chown agentops:agentops \
+                    ${state}/operator/secrets/builder_operator_ed25519.pub
+                  chmod 0644 ${state}/operator/secrets/builder_operator_ed25519.pub
+                  install -d -m 0700 -o agentops -g agentops \
+                    ${state}/operator/secrets/provisioning-pki
+                  install -m 0644 -o agentops -g agentops ${testPki}/ca.pem \
+                    ${state}/operator/secrets/provisioning-pki/internal-ca.pem
+                  for name in nomad-cli nomad-worker; do
+                    install -m 0644 -o agentops -g agentops ${testPki}/$name.pem \
+                      ${state}/operator/secrets/provisioning-pki/$name.pem
+                    install -m 0600 -o agentops -g agentops ${testPki}/$name-key.pem \
+                      ${state}/operator/secrets/provisioning-pki/$name-key.pem
                   done
                 '';
               };

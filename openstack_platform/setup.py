@@ -1107,6 +1107,7 @@ def _bootstrap_roles(
     remote_root = str(platform["paths"]["root"])
     guest_config = f"/etc/{namespace}/platform.json"
     hosted_image_seed = paths.workspace / "hosted-image-selections.json"
+    compatibility_hash = platform_openstack.image_compatibility_hash(load_platform(paths.platform))
     _atomic_private_write(
         hosted_image_seed,
         json.dumps(
@@ -1114,7 +1115,15 @@ def _bootstrap_roles(
                 "schemaVersion": 1,
                 "projectId": str(platform["projectId"]),
                 "namespace": namespace,
-                "images": {role: str(UUID(image_ids[role])) for role in IMAGE_ROLES},
+                "images": {
+                    role: {
+                        "imageId": str(UUID(image_ids[role])),
+                        "displayName": str(platform["images"][role]),
+                        "sourceCommit": commit,
+                        "compatibilityHash": compatibility_hash,
+                    }
+                    for role in IMAGE_ROLES
+                },
             },
             indent=2,
             sort_keys=True,

@@ -4,10 +4,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from openstack_platform import openstack
-from openstack_platform.config import load_platform
+from openstack_platform.config import PlatformConfig, load_platform
 from openstack_platform.contracts import IMAGE_ROLES
 from openstack_platform.controller import database as db
 from openstack_platform.controller import seed_images
@@ -16,23 +15,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HostedImageSeedTests(unittest.TestCase):
-    def test_seed_verifies_records_and_then_replays_without_provider_access(self) -> None:
-        platform_path = ROOT / "config/platform.example.json"
-        platform = load_platform(platform_path)
-        references = {
+    @staticmethod
+    def records(platform: PlatformConfig) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+        image_ids = {
             role: f"00000000-0000-4000-8000-{index:012d}"
             for index, role in enumerate(IMAGE_ROLES, 1)
         }
-        selected = {
-            role: openstack.ImageSelection(
-                role=role,
-                image_id=image_id,
-                display_name=str(platform.get(f"images.{role}")),
-                source_commit="a" * 40,
-                compatibility_hash="b" * 64,
-            )
-            for role, image_id in references.items()
+        compatibility = openstack.image_compatibility_hash(platform)
+        records = {
+            role: {
+                "imageId": image_id,
+                "displayName": str(platform.get(f"images.{role}")),
+                "sourceCommit": "a" * 40,
+                "compatibilityHash": compatibility,
+            }
+            for role, image_id in image_ids.items()
         }
+        return image_ids, records
+
+    def test_seed_records_all_roles_and_is_idempotent(self) -> None:
+        platform_path = ROOT / "config/platform.example.json"
+        platform = load_platform(platform_path)
+        image_ids, records = self.records(platform)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state = root / "state"
@@ -43,33 +47,20 @@ class HostedImageSeedTests(unittest.TestCase):
                         "schemaVersion": 1,
                         "projectId": platform.project_id,
                         "namespace": platform.namespace,
-                        "images": references,
+                        "images": records,
                     }
                 )
             )
             manifest.chmod(0o600)
-            with mock.patch.object(
-                seed_images.openstack, "select_images", return_value=selected
-            ) as select:
-                seed_images.seed(
-                    platform_config=platform_path,
-                    state_directory=state,
-                    manifest=manifest,
-                    openstack_command="/protected/openstack",
-                    timeout_seconds=30,
-                )
-                seed_images.seed(
-                    platform_config=platform_path,
-                    state_directory=state,
-                    manifest=manifest,
-                    openstack_command="/protected/openstack",
-                    timeout_seconds=30,
-                )
-            select.assert_called_once_with(
-                platform,
-                references,
-                timeout_seconds=30,
-                executable="/protected/openstack",
+            seed_images.seed(
+                platform_config=platform_path,
+                state_directory=state,
+                manifest=manifest,
+            )
+            seed_images.seed(
+                platform_config=platform_path,
+                state_directory=state,
+                manifest=manifest,
             )
             connection = db.connect(
                 state / "platform.sqlite3", identity=db.deployment_identity(platform)
@@ -77,7 +68,7 @@ class HostedImageSeedTests(unittest.TestCase):
             try:
                 self.assertEqual(
                     {item.role: item.image_id for item in db.list_image_selections(connection)},
-                    references,
+                    image_ids,
                 )
             finally:
                 connection.close()
@@ -85,6 +76,7 @@ class HostedImageSeedTests(unittest.TestCase):
     def test_seed_rejects_a_different_deployment_identity(self) -> None:
         platform_path = ROOT / "config/platform.example.json"
         platform = load_platform(platform_path)
+        _image_ids, records = self.records(platform)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = root / "images.json"
@@ -94,10 +86,7 @@ class HostedImageSeedTests(unittest.TestCase):
                         "schemaVersion": 1,
                         "projectId": "00000000-0000-4000-8000-000000000099",
                         "namespace": platform.namespace,
-                        "images": {
-                            role: f"00000000-0000-4000-8000-{index:012d}"
-                            for index, role in enumerate(IMAGE_ROLES, 1)
-                        },
+                        "images": records,
                     }
                 )
             )
@@ -107,8 +96,6 @@ class HostedImageSeedTests(unittest.TestCase):
                     platform_config=platform_path,
                     state_directory=root / "state",
                     manifest=manifest,
-                    openstack_command="/protected/openstack",
-                    timeout_seconds=30,
                 )
 
 
