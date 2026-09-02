@@ -305,9 +305,18 @@ PLATFORM_ALLOW_HTTP_GLANCE='I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP'
 ```
 
 This permits the scoped token to cross that HTTP connection; it does not disable
-certificate checks for HTTPS endpoints or enable redirects. Existing images
-without Glance `os_hash_*` fields are accepted only after setup downloads them
-and verifies the signed QCOW2 SHA-256.
+certificate checks for HTTPS endpoints or enable redirects. A legacy Glance
+that also returns `404` for its quota usage endpoint requires a second explicit
+waiver:
+
+```dotenv
+PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA='I_UNDERSTAND_GLANCE_QUOTA_IS_UNVERIFIED'
+```
+
+The check then labels both Glance quota dimensions
+`unverified-legacy-provider`; it does not claim measured capacity. Existing
+images without Glance `os_hash_*` fields are accepted only after setup downloads
+them and verifies the signed QCOW2 SHA-256.
 
 ## Create the deployment
 

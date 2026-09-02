@@ -677,6 +677,51 @@ class SetupPreflightTests(unittest.TestCase):
         self.assertEqual(result, {"limits": {}, "usage": {}})
         self.assertEqual(command.call_count, 2)
 
+    def test_legacy_glance_quota_404_requires_a_separate_exact_acknowledgement(self) -> None:
+        self.resolved.values["PLATFORM_ALLOW_HTTP_GLANCE"] = (
+            "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
+        )
+        catalog = {
+            "endpoints": [
+                {
+                    "interface": "public",
+                    "region": "RegionOne",
+                    "url": "http://images.example.test/v2",
+                }
+            ]
+        }
+        failure = setup.SetupError(
+            "setup command failed (curl): curl: (22) The requested URL returned error: 404"
+        )
+        try:
+            with (
+                mock.patch.object(setup, "_json_command", return_value=catalog),
+                mock.patch.object(setup, "_command", side_effect=("opaque-token", failure)),
+                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
+                self.assertRaisesRegex(setup.SetupError, "quota usage endpoint"),
+            ):
+                setup._glance_usage(Path("openstack"), self.resolved)
+
+            self.resolved.values["PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA"] = (
+                "I_UNDERSTAND_GLANCE_QUOTA_IS_UNVERIFIED"
+            )
+            with (
+                mock.patch.object(setup, "_json_command", return_value=catalog),
+                mock.patch.object(setup, "_command", side_effect=("opaque-token", failure)),
+                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
+            ):
+                usage = setup._glance_usage(Path("openstack"), self.resolved)
+            self.assertEqual(usage, {"_platform_glance_quota_unavailable": True})
+            with mock.patch.object(setup, "_glance_usage", return_value=usage):
+                quotas = setup._glance_quota_deltas(
+                    Path("openstack"), self.resolved, self.verified_release()[1]
+                )
+            self.assertTrue(setup._quotas_ready(quotas))
+            self.assertEqual(quotas["image_count"]["verification"], "unverified-legacy-provider")
+        finally:
+            self.resolved.values.pop("PLATFORM_ALLOW_HTTP_GLANCE", None)
+            self.resolved.values.pop("PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA", None)
+
     def test_glance_quota_bytes_and_gib_formatter_variants_are_canonicalized(self) -> None:
         fixture = json.loads(
             (

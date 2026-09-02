@@ -43,6 +43,8 @@ _ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 _SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 _HTTP_GLANCE_ACKNOWLEDGEMENT = "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
+_UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT = "I_UNDERSTAND_GLANCE_QUOTA_IS_UNVERIFIED"
+_GLANCE_QUOTA_UNAVAILABLE = "_platform_glance_quota_unavailable"
 
 
 class SetupError(RuntimeError):
@@ -1929,23 +1931,38 @@ def _glance_usage(openstack: Path, resolved: ResolvedSetup) -> Mapping[str, obje
     curl = shutil.which("curl")
     if curl is None:
         _fail("curl is required to query Glance quota")
-    raw = _command(
-        (
-            curl,
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "30",
-            "--header",
-            "@-",
-            url,
-        ),
-        environment=resolved.provider_environment,
-        capture=True,
-        stdin=f"X-Auth-Token: {token}\n".encode(),
-        timeout=40,
-    )
+    try:
+        raw = _command(
+            (
+                curl,
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "30",
+                "--header",
+                "@-",
+                url,
+            ),
+            environment=resolved.provider_environment,
+            capture=True,
+            stdin=f"X-Auth-Token: {token}\n".encode(),
+            timeout=40,
+        )
+    except SetupError as error:
+        if "curl: (22)" not in str(error) or "404" not in str(error):
+            raise
+        if (
+            resolved.values.get("PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA")
+            != _UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT
+        ):
+            _fail(
+                "OpenStack Glance has no quota usage endpoint; set "
+                "PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA="
+                f"{_UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT} to accept an unverified "
+                "legacy-provider quota gate explicitly"
+            )
+        return {_GLANCE_QUOTA_UNAVAILABLE: True}
     try:
         rows = json.loads(raw)
     except json.JSONDecodeError as error:
@@ -1959,15 +1976,6 @@ def _glance_quota_deltas(
     openstack: Path, resolved: ResolvedSetup, artifact_manifest: Mapping[str, Any]
 ) -> dict[str, Any]:
     rows = _glance_usage(openstack, resolved)
-    count_limit, count_used, count_unit = _glance_metric(
-        rows, names=("image_count", "count"), default_unit="images"
-    )
-    storage_limit, storage_used, storage_unit = _glance_metric(
-        rows, names=("image_size", "image_storage", "bytes"), default_unit="bytes"
-    )
-    if count_unit != "images":
-        _fail("OpenStack Glance image-count quota unit is malformed")
-
     records = artifact_manifest.get("roleArtifacts")
     sizes: dict[str, int] = {}
     if isinstance(records, dict) and set(records) == set(IMAGE_ROLES):
@@ -1977,6 +1985,37 @@ def _glance_quota_deltas(
             if isinstance(size, int) and not isinstance(size, bool) and size > 0:
                 sizes[role] = size
     required_storage = sum(sizes.values()) if len(sizes) == len(IMAGE_ROLES) else None
+    if rows == {_GLANCE_QUOTA_UNAVAILABLE: True}:
+        accepted = "unverified-legacy-provider"
+        return {
+            "image_count": {
+                "requiredDelta": len(IMAGE_ROLES),
+                "inUse": None,
+                "limit": None,
+                "available": accepted,
+                "shortfall": 0,
+                "verification": accepted,
+            },
+            "image_storage_bytes": {
+                "requiredDelta": required_storage,
+                "inUse": None,
+                "limit": None,
+                "available": accepted,
+                "shortfall": 0,
+                "artifactSizes": sizes,
+                "providerUnit": "unknown",
+                "verification": accepted,
+            },
+        }
+
+    count_limit, count_used, count_unit = _glance_metric(
+        rows, names=("image_count", "count"), default_unit="images"
+    )
+    storage_limit, storage_used, storage_unit = _glance_metric(
+        rows, names=("image_size", "image_storage", "bytes"), default_unit="bytes"
+    )
+    if count_unit != "images":
+        _fail("OpenStack Glance image-count quota unit is malformed")
 
     def projection(
         required: int | None, limit: int | str | None, used: int | None, unit: str
