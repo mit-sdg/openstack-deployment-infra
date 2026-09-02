@@ -7,13 +7,15 @@ let
   state = platform.paths.adminState;
   backups = platform.paths.backups;
   packages = import ../pkgs { inherit pkgs platform; };
-  imageCompatibilityHash = builtins.hashString "sha256" (builtins.toJSON {
-    format = 1;
-    inherit namespace;
-    pkiInternalCaFile = platform.pki.internalCaFile;
-    prefix = platform.prefix;
-    projectId = platform.projectId;
-  });
+  imageCompatibilityHash = builtins.hashString "sha256" (
+    builtins.toJSON {
+      format = 1;
+      inherit namespace;
+      pkiInternalCaFile = platform.pki.internalCaFile;
+      prefix = platform.prefix;
+      projectId = platform.projectId;
+    }
+  );
   systemdEscapePath =
     path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   testPki = pkgs.runCommand "${namespace}-test-pki" { nativeBuildInputs = [ pkgs.openssl ]; } ''
