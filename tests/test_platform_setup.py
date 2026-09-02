@@ -121,6 +121,35 @@ PLATFORM_DOMAIN='apps.example.test'
 
         self.assertEqual(resolved.provider_environment["OS_PROJECT_ID"], compact)
         self.assertEqual(resolved.project.project_id, canonical)
+        source = (Path(__file__).resolve().parents[1] / "openstack_platform/setup.py").read_text()
+        self.assertIn("_write_openstack_wrapper(paths, provider_environment, openstack)", source)
+
+    def test_generated_provider_wrapper_is_idempotent_after_executable_activation(self) -> None:
+        paths = setup.SetupPaths(
+            repository=self.root,
+            workspace=self.root / "workspace",
+            platform=self.root / "platform.json",
+            policy=self.root / "policy.json",
+            bootstrap=self.root / "bootstrap",
+            pki=self.root / "pki",
+            openstack_environment=self.root / "openstack.env",
+            openstack_wrapper=self.root / "platform-openstack",
+            ssh_directory=self.root / "ssh",
+        )
+        compact = "00000000000040008000000000000001"
+        setup._write_openstack_wrapper(
+            paths,
+            {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"},
+            Path("/nix/store/openstack-one"),
+        )
+        setup._write_openstack_wrapper(
+            paths,
+            {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"},
+            Path("/nix/store/openstack-two"),
+        )
+        self.assertEqual(paths.openstack_wrapper.stat().st_mode & 0o777, 0o700)
+        self.assertIn("/nix/store/openstack-two", paths.openstack_wrapper.read_text())
+        self.assertIn(compact, paths.openstack_environment.read_text())
 
     def test_hosted_controller_inputs_are_transferred_before_activation(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "openstack_platform/setup.py").read_text()

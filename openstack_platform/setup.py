@@ -813,6 +813,18 @@ def _write_openstack_wrapper(
         "set +a\n"
         f'exec {shlex.quote(str(openstack))} "$@"\n'
     )
+    if paths.openstack_wrapper.exists() or paths.openstack_wrapper.is_symlink():
+        metadata = paths.openstack_wrapper.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) not in {0o600, 0o700}
+        ):
+            _fail("existing generated OpenStack wrapper is unsafe")
+        # Durable replacement requires the destination's installation mode.
+        # Normalize the executable post-install mode before replacing it.
+        paths.openstack_wrapper.chmod(0o600)
     _atomic_private_write(paths.openstack_wrapper, wrapper)
     paths.openstack_wrapper.chmod(0o700)
 
@@ -1605,7 +1617,6 @@ def _name_collisions(openstack: Path, resolved: ResolvedSetup) -> list[dict[str,
         "server": set(document["hosts"].values()),
         "port": set(document["ports"].values()),
         "volume": {item["name"] for item in document["volumes"].values()},
-        "image": set(document["images"].values()),
         "security group": {f"{prefix}-{role}" for role in IMAGE_ROLES},
         "keypair": {f"{prefix}-admin"},
     }
@@ -1613,7 +1624,6 @@ def _name_collisions(openstack: Path, resolved: ResolvedSetup) -> list[dict[str,
         "server": ("server", "list", "-f", "json", "-c", "Name"),
         "port": ("port", "list", "-f", "json", "-c", "Name"),
         "volume": ("volume", "list", "-f", "json", "-c", "Name"),
-        "image": ("image", "list", "--private", "-f", "json", "-c", "Name"),
         "security group": ("security", "group", "list", "-f", "json", "-c", "Name"),
         "keypair": ("keypair", "list", "-f", "json", "-c", "Name"),
     }
@@ -2088,6 +2098,19 @@ def _setup_check(
         )
     except (KeyError, ReleaseVerificationError) as error:
         raise SetupError(f"release evidence preflight failed: {error}") from error
+    artifact_manifest_path = Path(values["PLATFORM_ARTIFACT_MANIFEST"])
+    artifact_manifest_sha256 = hashlib.sha256(artifact_manifest_path.read_bytes()).hexdigest()
+    for role in IMAGE_ROLES:
+        _existing_image_id(
+            Path(openstack_command),
+            resolved.provider_environment,
+            str(resolved.document["images"][role]),
+            role,
+            resolved.commit,
+            str(resolved.document["namespace"]),
+            artifact_manifest_sha256,
+            artifact_manifest["roleArtifacts"][role],
+        )
     choices, flavors = _resolved_provider_choices(Path(openstack_command), resolved)
     collisions = _name_collisions(Path(openstack_command), resolved)
     quotas = _quota_deltas(Path(openstack_command), resolved, flavors)
@@ -2303,7 +2326,9 @@ def run_setup(
             _fail("existing setup policy uses another backup age identity")
     else:
         _write_policy(repository, paths.policy, recipient, document, values)
-    _write_openstack_wrapper(paths, values, openstack)
+    # Use the provider-authentication projection so compact project IDs remain
+    # exactly as supplied even though the persisted inventory is canonical.
+    _write_openstack_wrapper(paths, provider_environment, openstack)
     child = _script_environment(provider_environment, paths, python_store)
     _command(
         (repository / "infra/pki/generate_internal_pki.sh", paths.pki),
