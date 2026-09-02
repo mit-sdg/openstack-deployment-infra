@@ -1004,8 +1004,12 @@ def _builder_identity(identity_path: str | Path) -> Path:
         raise ValidationError("builder identity is unavailable") from None
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise ValidationError("builder identity must be a direct regular file")
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise ValidationError("builder identity must not be group or world accessible")
+    mode = stat.S_IMODE(metadata.st_mode)
+    allowed_groups = {os.getegid(), *os.getgroups()}
+    owner_private = metadata.st_uid == os.geteuid() and mode in {0o600, 0o640}
+    controller_group_private = mode == 0o640 and metadata.st_gid in allowed_groups
+    if not owner_private and not controller_group_private:
+        raise ValidationError("builder identity is not restricted to its owner or controller group")
     return identity
 
 

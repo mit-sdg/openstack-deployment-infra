@@ -19,10 +19,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from . import durable
@@ -40,6 +42,7 @@ from .release_manifest import (
 _ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 _SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+_HTTP_GLANCE_ACKNOWLEDGEMENT = "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
 
 
 class SetupError(RuntimeError):
@@ -849,19 +852,43 @@ def _existing_image_id(
     )
     properties = detail.get("properties") if isinstance(detail, dict) else None
     key = namespace.replace("-", "_")
+    expected_sha256 = artifact.get("qcow2Sha256")
+    hash_algorithm = detail.get("os_hash_algo") or detail.get("OS Hash Algo")
+    hash_value = detail.get("os_hash_value") or detail.get("OS Hash Value")
     if (
         not isinstance(properties, dict)
         or properties.get(f"{key}_source_commit") != commit
         or properties.get(f"{key}_role") != role
         or properties.get(f"{key}_artifact_manifest_sha256") != artifact_manifest_sha256
-        or properties.get(f"{key}_qcow2_sha256") != artifact.get("qcow2Sha256")
+        or properties.get(f"{key}_qcow2_sha256") != expected_sha256
         or properties.get(f"{key}_nix_closure_sha256") != artifact.get("nixClosureSha256")
         or properties.get(f"{key}_nix_output") != artifact.get("nixOutput")
-        or (detail.get("os_hash_algo") or detail.get("OS Hash Algo")) != "sha256"
-        or (detail.get("os_hash_value") or detail.get("OS Hash Value"))
-        != artifact.get("qcow2Sha256")
         or (detail.get("status") or detail.get("Status")) != "active"
+        or not isinstance(expected_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
     ):
+        _fail(f"existing image does not match this setup release: {name}")
+    if hash_algorithm is None and hash_value is None:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="setup-existing-image-", suffix=".qcow2"
+        )
+        os.close(descriptor)
+        downloaded = Path(temporary_name)
+        downloaded.unlink()
+        try:
+            _command(
+                (wrapper, "image", "save", "--file", downloaded, image_id),
+                environment=environment,
+            )
+            digest = hashlib.sha256()
+            with downloaded.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                _fail(f"existing image download does not match this setup release: {name}")
+        finally:
+            downloaded.unlink(missing_ok=True)
+    elif hash_algorithm != "sha256" or hash_value != expected_sha256:
         _fail(f"existing image does not match this setup release: {name}")
     try:
         return str(UUID(image_id))
@@ -1079,6 +1106,75 @@ def _bootstrap_roles(
     namespace = str(platform["namespace"])
     remote_root = str(platform["paths"]["root"])
     guest_config = f"/etc/{namespace}/platform.json"
+    hosted_image_seed = paths.workspace / "hosted-image-selections.json"
+    _atomic_private_write(
+        hosted_image_seed,
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "projectId": str(platform["projectId"]),
+                "namespace": namespace,
+                "images": {role: str(UUID(image_ids[role])) for role in IMAGE_ROLES},
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    provisioning = f"{remote_root}/persistent/secrets/provisioning-pki"
+    _command(
+        (
+            "ssh",
+            "-F",
+            ssh_config,
+            OPERATOR_SSH_ALIAS,
+            "--",
+            "install",
+            "-d",
+            "-m",
+            "0700",
+            f"{remote_root}/secrets",
+            provisioning,
+        ),
+        environment=child,
+    )
+    transfers = [
+        (paths.policy, f"{remote_root}/persistent/policy.json", "0600"),
+        (hosted_image_seed, f"{remote_root}/persistent/image-selections.json", "0600"),
+        (paths.openstack_environment, f"{remote_root}/secrets/openstack.env", "0600"),
+        (
+            paths.bootstrap / "storage-bootstrap.env",
+            f"{remote_root}/secrets/storage-bootstrap.env",
+            "0600",
+        ),
+        (
+            builder_key.with_suffix(".pub"),
+            f"{remote_root}/secrets/builder_operator_ed25519.pub",
+            "0644",
+        ),
+        (builder_key, f"{remote_root}/secrets/builder_operator_ed25519", "0600"),
+        (
+            paths.pki / str(platform["pki"]["internalCaFile"]),
+            f"{provisioning}/{platform['pki']['internalCaFile']}",
+            "0644",
+        ),
+        (paths.pki / "nomad-cli.pem", f"{provisioning}/nomad-cli.pem", "0644"),
+        (paths.pki / "nomad-cli-key.pem", f"{provisioning}/nomad-cli-key.pem", "0600"),
+        (paths.pki / "nomad-worker.pem", f"{provisioning}/nomad-worker.pem", "0644"),
+        (paths.pki / "nomad-worker-key.pem", f"{provisioning}/nomad-worker-key.pem", "0600"),
+    ]
+    internal_ca_name = str(platform["pki"]["internalCaFile"])
+    if internal_ca_name != "internal-ca.pem":
+        transfers.append((paths.pki / internal_ca_name, f"{provisioning}/internal-ca.pem", "0644"))
+    for source, destination, mode in transfers:
+        _command(
+            ("scp", "-F", ssh_config, "--", source, f"{OPERATOR_SSH_ALIAS}:{destination}"),
+            environment=child,
+        )
+        _command(
+            ("ssh", "-F", ssh_config, OPERATOR_SSH_ALIAS, "--", "chmod", mode, destination),
+            environment=child,
+        )
     _command(
         (
             "ssh",
@@ -1110,56 +1206,6 @@ def _bootstrap_roles(
         environment=child,
         cwd=paths.repository,
     )
-    provisioning = f"{remote_root}/persistent/secrets/provisioning-pki"
-    _command(
-        (
-            "ssh",
-            "-F",
-            ssh_config,
-            OPERATOR_SSH_ALIAS,
-            "--",
-            "install",
-            "-d",
-            "-m",
-            "0700",
-            f"{remote_root}/secrets",
-            provisioning,
-        ),
-        environment=child,
-    )
-    transfers = [
-        (paths.openstack_environment, f"{remote_root}/secrets/openstack.env", "0600"),
-        (
-            paths.bootstrap / "storage-bootstrap.env",
-            f"{remote_root}/secrets/storage-bootstrap.env",
-            "0600",
-        ),
-        (
-            builder_key.with_suffix(".pub"),
-            f"{remote_root}/secrets/builder_operator_ed25519.pub",
-            "0600",
-        ),
-        (builder_key, f"{remote_root}/secrets/builder_operator_ed25519", "0600"),
-        (
-            paths.pki / str(platform["pki"]["internalCaFile"]),
-            f"{provisioning}/{platform['pki']['internalCaFile']}",
-            "0644",
-        ),
-        (paths.pki / "nomad-worker.pem", f"{provisioning}/nomad-worker.pem", "0644"),
-        (paths.pki / "nomad-worker-key.pem", f"{provisioning}/nomad-worker-key.pem", "0600"),
-    ]
-    internal_ca_name = str(platform["pki"]["internalCaFile"])
-    if internal_ca_name != "internal-ca.pem":
-        transfers.append((paths.pki / internal_ca_name, f"{provisioning}/internal-ca.pem", "0644"))
-    for source, destination, mode in transfers:
-        _command(
-            ("scp", "-F", ssh_config, "--", source, f"{OPERATOR_SSH_ALIAS}:{destination}"),
-            environment=child,
-        )
-        _command(
-            ("ssh", "-F", ssh_config, OPERATOR_SSH_ALIAS, "--", "chmod", mode, destination),
-            environment=child,
-        )
     ingress = dict(child)
     ingress["NOMAD_TOKENS_FILE"] = str(nomad_tokens)
     if cloudflare_token is None:
@@ -1838,8 +1884,25 @@ def _glance_usage(openstack: Path, resolved: ResolvedSetup) -> Mapping[str, obje
         for row in endpoints
         if _field(row, "interface") == interface and (not region or _field(row, "region") == region)
     ]
-    if len(urls) != 1 or not urls[0].startswith("https://"):
-        _fail("OpenStack Glance endpoint must resolve exactly once over HTTPS")
+    if len(urls) != 1:
+        _fail("OpenStack Glance endpoint must resolve exactly once")
+    parsed = urlsplit(urls[0])
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        _fail("OpenStack Glance endpoint URL is malformed")
+    if parsed.scheme == "http" and (
+        resolved.values.get("PLATFORM_ALLOW_HTTP_GLANCE") != _HTTP_GLANCE_ACKNOWLEDGEMENT
+    ):
+        _fail(
+            "OpenStack Glance endpoint uses HTTP; set PLATFORM_ALLOW_HTTP_GLANCE="
+            f"{_HTTP_GLANCE_ACKNOWLEDGEMENT} to acknowledge token transport explicitly"
+        )
     endpoint = urls[0].rstrip("/")
     url = endpoint + "/info/usage" if endpoint.endswith("/v2") else endpoint + "/v2/info/usage"
     token = _command(

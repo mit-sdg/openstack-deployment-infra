@@ -397,54 +397,24 @@ class OpenStackTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.platform = load_platform(ROOT / "config/platform.example.json")
 
-    def test_openstack_deadline_is_absolute_and_refuses_a_late_phase(self) -> None:
-        current = [100.0]
+    def test_project_verification_uses_one_bounded_scoped_token_request(self) -> None:
         timeouts: list[float] = []
-
-        def clock() -> float:
-            return current[0]
 
         def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
             timeouts.append(float(kwargs["timeout_seconds"]))
-            if len(timeouts) == 1:
-                current[0] = 106.0
-                return result(argv, {"project_id": self.platform.project_id})
-            raise AssertionError("the expired second phase must not invoke OpenStack")
-
-        with self.assertRaisesRegex(openstack.OpenStackError, "deadline"):
-            openstack.verify_project(
-                self.platform,
-                timeout_seconds=5,
-                command_runner=runner,
-                clock=clock,
-            )
-        self.assertEqual(len(timeouts), 1)
-        self.assertEqual(timeouts[0], 5.0)
-
-    def test_openstack_deadline_is_carried_as_remaining_time_between_commands(self) -> None:
-        current = [200.0]
-        timeouts: list[float] = []
-
-        def clock() -> float:
-            return current[0]
-
-        def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            timeouts.append(float(kwargs["timeout_seconds"]))
-            if len(timeouts) == 1:
-                current[0] += 3.5
-                return result(argv, {"project_id": self.platform.project_id})
-            return result(
-                argv, {"id": self.platform.project_id, "name": self.platform.project_name}
-            )
+            self.assertEqual(tuple(argv)[1:3], ("token", "issue"))
+            return result(argv, {"project_id": self.platform.project_id})
 
         identity = openstack.verify_project(
             self.platform,
             timeout_seconds=5,
             command_runner=runner,
-            clock=clock,
         )
         self.assertEqual(identity.project_id, self.platform.project_id)
-        self.assertEqual(timeouts, [5.0, 1.5])
+        self.assertEqual(identity.project_name, self.platform.project_name)
+        self.assertEqual(len(timeouts), 1)
+        self.assertGreater(timeouts[0], 4.9)
+        self.assertLessEqual(timeouts[0], 5.0)
 
     def test_publisher_script_emits_canonical_metadata_and_verifies_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -635,9 +605,7 @@ else:
         resources = openstack.observe_host_resources(platform, "admin", command_runner=cloud)
 
         self.assertEqual(identity.project_id, fixture["project_uuid"])
-        project_lookups = [call[3] for call in cloud.calls if call[1:3] == ("project", "show")]
-        self.assertEqual(project_lookups, [fixture["project_id"]] * 3)
-        self.assertNotIn(fixture["project_uuid"], project_lookups)
+        self.assertFalse(any(call[1:3] == ("project", "show") for call in cloud.calls))
         self.assertEqual(images[0].image_id, IMAGE_1)
         self.assertEqual(images[0].owner_id, fixture["project_uuid"])
         self.assertEqual(resources.host.server_id, SERVER)
@@ -660,15 +628,10 @@ else:
                 document[field] = "7A3C91D24B8E42F09C156DE0F28A15B3"
                 return result(tuple(argv), document, returncode=completed.returncode)
 
-        for malformed_command in (("token", "issue"), ("project", "show")):
-            cloud = MalformedProjectCloud(self.platform, malformed_command=malformed_command)
-            with (
-                self.subTest(malformed_command=malformed_command),
-                self.assertRaisesRegex(openstack.OpenStackError, "malformed project UUID"),
-            ):
-                openstack.verify_project(self.platform, command_runner=cloud)
-            if malformed_command == ("token", "issue"):
-                self.assertFalse(any(call[1:3] == ("project", "show") for call in cloud.calls))
+        cloud = MalformedProjectCloud(self.platform, malformed_command=("token", "issue"))
+        with self.assertRaisesRegex(openstack.OpenStackError, "malformed project UUID"):
+            openstack.verify_project(self.platform, command_runner=cloud)
+        self.assertFalse(any(call[1:3] == ("project", "show") for call in cloud.calls))
 
         class MalformedResourceCloud(FakeCloud):
             def __init__(self, *args, target: tuple[str, ...], **kwargs):
@@ -939,12 +902,23 @@ else:
             )
         self.assertFalse(any(call[1:3] == ("image", "delete") for call in cloud.calls))
 
-    def test_flavor_observation_enforces_one_vcpu(self) -> None:
-        cloud = FakeCloud(self.platform)
+    def test_worker_flavor_observation_accepts_available_multi_vcpu_flavor(self) -> None:
+        class MultiCpuCloud(FakeCloud):
+            def __call__(self, argv, **kwargs):
+                if tuple(argv)[1:3] == ("flavor", "show"):
+                    self.calls.append(tuple(argv))
+                    self.assert_safe_call(tuple(argv), kwargs)
+                    return result(
+                        tuple(argv),
+                        {"id": FLAVOR, "name": "example.2c4g", "vcpus": 2, "ram": 4096},
+                    )
+                return super().__call__(argv, **kwargs)
+
+        cloud = MultiCpuCloud(self.platform)
         flavor_name = openstack.observe_flavor(
-            self.platform, "example.1c2g", require_one_vcpu=True, command_runner=cloud
+            self.platform, "example.2c4g", require_one_vcpu=True, command_runner=cloud
         )
-        self.assertEqual(flavor_name, "example.1c2g")
+        self.assertEqual(flavor_name, "example.2c4g")
 
     def test_power_uses_selected_server_uuid_and_requires_health(self) -> None:
         cloud = FakeCloud(self.platform)

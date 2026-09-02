@@ -176,7 +176,7 @@ role. The QCOW2 artifacts use no additional compression and expire after one
 day. An aggregation job downloads only compact evidence and emits the shared
 unsigned manifest. Five dependent jobs each download one exact QCOW2, QEMU-boot, verify, and
 publish it without rebuilding an independently varying QCOW2. Provider-facing
-publication is limited to two concurrent jobs, and a missing Glance SHA-256
+publication is serialized to one job at a time, and a missing Glance SHA-256
 triggers up to three bounded download-verification attempts. Success requires
 all five publish jobs and the
 `development-role-evidence-<commit>` artifact. Never expose these

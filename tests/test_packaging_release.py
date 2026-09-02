@@ -1114,6 +1114,9 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertIn("/run/current-system/sw/bin/python3.14", script)
         self.assertIn('--archive-sha256 "$archive_sha256"', script)
         self.assertNotIn("/srv/" + "test-platform", script)
+        installer = (ROOT / "deploy/releases/install_release.py").read_text()
+        self.assertIn('replace_packaged_root_symlink=mode == "helper"', installer)
+        self.assertIn("_packaged_root_symlink", installer)
 
 
 class OperatorConfigInstallerTests(unittest.TestCase):

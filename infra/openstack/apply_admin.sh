@@ -128,11 +128,9 @@ wait_for_bootstrap() {
       echo "admin bootstrap ready: $SERVER_NAME"
       return 0
     fi
-    if grep -Fq "$PLATFORM_NAMESPACE NixOS admin readiness failed" <<<"$log"; then
-      echo "admin bootstrap reported a definitive failure: $SERVER_NAME" >&2
-      grep -Ei 'FAILED|error|dependency|fatal|permission' <<<"$log" | tail -20 >&2 || true
-      return 1
-    fi
+    # A fresh retained-volume initialization deliberately reboots once. Console
+    # output from the pre-reboot boot is retained, so an early readiness failure
+    # is diagnostic only; a later success marker remains authoritative.
     report_every=$((30 / BOOTSTRAP_POLL_INTERVAL))
     (( report_every > 0 )) || report_every=1
     if (( i == 1 || i % report_every == 0 )); then
@@ -143,6 +141,7 @@ wait_for_bootstrap() {
     sleep "$BOOTSTRAP_POLL_INTERVAL"
   done
   echo "timed out waiting for admin bootstrap: $SERVER_NAME" >&2
+  grep -Ei 'FAILED|error|dependency|fatal|permission' <<<"${log:-}" | tail -20 >&2 || true
   return 1
 }
 

@@ -100,7 +100,7 @@ class PublicationTriggerTests(unittest.TestCase):
         self.assertIn("Upload exact role QCOW2", workflow)
         self.assertIn("compression-level: 0", workflow)
         self.assertIn("Download exact role QCOW2", workflow)
-        self.assertIn("max-parallel: 2", workflow)
+        self.assertGreaterEqual(workflow.count("max-parallel: 1"), 2)
         self.assertIn("merge-multiple: true", workflow)
         self.assertIn("role:\n          - admin", workflow)
         self.assertIn("environment: openstack-images", workflow)

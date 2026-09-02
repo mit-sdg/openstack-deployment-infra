@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tempfile
@@ -120,6 +121,19 @@ PLATFORM_DOMAIN='apps.example.test'
 
         self.assertEqual(resolved.provider_environment["OS_PROJECT_ID"], compact)
         self.assertEqual(resolved.project.project_id, canonical)
+
+    def test_hosted_controller_inputs_are_transferred_before_activation(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "openstack_platform/setup.py").read_text()
+        for name in (
+            "persistent/policy.json",
+            "persistent/image-selections.json",
+            "nomad-cli.pem",
+            "nomad-cli-key.pem",
+            "nomad-worker-key.pem",
+            "builder_operator_ed25519.pub",
+        ):
+            self.assertIn(name, source)
+        self.assertIn('builder_operator_ed25519.pub",\n            "0644"', source)
 
     def test_malformed_or_missing_direct_provider_cidrs_fail_before_mutation(self) -> None:
         cases = (
@@ -552,6 +566,56 @@ class SetupPreflightTests(unittest.TestCase):
         self.assertFalse(plan["ready"])
         self.assertFalse(plan["resolved"]["fixedAddresses"]["ingress"]["available"])
 
+    def test_existing_image_without_provider_hash_uses_download_sha256(self) -> None:
+        payload = b"verified existing image"
+        digest = hashlib.sha256(payload).hexdigest()
+        image_id = "00000000-0000-4000-8000-000000000099"
+        artifact_manifest_sha256 = "c" * 64
+        artifact = {
+            "qcow2Sha256": digest,
+            "nixClosureSha256": "d" * 64,
+            "nixOutput": "nix-output",
+        }
+        properties = {
+            "demo_platform_source_commit": "a" * 40,
+            "demo_platform_role": "worker",
+            "demo_platform_artifact_manifest_sha256": artifact_manifest_sha256,
+            "demo_platform_qcow2_sha256": digest,
+            "demo_platform_nix_closure_sha256": "d" * 64,
+            "demo_platform_nix_output": "nix-output",
+        }
+
+        def provider(argv: object, **_kwargs: object) -> object:
+            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+            if command[1:3] == ("image", "list"):
+                return [{"ID": image_id, "Name": "demo-worker"}]
+            if command[1:3] == ("image", "show"):
+                return {"status": "active", "properties": properties}
+            self.fail(command)
+
+        def download(argv: object, **_kwargs: object) -> str:
+            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+            self.assertEqual(command[1:3], ("image", "save"))
+            Path(command[command.index("--file") + 1]).write_bytes(payload)
+            return ""
+
+        with (
+            mock.patch.object(setup, "_json_command", side_effect=provider),
+            mock.patch.object(setup, "_command", side_effect=download) as command,
+        ):
+            selected = setup._existing_image_id(
+                Path("openstack"),
+                {},
+                "demo-worker",
+                "worker",
+                "a" * 40,
+                "demo-platform",
+                artifact_manifest_sha256,
+                artifact,
+            )
+        self.assertEqual(selected, image_id)
+        command.assert_called_once()
+
     def test_glance_quota_refuses_non_https_endpoint_before_token_use(self) -> None:
         with (
             mock.patch.object(
@@ -568,10 +632,45 @@ class SetupPreflightTests(unittest.TestCase):
                 },
             ),
             mock.patch.object(setup, "_command") as command,
-            self.assertRaisesRegex(setup.SetupError, "over HTTPS"),
+            self.assertRaisesRegex(setup.SetupError, "uses HTTP"),
         ):
             setup._glance_usage(Path("openstack"), self.resolved)
         command.assert_not_called()
+
+    def test_glance_quota_allows_http_only_after_exact_acknowledgement(self) -> None:
+        self.resolved.values["PLATFORM_ALLOW_HTTP_GLANCE"] = (
+            "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
+        )
+        try:
+            with (
+                mock.patch.object(
+                    setup,
+                    "_json_command",
+                    return_value={
+                        "endpoints": [
+                            {
+                                "interface": "public",
+                                "region": "RegionOne",
+                                "url": "http://images.example.test/v2",
+                            }
+                        ]
+                    },
+                ),
+                mock.patch.object(
+                    setup,
+                    "_command",
+                    side_effect=(
+                        "opaque-token",
+                        json.dumps({"limits": {}, "usage": {}}),
+                    ),
+                ) as command,
+                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
+            ):
+                result = setup._glance_usage(Path("openstack"), self.resolved)
+        finally:
+            self.resolved.values.pop("PLATFORM_ALLOW_HTTP_GLANCE")
+        self.assertEqual(result, {"limits": {}, "usage": {}})
+        self.assertEqual(command.call_count, 2)
 
     def test_glance_quota_bytes_and_gib_formatter_variants_are_canonicalized(self) -> None:
         fixture = json.loads(

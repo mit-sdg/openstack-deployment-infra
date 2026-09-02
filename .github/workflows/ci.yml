@@ -308,7 +308,8 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 5
+      # Keep provider authentication and Glance mutations serialized.
+      max-parallel: 1
       matrix:
         role:
           - admin
@@ -781,7 +782,9 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      max-parallel: 2
+      # Keystone intermittently rejects concurrent project-scoped image
+      # publication even after each isolated role build has succeeded.
+      max-parallel: 1
       matrix:
         role:
           - admin

@@ -295,7 +295,19 @@ checks fixed addresses and reserved names, validates tooling and ingress, and
 verifies the release sources. It performs provider reads only: it does not
 create a workspace, generate credentials, build images, or mutate OpenStack.
 
-Continue only when the result reports `setup-check=ready`.
+Continue only when the result reports `setup-check=ready`. HTTPS is required for
+the catalog-selected Glance usage endpoint by default. On a provider whose
+Glance endpoint is intentionally HTTP-only, add this exact acknowledgement to
+the protected setup environment:
+
+```dotenv
+PLATFORM_ALLOW_HTTP_GLANCE='I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP'
+```
+
+This permits the scoped token to cross that HTTP connection; it does not disable
+certificate checks for HTTPS endpoints or enable redirects. Existing images
+without Glance `os_hash_*` fields are accepted only after setup downloads them
+and verifies the signed QCOW2 SHA-256.
 
 ## Create the deployment
 
@@ -319,8 +331,10 @@ pending. Setup then:
 5. creates admin and attaches its state and backup volumes;
 6. establishes the pinned operator bridge and Nomad ACLs;
 7. creates storage with its data volume, then creates ingress;
-8. installs matching operator/helper releases and starts the local controller;
-9. selects the five exact image UUIDs and initializes backup schedules; and
+8. transfers controller-readable lifecycle credentials, installs matching
+   operator/helper releases, seeds image selections, and starts the local controller;
+9. selects the same five exact image UUIDs in operator state and initializes
+   backup schedules; and
 10. requires healthy role and controller observations before completion.
 
 Successful output ends with:
