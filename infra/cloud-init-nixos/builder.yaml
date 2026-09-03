@@ -9,7 +9,21 @@ users:
     shell: /run/current-system/sw/bin/bash
     ssh_authorized_keys:
       - __BUILDER_OPERATOR_PUBLIC_KEY__
+bootcmd:
+  - |
+    set -eu
+    marker=/var/lib/__PLATFORM_NAMESPACE__-config-drive-v1
+    if [ ! -e "$marker" ]; then
+      find /var/lib/cloud -type f -path '*/sem/config_write_files' -delete
+      cloud-init single --name write-files --frequency always
+      : > "$marker"
+    fi
 write_files:
+  - path: /etc/__PLATFORM_NAMESPACE__/.provisioned
+    permissions: "0600"
+    owner: root:root
+    content: |
+      config-drive-v1
   - path: /usr/local/share/ca-certificates/__PLATFORM_NAMESPACE__-internal-ca.crt
     owner: root:root
     permissions: "0644"

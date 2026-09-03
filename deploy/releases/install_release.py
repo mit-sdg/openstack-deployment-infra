@@ -104,11 +104,37 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _atomic_symlink(target: Path, link: Path) -> None:
+def _packaged_root_symlink(link: Path, metadata: os.stat_result) -> bool:
+    if not stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != _ROOT_UID:
+        return False
+    try:
+        resolved = link.resolve(strict=True)
+        target = resolved.lstat()
+    except (OSError, RuntimeError):
+        return False
+    return (
+        resolved != _NIX_STORE
+        and resolved.is_relative_to(_NIX_STORE)
+        and stat.S_ISREG(target.st_mode)
+        and not stat.S_ISLNK(target.st_mode)
+        and target.st_uid == _ROOT_UID
+        and not (stat.S_IMODE(target.st_mode) & 0o022)
+        and os.access(resolved, os.X_OK)
+    )
+
+
+def _atomic_symlink(
+    target: Path,
+    link: Path,
+    *,
+    replace_packaged_root_symlink: bool = False,
+) -> None:
     _ensure_directory(link.parent, 0o750)
     if os.path.lexists(link):
         metadata = link.lstat()
-        if not stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        owned = stat.S_ISLNK(metadata.st_mode) and metadata.st_uid == os.geteuid()
+        packaged = replace_packaged_root_symlink and _packaged_root_symlink(link, metadata)
+        if not owned and not packaged:
             _fail("release selector must be a current-user-owned direct symlink")
     temporary = link.parent / f".{link.name}.tmp"
     if os.path.lexists(temporary):
@@ -1106,7 +1132,11 @@ def install(args: argparse.Namespace) -> Path:
 
         _atomic_symlink(final, release_root / "current")
         launcher_name = "openstack-platform" if mode == "operator" else "openstack-platform-helper"
-        _atomic_symlink(release_root / "current/bin" / launcher_name, bin_root / launcher_name)
+        _atomic_symlink(
+            release_root / "current/bin" / launcher_name,
+            bin_root / launcher_name,
+            replace_packaged_root_symlink=mode == "helper",
+        )
         if mode == "operator":
             _atomic_symlink(
                 release_root / "current/bin/openstack-platform-install-config",

@@ -19,10 +19,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from . import durable
@@ -40,6 +42,9 @@ from .release_manifest import (
 _ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 _SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+_HTTP_GLANCE_ACKNOWLEDGEMENT = "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
+_UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT = "I_UNDERSTAND_GLANCE_QUOTA_IS_UNVERIFIED"
+_GLANCE_QUOTA_UNAVAILABLE = "_platform_glance_quota_unavailable"
 
 
 class SetupError(RuntimeError):
@@ -207,8 +212,13 @@ def _repository_root() -> Path:
     return root
 
 
-def _source_commit(repository: Path, environment: Mapping[str, str]) -> str:
-    supplied = environment.get("PLATFORM_SOURCE_COMMIT")
+def _source_commit(
+    repository: Path,
+    environment: Mapping[str, str],
+    *,
+    supplied: str | None = None,
+) -> str:
+    supplied = supplied or environment.get("PLATFORM_SOURCE_COMMIT")
     if supplied:
         if not _FULL_COMMIT.fullmatch(supplied):
             _fail("PLATFORM_SOURCE_COMMIT must be a full lowercase commit")
@@ -808,6 +818,18 @@ def _write_openstack_wrapper(
         "set +a\n"
         f'exec {shlex.quote(str(openstack))} "$@"\n'
     )
+    if paths.openstack_wrapper.exists() or paths.openstack_wrapper.is_symlink():
+        metadata = paths.openstack_wrapper.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) not in {0o600, 0o700}
+        ):
+            _fail("existing generated OpenStack wrapper is unsafe")
+        # Durable replacement requires the destination's installation mode.
+        # Normalize the executable post-install mode before replacing it.
+        paths.openstack_wrapper.chmod(0o600)
     _atomic_private_write(paths.openstack_wrapper, wrapper)
     paths.openstack_wrapper.chmod(0o700)
 
@@ -849,19 +871,43 @@ def _existing_image_id(
     )
     properties = detail.get("properties") if isinstance(detail, dict) else None
     key = namespace.replace("-", "_")
+    expected_sha256 = artifact.get("qcow2Sha256")
+    hash_algorithm = detail.get("os_hash_algo") or detail.get("OS Hash Algo")
+    hash_value = detail.get("os_hash_value") or detail.get("OS Hash Value")
     if (
         not isinstance(properties, dict)
         or properties.get(f"{key}_source_commit") != commit
         or properties.get(f"{key}_role") != role
         or properties.get(f"{key}_artifact_manifest_sha256") != artifact_manifest_sha256
-        or properties.get(f"{key}_qcow2_sha256") != artifact.get("qcow2Sha256")
+        or properties.get(f"{key}_qcow2_sha256") != expected_sha256
         or properties.get(f"{key}_nix_closure_sha256") != artifact.get("nixClosureSha256")
         or properties.get(f"{key}_nix_output") != artifact.get("nixOutput")
-        or (detail.get("os_hash_algo") or detail.get("OS Hash Algo")) != "sha256"
-        or (detail.get("os_hash_value") or detail.get("OS Hash Value"))
-        != artifact.get("qcow2Sha256")
         or (detail.get("status") or detail.get("Status")) != "active"
+        or not isinstance(expected_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
     ):
+        _fail(f"existing image does not match this setup release: {name}")
+    if hash_algorithm is None and hash_value is None:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="setup-existing-image-", suffix=".qcow2"
+        )
+        os.close(descriptor)
+        downloaded = Path(temporary_name)
+        downloaded.unlink()
+        try:
+            _command(
+                (wrapper, "image", "save", "--file", downloaded, image_id),
+                environment=environment,
+            )
+            digest = hashlib.sha256()
+            with downloaded.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                _fail(f"existing image download does not match this setup release: {name}")
+        finally:
+            downloaded.unlink(missing_ok=True)
+    elif hash_algorithm != "sha256" or hash_value != expected_sha256:
         _fail(f"existing image does not match this setup release: {name}")
     try:
         return str(UUID(image_id))
@@ -1079,6 +1125,84 @@ def _bootstrap_roles(
     namespace = str(platform["namespace"])
     remote_root = str(platform["paths"]["root"])
     guest_config = f"/etc/{namespace}/platform.json"
+    hosted_image_seed = paths.workspace / "hosted-image-selections.json"
+    compatibility_hash = platform_openstack.image_compatibility_hash(load_platform(paths.platform))
+    _atomic_private_write(
+        hosted_image_seed,
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "projectId": str(platform["projectId"]),
+                "namespace": namespace,
+                "images": {
+                    role: {
+                        "imageId": str(UUID(image_ids[role])),
+                        "displayName": str(platform["images"][role]),
+                        "sourceCommit": commit,
+                        "compatibilityHash": compatibility_hash,
+                    }
+                    for role in IMAGE_ROLES
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    provisioning = f"{remote_root}/persistent/secrets/provisioning-pki"
+    _command(
+        (
+            "ssh",
+            "-F",
+            ssh_config,
+            OPERATOR_SSH_ALIAS,
+            "--",
+            "install",
+            "-d",
+            "-m",
+            "0700",
+            f"{remote_root}/secrets",
+            provisioning,
+        ),
+        environment=child,
+    )
+    transfers = [
+        (paths.policy, f"{remote_root}/persistent/policy.json", "0600"),
+        (hosted_image_seed, f"{remote_root}/persistent/image-selections.json", "0600"),
+        (paths.openstack_environment, f"{remote_root}/secrets/openstack.env", "0600"),
+        (
+            paths.bootstrap / "storage-bootstrap.env",
+            f"{remote_root}/secrets/storage-bootstrap.env",
+            "0600",
+        ),
+        (
+            builder_key.with_suffix(".pub"),
+            f"{remote_root}/secrets/builder_operator_ed25519.pub",
+            "0644",
+        ),
+        (builder_key, f"{remote_root}/secrets/builder_operator_ed25519", "0600"),
+        (
+            paths.pki / str(platform["pki"]["internalCaFile"]),
+            f"{provisioning}/{platform['pki']['internalCaFile']}",
+            "0644",
+        ),
+        (paths.pki / "nomad-cli.pem", f"{provisioning}/nomad-cli.pem", "0644"),
+        (paths.pki / "nomad-cli-key.pem", f"{provisioning}/nomad-cli-key.pem", "0600"),
+        (paths.pki / "nomad-worker.pem", f"{provisioning}/nomad-worker.pem", "0644"),
+        (paths.pki / "nomad-worker-key.pem", f"{provisioning}/nomad-worker-key.pem", "0600"),
+    ]
+    internal_ca_name = str(platform["pki"]["internalCaFile"])
+    if internal_ca_name != "internal-ca.pem":
+        transfers.append((paths.pki / internal_ca_name, f"{provisioning}/internal-ca.pem", "0644"))
+    for source, destination, mode in transfers:
+        _command(
+            ("scp", "-F", ssh_config, "--", source, f"{OPERATOR_SSH_ALIAS}:{destination}"),
+            environment=child,
+        )
+        _command(
+            ("ssh", "-F", ssh_config, OPERATOR_SSH_ALIAS, "--", "chmod", mode, destination),
+            environment=child,
+        )
     _command(
         (
             "ssh",
@@ -1110,56 +1234,6 @@ def _bootstrap_roles(
         environment=child,
         cwd=paths.repository,
     )
-    provisioning = f"{remote_root}/persistent/secrets/provisioning-pki"
-    _command(
-        (
-            "ssh",
-            "-F",
-            ssh_config,
-            OPERATOR_SSH_ALIAS,
-            "--",
-            "install",
-            "-d",
-            "-m",
-            "0700",
-            f"{remote_root}/secrets",
-            provisioning,
-        ),
-        environment=child,
-    )
-    transfers = [
-        (paths.openstack_environment, f"{remote_root}/secrets/openstack.env", "0600"),
-        (
-            paths.bootstrap / "storage-bootstrap.env",
-            f"{remote_root}/secrets/storage-bootstrap.env",
-            "0600",
-        ),
-        (
-            builder_key.with_suffix(".pub"),
-            f"{remote_root}/secrets/builder_operator_ed25519.pub",
-            "0600",
-        ),
-        (builder_key, f"{remote_root}/secrets/builder_operator_ed25519", "0600"),
-        (
-            paths.pki / str(platform["pki"]["internalCaFile"]),
-            f"{provisioning}/{platform['pki']['internalCaFile']}",
-            "0644",
-        ),
-        (paths.pki / "nomad-worker.pem", f"{provisioning}/nomad-worker.pem", "0644"),
-        (paths.pki / "nomad-worker-key.pem", f"{provisioning}/nomad-worker-key.pem", "0600"),
-    ]
-    internal_ca_name = str(platform["pki"]["internalCaFile"])
-    if internal_ca_name != "internal-ca.pem":
-        transfers.append((paths.pki / internal_ca_name, f"{provisioning}/internal-ca.pem", "0644"))
-    for source, destination, mode in transfers:
-        _command(
-            ("scp", "-F", ssh_config, "--", source, f"{OPERATOR_SSH_ALIAS}:{destination}"),
-            environment=child,
-        )
-        _command(
-            ("ssh", "-F", ssh_config, OPERATOR_SSH_ALIAS, "--", "chmod", mode, destination),
-            environment=child,
-        )
     ingress = dict(child)
     ingress["NOMAD_TOKENS_FILE"] = str(nomad_tokens)
     if cloudflare_token is None:
@@ -1422,7 +1496,11 @@ def _resolve_setup_inputs(
     """Resolve the strict setup inputs shared by check and apply."""
     _credential_requirements(values, input_reader, secret_reader)
     provider_environment = _openstack_environment(values)
-    resolved_commit = commit or _source_commit(repository, provider_environment)
+    resolved_commit = commit or _source_commit(
+        repository,
+        provider_environment,
+        supplied=values.get("PLATFORM_SOURCE_COMMIT"),
+    )
     project = _project_identity(openstack, provider_environment)
     # Preserve the provider-issued project ID spelling used for authentication.
     # Some Keystone deployments accept their compact UUID form but reject the
@@ -1548,7 +1626,6 @@ def _name_collisions(openstack: Path, resolved: ResolvedSetup) -> list[dict[str,
         "server": set(document["hosts"].values()),
         "port": set(document["ports"].values()),
         "volume": {item["name"] for item in document["volumes"].values()},
-        "image": set(document["images"].values()),
         "security group": {f"{prefix}-{role}" for role in IMAGE_ROLES},
         "keypair": {f"{prefix}-admin"},
     }
@@ -1556,7 +1633,6 @@ def _name_collisions(openstack: Path, resolved: ResolvedSetup) -> list[dict[str,
         "server": ("server", "list", "-f", "json", "-c", "Name"),
         "port": ("port", "list", "-f", "json", "-c", "Name"),
         "volume": ("volume", "list", "-f", "json", "-c", "Name"),
-        "image": ("image", "list", "--private", "-f", "json", "-c", "Name"),
         "security group": ("security", "group", "list", "-f", "json", "-c", "Name"),
         "keypair": ("keypair", "list", "-f", "json", "-c", "Name"),
     }
@@ -1833,13 +1909,35 @@ def _glance_usage(openstack: Path, resolved: ResolvedSetup) -> Mapping[str, obje
     if not isinstance(endpoints, list) or any(not isinstance(row, dict) for row in endpoints):
         _fail("OpenStack Glance endpoint inventory is malformed")
     region = resolved.provider_environment.get("OS_REGION_NAME")
-    urls = [
-        str(_field(row, "URL", "url"))
-        for row in endpoints
-        if _field(row, "interface") == interface and (not region or _field(row, "region") == region)
-    ]
-    if len(urls) != 1 or not urls[0].startswith("https://"):
-        _fail("OpenStack Glance endpoint must resolve exactly once over HTTPS")
+    # Some older service catalogs repeat the same endpoint record under
+    # different IDs. Require one unique URL rather than one catalog row.
+    urls = sorted(
+        {
+            str(_field(row, "URL", "url"))
+            for row in endpoints
+            if _field(row, "interface") == interface
+            and (not region or _field(row, "region") == region)
+        }
+    )
+    if len(urls) != 1:
+        _fail("OpenStack Glance endpoint must resolve exactly once")
+    parsed = urlsplit(urls[0])
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        _fail("OpenStack Glance endpoint URL is malformed")
+    if parsed.scheme == "http" and (
+        resolved.values.get("PLATFORM_ALLOW_HTTP_GLANCE") != _HTTP_GLANCE_ACKNOWLEDGEMENT
+    ):
+        _fail(
+            "OpenStack Glance endpoint uses HTTP; set PLATFORM_ALLOW_HTTP_GLANCE="
+            f"{_HTTP_GLANCE_ACKNOWLEDGEMENT} to acknowledge token transport explicitly"
+        )
     endpoint = urls[0].rstrip("/")
     url = endpoint + "/info/usage" if endpoint.endswith("/v2") else endpoint + "/v2/info/usage"
     token = _command(
@@ -1852,23 +1950,38 @@ def _glance_usage(openstack: Path, resolved: ResolvedSetup) -> Mapping[str, obje
     curl = shutil.which("curl")
     if curl is None:
         _fail("curl is required to query Glance quota")
-    raw = _command(
-        (
-            curl,
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "30",
-            "--header",
-            "@-",
-            url,
-        ),
-        environment=resolved.provider_environment,
-        capture=True,
-        stdin=f"X-Auth-Token: {token}\n".encode(),
-        timeout=40,
-    )
+    try:
+        raw = _command(
+            (
+                curl,
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "30",
+                "--header",
+                "@-",
+                url,
+            ),
+            environment=resolved.provider_environment,
+            capture=True,
+            stdin=f"X-Auth-Token: {token}\n".encode(),
+            timeout=40,
+        )
+    except SetupError as error:
+        if "curl: (22)" not in str(error) or "404" not in str(error):
+            raise
+        if (
+            resolved.values.get("PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA")
+            != _UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT
+        ):
+            _fail(
+                "OpenStack Glance has no quota usage endpoint; set "
+                "PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA="
+                f"{_UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT} to accept an unverified "
+                "legacy-provider quota gate explicitly"
+            )
+        return {_GLANCE_QUOTA_UNAVAILABLE: True}
     try:
         rows = json.loads(raw)
     except json.JSONDecodeError as error:
@@ -1882,15 +1995,6 @@ def _glance_quota_deltas(
     openstack: Path, resolved: ResolvedSetup, artifact_manifest: Mapping[str, Any]
 ) -> dict[str, Any]:
     rows = _glance_usage(openstack, resolved)
-    count_limit, count_used, count_unit = _glance_metric(
-        rows, names=("image_count", "count"), default_unit="images"
-    )
-    storage_limit, storage_used, storage_unit = _glance_metric(
-        rows, names=("image_size", "image_storage", "bytes"), default_unit="bytes"
-    )
-    if count_unit != "images":
-        _fail("OpenStack Glance image-count quota unit is malformed")
-
     records = artifact_manifest.get("roleArtifacts")
     sizes: dict[str, int] = {}
     if isinstance(records, dict) and set(records) == set(IMAGE_ROLES):
@@ -1900,6 +2004,37 @@ def _glance_quota_deltas(
             if isinstance(size, int) and not isinstance(size, bool) and size > 0:
                 sizes[role] = size
     required_storage = sum(sizes.values()) if len(sizes) == len(IMAGE_ROLES) else None
+    if rows == {_GLANCE_QUOTA_UNAVAILABLE: True}:
+        accepted = "unverified-legacy-provider"
+        return {
+            "image_count": {
+                "requiredDelta": len(IMAGE_ROLES),
+                "inUse": None,
+                "limit": None,
+                "available": accepted,
+                "shortfall": 0,
+                "verification": accepted,
+            },
+            "image_storage_bytes": {
+                "requiredDelta": required_storage,
+                "inUse": None,
+                "limit": None,
+                "available": accepted,
+                "shortfall": 0,
+                "artifactSizes": sizes,
+                "providerUnit": "unknown",
+                "verification": accepted,
+            },
+        }
+
+    count_limit, count_used, count_unit = _glance_metric(
+        rows, names=("image_count", "count"), default_unit="images"
+    )
+    storage_limit, storage_used, storage_unit = _glance_metric(
+        rows, names=("image_size", "image_storage", "bytes"), default_unit="bytes"
+    )
+    if count_unit != "images":
+        _fail("OpenStack Glance image-count quota unit is malformed")
 
     def projection(
         required: int | None, limit: int | str | None, used: int | None, unit: str
@@ -1972,6 +2107,19 @@ def _setup_check(
         )
     except (KeyError, ReleaseVerificationError) as error:
         raise SetupError(f"release evidence preflight failed: {error}") from error
+    artifact_manifest_path = Path(values["PLATFORM_ARTIFACT_MANIFEST"])
+    artifact_manifest_sha256 = hashlib.sha256(artifact_manifest_path.read_bytes()).hexdigest()
+    for role in IMAGE_ROLES:
+        _existing_image_id(
+            Path(openstack_command),
+            resolved.provider_environment,
+            str(resolved.document["images"][role]),
+            role,
+            resolved.commit,
+            str(resolved.document["namespace"]),
+            artifact_manifest_sha256,
+            artifact_manifest["roleArtifacts"][role],
+        )
     choices, flavors = _resolved_provider_choices(Path(openstack_command), resolved)
     collisions = _name_collisions(Path(openstack_command), resolved)
     quotas = _quota_deltas(Path(openstack_command), resolved, flavors)
@@ -2123,7 +2271,11 @@ def run_setup(
     repository = _repository_root()
     _credential_requirements(values, input_reader, secret_reader)
     provider_environment = _openstack_environment(values)
-    commit = _source_commit(repository, provider_environment)
+    commit = _source_commit(
+        repository,
+        provider_environment,
+        supplied=values.get("PLATFORM_SOURCE_COMMIT"),
+    )
     # This is the production gate: verify the complete signed component set
     # before creating a workspace, generating a key, or calling OpenStack/Nix.
     try:
@@ -2187,7 +2339,9 @@ def run_setup(
             _fail("existing setup policy uses another backup age identity")
     else:
         _write_policy(repository, paths.policy, recipient, document, values)
-    _write_openstack_wrapper(paths, values, openstack)
+    # Use the provider-authentication projection so compact project IDs remain
+    # exactly as supplied even though the persisted inventory is canonical.
+    _write_openstack_wrapper(paths, provider_environment, openstack)
     child = _script_environment(provider_environment, paths, python_store)
     _command(
         (repository / "infra/pki/generate_internal_pki.sh", paths.pki),

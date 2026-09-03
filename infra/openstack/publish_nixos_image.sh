@@ -274,10 +274,23 @@ PY
 if [[ $hash_verification == download ]]; then
   downloaded=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/published-image.XXXXXX.qcow2")
   trap 'rm -f "$downloaded"' EXIT
-  "$OSC" image save --file "$downloaded" "$image_id"
-  downloaded_sha256=$(sha256sum "$downloaded" | cut -d' ' -f1)
-  [[ $downloaded_sha256 == "$PLATFORM_ARTIFACT_QCOW2_SHA256" ]] || {
-    echo "downloaded published image SHA-256 differs" >&2
+  download_verified=false
+  for attempt in 1 2 3; do
+    rm -f "$downloaded"
+    if "$OSC" image save --file "$downloaded" "$image_id"; then
+      downloaded_sha256=$(sha256sum "$downloaded" | cut -d' ' -f1)
+      [[ $downloaded_sha256 == "$PLATFORM_ARTIFACT_QCOW2_SHA256" ]] || {
+        echo "downloaded published image SHA-256 differs" >&2
+        exit 1
+      }
+      download_verified=true
+      break
+    fi
+    (( attempt < 3 )) || break
+    sleep $((attempt * 10))
+  done
+  [[ $download_verified == true ]] || {
+    echo "published image could not be downloaded for SHA-256 verification" >&2
     exit 1
   }
   rm -f "$downloaded"

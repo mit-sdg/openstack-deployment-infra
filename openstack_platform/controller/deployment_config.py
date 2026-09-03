@@ -215,6 +215,7 @@ def validate_checkout(
     source_root: str | Path,
     *,
     maximum_package_bytes: int = 65_536,
+    maximum_lockfile_bytes: int = 1_048_576,
 ) -> None:
     """Validate UI-selected package inputs in an acquired exact checkout."""
     if not isinstance(configuration, DeploymentConfiguration):
@@ -230,7 +231,7 @@ def validate_checkout(
         if not directory.is_dir():
             raise ValidationError(f"package {package!r} is not a source directory")
         locks = [directory / name for name in lock_names]
-        if not any(_direct_file(path, maximum_package_bytes) for path in locks):
+        if not any(_direct_file(path, maximum_lockfile_bytes) for path in locks):
             raise ValidationError(f"package {package!r} is missing its supported lockfile")
 
     package_json = root / "package.json"

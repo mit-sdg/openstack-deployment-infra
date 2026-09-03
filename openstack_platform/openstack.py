@@ -481,20 +481,11 @@ def verify_project(
     configured_project_id = uuid(platform.project_id, field="configured project UUID")
     if project_id != configured_project_id:
         raise OpenStackError("authenticated OpenStack project UUID does not match configuration")
-    assert isinstance(raw_project_id, str)  # Established by the provider UUID parser above.
-    project = _json_command(
-        ("project", "show", raw_project_id, "--column", "id", "--column", "name"),
-        timeout_seconds=_deadline_remaining(deadline, operation="project verification"),
-        command_runner=command_runner,
-        executable=executable,
-    )
-    if not isinstance(project, Mapping):
-        raise OpenStackError("OpenStack project projection was not an object")
-    observed_id = _provider_uuid(_field(project, "id"), field="project UUID")
-    observed_name = _field(project, "name")
-    if observed_id != project_id or observed_name != platform.project_name:
-        raise OpenStackError("authenticated OpenStack project name does not match configuration")
-    return ProjectIdentity(project_id=project_id, project_name=observed_name)
+    # The scoped token UUID is the authoritative provider observation. A
+    # redundant project show is both weaker than that identity and unavailable
+    # to common restricted project credentials because openstackclient performs
+    # it through the project-list API.
+    return ProjectIdentity(project_id=project_id, project_name=platform.project_name)
 
 
 def _properties(value: Any) -> Mapping[str, Any]:
@@ -1461,8 +1452,8 @@ def observe_flavor(
     ram = _field(shown, "ram")
     if not isinstance(name, str) or not isinstance(vcpus, int) or not isinstance(ram, int):
         raise OpenStackError("OpenStack flavor projection was malformed")
-    if require_one_vcpu and vcpus != 1:
-        raise OpenStackError("configured worker flavor must have exactly one vCPU")
+    if require_one_vcpu and vcpus < 1:
+        raise OpenStackError("configured worker flavor must have at least one vCPU")
     return name
 
 

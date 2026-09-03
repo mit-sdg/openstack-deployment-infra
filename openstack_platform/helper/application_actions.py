@@ -704,7 +704,7 @@ def _remove_handler(
         if deleting_application:
             path = variable_path(application_slug)
             command_runner(
-                (*nomad_command, "var", "purge", "-force", path),
+                (*nomad_command, "var", "purge", path),
                 timeout_seconds=timeout_seconds,
                 stdout_limit=65_536,
                 stderr_limit=65_536,

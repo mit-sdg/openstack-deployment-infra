@@ -261,10 +261,14 @@ for path in "$TEMPLATE" "$PKI_DIR/$PLATFORM_INTERNAL_CA_FILE" \
 done
 python3 - "$PKI_DIR/nomad-worker-key.pem" "$STORAGE_SECRETS_FILE" <<'PY'
 import os, stat, sys
+allowed_groups = {os.getegid(), *os.getgroups()}
 for value in sys.argv[1:]:
     metadata = os.stat(value, follow_symlinks=False)
-    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise SystemExit(f"private input must be owner-only and owned by this operator: {value}")
+    mode = stat.S_IMODE(metadata.st_mode)
+    owner_private = metadata.st_uid == os.geteuid() and mode in {0o600, 0o640}
+    controller_group_private = mode == 0o640 and metadata.st_gid in allowed_groups
+    if not owner_private and not controller_group_private:
+        raise SystemExit(f"private input is not restricted to its owner or controller group: {value}")
 PY
 
 # Existing worker image/flavor and UUIDs are authoritative. Selection is read
@@ -287,8 +291,8 @@ fields={str(key).lower(): item for key,item in value.items()} if isinstance(valu
 name=fields.get("name"); vcpus=fields.get("vcpus")
 try: vcpus=int(vcpus)
 except (TypeError,ValueError): raise SystemExit("worker flavor vCPU count is malformed")
-if name != expected or vcpus != 1:
- raise SystemExit("worker flavor must resolve to the exact configured one-vCPU flavor")
+if name != expected or vcpus < 1:
+ raise SystemExit("worker flavor must resolve to the exact configured flavor with at least one vCPU")
 ' "$flavor"
 created_port=false
 if [[ -z $port_id ]]; then

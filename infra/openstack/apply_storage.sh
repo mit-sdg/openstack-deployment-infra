@@ -91,11 +91,9 @@ wait_for_bootstrap() {
       echo "storage bootstrap ready: $SERVER_NAME"
       return 0
     fi
-    if grep -Eq 'cloud-init.*FAIL:|===== recent system journal =====' <<<"$log"; then
-      echo "storage bootstrap reported a definitive failure: $SERVER_NAME" >&2
-      grep -Ei 'cloud-init.*FAIL:|FAILED|error|dependency|fatal|permission' <<<"$log" | tail -20 >&2 || true
-      return 1
-    fi
+    # The retained-volume boot intentionally reboots once and Nova preserves
+    # console output across that boundary. Treat an earlier failure marker as
+    # diagnostic until a later success marker arrives or the deadline expires.
     report_every=$((30 / BOOTSTRAP_POLL_INTERVAL))
     (( report_every > 0 )) || report_every=1
     if (( i == 1 || i % report_every == 0 )); then
@@ -106,6 +104,7 @@ wait_for_bootstrap() {
     sleep "$BOOTSTRAP_POLL_INTERVAL"
   done
   echo "timed out waiting for storage bootstrap: $SERVER_NAME" >&2
+  grep -Ei 'cloud-init.*FAIL:|FAILED|error|dependency|fatal|permission' <<<"${log:-}" | tail -20 >&2 || true
   return 1
 }
 

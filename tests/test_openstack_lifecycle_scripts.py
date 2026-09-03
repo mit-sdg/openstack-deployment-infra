@@ -190,49 +190,13 @@ class LifecycleDeletionTests(unittest.TestCase):
             [["token", "issue", "-f", "value", "-c", "project_id"]],
         )
 
+    def test_restricted_project_verification_does_not_call_project_show(self) -> None:
         self.write_state(port_name="unused", description="unused", project_name="wrong-project")
         result = self.run_lifecycle("builder_lifecycle.sh", ("show", APP_ID))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("name", result.stderr)
-        self.assertEqual(
-            self.read_state()["calls"],
-            [
-                ["token", "issue", "-f", "value", "-c", "project_id"],
-                [
-                    "project",
-                    "show",
-                    PROJECT_ID,
-                    "-f",
-                    "value",
-                    "-c",
-                    "id",
-                    "-c",
-                    "name",
-                ],
-            ],
-        )
-
-    def test_project_identity_accepts_openstack_value_formatter_lines(self) -> None:
-        self.write_state(port_name="unused", description="unused", project_output="lines")
-        result = self.run_lifecycle("builder_lifecycle.sh", ("show", APP_ID))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            self.read_state()["calls"][:2],
-            [
-                ["token", "issue", "-f", "value", "-c", "project_id"],
-                [
-                    "project",
-                    "show",
-                    PROJECT_ID,
-                    "-f",
-                    "value",
-                    "-c",
-                    "id",
-                    "-c",
-                    "name",
-                ],
-            ],
-        )
+        calls = self.read_state()["calls"]
+        self.assertEqual(calls[0], ["token", "issue", "-f", "value", "-c", "project_id"])
+        self.assertFalse(any(call[:2] == ["project", "show"] for call in calls))
 
     def test_delete_refuses_same_name_orphan_port_owned_by_something_else(self) -> None:
         for script_name, arguments, server_name, description in self.lifecycle_cases():

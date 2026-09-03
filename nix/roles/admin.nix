@@ -39,6 +39,8 @@ let
   controllerPolicy = "${controllerRoot}/policy.json";
   operatorRoot = "${state}/operator";
   operatorPolicy = "${operatorRoot}/policy.json";
+  operatorImageSelections = "${operatorRoot}/image-selections.json";
+  controllerImageSelections = "${controllerRoot}/image-selections.json";
   helperReleaseRoot = "${operatorRoot}/helper-releases";
   controllerSocketDirectory = "${namespace}-controller";
   controllerSocket = "/run/${controllerSocketDirectory}/project.sock";
@@ -168,25 +170,68 @@ let
 
     policy_source=${lib.escapeShellArg operatorPolicy}
     policy=${lib.escapeShellArg controllerPolicy}
+    image_source=${lib.escapeShellArg operatorImageSelections}
+    image_seed=${lib.escapeShellArg controllerImageSelections}
     test -f "$policy_source" && test ! -L "$policy_source"
     test "$(stat -c %U:%a "$policy_source")" = ${operatorAccount.name}:600
+    test -f "$image_source" && test ! -L "$image_source"
+    test "$(stat -c %U:%a "$image_source")" = ${operatorAccount.name}:600
     install -m 0600 -o ${controllerUser} -g ${controllerGroup} \
       "$policy_source" "$policy"
+    install -m 0600 -o ${controllerUser} -g ${controllerGroup} \
+      "$image_source" "$image_seed"
 
-    # Keep credentials owned by their installer or operator. Grant only the
-    # dedicated trusted controller group read/traverse access.
+    normalize_private() {
+      path=$1
+      test -f "$path" && test ! -L "$path"
+      identity=$(stat -c %U:%G:%a "$path")
+      case "$identity" in
+        ${operatorAccount.name}:${operatorAccount.name}:600|${operatorAccount.name}:${controllerGroup}:640) ;;
+        *) echo "controller credential ownership or mode is invalid" >&2; exit 1 ;;
+      esac
+      chgrp ${controllerGroup} "$path"
+      chmod 0640 "$path"
+    }
+
+    # Keep credentials operator-owned while granting only the dedicated
+    # controller group read/traverse access. Accept both the initial transfer
+    # mode and the already-prepared mode so path activation and reboot repeat.
     tree=${lib.escapeShellArg "${operatorRoot}/secrets"}
-    if test -d "$tree" && test ! -L "$tree"; then
-      chgrp ${controllerGroup} "$tree"
-      chmod 0750 "$tree"
-      for name in openstack.env nomad-tokens.env storage-bootstrap.env builder_operator_ed25519; do
-        path="$tree/$name"
-        test -f "$path" && test ! -L "$path"
-        test "$(stat -c %U:%a "$path")" = ${operatorAccount.name}:600
-        chgrp ${controllerGroup} "$path"
-        chmod 0640 "$path"
-      done
-    fi
+    test -d "$tree" && test ! -L "$tree"
+    case "$(stat -c %U:%G:%a "$tree")" in
+      ${operatorAccount.name}:${operatorAccount.name}:700|${operatorAccount.name}:${controllerGroup}:750) ;;
+      *) echo "controller credential directory ownership or mode is invalid" >&2; exit 1 ;;
+    esac
+    chgrp ${controllerGroup} "$tree"
+    chmod 0750 "$tree"
+    for name in openstack.env nomad-tokens.env storage-bootstrap.env builder_operator_ed25519; do
+      normalize_private "$tree/$name"
+    done
+    public_key="$tree/builder_operator_ed25519.pub"
+    test -f "$public_key" && test ! -L "$public_key"
+    test "$(stat -c %U:%a "$public_key")" = ${operatorAccount.name}:644
+
+    provisioning="$tree/provisioning-pki"
+    test -d "$provisioning" && test ! -L "$provisioning"
+    case "$(stat -c %U:%G:%a "$provisioning")" in
+      ${operatorAccount.name}:${operatorAccount.name}:700|${operatorAccount.name}:${controllerGroup}:750) ;;
+      *) echo "provisioning credential directory ownership or mode is invalid" >&2; exit 1 ;;
+    esac
+    chgrp ${controllerGroup} "$provisioning"
+    chmod 0750 "$provisioning"
+    normalize_private "$provisioning/nomad-cli-key.pem"
+    normalize_private "$provisioning/nomad-worker-key.pem"
+    for name in internal-ca.pem nomad-cli.pem nomad-worker.pem; do
+      path="$provisioning/$name"
+      test -f "$path" && test ! -L "$path"
+      test "$(stat -c %U:%a "$path")" = ${operatorAccount.name}:644
+    done
+
+    ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- \
+      ${packages.controllerPackage}/bin/openstack-platform-controller-seed-images \
+      --platform-config /etc/${namespace}/platform.json \
+      --state-directory ${controllerState} \
+      --manifest "$image_seed"
   '';
 in
 {
@@ -314,9 +359,9 @@ in
 
   environment.etc."${namespace}/nomad.env".text = ''
     export NOMAD_ADDR=https://127.0.0.1:${toString constants.ports.nomadHttp}
-    export NOMAD_CACERT=${configRoot}/pki/internal-ca.pem
-    export NOMAD_CLIENT_CERT=/etc/${namespace}/pki/nomad-cli.pem
-    export NOMAD_CLIENT_KEY=/etc/${namespace}/pki/nomad-cli-key.pem
+    export NOMAD_CACERT=${root}/persistent/secrets/provisioning-pki/internal-ca.pem
+    export NOMAD_CLIENT_CERT=${root}/persistent/secrets/provisioning-pki/nomad-cli.pem
+    export NOMAD_CLIENT_KEY=${root}/persistent/secrets/provisioning-pki/nomad-cli-key.pem
   '';
 
   systemd.tmpfiles.rules = [
@@ -368,6 +413,7 @@ in
     requires = [ stateMountUnit ];
     unitConfig.ConditionPathExists = [
       operatorPolicy
+      operatorImageSelections
       helperReleaseMarker
     ];
     serviceConfig = {
@@ -452,6 +498,7 @@ in
     ];
     unitConfig.ConditionPathExists = [
       controllerPolicy
+      controllerImageSelections
       helperReleaseMarker
     ];
     environment = {
@@ -511,6 +558,7 @@ in
         "AF_UNIX"
         "AF_INET"
         "AF_INET6"
+        "AF_NETLINK"
       ];
       RestrictNamespaces = true;
       RestrictRealtime = true;
@@ -533,8 +581,10 @@ in
     };
   };
 
-  # Installing the operator-owned helper release or policy after boot starts
-  # the controller without granting the operator service-management rights.
+  # The helper release marker is installed only after setup has transferred the
+  # operator policy and deterministic image seed. Trigger on that final marker:
+  # multiple PathExists entries are alternatives, not a conjunction, and can
+  # otherwise consume the one-shot activation before all inputs are present.
   systemd.services."${namespace}-controller-activate" = {
     description = "Activate ${platform.displayName} controller after release installation";
     serviceConfig = {
@@ -547,10 +597,7 @@ in
   systemd.paths."${namespace}-controller" = {
     wantedBy = [ "multi-user.target" ];
     pathConfig = {
-      PathExists = [
-        operatorPolicy
-        helperReleaseMarker
-      ];
+      PathExists = helperReleaseMarker;
       Unit = "${namespace}-controller-activate.service";
     };
   };

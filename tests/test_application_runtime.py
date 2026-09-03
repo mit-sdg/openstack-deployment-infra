@@ -785,7 +785,7 @@ class WorkerPrimitiveTests(unittest.TestCase):
             self.assertNotIn('port delete "$port_name"', text)
         worker = (ROOT / "infra" / "openstack" / "worker_lifecycle.sh").read_text()
         self.assertIn('flavor show "$flavor"', worker)
-        self.assertIn("vcpus != 1", worker)
+        self.assertIn("vcpus < 1", worker)
 
 
 class DeploymentTests(unittest.TestCase):

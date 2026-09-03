@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tempfile
@@ -65,6 +66,13 @@ PLATFORM_DOMAIN='apps.example.test'
             private_key.with_suffix(".pub").read_text(encoding="utf-8").startswith("ssh-rsa ")
         )
 
+    def test_source_commit_accepts_setup_environment_value(self) -> None:
+        commit = "a" * 40
+
+        resolved = setup._source_commit(self.root, {}, supplied=commit)
+
+        self.assertEqual(resolved, commit)
+
     def test_project_identity_uses_scoped_token_without_project_list_permission(self) -> None:
         project_id = "00000000-0000-4000-8000-000000000001"
         environment = {"OS_PROJECT_NAME": "demo", "OS_PROJECT_ID": project_id}
@@ -99,10 +107,15 @@ PLATFORM_DOMAIN='apps.example.test'
     def test_resolved_inputs_preserve_provider_project_id_spelling(self) -> None:
         compact = "00000000000040008000000000000001"
         canonical = "00000000-0000-4000-8000-000000000001"
-        values = {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"}
+        commit = "a" * 40
+        values = {
+            "OS_PROJECT_ID": compact,
+            "OS_PROJECT_NAME": "demo",
+            "PLATFORM_SOURCE_COMMIT": commit,
+        }
         with (
             mock.patch.object(setup, "_credential_requirements"),
-            mock.patch.object(setup, "_source_commit", return_value="a" * 40),
+            mock.patch.object(setup, "_source_commit", return_value=commit) as source_commit,
             mock.patch.object(
                 setup,
                 "_project_identity",
@@ -120,6 +133,49 @@ PLATFORM_DOMAIN='apps.example.test'
 
         self.assertEqual(resolved.provider_environment["OS_PROJECT_ID"], compact)
         self.assertEqual(resolved.project.project_id, canonical)
+        self.assertEqual(source_commit.call_args.kwargs["supplied"], commit)
+        source = (Path(__file__).resolve().parents[1] / "openstack_platform/setup.py").read_text()
+        self.assertIn("_write_openstack_wrapper(paths, provider_environment, openstack)", source)
+
+    def test_generated_provider_wrapper_is_idempotent_after_executable_activation(self) -> None:
+        paths = setup.SetupPaths(
+            repository=self.root,
+            workspace=self.root / "workspace",
+            platform=self.root / "platform.json",
+            policy=self.root / "policy.json",
+            bootstrap=self.root / "bootstrap",
+            pki=self.root / "pki",
+            openstack_environment=self.root / "openstack.env",
+            openstack_wrapper=self.root / "platform-openstack",
+            ssh_directory=self.root / "ssh",
+        )
+        compact = "00000000000040008000000000000001"
+        setup._write_openstack_wrapper(
+            paths,
+            {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"},
+            Path("/nix/store/openstack-one"),
+        )
+        setup._write_openstack_wrapper(
+            paths,
+            {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"},
+            Path("/nix/store/openstack-two"),
+        )
+        self.assertEqual(paths.openstack_wrapper.stat().st_mode & 0o777, 0o700)
+        self.assertIn("/nix/store/openstack-two", paths.openstack_wrapper.read_text())
+        self.assertIn(compact, paths.openstack_environment.read_text())
+
+    def test_hosted_controller_inputs_are_transferred_before_activation(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "openstack_platform/setup.py").read_text()
+        for name in (
+            "persistent/policy.json",
+            "persistent/image-selections.json",
+            "nomad-cli.pem",
+            "nomad-cli-key.pem",
+            "nomad-worker-key.pem",
+            "builder_operator_ed25519.pub",
+        ):
+            self.assertIn(name, source)
+        self.assertIn('builder_operator_ed25519.pub",\n            "0644"', source)
 
     def test_malformed_or_missing_direct_provider_cidrs_fail_before_mutation(self) -> None:
         cases = (
@@ -146,10 +202,11 @@ PLATFORM_DOMAIN='apps.example.test'
             "OS_PROJECT_NAME=demo\n"
             "OS_USERNAME=operator\n"
             "OS_PASSWORD=secret\n"
+            f"PLATFORM_SOURCE_COMMIT={'a' * 40}\n"
         )
         with (
             mock.patch.object(setup, "_repository_root", return_value=Path(__file__).parents[1]),
-            mock.patch.object(setup, "_source_commit", return_value="a" * 40),
+            mock.patch.object(setup, "_source_commit", return_value="a" * 40) as source_commit,
             mock.patch.object(setup, "_private_directory") as private_directory,
             self.assertRaisesRegex(setup.SetupError, "PLATFORM_RELEASE_MANIFEST"),
         ):
@@ -161,6 +218,7 @@ PLATFORM_DOMAIN='apps.example.test'
                 output=io.StringIO(),
             )
         private_directory.assert_not_called()
+        self.assertEqual(source_commit.call_args.kwargs["supplied"], "a" * 40)
         self.assertFalse((self.root / "workspace").exists())
 
     def test_check_is_non_mutating_and_renders_resolved_plan(self) -> None:
@@ -552,6 +610,56 @@ class SetupPreflightTests(unittest.TestCase):
         self.assertFalse(plan["ready"])
         self.assertFalse(plan["resolved"]["fixedAddresses"]["ingress"]["available"])
 
+    def test_existing_image_without_provider_hash_uses_download_sha256(self) -> None:
+        payload = b"verified existing image"
+        digest = hashlib.sha256(payload).hexdigest()
+        image_id = "00000000-0000-4000-8000-000000000099"
+        artifact_manifest_sha256 = "c" * 64
+        artifact = {
+            "qcow2Sha256": digest,
+            "nixClosureSha256": "d" * 64,
+            "nixOutput": "nix-output",
+        }
+        properties = {
+            "demo_platform_source_commit": "a" * 40,
+            "demo_platform_role": "worker",
+            "demo_platform_artifact_manifest_sha256": artifact_manifest_sha256,
+            "demo_platform_qcow2_sha256": digest,
+            "demo_platform_nix_closure_sha256": "d" * 64,
+            "demo_platform_nix_output": "nix-output",
+        }
+
+        def provider(argv: object, **_kwargs: object) -> object:
+            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+            if command[1:3] == ("image", "list"):
+                return [{"ID": image_id, "Name": "demo-worker"}]
+            if command[1:3] == ("image", "show"):
+                return {"status": "active", "properties": properties}
+            self.fail(command)
+
+        def download(argv: object, **_kwargs: object) -> str:
+            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
+            self.assertEqual(command[1:3], ("image", "save"))
+            Path(command[command.index("--file") + 1]).write_bytes(payload)
+            return ""
+
+        with (
+            mock.patch.object(setup, "_json_command", side_effect=provider),
+            mock.patch.object(setup, "_command", side_effect=download) as command,
+        ):
+            selected = setup._existing_image_id(
+                Path("openstack"),
+                {},
+                "demo-worker",
+                "worker",
+                "a" * 40,
+                "demo-platform",
+                artifact_manifest_sha256,
+                artifact,
+            )
+        self.assertEqual(selected, image_id)
+        command.assert_called_once()
+
     def test_glance_quota_refuses_non_https_endpoint_before_token_use(self) -> None:
         with (
             mock.patch.object(
@@ -568,10 +676,95 @@ class SetupPreflightTests(unittest.TestCase):
                 },
             ),
             mock.patch.object(setup, "_command") as command,
-            self.assertRaisesRegex(setup.SetupError, "over HTTPS"),
+            self.assertRaisesRegex(setup.SetupError, "uses HTTP"),
         ):
             setup._glance_usage(Path("openstack"), self.resolved)
         command.assert_not_called()
+
+    def test_glance_quota_allows_http_only_after_exact_acknowledgement(self) -> None:
+        self.resolved.values["PLATFORM_ALLOW_HTTP_GLANCE"] = (
+            "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
+        )
+        try:
+            with (
+                mock.patch.object(
+                    setup,
+                    "_json_command",
+                    return_value={
+                        "endpoints": [
+                            {
+                                "interface": "public",
+                                "region": "RegionOne",
+                                "url": "http://images.example.test/v2",
+                            },
+                            {
+                                "interface": "public",
+                                "region": "RegionOne",
+                                "url": "http://images.example.test/v2",
+                            },
+                        ]
+                    },
+                ),
+                mock.patch.object(
+                    setup,
+                    "_command",
+                    side_effect=(
+                        "opaque-token",
+                        json.dumps({"limits": {}, "usage": {}}),
+                    ),
+                ) as command,
+                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
+            ):
+                result = setup._glance_usage(Path("openstack"), self.resolved)
+        finally:
+            self.resolved.values.pop("PLATFORM_ALLOW_HTTP_GLANCE")
+        self.assertEqual(result, {"limits": {}, "usage": {}})
+        self.assertEqual(command.call_count, 2)
+
+    def test_legacy_glance_quota_404_requires_a_separate_exact_acknowledgement(self) -> None:
+        self.resolved.values["PLATFORM_ALLOW_HTTP_GLANCE"] = (
+            "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
+        )
+        catalog = {
+            "endpoints": [
+                {
+                    "interface": "public",
+                    "region": "RegionOne",
+                    "url": "http://images.example.test/v2",
+                }
+            ]
+        }
+        failure = setup.SetupError(
+            "setup command failed (curl): curl: (22) The requested URL returned error: 404"
+        )
+        try:
+            with (
+                mock.patch.object(setup, "_json_command", return_value=catalog),
+                mock.patch.object(setup, "_command", side_effect=("opaque-token", failure)),
+                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
+                self.assertRaisesRegex(setup.SetupError, "quota usage endpoint"),
+            ):
+                setup._glance_usage(Path("openstack"), self.resolved)
+
+            self.resolved.values["PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA"] = (
+                "I_UNDERSTAND_GLANCE_QUOTA_IS_UNVERIFIED"
+            )
+            with (
+                mock.patch.object(setup, "_json_command", return_value=catalog),
+                mock.patch.object(setup, "_command", side_effect=("opaque-token", failure)),
+                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
+            ):
+                usage = setup._glance_usage(Path("openstack"), self.resolved)
+            self.assertEqual(usage, {"_platform_glance_quota_unavailable": True})
+            with mock.patch.object(setup, "_glance_usage", return_value=usage):
+                quotas = setup._glance_quota_deltas(
+                    Path("openstack"), self.resolved, self.verified_release()[1]
+                )
+            self.assertTrue(setup._quotas_ready(quotas))
+            self.assertEqual(quotas["image_count"]["verification"], "unverified-legacy-provider")
+        finally:
+            self.resolved.values.pop("PLATFORM_ALLOW_HTTP_GLANCE", None)
+            self.resolved.values.pop("PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA", None)
 
     def test_glance_quota_bytes_and_gib_formatter_variants_are_canonicalized(self) -> None:
         fixture = json.loads(

@@ -206,10 +206,14 @@ for path in "$TEMPLATE" "$PKI_DIR/$PLATFORM_INTERNAL_CA_FILE" \
 done
 python3 - "$STORAGE_SECRETS_FILE" <<'PY'
 import os, stat, sys
+allowed_groups = {os.getegid(), *os.getgroups()}
 for value in sys.argv[1:]:
     metadata = os.stat(value, follow_symlinks=False)
-    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise SystemExit(f"private input must be owner-only and owned by this operator: {value}")
+    mode = stat.S_IMODE(metadata.st_mode)
+    owner_private = metadata.st_uid == os.geteuid() and mode in {0o600, 0o640}
+    controller_group_private = mode == 0o640 and metadata.st_gid in allowed_groups
+    if not owner_private and not controller_group_private:
+        raise SystemExit(f"private input is not restricted to its owner or controller group: {value}")
 PY
 # Validate any pre-existing resources before create/reconcile uses them.
 emit_observation >/dev/null

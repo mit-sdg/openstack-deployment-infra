@@ -122,6 +122,19 @@ class DeploymentConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValidationError, "script 'build'"):
                 validate_checkout(parsed, root)
 
+    def test_realistic_lockfile_limit_does_not_expand_package_json_limit(self) -> None:
+        parsed = parse_configuration(configuration() | {"storageBindings": []})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "package-lock.json").write_bytes(b" " * 900_000)
+            (root / "package.json").write_text(
+                json.dumps({"scripts": {"build": "safe build", "start": "safe start"}})
+            )
+            validate_checkout(parsed, root)
+            (root / "package.json").write_bytes(b" " * 65_537)
+            with self.assertRaisesRegex(ValidationError, "package.json"):
+                validate_checkout(parsed, root)
+
     def test_binding_targets_and_resources_are_unique(self) -> None:
         document = configuration()
         document["storageBindings"] = [

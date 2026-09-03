@@ -42,6 +42,9 @@ class ControllerHostingStaticTests(unittest.TestCase):
         self.assertIn('"--policy ${controllerPolicy}"', admin)
         self.assertIn('"--socket ${controllerSocket}"', admin)
         self.assertIn('helperReleaseRoot = "${operatorRoot}/helper-releases";', admin)
+        self.assertIn("openstack-platform-controller-seed-images", admin)
+        self.assertIn("operatorImageSelections", admin)
+        self.assertIn("controllerImageSelections", admin)
         self.assertIn('controllerSocket = "/run/${controllerSocketDirectory}/project.sock";', admin)
         self.assertIn(
             'controllerPrivilegedSocket = "/run/${controllerSocketDirectory}/privileged.sock";',
@@ -107,6 +110,7 @@ class ControllerHostingStaticTests(unittest.TestCase):
             'CapabilityBoundingSet = "";',
             "ReadOnlyPaths = [",
             "ReadWritePaths = [",
+            '"AF_NETLINK"',
         ):
             self.assertIn(setting, service)
         allowed_ports = source[
@@ -157,7 +161,9 @@ class ControllerHostingStaticTests(unittest.TestCase):
         ]
         self.assertIn('systemd.services."${namespace}-controller-activate"', controller_activation)
         self.assertIn("RemainAfterExit = true;", controller_activation)
-        self.assertIn("PathExists = [", controller_activation)
+        self.assertIn("PathExists = helperReleaseMarker;", controller_activation)
+        self.assertNotIn("PathExists = operatorPolicy;", controller_activation)
+        self.assertNotIn("PathExists = operatorImageSelections;", controller_activation)
         self.assertIn('Unit = "${namespace}-controller-activate.service";', controller_activation)
         self.assertNotIn("controllerPrivilegedSocket", management)
         self.assertIn("unitConfig.ConditionPathExists = managementWebExecutable;", management)
@@ -168,6 +174,16 @@ class ControllerHostingStaticTests(unittest.TestCase):
         )
         self.assertIn("PathExists = managementBrokerExecutable;", management)
         self.assertIn("PathExists = managementWebExecutable;", management)
+
+    def test_controller_credentials_are_repeatably_normalized_for_lifecycle_wrappers(self) -> None:
+        source = ADMIN.read_text(encoding="utf-8")
+        prepare = source[source.index("normalize_private()") : source.index("in\n{")]
+        self.assertIn("${operatorAccount.name}:${controllerGroup}:640", prepare)
+        self.assertIn("nomad-cli-key.pem", prepare)
+        self.assertIn("nomad-worker-key.pem", prepare)
+        self.assertIn("builder_operator_ed25519.pub", prepare)
+        self.assertIn("provisioning-pki/nomad-cli.pem", source)
+        self.assertIn("provisioning-pki/nomad-cli-key.pem", source)
 
     def test_nix_uses_named_inventory_validation_and_runtime_constants(self) -> None:
         flake = (ROOT / "flake.nix").read_text(encoding="utf-8")

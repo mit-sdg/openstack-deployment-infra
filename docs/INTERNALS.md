@@ -120,9 +120,11 @@ At a high level it:
    Nomad ACLs;
 6. creates storage and ingress, verifying exact serial readiness markers;
 7. installs the matching operator and helper releases;
-8. starts and verifies the hosted controller service, readiness unit, socket
-   ownership/mode, peer restrictions, and hosted-controller backup timer;
-9. selects all five accepted image UUIDs and initializes backup schedules; and
+8. seeds all five accepted image UUIDs, then starts and verifies the hosted
+   controller service, readiness unit, socket ownership/mode, peer restrictions,
+   and hosted-controller backup timer;
+9. records the same image UUIDs in operator state and initializes backup
+   schedules; and
 10. requires healthy aggregate status before reporting completion.
 
 Setup is resumable because generated private material and provider mutations are

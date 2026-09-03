@@ -752,7 +752,6 @@ class ApplicationActionTests(unittest.TestCase):
                     "fixed-nomad-wrapper",
                     "var",
                     "purge",
-                    "-force",
                     "nomad/jobs/demo-app",
                 ),
             ],

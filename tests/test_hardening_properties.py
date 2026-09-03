@@ -252,5 +252,47 @@ class SecretDiagnosticProperty(unittest.TestCase):
             self.assertNotIn(str(destination), rendered)
 
 
+class ImageFirstBootProperties(unittest.TestCase):
+    def test_production_cloud_init_runs_only_with_config_drive(self) -> None:
+        common = Path("nix/modules/common.nix").read_text()
+        datasource_block = common.split("datasource_list = [", 1)[1].split("];", 1)[0]
+
+        self.assertIn('"ConfigDrive"', datasource_block)
+        self.assertNotIn('"OpenStack"', datasource_block)
+        self.assertNotIn('"None"', datasource_block)
+        self.assertIn("preserve_hostname = true;", common)
+        self.assertNotIn("cloud-init-local.serviceConfig.ExecStartPre", common)
+        for role in ("admin", "ingress", "storage", "worker", "builder"):
+            template = Path(f"infra/cloud-init-nixos/{role}.yaml").read_text()
+            self.assertIn("/etc/__PLATFORM_NAMESPACE__/.provisioned", template)
+            self.assertIn("config-drive-v1", template)
+            self.assertIn("*/sem/config_write_files", template)
+            self.assertIn("cloud-init single --name write-files --frequency always", template)
+            self.assertIn("-config-drive-v1", template)
+        smoke = Path("tests/smoke_openstack_image.sh").read_text()
+        self.assertIn('-uuid "$instance_uuid"', smoke)
+        self.assertIn('{"uuid":"$instance_uuid"', smoke)
+
+    def test_mongodb_receives_a_uid_scoped_runtime_credential(self) -> None:
+        storage = Path("nix/roles/storage.nix").read_text()
+
+        self.assertIn('mongodbRuntimeDirectory = "/run/${namespace}-mongodb-credential"', storage)
+        self.assertIn(
+            'mongodbRuntimeSecret = "${mongodbRuntimeDirectory}/mongodb-password"', storage
+        )
+        self.assertIn("''${CREDENTIALS_DIRECTORY:?}/mongodb-password", storage)
+        self.assertIn("-m 0400 -o storage-service -g storage-service", storage)
+        self.assertIn("stageMongoCredential\n        ];", storage)
+        self.assertIn("mongodbRuntimeDirectory}:/run/secrets:ro", storage)
+        self.assertNotIn("mongodbRuntimeDirectory}:/run/secrets:ro,U", storage)
+        self.assertNotIn(
+            '"/run/credentials/podman-${namespace}-mongodb.service/mongodb-password:', storage
+        )
+        self.assertIn('dataLayoutUnit = "${namespace}-storage-data-layout.service"', storage)
+        self.assertIn("mountpoint -q ${data}", storage)
+        self.assertIn("install -d -m 0700 -o 999 -g 999", storage)
+        self.assertIn("dataLayoutUnit\n      ];", storage)
+
+
 if __name__ == "__main__":
     unittest.main()
