@@ -581,8 +581,10 @@ in
     };
   };
 
-  # Installing the operator-owned helper release or policy after boot starts
-  # the controller without granting the operator service-management rights.
+  # The helper release marker is installed only after setup has transferred the
+  # operator policy and deterministic image seed. Trigger on that final marker:
+  # multiple PathExists entries are alternatives, not a conjunction, and can
+  # otherwise consume the one-shot activation before all inputs are present.
   systemd.services."${namespace}-controller-activate" = {
     description = "Activate ${platform.displayName} controller after release installation";
     serviceConfig = {
@@ -595,10 +597,7 @@ in
   systemd.paths."${namespace}-controller" = {
     wantedBy = [ "multi-user.target" ];
     pathConfig = {
-      PathExists = [
-        operatorPolicy
-        helperReleaseMarker
-      ];
+      PathExists = helperReleaseMarker;
       Unit = "${namespace}-controller-activate.service";
     };
   };

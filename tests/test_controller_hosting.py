@@ -161,7 +161,9 @@ class ControllerHostingStaticTests(unittest.TestCase):
         ]
         self.assertIn('systemd.services."${namespace}-controller-activate"', controller_activation)
         self.assertIn("RemainAfterExit = true;", controller_activation)
-        self.assertIn("PathExists = [", controller_activation)
+        self.assertIn("PathExists = helperReleaseMarker;", controller_activation)
+        self.assertNotIn("PathExists = operatorPolicy;", controller_activation)
+        self.assertNotIn("PathExists = operatorImageSelections;", controller_activation)
         self.assertIn('Unit = "${namespace}-controller-activate.service";', controller_activation)
         self.assertNotIn("controllerPrivilegedSocket", management)
         self.assertIn("unitConfig.ConditionPathExists = managementWebExecutable;", management)
