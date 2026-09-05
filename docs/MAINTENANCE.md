@@ -356,6 +356,68 @@ systemctl --user is-enabled openstack-platform-backup.timer
 A failed candidate leaves the prior complete release selected. Selecting a
 prior executable does not restore database or provider state.
 
+### Import a legacy external controller
+
+`deploy/releases/migrate_legacy_controller.py` imports an authenticated legacy
+v5 external-controller snapshot into the current hosted-controller schema. Use
+it only when the source has migration versions `0` through `5`, the historical
+deployment marker matches the destination project/namespace/inventory identity,
+and every operation is terminal. Other schemas and unfinished operations fail
+without creating the destination.
+
+Before import, stop mutation intake, create and restore-check the external
+operator-state and managed-data backups, and take a mode-`0600` SQLite online
+snapshot. Prepare a mode-`0600` application mapping keyed by every legacy slug.
+Each entry supplies the retained source ref and current configuration snapshot;
+storage bindings identify an existing resource by type and name so the importer
+can assign its new immutable resource UUID. For example:
+
+```json
+{
+  "example-app": {
+    "requestedRef": "main",
+    "configuration": {
+      "schemaVersion": 1,
+      "build": {
+        "runtime": "bun",
+        "packages": ["."],
+        "buildScript": "build",
+        "startScript": "start"
+      },
+      "runtime": {"port": 3000, "healthPath": "/health"},
+      "storageBindings": [
+        {
+          "resourceType": "mongo",
+          "resourceName": "default",
+          "outputs": {"uri": "MONGODB_URI"}
+        }
+      ]
+    }
+  }
+}
+```
+
+Run the importer from the exact destination release checkout. The destination
+state directory must not exist:
+
+```sh
+python3 deploy/releases/migrate_legacy_controller.py \
+  --source-database /private/legacy/platform.sqlite3 \
+  --source-state /srv/openstack-platform/state \
+  --destination-state /private/hosted-controller-import \
+  --platform /private/current-platform.json \
+  --application-mapping /private/application-mapping.json
+```
+
+Success reports `legacy-controller-import=verified` and creates a current-schema
+`platform.sqlite3`, copies only accepted build logs referenced by imported
+deployments, and writes `LEGACY-IMPORT-RECEIPT.json` with source/destination
+checksums and bounded counts. Verify the receipt, current schema, application,
+storage, image selections, live Nomad job, worker identity, and public product
+health before installing the database through the offline hosted-controller
+restore procedure in [Operations](OPERATIONS.md#restore-the-hosted-controller).
+Do not copy migration rows or construct product records manually.
+
 ### Database migration order
 
 Controller migrations are forward-only. Before selecting a release that raises
@@ -364,9 +426,10 @@ Install matching operator/helper code, migrate once, start the controller, and
 verify its API before replacing role images.
 
 Executable rollback is safe only while the old controller accepts the current
-schema. After an incompatible forward migration, stop the controller, restore
-the pre-upgrade database offline, then select/start the old complete release.
-Database restore and provider-state recovery remain separate.
+schema. After the imported hosted controller accepts a mutation, rollback also
+requires stopping it, restoring the pre-import external-controller backup, and
+selecting the old complete release and role images. Database restore and
+provider-state recovery remain separate.
 
 ## Disposable live acceptance
 
