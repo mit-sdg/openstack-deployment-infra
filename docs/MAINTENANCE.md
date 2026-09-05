@@ -398,7 +398,30 @@ can assign its new immutable resource UUID. For example:
 ```
 
 Run the importer from the exact destination release checkout. The destination
-state directory must not exist:
+state directory must not exist. Normally every legacy operation must be
+terminal. If a replacement rollback completed but the legacy recovery defect
+left exactly one `infra.replace` operation at `replacement_created`, first
+verify that the recorded candidate UUID is absent, the recorded old server owns
+the recorded port and volumes, role readiness succeeds, and product health is
+restored. Record those immutable IDs and the verification time in a private
+receipt, then pass it with `--replacement-rollback-receipt`. Any field mismatch,
+additional unfinished operation, or receipt without an unfinished operation is
+rejected.
+
+```json
+{
+  "format": 1,
+  "operationId": "<recorded-operation-uuid>",
+  "role": "storage",
+  "oldServerId": "<recorded-old-server-uuid>",
+  "replacementServerId": "<confirmed-absent-candidate-uuid>",
+  "portId": "<recorded-port-uuid>",
+  "volumeIds": ["<recorded-volume-uuid>"],
+  "verifiedAt": "<UTC-timestamp>"
+}
+```
+
+Then run the importer:
 
 ```sh
 python3 deploy/releases/migrate_legacy_controller.py \
@@ -406,7 +429,8 @@ python3 deploy/releases/migrate_legacy_controller.py \
   --source-state /srv/openstack-platform/state \
   --destination-state /private/hosted-controller-import \
   --platform /private/current-platform.json \
-  --application-mapping /private/application-mapping.json
+  --application-mapping /private/application-mapping.json \
+  --replacement-rollback-receipt /private/replacement-rollback.json
 ```
 
 Success reports `legacy-controller-import=verified` and creates a current-schema

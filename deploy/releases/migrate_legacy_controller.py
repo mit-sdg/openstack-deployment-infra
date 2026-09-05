@@ -83,7 +83,11 @@ def _legacy_marker(identity: db.DeploymentIdentity) -> str:
     return hashlib.sha256(_LEGACY_MARKER_PREFIX + encoded).hexdigest()
 
 
-def _validate_legacy(connection: sqlite3.Connection, identity: db.DeploymentIdentity) -> None:
+def _validate_legacy(
+    connection: sqlite3.Connection,
+    identity: db.DeploymentIdentity,
+    rollback_receipt: dict[str, Any] | None,
+) -> int:
     if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
         _fail("legacy SQLite integrity check failed")
     if connection.execute("PRAGMA foreign_key_check").fetchall():
@@ -103,21 +107,67 @@ def _validate_legacy(connection: sqlite3.Connection, identity: db.DeploymentIden
     if migrations != expected:
         _fail("legacy SQLite marker or migration checksums are unsupported")
     unfinished = connection.execute(
-        "SELECT 1 FROM operations WHERE status IN ('running', 'recovery_required') LIMIT 1"
-    ).fetchone()
-    if unfinished is not None:
-        _fail("legacy SQLite has an unfinished operation")
+        "SELECT * FROM operations WHERE status IN ('running', 'recovery_required')"
+    ).fetchall()
+    if not unfinished:
+        if rollback_receipt is not None:
+            _fail("replacement rollback receipt has no unfinished operation")
+        return 0
+    if len(unfinished) != 1 or rollback_receipt is None:
+        _fail("legacy SQLite has an unacknowledged unfinished operation")
+    operation = unfinished[0]
+    try:
+        refs = json.loads(operation["refs_json"])
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ImportFailure("legacy replacement operation refs are malformed") from error
+    expected_receipt: dict[str, Any] = {
+        "format": 1,
+        "operationId": operation["operation_id"],
+        "role": refs.get("role"),
+        "oldServerId": refs.get("old_server_id"),
+        "replacementServerId": refs.get("replacement_server_id"),
+        "portId": refs.get("port_id"),
+        "volumeIds": refs.get("volume_ids"),
+        "verifiedAt": rollback_receipt.get("verifiedAt"),
+    }
+    if (
+        operation["kind"] != "infra.replace"
+        or operation["scope"] != "infrastructure"
+        or operation["status"] != "recovery_required"
+        or operation["phase"] != "replacement_created"
+        or rollback_receipt != expected_receipt
+        or expected_receipt["role"] not in {"admin", "ingress", "storage"}
+        or not isinstance(expected_receipt["verifiedAt"], str)
+        or not expected_receipt["verifiedAt"]
+    ):
+        _fail("replacement rollback receipt does not match the unfinished operation")
+    for field in ("operationId", "oldServerId", "replacementServerId", "portId"):
+        try:
+            if str(uuid_module.UUID(str(expected_receipt[field]))) != expected_receipt[field]:
+                raise ValueError
+        except ValueError:
+            _fail("replacement rollback receipt contains a malformed UUID")
+    volume_ids = expected_receipt["volumeIds"]
+    if not isinstance(volume_ids, list) or any(
+        not isinstance(value, str) or str(uuid_module.UUID(value)) != value for value in volume_ids
+    ):
+        _fail("replacement rollback receipt volume IDs are malformed")
+    return 1
 
 
-def _load_mapping(path: Path) -> dict[str, Any]:
-    _private_file(path, label="legacy application mapping")
+def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    _private_file(path, label=label)
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ImportFailure("legacy application mapping is malformed") from error
+        raise ImportFailure(f"{label} is malformed") from error
     if not isinstance(value, dict) or not value:
-        _fail("legacy application mapping must be a nonempty object")
+        _fail(f"{label} must be a nonempty object")
     return cast(dict[str, Any], value)
+
+
+def _load_mapping(path: Path) -> dict[str, Any]:
+    return _load_json_object(path, label="legacy application mapping")
 
 
 def _storage_id(identity: db.DeploymentIdentity, application_id: str, kind: str, name: str) -> str:
@@ -182,6 +232,7 @@ def import_legacy(
     destination_state: Path,
     platform_path: Path,
     mapping_path: Path,
+    rollback_receipt_path: Path | None = None,
 ) -> Path:
     if os.geteuid() == 0 or os.environ.get("SUDO_USER"):
         _fail("run legacy controller import as the unprivileged platform owner")
@@ -195,11 +246,16 @@ def import_legacy(
     platform = load_platform(platform_path)
     identity = db.deployment_identity(platform)
     mapping = _load_mapping(mapping_path)
+    rollback_receipt = (
+        None
+        if rollback_receipt_path is None
+        else _load_json_object(rollback_receipt_path, label="replacement rollback receipt")
+    )
 
     source = sqlite3.connect(f"file:{source_database}?mode=ro&immutable=1", uri=True)
     source.row_factory = sqlite3.Row
     try:
-        _validate_legacy(source, identity)
+        acknowledged_rollbacks = _validate_legacy(source, identity, rollback_receipt)
         applications = source.execute("SELECT * FROM applications ORDER BY slug").fetchall()
         deployments = {
             row["application_id"]: row
@@ -367,6 +423,7 @@ def import_legacy(
         "storageResources": len(resources),
         "imageSelections": len(images),
         "schemaVersion": db.MIGRATIONS[-1].version,
+        "acknowledgedReplacementRollbacks": acknowledged_rollbacks,
     }
     receipt_path = destination_state / "LEGACY-IMPORT-RECEIPT.json"
     descriptor = os.open(
@@ -389,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--destination-state", type=Path, required=True)
     parser.add_argument("--platform", type=Path, required=True)
     parser.add_argument("--application-mapping", type=Path, required=True)
+    parser.add_argument("--replacement-rollback-receipt", type=Path)
     args = parser.parse_args(argv)
     try:
         destination = import_legacy(
@@ -397,6 +455,7 @@ def main(argv: list[str] | None = None) -> int:
             destination_state=args.destination_state,
             platform_path=args.platform,
             mapping_path=args.application_mapping,
+            rollback_receipt_path=args.replacement_rollback_receipt,
         )
     except (ImportFailure, OSError, sqlite3.DatabaseError) as error:
         print(f"legacy controller import failed: {error}", file=sys.stderr)
