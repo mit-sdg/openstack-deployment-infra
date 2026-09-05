@@ -37,6 +37,7 @@ outside Git as described in [Deploy the platform](DEPLOYMENT.md).
 - `deploy/releases/deploy_helper_release.sh` — transfers and installs one commit-addressed helper release through the pinned admin bridge.
 - `deploy/releases/install_operator_config.py` — atomically installs validated non-secret operator configuration without privilege escalation.
 - `deploy/releases/install_release.py` — verifies, extracts, smoke-tests, and atomically selects immutable operator or helper release archives.
+- `deploy/releases/migrate_legacy_controller.py` — authenticates and imports terminal legacy controller state into a private current-schema hosted-controller candidate.
 - `deploy/releases/release_smoke.py` — checks the operator entry point or the helper action manifest/handler composition before release selection.
 - `deploy/releases/setup_operator_bridge.py` — preflights, writes, and validates the pinned SSH/OpenStack bridge between operator and admin hosts.
 - `deploy/releases/systemd/openstack-platform-backup.service` — user-service unit that runs the external operator-state backup command.
@@ -216,6 +217,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_ci_publication.py` — guards the CI path set that triggers role-image publication.
 - `tests/test_controller_api.py` — controller route composition, capability split, responses, idempotency, and service integration tests.
 - `tests/test_controller_database.py` — schema, migration, identity, journal, state transition, and database recovery tests.
+- `tests/test_legacy_controller_migration.py` — legacy marker rejection and complete application/storage/deployment import tests.
 - `tests/test_controller_hosting.py` — static Nix/controller account, socket, backup, and service-hosting boundary checks.
 - `tests/test_controller_http.py` — Unix HTTP parsing, deadlines, keep-alive, peer policy, overload, shutdown, and socket security tests.
 - `tests/test_controller_seed_images.py` — hosted image-seed identity, selection, and idempotence tests.
