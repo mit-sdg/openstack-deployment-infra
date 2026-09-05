@@ -226,6 +226,63 @@ class LegacyControllerMigrationTests(unittest.TestCase):
             receipt["sourceSha256"], hashlib.sha256(self.source.read_bytes()).hexdigest()
         )
 
+    def test_imports_one_exactly_acknowledged_replacement_rollback(self) -> None:
+        operation_id = "60000000-0000-4000-8000-000000000006"
+        replacement_id = "70000000-0000-4000-8000-000000000007"
+        volume_id = "80000000-0000-4000-8000-000000000008"
+        refs = {
+            "role": "storage",
+            "old_server_id": self.server_id,
+            "replacement_server_id": replacement_id,
+            "port_id": self.port_id,
+            "volume_ids": [volume_id],
+        }
+        connection = sqlite3.connect(self.source)
+        connection.execute(
+            "INSERT INTO operations VALUES (?, 'infra.replace', 'infrastructure', "
+            "'recovery_required', 'replacement_created', ?, ?, ?, ?, NULL, ?, NULL)",
+            (
+                operation_id,
+                "2026-01-03T00:00:00Z",
+                "2026-01-03T00:01:00Z",
+                "2026-01-03T01:00:00Z",
+                json.dumps(refs),
+                "provider result was ambiguous",
+            ),
+        )
+        connection.commit()
+        connection.close()
+        receipt_path = self.root / "rollback-receipt.json"
+        receipt_path.write_text(
+            json.dumps(
+                {
+                    "format": 1,
+                    "operationId": operation_id,
+                    "role": "storage",
+                    "oldServerId": self.server_id,
+                    "replacementServerId": replacement_id,
+                    "portId": self.port_id,
+                    "volumeIds": [volume_id],
+                    "verifiedAt": "2026-01-03T00:05:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        receipt_path.chmod(0o600)
+
+        destination_state = self.root / "acknowledged"
+        migration.import_legacy(
+            source_database=self.source,
+            source_state=self.source_state,
+            destination_state=destination_state,
+            platform_path=self.platform,
+            mapping_path=self.mapping,
+            rollback_receipt_path=receipt_path,
+        )
+
+        receipt = json.loads((destination_state / "LEGACY-IMPORT-RECEIPT.json").read_text())
+        self.assertEqual(receipt["acknowledgedReplacementRollbacks"], 1)
+
     def test_rejects_marker_for_another_deployment(self) -> None:
         connection = sqlite3.connect(self.source)
         connection.execute(

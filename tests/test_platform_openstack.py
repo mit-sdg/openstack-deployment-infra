@@ -1670,6 +1670,50 @@ else:
         self.assertEqual(recovered.active_server_id, REPLACEMENT)
         self.assertIsNone(cloud.server)
 
+    def test_created_checkpoint_rolls_back_when_candidate_is_already_absent(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        created_refs: dict | None = None
+
+        def checkpoint(phase: str, refs: object) -> None:
+            nonlocal created_refs
+            assert isinstance(refs, dict)
+            if phase == "replacement_created":
+                created_refs = dict(refs)
+                raise SimulatedCrash
+
+        with protected_user_data() as user_data_path:
+            with self.assertRaises(SimulatedCrash):
+                openstack.replace_host(
+                    self.platform,
+                    "ingress",
+                    selected_image_id=IMAGE_1,
+                    selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
+                    operation_id=OPERATION,
+                    user_data_path=user_data_path,
+                    checkpoint=checkpoint,
+                    health_check=self.role_health,
+                    command_runner=cloud,
+                )
+        assert created_refs is not None
+        cloud.replacement = None
+        recovered = openstack.recover_host_replacement(
+            self.platform,
+            "ingress",
+            phase="replacement_created",
+            refs=created_refs,
+            action="rollback",
+            checkpoint=lambda *_: None,
+            health_check=self.role_health,
+            command_runner=cloud,
+        )
+        self.assertEqual(recovered.active_server_id, SERVER)
+        self.assertEqual(recovered.cleanup_state, "confirmed")
+        self.assertEqual(cloud.server["status"], "ACTIVE")
+        self.assertEqual(cloud.port_device, SERVER)
+
     def test_accepted_delete_before_complete_checkpoint_continues_exactly(self) -> None:
         class SimulatedCrash(BaseException):
             pass

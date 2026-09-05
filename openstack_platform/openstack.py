@@ -3543,7 +3543,7 @@ def _recover_host_replacement(
         state = "continue_required" if phase in ("accepted", "complete") else "rollback_required"
         return RecoveryResult(role, action, active_id, state)
     selected_image_id = uuid(refs.get("selected_image_id"), field="selected image UUID")
-    if replacement_id is not None and phase == "replacement_deleted":
+    if replacement_id is not None and (phase == "replacement_deleted" or action == "rollback"):
         if not _resource_exists(
             "server",
             replacement_id,
