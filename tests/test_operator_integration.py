@@ -919,6 +919,7 @@ class OperatorIntegrationTests(unittest.TestCase):
         )
         self.assertNotIn("dataRetained", evidence["observations"])
         self.assertTrue(callable(replace_call.call_args.kwargs["health_check"]))
+        self.assertGreater(replace_call.call_args.kwargs["timeout_seconds"], 800)
 
     def test_replacement_lifecycle_evidence_rejects_each_falsified_observation(self) -> None:
         refs = {
