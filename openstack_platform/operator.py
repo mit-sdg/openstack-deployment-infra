@@ -829,9 +829,7 @@ def _infra_replace(
                     health_check=_role_health_check(config),
                     wait_seconds=_remaining(deadline, config.policy.limits.process_seconds),
                     poll_interval_seconds=config.policy.limits.poll_interval_seconds,
-                    timeout_seconds=_remaining(
-                        deadline, min(60, config.policy.limits.process_seconds)
-                    ),
+                    timeout_seconds=_remaining(deadline, config.policy.limits.process_seconds),
                 )
                 completed = db.mark_succeeded(
                     connection, operation_id, cleanup_state=recovered.cleanup_state
@@ -874,7 +872,7 @@ def _infra_replace(
                 health_check=_role_health_check(config),
                 wait_seconds=_remaining(deadline, config.policy.limits.process_seconds),
                 poll_interval_seconds=config.policy.limits.poll_interval_seconds,
-                timeout_seconds=_remaining(deadline, min(60, config.policy.limits.process_seconds)),
+                timeout_seconds=_remaining(deadline, config.policy.limits.process_seconds),
             )
             if not result.accepted:
                 error = openstack.OpenStackError(
