@@ -2292,11 +2292,16 @@ def check_role_health(
     root = Path(_inventory_text(platform, "paths.root"))
     command: tuple[str, ...]
     if role == "admin":
+        # Replacement cloud-init has the gossip key needed to form the Nomad
+        # server, but controller ACL tokens are installed only after the host
+        # has been accepted. The console readiness marker already verifies the
+        # local leader endpoint; the authenticated SSH check must not require a
+        # token that cannot safely exist in the image or replacement payload.
         command = (
-            str(root / "bin" / f"{platform.namespace}-nomad"),
-            "operator",
-            "raft",
-            "list-peers",
+            "/run/current-system/sw/bin/systemctl",
+            "is-active",
+            "--quiet",
+            "nomad.service",
         )
     elif role == "storage":
         command = (

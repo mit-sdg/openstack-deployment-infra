@@ -1877,7 +1877,9 @@ else:
                 http_get=http_get,
             )
         self.assertEqual(len(service_calls), 2)
-        self.assertTrue(any("nomad" in call[-1] for call in service_calls))
+        admin_check = next(call[-1] for call in service_calls if "nomad.service" in call[-1])
+        self.assertIn("/run/current-system/sw/bin/systemctl", admin_check)
+        self.assertNotIn("operator raft", admin_check)
         storage_check = next(
             call[-1] for call in service_calls if call[-1].endswith("check_services.py")
         )
