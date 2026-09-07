@@ -179,7 +179,7 @@ class HelperRuntimePathTests(unittest.TestCase):
         self.assertEqual(runtime.data, Path("/srv/test-platform-data"))
         self.assertEqual(
             runtime.diagnostic_directory,
-            Path("/srv/test-platform-state/controller/helper-diagnostics"),
+            Path("/srv/test-platform/persistent/helper-diagnostics"),
         )
         for relative in (
             "openstack_platform/helper/production.py",
@@ -193,7 +193,8 @@ class HelperRuntimePathTests(unittest.TestCase):
 
     def test_active_build_log_is_private_tail_readable_and_offset_readable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            runtime = mock.Mock(admin_state=Path(temporary))
+            runtime = mock.Mock(root=Path(temporary))
+            (runtime.root / "persistent").mkdir(mode=0o700)
             log_path, state_path = production._build_log_paths(
                 runtime, "demo-app", "00000000-0000-4000-8000-000000000099"
             )
