@@ -134,7 +134,7 @@ def helper_runtime() -> HelperRuntime:
         admin_state=admin_state,
         backups=backups,
         data=data,
-        diagnostic_directory=admin_state / "controller/helper-diagnostics",
+        diagnostic_directory=root / "persistent/helper-diagnostics",
     )
 
 
@@ -249,8 +249,7 @@ def _worker_result(observed: application.WorkerObservation) -> Mapping[str, Any]
 
 
 def _build_log_paths(runtime: HelperRuntime, app_slug: str, build_id: str) -> tuple[Path, Path]:
-    controller = ensure_private_directory(runtime.admin_state / "controller", create=True)
-    root = ensure_private_directory(controller / "build-logs", create=True)
+    root = ensure_private_directory(runtime.root / "persistent/helper-build-logs", create=True)
     directory = ensure_private_directory(root / slug(app_slug), create=True)
     identifier = uuid(build_id, field="build ID")
     return directory / f"{identifier}.log", directory / f"{identifier}.state"
