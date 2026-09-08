@@ -301,7 +301,6 @@ create_failed=true
   "${metadata_args[@]}" \
   --use-config-drive \
   --user-data "$tmp" \
-  --wait \
   "$server_name" >/dev/null
 create_failed=false
 server_id=$(server_id_for_name)

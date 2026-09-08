@@ -47,6 +47,11 @@ write_files:
     permissions: "0600"
     content: |
       name = "__WORKER_NAME__"
+      acl {
+        enabled = true
+        token_ttl = "30s"
+        policy_ttl = "30s"
+      }
       advertise {
         http = "__WORKER_IP__:__NOMAD_HTTP_PORT__"
         rpc  = "__WORKER_IP__:__NOMAD_RPC_PORT__"

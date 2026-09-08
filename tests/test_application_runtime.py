@@ -788,6 +788,14 @@ class WorkerPrimitiveTests(unittest.TestCase):
         worker = (ROOT / "infra" / "openstack" / "worker_lifecycle.sh").read_text()
         self.assertIn('flavor show "$flavor"', worker)
         self.assertIn("vcpus < 1", worker)
+        worker_template = (ROOT / "infra" / "cloud-init-nixos" / "worker.yaml").read_text()
+        self.assertIn("acl {\n        enabled = true", worker_template)
+        builder = (ROOT / "infra" / "openstack" / "builder_lifecycle.sh").read_text()
+        create = builder[
+            builder.index('"$OSC" server create') : builder.index("create_failed=false")
+        ]
+        self.assertNotIn("--wait", create)
+        self.assertIn('wait_for_bootstrap "$server_id"', builder)
 
 
 class DeploymentTests(unittest.TestCase):
