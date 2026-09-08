@@ -9,6 +9,7 @@ let
   packages = import ../pkgs { inherit pkgs platform; };
   namespace = platform.namespace;
   configRoot = "/etc/${namespace}";
+  platformJson = pkgs.writeText "${namespace}-platform.json" (builtins.toJSON platform);
   systemdEscapePath =
     path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   infra = pkgs.runCommand "${namespace}-infra" { } ''
@@ -96,7 +97,7 @@ let
       ${packages.controllerPackage}/bin/openstack-platform-controller-restore \
       "$input" \
       --destination ${controllerState}/platform.sqlite3 \
-      --platform-config /etc/${namespace}/platform.json \
+      --platform-config ${platformJson} \
       --yes
     ${pkgs.coreutils}/bin/rm -f -- "$input"
   '';
@@ -384,8 +385,8 @@ in
     "d ${helperReleaseRoot}/releases 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${helperReleaseRoot}/incoming 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${backups} 0710 ${operatorAccount.name} ${controllerGroup} -"
-    "d ${controllerBackupRoot} 0770 ${operatorAccount.name} ${controllerGroup} -"
-    "d ${controllerBackupRoot}/.staging 0770 ${operatorAccount.name} ${controllerGroup} -"
+    "d ${controllerBackupRoot} 0700 ${operatorAccount.name} ${operatorAccount.name} -"
+    "d ${controllerBackupRoot}/.staging 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${hostedControllerBackupRoot} 0750 ${controllerUser} ${operatorAccount.name} -"
     "d ${hostedControllerBackupRoot}/.staging 0750 ${controllerUser} ${operatorAccount.name} -"
     "L+ ${root}/persistent - - - - ${operatorRoot}"
@@ -448,7 +449,7 @@ in
       LimitCORE = 0;
       ExecStart = lib.concatStringsSep " " [
         "${packages.controllerPackage}/bin/openstack-platform-hosted-controller-backup"
-        "--platform-config /etc/${namespace}/platform.json"
+        "--platform-config ${platformJson}"
         "--policy ${controllerPolicy}"
         "--state-directory ${controllerState}"
         "--backup-root ${hostedControllerBackupRoot}"
