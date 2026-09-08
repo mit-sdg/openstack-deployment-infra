@@ -18,7 +18,7 @@ from . import durable, runtime
 from .config import load_platform
 from .controller import database as db
 from .installation import OPERATOR_BIN
-from .validation import ValidationError
+from .validation import ValidationError, uuid
 
 _MAX_BACKUP_BYTES = 1_073_741_824
 _AGE_HEADER = b"age-encryption.org/v1\n"
@@ -292,7 +292,10 @@ def _verify_candidate(path: Path, *, identity: db.DeploymentIdentity | None = No
 
 
 def _verify_existing_destination(
-    path: Path, *, identity: db.DeploymentIdentity | None = None
+    path: Path,
+    *,
+    identity: db.DeploymentIdentity | None = None,
+    expected_recovery_required_operation: str | None = None,
 ) -> None:
     if not os.path.lexists(path):
         return
@@ -316,14 +319,44 @@ def _verify_existing_destination(
             ) from error
     try:
         try:
-            unfinished = _unfinished_operations(connection)
+            operations = [
+                (str(row[0]), str(row[1]))
+                for row in connection.execute(
+                    "SELECT operation_id, status FROM operations "
+                    "WHERE status IN ('running', 'recovery_required') ORDER BY operation_id"
+                )
+            ]
+            dispatch_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_dispatches'"
+            ).fetchone()
+            dispatches = (
+                [
+                    (str(row[0]), str(row[1]))
+                    for row in connection.execute(
+                        "SELECT operation_id, status FROM operation_dispatches "
+                        "WHERE status IN ('pending', 'running', 'recovery_required') "
+                        "ORDER BY operation_id"
+                    )
+                ]
+                if dispatch_table is not None
+                else []
+            )
         except sqlite3.DatabaseError as error:
             raise RestoreError(
                 "existing controller database could not be inspected for unfinished operations"
             ) from error
-        if unfinished:
+        if not operations and not dispatches:
+            if expected_recovery_required_operation is not None:
+                _fail("current database has no acknowledged recovery-required operation")
+            return
+        if expected_recovery_required_operation is None:
             _fail(
                 "restore refuses while the current database has unfinished operations; recover or complete that operation first"
+            )
+        expected = (expected_recovery_required_operation, "recovery_required")
+        if operations != [expected] or dispatches not in ([], [expected]):
+            _fail(
+                "current database unfinished state does not exactly match the acknowledged recovery-required operation"
             )
     finally:
         connection.close()
@@ -337,6 +370,7 @@ def restore_database(
     age_command: str | None = None,
     maximum_bytes: int = _MAX_BACKUP_BYTES,
     identity: db.DeploymentIdentity | None = None,
+    expected_recovery_required_operation: str | None = None,
 ) -> RestoreResult:
     """Verify an offline controller backup and atomically replace ``destination``.
 
@@ -347,6 +381,16 @@ def restore_database(
     """
     if not 1 <= maximum_bytes <= _MAX_BACKUP_BYTES:
         raise ValueError("restore size limit must be from 1 through 1073741824 bytes")
+    if expected_recovery_required_operation is not None:
+        try:
+            expected_recovery_required_operation = uuid(
+                expected_recovery_required_operation,
+                field="acknowledged recovery-required operation UUID",
+            )
+        except ValidationError as error:
+            raise RestoreError(
+                "acknowledged recovery-required operation UUID is malformed"
+            ) from error
     backup_path = Path(backup)
     destination_path = Path(destination)
     if not destination_path.is_absolute():
@@ -354,7 +398,11 @@ def restore_database(
     _private_state_directory(destination_path.parent)
     if backup_path.absolute() == destination_path.absolute():
         _fail("restore source and destination must be different files")
-    _verify_existing_destination(destination_path, identity=identity)
+    _verify_existing_destination(
+        destination_path,
+        identity=identity,
+        expected_recovery_required_operation=expected_recovery_required_operation,
+    )
     old_sidecars = _validate_sidecars(destination_path)
     if old_sidecars and not os.path.lexists(destination_path):
         _fail("SQLite WAL/SHM sidecars exist without a controller database")
@@ -444,6 +492,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--platform-config", type=Path, required=True)
     parser.add_argument("--age-identity", type=Path)
     parser.add_argument(
+        "--replace-current-recovery-required-operation",
+        metavar="OPERATION_UUID",
+        help=(
+            "replace a current database only when its entire unfinished state is the exact "
+            "named recovery-required operation"
+        ),
+    )
+    parser.add_argument(
         "--yes", action="store_true", help="confirm replacement of the destination database"
     )
     args = parser.parse_args(argv)
@@ -457,6 +513,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.destination,
                 age_identity=args.age_identity,
                 identity=identity,
+                expected_recovery_required_operation=(
+                    args.replace_current_recovery_required_operation
+                ),
             )
     except (RestoreError, ValidationError, FileNotFoundError, runtime.RuntimeFailure) as error:
         print(f"offline restore failed: {error}", file=sys.stderr)

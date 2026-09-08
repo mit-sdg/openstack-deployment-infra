@@ -74,8 +74,17 @@ let
       echo "hosted controller restore must run as root from the recovery console" >&2
       exit 77
     fi
-    if [[ $# != 1 || $1 != --yes ]]; then
-      echo "usage: openstack-platform-hosted-controller-restore --yes" >&2
+    recovery_arguments=()
+    if [[ $# == 1 && $1 == --yes ]]; then
+      :
+    elif [[ $# == 3 && $1 == --yes && $2 == --replace-current-recovery-required-operation ]]; then
+      [[ $3 =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+        echo "recovery-required operation must be a canonical UUID" >&2
+        exit 64
+      }
+      recovery_arguments=(--replace-current-recovery-required-operation "$3")
+    else
+      echo "usage: openstack-platform-hosted-controller-restore --yes [--replace-current-recovery-required-operation OPERATION_UUID]" >&2
       exit 64
     fi
     for unit in \
@@ -98,6 +107,7 @@ let
       "$input" \
       --destination ${controllerState}/platform.sqlite3 \
       --platform-config ${platformJson} \
+      "''${recovery_arguments[@]}" \
       --yes
     ${pkgs.coreutils}/bin/rm -f -- "$input"
   '';

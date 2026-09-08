@@ -232,6 +232,24 @@ validates deployment identity, complete known schema, SQLite integrity, foreign
 keys, and unfinished operations before atomic replacement. On refusal, the
 current database remains unchanged.
 
+A persistent admin-image cutover can deadlock when controller preparation
+refuses changed image selections while the retained database has one known
+`recovery_required` operation. After retaining a fresh hosted backup and
+verifying that the replacement snapshot has no unfinished operations, recovery
+may explicitly acknowledge that exact operation UUID:
+
+```bash
+sudo openstack-platform-hosted-controller-restore --yes \
+  --replace-current-recovery-required-operation EXACT_OPERATION_UUID
+```
+
+This exception is recovery-console/root gated and succeeds only when the
+current database's entire unfinished operation and dispatch state is that one
+exact UUID in `recovery_required`; running, pending, additional, absent, or
+mismatched state is refused. It does not weaken candidate verification. Do not
+use it to avoid replaying a recoverable operation or without retaining its
+pre-restore hosted backup.
+
 Verify readiness and create a fresh hosted backup:
 
 ```bash

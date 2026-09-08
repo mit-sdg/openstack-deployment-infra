@@ -102,6 +102,8 @@ class ControllerHostingStaticTests(unittest.TestCase):
         self.assertIn("openstack-platform-controller-restore", source)
         self.assertIn("refusing restore while $unit is active", source)
         self.assertIn("${namespace}-hosted-controller-backup.timer", source)
+        self.assertIn("--replace-current-recovery-required-operation", source)
+        self.assertIn("\"''${recovery_arguments[@]}\"", source)
         self.assertIn("--destination ${controllerState}/platform.sqlite3", source)
         self.assertIn(
             "restore input must be a direct ${controllerUser}-owned mode-0600 file", source
