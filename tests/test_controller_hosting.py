@@ -33,6 +33,21 @@ class ControllerHostingStaticTests(unittest.TestCase):
         for trusted_group in ("agentops", "platform-admin", "nomad", "platform-controller"):
             self.assertNotIn(f'"{trusted_group}"', body)
 
+    def test_backup_and_restore_use_direct_inventory_and_private_operator_staging(self) -> None:
+        admin = ADMIN.read_text(encoding="utf-8")
+        self.assertIn('platformJson = pkgs.writeText "${namespace}-platform.json"', admin)
+        self.assertIn("--platform-config ${platformJson}", admin)
+        self.assertIn('"--platform-config ${platformJson}"', admin)
+        self.assertIn(
+            '"d ${controllerBackupRoot} 0700 ${operatorAccount.name} ${operatorAccount.name} -"',
+            admin,
+        )
+        self.assertIn(
+            '"d ${controllerBackupRoot}/.staging 0700 ${operatorAccount.name} ${operatorAccount.name} -"',
+            admin,
+        )
+        self.assertNotIn("${controllerBackupRoot} 0770", admin)
+
     def test_controller_is_packaged_and_uses_fixed_local_paths(self) -> None:
         admin = ADMIN.read_text(encoding="utf-8")
         packages = PACKAGES.read_text(encoding="utf-8")
