@@ -469,9 +469,11 @@ def acquire_github_commit(
             ),
             **bounds(),
         )
+        index_bounds = bounds()
+        index_bounds["stdout_limit"] = 1_048_576
         index = command_runner(
             ("git", *git_options, "-C", str(root), "ls-files", "--stage", "-z"),
-            **bounds(),
+            **index_bounds,
         ).stdout
         if not isinstance(index, bytes):
             raise ValidationError("Git index evidence was malformed")
