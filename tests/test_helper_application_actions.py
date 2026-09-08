@@ -672,6 +672,20 @@ class ApplicationActionTests(unittest.TestCase):
         self.assertEqual(recovery["keys"], ["API_KEY", "DATABASE_URL"])
         self.assertIn("repeat set", recovery["interruptionRecovery"])
 
+    def test_environment_for_stopped_legacy_job_does_not_require_candidate_metadata(self) -> None:
+        self.nomad.inspection = {"ID": "demo-app"}
+        self.nomad.status = {"ID": "demo-app", "Status": "dead"}
+        result = self.actions["app.env.set"](
+            {"slug": "demo-app", "updates": {"API_KEY": SENTINEL}, "ownership": {}}
+        )
+        self.assertFalse(result["restarted"])
+        self.assertFalse(result["schedulerHealthy"])
+        self.assertFalse(result["publicHealthy"])
+        self.assertNotIn(
+            ("fixed-nomad-wrapper", "job", "restart", "-yes", "demo-app"),
+            [argv for argv, _kwargs in self.nomad.calls],
+        )
+
     def test_environment_for_absent_job_mutates_without_a_false_health_claim(self) -> None:
         self.nomad.job_absent = True
         result = self.actions["app.env.set"](
