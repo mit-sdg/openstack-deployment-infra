@@ -136,7 +136,7 @@ def _status_or_absent(
             if len(value) == 1 and isinstance(value[0], dict) and "Allocations" in value[0]:
                 allocations = value[0]["Allocations"]
             if isinstance(allocations, list) and not allocations:
-                inspected = _inspected_candidate(
+                inspected = _inspected_job(
                     application_slug,
                     command_runner=command_runner,
                     nomad_command=nomad_command,
@@ -253,20 +253,15 @@ def inspected_job_identity(value: Mapping[str, Any], job_id: str) -> tuple[int, 
     return version, marker_identity, image
 
 
-def _inspected_candidate(
+def _inspected_job(
     job_id: str,
     *,
     command_runner: Callable[..., Any],
     nomad_command: tuple[str, ...],
     timeout_seconds: float,
     response_limit: int,
-) -> tuple[int, str, str] | None:
-    """Inspect one job, returning ``None`` only for exact absence.
-
-    ``None`` is intentionally not a generic "could not inspect" result.  A
-    dependency failure or malformed/ambiguous job is raised before callers can
-    submit a replacement or issue a destructive command.
-    """
+) -> Mapping[str, Any] | None:
+    """Inspect one exact job, returning ``None`` only for exact absence."""
     completed = command_runner(
         (*nomad_command, "job", "inspect", "-json", job_id),
         timeout_seconds=timeout_seconds,
@@ -281,7 +276,26 @@ def _inspected_candidate(
     value = _parse_json(completed.stdout, field="job inspection")
     if not isinstance(value, dict) or value.get("ID") != job_id:
         raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
-    return inspected_job_identity(value, job_id)
+    return value
+
+
+def _inspected_candidate(
+    job_id: str,
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+    response_limit: int,
+) -> tuple[int, str, str] | None:
+    """Inspect one job and require its immutable candidate identity."""
+    value = _inspected_job(
+        job_id,
+        command_runner=command_runner,
+        nomad_command=nomad_command,
+        timeout_seconds=timeout_seconds,
+        response_limit=response_limit,
+    )
+    return None if value is None else inspected_job_identity(value, job_id)
 
 
 def _inspected_route_marker(
@@ -318,7 +332,7 @@ def _only_job_id(
     jobs = [
         job_id
         for job_id in (application_slug, f"{application_slug}-candidate")
-        if _inspected_candidate(
+        if _inspected_job(
             job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
