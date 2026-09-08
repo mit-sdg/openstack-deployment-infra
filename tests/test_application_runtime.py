@@ -115,6 +115,8 @@ class SourceTests(unittest.TestCase):
                 (destination / ".git").mkdir()
                 (destination / "README.md").write_text("exact checkout\n")
             stdout = (COMMIT + "\n").encode() if "rev-parse" in argv else b""
+            if "ls-files" in argv:
+                self.assertEqual(kwargs["stdout_limit"], 1_048_576)
             self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
             self.assertEqual(kwargs["env"]["GIT_LFS_SKIP_SMUDGE"], "1")
             self.assertEqual(kwargs["env"]["GIT_CONFIG_GLOBAL"], "/dev/null")
