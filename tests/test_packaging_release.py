@@ -858,6 +858,7 @@ class ReleaseInstallerTests(unittest.TestCase):
             launcher_text,
         )
         self.assertIn('export PLATFORM_CONFIG="$platform_config"', launcher_text)
+        self.assertIn('export PATH="/run/current-system/sw/bin:$PATH"', launcher_text)
         self.assertIn('if test -L "$platform_config"', launcher_text)
         self.assertIn("/nix/store/*", launcher_text)
         self.assertNotIn('test ! -L "$platform_config"', launcher_text)

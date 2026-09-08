@@ -409,6 +409,9 @@ else
   }}
 fi
 export PLATFORM_CONFIG="$platform_config"
+# Hosted controller invokes the helper locally with a deliberately minimal
+# service PATH. Build actions still require the root-managed Git/OpenSSH tools.
+export PATH="/run/current-system/sw/bin:$PATH"
 """
     return f"""#!/bin/sh
 set -eu
