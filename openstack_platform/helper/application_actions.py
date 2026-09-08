@@ -129,11 +129,22 @@ def _status_or_absent(
             return value
         # Nomad 2 emits the allocation status projection as a JSON array for
         # stopped jobs. Environment mutation needs only the running/dead
-        # distinction, but every row must still belong to the exact job.
-        if isinstance(value, list) and value:
+        # distinction. Every row must belong to the exact job; an empty
+        # projection requires a separate exact job inspection.
+        if isinstance(value, list):
             allocations: object = value
             if len(value) == 1 and isinstance(value[0], dict) and "Allocations" in value[0]:
                 allocations = value[0]["Allocations"]
+            if isinstance(allocations, list) and not allocations:
+                inspected = _inspected_candidate(
+                    application_slug,
+                    command_runner=command_runner,
+                    nomad_command=nomad_command,
+                    timeout_seconds=timeout_seconds,
+                    response_limit=response_limit,
+                )
+                if inspected is not None:
+                    return {"ID": application_slug, "Status": "dead"}
             if (
                 isinstance(allocations, list)
                 and allocations

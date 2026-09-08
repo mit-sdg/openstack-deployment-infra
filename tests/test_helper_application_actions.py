@@ -793,6 +793,78 @@ class ApplicationActionTests(unittest.TestCase):
             {"ID": "demo-app", "Status": "dead"},
         )
 
+    def test_nomad_two_empty_stopped_status_requires_exact_job_inspection(self) -> None:
+        inspection = {
+            "ID": "demo-app",
+            "Version": 7,
+            "Meta": {
+                "platform_candidate_job_sha256": CANDIDATE_SHA,
+                "platform_candidate_image": CANDIDATE_IMAGE,
+            },
+            "TaskGroups": [
+                {
+                    "Name": "app",
+                    "Tasks": [{"Name": "app", "Config": {"image": CANDIDATE_IMAGE}}],
+                }
+            ],
+        }
+        calls: list[tuple[str, ...]] = []
+
+        def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            calls.append(argv)
+            if "status" in argv:
+                return CommandResult(argv, 0, b"[]", b"", False, False)
+            if "inspect" in argv:
+                return CommandResult(
+                    argv,
+                    0,
+                    json.dumps(inspection).encode(),
+                    b"",
+                    False,
+                    False,
+                )
+            raise AssertionError(argv)
+
+        self.assertEqual(
+            _status_or_absent(
+                "demo-app",
+                command_runner=runner,
+                nomad_command=("fixed-nomad-wrapper",),
+                timeout_seconds=20,
+                response_limit=65_536,
+            ),
+            {"ID": "demo-app", "Status": "dead"},
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("fixed-nomad-wrapper", "job", "status", "-json", "demo-app"),
+                ("fixed-nomad-wrapper", "job", "inspect", "-json", "demo-app"),
+            ],
+        )
+
+    def test_nomad_two_unanchored_empty_status_fails_closed(self) -> None:
+        def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if "status" in argv:
+                return CommandResult(argv, 0, b"[]", b"", False, False)
+            return CommandResult(
+                argv,
+                1,
+                b"",
+                b'No job with ID "demo-app" found',
+                False,
+                False,
+            )
+
+        with self.assertRaisesRegex(HelperActionError, "unexpected job"):
+            _status_or_absent(
+                "demo-app",
+                command_runner=runner,
+                nomad_command=("fixed-nomad-wrapper",),
+                timeout_seconds=20,
+                response_limit=65_536,
+            )
+
     def test_follow_logs_preserves_partial_output_at_deadline(self) -> None:
         partial = CommandResult(
             argv=("fixed-nomad-wrapper",),
