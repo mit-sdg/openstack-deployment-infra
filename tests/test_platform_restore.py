@@ -93,6 +93,68 @@ class OfflineRestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(restore.RestoreError, "current database has unfinished"):
             restore.restore_database(self.source, self.destination)
 
+    def test_restore_replaces_only_the_exact_acknowledged_recovery_required_operation(self) -> None:
+        self._write_backup()
+        current = self._database(self.destination)
+        db.put_application(
+            current,
+            application_id=APP_ID,
+            application_slug="current-app",
+            worker_flavor="example.1c2g",
+            scheduler_cpu_mhz=1000,
+            scheduler_memory_mib=2048,
+        )
+        db.begin_operation(
+            current,
+            operation_id=OPERATION_ID,
+            kind="app.deploy",
+            scope=f"app-{APP_ID}",
+            phase="validated",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+        db.mark_recovery_required(current, OPERATION_ID, "expected recovery")
+        current.close()
+
+        result = restore.restore_database(
+            self.source,
+            self.destination,
+            expected_recovery_required_operation=OPERATION_ID,
+        )
+        self.assertEqual(result.integrity, "ok")
+        connection = db.connect(self.destination)
+        self.assertIsNone(db.get_operation(connection, OPERATION_ID))
+        self.assertEqual(
+            connection.execute("SELECT slug FROM applications").fetchone()[0], "demo-app"
+        )
+        connection.close()
+
+    def test_restore_recovery_acknowledgement_fails_closed(self) -> None:
+        self._write_backup()
+        current = self._database(self.destination)
+        db.begin_operation(
+            current,
+            operation_id=OPERATION_ID,
+            kind="app.deploy",
+            scope=f"app-{APP_ID}",
+            phase="validated",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+        current.close()
+        before = self.destination.read_bytes()
+        with self.assertRaisesRegex(restore.RestoreError, "does not exactly match"):
+            restore.restore_database(
+                self.source,
+                self.destination,
+                expected_recovery_required_operation=OPERATION_ID,
+            )
+        with self.assertRaisesRegex(restore.RestoreError, "malformed"):
+            restore.restore_database(
+                self.source,
+                self.destination,
+                expected_recovery_required_operation="not-a-uuid",
+            )
+        self.assertEqual(self.destination.read_bytes(), before)
+
     def test_restore_checks_private_modes_and_leaves_destination_untouched_on_failure(self) -> None:
         self._write_backup()
         current = self._database(self.destination)
