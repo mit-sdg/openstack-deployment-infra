@@ -197,7 +197,9 @@ def _recover(
     connection: sqlite3.Connection, record: dict[str, Any], provider: fixed_ip.Provider
 ) -> None:
     matches = [
-        value for value in provider.inventory() if value.get("description") == record["description"]
+        value
+        for value in provider.inventory(name=record["name"])
+        if value.get("description") == record["description"]
     ]
     if len(matches) != 1:
         raise openstack.RecoveryRequired(
@@ -246,7 +248,7 @@ def release_locked(
     provider.verify()
     if record["phase"] == "allocating":
         _recover(connection, record, provider)
-    matches = [value for value in provider.inventory() if value["id"] == record["port_id"]]
+    matches = provider.inventory(identifier=record["port_id"])
     if not matches:
         if record["phase"] != "deleting":
             raise openstack.DriftError("retained port disappeared without deletion intent")
@@ -257,7 +259,7 @@ def release_locked(
     _save(connection, record)
     provider.check(provider.show(record["port_id"]), record)
     provider.delete(record["port_id"])
-    if any(value["id"] == record["port_id"] for value in provider.inventory()):
+    if provider.inventory(identifier=record["port_id"]):
         raise openstack.RecoveryRequired("retained port deletion was not confirmed", refs={})
     _forget(connection, application_id)
 

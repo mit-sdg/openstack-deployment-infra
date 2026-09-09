@@ -219,8 +219,26 @@ class RetainedFixedIPTests(unittest.TestCase):
         key, operation = self.reserve()
         self.assertEqual(operation.status, "recovery_required")
         self.assertEqual(service.get(self.connection, self.app_id)["phase"], "allocating")
+        dhcp_id = str(uuid.uuid4())
+        self.change(
+            lambda s: s["ports"].update(
+                {
+                    dhcp_id: dict(
+                        id=dhcp_id,
+                        name="unrelated-dhcp",
+                        device_owner="network:dhcp",
+                        device_id="dhcp-host-opaque-identifier",
+                        fixed_ips=[],
+                        security_group_ids=[],
+                    )
+                }
+            )
+        )
         self.assert_success(self.reserve(key))
         self.assertEqual(len([a for a in self.state()["calls"] if a[:2] == ["port", "create"]]), 1)
+        self.assert_success(self.fixture.post(self.base, {"action": "release"}))
+        self.assertEqual(set(self.state()["ports"]), {dhcp_id})
+        self.assertFalse(any(a[:3] == ["port", "show", dhcp_id] for a in self.state()["calls"]))
 
     def test_unknown_zero_allocation_never_recreates_or_releases(self):
         self.change(lambda s: s.update(fault="port.create.before"))

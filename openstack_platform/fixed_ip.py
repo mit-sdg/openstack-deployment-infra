@@ -112,14 +112,32 @@ class Provider:
             raise os_api.DriftError("retained port observation identity is malformed")
         return value
 
-    def inventory(self) -> list[dict[str, Any]]:
+    def inventory(
+        self, *, name: str | None = None, identifier: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Observe only exact candidates from an authoritative ID/name listing.
+
+        Unrelated DHCP/service ports may have opaque device IDs, no security
+        groups, or non-worker addresses. Never apply retained-worker validation
+        to them. Name filtering narrows recovery, but is not adoption authority:
+        the caller must still prove the complete journaled ownership marker.
+        """
+        if (name is None) == (identifier is None):
+            raise ValueError("port inventory requires exactly one identity selector")
+        if identifier is not None:
+            uuid(identifier, field="retained port UUID")
         rows = self.json(("port", "list", "--project", self.platform.project_id))
         if not isinstance(rows, list):
             raise os_api.OpenStackError("port inventory is malformed")
         ids = [os_api._provider_uuid(os_api._field(row, "id"), field="port UUID") for row in rows]
         if len(set(ids)) != len(ids):
             raise os_api.DriftError("duplicate port inventory identity")
-        return [self.show(identifier) for identifier in ids]
+        return [
+            self.show(pid)
+            for row, pid in zip(rows, ids, strict=True)
+            if (identifier is not None and pid == identifier)
+            or (name is not None and os_api._field(row, "name") == name)
+        ]
 
     def check(self, value: dict[str, Any], record: dict[str, Any], *, device_id: str = "") -> None:
         check_port(value, record, device_id=device_id)
