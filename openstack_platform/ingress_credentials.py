@@ -74,7 +74,9 @@ def _token(data: bytes) -> str:
             or re.fullmatch(r"[0-9a-f]{32}", account) is None
             or not isinstance(tunnel, str)
             or not isinstance(secret, str)
-            or len(base64.b64decode(secret, validate=True)) != 32
+            # cloudflared's TunnelToken unmarshals s as []byte, not a fixed-size
+            # key. Require nonempty decoded bytes, bounded by the outer token limit.
+            or not base64.b64decode(secret, validate=True)
         ):
             raise ValueError("invalid fields")
         uuid(tunnel, field="tunnel UUID")
