@@ -513,7 +513,11 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             )
             if action == "app.worker.delete" and args.get("single") is not True:
                 raise ValidationError("retained port cleanup requires an exact single worker slot")
-            provider = fixed_ip.Provider(platform, deadline=time.monotonic() + 120)
+            provider = fixed_ip.Provider(
+                platform,
+                deadline=time.monotonic() + 120,
+                executable=application.provider_command(platform, "openstack")[0],
+            )
             value = provider.show(retained_port["port_id"])
             device = value.get("device_id")
             if not isinstance(device, str):

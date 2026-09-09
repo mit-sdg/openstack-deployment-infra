@@ -421,6 +421,7 @@ in
     "L+ ${root}/bin/${namespace}-builder - - - - ${builderCli}/bin/${namespace}-builder"
     "L+ ${root}/bin/${namespace}-pin-builder-host-key - - - - ${pinBuilderHostKeyCli}/bin/${namespace}-pin-builder-host-key"
     "L+ ${root}/bin/openstack-platform-helper - - - - ${packages.helperLauncher}/bin/openstack-platform-helper"
+    "L+ ${root}/bin/${namespace}-openstack - - - - ${openstackClient}/bin/platform-openstack"
     "L+ ${root}/bin/age - - - - ${pkgs.age}/bin/age"
     "L+ ${root}/bin/age-keygen - - - - ${pkgs.age}/bin/age-keygen"
   ];
