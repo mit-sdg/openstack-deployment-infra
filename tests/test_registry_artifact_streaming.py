@@ -243,6 +243,7 @@ class RegistryArtifactStreamingTests(unittest.TestCase):
         )
         self.assertIn('RuntimeDirectory = "${namespace}-backup-private";', unit)
         self.assertIn('RuntimeDirectoryMode = "0700";', unit)
+        self.assertIn('"PATH=/run/wrappers/bin:${', unit)
         self.assertIn(
             '"${pkgs.coreutils}/bin/install -m 0600 %d/storage-bootstrap '
             '%t/${namespace}-backup-private/storage-bootstrap.env"',

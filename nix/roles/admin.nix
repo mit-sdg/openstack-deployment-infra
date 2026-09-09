@@ -877,7 +877,8 @@ in
         "REGISTRY_BACKUP_MAX_FILE_BYTES=1099511627776"
         "REGISTRY_BACKUP_MAX_TOTAL_BYTES=4398046511104"
         "REGISTRY_BACKUP_MAX_MANIFEST_BYTES=67108864"
-        "PATH=${
+        # Rootless Podman needs the NixOS setuid newuidmap/newgidmap wrappers.
+        "PATH=/run/wrappers/bin:${
           lib.makeBinPath [
             pkgs.coreutils
             pkgs.findutils
