@@ -88,5 +88,6 @@ def validate_plan(connection: sqlite3.Connection, application_id: str, value: ob
     if not isinstance(value, dict):
         raise ValidationError("rollback plan must be an exact plan response")
     fresh = plan(connection, application_id, value.get("targetDeploymentId"))
-    if value != fresh:
+    # JSON booleans/floats must not compare equal to integer revision/budget fields.
+    if db.request_fingerprint(value) != db.request_fingerprint(fresh):
         raise ValidationError("rollback plan drifted; obtain and review a fresh plan")

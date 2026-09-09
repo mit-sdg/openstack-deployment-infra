@@ -180,6 +180,8 @@ class RetainedRollbackTests(unittest.TestCase):
         plan = self.plan(first)
         for value, confirmation in (
             ({**plan, "imageDigest": "tampered"}, "commons"),
+            ({**plan, "environmentRevision": False}, "commons"),
+            ({**plan, "environmentRevision": float(plan["environmentRevision"])}, "commons"),
             (plan, "wrong"),
         ):
             self.fixture.calls.clear()
