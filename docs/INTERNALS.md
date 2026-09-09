@@ -233,11 +233,17 @@ external work. Four workers execute at most 32 admitted running/queued
 operations, serialized per application. Reads and polling use short independent
 SQLite transactions.
 
-Started work interrupted by controller restart becomes `recovery_required`.
-The caller resumes it by repeating the identical request and key. Request bodies
+Started work with recorded domain intent interrupted by controller restart becomes
+`recovery_required`, preserving its domain checkpoint. A dispatch interrupted
+before any domain intent was recorded becomes a terminal unstarted failure.
+The caller resumes recovery-required work by repeating the identical request and key. Request bodies
 are not retained in the dispatch journal, so secret-bearing environment bodies
 must be supplied again. A new key cannot bypass a recovery-required operation
-on the same application.
+on the same application. Storage dispatch/domain kinds agree; identical recovery
+can repair the former typed dispatch spelling only when the saved single-resource
+intent matches. A recorded build rejection becomes terminal only after exact
+builder absence and authenticated build-tag absence; uncertain cleanup is retried
+without rebuilding. No secret-bearing request payload is added to durable state.
 
 ### Project and privileged routes
 

@@ -193,6 +193,41 @@ before resize. Plans do not reserve quota, and the platform does not copy local
 disk state or resize managed-storage quotas. These examples describe the API;
 production provider behavior still requires a release acceptance exercise.
 
+## Retry application and storage operations
+
+Poll the `statusUrl` returned with HTTP 202. Privileged application/storage
+deletions return `/v1/admin/operations/{id}`, which is readable on the same
+privileged socket, including when the original request is replayed after deletion.
+Repeat an unknown or recovery-required request with its identical body and
+`Idempotency-Key`; do not allocate a new key to bypass unfinished scope.
+
+Storage dispatch now uses the same `storage.create`, `storage.verify`,
+`storage.rotate`, and `storage.remove` kinds as its domain journal. Identical
+recovery can also reconcile a previously recorded `storage.<type>.<action>`
+dispatch only when the domain operation's kind, application scope, and exact
+single selected type agree. Other mismatches remain conflicts; no manual SQLite
+repair is part of this procedure.
+
+A positively reported source/build rejection is recorded before cleanup. The
+controller requires both exact builder/server-port absence and an authenticated
+404 for that build's unique registry publication tag before marking the attempt
+and operation `failed` with confirmed cleanup. That terminal result frees the
+application scope for a corrected commit/configuration with a **new** key.
+Replaying the failed request returns its existing result without rebuilding.
+
+If cleanup, registry availability, or identity checks are uncertain, the operation
+remains `recovery_required`. Identical retries of a recorded rejection perform
+cleanup only, including after controller restart. A present build artifact is not
+deleted or adopted automatically; it requires separate investigation. Unknown
+transport results and malformed success metadata retain the existing deployment
+reconciliation path rather than being called deterministic rejection.
+
+Install matching controller and helper releases: `app.build.cleanup` is a new
+fixed helper action. An older helper cannot supply the required absence evidence
+and will leave recovery blocked. No runtime worker or managed storage is removed
+by failed-build cleanup. This is not an arbitrary cancellation or forced-unlock
+endpoint.
+
 ## Back up all state classes
 
 The deployment has three independent backup classes:

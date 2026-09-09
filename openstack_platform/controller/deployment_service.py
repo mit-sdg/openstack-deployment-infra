@@ -69,7 +69,7 @@ class DeploymentRequest:
     reuse_deployment_id: str | None = None
 
 
-RecoveryKind = Literal["candidate-removed", "accepted", "deployment-healthy"]
+RecoveryKind = Literal["candidate-removed", "build-rejected", "accepted", "deployment-healthy"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +214,72 @@ def _apply_registry_retention(
         raise app.ApplicationError("registry retention evidence was malformed")
 
 
+def _finish_rejected_build(
+    connection: sqlite3.Connection,
+    config: Config,
+    operation_id: str,
+    application_slug: str,
+    *,
+    helper_caller: HelperCaller,
+    deadline: float,
+) -> None:
+    operation = db.get_operation(connection, operation_id)
+    if (
+        operation is None
+        or operation.phase != "build_rejected"
+        or operation.candidate_digest is not None
+    ):
+        raise app.ApplicationError("rejected build cleanup intent is invalid")
+    result = helper_caller(
+        config,
+        "app.build.cleanup",
+        {"buildId": operation_id, "slug": application_slug},
+        deadline=deadline,
+    )
+    if (
+        set(result) != {"buildId", "slug", "builderAbsent", "artifactAbsent"}
+        or result.get("buildId") != operation_id
+        or result.get("slug") != application_slug
+        or result.get("builderAbsent") is not True
+        or result.get("artifactAbsent") is not True
+    ):
+        raise app.ApplicationError("exact rejected-build absence was not confirmed")
+    message = "application build was rejected; exact builder and build artifact absence confirmed"
+    # Mark the attempt first. A crash before finishing the operation will repeat
+    # the same absence checks rather than strand a nonterminal deployment row.
+    db.checkpoint_deployment_attempt(
+        connection, operation_id, status="failed", error=message, cleanup_state="confirmed"
+    )
+    db.mark_failed(connection, operation_id, message, cleanup_state="confirmed")
+
+
+def _call_build(
+    connection: sqlite3.Connection,
+    config: Config,
+    helper_caller: HelperCaller,
+    operation_id: str,
+    application_slug: str,
+    arguments: Mapping[str, Any],
+    *,
+    deadline: float,
+) -> Mapping[str, Any]:
+    try:
+        return helper_caller(config, "app.build", arguments, deadline=deadline)
+    except remote.HelperError as error:
+        if error.code != "BUILD_REJECTED":
+            raise
+        db.checkpoint_operation(connection, operation_id, phase="build_rejected")
+        _finish_rejected_build(
+            connection,
+            config,
+            operation_id,
+            application_slug,
+            helper_caller=helper_caller,
+            deadline=deadline,
+        )
+        raise app.ApplicationError("application build was rejected; cleanup confirmed") from None
+
+
 def _prepare_deployment_build(
     connection: sqlite3.Connection,
     config: Config,
@@ -246,9 +312,12 @@ def _prepare_deployment_build(
                 phase="builder_creating",
                 refs=refs,
             )
-        built = helper_caller(
+        built = _call_build(
+            connection,
             config,
-            "app.build",
+            helper_caller,
+            operation.operation_id,
+            application_slug,
             {
                 "buildId": operation.operation_id,
                 "slug": application_slug,
@@ -905,6 +974,16 @@ def _recover_app_deployment(
     application_id = spec.application_id
     application_slug = spec.application_slug
     operation_id = operation.operation_id
+    if operation.phase == "build_rejected":
+        _finish_rejected_build(
+            connection,
+            config,
+            operation_id,
+            application_slug,
+            helper_caller=helper_caller,
+            deadline=deadline,
+        )
+        return DeploymentRecovery(None, "build-rejected")
     if operation.phase in {"platform_environment_mutating", "platform_environment_ready"}:
         if operation.refs.get("platform_key_names") != sorted(_PLATFORM_ENVIRONMENT):
             raise app.ApplicationError("platform environment recovery intent is malformed")

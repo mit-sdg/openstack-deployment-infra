@@ -366,8 +366,10 @@ class ControllerAPI:
         kind: str,
         scope: str,
         claimed: db.IdempotencyRequest | None = None,
+        admin: bool = False,
     ) -> Response:
         claimed = self._claim(request) if claimed is None else claimed
+        admin = admin or request.path.startswith("/v1/admin/")
 
         def execute(connection: sqlite3.Connection) -> object:
             return work(connection, claimed.request_id)
@@ -388,9 +390,7 @@ class ControllerAPI:
                     scope=scope,
                     work=execute,
                 )
-            return self._operation_response(
-                claimed.result_id, admin=request.path.startswith("/v1/admin/")
-            )
+            return self._operation_response(claimed.result_id, admin=admin)
         self.executor.submit(
             self.connection,
             operation_id=claimed.request_id,
@@ -398,9 +398,7 @@ class ControllerAPI:
             scope=scope,
             work=execute,
         )
-        return self._operation_response(
-            claimed.request_id, admin=request.path.startswith("/v1/admin/")
-        )
+        return self._operation_response(claimed.request_id, admin=admin)
 
     def _create_application(self, request: Request) -> Response:
         self._no_query(request)
@@ -479,7 +477,7 @@ class ControllerAPI:
         body = self._body(request, allowed={"confirmation"}, required={"confirmation"})
         claimed = self._claim(request)
         if claimed.result_id is not None and not self._is_recovery_result(claimed):
-            return self._operation_response(claimed.result_id)
+            return self._operation_response(claimed.result_id, admin=True)
         application = self._application(self._path_uuid(request))
         return self._external(
             request,
@@ -493,6 +491,7 @@ class ControllerAPI:
             kind="app.delete",
             scope=f"app-{application.application_id}",
             claimed=claimed,
+            admin=True,
         )
 
     def _create_deployment(self, request: Request) -> Response:
@@ -767,7 +766,7 @@ class ControllerAPI:
                     request_id=key,
                 )
             ),
-            kind=f"storage.{resource_type}.create",
+            kind="storage.create",
             scope=f"app-{application.application_id}",
         )
 
@@ -827,7 +826,7 @@ class ControllerAPI:
                     request_id=key,
                 )
             ),
-            kind=f"storage.{resource.resource_type}.{action}",
+            kind=f"storage.{action}",
             scope=f"app-{resource.application_id}",
         )
 
@@ -840,7 +839,7 @@ class ControllerAPI:
         )
         claimed = self._claim(request)
         if claimed.result_id is not None and not self._is_recovery_result(claimed):
-            return self._operation_response(claimed.result_id)
+            return self._operation_response(claimed.result_id, admin=True)
         resource = self._resource(self._path_uuid(request))
         purge = body.get("purge", False)
         if not isinstance(purge, bool):
@@ -860,9 +859,10 @@ class ControllerAPI:
                     request_id=key,
                 )
             ),
-            kind=f"storage.{resource.resource_type}.remove",
+            kind="storage.remove",
             scope=f"app-{resource.application_id}",
             claimed=claimed,
+            admin=True,
         )
 
     def _get_operation(self, request: Request) -> Response:

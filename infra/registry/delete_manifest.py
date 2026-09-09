@@ -11,7 +11,9 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.platform_config import load  # noqa: E402
@@ -34,9 +36,50 @@ def env() -> dict[str, str]:
     return result
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, _req: Any, _fp: Any, _code: int, _msg: str, _headers: Any, _newurl: str
+    ) -> None:
+        return None
+
+
+def confirm_build_absent(repository: str, build_id: str) -> None:
+    """Only a 404 from the authenticated fixed registry proves tag absence."""
+    if str(uuid.UUID(build_id)) != build_id:
+        raise ValueError("build ID must be a canonical UUID")
+    reference = "build-" + build_id.replace("-", "")
+    password = env()["REGISTRY_BUILDER_PASSWORD"]
+    basic = base64.b64encode(f"builder:{password}".encode()).decode()
+    request = urllib.request.Request(
+        f"https://{HOST}/v2/{urllib.parse.quote(repository, safe='/')}/manifests/{reference}",
+        method="HEAD",
+        headers={
+            "Authorization": f"Basic {basic}",
+            "Accept": "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
+        },
+    )
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=internal_ca_context(CA)), _NoRedirect()
+    )
+    try:
+        with opener.open(request, timeout=15):
+            raise RuntimeError("build artifact remains; refusing terminal failure")
+    except urllib.error.HTTPError as error:
+        error.close()
+        if error.code != 404:
+            raise RuntimeError("build artifact absence could not be verified") from None
+    print(
+        json.dumps(
+            {"repository": repository, "buildId": build_id, "absent": True},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("delete",))
+    parser.add_argument("action", choices=("delete", "build-absent"))
     parser.add_argument("repository", help="controller repository under projects/")
     parser.add_argument("digest", help="sha256 manifest digest")
     arguments = sys.argv[1:]
@@ -47,6 +90,9 @@ def main() -> int:
         r"projects/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*", args.repository
     ):
         parser.error("repository must be a valid lowercase name under projects/")
+    if args.action == "build-absent":
+        confirm_build_absent(args.repository, args.digest)
+        return 0
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.digest):
         parser.error("digest must be a sha256 OCI digest")
     password = env()["REGISTRY_BUILDER_PASSWORD"]

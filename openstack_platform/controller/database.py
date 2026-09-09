@@ -1165,14 +1165,26 @@ def requeue_recovery_dispatch(
             or operation is None
             or dispatch.status != "recovery_required"
             or operation.status != "recovery_required"
-            or (dispatch.kind, dispatch.scope) != (checked_kind, checked_scope)
+            or dispatch.scope != checked_scope
             or (operation.kind, operation.scope) != (checked_kind, checked_scope)
         ):
             raise DatabaseError("operation is not eligible for recovery dispatch")
+        if dispatch.kind != checked_kind:
+            # Repair the former API storage.<type>.<action> dispatch spelling
+            # only for an identical replay whose domain kind, scope and selected
+            # type prove the exact operation. Do not relax other kind checks.
+            action = checked_kind.removeprefix("storage.")
+            selected = operation.refs.get("selected")
+            if (
+                action not in {"create", "verify", "rotate", "remove"}
+                or selected not in (["postgres"], ["mongo"], ["s3"])
+                or dispatch.kind != f"storage.{selected[0]}.{action}"
+            ):
+                raise DatabaseError("operation dispatch kind does not match domain intent")
         cursor = connection.execute(
-            "UPDATE operation_dispatches SET status = 'pending', updated_at = ?, "
+            "UPDATE operation_dispatches SET kind = ?, status = 'pending', updated_at = ?, "
             "safe_error = NULL WHERE operation_id = ? AND status = 'recovery_required'",
-            (now or utc_now(), identifier),
+            (checked_kind, now or utc_now(), identifier),
         )
         if cursor.rowcount != 1:
             raise DatabaseError("operation recovery dispatch changed concurrently")

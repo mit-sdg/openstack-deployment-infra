@@ -220,11 +220,13 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_application_sizing.py` — opaque flavor IDs, per-app plans, default preservation, resize acceptance, retries, and rollback tests.
 - `tests/test_helper_worker_capacity.py` — production capacity dispatch, pinned Nomad field/worker identity contract, deadlines, and sanitized failures.
 - `tests/test_ci_publication.py` — guards the CI path set that triggers role-image publication.
+- `tests/test_build_failure_cleanup.py` — deterministic build-rejection classification and exact builder/registry absence checks.
 - `tests/test_controller_api.py` — controller route composition, capability split, responses, idempotency, and service integration tests.
 - `tests/test_controller_database.py` — schema, migration, identity, journal, state transition, and database recovery tests.
 - `tests/test_legacy_controller_migration.py` — legacy marker rejection and complete application/storage/deployment import tests.
 - `tests/test_controller_hosting.py` — static Nix/controller account, socket, backup, and service-hosting boundary checks.
 - `tests/test_controller_http.py` — Unix HTTP parsing, deadlines, keep-alive, peer policy, overload, shutdown, and socket security tests.
+- `tests/test_controller_recovery.py` — storage-kind recovery, rejected-build terminalization, crash/retry, and privileged polling tests.
 - `tests/test_controller_seed_images.py` — hosted image-seed identity, selection, and idempotence tests.
 - `tests/test_deployment_config.py` — typed deployment configuration and Git branch/ref resolution tests.
 - `tests/test_documentation.py` — documentation links, consolidated reader paths, interface claims, route coverage, and repository-index checks.
