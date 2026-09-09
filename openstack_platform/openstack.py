@@ -3157,6 +3157,7 @@ def replace_host(
     selected_compatibility_hash: str,
     operation_id: str,
     user_data_path: str | Path | None = None,
+    cloudflare_tunnel_token_file: Path | None = None,
     checkpoint: Checkpoint,
     health_check: HealthCheck | None = None,
     wait_seconds: float = 900,
@@ -3172,8 +3173,9 @@ def replace_host(
 
     The default source is rendered from the reviewed role template, current
     platform inventory, retained resource UUIDs, and the established protected
-    input-path environment variables. ``user_data_path`` remains an explicit
-    protected-file override for controlled tooling and tests.
+    input-path environment variables. Every fresh ingress replacement requires
+    an explicit protected token file and cannot use a user-data override. Other
+    roles allow protected overrides. Recorded recovery does not render again.
     """
     role = _role(role, persistent=True)
     required_health_check = _required_role_health_check(
@@ -3186,7 +3188,23 @@ def replace_host(
         raise ValidationError("replacement user-data limit is malformed")
 
     expected_resources: HostResources | None = None
-    if user_data_path is None:
+    if role != "ingress" and cloudflare_tunnel_token_file is not None:
+        raise ValidationError(
+            "--cloudflare-tunnel-token-file is only valid for ingress replacement"
+        )
+    if role == "ingress":
+        from . import ingress_credentials
+
+        if user_data_path is not None:
+            raise ValidationError(
+                "ingress replacement requires reviewed user-data; overrides are refused"
+            )
+        source = ingress_credentials.staged_replacement_user_data(
+            platform,
+            cloudflare_tunnel_token_file,
+            maximum_bytes=user_data_limit,
+        )
+    elif user_data_path is None:
         from . import host_user_data
 
         # Render before any mutation. A second exact observation in
@@ -3696,7 +3714,7 @@ def recover_host_replacement(
     host_key_runner: Runner = runtime.run,
     sleep: Callable[[float], None] = time.sleep,
 ) -> RecoveryResult:
-    """Dispatch exact replacement recovery actions."""
+    """Recover recorded resources by provenance and health, without re-rendering credentials."""
     try:
         return _recover_host_replacement(
             platform,

@@ -153,6 +153,11 @@ def build_parser() -> argparse.ArgumentParser:
             operation.add_argument("--yes", action="store_true")
         if action == "replace":
             operation.add_argument("--user-data", type=Path, help=argparse.SUPPRESS)
+            operation.add_argument(
+                "--cloudflare-tunnel-token-file",
+                type=Path,
+                help="protected token file required for fresh ingress replacement; not read during recovery",
+            )
     logs = infra_commands.add_parser("logs")
     logs.add_argument("host", choices=openstack.PERSISTENT_ROLES)
     logs.add_argument("--lines", type=_lines, default=200)
@@ -765,11 +770,19 @@ def _infra_replace(
     output: Any,
 ) -> None:
     _confirm(
-        f"Replace {args.host}; its retained old server is deleted only after role readiness.",
+        f"Replace {args.host}; its old server is stopped but retained until role readiness passes.",
         yes=args.yes,
         input_stream=input_stream,
         output=output,
     )
+    if args.host != "ingress" and args.cloudflare_tunnel_token_file is not None:
+        raise ValidationError(
+            "--cloudflare-tunnel-token-file is only valid for ingress replacement"
+        )
+    if args.host == "ingress" and args.user_data is not None:
+        raise ValidationError(
+            "ingress replacement requires reviewed user-data; overrides are refused"
+        )
     selected = db.get_image_selection(connection, args.host)
     if selected is None:
         raise ValidationError("select an image for this role before replacement")
@@ -819,6 +832,8 @@ def _infra_replace(
                         merge_refs=True,
                     )
 
+                if args.cloudflare_tunnel_token_file is not None:
+                    print("Recovering recorded replacement; token file is not read.", file=output)
                 recovered = openstack.recover_host_replacement(
                     config.platform,
                     args.host,
@@ -831,6 +846,18 @@ def _infra_replace(
                     poll_interval_seconds=config.policy.limits.poll_interval_seconds,
                     timeout_seconds=_remaining(deadline, config.policy.limits.process_seconds),
                 )
+                if action == "rollback":
+                    db.mark_failed(
+                        connection,
+                        operation_id,
+                        "replacement rolled back to retained old host",
+                        cleanup_state=recovered.cleanup_state,
+                    )
+                    print(
+                        "Retained old host restored; start a fresh replacement separately.",
+                        file=output,
+                    )
+                    return
                 completed = db.mark_succeeded(
                     connection, operation_id, cleanup_state=recovered.cleanup_state
                 )
@@ -868,6 +895,7 @@ def _infra_replace(
                 selected_compatibility_hash=selected.compatibility_hash,
                 operation_id=operation_id,
                 user_data_path=user_data,
+                cloudflare_tunnel_token_file=args.cloudflare_tunnel_token_file,
                 checkpoint=checkpoint,
                 health_check=_role_health_check(config),
                 wait_seconds=_remaining(deadline, config.policy.limits.process_seconds),

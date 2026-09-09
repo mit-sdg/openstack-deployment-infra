@@ -338,23 +338,85 @@ full-loss drill.
 
 ## Replace a persistent host
 
+Replacement stops the old VM but retains it for rollback. The fixed port and
+retained volumes move to the candidate. This is a singleton replacement with
+service interruption, **not zero downtime**. The old VM is deleted only after
+the candidate passes readiness and exact image/flavor/name/provenance checks.
+On readiness failure, replacement restores the retained old host. Never delete
+the old server or detach a volume manually.
+
 Before replacing storage, require a fresh managed-data `RESTORE-MANIFEST`.
 Before replacing admin, require fresh hosted-controller and operator-state
 backups. Publish and live-test the replacement role image before selecting its
-exact UUID.
+exact UUID. Use `admin`, `ingress`, or `storage`; the token-file option below is
+valid only for ingress.
+
+### Supply the ingress token for each fresh replacement
+
+Obtain the current raw Cloudflare connector token through your authorized
+credential-custody process. The CLI does not extract guest credentials, prompt
+for tokens, or maintain a local credential store. If the only copy is on a
+guest without authenticated access, stop and resolve credential custody
+separately; do not bypass SSH host-key checking.
+
+The input must be a direct, single-link, operator-owned mode-0600 regular file,
+at most 16 KiB, under trusted parent directories. It must contain only the
+base64 connector token (at most 8192 characters), optionally followed by one
+LF or CRLF newline—not a `TUNNEL_TOKEN=...` environment file or an API token.
+The CLI checks file protection and the token's account/tunnel/secret structure
+**offline**. This does not prove Cloudflare authentication or domain routing.
+Confirm the intended tunnel and domain through authenticated Cloudflare records.
+A revoked but structurally valid token can pass local checks; candidate readiness
+must still pass before deleting the old VM.
+
+Run as the operator account using the variables from [Initialize operator
+variables](#initialize-operator-variables). Substitute your current protected
+bootstrap paths and the selected image UUID:
 
 ```bash
+export OPERATOR_PUBLIC_KEY=/private/operator.pub
+export NOMAD_TOKENS_FILE=/private/nomad-tokens.env
+export PKI_DIR=/private/pki
 $PLATFORM_CLI infra image set ingress NEW_INGRESS_IMAGE_UUID
-$PLATFORM_CLI infra replace ingress --yes
+$PLATFORM_CLI infra replace ingress --yes \
+  --cloudflare-tunnel-token-file /private/current-connector-token
 $PLATFORM_CLI infra logs ingress --lines 200
+test "$(curl --fail --show-error --silent "https://$PLATFORM_DOMAIN/healthz")" = OK
 ```
 
-Use `admin`, `ingress`, or `storage`. Replacement retains the current host,
-fixed port, and volumes until the candidate passes readiness and exact
-image/flavor/name/provenance checks. On readiness failure it restores the old
-host. An ambiguous provider result becomes recovery-required; restore the named
-dependency and rerun the same command. Never delete the old server or detach a
-volume manually.
+Supply a file path, never the token value in arguments, chat, or logs. Each fresh
+ingress replacement reads and validates the explicit file before any provider
+call, then renders the reviewed template with Cloudflare enabled. Missing or
+malformed input fails without stopping the old VM. `ENABLE_CLOUDFLARED=false`,
+`CLOUDFLARE_TUNNEL_TOKEN_FILE`, and opaque ingress `--user-data` cannot bypass
+this contract. Other roles retain their protected-input contract.
+
+The CLI leaves the original file unchanged. Private temporary token and rendered
+user-data files are unlinked on normal completion and handled failure; forced
+process termination can leave temporary files requiring protected cleanup.
+The token is provisioned to the candidate via provider user-data, not stored in
+operator SQLite, refs, logs, or a permanent local credential database. Maintain
+your own authorized credential custody. A later fresh replacement or rotation
+uses whichever current protected file you supply; no import or reset is needed.
+Coordinate Cloudflare rotation so the retained old host can still serve if rollback
+is needed; the CLI does not rotate credentials on that host.
+
+### Retry an interrupted replacement
+
+An ambiguous provider result becomes recovery-required. Restore the named
+dependency and rerun `infra replace ingress --yes` using the same inventory and
+state directory. A recorded pre-acceptance operation rolls back; an accepted
+operation rechecks exact candidate provenance, fixed resources, readiness, and
+internal/public `/healthz` before cleaning up the retained old VM. Neither path
+reads a token file or re-renders user-data. If supplied on that retry,
+`--cloudflare-tunnel-token-file` is ignored with an explicit acknowledgement; it
+cannot change the recorded candidate's credential.
+
+Successful rollback ends that operation and does not start another replacement.
+Invoke a fresh replacement separately with the current token file. If interruption
+occurred in the initial `validated` phase before provider observation, retry starts
+a fresh attempt and requires the file. Supplying the current file on every retry
+is therefore permitted, but it is consumed only when a fresh attempt starts.
 
 Release updates follow [Install releases outside automated
 setup](MAINTENANCE.md#install-releases-outside-automated-setup). Executable
