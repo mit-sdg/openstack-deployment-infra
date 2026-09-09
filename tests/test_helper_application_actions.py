@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
+from collections.abc import Mapping
 from types import SimpleNamespace
 
 from openstack_platform.config import PlatformConfig
@@ -14,10 +15,11 @@ from openstack_platform.controller.application_runtime import (
 from openstack_platform.helper.application_actions import (
     _public_health_from_job,
     _status_or_absent,
+    _synchronize_workload_variable,
     handlers,
 )
 from openstack_platform.helper.main import HelperActionError
-from openstack_platform.helper.nomad import SecretItems, VariableSnapshot
+from openstack_platform.helper.nomad import CasConflict, SecretItems, VariableSnapshot
 from openstack_platform.runtime import CommandResult, CommandTimedOut
 from openstack_platform.validation import ValidationError
 
@@ -32,14 +34,18 @@ class FakeVariableClient:
         self.index = 2
         self.items = SecretItems({"DATABASE_URL": "preserved"})
         self.written: SecretItems | None = None
+        self.absent_paths: set[str] = set()
 
     def read_variable(self, path: str) -> VariableSnapshot:
+        if path in self.absent_paths:
+            return VariableSnapshot(path, 0, SecretItems({}))
         return VariableSnapshot(path, self.index, self.items)
 
     def compare_and_set(self, path: str, expected_index: int, items: object) -> int:
         if expected_index != self.index:
             raise AssertionError("wrong CAS index")
         self.written = SecretItems(dict(items))  # type: ignore[arg-type]
+        self.absent_paths.discard(path)
         self.items = self.written
         self.index += 1
         return self.index
@@ -84,8 +90,10 @@ class FakeNomad:
             self.stopped_jobs.add(argv[-1])
             output = b""
         elif "purge" in argv:
-            self.variables.index = 0
-            self.variables.items = SecretItems({})
+            self.variables.absent_paths.add(argv[-1])
+            if argv[-1] == "nomad/jobs/demo-app":
+                self.variables.index = 0
+                self.variables.items = SecretItems({})
             output = b""
         elif "status" in argv:
             output = json.dumps(self.status).encode()
@@ -588,6 +596,45 @@ class ApplicationActionTests(unittest.TestCase):
         self.assertFalse(drifted["healthy"])
         self.assertTrue(drifted["terminal"])
 
+    def test_candidate_workload_variable_mirrors_canonical_values_without_exposure(self) -> None:
+        class Variables:
+            def __init__(self) -> None:
+                self.values = {
+                    "nomad/jobs/demo-app": VariableSnapshot(
+                        "nomad/jobs/demo-app", 4, SecretItems({"API_KEY": SENTINEL})
+                    ),
+                    "nomad/jobs/demo-app-candidate": VariableSnapshot(
+                        "nomad/jobs/demo-app-candidate", 0, SecretItems({})
+                    ),
+                }
+
+            def read_variable(self, path: str) -> VariableSnapshot:
+                return self.values[path]
+
+            def compare_and_set(
+                self, path: str, expected_index: int, items: Mapping[str, str]
+            ) -> int:
+                current = self.values[path]
+                if current.modify_index != expected_index:
+                    raise CasConflict(path)
+                index = expected_index + 1
+                self.values[path] = VariableSnapshot(path, index, SecretItems(dict(items)))
+                return index
+
+        variables = Variables()
+        path, index = _synchronize_workload_variable(
+            variables,
+            "demo-app",
+            "demo-app-candidate",
+        )
+        self.assertEqual(path, "nomad/jobs/demo-app-candidate")
+        self.assertEqual(index, 1)
+        self.assertEqual(
+            variables.values[path].items["API_KEY"],
+            SENTINEL,
+        )
+        self.assertNotIn(SENTINEL, repr((path, index)))
+
     def test_environment_updates_use_cas_preserve_other_owner_and_hide_values(self) -> None:
         result = self.actions["app.env.set"](
             {
@@ -749,7 +796,7 @@ class ApplicationActionTests(unittest.TestCase):
         self.assertTrue(removed["removed"])
         self.assertTrue(removed["jobAbsent"])
         self.assertTrue(removed["variableAbsent"])
-        removal_argvs = [call[0] for call in self.nomad.calls[-4:]]
+        removal_argvs = [call[0] for call in self.nomad.calls[-5:]]
         self.assertEqual(
             removal_argvs,
             [
@@ -767,6 +814,12 @@ class ApplicationActionTests(unittest.TestCase):
                     "var",
                     "purge",
                     "nomad/jobs/demo-app",
+                ),
+                (
+                    "fixed-nomad-wrapper",
+                    "var",
+                    "purge",
+                    "nomad/jobs/demo-app-candidate",
                 ),
             ],
         )
