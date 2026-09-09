@@ -239,6 +239,12 @@ are not retained in the dispatch journal, so secret-bearing environment bodies
 must be supplied again. A new key cannot bypass a recovery-required operation
 on the same application.
 
+Application route observations use the accepted deployment's configured health
+path and exact route marker, not the application's root page. A response from a
+different deployment cannot claim healthy status. Intentionally disabled apps
+report stopped state without probing an allocation or public route expected to
+be absent; missing accepted evidence or transport failures remain unknown.
+
 ### Project and privileged routes
 
 Application, deployment, operation, and managed-resource IDs are canonical UUIDs.
