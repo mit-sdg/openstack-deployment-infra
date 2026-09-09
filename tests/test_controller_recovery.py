@@ -28,14 +28,15 @@ class ControllerRecoveryTests(TestCase):
         self.cleanup = True
         self.generic_failure = False
         self.fixture.api.helper_caller = self.helper
-        db.put_image_selection(
-            self.connection,
-            role="builder",
-            image_id=self.other_key,
-            display_name="builder",
-            source_commit="b" * 40,
-            compatibility_hash="c" * 64,
-        )
+        for role in ("builder", "worker"):
+            db.put_image_selection(
+                self.connection,
+                role=role,
+                image_id=self.other_key,
+                display_name=role,
+                source_commit="b" * 40,
+                compatibility_hash="c" * 64,
+            )
 
     def helper(self, _config, action, values, **kwargs):
         self.calls.append(action)
