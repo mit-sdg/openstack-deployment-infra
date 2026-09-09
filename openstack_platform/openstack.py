@@ -32,7 +32,7 @@ from . import host_keys, remote, runtime
 from .config import PlatformConfig, load_platform
 from .contracts import IMAGE_ROLES as IMAGE_ROLES
 from .contracts import PERSISTENT_ROLES as PERSISTENT_ROLES
-from .validation import ValidationError, commit, openstack_uuid, sha256_hex, uuid
+from .validation import ValidationError, commit, flavor_reference, openstack_uuid, sha256_hex, uuid
 
 _METADATA_VERSION = "1"
 _IMAGE_INVENTORY_LIMIT = 500
@@ -1406,20 +1406,29 @@ def recover_image_prune(
     return PruneResult(tuple(deleted), plan.drift_hash)
 
 
-@_command_deadline("timeout_seconds")
 # Persistent host observation and lifecycle
 
 
-def observe_flavor(
+@dataclass(frozen=True, slots=True)
+class Flavor:
+    flavor_id: str
+    name: str
+    vcpus: int
+    ram_mib: int
+    disk_gib: int
+
+
+@_command_deadline("timeout_seconds")
+def observe_flavor_capacity(
     platform: PlatformConfig,
     reference: str,
     *,
-    require_one_vcpu: bool = False,
     timeout_seconds: float = 30,
     command_runner: Runner = runtime.run,
     executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
-) -> str:
-    """Observe a flavor, optionally enforcing the standard worker 1-vCPU policy."""
+) -> Flavor:
+    """Resolve a safe opaque ID or name to exact provider capacity."""
+    reference = flavor_reference(reference)
     verify_project(
         platform,
         timeout_seconds=timeout_seconds,
@@ -1439,6 +1448,8 @@ def observe_flavor(
             "vcpus",
             "--column",
             "ram",
+            "--column",
+            "disk",
         ),
         timeout_seconds=timeout_seconds,
         command_runner=command_runner,
@@ -1446,15 +1457,38 @@ def observe_flavor(
     )
     if not isinstance(shown, Mapping):
         raise OpenStackError("OpenStack flavor projection was not an object")
-    _provider_uuid(_field(shown, "id"), field="flavor UUID")
-    name = _field(shown, "name")
-    vcpus = _field(shown, "vcpus")
-    ram = _field(shown, "ram")
-    if not isinstance(name, str) or not isinstance(vcpus, int) or not isinstance(ram, int):
-        raise OpenStackError("OpenStack flavor projection was malformed")
-    if require_one_vcpu and vcpus < 1:
-        raise OpenStackError("configured worker flavor must have at least one vCPU")
-    return name
+    try:
+        identifier = flavor_reference(_field(shown, "id"))
+        name = flavor_reference(_field(shown, "name"))
+    except ValidationError as error:
+        raise OpenStackError("OpenStack flavor identity was malformed") from error
+    values = [_field(shown, key) for key in ("vcpus", "ram", "disk")]
+    if any(type(value) is not int for value in values):
+        raise OpenStackError("OpenStack flavor capacity was malformed")
+    vcpus, ram, disk = values
+    if not 1 <= vcpus <= 4096 or not 1 <= ram <= 16_777_216 or not 0 <= disk <= 1_048_576:
+        raise OpenStackError("OpenStack flavor capacity was outside safety bounds")
+    if reference not in {identifier, name}:
+        raise OpenStackError("OpenStack flavor reference resolved to a different identity")
+    return Flavor(identifier, name, vcpus, ram, disk)
+
+
+def observe_flavor(
+    platform: PlatformConfig,
+    reference: str,
+    *,
+    timeout_seconds: float = 30,
+    command_runner: Runner = runtime.run,
+    executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
+) -> str:
+    """Observe an exact flavor name; all supported flavors have positive capacity."""
+    return observe_flavor_capacity(
+        platform,
+        reference,
+        timeout_seconds=timeout_seconds,
+        command_runner=command_runner,
+        executable=executable,
+    ).name
 
 
 def _resource_id(value: Any, *, field: str) -> str | None:

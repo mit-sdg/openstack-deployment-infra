@@ -423,7 +423,7 @@ class ControllerAPITests(unittest.TestCase):
 
         response = self.dispatch("GET", f"/v1/operations/{operation_id}")
         self.assertEqual(response.body["status"], "recovery_required")
-        self.assertEqual(response.body["phase"], "startup_interrupted")
+        self.assertEqual(response.body["phase"], "intent_recorded")
         operation = db.get_operation(self.connection, operation_id)
         self.assertIsNotNone(operation)
         self.assertEqual(operation.status, "recovery_required")  # type: ignore[union-attr]

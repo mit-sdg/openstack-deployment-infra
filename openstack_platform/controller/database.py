@@ -1577,6 +1577,18 @@ def list_image_selections(connection: sqlite3.Connection) -> list[ImageSelection
     return selections
 
 
+@contextmanager
+def _acceptance_write(connection: sqlite3.Connection, within_transaction: bool) -> Iterator[None]:
+    """Join only an explicit local acceptance transaction; never provider work."""
+    if within_transaction:
+        if not connection.in_transaction:
+            raise DatabaseError("acceptance write requires an active transaction")
+        yield
+    else:
+        with transaction(connection):
+            yield
+
+
 def put_application(
     connection: sqlite3.Connection,
     *,
@@ -1593,6 +1605,7 @@ def put_application(
     worker_port_id: str | None = None,
     worker_port_name: str | None = None,
     now: str | None = None,
+    _within_transaction: bool = False,
 ) -> None:
     application_id = uuid(application_id, field="application_id")
     application_slug = slug(application_slug)
@@ -1603,7 +1616,7 @@ def put_application(
     if scheduler_cpu_mhz <= 0 or scheduler_memory_mib <= 0 or not worker_flavor:
         raise ValidationError("application sizing must be positive and have a worker flavor")
     timestamp = now or utc_now()
-    with transaction(connection):
+    with _acceptance_write(connection, _within_transaction):
         tombstone = connection.execute(
             "SELECT 1 FROM application_slug_tombstones WHERE slug = ?",
             (application_slug,),
@@ -2004,6 +2017,7 @@ def checkpoint_deployment_attempt(
     error: BaseException | str | None = None,
     cleanup_state: str | None = None,
     now: str | None = None,
+    _within_transaction: bool = False,
 ) -> DeploymentAttempt:
     identifier = uuid(deployment_id, field="deployment_id")
     if status not in _DEPLOYMENT_STATUSES:
@@ -2028,7 +2042,7 @@ def checkpoint_deployment_attempt(
     if cleanup_state is not None:
         evidence["cleanup_state"] = _cleanup_state(cleanup_state)
     timestamp = now or utc_now()
-    with transaction(connection):
+    with _acceptance_write(connection, _within_transaction):
         current = get_deployment_attempt(connection, identifier)
         if current is None:
             raise DatabaseError("deployment attempt is missing")

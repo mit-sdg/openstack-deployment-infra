@@ -70,6 +70,17 @@ def openstack_uuid(value: object, *, field: str = "OpenStack UUID") -> str:
     return uuid(value, field=field)
 
 
+def flavor_reference(value: object) -> str:
+    """Bounded opaque Nova flavor ID/name, safe as a single CLI argument.
+
+    Flavor IDs are not resource UUIDs. Preserve case and numeric strings;
+    reject option prefixes, whitespace, controls, and shell/path syntax.
+    """
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", value):
+        raise ValidationError("flavor must be 1-255 letters, digits, dots, underscores or hyphens")
+    return value
+
+
 def commit(value: object) -> str:
     """Validate an exact full lowercase Git commit ID."""
     if not isinstance(value, str) or not _COMMIT.fullmatch(value):

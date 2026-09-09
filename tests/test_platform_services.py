@@ -309,6 +309,13 @@ class ProductServiceTests(unittest.TestCase):
                     "portId": port_id,
                     "portName": "worker-demo-port",
                 }
+            if action == "app.worker.capacity":
+                return {
+                    "serverId": server_id,
+                    "flavorName": "example.1c2g",
+                    "cpuMHz": 1800,
+                    "memoryMiB": 3072,
+                }
             if action == "app.deploy":
                 self.assertEqual(values["job"], deployment.nomad_job)
                 return {
