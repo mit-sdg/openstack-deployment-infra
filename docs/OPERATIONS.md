@@ -260,12 +260,14 @@ privileged socket, including when the original request is replayed after deletio
 Repeat an unknown or recovery-required request with its identical body and
 `Idempotency-Key`; do not allocate a new key to bypass unfinished scope.
 
-Storage dispatch now uses the same `storage.create`, `storage.verify`,
-`storage.rotate`, and `storage.remove` kinds as its domain journal. Identical
-recovery can also reconcile a previously recorded `storage.<type>.<action>`
-dispatch only when the domain operation's kind, application scope, and exact
-single selected type agree. Other mismatches remain conflicts; no manual SQLite
-repair is part of this procedure.
+New storage dispatches use the same `storage.create`, `storage.verify`,
+`storage.rotate`, and `storage.remove` kinds as their domain journals. Recovery
+requires exact dispatch/domain kind and scope agreement. There is no dual-spelling
+compatibility path or data migration: an old unfinished `storage.<type>.<action>`
+dispatch paired with a different domain kind remains blocked and unchanged.
+Existing data is preserved. Check for unfinished storage operations before rollout.
+If a malformed dispatch is found, stop and obtain a separately reviewed, bounded
+recovery plan; do not bypass the invariant or edit SQLite as part of this procedure.
 
 A positively reported source/build rejection is recorded before cleanup. The
 controller requires both exact builder/server-port absence and an authenticated
@@ -282,8 +284,11 @@ transport results and malformed success metadata retain the existing deployment
 reconciliation path rather than being called deterministic rejection.
 
 Install matching controller and helper releases: `app.build.cleanup` is a new
-fixed helper action. An older helper cannot supply the required absence evidence
-and will leave recovery blocked. No runtime worker or managed storage is removed
+fixed helper action. The admin image must also contain the updated
+`<paths.root>/infra/registry/delete_manifest.py` with `build-absent`; Nix supplies
+that source through the baked `infra` link. An older helper or registry script
+cannot supply the required absence evidence and leaves recovery blocked.
+No runtime worker or managed storage is removed
 by failed-build cleanup. This is not an arbitrary cancellation or forced-unlock
 endpoint.
 

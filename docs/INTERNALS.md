@@ -240,10 +240,10 @@ before any domain intent was recorded becomes a terminal unstarted failure.
 The caller resumes recovery-required work by repeating the identical request and key. Request bodies
 are not retained in the dispatch journal, so secret-bearing environment bodies
 must be supplied again. A new key cannot bypass a recovery-required operation
-on the same application. Storage dispatch/domain kinds agree; identical recovery
-can repair the former typed dispatch spelling only when the saved single-resource
-intent matches. A recorded build rejection becomes terminal only after exact
-builder absence and authenticated build-tag absence; uncertain cleanup is retried
+on the same application. New storage dispatch/domain kinds agree; recovery
+requires exact kind and scope matching without legacy-spelling compatibility.
+Older malformed dispatches remain blocked and unchanged. A recorded build rejection
+becomes terminal only after exact builder absence and authenticated build-tag absence; uncertain cleanup is retried
 without rebuilding. No secret-bearing request payload is added to durable state.
 
 Application route observations use the accepted deployment's configured health

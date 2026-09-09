@@ -110,39 +110,22 @@ class ControllerRecoveryTests(TestCase):
         )
         self.fixture.router = self.fixture.api.router()
 
-    def test_storage_retry_runs_the_same_domain_kind_and_repairs_old_spelling(self):
-        for old_spelling in (False, True):
+    def test_storage_retry_runs_the_same_domain_kind_for_each_resource_type(self):
+        for index, resource_type in enumerate(("postgres", "mongo", "s3")):
             path = f"/v1/applications/{self.identifier}/storage"
-            self.key = "00000000-0000-4000-8000-00000000004" + ("2" if old_spelling else "0")
-            resource_type = "mongo" if old_spelling else "postgres"
+            self.key = f"00000000-0000-4000-8000-{40 + index:012d}"
             self.reject = True
-            real_external = self.fixture.api._external
-
-            def external(
-                *args,
-                old_spelling=old_spelling,
-                resource_type=resource_type,
-                real_external=real_external,
-                **kwargs,
-            ):
-                if old_spelling:
-                    kwargs["kind"] = f"storage.{resource_type}.create"
-                return real_external(*args, **kwargs)
-
-            with mock.patch.object(self.fixture.api, "_external", side_effect=external):
-                first = self.fixture.dispatch(
-                    "POST", path, {"type": resource_type}, self.fixture.headers(self.key)
-                )
-                self.assertEqual(self.wait(first).status, "recovery_required")
+            first = self.fixture.dispatch(
+                "POST", path, {"type": resource_type}, self.fixture.headers(self.key)
+            )
+            self.assertEqual(self.wait(first).status, "recovery_required")
             self.assertEqual(db.get_operation(self.connection, self.key).kind, "storage.create")
             with self.assertRaises(HttpError) as conflict:
                 self.fixture.dispatch(
                     "POST",
                     path,
                     {"type": resource_type},
-                    self.fixture.headers(
-                        "00000000-0000-4000-8000-00000000008" + ("2" if old_spelling else "0")
-                    ),
+                    self.fixture.headers(f"00000000-0000-4000-8000-{80 + index:012d}"),
                 )
             self.assertEqual(conflict.exception.code, "OPERATION_CONFLICT")
             self.restart()
@@ -155,9 +138,10 @@ class ControllerRecoveryTests(TestCase):
                 db.get_operation_dispatch(self.connection, self.key).kind, "storage.create"
             )
 
-    def test_storage_dispatch_repair_refuses_mismatched_domain_evidence(self):
+    def test_storage_recovery_requires_exact_dispatch_and_domain_kind(self):
         for index, (dispatch_kind, operation_kind, selected) in enumerate(
             (
+                ("storage.postgres.create", "storage.create", ["postgres"]),
                 ("storage.mongo.create", "storage.create", ["postgres"]),
                 ("storage.postgres.create", "storage.rotate", ["postgres"]),
                 ("storage.postgres.create", "storage.create", ["postgres", "mongo"]),
@@ -183,11 +167,14 @@ class ControllerRecoveryTests(TestCase):
             )
             db.mark_recovery_required(self.connection, key, "fixed failure")
             db.set_operation_dispatch_status(self.connection, key, "recovery_required")
+            saved_dispatch = db.get_operation_dispatch(self.connection, key)
+            saved_operation = db.get_operation(self.connection, key)
             with self.assertRaises(db.DatabaseError):
                 db.requeue_recovery_dispatch(
                     self.connection, operation_id=key, kind="storage.create", scope=scope
                 )
-            self.assertEqual(db.get_operation_dispatch(self.connection, key).kind, dispatch_kind)
+            self.assertEqual(db.get_operation_dispatch(self.connection, key), saved_dispatch)
+            self.assertEqual(db.get_operation(self.connection, key), saved_operation)
 
     def test_deterministic_rejection_releases_scope_only_after_exact_cleanup(self):
         response = self.deploy()
