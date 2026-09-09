@@ -360,7 +360,7 @@ class ApplicationSizingTests(unittest.TestCase):
         current = db.get_application(self.connection, self.app_id)
         self.assertEqual((current.scheduler_cpu_mhz, current.scheduler_memory_mib), (9000, 14400))
 
-    def test_invalid_confirmation_and_disabled_app_do_not_resize(self):
+    def test_invalid_confirmation_and_changed_enabled_state_reject_plans(self):
         self.deploy()
         plan = self.plan()
         self.calls.clear()
@@ -371,6 +371,91 @@ class ApplicationSizingTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         _, disabled = self.post(f"/v1/applications/{self.app_id}/disable", {})
         self.assertEqual(disabled.status, "succeeded", disabled.safe_error)
+        self.calls.clear()
+        _, rejected = self.resize(plan)
+        self.assertEqual(rejected.status, "failed")
+        self.assertEqual(self.calls, [])
+
+    def test_disabled_resize_reuses_artifact_without_overlapping_workers(self):
+        self.deploy()
+        _, disabled = self.post(f"/v1/applications/{self.app_id}/disable", {})
+        self.assertEqual(disabled.status, "succeeded", disabled.safe_error)
+        self.assertEqual(self.workers, {})
+        self.assertEqual(self.jobs, {})
+        plan = self.plan()
+        self.assertIs(plan["current"]["enabled"], False)
+        self.assertEqual(plan["activation"], "enable-after-healthy-acceptance")
+        self.calls.clear()
+
+        def serial_helper(config, action, values, **bounds):
+            if action == "app.worker.create":
+                self.assertEqual(self.workers, {})
+                self.assertEqual(self.jobs, {})
+            result = self.helper(config, action, values, **bounds)
+            self.assertLessEqual(len(self.workers), 1)
+            self.assertLessEqual(len(self.jobs), 1)
+            return result
+
+        self.api.helper_caller = serial_helper
+        _, resized = self.resize(plan)
+        self.assertEqual(resized.status, "succeeded", resized.safe_error)
+        current = db.get_application(self.connection, self.app_id)
+        self.assertTrue(current.desired_running)
+        self.assertEqual(current.worker_flavor, "xl.4core")
+        self.assertEqual((current.scheduler_cpu_mhz, current.scheduler_memory_mib), (9000, 14400))
+        self.assertFalse(any(action == "app.build" for action, _values in self.calls))
+        listed = self.router.dispatch("GET", "/v1/admin/applications", {}, None).body["items"]
+        self.assertEqual(
+            listed[0]["sizing"],
+            {"workerFlavor": "xl.4core", "cpuMHz": 9000, "memoryMiB": 14400},
+        )
+
+    def test_failed_disabled_resize_leaves_application_stopped_and_size_unchanged(self):
+        self.deploy()
+        self.post(f"/v1/applications/{self.app_id}/disable", {})
+        before = db.get_application(self.connection, self.app_id)
+        accepted = db.get_active_deployment(self.connection, self.app_id)
+        self.fail_health = True
+        _, rejected = self.resize(self.plan())
+        self.assertEqual(rejected.status, "failed", rejected.safe_error)
+        self.assertEqual(db.get_application(self.connection, self.app_id), before)
+        self.assertEqual(db.get_active_deployment(self.connection, self.app_id), accepted)
+        self.assertEqual(self.workers, {})
+        self.assertEqual(self.jobs, {})
+
+    def test_disabled_resize_checks_predecessor_absence_before_new_worker(self):
+        self.deploy()
+        old_workers = copy.deepcopy(self.workers)
+        self.post(f"/v1/applications/{self.app_id}/disable", {})
+        self.workers.update(old_workers)
+        plan = self.plan()
+        self.calls.clear()
+        _, blocked = self.resize(plan)
+        self.assertEqual(blocked.status, "recovery_required", blocked.safe_error)
+        self.assertFalse(db.get_application(self.connection, self.app_id).desired_running)
+        self.assertFalse(
+            any(
+                action in {"app.worker.create", "app.deploy", "app.promote"}
+                for action, _values in self.calls
+            )
+        )
+        self.assertEqual(self.workers, old_workers)
+
+    def test_disabled_plan_cannot_be_applied_after_another_operator_enables(self):
+        self.deploy()
+        self.post(f"/v1/applications/{self.app_id}/disable", {})
+        plan = self.plan()
+        _, enabled = self.post(f"/v1/applications/{self.app_id}/enable", {})
+        self.assertEqual(enabled.status, "succeeded", enabled.safe_error)
+        self.calls.clear()
+        _, rejected = self.resize(plan)
+        self.assertEqual(rejected.status, "failed", rejected.safe_error)
+        self.assertEqual(self.calls, [])
+
+    def test_sizing_plan_json_scalar_types_are_exact(self):
+        self.deploy()
+        plan = self.plan()
+        plan["flavor"]["vcpus"] = 4.0
         self.calls.clear()
         _, rejected = self.resize(plan)
         self.assertEqual(rejected.status, "failed")

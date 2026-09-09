@@ -1058,6 +1058,7 @@ class ControllerAPI:
         rows = self.connection.execute(
             "SELECT application.application_id, application.slug, "
             "application.desired_running, application.url, application.created_at, "
+            "application.worker_flavor, application.scheduler_cpu_mhz, application.scheduler_memory_mib, "
             "application.updated_at, tombstone.deleted_at, accepted.deployment_id AS active_deployment_id "
             "FROM applications AS application LEFT JOIN application_slug_tombstones "
             "AS tombstone USING (slug) LEFT JOIN active_deployments AS accepted "
@@ -1070,6 +1071,11 @@ class ControllerAPI:
                 "slug": row["slug"],
                 "enabled": bool(row["desired_running"]),
                 "activeDeploymentId": row["active_deployment_id"],
+                "sizing": {
+                    "workerFlavor": row["worker_flavor"],
+                    "cpuMHz": row["scheduler_cpu_mhz"],
+                    "memoryMiB": row["scheduler_memory_mib"],
+                },
                 "url": row["url"],
                 "createdAt": row["created_at"],
                 "updatedAt": row["updated_at"],

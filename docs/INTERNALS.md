@@ -325,7 +325,7 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | `POST /v1/admin/applications/{id}/public-ip/plan` | Read-only quota and routed-network capability check with `{externalNetworkId}` |
 | `POST /v1/admin/applications/{id}/public-ip` | App-locked `allocate`, `attach`, `release`, or `reconcile`; see [public IPv4 operations](OPERATIONS.md#reserve-a-stable-outbound-ipv4) |
 | `GET /v1/admin/applications/{id}/resize-plan` | Observe a sizing plan; requires one `flavor` query parameter |
-| `POST /v1/admin/applications/{id}/resize` | Apply `{plan, confirmation}` to an enabled accepted app, reusing its OCI artifact |
+| `POST /v1/admin/applications/{id}/resize` | Apply `{plan, confirmation}` to an accepted app, reusing its OCI artifact; disabled apps require predecessor absence and enable only after healthy acceptance |
 | `GET /v1/admin/applications/{id}/rollback-plan` | Read-only retained-artifact plan; requires exactly one `deploymentId` query parameter |
 | `POST /v1/admin/applications/{id}/rollback` | Apply the exact `{plan, confirmation}` through candidate health and acceptance without a build |
 | `POST /v1/admin/applications/{id}/deployments` | Deploy with the normal deployment fields plus a reviewed `plan` |
