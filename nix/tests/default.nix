@@ -59,6 +59,32 @@ let
         rm -f "$out"/*.csr "$out"/*.ext "$out"/*.srl
   '';
 
+  registryBackupCredentialProbe = pkgs.writeText "registry-backup-credential-probe.py" ''
+    import os
+    import stat
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, "${../../infra}")
+    from backup.registry_artifact import credentials, _runtime_paths
+
+    Path("${state}/operator/status/registry-backup-probe-ran").touch()
+    private = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "storage-bootstrap"
+    assert _runtime_paths()[0] == private
+    assert stat.S_IMODE(private.stat().st_mode) == 0o400
+    assert private.stat().st_uid == os.geteuid()
+    assert credentials(private).startswith("Basic ")
+    assert Path(os.environ["AGE_KEY"]).is_file()
+    shared = Path("${root}/secrets/storage-bootstrap.env")
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o640
+    try:
+        credentials(shared)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("registry accepted a group-readable shared source")
+  '';
+
   pkiEtc = {
     "${namespace}/pki/internal-ca.pem".source = "${testPki}/ca.pem";
     "${namespace}/pki/nomad-server.pem".source = "${testPki}/nomad-server.pem";
@@ -128,6 +154,10 @@ let
 
           systemd.services = lib.mkMerge [
             (lib.mkIf (role == "admin") {
+              # Exercise the real backup unit's User, Environment, LoadCredential
+              # and source guards without contacting any managed service.
+              "${namespace}-platform-backup".serviceConfig.ExecStart =
+                lib.mkForce "${packages.python}/bin/python ${registryBackupCredentialProbe}";
               nomad.preStart = lib.mkForce ''
                 install -d -m 0750 -o nomad -g nomad ${platform.paths.adminState}/nomad
                 install -d -m 0700 -o nomad -g nomad /run/${namespace}-nomad
@@ -188,6 +218,8 @@ let
                     chown agentops:agentops ${state}/operator/secrets/$credential
                     chmod 0600 ${state}/operator/secrets/$credential
                   done
+                  printf 'REGISTRY_BUILDER_PASSWORD=controller-secret\n' \
+                    > ${state}/operator/secrets/storage-bootstrap.env
                   printf 'ssh-ed25519 vm-test\n' \
                     > ${state}/operator/secrets/builder_operator_ed25519.pub
                   chown agentops:agentops \
@@ -310,6 +342,25 @@ let
               machine.succeed("! grep -R -a -F controller-secret ${state}/controller ${backups}/${constants.directories.controllerBackup}")
               machine.succeed("systemctl show ${namespace}-controller.service nomad.service -p LimitCORE --value | grep -vFx infinity")
               machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
+              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'LoadCredential=storage-bootstrap:${root}/secrets/storage-bootstrap.env'")
+              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'REGISTRY_BACKUP_SECRETS=%d/storage-bootstrap'")
+              machine.succeed("systemctl start ${namespace}-platform-backup.service; test -f ${state}/operator/status/registry-backup-probe-ran; rm ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("test $(stat -c %U:%G:%a ${root}/secrets/storage-bootstrap.env) = agentops:platform-controller:640")
+              machine.fail("test -e /run/credentials/${namespace}-platform-backup.service/storage-bootstrap")
+              machine.succeed("chmod 0644 ${root}/secrets/storage-bootstrap.env")
+              machine.fail("systemctl start ${namespace}-platform-backup.service")
+              machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("chmod 0640 ${root}/secrets/storage-bootstrap.env; chgrp agentops ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
+              machine.fail("systemctl start ${namespace}-platform-backup.service")
+              machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("chown root:platform-controller ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
+              machine.fail("systemctl start ${namespace}-platform-backup.service")
+              machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("chown agentops:platform-controller ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.env ${root}/secrets/storage-bootstrap.real; ln -s storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
+              machine.fail("systemctl start ${namespace}-platform-backup.service")
+              machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("rm ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service; systemctl start ${namespace}-platform-backup.service; test -f ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("! journalctl --boot --output=cat | grep -F controller-secret")
               machine.succeed("systemctl cat nomad.service | grep -F 'LoadCredential=nomad-gossip-key:/etc/${namespace}/secrets/nomad-gossip-key'")
               machine.succeed("systemctl cat nomad.service | grep -F '${namespace}-credential-guard /etc/${namespace}/secrets/nomad-gossip-key root'")
               machine.succeed("runuser -u platform-controller -- cat ${state}/operator/secrets/openstack.env >/dev/null")

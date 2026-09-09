@@ -63,6 +63,16 @@ let
     test "$(stat -c %U:%a "$path")" = "$owner:600"
     test "$(stat -c %s "$path")" -le 65536
   '';
+  storageBootstrapCredentialGuard = pkgs.writeShellScript "${namespace}-storage-bootstrap-credential-guard" ''
+    set -euo pipefail
+    path=$1
+    test -f "$path" && test ! -L "$path"
+    case "$(stat -c %U:%G:%a "$path")" in
+      ${operatorAccount.name}:${operatorAccount.name}:600|${operatorAccount.name}:${controllerGroup}:640) ;;
+      *) echo "storage backup credential ownership or mode is invalid" >&2; exit 1 ;;
+    esac
+    test "$(stat -c %s "$path")" -le 65536
+  '';
   controllerBackupRoot = "${backups}/${constants.directories.controllerBackup}";
   hostedControllerBackupRoot = "${backups}/${constants.directories.hostedControllerBackup}";
   offsiteExportConfig = "${operatorRoot}/offsite-export.json";
@@ -863,6 +873,7 @@ in
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
         "REGISTRY_ARTIFACT_SCRIPT=${infra}/backup/registry_artifact.py"
+        "REGISTRY_BACKUP_SECRETS=%d/storage-bootstrap"
         "REGISTRY_BACKUP_MAX_FILE_BYTES=1099511627776"
         "REGISTRY_BACKUP_MAX_TOTAL_BYTES=4398046511104"
         "REGISTRY_BACKUP_MAX_MANIFEST_BYTES=67108864"
@@ -876,8 +887,17 @@ in
           ]
         }"
       ];
-      ExecStartPre = "${credentialGuard} ${root}/persistent/secrets/backup-age-key.txt ${operatorAccount.name}";
-      LoadCredential = "backup-age-key:${root}/persistent/secrets/backup-age-key.txt";
+      ExecStartPre = [
+        "${credentialGuard} ${root}/persistent/secrets/backup-age-key.txt ${operatorAccount.name}"
+        "${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env"
+      ];
+      # Controller preparation grants its dedicated group read access to the
+      # shared source. Registry backup consumes only systemd's private copy;
+      # neither the source mode nor the registry parser's checks are relaxed.
+      LoadCredential = [
+        "backup-age-key:${root}/persistent/secrets/backup-age-key.txt"
+        "storage-bootstrap:${root}/secrets/storage-bootstrap.env"
+      ];
       LimitCORE = 0;
       ExecStart = "${infra}/backup/run_platform_backup.sh";
     };

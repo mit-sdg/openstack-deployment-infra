@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import tracemalloc
 import unittest
 from pathlib import Path
 from typing import BinaryIO
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "infra"))
 from backup import registry_artifact as artifact  # noqa: E402
@@ -197,6 +200,61 @@ class RegistryArtifactStreamingTests(unittest.TestCase):
         self.assertIn('"REGISTRY_BACKUP_MAX_FILE_BYTES=1099511627776"', source)
         self.assertIn('"REGISTRY_BACKUP_MAX_TOTAL_BYTES=4398046511104"', source)
         self.assertIn('"REGISTRY_BACKUP_MAX_MANIFEST_BYTES=67108864"', source)
+
+    def test_registry_accepts_private_systemd_copy_but_rejects_shared_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "storage-bootstrap.env"
+            source.write_text("REGISTRY_BUILDER_PASSWORD=backup-test-password\n")
+            for mode in (0o400, 0o600):
+                with self.subTest(mode=oct(mode)):
+                    source.chmod(mode)
+                    self.assertEqual(
+                        artifact.credentials(source),
+                        "Basic " + base64.b64encode(b"builder:backup-test-password").decode(),
+                    )
+            for mode in (0o640, 0o644):
+                with self.subTest(mode=oct(mode)):
+                    source.chmod(mode)
+                    with self.assertRaisesRegex(RuntimeError, "direct private file") as error:
+                        artifact.credentials(source)
+                    self.assertNotIn("backup-test-password", str(error.exception))
+            source.chmod(0o400)
+            link = Path(directory) / "linked-credential"
+            link.symlink_to(source)
+            with self.assertRaisesRegex(RuntimeError, "direct private file"):
+                artifact.credentials(link)
+
+    def test_registry_backup_environment_selects_systemd_credential_path(self) -> None:
+        config = {"paths": {"root": "/srv/platform"}, "addresses": {"storage": "192.0.2.10"}}
+        private = "/run/credentials/example-platform-backup.service/storage-bootstrap"
+        with (
+            mock.patch.object(artifact, "load", return_value=config),
+            mock.patch.dict(os.environ, {"REGISTRY_BACKUP_SECRETS": private}),
+        ):
+            self.assertEqual(artifact._runtime_paths()[0], Path(private))
+
+    def test_scheduled_backup_loads_private_storage_copy_and_guards_shared_source(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "nix/roles/admin.nix").read_text()
+        unit = source.split('systemd.services."${namespace}-platform-backup" = {', 1)[1].split(
+            'systemd.timers."${namespace}-platform-backup"', 1
+        )[0]
+        self.assertIn('"REGISTRY_BACKUP_SECRETS=%d/storage-bootstrap"', unit)
+        self.assertIn('"storage-bootstrap:${root}/secrets/storage-bootstrap.env"', unit)
+        self.assertIn('"backup-age-key:${root}/persistent/secrets/backup-age-key.txt"', unit)
+        self.assertIn(
+            '"${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env"', unit
+        )
+        guard = source.split("storageBootstrapCredentialGuard = pkgs.writeShellScript", 1)[1].split(
+            "'';", 1
+        )[0]
+        self.assertIn('test -f "$path" && test ! -L "$path"', guard)
+        self.assertIn(
+            "${operatorAccount.name}:${operatorAccount.name}:600|${operatorAccount.name}:${controllerGroup}:640",
+            guard,
+        )
+        self.assertIn('test "$(stat -c %s "$path")" -le 65536', guard)
+        self.assertNotIn("chmod", guard)
+        self.assertNotIn("cat ", guard)
 
     def test_descriptor_without_size_is_refused_before_blob_read(self) -> None:
         bounds = artifact.Bounds(1024**4, 4 * 1024**4, 64 * MIB)
