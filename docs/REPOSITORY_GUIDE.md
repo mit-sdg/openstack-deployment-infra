@@ -140,6 +140,7 @@ cross-cutting boundaries.
 - `openstack_platform/acceptance.py` — plan, checkpoint, evidence, and verification engine for disposable live acceptance.
 - `openstack_platform/acceptance_live_driver.py` — reviewed adapter from acceptance protocol actions to supported repository/operator interfaces.
 - `openstack_platform/config.py` — typed, strict loading of deployment inventory and private operator policy.
+- `openstack_platform/floating_ip.py` — bounded, project-scoped Neutron capability and floating IPv4 ownership operations.
 - `openstack_platform/contracts.py` — packaged typed access to the canonical cross-component JSON contract.
 - `openstack_platform/durable.py` — no-follow, fsync-backed primitives for crash-durable local file replacement.
 - `openstack_platform/host_keys.py` — verifies console/keyscan evidence and atomically pins the fixed admin SSH host key.
@@ -171,6 +172,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
 - `openstack_platform/controller/log_service.py` — bounded reads of runtime and retained build logs.
+- `openstack_platform/controller/public_ip_service.py` — app-scoped floating IPv4 reservation, handover, and release journals.
 - `openstack_platform/controller/main.py` — `openstack-platform-controller` executable composition and startup.
 - `openstack_platform/controller/nomad_jobs.py` — renders generated Nomad jobs and validates job/placement/route identities.
 - `openstack_platform/controller/sizing.py` — reviewed per-app flavor plans and measured capacity budgets with OS/service reserves.
@@ -248,6 +250,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_platform_foundation_validation_config.py` — shared validators plus inventory/policy parsing and rejection tests.
 - `tests/test_platform_host_keys.py` — console fingerprint, keyscan, known-hosts matching, drift, and atomic pin tests.
 - `tests/test_platform_openstack.py` — image selection/pruning and persistent-host power/replacement/recovery provider tests.
+- `tests/test_public_ip.py` — offline floating IPv4 capability, ownership, retry, handover, and release tests.
 - `tests/test_platform_restore.py` — encrypted/plain offline restore validation, operation-state, permissions, and atomicity tests.
 - `tests/test_platform_services.py` — application, deployment, environment, storage, log, and helper-failure service tests.
 - `tests/test_platform_setup.py` — environment parsing, read-only preflight, inventory generation, hosted-controller gates, resume, and CLI tests.

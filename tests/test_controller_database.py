@@ -70,6 +70,7 @@ class ControllerDatabaseTests(unittest.TestCase):
                 "environment_revisions",
                 "application_slug_tombstones",
                 "operation_dispatches",
+                "application_floating_ips",
             },
         )
         schema_sql = "\n".join(
