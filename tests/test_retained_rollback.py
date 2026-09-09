@@ -284,6 +284,33 @@ class RetainedRollbackTests(unittest.TestCase):
         )
         self.assertEqual(len(self.fixture.workers), 1)
 
+    def test_rollback_pins_only_worker_image_and_retains_it_across_selection_rollover(self):
+        first, _ = self.history()
+        plan = self.plan(first)
+        selected = db.get_image_selection(self.connection, "worker")
+        self.fixture.fail_action = "app.worker.create"
+        self.fixture.calls.clear()
+        key, interrupted = self.apply(plan)
+        self.assertEqual(interrupted.status, "recovery_required", interrupted.safe_error)
+        self.assertEqual(interrupted.refs["worker_image_id"], selected.image_id)
+        self.assertNotIn("builder_image_id", interrupted.refs)
+        db.put_image_selection(
+            self.connection,
+            role="worker",
+            image_id="22222222-2222-4222-8222-222222222222",
+            display_name="replacement-worker",
+            source_commit="d" * 40,
+            compatibility_hash="e" * 64,
+        )
+        _, recovered = self.apply(plan, key)
+        self.assertEqual(recovered.status, "succeeded", recovered.safe_error)
+        self.assertEqual(recovered.refs["worker_image_id"], selected.image_id)
+        creates = [value for action, value in self.fixture.calls if action == "app.worker.create"]
+        self.assertTrue(creates)
+        self.assertTrue(all(value["workerImageId"] == selected.image_id for value in creates))
+        self.assertFalse(any(action == "app.build" for action, _ in self.fixture.calls))
+        self.assertEqual(len(self.fixture.workers), 1)
+
     def test_post_acceptance_restart_retry_finishes_cleanup_with_original_plan(self):
         first, _ = self.history()
         plan = self.plan(first)

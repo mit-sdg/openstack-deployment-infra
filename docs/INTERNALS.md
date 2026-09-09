@@ -311,7 +311,8 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | --- | --- |
 | `GET /v1/admin/status` | Aggregate accepted and live status |
 | `GET /v1/admin/hosts` | Persistent-host observations |
-| `GET /v1/admin/images` | Selected/candidate image observations |
+| `GET /v1/admin/images` | Hosted role-image selection records |
+| `POST /v1/admin/images/{role}/selection` | Compare-and-swap exact hosted role-image metadata after provider validation; only worker/builder affect hosted provisioning |
 | `GET /v1/admin/applications` | Paginated global application list |
 | `GET /v1/admin/applications/{id}/public-ip` | Recorded optional outbound IPv4 reservation; staff only |
 | `POST /v1/admin/applications/{id}/public-ip/plan` | Read-only quota and routed-network capability check with `{externalNetworkId}` |
