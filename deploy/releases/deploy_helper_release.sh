@@ -63,6 +63,7 @@ release_manifest=${PLATFORM_RELEASE_MANIFEST:-}
 release_signature=${PLATFORM_RELEASE_SIGNATURE:-}
 release_trust_root=${PLATFORM_RELEASE_TRUST_ROOT:-}
 unsigned_ack=${PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT:-}
+production_unsigned_ack=${PLATFORM_ALLOW_UNSIGNED_PRODUCTION:-}
 [[ -f $release_manifest && ! -L $release_manifest ]] || {
   echo "PLATFORM_RELEASE_MANIFEST must select verified release evidence" >&2
   exit 1
@@ -89,7 +90,13 @@ PY
   echo "release SBOM/provenance evidence is incomplete" >&2
   exit 1
 }
-if [[ -n $unsigned_ack ]]; then
+if [[ -n $production_unsigned_ack ]]; then
+  [[ $production_unsigned_ack == I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES && \
+     -z $unsigned_ack && -z $release_signature && -z $release_trust_root ]] || {
+    echo "unsigned production release evidence is inconsistent" >&2
+    exit 1
+  }
+elif [[ -n $unsigned_ack ]]; then
   [[ $unsigned_ack == I_UNDERSTAND_THIS_IS_NOT_PRODUCTION && -z $release_signature && -z $release_trust_root ]] || {
     echo "unsigned development release evidence is inconsistent" >&2
     exit 1
@@ -348,7 +355,9 @@ for evidence in "${evidence_files[@]}"; do
   scp -F "$ssh_config" -- "$evidence" "${ssh_alias}:$remote_evidence/$(basename "$evidence")"
 done
 release_trust_arguments=()
-if [[ -n $unsigned_ack ]]; then
+if [[ -n $production_unsigned_ack ]]; then
+  release_trust_arguments+=(--allow-unsigned-production)
+elif [[ -n $unsigned_ack ]]; then
   release_trust_arguments+=(--allow-unsigned-development)
 else
   scp -F "$ssh_config" -- "$release_signature" "${ssh_alias}:$remote_signature"

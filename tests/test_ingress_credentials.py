@@ -16,6 +16,7 @@ from openstack_platform.validation import ValidationError
 ROOT = Path(__file__).resolve().parents[1]
 TUNNEL = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
+SECRET_36 = b"00000000-0000-4000-8000-000000000036"  # Synthetic, not an operator token.
 
 
 def connector_token(tunnel: str = TUNNEL, secret: bytes = b"s" * 32) -> bytes:
@@ -94,7 +95,7 @@ class IngressCredentialTests(unittest.TestCase):
             b"\x00" * 60,
             b"",
             connector_token() + b"\nINJECT=value",
-            connector_token(secret=b"short"),
+            connector_token(secret=b""),
             connector_token(tunnel="bad-tunnel"),
             base64.b64encode(b'{"a":1,"a":2}'),
             base64.b64encode(b"[]"),
@@ -107,6 +108,26 @@ class IngressCredentialTests(unittest.TestCase):
                 if token:
                     self.assertNotIn(token.decode(errors="replace"), message)
                 self.assertNotIn("sentinel", message)
+
+    def test_secret_is_nonempty_base64_not_a_fixed_size_key(self):
+        self.assertEqual(len(SECRET_36), 36)
+        # Upstream cloudflared's Test_TunnelToken also accepts []byte("secret").
+        for secret in (b"s", b"secret", b"s" * 32, SECRET_36, b"s" * 4536):
+            token = connector_token(secret=secret)
+            self.assertEqual(ingress_credentials._token(token), token.decode())
+        # The existing whole-token bound applies even to otherwise valid JSON.
+        self.assertEqual(len(connector_token(secret=b"s" * 4536)), 8192)
+        self.token.write_bytes(connector_token(secret=b"s" * 4537))
+        self.assert_rejected(self.token)
+
+    def test_malformed_secret_fields_fail_before_provider_calls(self):
+        for secret in (None, 32, [], {}, "", "!not-base64!", "a", "YWJj=trailing"):
+            document = {"a": "a" * 32, "t": TUNNEL, "s": secret}
+            token = base64.b64encode(json.dumps(document).encode())
+            self.token.write_bytes(token)
+            message = self.assert_rejected(self.token)
+            self.assertNotIn(token.decode(), message)
+            self.assertNotIn("not-base64", message)
 
     def test_unsafe_files_fail_before_provider_calls(self):
         for mode in (0o644, 0o640, 0o400):
@@ -141,7 +162,12 @@ class IngressCredentialTests(unittest.TestCase):
         temporary = self.root / "temporary"
         temporary.mkdir()
         before = set(self.root.rglob("*"))
-        for token in (connector_token(), connector_token(secret=b"z" * 32), connector_token(OTHER)):
+        for token in (
+            connector_token(),
+            connector_token(secret=b"z" * 32),
+            connector_token(secret=SECRET_36),
+            connector_token(OTHER),
+        ):
             self.token.write_bytes(token)
             staged_paths = []
             expected = openstack.ReplacementResult("ingress", True, OTHER, OTHER, "confirmed")

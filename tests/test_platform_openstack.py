@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import ingress_credentials, openstack, release_manifest
+from openstack_platform import ingress_credentials, openstack, release_manifest, setup
 from openstack_platform.config import load_platform
 from openstack_platform.runtime import CommandFailure, CommandResult, HttpResult
 from openstack_platform.validation import ValidationError
@@ -437,6 +437,12 @@ class OpenStackTests(unittest.TestCase):
         self.assertLessEqual(timeouts[0], 5.0)
 
     def test_publisher_script_emits_canonical_metadata_and_verifies_project(self) -> None:
+        self._publisher_script(unsigned_production=False)
+
+    def test_publisher_script_supports_explicit_unsigned_production(self) -> None:
+        self._publisher_script(unsigned_production=True)
+
+    def _publisher_script(self, *, unsigned_production: bool) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fake = root / "openstack"
@@ -446,7 +452,12 @@ class OpenStackTests(unittest.TestCase):
             repository, commit = clean_repository(ROOT, root / "repository")
             component_dir = root / "component"
             component_manifest = release_manifest.generate(
-                repository, commit, component_dir, signing_key=None, unsigned=True
+                repository,
+                commit,
+                component_dir,
+                signing_key=None,
+                unsigned=not unsigned_production,
+                unsigned_production=unsigned_production,
             )
             artifact_inputs: dict[str, object] = {}
             worker_output = Path("/nix/store/00000000000000000000000000000000-worker-image")
@@ -487,7 +498,8 @@ class OpenStackTests(unittest.TestCase):
                 inputs_path,
                 artifact_dir,
                 signing_key=None,
-                unsigned=True,
+                unsigned=not unsigned_production,
+                unsigned_production=unsigned_production,
             )
             artifact_manifest = json.loads(artifact_manifest_path.read_text())
             worker_artifact = artifact_manifest["roleArtifacts"]["worker"]
@@ -501,7 +513,7 @@ elif args[:2] == ["project", "show"]:
     print("00000000000040008000000000000000")
     print("example-project")
 elif args[:2] == ["image", "list"]:
-    print("[]")
+    print(json.dumps([{"ID": "11111111-1111-4111-8111-111111111111", "Name": "example-nixos-worker"}] if os.environ.get("FAKE_EXISTING_IMAGE") else []))
 elif args[:2] == ["image", "show"]:
     created = json.loads(pathlib.Path(os.environ["FAKE_LOG"]).read_text())
     properties = {
@@ -509,6 +521,8 @@ elif args[:2] == ["image", "show"]:
         for index, item in enumerate(created)
         if index and created[index - 1] == "--property" and "=" in item
     }
+    if os.environ.get("FAKE_BAD_METADATA"):
+        properties = {key: "wrong" for key in properties}
     image_file = created[created.index("--file") + 1]
     digest = hashlib.md5(pathlib.Path(image_file).read_bytes(), usedforsecurity=False).hexdigest()
     print(json.dumps({
@@ -517,6 +531,8 @@ elif args[:2] == ["image", "show"]:
         "status": "active",
         "owner": "00000000000040008000000000000000",
         "checksum": digest,
+        "os_hash_algo": os.environ.get("FAKE_HASH_ALGO"),
+        "os_hash_value": hashlib.sha512(pathlib.Path(image_file).read_bytes()).hexdigest() if os.environ.get("FAKE_HASH_ALGO") == "sha512" else None,
         "properties": properties,
     }))
 elif args[:2] == ["image", "save"]:
@@ -524,7 +540,25 @@ elif args[:2] == ["image", "save"]:
     source = created[created.index("--file") + 1]
     destination = args[args.index("--file") + 1]
     shutil.copyfile(source, destination)
+    if os.environ.get("FAKE_BAD_DOWNLOAD"):
+        pathlib.Path(destination).write_bytes(b"wrong provider bytes")
+elif args[:2] == ["image", "set"]:
+    path = pathlib.Path(os.environ["FAKE_LOG"])
+    path.with_suffix(".set.json").write_text(json.dumps(args))
+    created = json.loads(path.read_text())
+    for index, item in enumerate(args):
+        if index and args[index - 1] == "--property":
+            key = item.split("=", 1)[0]
+            existing = next((i for i, value in enumerate(created) if i and created[i - 1] == "--property" and value.split("=", 1)[0] == key), None)
+            if existing is None:
+                created.extend(["--property", item])
+            else:
+                created[existing] = item
+    if not os.environ.get("FAKE_IGNORE_SET"):
+        path.write_text(json.dumps(created))
 elif args[:2] == ["image", "create"]:
+    if os.environ.get("FAKE_EXISTING_IMAGE"):
+        raise SystemExit("must verify and reuse rather than recreate")
     pathlib.Path(os.environ["FAKE_LOG"]).write_text(json.dumps(args))
     print("11111111-1111-4111-8111-111111111111")
 else:
@@ -541,7 +575,6 @@ else:
                     "FAKE_LOG": str(log),
                     "PLATFORM_RELEASE_MANIFEST": str(component_manifest),
                     "PLATFORM_ARTIFACT_MANIFEST": str(artifact_manifest_path),
-                    "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT": release_manifest.UNSIGNED_ACKNOWLEDGEMENT,
                     "OS_PROJECT_NAME": "example-project",
                     "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
                         artifact_manifest_path.read_bytes()
@@ -551,6 +584,16 @@ else:
                     "PLATFORM_ARTIFACT_NIX_OUTPUT": worker_artifact["nixOutput"],
                 }
             )
+            if unsigned_production:
+                environment["PLATFORM_ALLOW_UNSIGNED_PRODUCTION"] = (
+                    release_manifest.UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT
+                )
+                environment["PLATFORM_ENVIRONMENT"] = "production"
+                environment["FAKE_HASH_ALGO"] = "sha512"
+            else:
+                environment["PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"] = (
+                    release_manifest.UNSIGNED_ACKNOWLEDGEMENT
+                )
             completed = subprocess.run(
                 [
                     str(ROOT / "infra/openstack/publish_nixos_image.sh"),
@@ -577,6 +620,168 @@ else:
             for key, value in expected.items():
                 self.assertIn(f"{key}={value}", properties)
             self.assertIn("hw_qemu_guest_agent=yes", properties)
+            if unsigned_production:
+                retry_environment = {**environment, "FAKE_EXISTING_IMAGE": "1"}
+                retried = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env=retry_environment,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(retried.returncode, 0, retried.stderr.decode())
+                mismatched = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env={**retry_environment, "FAKE_BAD_METADATA": "1"},
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(mismatched.returncode, 0)
+                set_log = log.with_suffix(".set.json")
+                # Unsigned evidence cannot replace an existing evidence digest,
+                # even when the QCOW2 identity itself is unchanged.
+                unsigned_bytes = artifact_manifest_path.read_bytes()
+                artifact_manifest_path.write_bytes(unsigned_bytes + b" ")
+                refused = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env={
+                        **retry_environment,
+                        "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
+                            artifact_manifest_path.read_bytes()
+                        ).hexdigest(),
+                    },
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertFalse(set_log.exists())
+                artifact_manifest_path.write_bytes(unsigned_bytes)
+
+                key, public = root / "private.pem", root / "public.pem"
+                subprocess.run(
+                    ["openssl", "genpkey", "-algorithm", "ED25519", "-out", key], check=True
+                )
+                subprocess.run(
+                    ["openssl", "pkey", "-in", key, "-pubout", "-out", public], check=True
+                )
+                signed_component = release_manifest.generate(
+                    repository, commit, root / "signed", signing_key=key, unsigned=False
+                )
+                signed_artifact = release_manifest.generate_artifact_manifest(
+                    signed_component,
+                    inputs_path,
+                    root / "signed/artifacts",
+                    signing_key=key,
+                    unsigned=False,
+                )
+                key.unlink()  # The publisher never needs the signing key.
+                signed_environment = {
+                    **retry_environment,
+                    "PLATFORM_RELEASE_MANIFEST": str(signed_component),
+                    "PLATFORM_RELEASE_SIGNATURE": str(root / "signed/release-manifest.sig"),
+                    "PLATFORM_RELEASE_TRUST_ROOT": str(public),
+                    "PLATFORM_ARTIFACT_MANIFEST": str(signed_artifact),
+                    "PLATFORM_ARTIFACT_SIGNATURE": str(
+                        root / "signed/artifacts/role-artifacts.sig"
+                    ),
+                    "PLATFORM_ARTIFACT_TRUST_ROOT": str(public),
+                    "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
+                        signed_artifact.read_bytes()
+                    ).hexdigest(),
+                }
+                signed_environment.pop("PLATFORM_ALLOW_UNSIGNED_PRODUCTION")
+                for failure in ("FAKE_BAD_METADATA", "FAKE_BAD_DOWNLOAD"):
+                    refused = subprocess.run(
+                        completed.args,
+                        cwd=ROOT,
+                        env={**signed_environment, failure: "1"},
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertFalse(
+                        set_log.exists(), "failed identity/content gate reached metadata mutation"
+                    )
+                ignored_update = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env={**signed_environment, "FAKE_IGNORE_SET": "1"},
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(ignored_update.returncode, 0)
+                self.assertNotIn("signed-reattestation=verified", ignored_update.stdout.decode())
+                set_log.unlink()
+                promoted = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env=signed_environment,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(promoted.returncode, 0, promoted.stderr.decode())
+                self.assertIn("signed-reattestation=verified", promoted.stdout.decode())
+                self.assertEqual(image.read_bytes(), b"qcow")
+                updates = json.loads(set_log.read_text())
+                self.assertIn(
+                    "app_platform_artifact_manifest_sha256="
+                    + signed_environment["PLATFORM_ARTIFACT_MANIFEST_SHA256"],
+                    updates,
+                )
+                self.assertIn(
+                    "app_platform_previous_artifact_manifest_sha256="
+                    + environment["PLATFORM_ARTIFACT_MANIFEST_SHA256"],
+                    updates,
+                )
+                set_log.unlink()
+                retried = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env=signed_environment,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(retried.returncode, 0, retried.stderr.decode())
+                self.assertFalse(set_log.exists(), "an exact signed retry must not mutate metadata")
+                self.assertEqual(
+                    setup._existing_image_id(
+                        fake,
+                        signed_environment,
+                        "example-nixos-worker",
+                        "worker",
+                        commit,
+                        self.platform.namespace,
+                        signed_environment["PLATFORM_ARTIFACT_MANIFEST_SHA256"],
+                        worker_artifact,
+                    ),
+                    "11111111-1111-4111-8111-111111111111",
+                )
+                log.unlink()
+                for changes in (
+                    {"PLATFORM_ALLOW_UNSIGNED_PRODUCTION": ""},
+                    {"PLATFORM_ALLOW_UNSIGNED_PRODUCTION": "true"},
+                    {
+                        "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT": release_manifest.UNSIGNED_ACKNOWLEDGEMENT
+                    },
+                    {"PLATFORM_ARTIFACT_SIGNATURE": "/unexpected/signature"},
+                ):
+                    refused = subprocess.run(
+                        completed.args,
+                        cwd=ROOT,
+                        env={**environment, **changes},
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertFalse(log.exists(), "trust failure reached image creation")
+                image.write_bytes(b"changed after verification")
+                refused = subprocess.run(
+                    completed.args, cwd=ROOT, env=environment, capture_output=True, check=False
+                )
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertFalse(log.exists(), "changed QCOW2 reached image creation")
 
     def test_publisher_and_selector_share_complete_stable_metadata(self) -> None:
         metadata = openstack.publisher_metadata(self.platform, "worker", "a" * 40)

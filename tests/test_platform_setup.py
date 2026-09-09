@@ -611,6 +611,12 @@ class SetupPreflightTests(unittest.TestCase):
         self.assertFalse(plan["resolved"]["fixedAddresses"]["ingress"]["available"])
 
     def test_existing_image_without_provider_hash_uses_download_sha256(self) -> None:
+        self._existing_image_download(provider_sha512=False)
+
+    def test_existing_image_with_provider_sha512_uses_download_sha256(self) -> None:
+        self._existing_image_download(provider_sha512=True)
+
+    def _existing_image_download(self, *, provider_sha512: bool) -> None:
         payload = b"verified existing image"
         digest = hashlib.sha256(payload).hexdigest()
         image_id = "00000000-0000-4000-8000-000000000099"
@@ -634,7 +640,14 @@ class SetupPreflightTests(unittest.TestCase):
             if command[1:3] == ("image", "list"):
                 return [{"ID": image_id, "Name": "demo-worker"}]
             if command[1:3] == ("image", "show"):
-                return {"status": "active", "properties": properties}
+                return {
+                    "status": "active",
+                    "properties": properties,
+                    "os_hash_algo": "sha512" if provider_sha512 else None,
+                    "os_hash_value": hashlib.sha512(payload).hexdigest()
+                    if provider_sha512
+                    else None,
+                }
             self.fail(command)
 
         def download(argv: object, **_kwargs: object) -> str:
