@@ -512,6 +512,22 @@ MIGRATIONS: tuple[Migration, ...] = (
     ),
 )
 
+# Append-only optional floating address state; absent row means no reservation.
+MIGRATIONS += (
+    Migration(
+        3,
+        (
+            """
+            CREATE TABLE application_floating_ips (
+                application_id TEXT PRIMARY KEY REFERENCES applications(application_id),
+                floating_ip_id TEXT UNIQUE,
+                record_json TEXT NOT NULL CHECK (json_valid(record_json))
+            ) STRICT
+            """,
+        ),
+    ),
+)
+
 _BOOTSTRAP = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,

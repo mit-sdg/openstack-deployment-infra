@@ -215,6 +215,15 @@ class ApplicationService:
                         or identity[2] != refs["worker_port_id"]
                     ):
                         raise app.ApplicationError("active worker identity did not match SQLite")
+                from .public_ip_service import release_locked
+
+                release_locked(
+                    self.connection,
+                    self.config,
+                    current.application_id,
+                    deadline=deadline,
+                    reserve_only=True,
+                )
                 worker = self.helper_caller(
                     self.config,
                     "app.worker.delete",
@@ -404,6 +413,11 @@ class ApplicationService:
                     worker_port_name=port_name,
                     nomad_version=result.nomad_version,
                 )
+                from .public_ip_service import reconcile_accepted
+
+                reconcile_accepted(
+                    self.connection, self.config, current.application_id, deadline=deadline
+                )
                 db.mark_succeeded(self.connection, operation.operation_id)
             except Exception as error:
                 latest = db.get_operation(self.connection, operation.operation_id)
@@ -574,6 +588,13 @@ class ApplicationService:
                     operation.operation_id,
                     phase="worker_removing",
                     refs=refs,
+                )
+                # Release before worker deletion so exact port ownership is
+                # still provable. Ambiguity blocks deletion for safe retry.
+                from .public_ip_service import release_locked
+
+                release_locked(
+                    self.connection, self.config, current.application_id, deadline=deadline
                 )
                 worker = self.helper_caller(
                     self.config,

@@ -21,11 +21,14 @@ done
 
 work=$(mktemp -d)
 pid=
-# shellcheck disable=SC2317 # Invoked through the EXIT trap.
+# shellcheck disable=SC2317,SC2329 # Invoked through the EXIT trap.
 cleanup() {
   if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
+  fi
+  if [[ -n ${PLATFORM_QEMU_SERIAL_LOG:-} && -f $work/serial.log ]]; then
+    cp -- "$work/serial.log" "$PLATFORM_QEMU_SERIAL_LOG"
   fi
   rm -rf "$work"
 }
