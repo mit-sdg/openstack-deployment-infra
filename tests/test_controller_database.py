@@ -71,6 +71,7 @@ class ControllerDatabaseTests(unittest.TestCase):
                 "application_slug_tombstones",
                 "operation_dispatches",
                 "application_floating_ips",
+                "application_fixed_ports",
             },
         )
         schema_sql = "\n".join(

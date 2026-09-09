@@ -192,6 +192,36 @@ before predecessor cleanup; no FIP reservation is created by default. Interrupte
 acceptance or cleanup resumes with the original request and idempotency key.
 See [Roll back an application](OPERATIONS.md#roll-back-an-application).
 
+### Retained worker primary ports
+
+Migration 4 journals optional app-owned Neutron ports separately from disposable
+worker slots. `app.worker.create`, `observe`, `capacity`, and single-slot `delete`
+accept a closed `retainedPort` identity supplied by the controller, never a
+caller-selected port name alone. Worker server metadata remains generation-scoped;
+port name, description, UUID, network/subnet, security-group UUID, and IPv4 remain
+reservation-scoped. Provider UUIDs may be canonical or compact lowercase; requests
+and journal UUIDs must be canonical.
+
+Reservation alone does not alter the accepted generation. After bounded
+predecessor absence, the controller journals `worker_slot_id` before the next
+candidate uses the port. Only that slot receives the retained helper identity;
+ordinary predecessors retain their original cleanup semantics. Rebinding checks
+the former retained slot before changing this pointer, so post-acceptance cleanup
+never mistakes the shared port's new attachment for the old worker's attachment.
+An unbound retained port is positively validated but represented as worker
+absence, not port-allocation absence. Nova receives an explicit existing primary
+`--port` (not a newly allocated NIC); ordinary worker cleanup never deletes it.
+
+All reservation/lifecycle mutations share the application lock. The controller
+journals allocation and worker-create uncertainty before provider calls. Unknown
+outcomes cannot authorize repeated creation or release; recovery requires exact
+positive evidence. Release deletes only a proven unbound owned port. App deletion
+releases after bounded worker cleanup. Fixed and floating reservations exclude
+each other under that same lock. Retained-port deployment, resize, and rollback
+require maintenance mode; normal/floating rolling behavior is unchanged. See
+[retained primary IPv4 operations](OPERATIONS.md#retain-a-worker-primary-fixed-ipv4)
+for the admin-image/schema upgrade boundary and request/recovery procedure.
+
 ## Operator CLI reference
 
 Global syntax:
@@ -327,6 +357,9 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | `GET /v1/admin/images` | Hosted role-image selection records |
 | `POST /v1/admin/images/{role}/selection` | Compare-and-swap exact hosted role-image metadata after provider validation; only worker/builder affect hosted provisioning |
 | `GET /v1/admin/applications` | Paginated global application list |
+| `GET /v1/admin/applications/{id}/fixed-ip` | Reservation state; reserved ports include fresh exact attachment evidence; staff only |
+| `POST /v1/admin/applications/{id}/fixed-ip/plan` | Read-only primary-port plan with `{networkId, subnetId, address}`; availability unproven until reservation |
+| `POST /v1/admin/applications/{id}/fixed-ip` | App-locked `{action:"reserve", networkId, subnetId, address}` or `{action:"release"}`; see [retained primary IPv4](OPERATIONS.md#retain-a-worker-primary-fixed-ipv4) |
 | `GET /v1/admin/applications/{id}/public-ip` | Recorded optional outbound IPv4 reservation; staff only |
 | `POST /v1/admin/applications/{id}/public-ip/plan` | Read-only quota and routed-network capability check with `{externalNetworkId}` |
 | `POST /v1/admin/applications/{id}/public-ip` | App-locked `allocate`, `attach`, `release`, or `reconcile`; see [public IPv4 operations](OPERATIONS.md#reserve-a-stable-outbound-ipv4) |

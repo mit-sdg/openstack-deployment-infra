@@ -63,7 +63,7 @@ resolve_named_id() {
   local kind=$1 name=$2 payload
   payload=$("$OSC" "$kind" list --name "$name" -f json -c ID -c Name)
   python3 -c '
-import json,sys,uuid
+import json,os,sys,uuid
 name,kind=sys.argv[1:]; rows=json.load(sys.stdin)
 if not isinstance(rows,list): raise SystemExit(f"{kind} lookup was malformed")
 def field(row,key): return next((v for k,v in row.items() if str(k).lower()==key.lower()),None)
@@ -71,12 +71,41 @@ matches=[row for row in rows if isinstance(row,dict) and field(row,"Name")==name
 if len(matches)>1: raise SystemExit(f"refusing ambiguous duplicate {kind} name: {name}")
 if matches:
  value=str(uuid.UUID(str(field(matches[0],"ID"))))
- if value != field(matches[0],"ID"): raise SystemExit(f"{kind} UUID was not canonical")
+ raw=field(matches[0],"ID")
+ if value != raw and not (os.environ.get("RETAINED_PORT_JSON") and value.replace("-","")==raw):
+  raise SystemExit(f"{kind} UUID was not canonical")
  print(value)
 ' "$name" "$kind" <<<"$payload"
 }
 server_id_for_name() { resolve_named_id server "$server_name"; }
-port_id_for_name() { resolve_named_id port "$port_name"; }
+port_id_for_name() {
+  if [[ -n ${RETAINED_PORT_JSON:-} ]]; then
+    python3 -c 'import json,os; print(json.loads(os.environ["RETAINED_PORT_JSON"])["port_id"])'
+  else resolve_named_id port "$port_name"; fi
+}
+
+# Only the exact generation selected by the controller receives this identity.
+# An ordinary predecessor never receives the newly reserved port's identity.
+if [[ -n ${RETAINED_PORT_JSON:-} ]]; then
+  retained_identity=$(python3 - "$application_id" "$PLATFORM_PROJECT_ID" "$PLATFORM_PREFIX" "$PLATFORM_NAMESPACE" <<'PY'
+import json,os,sys,uuid
+slot,project,prefix,namespace=sys.argv[1:]
+r=json.loads(os.environ["RETAINED_PORT_JSON"])
+keys={"application_id","request_id","project_id","network_id","subnet_id","address","security_group_id","port_id","name","description"}
+if r.keys()!=keys: raise SystemExit("invalid retained primary port fields")
+for key in keys-{"address","name","description"}:
+ if str(uuid.UUID(r[key]))!=r[key]: raise SystemExit("invalid retained primary port UUID")
+app=r["application_id"]
+slots={app,*(str(uuid.uuid5(uuid.UUID(app),kind)) for kind in ("stable","candidate"))}
+if (slot not in slots or r["project_id"]!=project or r["name"]!=f"{prefix}-app-{app}-primary-v4"
+ or r["description"]!=f"{namespace}:app-fixed-port:{app}:{r['request_id']}"):
+ raise SystemExit("retained primary port ownership mismatch")
+print(r["name"]); print(r["description"])
+PY
+  )
+  port_name=${retained_identity%%$'\n'*}
+  port_description=${retained_identity#*$'\n'}
+fi
 
 observed_resource_id() {
   local resource=$1
@@ -166,7 +195,17 @@ emit_observation() {
   server_json=$(mktemp); port_json=$(mktemp)
   server_id=$(server_id_for_name); port_id=$(port_id_for_name)
   if [[ -n $server_id ]]; then
-    "$OSC" server show "$server_id" -f json -c id -c name -c status -c image -c flavor -c properties >"$server_json"
+    if [[ -n ${RETAINED_PORT_JSON:-} ]]; then
+      "$OSC" server show "$server_id" -f json >"$server_json"
+      "$OSC" port list --server "$server_id" -f json -c ID | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict) or rows[0].get("ID") not in (sys.argv[1],sys.argv[1].replace("-","")):
+ raise SystemExit("retained worker must have exactly its primary port")
+' "$port_id"
+    else
+      "$OSC" server show "$server_id" -f json -c id -c name -c status -c image -c flavor -c properties >"$server_json"
+    fi
     if [[ $("$OSC" server show "$server_id" -f value -c status) == ACTIVE ]] &&
        "$OSC" console log show --lines 2000 "$server_id" | grep -Fq "$BOOTSTRAP_MARKER"; then ready=true; fi
   else printf 'null' >"$server_json"; fi
@@ -175,13 +214,38 @@ emit_observation() {
     if NOMAD_ATTEMPTS=1 NOMAD_POLL_INTERVAL=0 wait_for_nomad >/dev/null 2>&1; then ready=true; fi
   fi
   if [[ -n $port_id ]]; then
-    "$OSC" port show "$port_id" -f json -c id -c name -c device_id -c fixed_ips -c description >"$port_json"
+    if [[ -n ${RETAINED_PORT_JSON:-} ]]; then
+      "$OSC" port show "$port_id" -f json >"$port_json"
+    else
+      "$OSC" port show "$port_id" -f json -c id -c name -c device_id -c fixed_ips -c description >"$port_json"
+    fi
   else printf 'null' >"$port_json"; fi
   python3 - "$application_id" "$application_slug" "$ready" "$server_json" "$port_json" \
     "$server_name" "$port_name" "$PLATFORM_METADATA_PREFIX" "$port_description" <<'PY'
-import ast,json,re,sys,uuid
+import ast,json,os,re,sys,uuid
 application_id,slug,ready,server_path,port_path,server_name,port_name,prefix,description=sys.argv[1:]
 server=json.load(open(server_path)); port=json.load(open(port_path))
+retained=json.loads(os.environ["RETAINED_PORT_JSON"]) if os.environ.get("RETAINED_PORT_JSON") else None
+def provider_id(raw):
+ try: parsed=str(uuid.UUID(str(raw)))
+ except ValueError: raise SystemExit("malformed provider UUID")
+ if raw not in (parsed,parsed.replace("-","")): raise SystemExit("malformed provider UUID")
+ return parsed
+if retained is not None:
+ if isinstance(server,dict):
+  for key in ("id","project_id","tenant_id"):
+   if key in server: server[key]=provider_id(server[key])
+  if isinstance(server.get("image"),dict) and "id" in server["image"]:
+   server["image"]["id"]=provider_id(server["image"]["id"])
+ if isinstance(port,dict):
+  for key in ("id","project_id","network_id"):
+   port[key]=provider_id(port.get(key))
+  if port.get("device_id"): port["device_id"]=provider_id(port["device_id"])
+  groups,fixed=port.get("security_group_ids"),port.get("fixed_ips")
+  if not isinstance(groups,list) or not isinstance(fixed,list) or any(not isinstance(v,dict) for v in fixed):
+   raise SystemExit("malformed retained port address/group projection")
+  port["security_group_ids"]=[provider_id(v) for v in groups]
+  port["fixed_ips"]=[{**v,"subnet_id":provider_id(v.get("subnet_id"))} for v in fixed]
 def field(value,name,default=None):
  if not isinstance(value,dict): return default
  return {str(k).lower().replace(" ","_"):v for k,v in value.items()}.get(name,default)
@@ -215,6 +279,26 @@ if server is not None:
   raise SystemExit("refusing worker with mismatched full application metadata or managed-by identity")
  server_out={"id":sid,"name":server_name,"status":str(field(server,"status","")),"imageId":image_id(field(server,"image")),"flavorName":flavor(field(server,"flavor")),"managedBy":"platform","applicationId":application_id,"applicationSlug":slug}
 port_out=None
+if retained is not None:
+ if server_out is not None and field(server,"project_id",field(server,"tenant_id"))!=retained["project_id"]:
+  raise SystemExit("retained worker server project drifted")
+ expected=dict(id=retained["port_id"],name=retained["name"],project_id=retained["project_id"],
+  network_id=retained["network_id"],description=retained["description"],
+  fixed_ips=[dict(subnet_id=retained["subnet_id"],ip_address=retained["address"])],
+  security_group_ids=[retained["security_group_id"]],port_security_enabled=True,allowed_address_pairs=[],
+  device_id=server_out["id"] if server_out else "")
+ if not isinstance(port,dict) or port.get("port_security_enabled") is not True or any(port.get(k)!=v for k,v in expected.items()):
+  raise SystemExit("retained primary port identity/security/attachment drifted")
+ owner=port.get("device_owner")
+ if (server_out is None and owner!="") or (server_out is not None and (not isinstance(owner,str) or not owner.startswith("compute:") or owner=="compute:")):
+  raise SystemExit("retained primary port device owner drifted")
+ if port.get("trunk_details") not in (None,{}): raise SystemExit("retained primary port is a trunk")
+ if server_out is None:
+  if any(port.get(key) not in (None,"") for key in ("binding:host_id","binding_host_id")):
+   raise SystemExit("retained primary port still host bound")
+  # Worker absence is distinct from reservation absence. The retained port was
+  # positively verified above and must remain allocated while detached.
+  port=None
 if port is not None:
  pid=rid(field(port,"id")); device=rid(field(port,"device_id"))
  if pid is None or field(port,"name") != port_name or field(port,"description") != description:
@@ -238,7 +322,7 @@ case "$action" in
     port_id=$(observed_resource_id port <<<"$observation")
     failed=false
     if [[ -n $server_id ]]; then "$OSC" server delete --wait "$server_id" || failed=true; fi
-    if [[ -n $port_id ]]; then "$OSC" port delete "$port_id" || failed=true; fi
+    if [[ -n $port_id && -z ${RETAINED_PORT_JSON:-} ]]; then "$OSC" port delete "$port_id" || failed=true; fi
     [[ $failed == false ]]
     emit_observation >/dev/null
     exit
@@ -304,6 +388,7 @@ if [[ -n ${FLAVOR_ID:-} && $flavor_id != "$FLAVOR_ID" ]]; then
 fi
 created_port=false
 if [[ -z $port_id ]]; then
+  [[ -z ${RETAINED_PORT_JSON:-} ]] || { echo "retained port must already exist" >&2; exit 1; }
   "$OSC" port create \
     --network "$NETWORK_NAME" \
     --security-group "$SECURITY_GROUP" \
@@ -376,6 +461,9 @@ if len(text.encode()) > 1_048_576:
 Path(output).write_text(text)
 PY
 
+# Reobserve immediately before attaching. An explicit existing --port is Nova's
+# primary NIC with delete_on_termination=false; never ask Nova to allocate it.
+emit_observation >/dev/null
 create_failed=true
 "$OSC" server create \
   --image "$image" \

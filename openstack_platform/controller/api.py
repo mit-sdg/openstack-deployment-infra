@@ -193,6 +193,9 @@ class ControllerAPI:
             ("GET", "/v1/admin/images", self._admin_images),
             ("POST", "/v1/admin/images/{role}/selection", self._select_hosted_image),
             ("GET", "/v1/admin/applications", self._admin_applications),
+            ("GET", "/v1/admin/applications/{id}/fixed-ip", self._get_fixed_ip),
+            ("POST", "/v1/admin/applications/{id}/fixed-ip/plan", self._plan_fixed_ip),
+            ("POST", "/v1/admin/applications/{id}/fixed-ip", self._mutate_fixed_ip),
             ("GET", "/v1/admin/applications/{id}/public-ip", self._get_public_ip),
             ("POST", "/v1/admin/applications/{id}/public-ip/plan", self._plan_public_ip),
             ("POST", "/v1/admin/applications/{id}/public-ip", self._mutate_public_ip),
@@ -936,6 +939,70 @@ class ControllerAPI:
                 if dispatch is None:
                     raise HttpError(404, "OPERATION_NOT_FOUND", "operation does not exist")
                 return Response(200, self._dispatch_model(dispatch))
+
+    def _get_fixed_ip(self, request: Request) -> Response:
+        from .fixed_ip_service import FixedIPService
+
+        self._no_query(request)
+        if request.body is not None:
+            raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
+        application = self._application(self._path_uuid(request))
+        return Response(
+            200,
+            FixedIPService(self.connection, self.config, self.state_directory).read(
+                application.application_id
+            ),
+        )
+
+    def _plan_fixed_ip(self, request: Request) -> Response:
+        from .fixed_ip_service import FixedIPService
+
+        self._no_query(request)
+        fields = {"networkId", "subnetId", "address"}
+        body = self._body(request, allowed=fields, required=fields)
+        application = self._application(self._path_uuid(request))
+        return Response(
+            200,
+            FixedIPService(self.connection, self.config, self.state_directory).plan(
+                application.application_id, body["networkId"], body["subnetId"], body["address"]
+            ),
+        )
+
+    def _mutate_fixed_ip(self, request: Request) -> Response:
+        from ..fixed_ip import ipv4
+        from .fixed_ip_service import FixedIPService
+
+        self._no_query(request)
+        body = self._body(
+            request, allowed={"action", "networkId", "subnetId", "address"}, required={"action"}
+        )
+        if body["action"] == "reserve":
+            expected = {"action", "networkId", "subnetId", "address"}
+            uuid(body.get("networkId"), field="worker network UUID")
+            uuid(body.get("subnetId"), field="worker subnet UUID")
+            ipv4(body.get("address"))
+        elif body["action"] == "release":
+            expected = {"action"}
+        else:
+            raise ValidationError("invalid retained fixed IP action")
+        if body.keys() != expected:
+            raise ValidationError("retained fixed IP action fields are invalid")
+        application = self._application(self._path_uuid(request))
+        return self._external(
+            request,
+            lambda connection, key: FixedIPService(
+                connection, self.config, self.state_directory
+            ).mutate(
+                application.application_id,
+                action=body["action"],
+                network_id=body.get("networkId"),
+                subnet_id=body.get("subnetId"),
+                address=body.get("address"),
+                request_id=key,
+            ),
+            kind="app.fixed-ip",
+            scope=f"app-{application.application_id}",
+        )
 
     def _get_public_ip(self, request: Request) -> Response:
         from .public_ip_service import model

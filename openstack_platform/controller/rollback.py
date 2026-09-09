@@ -39,10 +39,20 @@ def plan(
 ) -> dict[str, Any]:
     application = db.get_application(connection, application_id)
     active = db.get_active_deployment(connection, application_id)
-    if application is None or active is None or not application.desired_running:
+    from .fixed_ip_service import get as get_fixed
+    from .fixed_ip_service import require_maintenance
+
+    retained = get_fixed(connection, application_id)
+    if (
+        application is None
+        or active is None
+        or (retained is None and not application.desired_running)
+    ):
         raise ValidationError(
             "rollback requires an enabled application with an accepted deployment"
         )
+    if retained is not None:
+        require_maintenance(connection, application_id)
     attempt = target(connection, application_id, deployment_id)
     if active.deployment_id == attempt.deployment_id:
         raise ValidationError("rollback target is already the active deployment")
@@ -81,6 +91,11 @@ def plan(
         "environmentPolicy": "current-secrets",
         "dataPolicy": "no-data-rollback",
     }
+    if retained is not None:
+        projection["retainedPort"] = {
+            "portId": retained["port_id"],
+            "reservationId": retained["request_id"],
+        }
     return {**projection, "fingerprint": db.request_fingerprint(projection)}
 
 

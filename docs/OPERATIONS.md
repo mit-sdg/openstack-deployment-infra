@@ -387,6 +387,77 @@ No runtime worker or managed storage is removed
 by failed-build cleanup. This is not an arbitrary cancellation or forced-unlock
 endpoint.
 
+## Retain a worker primary fixed IPv4
+
+On provider-routed worker networks, staff can reserve an explicit IPv4 on a
+controller-owned Neutron **primary port**, before starting the worker. This is
+not a floating IP or post-health outbound-IP handover: the worker boots with this
+address and keeps it across disable/enable and maintenance replacement. The
+feature creates no router, floating IP, extra NIC, ingress rule, or DNS entry.
+It does not guarantee public reachability; cloud routing and policy still apply.
+Floating and retained fixed reservations are mutually exclusive per application.
+
+Before upgrading, take a fresh hosted-controller backup. Install matching
+controller, helper, and lifecycle scripts through the admin image, and verify
+new admin/controller readiness **before reserving**. Migration 4 adds
+`application_fixed_ports`; the older schema-3 controller (including `95d57d85`)
+cannot operate the migrated database. Do not downgrade that controller against
+schema 4 or restore old state while leaving retained provider ports unmanaged.
+Worker images do not need rebuilding for this feature.
+
+Run on admin as the operator admitted to `privileged.sock`:
+
+```bash
+umask 077
+APP_ID=your-canonical-application-uuid
+NETWORK_ID=your-canonical-worker-network-uuid
+SUBNET_ID=your-canonical-worker-subnet-uuid
+ADDRESS=your-requested-ipv4
+SOCKET="/run/${PLATFORM_NAMESPACE}-controller/privileged.sock"
+BASE="http://localhost/v1/admin/applications/${APP_ID}/fixed-ip"
+jq -n --arg network "$NETWORK_ID" --arg subnet "$SUBNET_ID" --arg address "$ADDRESS" \
+  '{networkId: $network, subnetId: $subnet, address: $address}' > fixed-ip-plan-request.json
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' --data-binary @fixed-ip-plan-request.json "$BASE/plan" | jq .
+jq '. + {action: "reserve"}' fixed-ip-plan-request.json > fixed-ip-request.json
+python3 -c 'import uuid; print(uuid.uuid4())' > fixed-ip-key.txt
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $(<fixed-ip-key.txt)" \
+  --data-binary @fixed-ip-request.json "$BASE" > fixed-ip-response.json
+STATUS_URL=$(jq -r .statusUrl fixed-ip-response.json)
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "http://localhost${STATUS_URL}" | jq .
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" "$BASE" | jq .
+```
+
+The plan checks the exact configured network, IPv4 subnet CIDR, usable address,
+and worker security-group identity. Explicit addresses outside automatic
+allocation pools are allowed; **availability and allocation permission remain
+unproven until reservation succeeds**. HTTP `202` means admitted: poll `statusUrl`
+until `succeeded` or `recovery_required`. A successful `GET` of a reserved port
+rechecks provider identity and reports `attachment: detached|attached`, `portId`,
+`address`, and `serverId`. It does not probe application traffic.
+
+Reservation may precede disabling an existing ordinary worker; that worker and
+its disposable port are unchanged. Before deploying, resizing, or rolling back,
+disable the application. Replacements require observed predecessor absence and
+never overlap workers. Enable also refuses to substitute the port while an old
+ordinary worker remains. Existing per-application flavor and scheduler sizing
+remain pinned. After acceptance, verify the same `portId`/`address`, application
+health at its original HTTPS URL, and connectivity to required dependencies.
+
+Disable and failed-candidate cleanup retain the detached port. To release, submit
+`{"action":"release"}` to the same endpoint with a **new** idempotency key;
+release accepts only the exact owned, unbound port and loses the address.
+Application deletion removes bounded worker slots first, then releases the port.
+Do not mutate these resources out of band: Neutron has no attachment/delete CAS.
+Unknown create/delete outcomes remain `recovery_required`. Retry the original
+request with its unchanged body/key. Lost allocation responses recover only an
+exact journaled ownership marker; an empty inventory does not authorize another
+allocation. Unresolved worker creation also blocks release. Wrong ownership,
+security, extra addresses, trunks, or foreign attachments block mutation; there
+is no name-only adoption or forced-release endpoint.
+
 ## Reserve a stable outbound IPv4
 
 Staff can optionally reserve one Neutron floating IPv4 across successful worker
@@ -397,9 +468,11 @@ connection-preserving or zero downtime. Applications must start and pass candida
 health without the reserved source address. A dependency that requires it before
 startup/health is incompatible with this candidate-first handover.
 
-Fixed IPs belong to disposable worker ports, not applications. They may already
-be globally public on provider-routed networks; this feature does not preserve
-those ports, add another NIC, or provision a tenant network/router. Floating-IP
+By default, fixed IPs belong to disposable worker ports, not applications. They
+may already be globally public on provider-routed networks; this floating-IP
+feature does not preserve those ports, add another NIC, or provision a tenant
+network/router. For that cloud topology, use the separate
+[retained primary fixed IPv4](#retain-a-worker-primary-fixed-ipv4) feature. Floating-IP
 quota `0` or no matching routed subnet makes this optional feature unavailable,
 even when existing public fixed-IP networking works.
 

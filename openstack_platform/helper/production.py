@@ -501,6 +501,30 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
         "app.worker.observe",
         "app.worker.capacity",
     }:
+        retained_port = None
+        if "retainedPort" in args:
+            from .. import fixed_ip
+
+            retained_port = fixed_ip.validate_request(
+                args["retainedPort"],
+                platform,
+                uuid(args.get("applicationId"), field="worker slot UUID"),
+                slug(args.get("slug")),
+            )
+            if action == "app.worker.delete" and args.get("single") is not True:
+                raise ValidationError("retained port cleanup requires an exact single worker slot")
+            provider = fixed_ip.Provider(platform, deadline=time.monotonic() + 120)
+            value = provider.show(retained_port["port_id"])
+            device = value.get("device_id")
+            if not isinstance(device, str):
+                raise ValidationError("retained port attachment evidence is malformed")
+            if device:
+                uuid(device, field="retained port attached server UUID")
+            provider.check(value, retained_port, device_id=device)
+            args = {key: value for key, value in args.items() if key != "retainedPort"}
+        worker_options: dict[str, Any] = (
+            {"retained_port": retained_port} if retained_port is not None else {}
+        )
         expected = {"applicationId", "slug", "workerImageId", "standardFlavor"}
         if action == "app.worker.delete":
             if args.keys() not in ({"applicationId", "slug"}, {"applicationId", "slug", "single"}):
@@ -519,6 +543,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             worker = application.create_worker(
                 args["applicationId"],
                 args["slug"],
+                **worker_options,
                 prefix=platform.prefix,
                 worker_command=application.provider_command(platform, "worker"),
                 selected_image_id=args["workerImageId"],
@@ -542,6 +567,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 application.delete_worker(
                     identity,
                     args["slug"],
+                    **worker_options,
                     prefix=platform.prefix,
                     worker_command=application.provider_command(platform, "worker"),
                     timeout_seconds=900,
@@ -557,6 +583,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             worker = application.observe_worker(
                 args["applicationId"],
                 args["slug"],
+                **worker_options,
                 prefix=platform.prefix,
                 worker_command=application.provider_command(platform, "worker"),
                 timeout_seconds=120,
