@@ -61,6 +61,62 @@ An unavailable live observation does not erase accepted state. Diagnose the
 named dependency before mutation; do not edit SQLite or provider resources to
 make status appear healthy.
 
+## Update hosted role image selections
+
+Use the hosted controller's privileged API to select role-image metadata. Run these commands **locally on the admin host as the permitted
+operator account**, after installing a controller release that includes this route.
+This is not the external operator database: `infra image set` does not update
+hosted selections. The setup-only image seed is not a rollover command. Startup
+preparation can replay the original seed without overwriting a journal-proven API
+rollover, including a committed selection awaiting crash reconciliation. An
+unjournaled difference still blocks preparation rather than being silently adopted.
+
+Publish and verify a compatible image first. The API accepts only exact image
+UUIDs for all five roles (`admin`, `ingress`, `storage`, `worker`, `builder`),
+reuses provider project/role/provenance checks,
+and compares the current selection with `expectedImageId` under the hosted
+infrastructure lock. It does not create/delete provider resources, replace running
+workers, update persistent hosts, or modify the external operator database.
+Only worker/builder selections affect future hosted provisioning. The other three
+are selected-image metadata, **not observations of a running host's image**, and
+changing them does not schedule or perform persistent-host replacement.
+
+```bash
+SOCKET="/run/${PLATFORM_NAMESPACE}-controller/privileged.sock"
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  http://localhost/v1/admin/images
+REQUEST_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $REQUEST_ID" \
+  --data '{"imageId":"NEW_WORKER_IMAGE_UUID","expectedImageId":"CURRENT_WORKER_IMAGE_UUID"}' \
+  http://localhost/v1/admin/images/worker/selection
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "http://localhost/v1/admin/operations/$REQUEST_ID"
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  http://localhost/v1/admin/images
+```
+
+Replace both uppercase UUID placeholders with reviewed values from provider
+publication evidence and the initial GET. HTTP 202 means accepted for execution,
+not selected: poll until `succeeded`, then verify the role's exact UUID in the
+selection list. Repeat for `/v1/admin/images/builder/selection` with its own
+current/new UUID and a new request ID. Roles are changed separately, not atomically.
+
+A stale expected UUID or rejected provider image leaves the selection unchanged
+and the operation failed. Read the current selection and submit a newly reviewed
+request with a new key. A recovery-required operation or unknown HTTP outcome must
+be retried with the **identical body and key**; changed input conflicts. Recovery
+revalidates the saved provider projection and reconciles a possible committed
+write without overwriting unrelated selection drift. Do not edit SQLite to unblock it.
+
+Deployment execution records both selected image UUIDs together before building;
+resize records its worker image before provisioning. Recovery retains recorded
+UUIDs even after rollover. Queued work that has not recorded selections uses the
+current choices when execution reaches that boundary. Enable already pins its
+worker image for retry. Keep old images available while recorded operations or
+accepted workers still reference them. This API only selects images; it does not
+publish, prune, or migrate existing workers.
+
 ## Size an application
 
 Use the controller's privileged Unix API to select one application's worker
@@ -635,6 +691,117 @@ Before replacing admin, require fresh hosted-controller and operator-state
 backups. Publish and live-test the replacement role image before selecting its
 exact UUID. Use `admin`, `ingress`, or `storage`; the token-file option below is
 valid only for ingress.
+
+### Replace admin across a baked image-inventory change
+
+The controller package in an admin image is immutable; installing the external
+operator or a helper release does **not** update that controller. The replacement
+admin image must contain this startup-seed and all-role selection API support.
+Keep the deployment identity and compatibility projection unchanged; this
+procedure does not migrate a namespace, project, prefix, or PKI identity.
+
+The actual boot path is:
+
+1. `paths.adminState` mounts the retained volume. `paths.root/persistent` points
+   to its operator subtree; the controller database is a separate retained subtree.
+2. `nix/roles/admin.nix` runs `<namespace>-controller-prepare.service`, copies
+   `<adminState>/operator/image-selections.json` to the controller-owned
+   `<adminState>/controller/image-selections.json`, and normalizes credential access.
+3. It runs the **baked** `openstack-platform-controller-seed-images` as the
+   controller account, with `/etc/<namespace>/platform.json` and
+   `<adminState>/controller/state`, before the controller service starts.
+4. Initial/missing-role seeding requires the baked image names. Existing records
+   matching the protected retained seed are preserved even when the new guest's
+   baked names differ. A changed existing selection instead requires exact hosted
+   CAS journal evidence. Seed replay never overwrites an existing selection.
+
+Use this order; do not replace the retained seed with the new build's inventory
+before the hosted metadata has been reconciled:
+
+1. Pause new application mutations for the cutover. Complete or deliberately
+   account for in-flight operations, retain their referenced images, and take the
+   required backups. Keep the old operator seed unchanged and keep a protected
+   copy of it. Its five records must match the retained hosted selections, or
+   already have the supported journal evidence. A pre-existing unexplained mismatch
+   is a blocker, not permission to edit the database.
+2. On the **external operator host**, select and replace only admin, using reviewed
+   exact publication evidence and the existing protected bootstrap inputs:
+
+   ```bash
+   export OPERATOR_PUBLIC_KEY=/private/operator.pub
+   export ADMIN_SECRETS_FILE=/private/admin-bootstrap.env
+   export PKI_DIR=/private/pki
+   $PLATFORM_CLI infra image set admin NEW_ADMIN_IMAGE_UUID
+   $PLATFORM_CLI infra replace admin --yes
+   $PLATFORM_CLI infra list
+   ```
+
+   The new guest starts against the unchanged retained seed and database; it does
+   not need its API to have been installed on the old guest. Keeping the old seed
+   also avoids a *seed-name* failure on automatic pre-acceptance rollback. This is
+   not a promise of schema downgrade compatibility: a fallback controller must
+   understand any newly applied migrations, including optional-public-IP schema 3.
+   Do not force-restore or delete migration rows to make an older binary start.
+3. Independently verify the new controller and readiness units on admin. The
+   operator's admin replacement gate checks Nomad readiness, not the full controller
+   API. Do not resume app mutations merely because `infra replace` returned success.
+   Install the matching reviewed helper release when required; retained helper
+   releases are not replaced by the image selection API.
+4. On **admin**, GET `/v1/admin/images`. Run the exact-UUID CAS/poll sequence in
+   [Update hosted role image selections](#update-hosted-role-image-selections) for
+   each of `admin`, `ingress`, `storage`, `worker`, and `builder`, using the latest
+   all-role build's reviewed UUIDs and each role's current UUID. Require `succeeded`
+   for each. Persistent metadata updates do not replace ingress or storage. Every
+   partial transition remains restartable against the unchanged old seed because
+   completed CAS operations provide the required evidence.
+5. Only after those operations succeed, atomically refresh the operator-owned
+   seed from the validated API projection, checking its names against the actual
+   new guest config. Run locally on admin as the permitted operator account:
+
+   ```bash
+   (
+     set -euo pipefail
+     umask 077
+     SOCKET="/run/${PLATFORM_NAMESPACE}-controller/privileged.sock"
+     seed="$PLATFORM_ADMIN_STATE/operator/image-selections.json"
+     test -f "$seed" && test ! -L "$seed"
+     test "$(stat -c '%u:%a' "$seed")" = "$(id -u):600"
+     temporary="$(mktemp "${seed}.XXXXXX")"
+     trap 'rm -f -- "$temporary"' EXIT
+     curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+       http://localhost/v1/admin/images |
+       jq --exit-status --slurpfile guest "/etc/${PLATFORM_NAMESPACE}/platform.json" '
+         if (.items | map(.role) | sort) != (["admin","ingress","storage","worker","builder"] | sort)
+           or any(.items[]; .displayName != $guest[0].images[.role])
+         then error("selected roles do not match the baked inventory")
+         else {schemaVersion: 1, projectId: $guest[0].projectId, namespace: $guest[0].namespace,
+           images: (.items | map({key: .role, value: {imageId, displayName, sourceCommit, compatibilityHash}}) | from_entries)}
+         end' > "$temporary"
+     sync -f "$temporary"
+     mv -T "$temporary" "$seed"
+     sync -f "$seed"
+   )
+   ```
+
+6. With approved service-administration authority, restart and verify the real
+   units; do not run the seed executable against SQLite as an ad hoc repair:
+
+   ```bash
+   sudo systemctl restart "$PLATFORM_NAMESPACE-controller.service"
+   sudo systemctl restart "$PLATFORM_NAMESPACE-controller-readiness.service"
+   sudo systemctl show -p Result "$PLATFORM_NAMESPACE-controller-prepare.service"
+   sudo systemctl is-active "$PLATFORM_NAMESPACE-controller.service" \
+     "$PLATFORM_NAMESPACE-controller-readiness.service"
+   ```
+
+   The prepare unit is a non-remaining oneshot: confirm its `Result=success` with
+   `systemctl show -p Result` rather than requiring it to remain active. Recheck
+   the API selections and the external observed admin UUID; resume app mutations
+   only after both checks pass. No external operator DB synchronization is implied.
+
+This preserves the existing controller DB rather than restoring or replacing it.
+A premature latest seed with unproven old DB selections still fails safely; keep
+or restore the original **metadata file**, not a different SQLite database.
 
 ### Supply the ingress token for each fresh replacement
 
