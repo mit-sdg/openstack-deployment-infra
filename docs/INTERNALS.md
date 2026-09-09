@@ -281,7 +281,8 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | --- | --- |
 | `GET /v1/admin/status` | Aggregate accepted and live status |
 | `GET /v1/admin/hosts` | Persistent-host observations |
-| `GET /v1/admin/images` | Selected/candidate image observations |
+| `GET /v1/admin/images` | Hosted role-image selection records |
+| `POST /v1/admin/images/{role}/selection` | Compare-and-swap exact hosted worker/builder image UUID after provider validation |
 | `GET /v1/admin/applications` | Paginated global application list |
 | `GET /v1/admin/applications/{id}/resize-plan` | Observe a sizing plan; requires one `flavor` query parameter |
 | `POST /v1/admin/applications/{id}/resize` | Apply `{plan, confirmation}` to an enabled accepted app, reusing its OCI artifact |

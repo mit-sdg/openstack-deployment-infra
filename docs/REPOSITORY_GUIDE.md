@@ -170,6 +170,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
+- `openstack_platform/controller/image_service.py` — validated hosted worker/builder image selection and immutable provisioning snapshots.
 - `openstack_platform/controller/log_service.py` — bounded reads of runtime and retained build logs.
 - `openstack_platform/controller/main.py` — `openstack-platform-controller` executable composition and startup.
 - `openstack_platform/controller/nomad_jobs.py` — renders generated Nomad jobs and validates job/placement/route identities.
@@ -225,6 +226,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_legacy_controller_migration.py` — legacy marker rejection and complete application/storage/deployment import tests.
 - `tests/test_controller_hosting.py` — static Nix/controller account, socket, backup, and service-hosting boundary checks.
 - `tests/test_controller_http.py` — Unix HTTP parsing, deadlines, keep-alive, peer policy, overload, shutdown, and socket security tests.
+- `tests/test_controller_images.py` — hosted image selection CAS, provider validation, recovery, capability, and pinned provisioning tests.
 - `tests/test_controller_seed_images.py` — hosted image-seed identity, selection, and idempotence tests.
 - `tests/test_deployment_config.py` — typed deployment configuration and Git branch/ref resolution tests.
 - `tests/test_documentation.py` — documentation links, consolidated reader paths, interface claims, route coverage, and repository-index checks.

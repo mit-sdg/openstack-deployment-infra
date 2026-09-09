@@ -58,6 +58,56 @@ An unavailable live observation does not erase accepted state. Diagnose the
 named dependency before mutation; do not edit SQLite or provider resources to
 make status appear healthy.
 
+## Update hosted worker and builder image selections
+
+Use the hosted controller's privileged API to select images for future application
+provisioning. Run these commands **locally on the admin host as the permitted
+operator account**, after installing a controller release that includes this route.
+This is not the external operator database: `infra image set` does not update
+hosted selections. The setup-only image seed is not a rollover command.
+
+Publish and verify a compatible image first. The API accepts only exact image
+UUIDs for `worker` or `builder`, reuses provider project/role/provenance checks,
+and compares the current selection with `expectedImageId` under the hosted
+infrastructure lock. It does not create/delete provider resources, replace running
+workers, update persistent hosts, or modify the external operator database.
+
+```bash
+SOCKET="/run/${PLATFORM_NAMESPACE}-controller/privileged.sock"
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  http://localhost/v1/admin/images
+REQUEST_ID="$(/srv/openstack-platform/runtime/python3.14 -c 'import uuid; print(uuid.uuid4())')"
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $REQUEST_ID" \
+  --data '{"imageId":"NEW_WORKER_IMAGE_UUID","expectedImageId":"CURRENT_WORKER_IMAGE_UUID"}' \
+  http://localhost/v1/admin/images/worker/selection
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "http://localhost/v1/admin/operations/$REQUEST_ID"
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  http://localhost/v1/admin/images
+```
+
+Replace both uppercase UUID placeholders with reviewed values from provider
+publication evidence and the initial GET. HTTP 202 means accepted for execution,
+not selected: poll until `succeeded`, then verify the role's exact UUID in the
+selection list. Repeat for `/v1/admin/images/builder/selection` with its own
+current/new UUID and a new request ID. Roles are changed separately, not atomically.
+
+A stale expected UUID or rejected provider image leaves the selection unchanged
+and the operation failed. Read the current selection and submit a newly reviewed
+request with a new key. A recovery-required operation or unknown HTTP outcome must
+be retried with the **identical body and key**; changed input conflicts. Recovery
+revalidates the saved provider projection and reconciles a possible committed
+write without overwriting unrelated selection drift. Do not edit SQLite to unblock it.
+
+Deployment execution records both selected image UUIDs together before building;
+resize records its worker image before provisioning. Recovery retains recorded
+UUIDs even after rollover. Queued work that has not recorded selections uses the
+current choices when execution reaches that boundary. Enable already pins its
+worker image for retry. Keep old images available while recorded operations or
+accepted workers still reference them. This API only selects images; it does not
+publish, prune, or migrate existing workers.
+
 ## Size an application
 
 Use the controller's privileged Unix API to select one application's worker
