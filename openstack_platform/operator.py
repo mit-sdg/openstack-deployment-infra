@@ -25,7 +25,7 @@ from pathlib import Path
 from tempfile import mkstemp
 from typing import Any, cast
 
-from . import openstack, remote, restore, runtime, setup
+from . import ingress_credentials, openstack, remote, restore, runtime, setup
 from .config import Config, load, load_platform
 from .contracts import CONTROLLER_BACKUP_DIRECTORY
 from .controller import application_runtime as app
@@ -137,6 +137,15 @@ def build_parser() -> argparse.ArgumentParser:
     infra = commands.add_parser("infra", help="inspect and operate infrastructure")
     infra_commands = infra.add_subparsers(dest="infra_command", required=True)
     infra_commands.add_parser("list")
+    credentials = infra_commands.add_parser(
+        "ingress-credentials", help="import or verify local token escrow"
+    )
+    credential_actions = credentials.add_subparsers(dest="credential_action", required=True)
+    for action in ("import", "verify"):
+        credential_command = credential_actions.add_parser(action)
+        credential_command.add_argument("--tunnel-id", required=True)
+        if action == "import":
+            credential_command.add_argument("--token-file", type=Path, required=True)
     image = infra_commands.add_parser("image")
     image_commands = image.add_subparsers(dest="image_command", required=True)
     image_commands.add_parser("list")
@@ -822,6 +831,7 @@ def _infra_replace(
                 recovered = openstack.recover_host_replacement(
                     config.platform,
                     args.host,
+                    ingress_escrow_state_directory=args.state_directory,
                     phase=unfinished.phase,
                     refs=unfinished.refs,
                     action=action,
@@ -868,6 +878,7 @@ def _infra_replace(
                 selected_compatibility_hash=selected.compatibility_hash,
                 operation_id=operation_id,
                 user_data_path=user_data,
+                ingress_escrow_state_directory=args.state_directory,
                 checkpoint=checkpoint,
                 health_check=_role_health_check(config),
                 wait_seconds=_remaining(deadline, config.policy.limits.process_seconds),
@@ -1081,6 +1092,20 @@ def dispatch(
             json_output=args.json,
             input_reader=setup_input,
             output=stdout,
+        )
+        return
+    if args.command == "infra" and args.infra_command == "ingress-credentials":
+        platform = load_platform(args.platform_config)
+        if args.credential_action == "import":
+            ingress_credentials.import_escrow(
+                platform, args.state_directory, args.token_file, tunnel_id=args.tunnel_id
+            )
+        else:
+            ingress_credentials.verify_escrow(
+                platform, args.state_directory, tunnel_id=args.tunnel_id
+            )
+        print(
+            "ingress escrow verified locally; remote credential validity not checked", file=stdout
         )
         return
     command_started = time.monotonic()

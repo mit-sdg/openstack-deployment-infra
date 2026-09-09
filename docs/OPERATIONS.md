@@ -336,7 +336,68 @@ infra/backup/full_loss_recovery_drill.sh --verify-only \
 Verify-only cannot create `DRILL-EVIDENCE.json` and is not a completed
 full-loss drill.
 
+## Escrow the ingress connector token
+
+Before ingress replacement, import the existing Cloudflare connector token into
+local operator escrow. This procedure is offline: it verifies file protection,
+token structure, the expected tunnel UUID, and the configured project UUID,
+namespace, and domain. It does **not** prove that Cloudflare still accepts the
+token or that the tunnel routes the configured domain. Confirm those facts from
+authenticated Cloudflare configuration and current public health separately.
+
+Prerequisites:
+
+- Use the current platform release and the intended non-secret inventory. Obtain
+  the expected tunnel UUID independently from authenticated Cloudflare records.
+- Obtain the raw connector token through an authorized, authenticated source.
+  The input must contain only the base64 connector token, optionally followed by
+  one newline; it is not a `TUNNEL_TOKEN=...` environment file or an API token.
+  Do not source guest files as shell code or put the token in arguments/logs.
+- If the only copy is on a retained guest without an authenticated SSH host key,
+  stop here. Console history without key evidence does not authenticate SSH.
+  Recovery requires separately approved authenticated provider snapshot access,
+  proof of the exact source server/disk identity, a private snapshot, and isolated
+  read-only extraction (for example, guestfish without booting the copied guest).
+  This CLI does not perform that recovery. Do not disable host-key checking,
+  accept a scanned key as proof, or stop/delete the serving host to obtain a token.
+- The raw file must be a direct, single-link, operator-owned mode-0600 file.
+  State and credentials directories must be operator-owned mode 0700, under
+  trusted parent directories. Import creates missing final directories, not parents.
+
+Run as the operator account; replace the uppercase tunnel UUID and private input
+path with verified values. Use the same state directory for all commands:
+
+```bash
+export OPERATOR_STATE=/srv/openstack-platform/state
+$PLATFORM_CLI --state-directory "$OPERATOR_STATE" infra ingress-credentials import \
+  --token-file /private/recovered-connector-token --tunnel-id EXPECTED_TUNNEL_UUID
+$PLATFORM_CLI --state-directory "$OPERATOR_STATE" infra ingress-credentials verify \
+  --tunnel-id EXPECTED_TUNNEL_UUID
+```
+
+Success prints only a local-verification acknowledgement. The plaintext escrow
+is `$OPERATOR_STATE/credentials/ingress-credentials.json` (0600); import commits
+it with file and directory fsync. Re-importing the same token is idempotent.
+An existing different or invalid escrow is not overwritten; import is not a
+rotation command. Protect an independently encrypted offline copy under your
+credential-custody procedure: SQLite backups do not include this file. After
+verification and custody are complete, remove temporary extraction copies under
+the approved recovery cleanup procedure, retaining the original serving host
+until replacement acceptance.
+
+Missing, malformed, mismatched, symlinked, or weakly protected escrow blocks a
+new ingress replacement before any provider call. Correct the input or restore
+the verified escrow rather than bypassing the check. Verification never prints
+the token, its decoded secret, or a secret fingerprint.
+
 ## Replace a persistent host
+
+Before replacing ingress, complete [token escrow](#escrow-the-ingress-connector-token).
+Supply the current protected bootstrap inputs through `OPERATOR_PUBLIC_KEY`,
+`NOMAD_TOKENS_FILE`, and `PKI_DIR`. Ingress replacement always renders the reviewed
+template with the escrowed token and Cloudflare enabled; `ENABLE_CLOUDFLARED=false`
+and `CLOUDFLARE_TUNNEL_TOKEN_FILE` cannot override escrow. Explicit ingress
+`--user-data` is refused. Other roles retain their protected-input contract.
 
 Before replacing storage, require a fresh managed-data `RESTORE-MANIFEST`.
 Before replacing admin, require fresh hosted-controller and operator-state
@@ -344,8 +405,8 @@ backups. Publish and live-test the replacement role image before selecting its
 exact UUID.
 
 ```bash
-$PLATFORM_CLI infra image set ingress NEW_INGRESS_IMAGE_UUID
-$PLATFORM_CLI infra replace ingress --yes
+$PLATFORM_CLI --state-directory "$OPERATOR_STATE" infra image set ingress NEW_INGRESS_IMAGE_UUID
+$PLATFORM_CLI --state-directory "$OPERATOR_STATE" infra replace ingress --yes
 $PLATFORM_CLI infra logs ingress --lines 200
 ```
 
@@ -353,8 +414,11 @@ Use `admin`, `ingress`, or `storage`. Replacement retains the current host,
 fixed port, and volumes until the candidate passes readiness and exact
 image/flavor/name/provenance checks. On readiness failure it restores the old
 host. An ambiguous provider result becomes recovery-required; restore the named
-dependency and rerun the same command. Never delete the old server or detach a
-volume manually.
+dependency and rerun the same command. Ingress acceptance checks both internal
+and public `/healthz`; local escrow verification alone cannot authorize deleting
+the retained host. Recovery that continues acceptance or old-host cleanup also
+requires intact escrow. Rollback remains available without escrow. Never delete
+the old server or detach a volume manually.
 
 Release updates follow [Install releases outside automated
 setup](MAINTENANCE.md#install-releases-outside-automated-setup). Executable

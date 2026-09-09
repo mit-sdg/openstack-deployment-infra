@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -13,11 +14,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import openstack, release_manifest
+from openstack_platform import ingress_credentials, openstack, release_manifest
 from openstack_platform.config import load_platform
 from openstack_platform.runtime import CommandFailure, CommandResult, HttpResult
 from openstack_platform.validation import ValidationError
 from tests.repository_fixtures import clean_repository
+from tests.test_ingress_credentials import TUNNEL, connector_token
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "00000000-0000-4000-8000-000000000000"
@@ -44,7 +46,25 @@ def protected_user_data(value: bytes = b"private cloud-init"):
         path = Path(directory) / "user-data"
         path.write_bytes(value)
         path.chmod(0o600)
-        yield path
+        # These tests exercise the provider state machine with opaque fixtures.
+        # Real escrow/rendering and bypass refusal are covered separately.
+        real_replace = openstack.replace_host
+
+        def replace_fixture(platform, role, **kwargs):
+            if role == "ingress":
+                kwargs["user_data_path"] = None
+                with mock.patch.object(
+                    ingress_credentials,
+                    "staged_replacement_user_data",
+                    side_effect=lambda *args, **kw: openstack._protected_user_data_copy(
+                        path, maximum_bytes=kw["maximum_bytes"]
+                    ),
+                ):
+                    return real_replace(platform, role, **kwargs)
+            return real_replace(platform, role, **kwargs)
+
+        with mock.patch.object(openstack, "replace_host", side_effect=replace_fixture):
+            yield path
 
 
 def result(argv: tuple[str, ...], value: object = None, *, returncode: int = 0) -> CommandResult:
@@ -396,6 +416,19 @@ class OpenStackTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.platform = load_platform(ROOT / "config/platform.example.json")
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        token = root / "token"
+        token.write_bytes(connector_token())
+        token.chmod(0o600)
+        state = root / "state"
+        ingress_credentials.import_escrow(self.platform, state, token, tunnel_id=TUNNEL)
+        patcher = mock.patch("openstack_platform.installation.OPERATOR_STATE", state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_project_verification_uses_one_bounded_scoped_token_request(self) -> None:
         timeouts: list[float] = []
@@ -1137,6 +1170,11 @@ else:
                 f"NOMAD_TRAEFIK_TOKEN={sentinel}\n"
             )
             tokens.chmod(0o600)
+            tunnel = root / "tunnel-token"
+            tunnel.write_bytes(connector_token())
+            tunnel.chmod(0o600)
+            state = root / "state"
+            ingress_credentials.import_escrow(self.platform, state, tunnel, tunnel_id=TUNNEL)
             environment = {
                 "OPERATOR_PUBLIC_KEY": str(public_key),
                 "NOMAD_TOKENS_FILE": str(tokens),
@@ -1152,6 +1190,7 @@ else:
                     selected_image_id=IMAGE_1,
                     selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
                     operation_id=OPERATION,
+                    ingress_escrow_state_directory=state,
                     checkpoint=lambda phase, refs: checkpoints.append((phase, dict(refs))),
                     health_check=self.role_health,
                     command_runner=cloud,
@@ -1164,6 +1203,12 @@ else:
                         os.environ[name] = value
         self.assertTrue(replaced.accepted)
         self.assertIn(sentinel.encode(), cloud.user_data_payload)
+        self.assertIn(
+            base64.b64encode(b"TUNNEL_TOKEN=" + connector_token() + b"\n"), cloud.user_data_payload
+        )
+        self.assertNotIn(connector_token().decode(), repr(cloud.calls))
+        self.assertNotIn(connector_token().decode(), repr(checkpoints))
+        self.assertNotIn(connector_token().decode(), repr(replaced))
         self.assertIsNotNone(cloud.user_data_path)
         assert cloud.user_data_path is not None
         self.assertFalse(cloud.user_data_path.exists())
@@ -1352,7 +1397,7 @@ else:
             path = Path(directory) / "user-data"
             path.write_bytes(b"sentinel-private-user-data")
             path.chmod(0o644)
-            with self.assertRaisesRegex(ValidationError, "owner-only"):
+            with self.assertRaisesRegex(ValidationError, "requires escrow and reviewed user-data"):
                 openstack.replace_host(
                     self.platform,
                     "ingress",
