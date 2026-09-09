@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -136,21 +135,132 @@ class ImagePipelineTests(unittest.TestCase):
             )
         self.assertEqual(published, list(release.ROLES))
 
-    def test_all_five_builds_are_parallel_and_failure_propagates(self) -> None:
-        barrier = threading.Barrier(5, timeout=5)
-        roles = []
+    def test_inventory_keeps_signing_independent_of_build_bytes_and_publication_names_distinct(
+        self,
+    ) -> None:
+        values = {
+            **self.values,
+            "OPENSTACK_PUBLISH_ENABLED": "true",
+            "OPENSTACK_UNSIGNED_PRODUCTION": release.UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT,
+            "PLATFORM_CONFIG_JSON": self.platform.read_text(),
+            "OS_PROJECT_ID": load_platform(self.platform).project_id.replace("-", ""),
+        }
+        build, unsigned, signed = (
+            self.directory / name for name in ("build.json", "unsigned.json", "signed.json")
+        )
+        pipeline.write_inventory(self.repository, build, values)
+        pipeline.write_inventory(self.repository, unsigned, values, publication=True)
+        pipeline.write_inventory(
+            self.repository,
+            signed,
+            {**values, "OPENSTACK_UNSIGNED_PRODUCTION": ""},
+            publication=True,
+        )
+        self.assertEqual(build.read_bytes(), signed.read_bytes())
+        self.assertEqual(build.stat().st_mode & 0o777, 0o600)
+        for role in release.ROLES:
+            self.assertNotEqual(
+                json.loads(unsigned.read_text())["images"][role],
+                json.loads(signed.read_text())["images"][role],
+            )
+            self.assertEqual(
+                publisher_metadata(load_platform(unsigned), role, self.commit),
+                publisher_metadata(load_platform(signed), role, self.commit),
+            )
+        self.assertEqual(
+            pipeline._inputs(self.root, signed, self.context),
+            pipeline._inputs(self.root, unsigned, self.context),
+        )
 
-        def build(_repository, _root, _platform, role, _values):
-            roles.append(role)
-            barrier.wait()
-            if role == "storage":
-                raise RuntimeError("failed QEMU smoke")
+    def test_offline_signing_inputs_validate_github_main_run_and_all_successful_source_jobs(
+        self,
+    ) -> None:
+        run = {
+            "id": 100,
+            "head_sha": self.commit,
+            "head_branch": "main",
+            "event": "push",
+            "head_repository": {"full_name": "example/platform"},
+            "path": ".github/workflows/ci.yml",
+            "run_attempt": 2,
+            "conclusion": "failure",
+        }  # Awaiting external evidence is expected.
+        names = [
+            "Static checks",
+            "Build, start, and health-check generated Bun and Node recipes",
+            "Nix evaluation and formatting",
+            "Test packaged binaries",
+            *(f"Test {role} VM" for role in release.ROLES),
+            *(f"Build production {role} image" for role in release.ROLES),
+        ]
+        jobs = {
+            "total_count": len(names),
+            "jobs": [
+                {"name": name, "head_sha": self.commit, "conclusion": "success"} for name in names
+            ],
+        }
+        output = self.directory / "signing-inputs.json"
+        real_run = subprocess.run
 
-        with mock.patch.object(pipeline, "build_role", side_effect=build):
-            with self.assertRaisesRegex(RuntimeError, "failed QEMU"):
-                pipeline.build_all(self.repository, self.root, self.platform, self.values)
-        self.assertEqual(set(roles), set(release.ROLES))
-        self.assertFalse((self.root / "publication.json").exists())
+        def api(arguments, **kwargs):
+            if arguments[:2] == ["gh", "api"]:
+                document = jobs if "/jobs?" in arguments[2] else run
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(document))
+            self.assertEqual(arguments[0], "git")
+            return real_run(arguments, **kwargs)
+
+        with (
+            mock.patch.object(pipeline.subprocess, "run", side_effect=api),
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            pipeline.signing_inputs(
+                self.repository,
+                self.root,
+                self.platform,
+                github_repository="example/platform",
+                run_id="100",
+                output=output,
+            )
+            self.assertEqual(
+                json.loads(output.with_suffix(".context.json").read_text()), self.context
+            )
+            self.assertEqual(
+                json.loads(output.read_text()),
+                pipeline._inputs(self.root, self.platform, self.context),
+            )
+            output.unlink()
+            output.with_suffix(".context.json").unlink()
+            for key, value in (
+                ("head_branch", "feature"),
+                ("head_sha", "a" * 40),
+                ("event", "pull_request"),
+                ("head_repository", {"full_name": "fork/platform"}),
+            ):
+                original = run[key]
+                run[key] = value
+                with self.assertRaises(release.ReleaseVerificationError):
+                    pipeline.signing_inputs(
+                        self.repository,
+                        self.root,
+                        self.platform,
+                        github_repository="example/platform",
+                        run_id="100",
+                        output=output,
+                    )
+                run[key] = original
+            for job in jobs["jobs"]:
+                job["conclusion"] = "skipped"
+                with self.assertRaises(release.ReleaseVerificationError):
+                    pipeline.signing_inputs(
+                        self.repository,
+                        self.root,
+                        self.platform,
+                        github_repository="example/platform",
+                        run_id="100",
+                        output=output,
+                    )
+                job["conclusion"] = "success"
+            self.assertFalse(output.exists())
 
     def test_build_role_retains_smoke_and_closure_logs_only_after_success(self) -> None:
         role = "admin"
@@ -358,15 +468,43 @@ class ImagePipelineTests(unittest.TestCase):
         inputs = self.directory / "inputs.json"
         pipeline._json(inputs, pipeline._inputs(self.root, self.platform, self.context))
         release.generate_artifact_manifest(
-            component, inputs, evidence / "artifacts", signing_key=key, unsigned=False
+            component,
+            inputs,
+            evidence / "artifacts",
+            signing_key=key,
+            unsigned=False,
+            build_context=self.context,
         )
-        key.unlink()
         self.values.update(
             {
                 "PLATFORM_RELEASE_TRUST_ROOT": str(public),
                 "PLATFORM_ARTIFACT_TRUST_ROOT": str(public),
             }
         )
+        for key_name, value in (
+            ("runId", "101"),
+            ("repository", "fork/platform"),
+            ("runAttempt", "2"),
+        ):
+            release.generate_artifact_manifest(
+                component,
+                inputs,
+                evidence / "artifacts",
+                signing_key=key,
+                unsigned=False,
+                build_context={**self.context, key_name: value},
+            )
+            with self.assertRaisesRegex(release.ReleaseVerificationError, "exact CI build context"):
+                pipeline._verify(self.repository, self.root, self.platform, self.values)
+        release.generate_artifact_manifest(
+            component,
+            inputs,
+            evidence / "artifacts",
+            signing_key=key,
+            unsigned=False,
+            build_context=self.context,
+        )
+        key.unlink()
         self.prepare()
         child, artifact = pipeline._verify(self.repository, self.root, self.platform, self.values)
         self.assertEqual(artifact["trust"]["mode"], "production-ed25519")

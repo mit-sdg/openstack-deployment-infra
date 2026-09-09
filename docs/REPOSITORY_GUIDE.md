@@ -103,7 +103,7 @@ operator, the helper, CI, or systemd. They are not a second public CLI.
 - `infra/openstack/builder_lifecycle.sh` — creates, observes, and deletes builders and their fixed ports with exact ownership checks.
 - `infra/openstack/persistent-host.sh` — shared shell functions for safe persistent-server and attached-volume reconciliation.
 - `infra/openstack/pin_ephemeral_host_key.sh` — derives and pins an ephemeral host SSH key from provider console evidence.
-- `infra/openstack/publish_nixos_image.sh` — verifies signed artifact inputs, uploads one QCOW2, and checks its Glance identity and metadata.
+- `infra/openstack/publish_nixos_image.sh` — verifies production/development trust and exact artifact bytes, uploads or verifies one QCOW2, and checks its Glance identity and metadata.
 - `infra/openstack/render_host_user_data.py` — renders protected persistent-role cloud-init from exact volume and environment inputs.
 - `infra/openstack/verify_persistent_host.py` — checks an existing persistent host projection before an apply script reuses it.
 - `infra/openstack/worker_lifecycle.sh` — creates, observes, and deletes worker servers and ports with Nomad/ownership checks.
@@ -144,6 +144,7 @@ cross-cutting boundaries.
 - `openstack_platform/durable.py` — no-follow, fsync-backed primitives for crash-durable local file replacement.
 - `openstack_platform/host_keys.py` — verifies console/keyscan evidence and atomically pins the fixed admin SSH host key.
 - `openstack_platform/host_user_data.py` — validates protected inputs and renders role-specific cloud-init templates.
+- `openstack_platform/image_pipeline.py` — exact-run image build retention, CI/signing-input verification, and no-rebuild production publication.
 - `openstack_platform/installation.py` — central definitions of installed filesystem locations used by entry points.
 - `openstack_platform/openstack.py` — bounded provider operations for images and persistent-host power/replacement lifecycle.
 - `openstack_platform/operator.py` — `openstack-platform` command parser and operator-level setup/status/backup/restore/infra orchestration.
@@ -228,6 +229,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_helper_application_actions.py` — Nomad helper deployment, ownership, health, promotion, environment, logs, and removal tests.
 - `tests/test_host_user_data.py` — protected-input validation and cloud-init rendering tests for each role.
 - `tests/test_hosted_controller_backup.py` — hosted SQLite backup encryption, evidence, permissions, and failure cleanup tests.
+- `tests/test_image_pipeline.py` — retained-byte, CI/source-run identity, signed promotion, unsigned rollback, and publication gate tests.
 - `tests/test_infra_http.py` — bounded infrastructure HTTP helper redirect, size, status, and JSON tests.
 - `tests/test_live_acceptance.py` — plan immutability, checkpoint/resume, evidence chain, signature, and failure tests.
 - `tests/test_live_acceptance_driver.py` — repository driver protocol, observations, interruption, recovery, ownership, and teardown tests.

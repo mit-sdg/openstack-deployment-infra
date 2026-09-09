@@ -8,13 +8,13 @@ external signer, or the explicit emergency production acknowledgement is used.
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import json
 import os
 import re
 import subprocess
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from . import release_manifest as release
 from .config import load_platform
@@ -175,15 +175,109 @@ def build_role(
     _json(directory / "record.json", record)
 
 
-def build_all(repository: Path, root: Path, platform: Path, values: dict[str, str]) -> None:
-    """All five builds run independently; a failed role prevents aggregation."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [
-            executor.submit(build_role, repository, root, platform, role, values)
-            for role in release.ROLES
-        ]
-        for future in futures:
-            future.result()
+def write_inventory(
+    repository: Path, output: Path, values: dict[str, str], *, publication: bool = False
+) -> None:
+    """Keep the validated, versioned build inventory outside retained artifacts."""
+    context = publication_context(values)
+    if values.get("OPENSTACK_PUBLISH_ENABLED") == "true":
+        document = json.loads(values["PLATFORM_CONFIG_JSON"])
+        document["projectId"] = str(UUID(values["OS_PROJECT_ID"]))
+    else:
+        document = release._load(repository / "config/platform.example.json")
+    suffix = context["commit"][:8]
+    if (
+        publication
+        and values.get("OPENSTACK_UNSIGNED_PRODUCTION")
+        == release.UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT
+    ):
+        # Promotion signs the same bytes under a distinct Glance name. Never
+        # relabel an existing unsigned image as authenticated production.
+        suffix = f"unsigned-{suffix}"
+    document["images"] = {
+        role: f"{re.sub(r'-(?:unsigned-)?[0-9a-f]{8}$', '', name)}-{suffix}"
+        for role, name in document["images"].items()
+    }
+    with open(output, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
+        json.dump(document, stream)
+    load_platform(output)
+
+
+def signing_inputs(
+    repository: Path,
+    root: Path,
+    platform: Path,
+    *,
+    github_repository: str,
+    run_id: str,
+    output: Path,
+) -> None:
+    """Export relocated direct inputs only from a reviewed main build run.
+
+    This offline signer command reads GitHub metadata; it never invents a
+    GITHUB_* environment or builds images. The private signing key is not an input.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", github_repository) or not re.fullmatch(
+        r"[1-9][0-9]*", run_id
+    ):
+        raise release.ReleaseVerificationError("invalid signing source repository or run")
+    prefix = f"repos/{github_repository}/actions/runs/{run_id}"
+
+    def github(endpoint: str) -> dict[str, Any]:
+        result = subprocess.run(["gh", "api", endpoint], check=True, capture_output=True, text=True)
+        document = json.loads(result.stdout)
+        if not isinstance(document, dict):
+            raise release.ReleaseVerificationError("invalid GitHub run metadata")
+        return document
+
+    run = github(prefix)
+    context = release._load(root / "admin/record.json")["context"]
+    if (
+        run.get("id") != int(run_id)
+        or run.get("head_sha") != context["commit"]
+        or run.get("head_branch") != "main"
+        or run.get("event") not in ("push", "workflow_dispatch")
+        or run.get("head_repository", {}).get("full_name") != github_repository
+        or run.get("path") != ".github/workflows/ci.yml"
+        or context["repository"] != github_repository
+        or context["runId"] != run_id
+        or context["ref"] != "refs/heads/main"
+        or context["event"] != run["event"]
+        or not re.fullmatch(r"[1-9][0-9]*", context["runAttempt"])
+        or int(context["runAttempt"]) > run["run_attempt"]
+    ):
+        raise release.ReleaseVerificationError("signing source is not the exact main CI build")
+    jobs = github(f"{prefix}/jobs?filter=latest&per_page=100")
+    required = {
+        "Static checks",
+        "Build, start, and health-check generated Bun and Node recipes",
+        "Nix evaluation and formatting",
+        "Test packaged binaries",
+        *(f"Test {role} VM" for role in release.ROLES),
+        *(f"Build production {role} image" for role in release.ROLES),
+    }
+    rows = jobs.get("jobs", [])
+    if jobs.get("total_count") != len(rows) or any(
+        len(matches := [job for job in rows if job.get("name") == name]) != 1
+        or matches[0].get("conclusion") != "success"
+        or matches[0].get("head_sha") != context["commit"]
+        for name in required
+    ):
+        raise release.ReleaseVerificationError(
+            "source run CI and all five image builds must succeed"
+        )
+    release._verify_checkout(repository, context["commit"])
+    inputs = _inputs(root, platform, context)
+    for role, value in inputs.items():
+        projection, _ = release._closure_projection(Path(value["pathInfo"]))
+        if Path(value["outputStorePath"]).name not in {item["storePath"] for item in projection}:
+            raise release.ReleaseVerificationError(
+                f"signing input output is absent from closure: {role}"
+            )
+    if output.exists() or output.with_suffix(".context.json").exists():
+        raise release.ReleaseVerificationError("signing inputs destination already exists")
+    _json(output, inputs)
+    _json(output.with_suffix(".context.json"), context)
 
 
 def _retained_context(root: Path, values: dict[str, str]) -> dict[str, str]:
@@ -289,8 +383,18 @@ def _verify(
     artifact = release.verify_artifact_from_environment(
         Path(child["PLATFORM_RELEASE_MANIFEST"]), child
     )
-    if artifact["releaseChannel"] != "production":
-        raise release.ReleaseVerificationError("production pipeline requires production evidence")
+    provenance = release._load(root / "evidence/artifacts/role-artifacts.provenance.json")
+    if (
+        artifact["releaseChannel"] != "production"
+        or provenance.get("predicate", {})
+        .get("runDetails", {})
+        .get("metadata", {})
+        .get("buildContext")
+        != context
+    ):
+        raise release.ReleaseVerificationError(
+            "production evidence must bind this exact CI build context"
+        )
     for role, record in inputs.items():
         release.verify_role_artifact(
             artifact,
@@ -339,6 +443,7 @@ def prepare(
                 signing_key=None,
                 unsigned=False,
                 unsigned_production=True,
+                build_context=context,
             )
         finally:
             inputs_path.unlink()
@@ -439,7 +544,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--platform", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("context").add_argument("--before", default="")
-    commands.add_parser("build-all")
+    inventory = commands.add_parser("inventory")
+    inventory.add_argument("--output", type=Path, required=True)
+    inventory.add_argument("--publication", action="store_true")
+    signing = commands.add_parser("signing-inputs")
+    signing.add_argument("--github-repository", required=True)
+    signing.add_argument("--run-id", required=True)
+    signing.add_argument("--output", type=Path, required=True)
     commands.add_parser("build-role").add_argument("role", choices=release.ROLES)
     commands.add_parser("prepare").add_argument("--gates", type=Path, required=True)
     commands.add_parser("publish")
@@ -452,13 +563,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"publish={str(relevant).lower()}\ncommit_sha={context['commit']}")
         return 0
+    if args.command == "inventory":
+        write_inventory(args.repository, args.output, values, publication=args.publication)
+        return 0
     if args.root is None or args.platform is None:
         parser.error("--root and --platform are required for image commands")
     repository, root, platform = (
         path.resolve() for path in (args.repository, args.root, args.platform)
     )
-    if args.command == "build-all":
-        build_all(repository, root, platform, values)
+    if args.command == "signing-inputs":
+        signing_inputs(
+            repository,
+            root,
+            platform,
+            github_repository=args.github_repository,
+            run_id=args.run_id,
+            output=args.output,
+        )
     elif args.command == "build-role":
         build_role(repository, root, platform, args.role, values)
     elif args.command == "prepare":

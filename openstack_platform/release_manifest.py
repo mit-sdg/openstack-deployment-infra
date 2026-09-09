@@ -644,6 +644,7 @@ def generate_artifact_manifest(
     signing_key: Path | None,
     unsigned: bool,
     unsigned_production: bool = False,
+    build_context: dict[str, str] | None = None,
 ) -> Path:
     """Generate identities for all five concrete role artifacts.
 
@@ -724,7 +725,7 @@ def generate_artifact_manifest(
         }
         for role in ROLES
     )
-    provenance = {
+    provenance: dict[str, Any] = {
         "_type": PROVENANCE_FORMAT,
         "subject": subjects,
         "predicateType": "https://slsa.dev/provenance/v1",
@@ -742,6 +743,10 @@ def generate_artifact_manifest(
             "runDetails": {"builder": {"id": "nix-openstack-role-image-v1"}},
         },
     }
+    if build_context is not None:
+        if build_context.get("commit") != commit:
+            _fail("artifact build context commit differs from source components")
+        provenance["predicate"]["runDetails"]["metadata"] = {"buildContext": build_context}
     provenance_path = output / "role-artifacts.provenance.json"
     provenance_path.write_bytes(_canonical(provenance))
     manifest = {
@@ -1206,6 +1211,7 @@ def main(argv: list[str] | None = None) -> int:
     artifact_create.add_argument("--signing-key", type=Path)
     artifact_create.add_argument("--unsigned-development", action="store_true")
     artifact_create.add_argument("--unsigned-production", action="store_true")
+    artifact_create.add_argument("--build-context", type=Path)
     artifact_check = commands.add_parser("artifact-verify")
     artifact_check.add_argument("--component-manifest", type=Path, required=True)
     artifact_check.add_argument("--manifest", type=Path, required=True)
@@ -1277,6 +1283,7 @@ def main(argv: list[str] | None = None) -> int:
             signing_key=args.signing_key,
             unsigned=args.unsigned_development,
             unsigned_production=args.unsigned_production,
+            build_context=_load(args.build_context) if args.build_context else None,
         )
         print(f"artifact-manifest={path}")
     else:

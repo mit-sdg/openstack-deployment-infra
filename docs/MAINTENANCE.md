@@ -7,12 +7,15 @@ platform](DEPLOYMENT.md) and [Operations](OPERATIONS.md).
 
 ## Release evidence
 
-Production setup and release installation require a signed component manifest
-and a signed post-build role-artifact manifest. Verification happens before
+By default, production setup and release installation require a signed component
+manifest and a signed post-build role-artifact manifest. The temporary
+[unsigned-production exception](#temporarily-disable-production-signing) requires
+its own explicit acknowledgement; development evidence is never a production
+fallback. Verification happens before
 setup creates local state or calls Nix/OpenStack and before an installer changes
 a selected release.
 
-Keep the Ed25519 signing key outside the repository. From a clean release
+Keep the Ed25519 signing key outside the repository **and GitHub**. From a clean release
 commit:
 
 ```sh
@@ -74,7 +77,7 @@ provenance are artifacts, not CI secrets; the signing key never enters CI.
 
 ### Unsigned development evidence
 
-Unsigned evidence is not a production fallback:
+Development evidence is not a production fallback:
 
 ```sh
 python3 -m openstack_platform.release_manifest generate \
@@ -89,8 +92,9 @@ Verification requires `--allow-unsigned-development` or the exact setup value:
 PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT=I_UNDERSTAND_THIS_IS_NOT_PRODUCTION
 ```
 
-The same acknowledgement is required for unsigned artifact evidence. Unsigned
-verification is refused when `PLATFORM_ENVIRONMENT=production`.
+The same development acknowledgement is required for development artifact evidence.
+Development verification is refused when `PLATFORM_ENVIRONMENT=production`, even
+if the separate unsigned-production exception is enabled.
 
 ## Build and test role images
 
@@ -142,21 +146,165 @@ config drive. Lifecycle calls must enable config-drive use.
 
 ## Publish image candidates
 
-The `CI` workflow publishes production candidates only when a protected `main`
-push changes an image input and `OPENSTACK_PUBLISH_ENABLED=true`, or when an
-authorized manual dispatch requests signed publication from `main`. Image
-inputs are `flake.nix`, `flake.lock`, `nix/`, `infra/`, `openstack_platform/`,
-`deploy/`, `pyproject.toml`, `uv.lock`, and `LICENSE`; Markdown-only changes are
-excluded.
+Relevant `main` pushes start five independent `ubuntu-latest` matrix runners,
+one each for `admin`, `ingress`, `storage`, `worker`, and `builder`, with
+`max-parallel: 5` and `fail-fast: false`. They do not wait for signing evidence
+or serialize builds behind OpenStack authentication. An authorized manual
+`publish=true` dispatch from `main` uses the same pipeline. Image inputs are
+`flake.nix`, `flake.lock`, `config/platform.example.json`, `nix/`, `infra/`,
+`openstack_platform/`, `deploy/`, `pyproject.toml`, `uv.lock`, and `LICENSE`;
+Markdown-only changes are excluded. An unavailable previous push commit fails
+path detection rather than silently authorizing publication.
 
-The protected matrix checks out one exact commit, installs private inventory,
-derives a commit-suffixed name for all roles, builds each role once, verifies
-signed artifact evidence, QEMU-boots that QCOW2, authenticates to the exact
-project, and publishes the same file. The publisher verifies content,
-closure/output identity, commit, metadata, owner/status, and provider checksum.
-It waits for asynchronous uploads to become active. When Glance does not expose
-a provider SHA-256, it downloads the accepted image and verifies SHA-256 before
-reporting publication success. It never overwrites an existing image name.
+With `OPENSTACK_PUBLISH_ENABLED=true`, builds use the protected inventory and
+project UUID. Otherwise they build the example inventory and retain candidates
+without publication; example-inventory artifacts cannot be promoted into a
+different deployment. Each production build checks out the native main run's
+exact `GITHUB_SHA`, QEMU-boots an overlay of the retained QCOW2, and uploads
+`production-role-<run-id>-<role>` with no extra compression and 30-day retention.
+Each artifact contains its role directory with the exact QCOW2, closure JSON,
+source/run record, build log, QEMU summary and full serial log. Failure diagnostics
+use `production-logs-<run-id>-<attempt>-<role>` and upload only those log files.
+The private inventory lives outside the upload root; build jobs receive no
+OpenStack password, bootstrap credentials, private PKI or signing key.
+
+The dependent `publish-images` job requires successful static checks, generated
+recipe smoke, Nix evaluation, package tests, all five role VM tests and all five
+image builds. It downloads the artifacts **from that same run**, verifies all
+roles and CI results, and uploads `production-evidence-<run-id>-<attempt>` before
+its first provider call. This artifact contains source/component and role
+manifests, SBOM/provenance and `publication.json`, which binds CI context/results
+and the exact retained file inventory with SHA256. Keep both role and evidence
+artifacts; the receipt alone is not a backup of the images.
+
+Publication is serialized in the `openstack-images-provider` concurrency group
+and has no Nix build or QEMU step. It verifies content, closure/output identity,
+source commit, metadata, owner/status and provider checksum, then waits for
+uploads to become active. Missing provider hashes or Glance's standard SHA512
+response use an independent image download/SHA256 check. An existing name is
+reused only after the complete metadata and byte checks, never on source commit
+alone; ambiguous or mismatched images fail without replacement.
+
+### Temporarily disable production signing
+
+This exception removes signature/authenticity assurance, not SHA256, CI, QEMU,
+source/closure/provenance or provider gates. It produces `releaseChannel=production`
+and `trust.mode=production-unsigned`, never development evidence. Repository or
+`openstack-images` environment variables control it; environment values override
+repository values. An operator must explicitly review the effective scope.
+
+1. Keep `OPENSTACK_PUBLISH_ENABLED=true` and the protected deployment/provider
+   secrets configured.
+2. Set `OPENSTACK_UNSIGNED_PRODUCTION=I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES`.
+   No other truthy spelling is accepted. Empty or `false` selects signed mode;
+   other values stop publication.
+3. Let a relevant main push run. No `RELEASE_EVIDENCE_URL`,
+   `RELEASE_EVIDENCE_SHA256`, PEM or external bundle is required in this mode.
+4. Require all five build jobs and `Verify and publish retained production images`
+   to succeed. Inspect `publication.json` for the actual main commit/run and all
+   five CI gate results, and retain the role artifacts and reported Glance UUIDs.
+
+The workflow maps the exact variable to
+`PLATFORM_ALLOW_UNSIGNED_PRODUCTION=I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES` only
+for verification/publication. Unsigned Glance names end in
+`-unsigned-<commit-eight>`; signed names end in `-<commit-eight>`. Build inputs
+and retained bytes do not change with signing policy. The distinct publication
+names permit later signed publication of the same bytes without relabeling an
+already-published unsigned image. Neither publication selects an image or
+replaces a host.
+
+### Sign retained GitHub images and re-enable signing
+
+Use a trusted signing machine with the private key, Python, OpenSSL, the GitHub
+CLI authenticated for repository read access, and a clean checkout of the source
+commit. The signing key must never enter a runner or GitHub secret. Supply the
+same private inventory/project UUID used by the builds; it is deliberately not
+an artifact. Allow disk space for all five QCOW2s and finish within the 30-day
+artifact retention window.
+
+1. Record the main build run ID. For a default signed run, a missing or stale
+   external evidence bundle may fail `publish-images` **after** the five builds
+   have succeeded and uploaded their bytes. This is the external signing handoff,
+   not a reason to rebuild. For an unsigned-to-signed promotion, use the original
+   successful main run.
+2. On the signing machine, download the five exact artifacts. Replace the run ID,
+   checkout and private paths below with the reviewed source run and locations:
+
+   ```sh
+   repository=mit-sdg/openstack-deployment-infra
+   run=123456789
+   retained=/private/retained-images
+   platform=/private/platform.json
+   signing=/private/signed-release
+   commit=$(gh api "repos/$repository/actions/runs/$run" --jq .head_sha)
+   cd /private/clean-source-checkout
+   test "$(git rev-parse HEAD)" = "$commit"
+   mkdir -m 0700 "$retained" "$signing"
+   for role in admin ingress storage worker builder; do
+     gh run download "$run" --repo "$repository" \
+       --name "production-role-$run-$role" --dir "$retained"
+   done
+   python3 -m openstack_platform.image_pipeline \
+     --root "$retained" --platform "$platform" signing-inputs \
+     --github-repository "$repository" --run-id "$run" \
+     --output "$signing/inputs.json"
+   ```
+
+   `signing-inputs` reads the actual GitHub run/jobs APIs and refuses forks, PRs,
+   another commit/workflow, incomplete job results, mixed build attempts or failed
+   source CI/build jobs. It verifies local hashes, closures, role metadata and
+   clean source, then writes direct relocated QCOW2 inputs and
+   `inputs.context.json`. It does not require or fabricate `GITHUB_*` variables,
+   run Nix or rebuild a disk. The overall source run may be failed solely because
+   publication is waiting for signatures; all required source jobs must succeed.
+3. Sign the component and concrete role evidence, including the exported build
+   context, then package only the signed evidence:
+
+   ```sh
+   python3 -m openstack_platform.release_manifest generate \
+     --repository "$PWD" --commit "$commit" --output "$signing/evidence" \
+     --signing-key /private/release-signing-key.pem
+   python3 -m openstack_platform.release_manifest artifact-generate \
+     --component-manifest "$signing/evidence/release-manifest.json" \
+     --inputs "$signing/inputs.json" --build-context "$signing/inputs.context.json" \
+     --output "$signing/evidence/artifacts" \
+     --signing-key /private/release-signing-key.pem
+   python3 -m openstack_platform.release_manifest bundle-create \
+     --source "$signing/evidence" --output "$signing/release-evidence.tar"
+   sha256sum "$signing/release-evidence.tar"
+   ```
+
+   The signed artifact provenance binds the real repository, commit, event/ref,
+   run ID and build attempt. A valid signature for different bytes or a different
+   build context will still fail publication. No Nix store is needed on the
+   signer: closure JSON and output identities are retained with the QCOW2s.
+4. Serve this immutable bounded tar over HTTPS. Configure the reviewed
+   `RELEASE_EVIDENCE_URL`, its `RELEASE_EVIDENCE_SHA256`, and the signing key's
+   public PEM in `RELEASE_TRUST_ROOT_PEM` in the effective repository/environment
+   scope. Clear `OPENSTACK_UNSIGNED_PRODUCTION` or set it to `false`. This is the
+   signing rollback: merely unsetting the variable without supplying valid signed
+   evidence intentionally stops publication.
+5. Re-run **only `publish-images`** on that original run. Use **Re-run failed jobs**
+   if it failed awaiting evidence; for promotion of a successful unsigned run,
+   use the individual publication job's **Re-run job** control. Do not dispatch a
+   new run, re-run all jobs, or change the source SHA. A later run attempt consumes
+   the earlier complete five-role build; immutable role artifact names prevent
+   accidental replacement. The retry downloads the original roles, fetches the
+   signed bundle and verifies the exact source/run binding before publishing.
+6. Verify the new `production-evidence-<run-id>-<attempt>` artifact shows
+   `production-ed25519`, the original QCOW2 SHA256s and build context, and the
+   new signed Glance names/UUIDs pass publication. Preserve both generations of
+   evidence. Previously unsigned images are not retroactively authenticated or
+   deleted; select the independently accepted signed UUIDs explicitly.
+
+If inventory, source SHA or any role hash differs, stop and identify the mismatch;
+do not edit records or regenerate evidence against a rebuild. If artifacts have
+expired, that run cannot be promoted. Start a new reviewed build/run and sign its
+new identities instead. A failure after one upload can leave some candidates
+published; rerunning the same publication job verifies/reuses exact matches and
+continues without rebuilding or overwriting.
+
+### Development publication before merge
 
 For real-cloud testing before merge, manually dispatch the workflow against the
 exact same-repository PR branch:
@@ -200,6 +348,8 @@ export PLATFORM_CONFIG="$PWD/config/platform.json"
 export OSC=/srv/openstack-platform/bin/platform-openstack
 export SOURCE_COMMIT="$(git rev-parse HEAD)"
 export PLATFORM_RELEASE_MANIFEST=/private/releases/$SOURCE_COMMIT/release-manifest.json
+export PLATFORM_RELEASE_SIGNATURE=/private/releases/$SOURCE_COMMIT/release-manifest.sig
+export PLATFORM_RELEASE_TRUST_ROOT=/private/release-trust-root.pem
 export PLATFORM_ARTIFACT_MANIFEST=/private/releases/$SOURCE_COMMIT/artifacts/role-artifacts.json
 export PLATFORM_ARTIFACT_SIGNATURE=/private/releases/$SOURCE_COMMIT/artifacts/role-artifacts.sig
 export PLATFORM_ARTIFACT_TRUST_ROOT=/private/release-trust-root.pem
@@ -541,7 +691,8 @@ Before production use, retain private evidence that:
 - static checks, unit tests, Nix evaluation, package smoke, all role VM tests,
   and all five QCOW2 boot tests pass at the exact commit;
 - component and role-artifact signatures verify against the selected public
-  trust root;
+  trust root, or a recorded temporary unsigned-production authorization identifies
+  the exact run and explicitly accepts the missing authenticity assurance;
 - every selected image has accepted role-live evidence and exact Glance UUID,
   commit, checksums, closure, and metadata;
 - setup and public health pass in the intended project;
