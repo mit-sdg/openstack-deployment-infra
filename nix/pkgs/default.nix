@@ -64,7 +64,19 @@ let
 
   age = pkgs.age;
 
-  python = pkgs.python3.withPackages (
+  # Older Neutron exposes security-group ownership only as tenant_id. OSC hides
+  # that deprecated column; SDK 4.13 must project it as project_id, as Port and
+  # Subnet already do. Override the package scope so OSC and direct SDK consumers
+  # use the same patched dependency in every admin/helper/provider launcher.
+  openstackPython = pkgs.python3.override {
+    packageOverrides = _final: prev: {
+      openstacksdk = prev.openstacksdk.overridePythonAttrs (old: {
+        patches = (old.patches or [ ]) ++ [ ./openstacksdk-security-group-project-alias.patch ];
+      });
+    };
+  };
+
+  python = openstackPython.withPackages (
     ps: with ps; [
       bcrypt
       boto3

@@ -202,6 +202,16 @@ port name, description, UUID, network/subnet, security-group UUID, and IPv4 rema
 reservation-scoped. Provider UUIDs may be canonical or compact lowercase; requests
 and journal UUIDs must be canonical.
 
+The Nix provider Python environment patches openstacksdk's security-group
+`project_id` descriptor to alias legacy Neutron `tenant_id`, matching the SDK's
+port/subnet behavior. OSC hides `tenant_id`; without the alias, tenant-only
+responses lose ownership evidence. The package-scoped override applies to both
+OSC and direct SDK consumers used by admin/helper launchers. It does not infer
+ownership from credentials or repair an explicit null/wrong project. Provider
+ownership validation remains strict. Nix `package-smoke` verifies the real CLI
+against a loopback tenant-only response; adopting the fix requires a new admin
+image, not a controller database migration.
+
 Reservation alone does not alter the accepted generation. After bounded
 predecessor absence, the controller journals `worker_slot_id` before the next
 candidate uses the port. Only that slot receives the retained helper identity;

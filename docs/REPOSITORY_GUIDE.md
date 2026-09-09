@@ -120,6 +120,7 @@ operator, the helper, CI, or systemd. They are not a second public CLI.
 - `nix/lib/inventory.nix` — strictly loads and validates the selected deployment inventory for Nix evaluation.
 - `nix/modules/common.nix` — common NixOS users, packages, cloud-init, networking, security, logging, and platform paths shared by all roles.
 - `nix/pkgs/default.nix` — pins/packages third-party binaries, the Python application, release tools, and helper launcher used by role images.
+- `nix/pkgs/openstacksdk-security-group-project-alias.patch` — preserves legacy Neutron tenant-only security-group ownership in SDK/OSC projections.
 - `nix/roles/admin.nix` — admin role services: Nomad control, controller/helper, monitoring, backup, release credentials, and state mounts.
 - `nix/roles/builder.nix` — rootless BuildKit builder role, restricted SSH execution, metadata denial, and expiry.
 - `nix/roles/ingress.nix` — Traefik ingress role, tunnel/direct listener policy, routes, and trusted-forwarder controls.
@@ -216,6 +217,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/fixtures/apps/node/package.json` — Node fixture start command and package metadata.
 - `tests/fixtures/apps/node/server.js` — Node HTTP fixture with a deterministic readiness endpoint.
 - `tests/fixtures/openstack/glance_quota_formatter_outputs.json` — Glance quota API/CLI output variants, including unknown and unlimited values.
+- `tests/fixtures/openstack/neutron_security_group_tenant_only.json` — sanitized legacy Neutron response with authoritative tenant ownership and no project field.
 - `tests/fixtures/openstack/provider_uuid_outputs.json` — compact and canonical UUID projections returned by different OpenStack surfaces.
 - `tests/fixtures/retained_openstack.py` — offline OSC/Nomad process double for real worker helper and lifecycle integration tests.
 - `tests/install_ci_apt_packages.sh` — bounded retry wrapper for fixed CI-only APT package installation.
@@ -255,6 +257,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_live_acceptance.py` — plan immutability, checkpoint/resume, evidence chain, signature, and failure tests.
 - `tests/test_live_acceptance_driver.py` — repository driver protocol, observations, interruption, recovery, ownership, and teardown tests.
 - `tests/test_namespace.py` — namespace propagation and inventory validation across Python and Nix role sources.
+- `tests/test_neutron_sdk_projection.py` — mandatory Nix package-smoke regression using the actual SDK and OSC against a loopback tenant-only Neutron fixture.
 - `tests/test_openstack_lifecycle_scripts.py` — shell lifecycle deletion, ambiguity, ownership, and exact-resource behavior tests.
 - `tests/test_operator_bridge.py` — operator bridge preflight, generated SSH/provider wrappers, key pinning, and drift tests.
 - `tests/test_operator_integration.py` — operator command and helper protocol integration tests over fake dependencies.

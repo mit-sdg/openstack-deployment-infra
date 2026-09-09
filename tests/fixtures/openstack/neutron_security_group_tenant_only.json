@@ -1,0 +1,9 @@
+{
+  "security_group": {
+    "id": "00000000-0000-4000-8000-000000000003",
+    "name": "example-worker",
+    "description": "Sanitized legacy Neutron tenant-only ownership response",
+    "tenant_id": "00000000000040008000000000000099",
+    "security_group_rules": []
+  }
+}
