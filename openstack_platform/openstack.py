@@ -2289,15 +2289,17 @@ def check_role_health(
     service_runner: Runner = runtime.run,
     http_get: Callable[..., runtime.HttpResult] = runtime.bounded_http,
     executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Run the bounded concrete health contract for one persistent role.
 
     The authenticated OpenStack console proves the latest guest readiness run
     did not report failed units. Admin and storage checks run on the pinned
     admin control host, where their credentials and deployed paths exist.
-    Ingress is checked from this external operator process against both its
-    fixed address and public TLS origin. No response body or command output
-    escapes this boundary.
+    Ingress is checked through its public TLS origin. Tunnel-mode HTTP is
+    deliberately loopback-only; direct-mode sources are restricted to configured
+    providers, so an external operator must not require direct origin access.
+    No response body or command output escapes this boundary.
     """
     role = _role(role, persistent=True)
     if host.role != role or host.server_id is None or remaining_seconds <= 0:
@@ -2389,24 +2391,28 @@ def check_role_health(
         if checked.stdout_truncated or checked.stderr_truncated:
             raise OpenStackError(f"{role} authenticated health output exceeded its limit")
     if role == "ingress":
-        # These probes intentionally originate outside the OpenStack guests:
-        # the TLS check must exercise the same public route as a client.
-        urls = (
-            f"http://{_inventory_text(platform, 'addresses.ingress')}/healthz",
-            f"https://{platform.domain}/healthz",
-        )
-        for url in urls:
+        # Local readiness can precede container pull/tunnel connection. Keep
+        # the old guest until the public route actually works; never reopen the
+        # intentionally closed origin listener to make a health probe pass.
+        deadline = min(_active_deadline(operation="ingress health"), _monotonic() + 120)
+        url = f"https://{platform.domain}/healthz"
+        while True:
+            remaining = _deadline_remaining(deadline, operation="ingress public readiness")
             try:
                 response = http_get(
                     url,
-                    timeout_seconds=per_check,
+                    timeout_seconds=min(per_check, remaining),
                     response_limit=64,
                     allow_redirects=False,
                 )
-            except Exception as error:
-                raise OpenStackError("ingress internal/public health check failed") from error
-            if not 200 <= response.status < 300 or response.body.strip() != b"OK":
-                raise OpenStackError("ingress internal/public health response was unhealthy")
+                if 200 <= response.status < 300 and response.body.strip() == b"OK":
+                    return
+            except Exception:
+                pass
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                raise OpenStackError("ingress public health did not become ready before deadline")
+            sleep(min(2.0, remaining))
 
 
 def _check_port_device(

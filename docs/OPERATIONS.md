@@ -55,7 +55,12 @@ test "$(curl --fail --show-error --silent \
 A healthy infrastructure deployment has five accepted image roles, three
 available persistent-role observations, active controller/readiness units, and
 an exact public `OK` response. `APPS` and `STORAGE` are aggregate controller
-counts; the operator CLI cannot inspect or mutate those records.
+counts from the hosted controller API; external shadow application records are
+not authoritative. `status` requires the pinned hosted API and reports its
+unavailability rather than falling back to shadow state. Local image selection
+and unfinished infrastructure operations remain authoritative in the external
+operator state. Use `infra list` for foundation inspection during controller
+bootstrap/outage; the operator CLI cannot inspect or mutate product records.
 
 An unavailable live observation does not erase accepted state. Diagnose the
 named dependency before mutation; do not edit SQLite or provider resources to
@@ -954,7 +959,12 @@ An ambiguous provider result becomes recovery-required. Restore the named
 dependency and rerun `infra replace ingress --yes` using the same inventory and
 state directory. A recorded pre-acceptance operation rolls back; an accepted
 operation rechecks exact candidate provenance, fixed resources, readiness, and
-internal/public `/healthz` before cleaning up the retained old VM. Neither path
+public HTTPS `/healthz` before cleaning up the retained old VM. Tunnel-mode
+HTTP is deliberately loopback-only, and direct-mode HTTP is restricted to
+provider sources: the external checker does not probe the fixed IP's HTTP port.
+It allows up to 120 seconds of public connector warm-up within the remaining
+operation deadline, without accepting redirects or a response other than `OK`.
+Neither path
 reads a token file or re-renders user-data. If supplied on that retry,
 `--cloudflare-tunnel-token-file` is ignored with an explicit acknowledgement; it
 cannot change the recorded candidate's credential.

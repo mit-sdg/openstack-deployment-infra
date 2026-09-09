@@ -272,8 +272,75 @@ def _role_health_check(config: Config) -> openstack.HealthCheck:
     return check
 
 
+def _hosted_status(config: Config) -> dict[str, Any]:
+    """Read product truth through the hosted API, never external shadow rows."""
+    seconds = min(120, config.policy.limits.process_seconds)
+    command = remote.pinned_admin_command(
+        (
+            "/run/current-system/sw/bin/curl",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            str(max(1, seconds - 5)),
+            "--unix-socket",
+            f"/run/{config.platform.namespace}-controller/privileged.sock",
+            "http://localhost/v1/admin/status",
+        )
+    )
+    try:
+        result = runtime.run(
+            command,
+            timeout_seconds=seconds,
+            stdout_limit=65_536,
+            stderr_limit=65_536,
+            inherit_env=("HOME", "USER", "SSH_AUTH_SOCK"),
+        )
+    except runtime.CommandFailure:
+        raise remote.DependencyUnavailable("hosted controller status is unavailable") from None
+    if result.stdout_truncated or result.stderr_truncated:
+        raise remote.ProtocolError("hosted controller status exceeded its limit")
+    value = remote._json_object(result.stdout, maximum_bytes=65_536, name="hosted status")
+    if set(value) != {"state", "accepted", "observations", "operations"} or value.get(
+        "state"
+    ) not in ("healthy", "degraded"):
+        raise remote.ProtocolError("hosted controller status is malformed")
+    fields = {
+        "accepted": {"infrastructureRoles", "applications", "storageResources"},
+        "observations": {"available", "unavailable", "unhealthy"},
+        "operations": {"incomplete", "builders"},
+    }
+    model: dict[str, Any] = {"state": value["state"]}
+    for group, keys in fields.items():
+        observed = value.get(group)
+        expected = keys | ({"items"} if group == "operations" else set())
+        if (
+            not isinstance(observed, dict)
+            or set(observed) != expected
+            or any(
+                type(observed[key]) is not int or not 0 <= observed[key] <= 1_000_000
+                for key in keys
+            )
+            or (group == "operations" and not isinstance(observed["items"], list))
+        ):
+            raise remote.ProtocolError("hosted controller status counts are malformed")
+        model[group] = {key: observed[key] for key in keys}
+    return model
+
+
 def _status_command(connection: sqlite3.Connection, config: Config, *, output: Any) -> None:
-    model = status.status_show_live(connection, config)
+    model = _hosted_status(config)
+    # Image selection and unfinished infrastructure work belong to this plane;
+    # application/storage state belongs exclusively to the hosted controller.
+    model["accepted"]["infrastructureRoles"] = len(db.list_image_selections(connection))
+    if (
+        status.incomplete_operations(connection)
+        or model["accepted"]["infrastructureRoles"] != len(openstack.IMAGE_ROLES)
+        or model["observations"]["unavailable"]
+        or model["observations"]["unhealthy"]
+        or model["operations"]["incomplete"]
+    ):
+        model["state"] = "degraded"
     accepted = model["accepted"]
     observations = model["observations"]
     assert isinstance(accepted, dict) and isinstance(observations, dict)

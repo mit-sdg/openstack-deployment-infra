@@ -255,6 +255,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_openstack_lifecycle_scripts.py` — shell lifecycle deletion, ambiguity, ownership, and exact-resource behavior tests.
 - `tests/test_operator_bridge.py` — operator bridge preflight, generated SSH/provider wrappers, key pinning, and drift tests.
 - `tests/test_operator_integration.py` — operator command and helper protocol integration tests over fake dependencies.
+- `tests/test_operator_live_health.py` — hosted-authoritative operator status and public-only tunnel readiness regression tests.
 - `tests/test_packaging_release.py` — release archive identity, runtime paths, configuration validation, installer, and atomic-selection tests.
 - `tests/test_platform_contract.py` — parity and required-value checks for JSON, Python, Nix, shell, and packaged contracts.
 - `tests/test_platform_foundation_nomad.py` — owner-scoped Nomad Variable merge and compare-and-set behavior tests.

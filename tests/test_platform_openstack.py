@@ -2027,7 +2027,7 @@ else:
             service_runner=lambda argv, **_kwargs: result(argv),
             http_get=http_get,
         )
-        self.assertEqual(len(http_calls), 2)
+        self.assertEqual(len(http_calls), 1)
 
     def test_explicit_failure_marker_still_fails_hard(self) -> None:
         cloud = FakeCloud(self.platform, role="ingress")
@@ -2129,10 +2129,7 @@ else:
         )
         self.assertEqual(
             http_calls,
-            [
-                f"http://{self.platform.get('addresses.ingress')}/healthz",
-                f"https://{self.platform.domain}/healthz",
-            ],
+            [f"https://{self.platform.domain}/healthz"],
         )
 
     def test_current_failed_readiness_blocks_role_acceptance(self) -> None:
