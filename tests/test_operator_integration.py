@@ -181,7 +181,16 @@ class OperatorIntegrationTests(unittest.TestCase):
 
     def test_status_initializes_private_database_and_renders_table(self) -> None:
         output = StringIO()
-        operator.dispatch(operator.build_parser().parse_args(self.argv("status")), stdout=output)
+        model = {
+            "state": "healthy",
+            "accepted": {"infrastructureRoles": 0, "applications": 0, "storageResources": 0},
+            "observations": {"available": 3, "unavailable": 0, "unhealthy": 0},
+            "operations": {"incomplete": 0, "builders": 0},
+        }
+        with mock.patch.object(operator, "_hosted_status", return_value=model):
+            operator.dispatch(
+                operator.build_parser().parse_args(self.argv("status")), stdout=output
+            )
         self.assertIn("STATE", output.getvalue())
         database = self.state / "platform.sqlite3"
         self.assertEqual(database.stat().st_mode & 0o777, 0o600)
@@ -865,8 +874,9 @@ class OperatorIntegrationTests(unittest.TestCase):
                 "storageResources": 0,
             },
             "observations": {"available": 0, "unavailable": 0, "unhealthy": 0},
+            "operations": {"incomplete": 0, "builders": 0},
         }
-        with mock.patch.object(operator.status, "status_show_live", return_value=model) as live:
+        with mock.patch.object(operator, "_hosted_status", return_value=model) as live:
             operator.dispatch(status_args, stdout=StringIO())
         live.assert_called_once()
 
