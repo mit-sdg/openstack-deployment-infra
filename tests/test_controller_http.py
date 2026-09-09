@@ -355,17 +355,30 @@ class ControllerSocketSecurityTests(unittest.TestCase):
         ):
             with self.subTest(reader=reader), tempfile.TemporaryDirectory() as temporary:
                 path = str(Path(temporary) / "controller.sock")
+                request_sent = threading.Event()
+
+                def credentials(connection, *, request_sent=request_sent, reader=reader):
+                    # Peer rejection may legitimately close before the client
+                    # sends HTTP. Hold the test double until send completes so
+                    # this assertion tests the rejection envelope, not that race.
+                    if not request_sent.wait(5):
+                        raise OSError("test request was not sent")
+                    return reader(connection)
+
                 server = ControllerServer(
                     path,
                     Router(),
                     peer_policy=PeerPolicy(frozenset({(100, 200)})),
-                    peer_credentials=reader,
+                    peer_credentials=credentials,
                 )
                 thread = threading.Thread(target=server.serve_forever)
                 thread.start()
                 try:
                     connection = UnixHTTPConnection(path)
-                    connection.request("GET", "/v1/health")
+                    try:
+                        connection.request("GET", "/v1/health")
+                    finally:
+                        request_sent.set()
                     response = connection.getresponse()
                     body = json.loads(response.read())
                     self.assertEqual(response.status, 503)
