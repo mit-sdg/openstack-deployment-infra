@@ -529,6 +529,21 @@ MIGRATIONS += (
     ),
 )
 
+MIGRATIONS += (
+    Migration(
+        4,
+        (
+            """
+        CREATE TABLE application_fixed_ports (
+            application_id TEXT PRIMARY KEY REFERENCES applications(application_id),
+            port_id TEXT UNIQUE,
+            record_json TEXT NOT NULL CHECK (json_valid(record_json))
+        ) STRICT
+    """,
+        ),
+    ),
+)
+
 _BOOTSTRAP = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,

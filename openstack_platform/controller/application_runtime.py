@@ -1336,13 +1336,14 @@ def parse_worker_observation(
     application_id: str,
     application_slug: str,
     prefix: str,
+    retained_port: dict[str, Any] | None = None,
 ) -> WorkerObservation:
     identifier = uuid(application_id, field="application ID")
     app_slug = slug(application_slug)
     safe_prefix = _provider_name(prefix, field_name="platform prefix")
     short = identifier.replace("-", "")[:12]
     server_name = f"{safe_prefix}-worker-{short}"
-    port_name = f"{server_name}-v4"
+    port_name = f"{server_name}-v4" if retained_port is None else retained_port["name"]
     value = _json_object(payload, field_name="worker observation")
     if value.keys() != {"applicationId", "slug", "server", "port", "ready"}:
         raise ApplicationError("worker observation fields were invalid")
@@ -1386,7 +1387,15 @@ def parse_worker_observation(
         if port.keys() != {"id", "name", "deviceId", "address", "description"}:
             raise ApplicationError("worker port evidence was malformed")
         port_id = _optional_uuid(port["id"], field_name="worker port UUID")
-        description = f"managed-by=platform;application-id={identifier};application-slug={app_slug}"
+        description = (
+            f"managed-by=platform;application-id={identifier};application-slug={app_slug}"
+            if retained_port is None
+            else retained_port["description"]
+        )
+        if retained_port is not None and (
+            port_id != retained_port["port_id"] or port["address"] != retained_port["address"]
+        ):
+            raise ApplicationError("retained worker primary port identity or address drifted")
         if port_id is None or port["name"] != port_name or port["description"] != description:
             raise ApplicationError("worker port identity did not match the request")
         device_id = _optional_uuid(port["deviceId"], field_name="worker port device UUID")
@@ -1417,6 +1426,7 @@ def observe_worker(
     application_id: str,
     application_slug: str,
     *,
+    retained_port: dict[str, Any] | None = None,
     prefix: str,
     timeout_seconds: float,
     nomad_command: str | None = None,
@@ -1429,6 +1439,8 @@ def observe_worker(
     app_slug = slug(application_slug)
     command = _fixed_command(worker_command, field_name="worker command")
     environment = _project_environment(project_name, project_id)
+    if retained_port is not None:
+        environment["RETAINED_PORT_JSON"] = json.dumps(retained_port, sort_keys=True)
     if nomad_command is not None:
         environment["NOMAD"] = _fixed_executable(nomad_command, field_name="Nomad command")
     result = _provider_result(
@@ -1442,6 +1454,7 @@ def observe_worker(
         application_id=identifier,
         application_slug=app_slug,
         prefix=prefix,
+        retained_port=retained_port,
     )
 
 
@@ -1449,6 +1462,7 @@ def create_worker(
     application_id: str,
     application_slug: str,
     *,
+    retained_port: dict[str, Any] | None = None,
     prefix: str,
     selected_image_id: str | None,
     standard_flavor: str | None,
@@ -1471,6 +1485,7 @@ def create_worker(
     existing = observe_worker(
         identifier,
         app_slug,
+        retained_port=retained_port,
         prefix=prefix,
         timeout_seconds=timeout_seconds,
         nomad_command=nomad,
@@ -1499,6 +1514,8 @@ def create_worker(
         # Existing infrastructure is authoritative. Image selection applies only
         # when allocating a new worker; it must never relabel or mutate this VM.
         environment = {"NOMAD": nomad, **_project_environment(project_name, project_id)}
+    if retained_port is not None:
+        environment["RETAINED_PORT_JSON"] = json.dumps(retained_port, sort_keys=True)
     _provider_result(
         command_runner,
         (*command, "create", identifier, app_slug),
@@ -1508,6 +1525,7 @@ def create_worker(
     observed = observe_worker(
         identifier,
         app_slug,
+        retained_port=retained_port,
         prefix=prefix,
         timeout_seconds=timeout_seconds,
         nomad_command=nomad,
@@ -1534,6 +1552,7 @@ def delete_worker(
     application_id: str,
     application_slug: str,
     *,
+    retained_port: dict[str, Any] | None = None,
     prefix: str,
     timeout_seconds: float,
     project_name: str | None = None,
@@ -1548,11 +1567,20 @@ def delete_worker(
         command_runner,
         (*command, "delete", identifier, app_slug),
         timeout_seconds=timeout_seconds,
-        env=_project_environment(project_name, project_id) or None,
+        env={
+            **_project_environment(project_name, project_id),
+            **(
+                {"RETAINED_PORT_JSON": json.dumps(retained_port, sort_keys=True)}
+                if retained_port is not None
+                else {}
+            ),
+        }
+        or None,
     )
     observed = observe_worker(
         identifier,
         app_slug,
+        retained_port=retained_port,
         prefix=prefix,
         timeout_seconds=timeout_seconds,
         project_name=project_name,

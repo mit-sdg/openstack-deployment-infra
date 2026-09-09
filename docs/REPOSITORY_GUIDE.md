@@ -140,6 +140,7 @@ cross-cutting boundaries.
 - `openstack_platform/acceptance.py` — plan, checkpoint, evidence, and verification engine for disposable live acceptance.
 - `openstack_platform/acceptance_live_driver.py` — reviewed adapter from acceptance protocol actions to supported repository/operator interfaces.
 - `openstack_platform/config.py` — typed, strict loading of deployment inventory and private operator policy.
+- `openstack_platform/fixed_ip.py` — exact retained primary Neutron port capability, ownership, and provider UUID validation.
 - `openstack_platform/floating_ip.py` — bounded, project-scoped Neutron capability and floating IPv4 ownership operations.
 - `openstack_platform/contracts.py` — packaged typed access to the canonical cross-component JSON contract.
 - `openstack_platform/durable.py` — no-follow, fsync-backed primitives for crash-durable local file replacement.
@@ -176,6 +177,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
 - `openstack_platform/controller/image_service.py` — validated hosted role-image metadata selection and immutable worker/builder provisioning snapshots.
 - `openstack_platform/controller/log_service.py` — bounded reads of runtime and retained build logs.
+- `openstack_platform/controller/fixed_ip_service.py` — app-locked retained primary port reservations, generation binding, and uncertain-create recovery.
 - `openstack_platform/controller/public_ip_service.py` — app-scoped floating IPv4 reservation, handover, and release journals.
 - `openstack_platform/controller/main.py` — `openstack-platform-controller` executable composition and startup.
 - `openstack_platform/controller/nomad_jobs.py` — renders generated Nomad jobs and validates job/placement/route identities.
@@ -215,6 +217,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/fixtures/apps/node/server.js` — Node HTTP fixture with a deterministic readiness endpoint.
 - `tests/fixtures/openstack/glance_quota_formatter_outputs.json` — Glance quota API/CLI output variants, including unknown and unlimited values.
 - `tests/fixtures/openstack/provider_uuid_outputs.json` — compact and canonical UUID projections returned by different OpenStack surfaces.
+- `tests/fixtures/retained_openstack.py` — offline OSC/Nomad process double for real worker helper and lifecycle integration tests.
 - `tests/install_ci_apt_packages.sh` — bounded retry wrapper for fixed CI-only APT package installation.
 - `tests/product_fixtures.py` — reusable builders for accepted application/deployment product state.
 - `tests/repository_fixtures.py` — creates clean temporary Git repositories from the current worktree for release-sensitive tests.
@@ -263,6 +266,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_platform_foundation_validation_config.py` — shared validators plus inventory/policy parsing and rejection tests.
 - `tests/test_platform_host_keys.py` — console fingerprint, keyscan, known-hosts matching, drift, and atomic pin tests.
 - `tests/test_platform_openstack.py` — image selection/pruning and persistent-host power/replacement/recovery provider tests.
+- `tests/test_fixed_ip.py` — retained primary port HTTP/helper/shell lifecycle, drift, compact UUID, maintenance, and lost-response integration tests.
 - `tests/test_public_ip.py` — offline floating IPv4 capability, ownership, retry, handover, and release tests.
 - `tests/test_platform_restore.py` — encrypted/plain offline restore validation, operation-state, permissions, and atomicity tests.
 - `tests/test_platform_services.py` — application, deployment, environment, storage, log, and helper-failure service tests.

@@ -555,6 +555,17 @@ def _prepare_deployment_worker(
         worker_application_id = worker_ids[
             1 if app.nomad_job_id(previous.nomad_job, application_slug) == application_slug else 0
         ]
+    from .fixed_ip_service import bind_worker, require_maintenance
+
+    require_maintenance(connection, application_id)
+    bind_worker(
+        connection,
+        config,
+        application_id,
+        worker_application_id,
+        helper_caller=helper_caller,
+        deadline=deadline,
+    )
     refs = {**refs, "worker_application_id": worker_application_id}
     db.checkpoint_operation(
         connection,
@@ -1310,7 +1321,9 @@ class DeploymentService:
         self.connection = connection
         self.config = config
         self.state_directory = state_directory
-        self.helper_caller = helper_caller
+        from .fixed_ip_service import worker_helper
+
+        self.helper_caller = worker_helper(connection, helper_caller)
 
     def recover_operation(
         self,
@@ -1773,6 +1786,13 @@ class DeploymentService:
             )
 
         def verify_project() -> None:
+            from .fixed_ip_service import require_maintenance
+
+            # Accepted-but-interrupted cleanup is forward recovery, not a new
+            # overlapping replacement. Every new attempt checks under app lock.
+            active = db.get_active_deployment(self.connection, application_id)
+            if active is None or active.deployment_id != selected_request_id:
+                require_maintenance(self.connection, application_id)
             if request.rollback_plan is not None:
                 if (
                     request.sizing_plan is not None

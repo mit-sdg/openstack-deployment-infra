@@ -62,7 +62,9 @@ class ApplicationService:
         self.connection = connection
         self.config = config
         self.state_directory = state_directory
-        self.helper_caller = helper_caller
+        from .fixed_ip_service import worker_helper
+
+        self.helper_caller = worker_helper(connection, helper_caller)
 
     def declare(
         self, application_slug: str, *, application_id: str | None = None
@@ -270,6 +272,13 @@ class ApplicationService:
                 raise ValidationError("enable requires an accepted deployment")
             unfinished = db.get_unfinished_operation(self.connection, scope)
             if current.desired_running and unfinished is None:
+                from .fixed_ip_service import get as get_fixed
+
+                retained = get_fixed(self.connection, current.application_id)
+                if retained is not None and current.worker_port_id != retained["port_id"]:
+                    raise ValidationError(
+                        "disable the ordinary predecessor before enabling a retained primary port"
+                    )
                 return ApplicationLifecycleChanged(current.application_id, current.slug, "enabled")
             marker = app.nomad_route_marker(deployment.nomad_job)
             placement_id = app.nomad_placement_id(deployment.nomad_job)
@@ -313,6 +322,16 @@ class ApplicationService:
             )
             refs = dict(operation.refs)
             try:
+                from .fixed_ip_service import bind_worker
+
+                bind_worker(
+                    self.connection,
+                    self.config,
+                    current.application_id,
+                    placement_id,
+                    helper_caller=self.helper_caller,
+                    deadline=deadline,
+                )
                 worker = self.helper_caller(
                     self.config,
                     "app.worker.observe",
@@ -604,6 +623,11 @@ class ApplicationService:
                 )
                 if worker.get("absent") is not True:
                     raise app.ApplicationError("bounded worker-slot absence was not confirmed")
+                from .fixed_ip_service import release_locked as release_fixed_port
+
+                release_fixed_port(
+                    self.connection, self.config, current.application_id, deadline=deadline
+                )
                 db.set_application_runtime(self.connection, current.application_id, running=False)
                 db.checkpoint_operation(
                     self.connection, operation.operation_id, phase="worker_absent", refs=refs

@@ -368,6 +368,12 @@ class PublicIPService:
             provider = provider or floating_ip.Provider(self.config.platform, deadline=deadline)
             try:
                 if action in {"allocate", "attach"}:
+                    from .fixed_ip_service import get as get_fixed
+
+                    if get_fixed(self.connection, application_id) is not None:
+                        raise ValidationError(
+                            "floating and retained fixed IP reservations are mutually exclusive"
+                        )
                     record = get(self.connection, application_id)
                     if record is not None and record["request_id"] != request_id:
                         raise ValidationError(
