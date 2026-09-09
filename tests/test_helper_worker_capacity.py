@@ -158,6 +158,22 @@ class ProductionWorkerCapacityTests(unittest.TestCase):
         )
         self.assertEqual(self.calls[0][1]["stdout_limit"], 1_048_576)
 
+    def test_replacement_ignores_only_explicitly_down_registrations(self):
+        ready = copy.deepcopy(self.nodes[0])
+        stale = {"ID": REQUEST_ID, "Name": self.server_name, "Status": "down"}
+        self.nodes = [stale, ready]
+        self.assertTrue(self.dispatch()["ok"])
+        self.nodes = [stale]
+        self.assertFalse(self.dispatch()["ok"])
+        for status in (None, "unknown", "initializing", "disconnected", "ready"):
+            with self.subTest(status=status):
+                self.nodes = [ready, {**stale, "Status": status}]
+                self.assertFalse(self.dispatch()["ok"])
+        # A node changing state between inventory and detail is rejected too.
+        self.nodes = [ready]
+        self.node["Status"] = "down"
+        self.assertFalse(self.dispatch()["ok"])
+
     def test_request_cannot_select_nomad_command_or_node(self):
         for field in ("nomadCommand", "nodeId", "serverName"):
             with self.subTest(field=field):

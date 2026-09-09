@@ -556,7 +556,37 @@ def _smoke(mode: str, release: Path, python: Path) -> None:
             "--restore-launcher",
             release / "bin/openstack-platform-restore",
         )
+    if mode == "helper":
+        # Match the controller's bounded child PATH even when bootstrap SSH
+        # supplied no PATH. The real launcher needs bash/stat/readlink.
+        environment["PATH"] = "/run/current-system/sw/bin:/usr/bin:/bin"
+        arguments += ("--launcher", release / "bin/openstack-platform-helper")
     _run(arguments, env=environment)
+    if mode == "helper":
+        # Older retained releases accepted --launcher but did not exercise it.
+        # Enforce the entrypoint check in the installer as well, independently
+        # of the retained release's smoke implementation.
+        try:
+            result = subprocess.run(
+                (release / "bin/openstack-platform-helper",),
+                input=b"{}\n",
+                capture_output=True,
+                timeout=30,
+                env=environment,
+                check=False,
+            )
+            response = json.loads(result.stdout)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            _fail("the installed helper launcher is unavailable")
+        if (
+            result.returncode != 0
+            or not isinstance(response, dict)
+            or response.get("version") != 1
+            or response.get("ok") is not False
+            or not isinstance(response.get("error"), dict)
+            or response["error"].get("code") != "INVALID_REQUEST"
+        ):
+            _fail("the installed helper launcher failed the protocol smoke")
 
 
 def _verify_protected_executable(path: Path, *, label: str) -> None:
@@ -1056,7 +1086,13 @@ def install(args: argparse.Namespace) -> Path:
             expected_identity_sha256=expected_platform_identity_sha256,
         )
 
-    python = _check_runtime(cast(Path, args.python))
+    requested_python = cast(Path, args.python).absolute()
+    python = _check_runtime(requested_python)
+    if mode == "helper":
+        # Keep the operator-selected stable guest runtime path. Resolving the
+        # current-system symlink here pins a store closure that may disappear
+        # when the persistent helper is carried to a replacement admin VM.
+        python = requested_python
     remove_archive = cast(bool, args.remove_archive)
     temporary_archive: Path | None = None
     requested_archive = cast(Path | None, args.archive)

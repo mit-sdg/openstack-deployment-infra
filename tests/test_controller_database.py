@@ -219,7 +219,8 @@ class ControllerDatabaseTests(unittest.TestCase):
             self.connection, operation_id, "2026-01-01T09:15:00Z", now="2026-01-01T09:00:00Z"
         )
         self.assertEqual(renewed.deadline_at, "2026-01-01T09:15:00Z")
-        self.assertEqual(renewed.status, "recovery_required")
+        self.assertEqual(renewed.status, "running")
+        self.assertIsNone(renewed.safe_error)
         self.assertFalse(self.connection.in_transaction)
         # The record the helper is checked against moves with it.
         stored = db.get_unfinished_operation(self.connection, f"app-{APP_ID}")

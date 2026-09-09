@@ -29,6 +29,9 @@ contract.
 
 ## Documentation
 
+- [Deploy an application with curl](docs/APPLICATION_DEPLOYMENTS.md) — operator
+  deployment, maintenance cutover, recovery, and rollback without the management UI.
+
 - [Deploy the platform](docs/DEPLOYMENT.md) — what the platform creates, what it
   supports, its security model, setup, ingress, and verification.
 - [Operate and recover it](docs/OPERATIONS.md) — health, backups, off-site

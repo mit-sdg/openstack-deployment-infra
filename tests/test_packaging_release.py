@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -225,13 +226,22 @@ class HelperRuntimePathTests(unittest.TestCase):
     def test_helper_release_smoke_uses_only_sanitized_inventory(self) -> None:
         environment = os.environ.copy()
         environment["PLATFORM_CONFIG"] = "/private/inventory/must-not-be-read.json"
-        result = subprocess.run(
-            [sys.executable, SMOKE, "helper", "--source", ROOT],
-            env=environment,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            launcher = Path(temporary) / "helper"
+            launcher.write_text(
+                "#!/bin/sh\n"
+                f"export PLATFORM_CONFIG={shlex.quote(str(ROOT / 'config/platform.example.json'))}\n"
+                f"export PYTHONPATH={shlex.quote(str(ROOT))}\n"
+                f"exec {shlex.quote(sys.executable)} -m openstack_platform.helper.main\n"
+            )
+            launcher.chmod(0o700)
+            result = subprocess.run(
+                [sys.executable, SMOKE, "helper", "--source", ROOT, "--launcher", launcher],
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         self.assertEqual(result.stdout, "release-smoke=helper:ok\n")
 
 
@@ -600,6 +610,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         install_units: bool = False,
         prepare_config: bool = True,
         evidence_commit: str | None = None,
+        python: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         installation_root = self.root / f"{mode}-install"
         release_root = installation_root / (
@@ -641,7 +652,7 @@ class ReleaseInstallerTests(unittest.TestCase):
             self._evidence(repository, evidence_commit or commit) / "release-manifest.json",
             "--allow-unsigned-development",
             "--python",
-            sys.executable,
+            python or sys.executable,
             "--uv",
             UV,
             "--release-root",
@@ -873,6 +884,44 @@ class ReleaseInstallerTests(unittest.TestCase):
         rejected = subprocess.run([launcher], capture_output=True, text=True)
         self.assertEqual(rejected.returncode, 78)
         self.assertIn("invalid symlink target", rejected.stderr)
+
+    def test_helper_survives_runtime_symlink_replacement_and_reinstall(self) -> None:
+        repository, commit = self._repository()
+        first = self.root / "first-python"
+        second = self.root / "second-python"
+        stable = self.root / "current-python"
+        for runtime in (first, second):
+            runtime.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+            runtime.chmod(0o700)
+        stable.symlink_to(first)
+        self._install(repository, commit, "helper", python=stable)
+        launcher = self.root / "helper-install/bin/openstack-platform-helper"
+        self.assertIn(str(stable), launcher.read_text())
+        self.assertNotIn(str(first), launcher.read_text())
+        stable.unlink()
+        stable.symlink_to(second)
+        first.unlink()
+        self._install(repository, commit, "helper", python=stable)
+        response = subprocess.run(
+            [launcher], input="{}", text=True, capture_output=True, check=True
+        )
+        self.assertEqual(json.loads(response.stdout)["error"]["code"], "INVALID_REQUEST")
+
+    def test_existing_helper_with_dead_launcher_is_not_accepted_by_import_smoke(self) -> None:
+        repository, commit = self._repository()
+        self._install(repository, commit, "helper")
+        launcher = self.root / "helper-install/bin/openstack-platform-helper"
+        target = launcher.resolve()
+        target.chmod(0o700)
+        target.write_text("#!/bin/sh\nexec /nonexistent-old-runtime/python3.14\n")
+        target.chmod(0o550)
+        # Simulate a legacy retained smoke that ignores --launcher entirely.
+        smoke = target.parent.parent / "source/deploy/releases/release_smoke.py"
+        smoke.chmod(0o600)
+        smoke.write_text('print("legacy-import-smoke=ok")\n')
+        result = self._install(repository, commit, "helper", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("installed helper launcher", result.stderr)
 
     def test_partial_helper_action_map_is_never_selected(self) -> None:
         repository, commit = self._repository(partial_helper=True)

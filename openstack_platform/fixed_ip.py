@@ -148,6 +148,9 @@ class Provider:
             raise os_api.DriftError("retained worker security group changed")
 
     def create(self, record: dict[str, Any]) -> dict[str, Any]:
+        # Shared-network users may allocate ports but may not explicitly set
+        # port_security_enabled. Inherit the network default; the subsequent
+        # exact-port check still requires observed port security to be true.
         value = self.json(
             (
                 "port",
@@ -158,7 +161,6 @@ class Provider:
                 f"subnet={record['subnet_id']},ip-address={record['address']}",
                 "--security-group",
                 record["security_group_id"],
-                "--enable-port-security",
                 "--description",
                 record["description"],
                 record["name"],

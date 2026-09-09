@@ -277,6 +277,19 @@ policy. A new worker with insufficient measured capacity fails closed instead
 of silently reducing the allocation. The same plan/apply procedure can shrink
 an app; this is replacement, not Nova's in-place resize/confirm/revert protocol.
 
+### Deploy new source without stopping the old app during build
+
+Use the [operator curl deployment runbook](APPLICATION_DEPLOYMENTS.md). The
+privileged deployment endpoint accepts explicit `maintenance: true`: it builds,
+checks artifact availability and storage bindings, then journals and stops the
+exact accepted job/worker before starting the replacement. Build/preflight
+failure leaves the old app serving. Failure after the stop requires recovery;
+there is no automatic database rollback or zero-downtime promise.
+
+Check `/v1/admin/capabilities` for `maintenance-after-build-v1` first. Keep the app
+enabled when obtaining the plan and submitting this request. An older controller
+must be upgraded, not worked around by disabling the app before its build.
+
 ### Resize without concurrent application processes
 
 Applications whose database integrity depends on a single process must not use
@@ -439,9 +452,11 @@ rechecks provider identity and reports `attachment: detached|attached`, `portId`
 `address`, and `serverId`. It does not probe application traffic.
 
 Reservation may precede disabling an existing ordinary worker; that worker and
-its disposable port are unchanged. Before deploying, resizing, or rolling back,
-disable the application. Replacements require observed predecessor absence and
-never overlap workers. Enable also refuses to substitute the port while an old
+its disposable port are unchanged. For new source, use explicit
+[`maintenance: true`](APPLICATION_DEPLOYMENTS.md) so the controller builds first
+and disables the predecessor only at cutover. For standalone resize or rollback,
+disable the application before obtaining the plan. Replacements require observed
+predecessor absence and never overlap workers. Enable also refuses to substitute the port while an old
 ordinary worker remains. Existing per-application flavor and scheduler sizing
 remain pinned. After acceptance, verify the same `portId`/`address`, application
 health at its original HTTPS URL, and connectivity to required dependencies.

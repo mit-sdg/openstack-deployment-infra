@@ -432,6 +432,17 @@ The admin host must already provide Python 3.14 and its helper runtime
 libraries. The operator's `platform-openstack` wrapper and `platform-admin` SSH
 alias are protected stable inputs, not release contents.
 
+For helper installation, supply the stable guest runtime path
+`/run/current-system/sw/bin/python3.14`, not its resolved Nix-store target. The
+installer verifies Python 3.14 but preserves the supplied path in the persistent
+launcher, so an admin-image replacement can change the underlying closure.
+Both new and already-complete helper releases must pass an actual launcher
+protocol smoke (an invalid request that dispatches no provider action), not just
+an import check using the installer's Python. A dead legacy launcher fails
+closed; do not edit the accepted release or its `.complete` marker to bypass it.
+Select an intact compatible release or stage a new reviewed release with the
+supported installer before replacing infrastructure.
+
 ### Bootstrap the stable runtime once
 
 ```sh

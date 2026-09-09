@@ -98,8 +98,9 @@ jobs:
       - name: Smoke integrated entrypoints
         run: |
           if [[ -f openstack_platform/operator.py && -f openstack_platform/helper/actions-v1.txt ]]; then
-            uv run python deploy/releases/release_smoke.py \
-              helper --source "$PWD"
+            PLATFORM_CONFIG="$PWD/config/platform.example.json" \
+              uv run python deploy/releases/release_smoke.py \
+              helper --source "$PWD" --launcher "$PWD/.venv/bin/openstack-platform-helper"
             uv run openstack-platform --help >/dev/null
           elif [[ -e openstack_platform/operator.py || -e openstack_platform/helper/actions-v1.txt ]]; then
             echo "CLI composition and helper action manifest must land together" >&2
