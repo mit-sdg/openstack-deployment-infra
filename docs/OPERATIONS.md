@@ -64,7 +64,10 @@ Use the hosted controller's privileged API to select images for future applicati
 provisioning. Run these commands **locally on the admin host as the permitted
 operator account**, after installing a controller release that includes this route.
 This is not the external operator database: `infra image set` does not update
-hosted selections. The setup-only image seed is not a rollover command.
+hosted selections. The setup-only image seed is not a rollover command. Startup
+preparation can replay the original seed without overwriting a journal-proven API
+rollover, including a committed selection awaiting crash reconciliation. An
+unjournaled difference still blocks preparation rather than being silently adopted.
 
 Publish and verify a compatible image first. The API accepts only exact image
 UUIDs for `worker` or `builder`, reuses provider project/role/provenance checks,

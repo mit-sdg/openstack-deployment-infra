@@ -1,10 +1,11 @@
-"""Seed the hosted controller's immutable role-image selections during setup."""
+"""Seed initial hosted images without reverting journal-proven API rollovers."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sqlite3
 import stat
 import sys
 from collections.abc import Mapping
@@ -101,6 +102,43 @@ def _manifest(
     return result
 
 
+def _recorded_rollover(connection: sqlite3.Connection, selection: db.ImageSelection) -> bool:
+    """Allow setup replay only when hosted API intent proves the changed selection."""
+    if selection.role not in {"worker", "builder"}:
+        return False
+    rows = connection.execute(
+        "SELECT operation_id FROM operations WHERE kind = 'infra.image.set' AND scope = 'infrastructure' "
+        "AND ((status = 'succeeded' AND phase = 'complete') OR "
+        "(status IN ('running','recovery_required') AND phase = 'selection_observed'))"
+    )
+    for row in rows:
+        operation = db.get_operation(connection, row["operation_id"])
+        assert operation is not None
+        refs = operation.refs
+        if set(refs) != {
+            "role",
+            "image_id",
+            "expected_image_id",
+            "display_name",
+            "source_commit",
+            "compatibility_hash",
+        }:
+            continue
+        try:
+            uuid(refs["expected_image_id"], field="prior hosted image UUID")
+        except ValidationError:
+            continue
+        if (
+            refs["role"] == selection.role
+            and refs["image_id"] == selection.image_id
+            and refs["display_name"] == selection.display_name
+            and refs["source_commit"] == selection.source_commit
+            and refs["compatibility_hash"] == selection.compatibility_hash
+        ):
+            return True
+    return False
+
+
 def seed(*, platform_config: Path, state_directory: Path, manifest: Path) -> None:
     if os.geteuid() == 0 or os.environ.get("SUDO_USER"):
         _fail("hosted image seeding must run as the controller account")
@@ -120,7 +158,11 @@ def seed(*, platform_config: Path, state_directory: Path, manifest: Path) -> Non
                     or existing.source_commit != item.source_commit
                     or existing.compatibility_hash != item.compatibility_hash
                 ):
-                    _fail("hosted controller already selected a different role image")
+                    # Preparation reruns on reboot. Preserve a proven API rollover,
+                    # including a committed write awaiting post-crash reconciliation.
+                    # An unjournaled difference remains a hard refusal.
+                    if not _recorded_rollover(connection, existing):
+                        _fail("hosted controller already selected an unproven different role image")
                 if existing is None:
                     db.put_image_selection(
                         connection,
