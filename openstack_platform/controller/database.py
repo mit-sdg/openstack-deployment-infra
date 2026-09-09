@@ -205,6 +205,7 @@ class DeploymentAttempt:
 @dataclass(frozen=True, slots=True)
 class Deployment:
     application_id: str
+    deployment_id: str
     source_commit: str
     recipe_hash: str
     image_digest: str
@@ -1910,6 +1911,7 @@ def get_deployment(connection: sqlite3.Connection, application_id: str) -> Deplo
         raise DatabaseError("active deployment evidence is incomplete")
     return Deployment(
         application_id=attempt.application_id,
+        deployment_id=attempt.deployment_id,
         source_commit=attempt.source_commit,
         recipe_hash=attempt.recipe_hash,
         image_digest=attempt.image_digest,

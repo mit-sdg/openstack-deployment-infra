@@ -162,6 +162,36 @@ Environment values and managed-service credentials live in owner-scoped Nomad
 Variables. Controller SQLite records key names, owners, revisions, and
 timestamps, never values. API reads never return values.
 
+### Authoritative deployment reads and retained rollback
+
+Application reads expose `activeDeploymentId` from the accepted pointer, not the
+newest attempt. Deployment reads/history expose `configuration`, its canonical
+`configurationSha256`, and `sourceRepository` alongside the exact commit and
+artifact digest. Configuration contains build/runtime settings and storage
+resource IDs/output-to-key bindings, not environment values. Source comes from
+the matching deployment journal intent, never the application's mutable current
+repository. Missing or inconsistent source evidence returns `null` and prevents
+using that attempt as a rollback target.
+
+Staff rollback requires a different, complete successful attempt for the same
+enabled application. The review plan binds the current accepted deployment,
+current environment revision, sizing, storage identities and historical artifact
+and configuration. Apply compares that projection under the application lock
+and rechecks current storage outputs and registry availability before candidate
+creation. `app.manifest.verify` checks digest-addressed OCI/Docker manifests and
+reachable blob availability using only GET/HEAD within the application's registry
+repository; it does not rebuild or return registry content or credentials.
+
+Rollback preserves current sizing and copies current secrets into the candidate's
+workload variable. Derived platform values, including `PORT`, come from that
+candidate's configuration rather than the shared variable. No environment
+snapshot, database contents, storage objects, or worker filesystem is restored.
+The shared health/promotion/acceptance path preserves the predecessor on candidate
+failure. After acceptance, an existing optional FIP is handed over and verified
+before predecessor cleanup; no FIP reservation is created by default. Interrupted
+acceptance or cleanup resumes with the original request and idempotency key.
+See [Roll back an application](OPERATIONS.md#roll-back-an-application).
+
 ## Operator CLI reference
 
 Global syntax:
@@ -288,6 +318,8 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | `POST /v1/admin/applications/{id}/public-ip` | App-locked `allocate`, `attach`, `release`, or `reconcile`; see [public IPv4 operations](OPERATIONS.md#reserve-a-stable-outbound-ipv4) |
 | `GET /v1/admin/applications/{id}/resize-plan` | Observe a sizing plan; requires one `flavor` query parameter |
 | `POST /v1/admin/applications/{id}/resize` | Apply `{plan, confirmation}` to an enabled accepted app, reusing its OCI artifact |
+| `GET /v1/admin/applications/{id}/rollback-plan` | Read-only retained-artifact plan; requires exactly one `deploymentId` query parameter |
+| `POST /v1/admin/applications/{id}/rollback` | Apply the exact `{plan, confirmation}` through candidate health and acceptance without a build |
 | `POST /v1/admin/applications/{id}/deployments` | Deploy with the normal deployment fields plus a reviewed `plan` |
 | `GET /v1/admin/operations/{id}` | Poll an operator mutation on the privileged socket |
 | `GET /v1/admin/deployments` | Paginated global deployment list |

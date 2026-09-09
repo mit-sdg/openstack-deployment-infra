@@ -7,6 +7,7 @@ release smoke gate meaningful without requiring live credentials.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import ssl
@@ -59,6 +60,7 @@ APP_ACTIONS = (
     "app.logs",
     "app.manifest.delete",
     "app.manifest.retain",
+    "app.manifest.verify",
     "app.promote",
     "app.remove",
     "app.worker.capacity",
@@ -73,6 +75,7 @@ _PROVIDER_APP_ACTIONS = frozenset(
         "app.builder.delete",
         "app.manifest.delete",
         "app.manifest.retain",
+        "app.manifest.verify",
         "app.worker.capacity",
         "app.worker.create",
         "app.worker.delete",
@@ -537,6 +540,27 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             )
             return {**capacity, "serverId": worker.server_id, "flavorName": worker.flavor_name}
         return _worker_result(worker)
+    if action == "app.manifest.verify":
+        from .registry_artifact import verify_image
+
+        _exact_args(args, {"slug", "image"}, action)
+        password = _read_environment(runtime.root / "secrets/storage-bootstrap.env").get(
+            "REGISTRY_BUILDER_PASSWORD"
+        )
+        if not password:
+            raise HelperActionError(
+                "DEPENDENCY_UNAVAILABLE", "registry credentials are unavailable"
+            )
+        authorization = "Basic " + base64.b64encode(f"builder:{password}".encode()).decode()
+        return verify_image(
+            f"{platform.get('addresses.storage')}:{REGISTRY_PORT}",
+            args["slug"],
+            args["image"],
+            authorization=authorization,
+            ssl_context=ssl.create_default_context(
+                cafile=str(_nomad_secrets(runtime) / "internal-ca.pem")
+            ),
+        )
     registry_command = (
         "/run/current-system/sw/bin/python3",
         str(runtime.root / "infra/registry/delete_manifest.py"),

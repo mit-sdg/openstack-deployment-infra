@@ -555,6 +555,7 @@ def _application_model(
         "applicationId": application.application_id,
         "slug": application.slug,
         "desiredRunning": application.desired_running,
+        "activeDeploymentId": None if deployment is None else deployment.deployment_id,
         "url": _safe_public_url(application.url),
         "sizing": {
             "workerFlavor": _safe_name(application.worker_flavor),
@@ -565,6 +566,7 @@ def _application_model(
             None
             if deployment is None
             else {
+                "deploymentId": deployment.deployment_id,
                 "sourceCommit": deployment.source_commit,
                 "imageDigest": deployment.image_digest,
                 "nomadVersion": deployment.nomad_version,

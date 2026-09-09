@@ -146,7 +146,7 @@ class DocumentationTests(unittest.TestCase):
         implementation = (ROOT / "openstack_platform" / "controller" / "api.py").read_text()
         internals = (ROOT / "docs" / "INTERNALS.md").read_text()
         routes = set(ROUTE_RE.findall(implementation))
-        self.assertEqual(len(routes), 37)
+        self.assertEqual(len(routes), 39)
         for method, path in routes:
             with self.subTest(method=method, path=path):
                 self.assertIn(f"`{method} {path}`", internals)

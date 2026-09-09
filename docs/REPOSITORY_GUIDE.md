@@ -168,6 +168,8 @@ cross-cutting boundaries.
 - `openstack_platform/controller/async_operations.py` — bounded worker pool for durably accepted, per-application serialized mutations.
 - `openstack_platform/controller/database.py` — SQLite schema, migrations, deployment identity, journals, and short product-state operations.
 - `openstack_platform/controller/deployment_config.py` — parses typed UI-owned deployment configuration and validates repository checkouts.
+- `openstack_platform/controller/deployment_reads.py` — allowlisted immutable configuration and exact per-attempt source repository reads.
+- `openstack_platform/controller/rollback.py` — retained-artifact rollback target validation and compare-and-set review plans.
 - `openstack_platform/controller/deployment_service.py` — coordinates candidate build/deploy/accept/recovery independently of HTTP parsing.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
@@ -193,6 +195,7 @@ cross-cutting boundaries.
 - `openstack_platform/helper/nomad.py` — Nomad Variable reads and owner-scoped compare-and-set updates.
 - `openstack_platform/helper/worker_capacity.py` — exact owned Nomad node readiness and allocatable CPU/RAM observations.
 - `openstack_platform/helper/production.py` — lazily constructs concrete production handlers and trusted local service clients.
+- `openstack_platform/helper/registry_artifact.py` — bounded read-only manifest and blob availability checks within one application registry repository.
 - `openstack_platform/helper/storage.py` — trusted provider operations for PostgreSQL, MongoDB, and Garage/S3 resources and credentials.
 
 ## Tests
@@ -233,6 +236,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_documentation.py` — documentation links, consolidated reader paths, interface claims, route coverage, and repository-index checks.
 - `tests/test_full_loss_recovery_drill.py` — full and verify-only recovery drill command/evidence/failure-boundary tests.
 - `tests/test_hardening_properties.py` — generated property cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
+- `tests/test_helper_registry_artifact.py` — scoped read-only artifact graph verification, missing content, digest tampering, and secret-safe results.
+- `tests/test_retained_rollback.py` — authoritative reads, no-build rollback, storage drift, current secrets, acceptance recovery, and optional FIP handover ordering.
 - `tests/test_helper_application_actions.py` — Nomad helper deployment, ownership, health, promotion, environment, logs, and removal tests.
 - `tests/test_host_user_data.py` — protected-input validation and cloud-init rendering tests for each role.
 - `tests/test_ingress_credentials.py` — per-replacement token validation, rotation, cleanup, non-persistence, and CLI contract tests.
