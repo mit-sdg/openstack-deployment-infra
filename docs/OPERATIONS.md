@@ -336,89 +336,87 @@ infra/backup/full_loss_recovery_drill.sh --verify-only \
 Verify-only cannot create `DRILL-EVIDENCE.json` and is not a completed
 full-loss drill.
 
-## Escrow the ingress connector token
-
-Before ingress replacement, import the existing Cloudflare connector token into
-local operator escrow. This procedure is offline: it verifies file protection,
-token structure, the expected tunnel UUID, and the configured project UUID,
-namespace, and domain. It does **not** prove that Cloudflare still accepts the
-token or that the tunnel routes the configured domain. Confirm those facts from
-authenticated Cloudflare configuration and current public health separately.
-
-Prerequisites:
-
-- Use the current platform release and the intended non-secret inventory. Obtain
-  the expected tunnel UUID independently from authenticated Cloudflare records.
-- Obtain the raw connector token through an authorized, authenticated source.
-  The input must contain only the base64 connector token, optionally followed by
-  one newline; it is not a `TUNNEL_TOKEN=...` environment file or an API token.
-  Do not source guest files as shell code or put the token in arguments/logs.
-- If the only copy is on a retained guest without an authenticated SSH host key,
-  stop here. Console history without key evidence does not authenticate SSH.
-  Recovery requires separately approved authenticated provider snapshot access,
-  proof of the exact source server/disk identity, a private snapshot, and isolated
-  read-only extraction (for example, guestfish without booting the copied guest).
-  This CLI does not perform that recovery. Do not disable host-key checking,
-  accept a scanned key as proof, or stop/delete the serving host to obtain a token.
-- The raw file must be a direct, single-link, operator-owned mode-0600 file.
-  State and credentials directories must be operator-owned mode 0700, under
-  trusted parent directories. Import creates missing final directories, not parents.
-
-Run as the operator account; replace the uppercase tunnel UUID and private input
-path with verified values. Use the same state directory for all commands:
-
-```bash
-export OPERATOR_STATE=/srv/openstack-platform/state
-$PLATFORM_CLI --state-directory "$OPERATOR_STATE" infra ingress-credentials import \
-  --token-file /private/recovered-connector-token --tunnel-id EXPECTED_TUNNEL_UUID
-$PLATFORM_CLI --state-directory "$OPERATOR_STATE" infra ingress-credentials verify \
-  --tunnel-id EXPECTED_TUNNEL_UUID
-```
-
-Success prints only a local-verification acknowledgement. The plaintext escrow
-is `$OPERATOR_STATE/credentials/ingress-credentials.json` (0600); import commits
-it with file and directory fsync. Re-importing the same token is idempotent.
-An existing different or invalid escrow is not overwritten; import is not a
-rotation command. Protect an independently encrypted offline copy under your
-credential-custody procedure: SQLite backups do not include this file. After
-verification and custody are complete, remove temporary extraction copies under
-the approved recovery cleanup procedure, retaining the original serving host
-until replacement acceptance.
-
-Missing, malformed, mismatched, symlinked, or weakly protected escrow blocks a
-new ingress replacement before any provider call. Correct the input or restore
-the verified escrow rather than bypassing the check. Verification never prints
-the token, its decoded secret, or a secret fingerprint.
-
 ## Replace a persistent host
 
-Before replacing ingress, complete [token escrow](#escrow-the-ingress-connector-token).
-Supply the current protected bootstrap inputs through `OPERATOR_PUBLIC_KEY`,
-`NOMAD_TOKENS_FILE`, and `PKI_DIR`. Ingress replacement always renders the reviewed
-template with the escrowed token and Cloudflare enabled; `ENABLE_CLOUDFLARED=false`
-and `CLOUDFLARE_TUNNEL_TOKEN_FILE` cannot override escrow. Explicit ingress
-`--user-data` is refused. Other roles retain their protected-input contract.
+Replacement stops the old VM but retains it for rollback. The fixed port and
+retained volumes move to the candidate. This is a singleton replacement with
+service interruption, **not zero downtime**. The old VM is deleted only after
+the candidate passes readiness and exact image/flavor/name/provenance checks.
+On readiness failure, replacement restores the retained old host. Never delete
+the old server or detach a volume manually.
 
 Before replacing storage, require a fresh managed-data `RESTORE-MANIFEST`.
 Before replacing admin, require fresh hosted-controller and operator-state
 backups. Publish and live-test the replacement role image before selecting its
-exact UUID.
+exact UUID. Use `admin`, `ingress`, or `storage`; the token-file option below is
+valid only for ingress.
+
+### Supply the ingress token for each fresh replacement
+
+Obtain the current raw Cloudflare connector token through your authorized
+credential-custody process. The CLI does not extract guest credentials, prompt
+for tokens, or maintain a local credential store. If the only copy is on a
+guest without authenticated access, stop and resolve credential custody
+separately; do not bypass SSH host-key checking.
+
+The input must be a direct, single-link, operator-owned mode-0600 regular file,
+at most 16 KiB, under trusted parent directories. It must contain only the
+base64 connector token (at most 8192 characters), optionally followed by one
+LF or CRLF newline—not a `TUNNEL_TOKEN=...` environment file or an API token.
+The CLI checks file protection and the token's account/tunnel/secret structure
+**offline**. This does not prove Cloudflare authentication or domain routing.
+Confirm the intended tunnel and domain through authenticated Cloudflare records.
+A revoked but structurally valid token can pass local checks; candidate readiness
+must still pass before deleting the old VM.
+
+Run as the operator account using the variables from [Initialize operator
+variables](#initialize-operator-variables). Substitute your current protected
+bootstrap paths and the selected image UUID:
 
 ```bash
-$PLATFORM_CLI --state-directory "$OPERATOR_STATE" infra image set ingress NEW_INGRESS_IMAGE_UUID
-$PLATFORM_CLI --state-directory "$OPERATOR_STATE" infra replace ingress --yes
+export OPERATOR_PUBLIC_KEY=/private/operator.pub
+export NOMAD_TOKENS_FILE=/private/nomad-tokens.env
+export PKI_DIR=/private/pki
+$PLATFORM_CLI infra image set ingress NEW_INGRESS_IMAGE_UUID
+$PLATFORM_CLI infra replace ingress --yes \
+  --cloudflare-tunnel-token-file /private/current-connector-token
 $PLATFORM_CLI infra logs ingress --lines 200
+test "$(curl --fail --show-error --silent "https://$PLATFORM_DOMAIN/healthz")" = OK
 ```
 
-Use `admin`, `ingress`, or `storage`. Replacement retains the current host,
-fixed port, and volumes until the candidate passes readiness and exact
-image/flavor/name/provenance checks. On readiness failure it restores the old
-host. An ambiguous provider result becomes recovery-required; restore the named
-dependency and rerun the same command. Ingress acceptance checks both internal
-and public `/healthz`; local escrow verification alone cannot authorize deleting
-the retained host. Recovery that continues acceptance or old-host cleanup also
-requires intact escrow. Rollback remains available without escrow. Never delete
-the old server or detach a volume manually.
+Supply a file path, never the token value in arguments, chat, or logs. Each fresh
+ingress replacement reads and validates the explicit file before any provider
+call, then renders the reviewed template with Cloudflare enabled. Missing or
+malformed input fails without stopping the old VM. `ENABLE_CLOUDFLARED=false`,
+`CLOUDFLARE_TUNNEL_TOKEN_FILE`, and opaque ingress `--user-data` cannot bypass
+this contract. Other roles retain their protected-input contract.
+
+The CLI leaves the original file unchanged. Private temporary token and rendered
+user-data files are unlinked on normal completion and handled failure; forced
+process termination can leave temporary files requiring protected cleanup.
+The token is provisioned to the candidate via provider user-data, not stored in
+operator SQLite, refs, logs, or a permanent local credential database. Maintain
+your own authorized credential custody. A later fresh replacement or rotation
+uses whichever current protected file you supply; no import or reset is needed.
+Coordinate Cloudflare rotation so the retained old host can still serve if rollback
+is needed; the CLI does not rotate credentials on that host.
+
+### Retry an interrupted replacement
+
+An ambiguous provider result becomes recovery-required. Restore the named
+dependency and rerun `infra replace ingress --yes` using the same inventory and
+state directory. A recorded pre-acceptance operation rolls back; an accepted
+operation rechecks exact candidate provenance, fixed resources, readiness, and
+internal/public `/healthz` before cleaning up the retained old VM. Neither path
+reads a token file or re-renders user-data. If supplied on that retry,
+`--cloudflare-tunnel-token-file` is ignored with an explicit acknowledgement; it
+cannot change the recorded candidate's credential.
+
+Successful rollback ends that operation and does not start another replacement.
+Invoke a fresh replacement separately with the current token file. If interruption
+occurred in the initial `validated` phase before provider observation, retry starts
+a fresh attempt and requires the file. Supplying the current file on every retry
+is therefore permitted, but it is consumed only when a fresh attempt starts.
 
 Release updates follow [Install releases outside automated
 setup](MAINTENANCE.md#install-releases-outside-automated-setup). Executable

@@ -144,6 +144,7 @@ cross-cutting boundaries.
 - `openstack_platform/durable.py` — no-follow, fsync-backed primitives for crash-durable local file replacement.
 - `openstack_platform/host_keys.py` — verifies console/keyscan evidence and atomically pins the fixed admin SSH host key.
 - `openstack_platform/host_user_data.py` — validates protected inputs and renders role-specific cloud-init templates.
+- `openstack_platform/ingress_credentials.py` — validates per-replacement protected connector-token files and stages ingress user-data without a credential store.
 - `openstack_platform/installation.py` — central definitions of installed filesystem locations used by entry points.
 - `openstack_platform/openstack.py` — bounded provider operations for images and persistent-host power/replacement lifecycle.
 - `openstack_platform/operator.py` — `openstack-platform` command parser and operator-level setup/status/backup/restore/infra orchestration.
@@ -227,6 +228,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_hardening_properties.py` — generated property cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
 - `tests/test_helper_application_actions.py` — Nomad helper deployment, ownership, health, promotion, environment, logs, and removal tests.
 - `tests/test_host_user_data.py` — protected-input validation and cloud-init rendering tests for each role.
+- `tests/test_ingress_credentials.py` — per-replacement token validation, rotation, cleanup, non-persistence, and CLI contract tests.
 - `tests/test_hosted_controller_backup.py` — hosted SQLite backup encryption, evidence, permissions, and failure cleanup tests.
 - `tests/test_infra_http.py` — bounded infrastructure HTTP helper redirect, size, status, and JSON tests.
 - `tests/test_live_acceptance.py` — plan immutability, checkpoint/resume, evidence chain, signature, and failure tests.

@@ -19,7 +19,7 @@ from openstack_platform.config import load_platform
 from openstack_platform.runtime import CommandFailure, CommandResult, HttpResult
 from openstack_platform.validation import ValidationError
 from tests.repository_fixtures import clean_repository
-from tests.test_ingress_credentials import TUNNEL, connector_token
+from tests.test_ingress_credentials import connector_token
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "00000000-0000-4000-8000-000000000000"
@@ -47,7 +47,7 @@ def protected_user_data(value: bytes = b"private cloud-init"):
         path.write_bytes(value)
         path.chmod(0o600)
         # These tests exercise the provider state machine with opaque fixtures.
-        # Real escrow/rendering and bypass refusal are covered separately.
+        # Real protected-token rendering and bypass refusal are covered separately.
         real_replace = openstack.replace_host
 
         def replace_fixture(platform, role, **kwargs):
@@ -416,19 +416,6 @@ class OpenStackTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.platform = load_platform(ROOT / "config/platform.example.json")
-
-    def setUp(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        token = root / "token"
-        token.write_bytes(connector_token())
-        token.chmod(0o600)
-        state = root / "state"
-        ingress_credentials.import_escrow(self.platform, state, token, tunnel_id=TUNNEL)
-        patcher = mock.patch("openstack_platform.installation.OPERATOR_STATE", state)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def test_project_verification_uses_one_bounded_scoped_token_request(self) -> None:
         timeouts: list[float] = []
@@ -1173,8 +1160,6 @@ else:
             tunnel = root / "tunnel-token"
             tunnel.write_bytes(connector_token())
             tunnel.chmod(0o600)
-            state = root / "state"
-            ingress_credentials.import_escrow(self.platform, state, tunnel, tunnel_id=TUNNEL)
             environment = {
                 "OPERATOR_PUBLIC_KEY": str(public_key),
                 "NOMAD_TOKENS_FILE": str(tokens),
@@ -1190,7 +1175,7 @@ else:
                     selected_image_id=IMAGE_1,
                     selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
                     operation_id=OPERATION,
-                    ingress_escrow_state_directory=state,
+                    cloudflare_tunnel_token_file=tunnel,
                     checkpoint=lambda phase, refs: checkpoints.append((phase, dict(refs))),
                     health_check=self.role_health,
                     command_runner=cloud,
@@ -1232,6 +1217,8 @@ else:
             operation_log.write_text(repr(cloud.calls) + repr(replaced))
             self.assertNotIn(sentinel.encode(), operation_database.read_bytes())
             self.assertNotIn(sentinel, operation_log.read_text())
+            self.assertNotIn(connector_token(), operation_database.read_bytes())
+            self.assertNotIn(connector_token().decode(), operation_log.read_text())
 
     def test_replacement_health_failure_rolls_back_retained_old_server(self) -> None:
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
@@ -1397,7 +1384,7 @@ else:
             path = Path(directory) / "user-data"
             path.write_bytes(b"sentinel-private-user-data")
             path.chmod(0o644)
-            with self.assertRaisesRegex(ValidationError, "requires escrow and reviewed user-data"):
+            with self.assertRaisesRegex(ValidationError, "overrides are refused"):
                 openstack.replace_host(
                     self.platform,
                     "ingress",
@@ -1984,6 +1971,28 @@ else:
         phase, refs = checkpoints[-1]
         self.assertEqual(phase, "complete")
         cloud.retain_old_delete = False
+        # No local credential is needed to recover the already-rendered candidate.
+        # Wrong candidate provenance or failed health must still prevent deletion.
+        for recovery_refs, health in (
+            ({**refs, "selected_image_id": IMAGE_2}, self.role_health),
+            (refs, mock.Mock(side_effect=openstack.OpenStackError("candidate unhealthy"))),
+        ):
+            before = len(cloud.calls)
+            with self.assertRaises(openstack.OpenStackError):
+                openstack.recover_host_replacement(
+                    self.platform,
+                    "ingress",
+                    phase=phase,
+                    refs=recovery_refs,
+                    action="cleanup_old",
+                    checkpoint=lambda *_: None,
+                    health_check=health,
+                    command_runner=cloud,
+                )
+            self.assertIsNotNone(cloud.server)
+            self.assertFalse(
+                any(call[1:3] == ("server", "delete") for call in cloud.calls[before:])
+            )
         recovered = openstack.recover_host_replacement(
             self.platform,
             "ingress",

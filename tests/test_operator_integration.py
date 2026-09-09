@@ -7,7 +7,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import openstack, operator, remote
+from openstack_platform import ingress_credentials, openstack, operator, remote
 from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
 from openstack_platform.controller import deployment_service, status
@@ -869,7 +869,14 @@ class OperatorIntegrationTests(unittest.TestCase):
         self.assertTrue(callable(power.call_args.kwargs["checkpoint"]))
 
         replace_args = operator.build_parser().parse_args(
-            self.argv("infra", "replace", "ingress", "--yes")
+            self.argv(
+                "infra",
+                "replace",
+                "ingress",
+                "--yes",
+                "--cloudflare-tunnel-token-file",
+                str(self.root / "current-token"),
+            )
         )
         with operator._database(replace_args) as connection:
             db.put_image_selection(
@@ -890,6 +897,7 @@ class OperatorIntegrationTests(unittest.TestCase):
 
         def replace(*_args: object, **kwargs: object) -> openstack.ReplacementResult:
             self.assertIsNone(kwargs["user_data_path"])
+            self.assertEqual(kwargs["cloudflare_tunnel_token_file"], self.root / "current-token")
             checkpoint = kwargs["checkpoint"]
             refs = {
                 "role": "ingress",
@@ -920,6 +928,139 @@ class OperatorIntegrationTests(unittest.TestCase):
         self.assertNotIn("dataRetained", evidence["observations"])
         self.assertTrue(callable(replace_call.call_args.kwargs["health_check"]))
         self.assertGreater(replace_call.call_args.kwargs["timeout_seconds"], 800)
+
+    def _ingress_replacement_args(self, *options: str):
+        args = operator.build_parser().parse_args(
+            self.argv("infra", "replace", "ingress", "--yes", *options)
+        )
+        with operator._database(args) as connection:
+            db.put_image_selection(
+                connection,
+                role="ingress",
+                image_id=IMAGE_ID,
+                display_name="ingress-image",
+                source_commit="b" * 40,
+                compatibility_hash="c" * 64,
+            )
+        return args
+
+    def test_ingress_cli_missing_or_malformed_token_fails_without_mutation_or_secret_refs(
+        self,
+    ) -> None:
+        token = self.root / "token"
+        sentinel = "sentinel-not-a-connector-token" * 4
+        token.write_text(sentinel)
+        token.chmod(0o600)
+        for options in ((), ("--cloudflare-tunnel-token-file", str(token))):
+            args = self._ingress_replacement_args(*options)
+            output = StringIO()
+            with mock.patch.object(openstack, "_replace_host") as mutation:
+                with self.assertRaises(operator.ValidationError) as caught:
+                    operator.dispatch(args, stdout=output)
+            mutation.assert_not_called()
+            self.assertNotIn(sentinel, str(caught.exception) + output.getvalue())
+            self.assertIn("stopped but retained", output.getvalue())
+            self.assertNotIn(sentinel.encode(), (self.state / "platform.sqlite3").read_bytes())
+            self.assertFalse((self.state / "credentials").exists())
+            with operator._database(args) as connection:
+                self.assertIsNone(db.get_unfinished_operation(connection, "infrastructure"))
+
+    def test_ingress_retry_before_observation_is_fresh_and_requires_file(self) -> None:
+        args = self._ingress_replacement_args()
+        with operator._database(args) as connection:
+            operation_id = operator._begin(
+                connection,
+                operator._load_config(args),
+                kind="infra.replace",
+                scope="infrastructure",
+                refs={"role": "ingress", "selected_image_id": IMAGE_ID},
+            )
+        with (
+            mock.patch.object(openstack, "_replace_host") as mutation,
+            mock.patch.object(openstack, "recover_host_replacement") as recover,
+        ):
+            with self.assertRaisesRegex(operator.ValidationError, "--cloudflare-tunnel-token-file"):
+                operator.dispatch(args, stdout=StringIO())
+        mutation.assert_not_called()
+        recover.assert_not_called()
+        with operator._database(args) as connection:
+            self.assertEqual(db.get_operation(connection, operation_id).status, "failed")
+            self.assertIsNone(db.get_unfinished_operation(connection, "infrastructure"))
+
+    def test_ingress_cli_recovery_does_not_read_token_or_start_fresh_replacement(self) -> None:
+        for phase in ("old_stopped", "accepted"):
+            for options in (
+                (),
+                ("--cloudflare-tunnel-token-file", str(self.root / "missing-token")),
+            ):
+                args = self._ingress_replacement_args(*options)
+                action = "rollback" if phase == "old_stopped" else "continue"
+                refs = {
+                    "role": "ingress",
+                    "old_server_id": APP_ID,
+                    "replacement_server_id": "00000000-0000-4000-8000-000000000008",
+                    "selected_image_id": IMAGE_ID,
+                    "lifecycle_observations": {
+                        "old_host_retained_until_ready": True,
+                        "exact_identity_verified": True,
+                    },
+                }
+                with operator._database(args) as connection:
+                    operation_id = operator._begin(
+                        connection,
+                        operator._load_config(args),
+                        kind="infra.replace",
+                        scope="infrastructure",
+                        refs=refs,
+                    )
+                    db.checkpoint_operation(connection, operation_id, phase=phase)
+                    db.mark_recovery_required(connection, operation_id, "simulated interruption")
+
+                def recover(*_args, expected_action=action, expected_refs=refs, **kwargs):
+                    self.assertEqual(kwargs["action"], expected_action)
+                    self.assertNotIn("cloudflare_tunnel_token_file", kwargs)
+                    kwargs["checkpoint"](
+                        "rolled_back" if expected_action == "rollback" else "complete",
+                        expected_refs,
+                    )
+                    return openstack.RecoveryResult("ingress", expected_action, APP_ID, "confirmed")
+
+                output = StringIO()
+                with (
+                    mock.patch.object(openstack, "replace_host") as fresh,
+                    mock.patch.object(openstack, "recover_host_replacement", side_effect=recover),
+                    mock.patch.object(
+                        ingress_credentials, "_read", side_effect=AssertionError("no token read")
+                    ),
+                ):
+                    operator.dispatch(args, stdout=output)
+                fresh.assert_not_called()
+                if options:
+                    self.assertIn("token file is not read", output.getvalue())
+                if action == "rollback":
+                    self.assertIn("start a fresh replacement separately", output.getvalue())
+                    self.assertNotIn("persistent-host-replacement-observation", output.getvalue())
+                else:
+                    self.assertIn("persistent-host-replacement-observation", output.getvalue())
+                with operator._database(args) as connection:
+                    operation = db.get_operation(connection, operation_id)
+                    self.assertEqual(
+                        operation.status, "failed" if action == "rollback" else "succeeded"
+                    )
+                    self.assertIsNone(db.get_unfinished_operation(connection, "infrastructure"))
+
+    def test_token_option_is_rejected_for_other_roles_and_ingress_override_is_refused(self) -> None:
+        for host, options in (
+            ("admin", ("--cloudflare-tunnel-token-file", "private-token")),
+            ("ingress", ("--user-data", "private-payload")),
+        ):
+            args = operator.build_parser().parse_args(
+                self.argv("infra", "replace", host, "--yes", *options)
+            )
+            with mock.patch.object(openstack, "replace_host") as replace:
+                with self.assertRaises(operator.ValidationError):
+                    operator.dispatch(args, stdout=StringIO())
+            replace.assert_not_called()
 
     def test_replacement_lifecycle_evidence_rejects_each_falsified_observation(self) -> None:
         refs = {
