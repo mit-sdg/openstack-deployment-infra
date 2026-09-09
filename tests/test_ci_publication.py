@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import shlex
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -205,11 +208,13 @@ class PublicationTriggerTests(unittest.TestCase):
 
     def test_qemu_tool_installation_retries_bounded_apt_setup(self) -> None:
         installer = (ROOT / "tests/install_ci_apt_packages.sh").read_text()
-        self.assertEqual(WORKFLOW.read_text().count("tests/install_ci_apt_packages.sh"), 4)
+        self.assertEqual(WORKFLOW.read_text().count("tests/install_ci_apt_packages.sh"), 6)
+        self.assertNotIn("sudo apt-get", WORKFLOW.read_text())
         for value in (
-            "for attempt in 1 2",
-            "timeout --foreground --kill-after=30s 5m sudo apt-get update",
-            "timeout --foreground --kill-after=30s 10m sudo apt-get install",
+            "ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources",
+            "for attempt in 1 2 3",
+            'timeout --foreground --kill-after=30s 5m sudo apt-get "${apt_options[@]}" update',
+            'timeout --foreground --kill-after=30s 10m sudo apt-get "${apt_options[@]}" install',
         ):
             self.assertIn(value, installer)
 
@@ -229,6 +234,145 @@ class PublicationTriggerTests(unittest.TestCase):
             self.assertIn(value, workflow)
         self.assertNotIn("OPENSTACK_UNSIGNED_PRODUCTION", job("development-publish"))
         self.assertIn("max-parallel: 1", job("development-publish"))
+
+
+class CIAptIsolationTests(unittest.TestCase):
+    """Exercise the real shell with process doubles; never run host APT/sudo."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.sources = self.root / "ubuntu.sources"
+        self.sources.write_text(
+            "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\n"
+            "Components: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+        )
+        self.script = self.root / "install.sh"
+        source = (ROOT / "tests/install_ci_apt_packages.sh").read_text()
+        # Remap only the fixed file path into the fixture; production has no
+        # caller-controlled source override or host configuration mutation.
+        self.script.write_text(
+            source.replace(
+                "ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources",
+                "ubuntu_sources=" + shlex.quote(str(self.sources)),
+            )
+        )
+        self.log = self.root / "calls.jsonl"
+        runner = f"#!{sys.executable}\n" + textwrap.dedent("""\
+            import json, os, sys
+            from pathlib import Path
+            name = Path(sys.argv[0]).name
+            args = sys.argv[1:]
+            log = Path(os.environ["FAKE_APT_LOG"])
+            previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            with log.open("a") as stream:
+                stream.write(json.dumps([name, *args]) + "\\n")
+            if name == "timeout":
+                os.execvp(args[3], args[3:])
+            if name == "sudo":
+                os.execvp(args[0], args)
+            if name == "apt-get":
+                action = "update" if "update" in args else "install"
+                count = sum(row[0] == "apt-get" and action in row for row in previous)
+                if action == os.environ.get("FAIL_ACTION") and count < int(os.environ.get("FAIL_COUNT", "0")):
+                    sys.exit(int(os.environ.get("FAIL_CODE", "100")))
+            """)
+        for name in ("timeout", "sudo", "apt-get", "dpkg", "rm", "sleep"):
+            executable = self.root / name
+            executable.write_text(runner)
+            executable.chmod(0o755)
+
+    def run_installer(self, *packages, **environment):
+        return subprocess.run(
+            ["/bin/bash", str(self.script), *packages],
+            env={
+                "PATH": str(self.root),
+                "GITHUB_ACTIONS": "true",
+                "FAKE_APT_LOG": str(self.log),
+                **environment,
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    def calls(self, name):
+        rows = (
+            [json.loads(line) for line in self.log.read_text().splitlines()]
+            if self.log.exists()
+            else []
+        )
+        return [row[1:] for row in rows if row[0] == name]
+
+    def test_both_commands_use_only_ubuntu_sources_without_relaxing_integrity(self):
+        result = self.run_installer("shellcheck", "podman")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        options = [
+            "-o",
+            f"Dir::Etc::sourcelist={self.sources}",
+            "-o",
+            "Dir::Etc::sourceparts=-",
+            "-o",
+            "Dir::Cache::pkgcache=",
+            "-o",
+            "Dir::Cache::srcpkgcache=",
+            "-o",
+            "APT::Get::List-Cleanup=0",
+            "-o",
+            "APT::Update::Error-Mode=any",
+        ]
+        self.assertEqual(
+            self.calls("apt-get"),
+            [options + ["update"], options + ["install", "--yes", "shellcheck", "podman"]],
+        )
+        self.assertEqual(
+            [call[:3] for call in self.calls("timeout")],
+            [
+                ["--foreground", "--kill-after=30s", "5m"],
+                ["--foreground", "--kill-after=30s", "10m"],
+            ],
+        )
+        self.assertEqual(self.calls("rm"), [])
+        self.assertTrue(self.sources.exists())
+
+    def test_update_failure_retries_boundedly_and_never_installs_from_stale_lists(self):
+        result = self.run_installer(
+            "shellcheck", FAIL_ACTION="update", FAIL_COUNT="3", FAIL_CODE="124"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("failed after 3 attempts", result.stderr)
+        self.assertEqual(len(self.calls("apt-get")), 3)
+        self.assertTrue(all(call[-1] == "update" for call in self.calls("apt-get")))
+        self.assertEqual(len(self.calls("dpkg")), 2)
+        self.assertEqual(self.calls("sleep"), [["15"], ["15"]])
+
+    def test_install_errors_are_not_suppressed_and_transient_update_can_recover(self):
+        result = self.run_installer("podman", FAIL_ACTION="install", FAIL_COUNT="3")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(sum("install" in call for call in self.calls("apt-get")), 3)
+        self.log.unlink()
+        result = self.run_installer("podman", FAIL_ACTION="update", FAIL_COUNT="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sum("update" in call for call in self.calls("apt-get")), 2)
+        self.assertEqual(sum("install" in call for call in self.calls("apt-get")), 1)
+
+    def test_missing_or_symlink_source_non_ci_and_option_injection_fail_before_sudo(self):
+        for packages, environment in (
+            (("shellcheck",), {"GITHUB_ACTIONS": "false"}),
+            (("--allow-unauthenticated",), {}),
+        ):
+            with self.subTest(packages=packages, environment=environment):
+                self.assertEqual(self.run_installer(*packages, **environment).returncode, 2)
+                self.assertEqual(self.calls("sudo"), [])
+        self.sources.unlink()
+        self.assertEqual(self.run_installer("shellcheck").returncode, 2)
+        other = self.root / "other.sources"
+        other.write_text("unrelated source")
+        self.sources.symlink_to(other)
+        self.assertEqual(self.run_installer("shellcheck").returncode, 2)
+        self.assertEqual(self.calls("sudo"), [])
 
 
 if __name__ == "__main__":

@@ -56,9 +56,7 @@ jobs:
           uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
 
       - name: Install ShellCheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes shellcheck
+        run: tests/install_ci_apt_packages.sh shellcheck
 
       - name: Validate JSON and SVG
         run: |
@@ -141,9 +139,7 @@ jobs:
         run: uv sync --frozen --no-dev
 
       - name: Install rootless OCI runner tooling
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes fuse-overlayfs podman slirp4netns uidmap
+        run: tests/install_ci_apt_packages.sh fuse-overlayfs podman slirp4netns uidmap
 
       - name: Generate, build, start, and health-check both runtime recipes
         run: tests/smoke_generated_recipes.sh
