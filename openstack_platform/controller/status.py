@@ -343,7 +343,12 @@ def application_observer(
         scheduler_state = "unknown"
         allocation_healthy: bool | None = None
         deployment = deployments.get(application_id)
-        if deployment is not None:
+        if not application.desired_running:
+            # Disabled/declaration state does not promise a running allocation
+            # or public route; do not classify their intentional absence as bad health.
+            scheduler_available = True
+            scheduler_state = "stopped"
+        elif deployment is not None:
             try:
                 result = helper_caller(
                     "app.health",
@@ -368,22 +373,23 @@ def application_observer(
                 scheduler_state = "running" if healthy else "dead" if terminal else "pending"
             except Exception:
                 pass
-        elif not application.desired_running:
-            scheduler_available = True
-            scheduler_state = "stopped"
 
         route_available = False
         route_healthy: bool | None = None
-        if application.url is not None:
+        if application.desired_running and deployment is not None:
             try:
-                response = http_get(
-                    application.url,
+                # Use the same canonical route, configured health path and exact
+                # accepted marker as deployment acceptance. A root-page 200 or
+                # another deployment's response is not this deployment's health.
+                route_healthy = app.check_public_health(
+                    application.slug,
+                    config.platform,
+                    deployment.health_path,
                     timeout_seconds=config.policy.limits.http_seconds,
-                    response_limit=65_536,
-                    allow_redirects=False,
+                    expected_marker=app.nomad_route_marker(deployment.nomad_job),
+                    http_caller=http_get,
                 )
                 route_available = True
-                route_healthy = 200 <= response.status < 300
             except Exception:
                 pass
         return ApplicationObservation(
