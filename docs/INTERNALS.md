@@ -230,8 +230,9 @@ method, path, or body returns `409 IDEMPOTENCY_CONFLICT`.
 Database-only application creation returns `201`. External mutations durably
 reserve application scope and return `202` with an operation resource before
 external work. Four workers execute at most 32 admitted running/queued
-operations, serialized per application. Reads and polling use short independent
-SQLite transactions.
+operations, serialized per application. Operation polling uses an independent,
+query-only SQLite read snapshot and does not wait for the API handler lock held
+by slow live observations. Other synchronous handlers still share that lock.
 
 Started work with recorded domain intent interrupted by controller restart becomes
 `recovery_required`, preserving its domain checkpoint. A dispatch interrupted
@@ -244,6 +245,12 @@ can repair the former typed dispatch spelling only when the saved single-resourc
 intent matches. A recorded build rejection becomes terminal only after exact
 builder absence and authenticated build-tag absence; uncertain cleanup is retried
 without rebuilding. No secret-bearing request payload is added to durable state.
+
+Application route observations use the accepted deployment's configured health
+path and exact route marker, not the application's root page. A response from a
+different deployment cannot claim healthy status. Intentionally disabled apps
+report stopped state without probing an allocation or public route expected to
+be absent; missing accepted evidence or transport failures remain unknown.
 
 ### Project and privileged routes
 
