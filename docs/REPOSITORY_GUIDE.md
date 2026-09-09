@@ -172,6 +172,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/log_service.py` — bounded reads of runtime and retained build logs.
 - `openstack_platform/controller/main.py` — `openstack-platform-controller` executable composition and startup.
 - `openstack_platform/controller/nomad_jobs.py` — renders generated Nomad jobs and validates job/placement/route identities.
+- `openstack_platform/controller/sizing.py` — reviewed per-app flavor plans and measured capacity budgets with OS/service reserves.
 - `openstack_platform/controller/seed_images.py` — validates setup-bound role-image evidence and idempotently seeds hosted controller selections.
 - `openstack_platform/controller/service_support.py` — shared deadlines, helper transport protocol, and mutation guards.
 - `openstack_platform/controller/status.py` — safe infrastructure, application, storage, operation, and live status read models.
@@ -186,6 +187,7 @@ cross-cutting boundaries.
 - `openstack_platform/helper/application_actions.py` — fixed Nomad deployment, health, promotion, log, removal, and environment handlers.
 - `openstack_platform/helper/main.py` — one-request helper dispatcher plus committed backup/retention evidence handling.
 - `openstack_platform/helper/nomad.py` — Nomad Variable reads and owner-scoped compare-and-set updates.
+- `openstack_platform/helper/worker_capacity.py` — exact owned Nomad node readiness and allocatable CPU/RAM observations.
 - `openstack_platform/helper/production.py` — lazily constructs concrete production handlers and trusted local service clients.
 - `openstack_platform/helper/storage.py` — trusted provider operations for PostgreSQL, MongoDB, and Garage/S3 resources and credentials.
 
@@ -214,6 +216,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 ### Test modules
 
 - `tests/test_application_runtime.py` — source, recipe, BuildKit, worker, deployment, cleanup, and retention runtime tests.
+- `tests/test_application_sizing.py` — opaque flavor IDs, per-app plans, default preservation, resize acceptance, retries, and rollback tests.
 - `tests/test_ci_publication.py` — guards the CI path set that triggers role-image publication.
 - `tests/test_controller_api.py` — controller route composition, capability split, responses, idempotency, and service integration tests.
 - `tests/test_controller_database.py` — schema, migration, identity, journal, state transition, and database recovery tests.

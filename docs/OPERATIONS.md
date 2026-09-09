@@ -10,7 +10,9 @@ Run ordinary commands as the unprivileged owner of
 `/srv/openstack-platform`. Use only the generated `platform-admin` SSH alias for
 admin-host operations. Root is required only for the explicitly marked offline
 hosted-controller restore. Every provider operation is limited to resources
-named by the installed inventory.
+named by the installed inventory. For per-app worker flavor selection and
+candidate-based resize through the privileged controller API, see
+[Size an application](#size-an-application).
 
 ## Initialize operator variables
 
@@ -55,6 +57,134 @@ counts; the operator CLI cannot inspect or mutate those records.
 An unavailable live observation does not erase accepted state. Diagnose the
 named dependency before mutation; do not edit SQLite or provider resources to
 make status appear healthy.
+
+## Size an application
+
+Use the controller's privileged Unix API to select one application's worker
+flavor. This does not change the platform's student defaults. The infrastructure
+CLI has no product-mutation commands.
+
+Run these commands **locally on admin**, as the operator UID/GID admitted to
+`privileged.sock`. Install matching controller and helper releases first; the
+helper must provide `app.worker.capacity`. You need `curl`, `jq`, and Python.
+No direct SQLite writes or OpenStack server resize commands are supported.
+
+### Plan and resize an accepted application
+
+The app must be enabled and have an accepted deployment. Replacement needs quota
+for both the old worker and the target worker/port simultaneously. Worker disks
+are disposable: the new VM does not copy the old VM's filesystem. Managed
+PostgreSQL, MongoDB, and S3 resources are unchanged.
+
+Set the installed namespace and the application's UUID (not its slug). Select
+an available flavor by name or opaque ID. The Commons target is `xl.4core`, ID
+`4200`: 4 vCPUs, 16384 MiB RAM, 64 GiB disk. Availability is checked by the API,
+not assumed from this example.
+
+```bash
+umask 077
+NAMESPACE=your-installed-namespace
+APP_ID=your-canonical-application-uuid
+SOCKET="/run/${NAMESPACE}-controller/privileged.sock"
+BASE="http://localhost/v1/admin/applications/${APP_ID}"
+
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "$BASE/resize-plan?flavor=4200" > resize-plan.json
+jq . resize-plan.json
+```
+
+Review `applicationId`, `deploymentId`, `current`, `flavor`, and `reserve`.
+The plan is an observation, not a capacity reservation. Apply rechecks the exact
+application/deployment and flavor projection under the application lock. A
+changed plan or provider projection fails before creating a candidate.
+
+CPU allocation uses the new Nomad node's measured total MHz, not an assumed
+MHz-per-vCPU conversion. RAM uses measured node memory, bounded by the reviewed
+flavor RAM. For each resource the reserve is the larger of 10% (rounded up) and
+200 MHz / 512 MiB respectively, or Nomad's larger reported reserve. Thus a node
+reporting 10000 MHz and 16000 MiB offers 9000 MHz and 14400 MiB. Exact MHz and RAM
+are known only after the candidate VM registers; the plan does not promise a
+clock speed or benchmark throughput.
+
+Prepare one immutable request and idempotency key. Replace `commons` with the
+app's exact slug when sizing another app:
+
+```bash
+jq -n --slurpfile plan resize-plan.json \
+  '{plan: $plan[0], confirmation: "commons"}' > resize-request.json
+python3 -c 'import uuid; print(uuid.uuid4())' > resize-key.txt
+
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<resize-key.txt)" \
+  --data-binary @resize-request.json "$BASE/resize" > resize-response.json
+jq . resize-response.json
+
+STATUS_URL=$(jq -r .statusUrl resize-response.json)
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "http://localhost${STATUS_URL}" | jq .
+```
+
+Poll until `status` is `succeeded`, `failed`, or `recovery_required`. HTTP `202`
+means admission, not success. Resize creates an immutable deployment attempt,
+reuses the accepted digest/configuration without rebuilding or modifying
+environment values, starts an isolated worker/job, checks preview health,
+promotes the route, then checks public health and commits sizing with the active
+deployment pointer. Only then does it remove the predecessor.
+
+Inspect the accepted size through the administrator list (use pagination for
+larger inventories):
+
+```bash
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  'http://localhost/v1/admin/applications?limit=100' | jq .
+```
+
+The accepted `sizing.workerFlavor`, `sizing.cpuMHz`, and `sizing.memoryMiB` are
+pinned for normal redeploy and disable/enable, rather than reset to student
+policy. A new worker with insufficient measured capacity fails closed instead
+of silently reducing the allocation. The same plan/apply procedure can shrink
+an app; this is replacement, not Nova's in-place resize/confirm/revert protocol.
+
+### Select a flavor for the first deployment
+
+Declare the app through `POST /v1/applications` on the project socket, then get a
+sizing plan as above. Its `deploymentId` is `null`. Submit the usual exact-commit
+[deployment fields](INTERNALS.md#project-and-privileged-routes), plus the complete
+`plan` object, to:
+
+```text
+POST /v1/admin/applications/{id}/deployments
+```
+
+This privileged route also supports a new source deployment combined with a
+size change. The project deployment route rejects sizing fields. Omit operator
+sizing entirely for students: ordinary declaration/deployment retains the
+policy's small flavor, CPU, and memory values, subject to the same capacity
+check. Policy defaults are not changed by selecting another app's flavor.
+
+### Sizing failures and retries
+
+- **Plan drift or invalid confirmation:** no candidate is created. Obtain and
+  review a fresh plan, then submit a new request/key.
+- **Candidate scheduler, application, or public health failure with confirmed
+  cleanup:** the operation is `failed`; the prior accepted size and route remain.
+  The reused accepted artifact is not deleted. Fix the app/dependency, review a
+  plan, and use a new key for a new attempt.
+- **Unknown provider/helper result, interrupted acceptance, or unfinished
+  cleanup:** the operation is `recovery_required`. Preserve the request and key;
+  after restoring the dependency, repeat the exact POST. Do not edit the plan or
+  use a new key to bypass the application's blocked scope. Recovery reobserves
+  health before accepting and resumes predecessor cleanup after acceptance.
+- **Lost response:** repeat the same POST/key. It returns the existing operation
+  instead of allocating another worker. Reusing a key with a changed body is
+  `409 IDEMPOTENCY_CONFLICT`.
+
+There is no forced rollback after successful acceptance and predecessor deletion;
+use a new reviewed sizing operation. Disabled accepted apps must be enabled
+before resize. Plans do not reserve quota, and the platform does not copy local
+disk state or resize managed-storage quotas. These examples describe the API;
+production provider behavior still requires a release acceptance exercise.
 
 ## Back up all state classes
 

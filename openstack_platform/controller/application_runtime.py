@@ -1433,12 +1433,17 @@ def create_worker(
     selected_image_id: str | None,
     standard_flavor: str | None,
     nomad_command: str,
+    flavor_id: str | None = None,
     timeout_seconds: float,
     project_name: str | None = None,
     project_id: str | None = None,
     command_runner: Callable[..., Any] = run,
     worker_command: Sequence[str] = (),
 ) -> WorkerObservation:
+    from ..validation import flavor_reference
+
+    if flavor_id is not None:
+        flavor_id = flavor_reference(flavor_id)
     identifier = uuid(application_id, field="application ID")
     app_slug = slug(application_slug)
     nomad = _fixed_executable(nomad_command, field_name="Nomad command")
@@ -1462,6 +1467,7 @@ def create_worker(
         environment = {
             "IMAGE_NAME": image_id,
             "FLAVOR_NAME": flavor,
+            **({"FLAVOR_ID": flavor_id} if flavor_id is not None else {}),
             "NOMAD": nomad,
             **_project_environment(project_name, project_id),
         }
@@ -1814,6 +1820,7 @@ def execute_deployment_workflow(
     create_attempt: Callable[[str], None],
     checkpoint_attempt: Callable[[str, BaseException], None],
     operation_id: str | None = None,
+    intent_refs: Mapping[str, Any] | None = None,
 ) -> tuple[str, DeploymentResult] | None:
     """Own the durable top-level deploy sequence outside CLI presentation.
 
@@ -1836,6 +1843,7 @@ def execute_deployment_workflow(
             raise ApplicationError("deployment operation deadline was reached")
         lock_deadline = time.monotonic() + remaining
     base_refs = {
+        **(intent_refs or {}),
         "application_id": identifier,
         "slug": app_slug,
         "repository": repository_url(spec.repository),
@@ -1974,33 +1982,38 @@ def accept_healthy_deployment(
     attempt = db.get_deployment_attempt(connection, acceptance.deployment_id)
     if attempt is None or attempt.application_id != identifier:
         raise ApplicationError("deployment attempt snapshot is missing for acceptance")
-    db.put_application(
-        connection,
-        application_id=identifier,
-        application_slug=app_slug,
-        repository_url=acceptance.repository,
-        desired_running=True,
-        url=acceptance.public_url,
-        worker_server_id=acceptance.worker_server_id,
-        worker_server_name=acceptance.worker_server_name,
-        worker_port_id=acceptance.worker_port_id,
-        worker_port_name=acceptance.worker_port_name,
-        worker_flavor=acceptance.worker_flavor,
-        scheduler_cpu_mhz=acceptance.cpu_mhz,
-        scheduler_memory_mib=acceptance.memory_mib,
-    )
-    db.checkpoint_deployment_attempt(
-        connection,
-        acceptance.deployment_id,
-        status="succeeded",
-        recipe_hash=acceptance.recipe_hash,
-        image_digest=expected_image,
-        nomad_job=acceptance.nomad_job,
-        nomad_job_sha256=expected_hash,
-        nomad_version=version,
-        build_log_path=acceptance.build_log_path,
-        cleanup_state="not_required",
-    )
+    # Commit placement/sizing and the accepted pointer together. A failed
+    # SQLite write must not pin the new size while the old deployment is active.
+    with db.transaction(connection):
+        db.put_application(
+            connection,
+            application_id=identifier,
+            application_slug=app_slug,
+            repository_url=acceptance.repository,
+            desired_running=True,
+            url=acceptance.public_url,
+            worker_server_id=acceptance.worker_server_id,
+            worker_server_name=acceptance.worker_server_name,
+            worker_port_id=acceptance.worker_port_id,
+            worker_port_name=acceptance.worker_port_name,
+            worker_flavor=acceptance.worker_flavor,
+            scheduler_cpu_mhz=acceptance.cpu_mhz,
+            scheduler_memory_mib=acceptance.memory_mib,
+            _within_transaction=True,
+        )
+        db.checkpoint_deployment_attempt(
+            connection,
+            acceptance.deployment_id,
+            status="succeeded",
+            recipe_hash=acceptance.recipe_hash,
+            image_digest=expected_image,
+            nomad_job=acceptance.nomad_job,
+            nomad_job_sha256=expected_hash,
+            nomad_version=version,
+            build_log_path=acceptance.build_log_path,
+            cleanup_state="not_required",
+            _within_transaction=True,
+        )
     return DeploymentResult(nomad_version=version, observations=1)
 
 

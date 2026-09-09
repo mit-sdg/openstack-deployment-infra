@@ -61,6 +61,7 @@ APP_ACTIONS = (
     "app.manifest.retain",
     "app.promote",
     "app.remove",
+    "app.worker.capacity",
     "app.worker.create",
     "app.worker.delete",
     "app.worker.observe",
@@ -72,6 +73,7 @@ _PROVIDER_APP_ACTIONS = frozenset(
         "app.builder.delete",
         "app.manifest.delete",
         "app.manifest.retain",
+        "app.worker.capacity",
         "app.worker.create",
         "app.worker.delete",
         "app.worker.observe",
@@ -452,7 +454,12 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             project_id=platform.project_id,
         )
         return {"buildId": builder.build_id, "absent": builder.absent}
-    if action in {"app.worker.create", "app.worker.delete", "app.worker.observe"}:
+    if action in {
+        "app.worker.create",
+        "app.worker.delete",
+        "app.worker.observe",
+        "app.worker.capacity",
+    }:
         expected = {"applicationId", "slug", "workerImageId", "standardFlavor"}
         if action == "app.worker.delete":
             if args.keys() not in ({"applicationId", "slug"}, {"applicationId", "slug", "single"}):
@@ -460,6 +467,8 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             if not isinstance(args.get("single", False), bool):
                 raise ValidationError("single-worker selector must be boolean")
         else:
+            if action == "app.worker.create" and "flavorId" in args:
+                expected.add("flavorId")
             _exact_args(
                 args,
                 expected if action == "app.worker.create" else {"applicationId", "slug"},
@@ -473,6 +482,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 worker_command=application.provider_command(platform, "worker"),
                 selected_image_id=args["workerImageId"],
                 standard_flavor=args["standardFlavor"],
+                flavor_id=args.get("flavorId"),
                 nomad_command=application.provider_command(platform, "nomad")[0],
                 timeout_seconds=900,
                 project_name=platform.project_name,
@@ -513,6 +523,19 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 project_name=platform.project_name,
                 project_id=platform.project_id,
             )
+        if action == "app.worker.capacity":
+            from .worker_capacity import observe_capacity
+
+            if not worker.ready or worker.server_id is None:
+                raise ValidationError("worker is not ready for capacity observation")
+            capacity = observe_capacity(
+                platform,
+                worker.application_id,
+                worker.application_slug,
+                worker.server_name,
+                nomad_command=application.provider_command(platform, "nomad")[0],
+            )
+            return {**capacity, "serverId": worker.server_id, "flavorName": worker.flavor_name}
         return _worker_result(worker)
     registry_command = (
         "/run/current-system/sw/bin/python3",

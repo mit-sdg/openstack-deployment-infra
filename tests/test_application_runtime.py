@@ -434,6 +434,36 @@ class ProviderCommandTests(unittest.TestCase):
                 "NOMAD": "fixed-nomad-wrapper",
             },
         )
+        calls.clear()
+        created = False
+        create_worker(
+            APP_ID,
+            "demo-app",
+            prefix="example",
+            selected_image_id=self.IMAGE_ID,
+            standard_flavor="worker-standard",
+            flavor_id="4200",
+            nomad_command="fixed-nomad-wrapper",
+            timeout_seconds=30,
+            command_runner=runner,
+            worker_command=("fixed-worker",),
+        )
+        self.assertEqual(calls[1][1]["env"]["FLAVOR_ID"], "4200")
+        calls.clear()
+        with self.assertRaises(ValidationError):
+            create_worker(
+                APP_ID,
+                "demo-app",
+                prefix="example",
+                selected_image_id=self.IMAGE_ID,
+                standard_flavor="worker-standard",
+                flavor_id="--help",
+                nomad_command="fixed-nomad-wrapper",
+                timeout_seconds=30,
+                command_runner=runner,
+                worker_command=("fixed-worker",),
+            )
+        self.assertEqual(calls, [])
 
     def test_worker_delete_expands_only_the_two_bounded_deployment_slots(self) -> None:
         platform = SimpleNamespace(prefix="example", project_name="project", project_id=APP_ID)

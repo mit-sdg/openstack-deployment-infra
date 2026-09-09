@@ -477,6 +477,13 @@ class OperatorIntegrationTests(unittest.TestCase):
                     "portId": "00000000-0000-4000-8000-000000000005",
                     "portName": "example-worker-000000000001-v4",
                 }
+            if action == "app.worker.capacity":
+                return {
+                    "serverId": "00000000-0000-4000-8000-000000000004",
+                    "flavorName": "one-vcpu",
+                    "cpuMHz": 1800,
+                    "memoryMiB": 3072,
+                }
             if action == "app.deploy":
                 candidate = app.nomad_candidate_identity(values["job"])  # type: ignore[index]
                 assert candidate is not None
@@ -808,6 +815,13 @@ class OperatorIntegrationTests(unittest.TestCase):
                     "serverName": "example-worker-failed",
                     "portId": "00000000-0000-4000-8000-000000000005",
                     "portName": "example-worker-failed-v4",
+                }
+            if action == "app.worker.capacity":
+                return {
+                    "serverId": "00000000-0000-4000-8000-000000000004",
+                    "flavorName": "one-vcpu",
+                    "cpuMHz": 1800,
+                    "memoryMiB": 3072,
                 }
             if action == "app.manifest.delete":
                 if fail_candidate_cleanup[0]:

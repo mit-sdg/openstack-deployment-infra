@@ -15,7 +15,7 @@ from ..runtime import safe_summary
 from ..validation import ValidationError, bounded_text, env_key, resource_name, uuid
 from . import application_runtime as app
 from . import database as db
-from . import status, storage
+from . import sizing, status, storage
 from .application_service import ApplicationService
 from .async_operations import AsyncOperationExecutor
 from .deployment_config import parse_configuration
@@ -188,6 +188,10 @@ class ControllerAPI:
             ("GET", "/v1/admin/hosts", self._admin_hosts),
             ("GET", "/v1/admin/images", self._admin_images),
             ("GET", "/v1/admin/applications", self._admin_applications),
+            ("GET", "/v1/admin/applications/{id}/resize-plan", self._resize_plan),
+            ("POST", "/v1/admin/applications/{id}/resize", self._resize),
+            ("POST", "/v1/admin/applications/{id}/deployments", self._operator_deployment),
+            ("GET", "/v1/admin/operations/{id}", self._get_operation),
             ("GET", "/v1/admin/deployments", self._admin_deployments),
             ("GET", "/v1/admin/storage", self._admin_storage),
             ("GET", "/v1/admin/operations", self._admin_operations),
@@ -329,16 +333,17 @@ class ControllerAPI:
             request_fingerprint=self._fingerprint(request),
         )
 
-    def _operation_response(self, operation_id: str) -> Response:
+    def _operation_response(self, operation_id: str, *, admin: bool = False) -> Response:
+        status_url = f"/v1/{'admin/' if admin else ''}operations/{operation_id}"
         body: dict[str, object] = {
             "operationId": operation_id,
-            "statusUrl": f"/v1/operations/{operation_id}",
+            "statusUrl": status_url,
             "result": {"kind": "operation", "id": operation_id},
         }
         return Response(
             202,
             body,
-            {"Location": f"/v1/operations/{operation_id}"},
+            {"Location": status_url},
         )
 
     def _is_recovery_result(self, claimed: db.IdempotencyRequest) -> bool:
@@ -383,7 +388,9 @@ class ControllerAPI:
                     scope=scope,
                     work=execute,
                 )
-            return self._operation_response(claimed.result_id)
+            return self._operation_response(
+                claimed.result_id, admin=request.path.startswith("/v1/admin/")
+            )
         self.executor.submit(
             self.connection,
             operation_id=claimed.request_id,
@@ -391,7 +398,9 @@ class ControllerAPI:
             scope=scope,
             work=execute,
         )
-        return self._operation_response(claimed.request_id)
+        return self._operation_response(
+            claimed.request_id, admin=request.path.startswith("/v1/admin/")
+        )
 
     def _create_application(self, request: Request) -> Response:
         self._no_query(request)
@@ -520,6 +529,84 @@ class ControllerAPI:
                     body["configurationRevision"],
                     configuration,
                     key,
+                )
+            ),
+            kind="app.deploy",
+            scope=f"app-{application.application_id}",
+        )
+
+    def _resize_plan(self, request: Request) -> Response:
+        if (
+            request.body is not None
+            or set(request.query) != {"flavor"}
+            or len(request.query["flavor"]) != 1
+        ):
+            raise HttpError(
+                400, "INVALID_QUERY", "supply exactly one flavor query field and no body"
+            )
+        application = self._application(self._path_uuid(request))
+        return Response(
+            200,
+            sizing.plan(
+                self.connection, self.config, application.application_id, request.query["flavor"][0]
+            ),
+        )
+
+    def _resize(self, request: Request) -> Response:
+        self._no_query(request)
+        body = self._body(
+            request, allowed={"plan", "confirmation"}, required={"plan", "confirmation"}
+        )
+        if not isinstance(body["plan"], dict):
+            raise ValidationError("resize plan must be an object")
+        claimed = self._claim(request)
+        if claimed.result_id is not None and not self._is_recovery_result(claimed):
+            return self._operation_response(claimed.result_id, admin=True)
+        application = self._application(self._path_uuid(request))
+        return self._external(
+            request,
+            lambda connection, key: DeploymentService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).resize(
+                application.application_id,
+                body["plan"],
+                confirmation=body["confirmation"],
+                request_id=key,
+            ),
+            kind="app.deploy",
+            scope=f"app-{application.application_id}",
+            claimed=claimed,
+        )
+
+    def _operator_deployment(self, request: Request) -> Response:
+        self._no_query(request)
+        fields = {
+            "repository",
+            "commit",
+            "requestedRef",
+            "configurationRevision",
+            "configuration",
+            "plan",
+        }
+        body = self._body(request, allowed=fields, required=fields)
+        if not isinstance(body["plan"], dict):
+            raise ValidationError("sizing plan must be an object")
+        application = self._application(self._path_uuid(request))
+        configuration = parse_configuration(body["configuration"])
+        return self._external(
+            request,
+            lambda connection, key: DeploymentService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).deploy(
+                DeploymentRequest(
+                    application.slug,
+                    body["repository"],
+                    body["requestedRef"],
+                    body["commit"],
+                    body["configurationRevision"],
+                    configuration,
+                    key,
+                    body["plan"],
                 )
             ),
             kind="app.deploy",
@@ -916,6 +1003,11 @@ class ControllerAPI:
             "slug": application.slug,
             "url": application.url,
             "enabled": application.desired_running,
+            "sizing": {
+                "workerFlavor": application.worker_flavor,
+                "cpuMHz": application.scheduler_cpu_mhz,
+                "memoryMiB": application.scheduler_memory_mib,
+            },
             "createdAt": application.created_at,
             "updatedAt": application.updated_at,
         }

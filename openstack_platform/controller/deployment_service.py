@@ -8,7 +8,7 @@ import sqlite3
 import time
 import uuid as uuid_module
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -30,6 +30,7 @@ from ..validation import (
 )
 from . import application_runtime as app
 from . import database as db
+from . import sizing
 from .deployment_config import DeploymentConfiguration, branch_name
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
@@ -64,6 +65,8 @@ class DeploymentRequest:
     configuration_revision: int
     configuration: DeploymentConfiguration
     request_id: str | None = None
+    sizing_plan: dict[str, Any] | None = None
+    reuse_deployment_id: str | None = None
 
 
 RecoveryKind = Literal["candidate-removed", "accepted", "deployment-healthy"]
@@ -446,9 +449,18 @@ def _prepare_deployment_worker(
     application_slug: str,
     worker_flavor: str,
     candidate: str,
+    flavor_plan: dict[str, Any] | None = None,
     refs: dict[str, Any],
     deadline: float,
 ) -> app.DeploymentWorker:
+    if flavor_plan is not None:
+        observed_flavor = openstack.observe_flavor_capacity(
+            config.platform,
+            flavor_plan["flavor_id"],
+            timeout_seconds=_remaining(deadline, config.policy.limits.process_seconds),
+        )
+        if sizing.flavor_projection(observed_flavor) != flavor_plan:
+            raise app.ApplicationError("reviewed flavor capacity or identity drifted")
     # Alternate bounded worker slots so staged and accepted fixed ports coexist.
     previous = db.get_deployment(connection, application_id)
     if previous is None:
@@ -501,6 +513,7 @@ def _prepare_deployment_worker(
                 "slug": application_slug,
                 "workerImageId": worker_image.image_id,
                 "standardFlavor": worker_flavor,
+                **({"flavorId": flavor_plan["flavor_id"]} if flavor_plan is not None else {}),
             },
             deadline=deadline,
         )
@@ -1218,6 +1231,37 @@ class DeploymentService:
             deadline=selected_deadline,
         )
 
+    def resize(
+        self, application_id: str, plan: dict[str, Any], *, confirmation: str, request_id: str
+    ) -> DeploymentOutcome:
+        application = db.get_application(self.connection, application_id)
+        if application is None or confirmation != application.slug:
+            raise ValidationError("resize requires exact application slug confirmation")
+        prior_id = uuid(plan.get("deploymentId"), field="resize source deployment ID")
+        prior = db.get_deployment_attempt(self.connection, prior_id)
+        if (
+            prior is None
+            or prior.application_id != application_id
+            or prior.status != "succeeded"
+            or prior.configuration is None
+            or application.repository_url is None
+        ):
+            raise ValidationError("resize requires an accepted deployment snapshot")
+        assert prior.requested_ref is not None and prior.configuration_revision is not None
+        return self.deploy(
+            DeploymentRequest(
+                application.slug,
+                application.repository_url,
+                prior.requested_ref,
+                prior.source_commit,
+                prior.configuration_revision,
+                prior.configuration,
+                request_id,
+                plan,
+                prior_id,
+            )
+        )
+
     def deploy(
         self,
         request: DeploymentRequest,
@@ -1269,6 +1313,10 @@ class DeploymentService:
             existing.scheduler_cpu_mhz if existing is not None else standard.cpu_mhz,
             existing.scheduler_memory_mib if existing is not None else standard.memory_mib,
         )
+        if request.sizing_plan is not None:
+            if existing is None or not isinstance(request.sizing_plan.get("flavor"), dict):
+                raise ValidationError("operator sizing requires a declared application and plan")
+            spec = replace(spec, worker_flavor=request.sizing_plan["flavor"].get("name"))
         selected_deadline = (
             time.monotonic() + self.config.policy.limits.process_seconds
             if deadline is None
@@ -1289,6 +1337,8 @@ class DeploymentService:
                         "commit": source_commit,
                         "configurationRevision": request.configuration_revision,
                         "configuration": json.loads(configuration_json),
+                        "sizingPlan": request.sizing_plan,
+                        "reuseDeploymentId": request.reuse_deployment_id,
                     }
                 ),
                 environment.revision,
@@ -1382,7 +1432,12 @@ class DeploymentService:
                 )
 
         def recover(operation: db.Operation) -> db.Operation | None:
-            nonlocal completed_recovery
+            nonlocal completed_recovery, spec
+            allocation = operation.refs.get("allocation")
+            if allocation is not None:
+                spec = replace(
+                    spec, cpu_mhz=allocation["cpuMHz"], memory_mib=allocation["memoryMiB"]
+                )
             if (
                 operation.phase == "validated"
                 and db.get_deployment_attempt(self.connection, operation.operation_id) is None
@@ -1394,6 +1449,44 @@ class DeploymentService:
 
         def prepare_build(operation: db.Operation) -> app.DeploymentBuild:
             configuration, snapshotted_manifest = snapshot(operation.operation_id)
+            if request.reuse_deployment_id is not None:
+                prior = db.get_deployment_attempt(self.connection, request.reuse_deployment_id)
+                if (
+                    prior is None
+                    or prior.status != "succeeded"
+                    or prior.image_digest is None
+                    or prior.recipe_hash is None
+                    or prior.build_log_path is None
+                ):
+                    raise ValidationError("resize source artifact is unavailable")
+                refs = {
+                    **operation.refs,
+                    "recipe_hash": prior.recipe_hash,
+                    "build_log_path": prior.build_log_path,
+                }
+                db.checkpoint_operation(
+                    self.connection,
+                    operation.operation_id,
+                    phase="image_pushed",
+                    refs=refs,
+                    candidate_digest=prior.image_digest,
+                    cleanup_state="not_required",
+                )
+                db.checkpoint_deployment_attempt(
+                    self.connection,
+                    operation.operation_id,
+                    status="deploying",
+                    recipe_hash=prior.recipe_hash,
+                    image_digest=prior.image_digest,
+                    build_log_path=prior.build_log_path,
+                )
+                return app.DeploymentBuild(
+                    prior.image_digest,
+                    snapshotted_manifest,
+                    prior.recipe_hash,
+                    prior.build_log_path,
+                    refs,
+                )
             return _prepare_deployment_build(
                 self.connection,
                 self.config,
@@ -1412,6 +1505,8 @@ class DeploymentService:
             )
 
         def prepare_environment(operation_id: str, build: app.DeploymentBuild) -> dict[str, Any]:
+            if request.reuse_deployment_id is not None:
+                return dict(build.refs)
             return _prepare_platform_environment(
                 self.connection,
                 self.config,
@@ -1428,8 +1523,9 @@ class DeploymentService:
             build: app.DeploymentBuild,
             refs: dict[str, Any],
         ) -> app.DeploymentWorker:
+            nonlocal spec
             db.checkpoint_deployment_attempt(self.connection, operation_id, status="deploying")
-            return _prepare_deployment_worker(
+            worker = _prepare_deployment_worker(
                 self.connection,
                 self.config,
                 helper_caller=self.helper_caller,
@@ -1438,10 +1534,40 @@ class DeploymentService:
                 application_id=application_id,
                 application_slug=application_slug,
                 worker_flavor=spec.worker_flavor,
+                flavor_plan=None if request.sizing_plan is None else request.sizing_plan["flavor"],
                 candidate=build.image,
                 refs=refs,
                 deadline=selected_deadline,
             )
+            capacity = self.helper_caller(
+                self.config,
+                "app.worker.capacity",
+                {"applicationId": worker.refs["worker_application_id"], "slug": application_slug},
+                deadline=selected_deadline,
+            )
+            cpu, memory = sizing.worker_budget(capacity, worker.server_id, spec.worker_flavor)
+            if request.sizing_plan is not None and "allocation" not in refs:
+                # Do not allocate RAM beyond the reviewed provider flavor even
+                # if a malformed guest observation claims additional capacity.
+                ram = request.sizing_plan["flavor"]["ram_mib"]
+                memory = min(memory, ram - sizing.reserve(ram, sizing.MEMORY_RESERVE_MIB))
+                spec = replace(spec, cpu_mhz=cpu, memory_mib=memory)
+            if spec.cpu_mhz > cpu or spec.memory_mib > memory:
+                raise app.ApplicationError(
+                    "pinned allocation exceeds worker capacity after reserve"
+                )
+            refs = {
+                **worker.refs,
+                "allocation": {"cpuMHz": spec.cpu_mhz, "memoryMiB": spec.memory_mib},
+            }
+            db.checkpoint_operation(
+                self.connection,
+                operation_id,
+                phase="worker_ready",
+                refs=refs,
+                candidate_digest=build.image,
+            )
+            return replace(worker, refs=refs)
 
         def deploy_and_accept(
             operation_id: str,
@@ -1460,6 +1586,22 @@ class DeploymentService:
             )
 
         def verify_project() -> None:
+            if request.sizing_plan is not None:
+                unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
+                if unfinished is None:
+                    sizing.validate_plan(
+                        self.connection,
+                        self.config,
+                        application_id,
+                        request.sizing_plan,
+                        timeout_seconds=_remaining(
+                            selected_deadline, self.config.policy.limits.process_seconds
+                        ),
+                    )
+                elif unfinished.refs.get("sizing_plan") != request.sizing_plan:
+                    raise db.UnfinishedOperationError(
+                        unfinished.scope, unfinished.operation_id, unfinished.kind
+                    )
             openstack.verify_project(
                 self.config.platform,
                 timeout_seconds=_remaining(
@@ -1484,6 +1626,10 @@ class DeploymentService:
             create_attempt=create_attempt,
             checkpoint_attempt=checkpoint_attempt,
             operation_id=selected_request_id,
+            intent_refs={
+                "sizing_plan": request.sizing_plan,
+                "reuse_deployment_id": request.reuse_deployment_id,
+            },
         )
         if result is None:
             if completed_recovery is None:

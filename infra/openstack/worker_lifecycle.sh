@@ -284,8 +284,8 @@ if [[ -n $server_id ]]; then
 fi
 flavor=${FLAVOR_NAME:?set FLAVOR_NAME to the standard worker flavor for a new worker}
 image=${IMAGE_NAME:?set IMAGE_NAME to the selected image UUID for a new worker}
-"$OSC" flavor show "$flavor" -f json -c name -c vcpus | python3 -c '
-import json,sys
+flavor_id=$("$OSC" flavor show "$flavor" -f json -c id -c name -c vcpus | python3 -c '
+import json,re,sys
 expected=sys.argv[1]; value=json.load(sys.stdin)
 fields={str(key).lower(): item for key,item in value.items()} if isinstance(value,dict) else {}
 name=fields.get("name"); vcpus=fields.get("vcpus")
@@ -293,7 +293,15 @@ try: vcpus=int(vcpus)
 except (TypeError,ValueError): raise SystemExit("worker flavor vCPU count is malformed")
 if name != expected or vcpus < 1:
  raise SystemExit("worker flavor must resolve to the exact configured flavor with at least one vCPU")
-' "$flavor"
+identifier=fields.get("id")
+if not isinstance(identifier,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}",identifier):
+ raise SystemExit("worker flavor ID was malformed")
+print(identifier)
+' "$flavor")
+if [[ -n ${FLAVOR_ID:-} && $flavor_id != "$FLAVOR_ID" ]]; then
+  echo "reviewed worker flavor ID drifted" >&2
+  exit 2
+fi
 created_port=false
 if [[ -z $port_id ]]; then
   "$OSC" port create \
@@ -371,7 +379,7 @@ PY
 create_failed=true
 "$OSC" server create \
   --image "$image" \
-  --flavor "$flavor" \
+  --flavor "$flavor_id" \
   --port "$port_id" \
   "${metadata_args[@]}" \
   --use-config-drive \

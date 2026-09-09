@@ -910,7 +910,7 @@ else:
                     self.assert_safe_call(tuple(argv), kwargs)
                     return result(
                         tuple(argv),
-                        {"id": FLAVOR, "name": "example.2c4g", "vcpus": 2, "ram": 4096},
+                        {"id": FLAVOR, "name": "example.2c4g", "vcpus": 2, "ram": 4096, "disk": 20},
                     )
                 return super().__call__(argv, **kwargs)
 

@@ -78,11 +78,13 @@ class AsyncOperationExecutor:
                     )
                     db.set_operation_dispatch_status(connection, dispatch.operation_id, "finished")
                     continue
+                # Keep an existing domain checkpoint: deployment recovery must
+                # distinguish a candidate worker from an accepted route. Only
+                # the placeholder created above uses startup_interrupted.
                 db.mark_recovery_required(
                     connection,
                     operation.operation_id,
                     "controller stopped before asynchronous work completed",
-                    phase="startup_interrupted",
                 )
             db.set_operation_dispatch_status(
                 connection,

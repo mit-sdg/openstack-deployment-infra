@@ -60,14 +60,10 @@ def render_nomad_job(
         raise ValidationError("route priority must be from 100 through 1000000000")
     job_id = f"{app_slug}-candidate" if candidate else app_slug
     image_pin = oci_digest_pin(image, field="application image")
-    if isinstance(cpu_mhz, bool) or not isinstance(cpu_mhz, int) or not 100 <= cpu_mhz <= 2_000:
-        raise ValidationError("scheduler CPU must be an integer from 100 through 2000 MHz")
-    if (
-        isinstance(memory_mib, bool)
-        or not isinstance(memory_mib, int)
-        or not 64 <= memory_mib <= 3_072
-    ):
-        raise ValidationError("scheduler memory must be an integer from 64 through 3072 MiB")
+    if type(cpu_mhz) is not int or cpu_mhz < 100:
+        raise ValidationError("scheduler CPU must be an integer of at least 100 MHz")
+    if isinstance(memory_mib, bool) or not isinstance(memory_mib, int) or memory_mib < 64:
+        raise ValidationError("scheduler memory must be an integer of at least 64 MiB")
     checked_source = commit(source_commit)
     checked_recipe = sha256_hex(recipe_hash, field="recipe hash")
     hostname = f"{app_slug}.{platform.domain}"

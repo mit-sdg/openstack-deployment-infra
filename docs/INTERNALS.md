@@ -241,7 +241,9 @@ on the same application.
 
 ### Project and privileged routes
 
-All IDs are canonical UUIDs. The project socket exposes these non-destructive
+Application, deployment, operation, and managed-resource IDs are canonical UUIDs.
+OpenStack flavor IDs are opaque strings (for example `4200`), not UUIDs.
+The project socket exposes these non-destructive
 routes; the delete routes shown below are installed only on the privileged
 socket.
 
@@ -271,7 +273,9 @@ socket.
 | `DELETE /v1/storage/{id}` | Privileged deletion with machine-name confirmation |
 | `GET /v1/operations/{id}` | Poll an accepted mutation |
 
-The privileged socket also exposes bounded administrator views:
+The privileged socket also exposes administrator views and operator-only sizing operations.
+Sizing is plan-first and uses the same deployment admission, candidate health,
+acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-an-application).
 
 | Method and route | Purpose |
 | --- | --- |
@@ -279,6 +283,10 @@ The privileged socket also exposes bounded administrator views:
 | `GET /v1/admin/hosts` | Persistent-host observations |
 | `GET /v1/admin/images` | Selected/candidate image observations |
 | `GET /v1/admin/applications` | Paginated global application list |
+| `GET /v1/admin/applications/{id}/resize-plan` | Observe a sizing plan; requires one `flavor` query parameter |
+| `POST /v1/admin/applications/{id}/resize` | Apply `{plan, confirmation}` to an enabled accepted app, reusing its OCI artifact |
+| `POST /v1/admin/applications/{id}/deployments` | Deploy with the normal deployment fields plus a reviewed `plan` |
+| `GET /v1/admin/operations/{id}` | Poll an operator mutation on the privileged socket |
 | `GET /v1/admin/deployments` | Paginated global deployment list |
 | `GET /v1/admin/storage` | Paginated global storage list |
 | `GET /v1/admin/operations` | Paginated global operation list |
