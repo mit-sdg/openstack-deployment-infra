@@ -144,6 +144,43 @@ class ImagePipelineTests(unittest.TestCase):
             )
         self.assertEqual(published, list(release.ROLES))
 
+    def test_paused_publication_retains_real_inventory_for_later_promotion(self) -> None:
+        document = json.loads(self.platform.read_text())
+        document["displayName"] = "Prepared production"
+        values = {
+            **self.values,
+            "OPENSTACK_PUBLISH_ENABLED": "false",
+            "PLATFORM_CONFIG_JSON": json.dumps(document),
+            "OS_PROJECT_ID": document["projectId"],
+        }
+        paused = self.directory / "paused-platform.json"
+        enabled = self.directory / "enabled-platform.json"
+        pipeline.write_inventory(self.repository, paused, values)
+        pipeline.write_inventory(
+            self.repository, enabled, {**values, "OPENSTACK_PUBLISH_ENABLED": "true"}
+        )
+        self.assertEqual(paused.read_bytes(), enabled.read_bytes())
+        self.assertEqual(load_platform(paused).get("displayName"), "Prepared production")
+
+    def test_partial_protected_inventory_never_falls_back_to_example(self) -> None:
+        for supplied in (
+            {"PLATFORM_CONFIG_JSON": self.platform.read_text()},
+            {"OS_PROJECT_ID": "00000000-0000-4000-8000-000000000001"},
+        ):
+            values = {
+                **{
+                    key: value
+                    for key, value in self.values.items()
+                    if key not in {"PLATFORM_CONFIG_JSON", "OS_PROJECT_ID"}
+                },
+                "OPENSTACK_PUBLISH_ENABLED": "false",
+                **supplied,
+            }
+            output = self.directory / "incomplete-platform.json"
+            with self.assertRaises(release.ReleaseVerificationError):
+                pipeline.write_inventory(self.repository, output, values)
+            self.assertFalse(output.exists())
+
     def test_build_publication_and_hosted_seed_use_identical_inventory_in_both_modes(self) -> None:
         values = {
             **self.values,

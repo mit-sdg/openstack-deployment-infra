@@ -156,10 +156,13 @@ or serialize builds behind OpenStack authentication. An authorized manual
 Markdown-only changes are excluded. An unavailable previous push commit fails
 path detection rather than silently authorizing publication.
 
-With `OPENSTACK_PUBLISH_ENABLED=true`, builds use the protected inventory and
-project UUID. Otherwise they build the example inventory and retain candidates
-without publication; example-inventory artifacts cannot be promoted into a
-different deployment. Each production build checks out the native main run's
+When protected inventory and project UUID inputs exist, builds use them even
+while `OPENSTACK_PUBLISH_ENABLED=false`, so a paused publication still retains
+real deployment artifacts for later promotion. A partially configured pair
+fails closed. Only disabled publication with neither input uses example
+inventory; those artifacts cannot be promoted into a different deployment.
+Publication itself still requires `OPENSTACK_PUBLISH_ENABLED=true`.
+Each production build checks out the native main run's
 exact `GITHUB_SHA`, QEMU-boots an overlay of the retained QCOW2, and uploads
 `production-role-<run-id>-<role>` with no extra compression and 30-day retention.
 Each artifact contains its role directory with the exact QCOW2, closure JSON,

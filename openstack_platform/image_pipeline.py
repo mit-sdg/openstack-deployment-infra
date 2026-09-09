@@ -190,7 +190,14 @@ def build_role(
 def write_inventory(repository: Path, output: Path, values: dict[str, str]) -> None:
     """Keep the validated, versioned build inventory outside retained artifacts."""
     context = publication_context(values)
-    if values.get("OPENSTACK_PUBLISH_ENABLED") == "true":
+    # Publication can be paused while retaining a real, promotable production
+    # build. Do not silently build example inventory when protected inputs exist.
+    configured = values.get("PLATFORM_CONFIG_JSON") or values.get("OS_PROJECT_ID")
+    if configured or values.get("OPENSTACK_PUBLISH_ENABLED") == "true":
+        if not values.get("PLATFORM_CONFIG_JSON") or not values.get("OS_PROJECT_ID"):
+            raise release.ReleaseVerificationError(
+                "production build inventory inputs are incomplete"
+            )
         document = json.loads(values["PLATFORM_CONFIG_JSON"])
         document["projectId"] = str(UUID(values["OS_PROJECT_ID"]))
     else:

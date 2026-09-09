@@ -61,6 +61,8 @@ let
 
   registryBackupCredentialProbe = pkgs.writeText "registry-backup-credential-probe.py" ''
     import os
+    import shutil
+    import subprocess
     import stat
     import sys
     from pathlib import Path
@@ -69,6 +71,12 @@ let
     from backup.registry_artifact import credentials, _runtime_paths
 
     Path("${state}/operator/status/registry-backup-probe-ran").touch()
+    for name in ("newuidmap", "newgidmap"):
+        assert shutil.which(name) == "/run/wrappers/bin/" + name
+    subprocess.run(
+        ["${pkgs.podman}/bin/podman", "unshare", "${pkgs.coreutils}/bin/true"],
+        check=True, capture_output=True, timeout=30,
+    )
     loaded = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "storage-bootstrap"
     private = Path("/run/${namespace}-backup-private/storage-bootstrap.env")
     assert _runtime_paths()[0] == private
