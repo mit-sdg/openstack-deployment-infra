@@ -375,9 +375,8 @@ jobs:
         env:
           PLATFORM_CONFIG_JSON: ${{ secrets.PLATFORM_CONFIG_JSON }}
           OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
-          OPENSTACK_UNSIGNED_PRODUCTION: ${{ vars.OPENSTACK_UNSIGNED_PRODUCTION }}
         run: |
-          python3 -m openstack_platform.image_pipeline inventory --publication --output "$RUNNER_TEMP/production-platform.json"
+          python3 -m openstack_platform.image_pipeline inventory --output "$RUNNER_TEMP/production-platform.json"
           echo "PLATFORM_CONFIG=$RUNNER_TEMP/production-platform.json" >> "$GITHUB_ENV"
       - name: Select explicit production trust policy
         if: env.OPENSTACK_PUBLISH_ENABLED == 'true'

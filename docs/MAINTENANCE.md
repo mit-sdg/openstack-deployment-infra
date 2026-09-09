@@ -163,7 +163,8 @@ different deployment. Each production build checks out the native main run's
 exact `GITHUB_SHA`, QEMU-boots an overlay of the retained QCOW2, and uploads
 `production-role-<run-id>-<role>` with no extra compression and 30-day retention.
 Each artifact contains its role directory with the exact QCOW2, closure JSON,
-source/run record, build log, QEMU summary and full serial log. Failure diagnostics
+source/run record, full-inventory SHA256 (not the inventory contents), build log,
+QEMU summary and full serial log. Failure diagnostics
 use `production-logs-<run-id>-<attempt>-<role>` and upload only those log files.
 The private inventory lives outside the upload root; build jobs receive no
 OpenStack password, bootstrap credentials, private PKI or signing key.
@@ -183,7 +184,9 @@ source commit, metadata, owner/status and provider checksum, then waits for
 uploads to become active. Missing provider hashes or Glance's standard SHA512
 response use an independent image download/SHA256 check. An existing name is
 reused only after the complete metadata and byte checks, never on source commit
-alone; ambiguous or mismatched images fail without replacement.
+alone; ambiguous or mismatched images fail without replacement. Only after
+externally signed evidence verifies the exact existing bytes can publication
+update the artifact-evidence digest as described below.
 
 ### Temporarily disable production signing
 
@@ -206,12 +209,13 @@ repository values. An operator must explicitly review the effective scope.
 
 The workflow maps the exact variable to
 `PLATFORM_ALLOW_UNSIGNED_PRODUCTION=I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES` only
-for verification/publication. Unsigned Glance names end in
-`-unsigned-<commit-eight>`; signed names end in `-<commit-eight>`. Build inputs
-and retained bytes do not change with signing policy. The distinct publication
-names permit later signed publication of the same bytes without relabeling an
-already-published unsigned image. Neither publication selects an image or
-replaces a host.
+for verification/publication. Both modes use the same `-<commit-eight>` Glance
+names and identical build/publication inventory. Nix embeds that inventory in
+`/etc/<namespace>/platform.json`; hosted controller seeding requires an exact
+name match. The pipeline checks a canonical SHA256 of the entire inventory,
+including image names, before publication. Signing policy cannot change the
+names, embedded configuration or retained bytes. Publication does not select an
+image or replace a host.
 
 ### Sign retained GitHub images and re-enable signing
 
@@ -252,8 +256,10 @@ artifact retention window.
 
    `signing-inputs` reads the actual GitHub run/jobs APIs and refuses forks, PRs,
    another commit/workflow, incomplete job results, mixed build attempts or failed
-   source CI/build jobs. It verifies local hashes, closures, role metadata and
-   clean source, then writes direct relocated QCOW2 inputs and
+   source CI/build jobs. It derives the same commit-suffixed names from the
+   supplied private inventory (already-suffixed names are accepted), then verifies
+   the full inventory hash, local hashes, closures, role metadata and clean source.
+   It writes direct relocated QCOW2 inputs and
    `inputs.context.json`. It does not require or fabricate `GITHUB_*` variables,
    run Nix or rebuild a disk. The overall source run may be failed solely because
    publication is waiting for signatures; all required source jobs must succeed.
@@ -275,8 +281,8 @@ artifact retention window.
    ```
 
    The signed artifact provenance binds the real repository, commit, event/ref,
-   run ID and build attempt. A valid signature for different bytes or a different
-   build context will still fail publication. No Nix store is needed on the
+   run ID, build attempt and full-inventory SHA256. A valid signature for different
+   bytes, image names or a different build context will still fail publication. No Nix store is needed on the
    signer: closure JSON and output identities are retained with the QCOW2s.
 4. Serve this immutable bounded tar over HTTPS. Configure the reviewed
    `RELEASE_EVIDENCE_URL`, its `RELEASE_EVIDENCE_SHA256`, and the signing key's
@@ -292,17 +298,28 @@ artifact retention window.
    accidental replacement. The retry downloads the original roles, fetches the
    signed bundle and verifies the exact source/run binding before publishing.
 6. Verify the new `production-evidence-<run-id>-<attempt>` artifact shows
-   `production-ed25519`, the original QCOW2 SHA256s and build context, and the
-   new signed Glance names/UUIDs pass publication. Preserve both generations of
-   evidence. Previously unsigned images are not retroactively authenticated or
-   deleted; select the independently accepted signed UUIDs explicitly.
+   `production-ed25519`, the original QCOW2 SHA256s, inventory hash and build
+   context. For an already-published unsigned image, require
+   `signed-reattestation=verified` followed by publication success. Its UUID, name
+   and QCOW2 remain unchanged. Only after signature, source/closure/metadata and
+   independent provider/download SHA256 checks does the publisher update
+   `<namespace>_artifact_manifest_sha256`, recording the previous digest in
+   `<namespace>_previous_artifact_manifest_sha256`. It re-reads the image to verify
+   the metadata update. Unsigned evidence cannot authorize such an update.
+   Preserve both generations of evidence: the original publication was unsigned;
+   the retained bytes are authenticated by the new signature now. Setup can reuse
+   the same UUID without rebuilding, and hosted seeding still matches the immutable
+   guest inventory.
 
 If inventory, source SHA or any role hash differs, stop and identify the mismatch;
 do not edit records or regenerate evidence against a rebuild. If artifacts have
 expired, that run cannot be promoted. Start a new reviewed build/run and sign its
 new identities instead. A failure after one upload can leave some candidates
 published; rerunning the same publication job verifies/reuses exact matches and
-continues without rebuilding or overwriting.
+continues without rebuilding, renaming or replacing image bytes. If a signed
+metadata update succeeded but its final observation failed, a retry verifies the
+new digest and completes without another update. Do not attempt to downgrade that
+image's evidence by retrying with an unsigned manifest.
 
 ### Development publication before merge
 

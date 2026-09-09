@@ -888,7 +888,13 @@ def _existing_image_id(
         or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
     ):
         _fail(f"existing image does not match this setup release: {name}")
-    if hash_algorithm is None and hash_value is None:
+    if (hash_algorithm is None and hash_value is None) or (
+        hash_algorithm == "sha512"
+        and isinstance(hash_value, str)
+        and re.fullmatch(r"[0-9a-f]{128}", hash_value)
+    ):
+        # Match publication's independent SHA256 gate for Glance's default
+        # SHA512 response instead of rejecting a usable retained image.
         descriptor, temporary_name = tempfile.mkstemp(
             prefix="setup-existing-image-", suffix=".qcow2"
         )

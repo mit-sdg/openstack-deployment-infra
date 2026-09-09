@@ -12,12 +12,13 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from . import release_manifest as release
-from .config import load_platform
+from .config import PlatformConfig, _plain, load_platform
 from .openstack import publisher_metadata
 
 GATES = ("static", "generated-recipes", "nix-eval", "package-tests", "role-vm-tests")
@@ -79,6 +80,16 @@ def relevant_push(repository: Path, before: str, commit: str) -> bool:
     if result.returncode not in (0, 1):
         raise release.ReleaseVerificationError("previous push commit is unavailable")
     return result.returncode == 1
+
+
+def _inventory_sha256(platform: PlatformConfig) -> str:
+    return release._sha256_bytes(release._canonical(_plain(platform.document)))
+
+
+def _image_names(images: dict[str, str], commit: str) -> dict[str, str]:
+    return {
+        role: f"{re.sub(r'-[0-9a-f]{8}$', '', name)}-{commit[:8]}" for role, name in images.items()
+    }
 
 
 def _json(path: Path, value: object) -> None:
@@ -158,6 +169,7 @@ def build_role(
     record = {
         "role": role,
         "context": context,
+        "inventorySha256": _inventory_sha256(inventory),
         "outputStorePath": str(output),
         "publicationMetadata": dict(publisher_metadata(inventory, role, context["commit"])),
         "qemu": "passed",
@@ -175,9 +187,7 @@ def build_role(
     _json(directory / "record.json", record)
 
 
-def write_inventory(
-    repository: Path, output: Path, values: dict[str, str], *, publication: bool = False
-) -> None:
+def write_inventory(repository: Path, output: Path, values: dict[str, str]) -> None:
     """Keep the validated, versioned build inventory outside retained artifacts."""
     context = publication_context(values)
     if values.get("OPENSTACK_PUBLISH_ENABLED") == "true":
@@ -185,19 +195,9 @@ def write_inventory(
         document["projectId"] = str(UUID(values["OS_PROJECT_ID"]))
     else:
         document = release._load(repository / "config/platform.example.json")
-    suffix = context["commit"][:8]
-    if (
-        publication
-        and values.get("OPENSTACK_UNSIGNED_PRODUCTION")
-        == release.UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT
-    ):
-        # Promotion signs the same bytes under a distinct Glance name. Never
-        # relabel an existing unsigned image as authenticated production.
-        suffix = f"unsigned-{suffix}"
-    document["images"] = {
-        role: f"{re.sub(r'-(?:unsigned-)?[0-9a-f]{8}$', '', name)}-{suffix}"
-        for role, name in document["images"].items()
-    }
+    # These names are embedded in the immutable guest inventory and used by
+    # hosted selection seeding. Signing policy must never change them.
+    document["images"] = _image_names(document["images"], context["commit"])
     with open(output, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
         json.dump(document, stream)
     load_platform(output)
@@ -267,7 +267,16 @@ def signing_inputs(
             "source run CI and all five image builds must succeed"
         )
     release._verify_checkout(repository, context["commit"])
-    inputs = _inputs(root, platform, context)
+    inventory = load_platform(platform)
+    inventory = replace(
+        inventory,
+        document={
+            **inventory.document,
+            "projectId": inventory.project_id,
+            "images": _image_names(inventory.get("images"), context["commit"]),
+        },
+    )
+    inputs = _inputs(root, inventory, context)
     for role, value in inputs.items():
         projection, _ = release._closure_projection(Path(value["pathInfo"]))
         if Path(value["outputStorePath"]).name not in {item["storePath"] for item in projection}:
@@ -277,7 +286,10 @@ def signing_inputs(
     if output.exists() or output.with_suffix(".context.json").exists():
         raise release.ReleaseVerificationError("signing inputs destination already exists")
     _json(output, inputs)
-    _json(output.with_suffix(".context.json"), context)
+    _json(
+        output.with_suffix(".context.json"),
+        {**context, "inventorySha256": _inventory_sha256(inventory)},
+    )
 
 
 def _retained_context(root: Path, values: dict[str, str]) -> dict[str, str]:
@@ -297,9 +309,9 @@ def _retained_context(root: Path, values: dict[str, str]) -> dict[str, str]:
     return context
 
 
-def _inputs(root: Path, platform: Path, context: dict[str, str]) -> dict[str, Any]:
+def _inputs(root: Path, platform: Path | PlatformConfig, context: dict[str, str]) -> dict[str, Any]:
     inputs = {}
-    inventory = load_platform(platform)
+    inventory = load_platform(platform) if isinstance(platform, Path) else platform
     for role in release.ROLES:
         directory = root / role
         record = release._load(directory / "record.json")
@@ -307,9 +319,18 @@ def _inputs(root: Path, platform: Path, context: dict[str, str]) -> dict[str, An
         metadata = dict(publisher_metadata(inventory, role, context["commit"]))
         if (
             set(record)
-            != {"role", "context", "outputStorePath", "publicationMetadata", "qemu", "sha256"}
+            != {
+                "role",
+                "context",
+                "inventorySha256",
+                "outputStorePath",
+                "publicationMetadata",
+                "qemu",
+                "sha256",
+            }
             or record["role"] != role
             or record["context"] != context
+            or record["inventorySha256"] != _inventory_sha256(inventory)
             or record["publicationMetadata"] != metadata
             or record["qemu"] != "passed"
             or not isinstance(record["sha256"], dict)
@@ -384,14 +405,12 @@ def _verify(
         Path(child["PLATFORM_RELEASE_MANIFEST"]), child
     )
     provenance = release._load(root / "evidence/artifacts/role-artifacts.provenance.json")
-    if (
-        artifact["releaseChannel"] != "production"
-        or provenance.get("predicate", {})
-        .get("runDetails", {})
-        .get("metadata", {})
-        .get("buildContext")
-        != context
-    ):
+    if artifact["releaseChannel"] != "production" or provenance.get("predicate", {}).get(
+        "runDetails", {}
+    ).get("metadata", {}).get("buildContext") != {
+        **context,
+        "inventorySha256": _inventory_sha256(load_platform(platform)),
+    }:
         raise release.ReleaseVerificationError(
             "production evidence must bind this exact CI build context"
         )
@@ -443,7 +462,10 @@ def prepare(
                 signing_key=None,
                 unsigned=False,
                 unsigned_production=True,
-                build_context=context,
+                build_context={
+                    **context,
+                    "inventorySha256": _inventory_sha256(load_platform(platform)),
+                },
             )
         finally:
             inputs_path.unlink()
@@ -546,7 +568,6 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("context").add_argument("--before", default="")
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--output", type=Path, required=True)
-    inventory.add_argument("--publication", action="store_true")
     signing = commands.add_parser("signing-inputs")
     signing.add_argument("--github-repository", required=True)
     signing.add_argument("--run-id", required=True)
@@ -564,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"publish={str(relevant).lower()}\ncommit_sha={context['commit']}")
         return 0
     if args.command == "inventory":
-        write_inventory(args.repository, args.output, values, publication=args.publication)
+        write_inventory(args.repository, args.output, values)
         return 0
     if args.root is None or args.platform is None:
         parser.error("--root and --platform are required for image commands")

@@ -16,6 +16,7 @@ from openstack_platform import image_pipeline as pipeline
 from openstack_platform import release_manifest as release
 from openstack_platform import setup
 from openstack_platform.config import load_platform
+from openstack_platform.controller import seed_images
 from openstack_platform.openstack import publisher_metadata
 from tests.repository_fixtures import clean_repository
 
@@ -37,7 +38,10 @@ class ImagePipelineTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
         self.root = self.directory / "retained"
-        self.platform = self.repository / "config/platform.example.json"
+        self.platform = self.directory / "platform.json"
+        document = json.loads((self.repository / "config/platform.example.json").read_text())
+        document["images"] = pipeline._image_names(document["images"], self.commit)
+        pipeline._json(self.platform, document)
         self.values = {
             **os.environ,
             "GITHUB_SHA": self.commit,
@@ -51,6 +55,10 @@ class ImagePipelineTests(unittest.TestCase):
         }
         self.context = pipeline.publication_context(self.values)
         inventory = load_platform(self.platform)
+        self.evidence_context = {
+            **self.context,
+            "inventorySha256": pipeline._inventory_sha256(inventory),
+        }
         for index, role in enumerate(release.ROLES):
             directory = self.root / role
             directory.mkdir(parents=True)
@@ -78,6 +86,7 @@ class ImagePipelineTests(unittest.TestCase):
                 {
                     "role": role,
                     "context": self.context,
+                    "inventorySha256": pipeline._inventory_sha256(inventory),
                     "outputStorePath": output,
                     "publicationMetadata": dict(publisher_metadata(inventory, role, self.commit)),
                     "qemu": "passed",
@@ -135,9 +144,7 @@ class ImagePipelineTests(unittest.TestCase):
             )
         self.assertEqual(published, list(release.ROLES))
 
-    def test_inventory_keeps_signing_independent_of_build_bytes_and_publication_names_distinct(
-        self,
-    ) -> None:
+    def test_build_publication_and_hosted_seed_use_identical_inventory_in_both_modes(self) -> None:
         values = {
             **self.values,
             "OPENSTACK_PUBLISH_ENABLED": "true",
@@ -149,17 +156,17 @@ class ImagePipelineTests(unittest.TestCase):
             self.directory / name for name in ("build.json", "unsigned.json", "signed.json")
         )
         pipeline.write_inventory(self.repository, build, values)
-        pipeline.write_inventory(self.repository, unsigned, values, publication=True)
+        pipeline.write_inventory(self.repository, unsigned, values)
         pipeline.write_inventory(
             self.repository,
             signed,
             {**values, "OPENSTACK_UNSIGNED_PRODUCTION": ""},
-            publication=True,
         )
         self.assertEqual(build.read_bytes(), signed.read_bytes())
+        self.assertEqual(build.read_bytes(), unsigned.read_bytes())
         self.assertEqual(build.stat().st_mode & 0o777, 0o600)
         for role in release.ROLES:
-            self.assertNotEqual(
+            self.assertEqual(
                 json.loads(unsigned.read_text())["images"][role],
                 json.loads(signed.read_text())["images"][role],
             )
@@ -171,6 +178,118 @@ class ImagePipelineTests(unittest.TestCase):
             pipeline._inputs(self.root, signed, self.context),
             pipeline._inputs(self.root, unsigned, self.context),
         )
+        # Setup builds these seed records from its image inventory. Use the
+        # exact build inventory as the immutable /etc/.../platform.json input.
+        seed_path = self.directory / "image-selections.json"
+        guest = load_platform(build)
+        document = {
+            "schemaVersion": 1,
+            "projectId": guest.project_id,
+            "namespace": guest.namespace,
+            "images": {
+                role: {
+                    "imageId": f"00000000-0000-4000-8000-{index:012d}",
+                    "displayName": load_platform(unsigned).get(f"images.{role}"),
+                    "sourceCommit": self.commit,
+                    "compatibilityHash": publisher_metadata(guest, role, self.commit)[
+                        f"{guest.namespace.replace('-', '_')}_compatibility_sha256"
+                    ],
+                }
+                for index, role in enumerate(release.ROLES, 1)
+            },
+        }
+        pipeline._json(seed_path, document)
+        seed_path.chmod(0o600)
+        seed_images.seed(
+            platform_config=build, state_directory=self.directory / "controller", manifest=seed_path
+        )
+        seed_images.seed(
+            platform_config=signed,
+            state_directory=self.directory / "controller",
+            manifest=seed_path,
+        )
+        document["images"]["worker"]["displayName"] += "-unsigned"
+        pipeline._json(seed_path, document)
+        with self.assertRaisesRegex(seed_images.SeedFailure, "name does not match"):
+            seed_images.seed(
+                platform_config=build,
+                state_directory=self.directory / "controller",
+                manifest=seed_path,
+            )
+        changed = json.loads(unsigned.read_text())
+        changed["images"]["worker"] += "-unsigned"
+        pipeline._json(unsigned, changed)
+        with self.assertRaisesRegex(release.ReleaseVerificationError, "role evidence"):
+            pipeline._inputs(self.root, unsigned, self.context)
+
+    def test_setup_reuses_all_published_sha512_roles_without_rebuilding_images(self) -> None:
+        self.prepare()
+        artifact_path = self.root / "evidence/artifacts/role-artifacts.json"
+        artifact = release._load(artifact_path)
+        inventory = load_platform(self.platform)
+        prefix = inventory.namespace.replace("-", "_")
+        ids = {
+            role: f"00000000-0000-4000-8000-{index:012d}"
+            for index, role in enumerate(release.ROLES, 1)
+        }
+        paths = mock.Mock(
+            repository=self.repository,
+            workspace=self.directory,
+            platform=self.platform,
+            openstack_wrapper=Path("fake-openstack"),
+        )
+
+        def provider(arguments, **_kwargs):
+            if arguments[1:3] == ("image", "list"):
+                name = arguments[arguments.index("--name") + 1]
+                role = next(
+                    role for role in release.ROLES if inventory.get(f"images.{role}") == name
+                )
+                return [{"Name": name, "ID": ids[role]}]
+            self.assertEqual(arguments[1:3], ("image", "show"))
+            role = next(role for role, image_id in ids.items() if image_id == arguments[3])
+            record = artifact["roleArtifacts"][role]
+            return {
+                "status": "active",
+                "os_hash_algo": "sha512",
+                "os_hash_value": "a" * 128,
+                "properties": {
+                    **record["publicationMetadata"],
+                    f"{prefix}_artifact_manifest_sha256": release._sha256_file(artifact_path),
+                    f"{prefix}_qcow2_sha256": record["qcow2Sha256"],
+                    f"{prefix}_nix_closure_sha256": record["nixClosureSha256"],
+                    f"{prefix}_nix_output": record["nixOutput"],
+                },
+            }
+
+        def download(arguments, **_kwargs):
+            self.assertEqual(arguments[1:3], ("image", "save"))
+            role = next(role for role, image_id in ids.items() if image_id == arguments[-1])
+            Path(arguments[arguments.index("--file") + 1]).write_bytes(
+                (self.root / role / f"{role}.qcow2").read_bytes()
+            )
+            return ""
+
+        with (
+            mock.patch.object(setup, "_json_command", side_effect=provider),
+            mock.patch.object(setup, "_command", side_effect=download),
+            mock.patch.object(
+                setup, "_build_nix_output", return_value=Path("/nix/store/smoke")
+            ) as build,
+        ):
+            self.assertEqual(
+                setup._build_and_publish_images(
+                    paths,
+                    inventory.document,
+                    {},
+                    Path("/nix/store/python"),
+                    self.commit,
+                    artifact,
+                    artifact_path,
+                ),
+                ids,
+            )
+        build.assert_called_once_with(self.repository, {}, "imageSmoke")
 
     def test_offline_signing_inputs_validate_github_main_run_and_all_successful_source_jobs(
         self,
@@ -216,13 +335,13 @@ class ImagePipelineTests(unittest.TestCase):
             pipeline.signing_inputs(
                 self.repository,
                 self.root,
-                self.platform,
+                self.repository / "config/platform.example.json",
                 github_repository="example/platform",
                 run_id="100",
                 output=output,
             )
             self.assertEqual(
-                json.loads(output.with_suffix(".context.json").read_text()), self.context
+                json.loads(output.with_suffix(".context.json").read_text()), self.evidence_context
             )
             self.assertEqual(
                 json.loads(output.read_text()),
@@ -473,7 +592,7 @@ class ImagePipelineTests(unittest.TestCase):
             evidence / "artifacts",
             signing_key=key,
             unsigned=False,
-            build_context=self.context,
+            build_context=self.evidence_context,
         )
         self.values.update(
             {
@@ -485,6 +604,7 @@ class ImagePipelineTests(unittest.TestCase):
             ("runId", "101"),
             ("repository", "fork/platform"),
             ("runAttempt", "2"),
+            ("inventorySha256", "b" * 64),
         ):
             release.generate_artifact_manifest(
                 component,
@@ -492,7 +612,7 @@ class ImagePipelineTests(unittest.TestCase):
                 evidence / "artifacts",
                 signing_key=key,
                 unsigned=False,
-                build_context={**self.context, key_name: value},
+                build_context={**self.evidence_context, key_name: value},
             )
             with self.assertRaisesRegex(release.ReleaseVerificationError, "exact CI build context"):
                 pipeline._verify(self.repository, self.root, self.platform, self.values)
@@ -502,7 +622,7 @@ class ImagePipelineTests(unittest.TestCase):
             evidence / "artifacts",
             signing_key=key,
             unsigned=False,
-            build_context=self.context,
+            build_context=self.evidence_context,
         )
         key.unlink()
         self.prepare()

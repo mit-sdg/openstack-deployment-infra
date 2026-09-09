@@ -146,7 +146,10 @@ class PublicationTriggerTests(unittest.TestCase):
                     self.assertIn("/build.log", step)
                     self.assertIn("/qemu-serial.log", step)
                     self.assertNotIn("path: ${{ runner.temp }}/production-images\n", step)
-        self.assertIn("inventory --publication", publication)
+        self.assertIn(
+            'image_pipeline inventory --output "$RUNNER_TEMP/production-platform.json"', publication
+        )
+        self.assertNotIn("--publication", publication)
 
     def test_unsigned_variable_is_explicit_and_bypasses_only_external_signing_inputs(self) -> None:
         publication = job("publish-images")
