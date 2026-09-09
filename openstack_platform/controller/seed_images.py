@@ -88,8 +88,6 @@ def _manifest(
         compatibility_hash = sha256_hex(
             raw_item["compatibilityHash"], field="image compatibility hash"
         )
-        if display_name != platform.get(f"images.{role}"):
-            _fail("hosted image seed name does not match platform inventory")
         if compatibility_hash != expected_compatibility:
             _fail("hosted image seed compatibility does not match platform inventory")
         result[role] = openstack.ImageSelection(
@@ -104,12 +102,11 @@ def _manifest(
 
 def _recorded_rollover(connection: sqlite3.Connection, selection: db.ImageSelection) -> bool:
     """Allow setup replay only when hosted API intent proves the changed selection."""
-    if selection.role not in {"worker", "builder"}:
+    if selection.role not in IMAGE_ROLES:
         return False
     rows = connection.execute(
         "SELECT operation_id FROM operations WHERE kind = 'infra.image.set' AND scope = 'infrastructure' "
-        "AND ((status = 'succeeded' AND phase = 'complete') OR "
-        "(status IN ('running','recovery_required') AND phase = 'selection_observed'))"
+        "AND status IN ('succeeded','running','recovery_required') AND phase = 'selection_observed'"
     )
     for row in rows:
         operation = db.get_operation(connection, row["operation_id"])
@@ -150,6 +147,7 @@ def seed(*, platform_config: Path, state_directory: Path, manifest: Path) -> Non
         connection = db.connect(state / "platform.sqlite3", identity=identity)
         try:
             db.migrate(connection, identity=identity)
+            missing: list[openstack.ImageSelection] = []
             for role, item in selections.items():
                 existing = db.get_image_selection(connection, role)
                 if existing is not None and (
@@ -164,14 +162,21 @@ def seed(*, platform_config: Path, state_directory: Path, manifest: Path) -> Non
                     if not _recorded_rollover(connection, existing):
                         _fail("hosted controller already selected an unproven different role image")
                 if existing is None:
-                    db.put_image_selection(
-                        connection,
-                        role=item.role,
-                        image_id=item.image_id,
-                        display_name=item.display_name,
-                        source_commit=item.source_commit,
-                        compatibility_hash=item.compatibility_hash,
-                    )
+                    # Only bootstrap may take values from the seed. A retained
+                    # matching row remains authoritative across a new admin's
+                    # baked display-name inventory, without inventing API proof.
+                    if item.display_name != platform.get(f"images.{role}"):
+                        _fail("unseeded image name does not match platform inventory")
+                    missing.append(item)
+            for item in missing:
+                db.put_image_selection(
+                    connection,
+                    role=item.role,
+                    image_id=item.image_id,
+                    display_name=item.display_name,
+                    source_commit=item.source_commit,
+                    compatibility_hash=item.compatibility_hash,
+                )
         finally:
             connection.close()
 

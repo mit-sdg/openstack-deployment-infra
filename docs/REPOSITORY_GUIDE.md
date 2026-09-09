@@ -172,13 +172,13 @@ cross-cutting boundaries.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
-- `openstack_platform/controller/image_service.py` — validated hosted worker/builder image selection and immutable provisioning snapshots.
+- `openstack_platform/controller/image_service.py` — validated hosted role-image metadata selection and immutable worker/builder provisioning snapshots.
 - `openstack_platform/controller/log_service.py` — bounded reads of runtime and retained build logs.
 - `openstack_platform/controller/public_ip_service.py` — app-scoped floating IPv4 reservation, handover, and release journals.
 - `openstack_platform/controller/main.py` — `openstack-platform-controller` executable composition and startup.
 - `openstack_platform/controller/nomad_jobs.py` — renders generated Nomad jobs and validates job/placement/route identities.
 - `openstack_platform/controller/sizing.py` — reviewed per-app flavor plans and measured capacity budgets with OS/service reserves.
-- `openstack_platform/controller/seed_images.py` — validates setup-bound role-image evidence and idempotently seeds hosted controller selections.
+- `openstack_platform/controller/seed_images.py` — validates seed evidence, preserves retained/journal-proven selections across admin replacement, and seeds missing roles.
 - `openstack_platform/controller/service_support.py` — shared deadlines, helper transport protocol, and mutation guards.
 - `openstack_platform/controller/status.py` — safe infrastructure, application, storage, operation, and live status read models.
 - `openstack_platform/controller/storage.py` — low-level PostgreSQL, MongoDB, and S3 operation state machine and helper calls.

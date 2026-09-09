@@ -1,4 +1,4 @@
-"""Hosted worker/builder image selection and durable provisioning snapshots."""
+"""Hosted role-image metadata selection and durable provisioning snapshots."""
 
 from __future__ import annotations
 
@@ -8,17 +8,18 @@ from pathlib import Path
 
 from .. import openstack, runtime
 from ..config import Config
+from ..contracts import IMAGE_ROLES
 from ..validation import ValidationError, uuid
 from . import database as db
 from .service_support import operation_deadline, remaining_seconds, wall_deadline
 
-HOSTED_IMAGE_ROLES = ("worker", "builder")
+HOSTED_IMAGE_ROLES = IMAGE_ROLES
 IMAGE_SELECTION_KIND = "infra.image.set"
 
 
 def hosted_role(value: object) -> str:
     if not isinstance(value, str) or value not in HOSTED_IMAGE_ROLES:
-        raise ValidationError("hosted image selection role must be worker or builder")
+        raise ValidationError("hosted image selection role must be a platform image role")
     return value
 
 
@@ -37,7 +38,8 @@ def pin_deployment_images(
             raise db.DatabaseError("deployment operation is missing")
         refs: dict[str, object] = {}
         for role in roles:
-            role = hosted_role(role)
+            if role not in {"worker", "builder"}:
+                raise ValidationError("deployment provisioning can pin only worker or builder")
             key = f"{role}_image_id"
             if key in current.refs:
                 refs[key] = uuid(current.refs[key], field=f"recorded {role} image UUID")

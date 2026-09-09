@@ -117,9 +117,30 @@ class HostedImageTests(unittest.TestCase):
         with self.assertRaises(HttpError):
             self.api.router("project").dispatch("GET", first.body["statusUrl"], {}, None)
 
+    def test_persistent_role_selection_is_metadata_only(self):
+        for role in ("admin", "ingress", "storage"):
+            db.put_image_selection(
+                self.connection,
+                role=role,
+                image_id=OLD,
+                display_name=f"old-{role}",
+                source_commit="b" * 40,
+                compatibility_hash="c" * 64,
+            )
+            self.cloud.images[NEW] = canonical_image(self.config.platform, NEW, role=role)
+            self.assertEqual(self.poll(self.request(role=role))["status"], "succeeded")
+            self.assertEqual(db.get_image_selection(self.connection, role).image_id, NEW)
+        self.helper.assert_not_called()
+        self.assertTrue(
+            all(
+                call[1:3] in {("token", "issue"), ("image", "list"), ("image", "show")}
+                for call in self.cloud.calls
+            )
+        )
+
     def test_strict_uuid_role_fields_and_capability(self):
         for role, image, expected in (
-            ("admin", NEW, OLD),
+            ("unknown", NEW, OLD),
             ("worker", "image-name", OLD),
             ("builder", NEW, "bad"),
         ):
