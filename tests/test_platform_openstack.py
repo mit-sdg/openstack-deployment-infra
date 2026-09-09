@@ -915,9 +915,7 @@ else:
                 return super().__call__(argv, **kwargs)
 
         cloud = MultiCpuCloud(self.platform)
-        flavor_name = openstack.observe_flavor(
-            self.platform, "example.2c4g", require_one_vcpu=True, command_runner=cloud
-        )
+        flavor_name = openstack.observe_flavor(self.platform, "example.2c4g", command_runner=cloud)
         self.assertEqual(flavor_name, "example.2c4g")
 
     def test_power_uses_selected_server_uuid_and_requires_health(self) -> None:

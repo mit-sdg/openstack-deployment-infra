@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 
 from ..config import PlatformConfig
 from ..controller.sizing import capacity_budget
-from ..runtime import run
+from ..runtime import CommandTimedOut, run
 from ..validation import ValidationError, slug, uuid
 
 
@@ -19,15 +20,20 @@ def observe_capacity(
     server_name: str,
     *,
     nomad_command: str,
-    command_runner: Callable[..., Any] = run,
+    command_runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     identifier = uuid(application_id, field="worker application ID")
     application_slug = slug(application_slug)
+    runner = run if command_runner is None else command_runner
+    deadline = time.monotonic() + 30
 
     def query(*args: str) -> Any:
-        result = command_runner(
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CommandTimedOut("Nomad capacity observation exceeded its deadline")
+        result = runner(
             (nomad_command, "node", "status", "-json", *args),
-            timeout_seconds=30,
+            timeout_seconds=remaining,
             stdout_limit=1_048_576,
             stderr_limit=65_536,
         )
@@ -45,8 +51,13 @@ def observe_capacity(
     node = query(node_id)
     if not isinstance(node, dict):
         raise ValidationError("Nomad worker detail is malformed")
-    meta = node.get("Meta") or {}
-    docker = (node.get("Drivers") or {}).get("docker") or {}
+    meta = node.get("Meta")
+    drivers = node.get("Drivers")
+    if not isinstance(meta, dict) or not isinstance(drivers, dict):
+        raise ValidationError("Nomad worker metadata/drivers are malformed")
+    docker = drivers.get("docker")
+    if not isinstance(docker, dict):
+        raise ValidationError("Nomad worker Docker readiness is malformed")
     if (
         node.get("ID") != node_id
         or node.get("Name") != server_name
@@ -61,6 +72,9 @@ def observe_capacity(
         or docker.get("Healthy") is not True
     ):
         raise ValidationError("Nomad worker capacity identity/readiness did not match")
+    # Pinned Nomad v2.0.5: api/nodes.go defines these exact JSON fields;
+    # command/node_status.go computeNodeTotalResources uses the same subtraction.
+    # Do not fall back to the deprecated Resources/Reserved projections.
     try:
         resources = node["NodeResources"]
         reserved = node["ReservedResources"]

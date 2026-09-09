@@ -314,7 +314,6 @@ class ApplicationService:
                     flavor = openstack.observe_flavor(
                         self.config.platform,
                         current.worker_flavor,
-                        require_one_vcpu=True,
                         timeout_seconds=remaining_seconds(
                             deadline, self.config.policy.limits.process_seconds
                         ),

@@ -163,6 +163,13 @@ sizing entirely for students: ordinary declaration/deployment retains the
 policy's small flavor, CPU, and memory values, subject to the same capacity
 check. Policy defaults are not changed by selecting another app's flavor.
 
+A single-vCPU worker is supported when its measured CPU and RAM fit the pinned
+allocation after reserve. In particular, the example policy's 2048-MiB request
+cannot fit a VM with only 2048 MiB total RAM plus the service reserve. Choose a
+flavor with RAM headroom for that policy (one vCPU with 4 GiB can suffice), or
+use a reviewed per-app sizing plan before the first deployment. Existing pinned
+allocations are not silently reduced to accommodate a smaller worker.
+
 ### Sizing failures and retries
 
 - **Plan drift or invalid confirmation:** no candidate is created. Obtain and

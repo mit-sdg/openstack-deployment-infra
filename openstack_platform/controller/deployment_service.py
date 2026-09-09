@@ -500,7 +500,6 @@ def _prepare_deployment_worker(
         observed_flavor_name = openstack.observe_flavor(
             config.platform,
             worker_flavor,
-            require_one_vcpu=True,
             timeout_seconds=_remaining(deadline, config.policy.limits.process_seconds),
         )
         if observed_flavor_name != worker_flavor:

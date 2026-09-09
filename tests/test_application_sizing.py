@@ -5,6 +5,7 @@ import json
 import unittest
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -85,12 +86,14 @@ class ApplicationSizingTests(unittest.TestCase):
         for patch in (
             mock.patch.object(openstack, "verify_project"),
             mock.patch.object(
-                openstack, "observe_flavor", side_effect=lambda _p, ref, **kw: self.flavor(ref).name
+                openstack,
+                "observe_flavor",
+                side_effect=lambda _p, ref, **_kwargs: self.flavor(ref).name,
             ),
             mock.patch.object(
                 openstack,
                 "observe_flavor_capacity",
-                side_effect=lambda _p, ref, **kw: self.flavor(ref),
+                side_effect=lambda _p, ref, **_kwargs: self.flavor(ref),
             ),
             mock.patch.object(app, "check_public_health", return_value=True),
         ):
@@ -100,7 +103,7 @@ class ApplicationSizingTests(unittest.TestCase):
     def flavor(self, ref):
         return XL if ref in ("4200", "xl.4core") else SMALL
 
-    def helper(self, config, action, values, **kwargs):
+    def helper(self, config, action, values, **_kwargs):
         self.calls.append((action, copy.deepcopy(values)))
         if action == self.fail_action:
             self.fail_action = None
@@ -250,6 +253,22 @@ class ApplicationSizingTests(unittest.TestCase):
             ("xl.4core", 9000, 14400),
         )
         self.assertEqual(len(self.workers), 1)
+
+    def test_ordinary_one_vcpu_deploy_disable_enable_preserves_default_allocation(self):
+        self.assertEqual(SMALL.vcpus, 1)
+        _, deployed = self.deploy()
+        self.assertEqual(deployed.status, "succeeded", deployed.safe_error)
+        defaults = self.config.policy.standard
+        _, disabled = self.post(f"/v1/applications/{self.app_id}/disable", {})
+        self.assertEqual(disabled.status, "succeeded", disabled.safe_error)
+        _, enabled = self.post(f"/v1/applications/{self.app_id}/enable", {})
+        self.assertEqual(enabled.status, "succeeded", enabled.safe_error)
+        current = db.get_application(self.connection, self.app_id)
+        self.assertEqual(
+            (current.worker_flavor, current.scheduler_cpu_mhz, current.scheduler_memory_mib),
+            (defaults.worker_flavor, defaults.cpu_mhz, defaults.memory_mib),
+        )
+        self.assertFalse(any(action == "app.promote" for action, _ in self.calls))
 
     def test_custom_flavor_first_deployment_and_student_plan_is_not_public(self):
         plan = self.plan()
@@ -482,6 +501,19 @@ class FlavorCapacityTests(unittest.TestCase):
         for values in ((True, 2048), (2000, "2048"), (200, 512), (2000, 2048, -1)):
             with self.assertRaises(ValidationError):
                 sizing.capacity_budget(*values)
+
+    def test_one_vcpu_example_policy_needs_memory_headroom_not_an_extra_vcpu(self):
+        policy = json.loads(
+            (
+                Path(__file__).resolve().parents[1] / "config/platform-policy.example.json"
+            ).read_text()
+        )["standard"]
+        # A single 2-GHz vCPU on a 4-GiB flavor fits the unchanged example
+        # 1000-MHz / 2048-MiB allocation; a 2-GiB flavor cannot also reserve RAM.
+        cpu, ram = sizing.capacity_budget(2000, 4000)
+        self.assertLessEqual(policy["cpuMHz"], cpu)
+        self.assertLessEqual(policy["memoryMiB"], ram)
+        self.assertGreater(policy["memoryMiB"], sizing.capacity_budget(2000, 2048)[1])
 
     def test_nomad_capacity_is_bound_to_ready_owned_node(self):
         platform = SimpleNamespace(namespace="test")

@@ -1477,7 +1477,6 @@ def observe_flavor(
     platform: PlatformConfig,
     reference: str,
     *,
-    require_one_vcpu: bool = False,
     timeout_seconds: float = 30,
     command_runner: Runner = runtime.run,
     executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
