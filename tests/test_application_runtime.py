@@ -918,6 +918,8 @@ class DeploymentTests(unittest.TestCase):
             route_marker="00000000-0000-4000-8000-000000000099",
         )
         self.assertIn('job "demo-app-candidate"', candidate_job)
+        self.assertIn('nomadVar "nomad/jobs/demo-app-candidate"', candidate_job)
+        self.assertNotIn('nomadVar "nomad/jobs/demo-app"', candidate_job)
         self.assertIn('value     = "00000000-0000-4000-8000-000000000099"', candidate_job)
         self.assertIn("Host(`demo-app-preview.apps.example.com`)", candidate_job)
         self.assertNotIn("Host(`demo-app.apps.example.com`)", candidate_job)

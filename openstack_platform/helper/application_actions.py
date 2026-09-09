@@ -346,7 +346,34 @@ def _only_job_id(
     return jobs[0] if jobs else application_slug
 
 
+def _synchronize_workload_variable(
+    client: VariableClient,
+    application_slug: str,
+    job_id: str,
+) -> tuple[str, int]:
+    canonical_path = variable_path(application_slug)
+    workload_path = variable_path(job_id)
+    source = client.read_variable(canonical_path)
+    if workload_path == canonical_path:
+        return workload_path, source.modify_index
+    if source.modify_index == 0:
+        raise HelperActionError("VARIABLE_MISSING", "canonical application variable is unavailable")
+    for attempt in range(3):
+        target = client.read_variable(workload_path)
+        if dict(target.items) == dict(source.items):
+            return workload_path, target.modify_index
+        try:
+            return workload_path, client.compare_and_set(
+                workload_path, target.modify_index, source.items
+            )
+        except CasConflict:
+            if attempt == 2:
+                raise
+    raise AssertionError("bounded workload variable CAS did not return")
+
+
 def _deploy_handler(
+    variable_client: VariableClient,
     *,
     command_runner: Callable[..., Any],
     nomad_command: tuple[str, ...],
@@ -367,6 +394,7 @@ def _deploy_handler(
             stderr_limit=65_536,
             check=True,
         )
+        _synchronize_workload_variable(variable_client, application_slug, job_id)
         current = _inspected_candidate(
             job_id,
             command_runner=command_runner,
@@ -495,6 +523,7 @@ def _health_handler(
 
 
 def _promote_handler(
+    variable_client: VariableClient,
     *,
     command_runner: Callable[..., Any],
     nomad_command: tuple[str, ...],
@@ -508,6 +537,7 @@ def _promote_handler(
         response_limit=response_limit,
     )
     deploy_job = _deploy_handler(
+        variable_client,
         command_runner=command_runner,
         nomad_command=nomad_command,
         timeout_seconds=timeout_seconds,
@@ -725,9 +755,13 @@ def _remove_handler(
                 is not None
             ):
                 raise HelperActionError("JOB_REMAINS", "Nomad job remained after removal")
-        variable_absent = False
-        if deleting_application:
-            path = variable_path(application_slug)
+        variable_paths = (
+            (variable_path(application_slug), variable_path(f"{application_slug}-candidate"))
+            if deleting_application
+            else ((variable_path(job_id),) if job_id != application_slug else ())
+        )
+        variable_absent = bool(variable_paths)
+        for path in variable_paths:
             command_runner(
                 (*nomad_command, "var", "purge", path),
                 timeout_seconds=timeout_seconds,
@@ -736,8 +770,8 @@ def _remove_handler(
                 check=False,
             )
             snapshot = variable_client.read_variable(path)
-            variable_absent = snapshot.modify_index == 0 and not snapshot.key_names
-            if not variable_absent:
+            if snapshot.modify_index != 0 or snapshot.key_names:
+                variable_absent = False
                 raise HelperActionError("VARIABLE_REMAINS", "Nomad Variable remained after removal")
         return {
             "slug": application_slug,
@@ -856,6 +890,7 @@ def _healthy_allocations(
 def _restart_and_observe_environment(
     application_slug: str,
     job_id: str,
+    variable: str,
     modify_index: int,
     baseline: Sequence[Mapping[str, Any]],
     client: VariableClient,
@@ -898,7 +933,7 @@ def _restart_and_observe_environment(
             restarted = healthy and any(
                 _allocation_token(item) not in baseline_tokens for item in healthy
             )
-            current = client.read_variable(variable_path(application_slug))
+            current = client.read_variable(variable)
             if restarted and current.modify_index == modify_index:
                 try:
                     publicly_healthy = public_health_check is None or public_health_check(
@@ -1032,6 +1067,9 @@ def _environment_handlers(
             maximum_keys=maximum_keys,
             maximum_value_bytes=maximum_value_bytes,
         )
+        workload_path, workload_index = _synchronize_workload_variable(
+            client, application_slug, job_id
+        )
         if not running:
             return {
                 "slug": application_slug,
@@ -1046,7 +1084,8 @@ def _environment_handlers(
             allocations = _restart_and_observe_environment(
                 application_slug,
                 job_id,
-                index,
+                workload_path,
+                workload_index,
                 before,
                 client,
                 command_runner=command_runner,
@@ -1063,7 +1102,10 @@ def _environment_handlers(
             # Interruptions (BaseException) bypass this block and are recovered
             # by observing key presence; ordinary health failure restores by CAS.
             try:
-                rollback_index = client.compare_and_set(path, index, previous.items)
+                client.compare_and_set(path, index, previous.items)
+                rollback_path, rollback_workload_index = _synchronize_workload_variable(
+                    client, application_slug, job_id
+                )
                 rollback_baseline = _allocations(
                     application_slug,
                     command_runner=command_runner,
@@ -1074,7 +1116,8 @@ def _environment_handlers(
                 _restart_and_observe_environment(
                     application_slug,
                     job_id,
-                    rollback_index,
+                    rollback_path,
+                    rollback_workload_index,
                     rollback_baseline,
                     client,
                     command_runner=command_runner,
@@ -1149,6 +1192,7 @@ def handlers(
     command = _command(nomad_command)
     result: dict[str, Handler] = {
         "app.deploy": _deploy_handler(
+            variable_client,
             command_runner=command_runner,
             nomad_command=command,
             timeout_seconds=timeout_seconds,
@@ -1161,6 +1205,7 @@ def handlers(
             response_limit=response_limit,
         ),
         "app.promote": _promote_handler(
+            variable_client,
             command_runner=command_runner,
             nomad_command=command,
             timeout_seconds=timeout_seconds,

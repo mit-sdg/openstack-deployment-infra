@@ -72,7 +72,7 @@ def render_nomad_job(
     checked_recipe = sha256_hex(recipe_hash, field="recipe hash")
     hostname = f"{app_slug}.{platform.domain}"
     preview_hostname = f"{app_slug}-preview.{platform.domain}"
-    variable = f"nomad/jobs/{app_slug}"
+    variable = f"nomad/jobs/{job_id}"
     routers = [(f"{job_id}-preview", preview_hostname, 100) if staged else (job_id, hostname, 100)]
     if promoted:
         routers.append((f"{job_id}-promoted", hostname, route_priority))
