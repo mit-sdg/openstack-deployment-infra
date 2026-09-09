@@ -145,6 +145,7 @@ cross-cutting boundaries.
 - `openstack_platform/host_keys.py` — verifies console/keyscan evidence and atomically pins the fixed admin SSH host key.
 - `openstack_platform/host_user_data.py` — validates protected inputs and renders role-specific cloud-init templates.
 - `openstack_platform/image_pipeline.py` — exact-run image build retention, CI/signing-input verification, and no-rebuild production publication.
+- `openstack_platform/ingress_credentials.py` — validates per-replacement protected connector-token files and stages ingress user-data without a credential store.
 - `openstack_platform/installation.py` — central definitions of installed filesystem locations used by entry points.
 - `openstack_platform/openstack.py` — bounded provider operations for images and persistent-host power/replacement lifecycle.
 - `openstack_platform/operator.py` — `openstack-platform` command parser and operator-level setup/status/backup/restore/infra orchestration.
@@ -173,6 +174,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/log_service.py` — bounded reads of runtime and retained build logs.
 - `openstack_platform/controller/main.py` — `openstack-platform-controller` executable composition and startup.
 - `openstack_platform/controller/nomad_jobs.py` — renders generated Nomad jobs and validates job/placement/route identities.
+- `openstack_platform/controller/sizing.py` — reviewed per-app flavor plans and measured capacity budgets with OS/service reserves.
 - `openstack_platform/controller/seed_images.py` — validates setup-bound role-image evidence and idempotently seeds hosted controller selections.
 - `openstack_platform/controller/service_support.py` — shared deadlines, helper transport protocol, and mutation guards.
 - `openstack_platform/controller/status.py` — safe infrastructure, application, storage, operation, and live status read models.
@@ -187,6 +189,7 @@ cross-cutting boundaries.
 - `openstack_platform/helper/application_actions.py` — fixed Nomad deployment, health, promotion, log, removal, and environment handlers.
 - `openstack_platform/helper/main.py` — one-request helper dispatcher plus committed backup/retention evidence handling.
 - `openstack_platform/helper/nomad.py` — Nomad Variable reads and owner-scoped compare-and-set updates.
+- `openstack_platform/helper/worker_capacity.py` — exact owned Nomad node readiness and allocatable CPU/RAM observations.
 - `openstack_platform/helper/production.py` — lazily constructs concrete production handlers and trusted local service clients.
 - `openstack_platform/helper/storage.py` — trusted provider operations for PostgreSQL, MongoDB, and Garage/S3 resources and credentials.
 
@@ -215,6 +218,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 ### Test modules
 
 - `tests/test_application_runtime.py` — source, recipe, BuildKit, worker, deployment, cleanup, and retention runtime tests.
+- `tests/test_application_sizing.py` — opaque flavor IDs, per-app plans, default preservation, resize acceptance, retries, and rollback tests.
+- `tests/test_helper_worker_capacity.py` — production capacity dispatch, pinned Nomad field/worker identity contract, deadlines, and sanitized failures.
 - `tests/test_ci_publication.py` — guards the CI path set that triggers role-image publication.
 - `tests/test_controller_api.py` — controller route composition, capability split, responses, idempotency, and service integration tests.
 - `tests/test_controller_database.py` — schema, migration, identity, journal, state transition, and database recovery tests.
@@ -228,6 +233,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_hardening_properties.py` — generated property cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
 - `tests/test_helper_application_actions.py` — Nomad helper deployment, ownership, health, promotion, environment, logs, and removal tests.
 - `tests/test_host_user_data.py` — protected-input validation and cloud-init rendering tests for each role.
+- `tests/test_ingress_credentials.py` — per-replacement token validation, rotation, cleanup, non-persistence, and CLI contract tests.
 - `tests/test_hosted_controller_backup.py` — hosted SQLite backup encryption, evidence, permissions, and failure cleanup tests.
 - `tests/test_image_pipeline.py` — retained-byte, CI/source-run identity, signed promotion, unsigned rollback, and publication gate tests.
 - `tests/test_infra_http.py` — bounded infrastructure HTTP helper redirect, size, status, and JSON tests.

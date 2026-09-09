@@ -10,7 +10,9 @@ Run ordinary commands as the unprivileged owner of
 `/srv/openstack-platform`. Use only the generated `platform-admin` SSH alias for
 admin-host operations. Root is required only for the explicitly marked offline
 hosted-controller restore. Every provider operation is limited to resources
-named by the installed inventory.
+named by the installed inventory. For per-app worker flavor selection and
+candidate-based resize through the privileged controller API, see
+[Size an application](#size-an-application).
 
 ## Initialize operator variables
 
@@ -55,6 +57,141 @@ counts; the operator CLI cannot inspect or mutate those records.
 An unavailable live observation does not erase accepted state. Diagnose the
 named dependency before mutation; do not edit SQLite or provider resources to
 make status appear healthy.
+
+## Size an application
+
+Use the controller's privileged Unix API to select one application's worker
+flavor. This does not change the platform's student defaults. The infrastructure
+CLI has no product-mutation commands.
+
+Run these commands **locally on admin**, as the operator UID/GID admitted to
+`privileged.sock`. Install matching controller and helper releases first; the
+helper must provide `app.worker.capacity`. You need `curl`, `jq`, and Python.
+No direct SQLite writes or OpenStack server resize commands are supported.
+
+### Plan and resize an accepted application
+
+The app must be enabled and have an accepted deployment. Replacement needs quota
+for both the old worker and the target worker/port simultaneously. Worker disks
+are disposable: the new VM does not copy the old VM's filesystem. Managed
+PostgreSQL, MongoDB, and S3 resources are unchanged.
+
+Set the installed namespace and the application's UUID (not its slug). Select
+an available flavor by name or opaque ID. The Commons target is `xl.4core`, ID
+`4200`: 4 vCPUs, 16384 MiB RAM, 64 GiB disk. Availability is checked by the API,
+not assumed from this example.
+
+```bash
+umask 077
+NAMESPACE=your-installed-namespace
+APP_ID=your-canonical-application-uuid
+SOCKET="/run/${NAMESPACE}-controller/privileged.sock"
+BASE="http://localhost/v1/admin/applications/${APP_ID}"
+
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "$BASE/resize-plan?flavor=4200" > resize-plan.json
+jq . resize-plan.json
+```
+
+Review `applicationId`, `deploymentId`, `current`, `flavor`, and `reserve`.
+The plan is an observation, not a capacity reservation. Apply rechecks the exact
+application/deployment and flavor projection under the application lock. A
+changed plan or provider projection fails before creating a candidate.
+
+CPU allocation uses the new Nomad node's measured total MHz, not an assumed
+MHz-per-vCPU conversion. RAM uses measured node memory, bounded by the reviewed
+flavor RAM. For each resource the reserve is the larger of 10% (rounded up) and
+200 MHz / 512 MiB respectively, or Nomad's larger reported reserve. Thus a node
+reporting 10000 MHz and 16000 MiB offers 9000 MHz and 14400 MiB. Exact MHz and RAM
+are known only after the candidate VM registers; the plan does not promise a
+clock speed or benchmark throughput.
+
+Prepare one immutable request and idempotency key. Replace `commons` with the
+app's exact slug when sizing another app:
+
+```bash
+jq -n --slurpfile plan resize-plan.json \
+  '{plan: $plan[0], confirmation: "commons"}' > resize-request.json
+python3 -c 'import uuid; print(uuid.uuid4())' > resize-key.txt
+
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<resize-key.txt)" \
+  --data-binary @resize-request.json "$BASE/resize" > resize-response.json
+jq . resize-response.json
+
+STATUS_URL=$(jq -r .statusUrl resize-response.json)
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "http://localhost${STATUS_URL}" | jq .
+```
+
+Poll until `status` is `succeeded`, `failed`, or `recovery_required`. HTTP `202`
+means admission, not success. Resize creates an immutable deployment attempt,
+reuses the accepted digest/configuration without rebuilding or modifying
+environment values, starts an isolated worker/job, checks preview health,
+promotes the route, then checks public health and commits sizing with the active
+deployment pointer. Only then does it remove the predecessor.
+
+Inspect the accepted size through the administrator list (use pagination for
+larger inventories):
+
+```bash
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  'http://localhost/v1/admin/applications?limit=100' | jq .
+```
+
+The accepted `sizing.workerFlavor`, `sizing.cpuMHz`, and `sizing.memoryMiB` are
+pinned for normal redeploy and disable/enable, rather than reset to student
+policy. A new worker with insufficient measured capacity fails closed instead
+of silently reducing the allocation. The same plan/apply procedure can shrink
+an app; this is replacement, not Nova's in-place resize/confirm/revert protocol.
+
+### Select a flavor for the first deployment
+
+Declare the app through `POST /v1/applications` on the project socket, then get a
+sizing plan as above. Its `deploymentId` is `null`. Submit the usual exact-commit
+[deployment fields](INTERNALS.md#project-and-privileged-routes), plus the complete
+`plan` object, to:
+
+```text
+POST /v1/admin/applications/{id}/deployments
+```
+
+This privileged route also supports a new source deployment combined with a
+size change. The project deployment route rejects sizing fields. Omit operator
+sizing entirely for students: ordinary declaration/deployment retains the
+policy's small flavor, CPU, and memory values, subject to the same capacity
+check. Policy defaults are not changed by selecting another app's flavor.
+
+A single-vCPU worker is supported when its measured CPU and RAM fit the pinned
+allocation after reserve. In particular, the example policy's 2048-MiB request
+cannot fit a VM with only 2048 MiB total RAM plus the service reserve. Choose a
+flavor with RAM headroom for that policy (one vCPU with 4 GiB can suffice), or
+use a reviewed per-app sizing plan before the first deployment. Existing pinned
+allocations are not silently reduced to accommodate a smaller worker.
+
+### Sizing failures and retries
+
+- **Plan drift or invalid confirmation:** no candidate is created. Obtain and
+  review a fresh plan, then submit a new request/key.
+- **Candidate scheduler, application, or public health failure with confirmed
+  cleanup:** the operation is `failed`; the prior accepted size and route remain.
+  The reused accepted artifact is not deleted. Fix the app/dependency, review a
+  plan, and use a new key for a new attempt.
+- **Unknown provider/helper result, interrupted acceptance, or unfinished
+  cleanup:** the operation is `recovery_required`. Preserve the request and key;
+  after restoring the dependency, repeat the exact POST. Do not edit the plan or
+  use a new key to bypass the application's blocked scope. Recovery reobserves
+  health before accepting and resumes predecessor cleanup after acceptance.
+- **Lost response:** repeat the same POST/key. It returns the existing operation
+  instead of allocating another worker. Reusing a key with a changed body is
+  `409 IDEMPOTENCY_CONFLICT`.
+
+There is no forced rollback after successful acceptance and predecessor deletion;
+use a new reviewed sizing operation. Disabled accepted apps must be enabled
+before resize. Plans do not reserve quota, and the platform does not copy local
+disk state or resize managed-storage quotas. These examples describe the API;
+production provider behavior still requires a release acceptance exercise.
 
 ## Back up all state classes
 
@@ -338,23 +475,85 @@ full-loss drill.
 
 ## Replace a persistent host
 
+Replacement stops the old VM but retains it for rollback. The fixed port and
+retained volumes move to the candidate. This is a singleton replacement with
+service interruption, **not zero downtime**. The old VM is deleted only after
+the candidate passes readiness and exact image/flavor/name/provenance checks.
+On readiness failure, replacement restores the retained old host. Never delete
+the old server or detach a volume manually.
+
 Before replacing storage, require a fresh managed-data `RESTORE-MANIFEST`.
 Before replacing admin, require fresh hosted-controller and operator-state
 backups. Publish and live-test the replacement role image before selecting its
-exact UUID.
+exact UUID. Use `admin`, `ingress`, or `storage`; the token-file option below is
+valid only for ingress.
+
+### Supply the ingress token for each fresh replacement
+
+Obtain the current raw Cloudflare connector token through your authorized
+credential-custody process. The CLI does not extract guest credentials, prompt
+for tokens, or maintain a local credential store. If the only copy is on a
+guest without authenticated access, stop and resolve credential custody
+separately; do not bypass SSH host-key checking.
+
+The input must be a direct, single-link, operator-owned mode-0600 regular file,
+at most 16 KiB, under trusted parent directories. It must contain only the
+base64 connector token (at most 8192 characters), optionally followed by one
+LF or CRLF newline—not a `TUNNEL_TOKEN=...` environment file or an API token.
+The CLI checks file protection and the token's account/tunnel/secret structure
+**offline**. This does not prove Cloudflare authentication or domain routing.
+Confirm the intended tunnel and domain through authenticated Cloudflare records.
+A revoked but structurally valid token can pass local checks; candidate readiness
+must still pass before deleting the old VM.
+
+Run as the operator account using the variables from [Initialize operator
+variables](#initialize-operator-variables). Substitute your current protected
+bootstrap paths and the selected image UUID:
 
 ```bash
+export OPERATOR_PUBLIC_KEY=/private/operator.pub
+export NOMAD_TOKENS_FILE=/private/nomad-tokens.env
+export PKI_DIR=/private/pki
 $PLATFORM_CLI infra image set ingress NEW_INGRESS_IMAGE_UUID
-$PLATFORM_CLI infra replace ingress --yes
+$PLATFORM_CLI infra replace ingress --yes \
+  --cloudflare-tunnel-token-file /private/current-connector-token
 $PLATFORM_CLI infra logs ingress --lines 200
+test "$(curl --fail --show-error --silent "https://$PLATFORM_DOMAIN/healthz")" = OK
 ```
 
-Use `admin`, `ingress`, or `storage`. Replacement retains the current host,
-fixed port, and volumes until the candidate passes readiness and exact
-image/flavor/name/provenance checks. On readiness failure it restores the old
-host. An ambiguous provider result becomes recovery-required; restore the named
-dependency and rerun the same command. Never delete the old server or detach a
-volume manually.
+Supply a file path, never the token value in arguments, chat, or logs. Each fresh
+ingress replacement reads and validates the explicit file before any provider
+call, then renders the reviewed template with Cloudflare enabled. Missing or
+malformed input fails without stopping the old VM. `ENABLE_CLOUDFLARED=false`,
+`CLOUDFLARE_TUNNEL_TOKEN_FILE`, and opaque ingress `--user-data` cannot bypass
+this contract. Other roles retain their protected-input contract.
+
+The CLI leaves the original file unchanged. Private temporary token and rendered
+user-data files are unlinked on normal completion and handled failure; forced
+process termination can leave temporary files requiring protected cleanup.
+The token is provisioned to the candidate via provider user-data, not stored in
+operator SQLite, refs, logs, or a permanent local credential database. Maintain
+your own authorized credential custody. A later fresh replacement or rotation
+uses whichever current protected file you supply; no import or reset is needed.
+Coordinate Cloudflare rotation so the retained old host can still serve if rollback
+is needed; the CLI does not rotate credentials on that host.
+
+### Retry an interrupted replacement
+
+An ambiguous provider result becomes recovery-required. Restore the named
+dependency and rerun `infra replace ingress --yes` using the same inventory and
+state directory. A recorded pre-acceptance operation rolls back; an accepted
+operation rechecks exact candidate provenance, fixed resources, readiness, and
+internal/public `/healthz` before cleaning up the retained old VM. Neither path
+reads a token file or re-renders user-data. If supplied on that retry,
+`--cloudflare-tunnel-token-file` is ignored with an explicit acknowledgement; it
+cannot change the recorded candidate's credential.
+
+Successful rollback ends that operation and does not start another replacement.
+Invoke a fresh replacement separately with the current token file. If interruption
+occurred in the initial `validated` phase before provider observation, retry starts
+a fresh attempt and requires the file. Supplying the current file on every retry
+is therefore permitted, but it is consumed only when a fresh attempt starts.
 
 Release updates follow [Install releases outside automated
 setup](MAINTENANCE.md#install-releases-outside-automated-setup). Executable

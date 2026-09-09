@@ -15,6 +15,7 @@ from ..config import Config
 from ..validation import ValidationError, bounded_text, slug, uuid
 from . import application_runtime as app
 from . import database as db
+from . import sizing
 from .service_support import (
     HelperCaller,
     operation_deadline,
@@ -313,7 +314,6 @@ class ApplicationService:
                     flavor = openstack.observe_flavor(
                         self.config.platform,
                         current.worker_flavor,
-                        require_one_vcpu=True,
                         timeout_seconds=remaining_seconds(
                             deadline, self.config.policy.limits.process_seconds
                         ),
@@ -332,6 +332,17 @@ class ApplicationService:
                         deadline=deadline,
                     )
                 server_id, server_name, port_id, port_name = self._worker_identity(worker)
+                capacity = self.helper_caller(
+                    self.config,
+                    "app.worker.capacity",
+                    {"applicationId": placement_id, "slug": current.slug},
+                    deadline=deadline,
+                )
+                cpu, memory = sizing.worker_budget(capacity, server_id, current.worker_flavor)
+                if current.scheduler_cpu_mhz > cpu or current.scheduler_memory_mib > memory:
+                    raise app.ApplicationError(
+                        "pinned allocation exceeds worker capacity after reserve"
+                    )
                 observed_identity = {
                     "worker_server_id": server_id,
                     "worker_server_name": server_name,
