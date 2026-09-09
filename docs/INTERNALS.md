@@ -230,8 +230,9 @@ method, path, or body returns `409 IDEMPOTENCY_CONFLICT`.
 Database-only application creation returns `201`. External mutations durably
 reserve application scope and return `202` with an operation resource before
 external work. Four workers execute at most 32 admitted running/queued
-operations, serialized per application. Reads and polling use short independent
-SQLite transactions.
+operations, serialized per application. Operation polling uses an independent,
+query-only SQLite read snapshot and does not wait for the API handler lock held
+by slow live observations. Other synchronous handlers still share that lock.
 
 Started work interrupted by controller restart becomes `recovery_required`.
 The caller resumes it by repeating the identical request and key. Request bodies

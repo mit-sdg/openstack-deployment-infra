@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any, Literal
 
@@ -140,6 +141,7 @@ class ControllerAPI:
         )
         self.logs = LogService(connection, config, state_directory, helper_caller=helper_caller)
         database_path = Path(connection.execute("PRAGMA database_list").fetchone()["file"])
+        self._database_path = database_path
         self.executor = AsyncOperationExecutor(
             database_path,
             connection,
@@ -214,7 +216,10 @@ class ControllerAPI:
 
     def _safe(self, handler: Callable[[Request], Response]) -> Callable[[Request], Response]:
         def call(request: Request) -> Response:
-            with self._lock:
+            # A slow provider observation must not block operation polling or
+            # liveness. Polling uses its own connection, never the shared writer.
+            independent = handler in (self._get_operation, self._health)
+            with nullcontext() if independent else self._lock:
                 try:
                     return handler(request)
                 except HttpError:
@@ -871,13 +876,18 @@ class ControllerAPI:
     def _get_operation(self, request: Request) -> Response:
         self._no_query(request)
         identifier = self._path_uuid(request)
-        operation = db.get_operation(self.connection, identifier)
-        if operation is not None:
-            return Response(200, self._operation_model(operation))
-        dispatch = db.get_operation_dispatch(self.connection, identifier)
-        if dispatch is None:
-            raise HttpError(404, "OPERATION_NOT_FOUND", "operation does not exist")
-        return Response(200, self._dispatch_model(dispatch))
+        with closing(db.connect(self._database_path, create=False)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            # One short read snapshot keeps the domain/dispatch fallback coherent
+            # without holding the API lock throughout unrelated external reads.
+            with db.transaction(connection, immediate=False):
+                operation = db.get_operation(connection, identifier)
+                if operation is not None:
+                    return Response(200, self._operation_model(operation))
+                dispatch = db.get_operation_dispatch(connection, identifier)
+                if dispatch is None:
+                    raise HttpError(404, "OPERATION_NOT_FOUND", "operation does not exist")
+                return Response(200, self._dispatch_model(dispatch))
 
     def _get_public_ip(self, request: Request) -> Response:
         from .public_ip_service import model
