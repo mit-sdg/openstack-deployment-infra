@@ -771,6 +771,7 @@ def _trusted_manifest_preflight(
     signature: Path | None,
     trust_root: Path | None,
     allow_unsigned_development: bool,
+    allow_unsigned_production: bool = False,
 ) -> None:
     """Establish trust and verifier integrity without candidate code execution."""
     try:
@@ -831,9 +832,19 @@ def _trusted_manifest_preflight(
             _fail("release trust root does not match the signed manifest")
         if verified.returncode:
             _fail("release manifest signature verification failed")
+    elif trust.get("mode") == "production-unsigned" and channel == "production":
+        if (
+            not allow_unsigned_production
+            or allow_unsigned_development
+            or signature is not None
+            or trust_root is not None
+            or trust != {"mode": "production-unsigned", "warning": "SIGNING TEMPORARILY DISABLED"}
+        ):
+            _fail("unsigned production requires explicit acknowledgement and no signing material")
     elif trust.get("mode") == "development-unsigned" and channel == "development-unsigned":
         if (
-            not allow_unsigned_development
+            allow_unsigned_production
+            or not allow_unsigned_development
             or os.environ.get("PLATFORM_ENVIRONMENT") == "production"
             or signature is not None
             or trust_root is not None
@@ -853,6 +864,7 @@ def _verify_release_gate(
     signature: Path | None,
     trust_root: Path | None,
     allow_unsigned_development: bool,
+    allow_unsigned_production: bool = False,
 ) -> None:
     """Load the candidate's verifier and check evidence before install mutation."""
     _trusted_manifest_preflight(
@@ -861,6 +873,7 @@ def _verify_release_gate(
         signature=signature,
         trust_root=trust_root,
         allow_unsigned_development=allow_unsigned_development,
+        allow_unsigned_production=allow_unsigned_production,
     )
     verifier_path = source / "openstack_platform/release_manifest.py"
     if not verifier_path.is_file() or verifier_path.is_symlink():
@@ -878,6 +891,7 @@ def _verify_release_gate(
             signature=signature,
             trust_root=trust_root,
             allow_unsigned_development=allow_unsigned_development,
+            allow_unsigned_production=allow_unsigned_production,
         )
     except Exception as error:
         raise InstallFailure(f"release compatibility verification failed: {error}") from error
@@ -900,6 +914,7 @@ def _preflight_release_gate(args: argparse.Namespace, commit: str) -> None:
             signature=signature.absolute() if signature else None,
             trust_root=trust_root.absolute() if trust_root else None,
             allow_unsigned_development=allow_unsigned,
+            allow_unsigned_production=bool(args.allow_unsigned_production),
         )
         return
     assert archive is not None
@@ -919,6 +934,7 @@ def _preflight_release_gate(args: argparse.Namespace, commit: str) -> None:
             signature=signature.absolute() if signature else None,
             trust_root=trust_root.absolute() if trust_root else None,
             allow_unsigned_development=allow_unsigned,
+            allow_unsigned_production=bool(args.allow_unsigned_production),
         )
 
 
@@ -1199,6 +1215,11 @@ def _parser() -> argparse.ArgumentParser:
         "--allow-unsigned-development",
         action="store_true",
         help="accept only a manifest marked development-unsigned (never production)",
+    )
+    parser.add_argument(
+        "--allow-unsigned-production",
+        action="store_true",
+        help="temporarily accept explicitly production-unsigned evidence without authenticity assurance",
     )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--uv", type=Path, default=Path(shutil.which("uv") or "uv"))

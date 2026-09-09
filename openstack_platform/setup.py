@@ -34,6 +34,7 @@ from .contracts import IMAGE_ROLES, OPERATOR_SSH_ALIAS, PERSISTENT_ROLES
 from .installation import OPERATOR_ROOT
 from .release_manifest import (
     ReleaseVerificationError,
+    unsigned_environment,
     verify_artifact_from_environment,
     verify_from_environment,
     verify_role_artifact,
@@ -887,7 +888,13 @@ def _existing_image_id(
         or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
     ):
         _fail(f"existing image does not match this setup release: {name}")
-    if hash_algorithm is None and hash_value is None:
+    if (hash_algorithm is None and hash_value is None) or (
+        hash_algorithm == "sha512"
+        and isinstance(hash_value, str)
+        and re.fullmatch(r"[0-9a-f]{128}", hash_value)
+    ):
+        # Match publication's independent SHA256 gate for Glance's default
+        # SHA512 response instead of rejecting a usable retained image.
         descriptor, temporary_name = tempfile.mkstemp(
             prefix="setup-existing-image-", suffix=".qcow2"
         )
@@ -1057,8 +1064,11 @@ def _release_evidence_arguments(environment: Mapping[str, str]) -> tuple[str | P
         arguments += ("--release-signature", Path(signature))
     if trust_root:
         arguments += ("--release-trust-root", Path(trust_root))
-    if environment.get("PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"):
+    development, production = unsigned_environment(dict(environment))
+    if development:
         arguments += ("--allow-unsigned-development",)
+    if production:
+        arguments += ("--allow-unsigned-production",)
     return arguments
 
 
@@ -2315,6 +2325,7 @@ def run_setup(
         "PLATFORM_RELEASE_SIGNATURE",
         "PLATFORM_RELEASE_TRUST_ROOT",
         "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT",
+        "PLATFORM_ALLOW_UNSIGNED_PRODUCTION",
         "PLATFORM_ARTIFACT_MANIFEST",
         "PLATFORM_ARTIFACT_SIGNATURE",
         "PLATFORM_ARTIFACT_TRUST_ROOT",

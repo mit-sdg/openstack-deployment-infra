@@ -55,18 +55,40 @@ image_name=$("$CONFIG_HELPER" get "images.$role")
 }
 repository_root=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 artifact_trust_arguments=()
-if [[ -n ${PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT:-} ]]; then
+release_trust_arguments=()
+signed_evidence=false
+if [[ -n ${PLATFORM_ALLOW_UNSIGNED_PRODUCTION:-} ]]; then
+  [[ $PLATFORM_ALLOW_UNSIGNED_PRODUCTION == I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES && \
+     -z ${PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT:-} && \
+     -z ${PLATFORM_RELEASE_SIGNATURE:-} && -z ${PLATFORM_RELEASE_TRUST_ROOT:-} && \
+     -z ${PLATFORM_ARTIFACT_SIGNATURE:-} && -z ${PLATFORM_ARTIFACT_TRUST_ROOT:-} ]] || {
+    echo "unsigned production acknowledgement or trust material is inconsistent" >&2
+    exit 2
+  }
+  artifact_trust_arguments+=(--allow-unsigned-production)
+  release_trust_arguments+=(--allow-unsigned-production)
+elif [[ -n ${PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT:-} ]]; then
   [[ $PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT == I_UNDERSTAND_THIS_IS_NOT_PRODUCTION ]] || {
     echo "unsigned artifact acknowledgement is invalid" >&2
     exit 2
   }
   artifact_trust_arguments+=(--allow-unsigned-development)
+  release_trust_arguments+=(--allow-unsigned-development)
 else
+  signed_evidence=true
   artifact_trust_arguments+=(
     --signature "${PLATFORM_ARTIFACT_SIGNATURE:?PLATFORM_ARTIFACT_SIGNATURE is required}"
     --trust-root "${PLATFORM_ARTIFACT_TRUST_ROOT:?PLATFORM_ARTIFACT_TRUST_ROOT is required}"
   )
+  release_trust_arguments+=(
+    --signature "${PLATFORM_RELEASE_SIGNATURE:?PLATFORM_RELEASE_SIGNATURE is required}"
+    --trust-root "${PLATFORM_RELEASE_TRUST_ROOT:?PLATFORM_RELEASE_TRUST_ROOT is required}"
+  )
 fi
+PYTHONPATH="$repository_root" python3 -m openstack_platform.release_manifest verify \
+  --repository "$repository_root" --commit "$SOURCE_COMMIT" \
+  --manifest "${PLATFORM_RELEASE_MANIFEST:?PLATFORM_RELEASE_MANIFEST is required}" \
+  "${release_trust_arguments[@]}"
 artifact_output=$(
   PYTHONPATH="$repository_root" python3 -m openstack_platform.release_manifest verify-role \
     --component-manifest "${PLATFORM_RELEASE_MANIFEST:?PLATFORM_RELEASE_MANIFEST is required}" \
@@ -85,7 +107,7 @@ mapfile -t verified_artifact <<<"$artifact_output"
    ${verified_artifact[2]:-} == "nix_closure_sha256=$PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256" && \
    ${verified_artifact[3]:-} == "nix_output=$PLATFORM_ARTIFACT_NIX_OUTPUT" && \
    ${#verified_artifact[@]} -eq 4 ]] || {
-  echo "signed role artifact verification did not match publication inputs" >&2
+  echo "role artifact verification did not match publication inputs" >&2
   exit 2
 }
 metadata_output=$(
@@ -149,10 +171,19 @@ if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
     raise SystemExit("OpenStack image inventory is malformed")
 print(sum(row.get("Name") == name for row in rows))
 ' "$image_name" <<<"$existing_images")
-if [[ $existing_count != 0 ]]; then
-  echo "refusing to replace or ambiguously resolve existing image: $image_name" >&2
-  echo "publish a versioned name and update config/platform.json explicitly" >&2
+if [[ $existing_count != 0 && $existing_count != 1 ]]; then
+  echo "refusing to ambiguously resolve existing image: $image_name" >&2
   exit 1
+fi
+# Retry only after checking the complete retained identity below. A matching
+# source commit alone is not evidence that an existing image has these bytes.
+image_id=
+if [[ $existing_count == 1 ]]; then
+  image_id=$(python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+print(next(row["ID"] for row in rows if row.get("Name") == sys.argv[1]))
+' "$image_name" <<<"$existing_images")
 fi
 
 local_checksum=$(python3 - "$image_file" <<'PY'
@@ -174,7 +205,8 @@ PY
   exit 2
 }
 
-image_id=$("$OSC" image create \
+if [[ $existing_count == 0 ]]; then
+  image_id=$("$OSC" image create \
   --disk-format qcow2 \
   --container-format bare \
   --file "$image_file" \
@@ -182,6 +214,7 @@ image_id=$("$OSC" image create \
   "${metadata_properties[@]}" \
   -f value -c id \
   "$image_name")
+fi
 python3 - "$image_id" <<'PY'
 import sys, uuid
 try:
@@ -219,7 +252,10 @@ PY
       ;;
   esac
 done
-hash_verification=$(OBSERVED_IMAGE="$observed" EXPECTED_METADATA="$metadata_output" EXPECTED_CHECKSUM="$local_checksum" python3 - "$image_id" "$image_name" "$project_id" <<'PY'
+verify_observed_image() {
+  OBSERVED_IMAGE="$observed" EXPECTED_METADATA="$metadata_output" \
+    EXPECTED_CHECKSUM="$local_checksum" METADATA_KEY="$metadata_key" \
+    ALLOW_REATTESTATION="$1" python3 - "$image_id" "$image_name" "$project_id" <<'PY'
 import json
 import os
 import re
@@ -246,6 +282,16 @@ try:
         raise ValueError("properties or checksum is malformed")
 except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
     raise SystemExit("published image projection is malformed") from error
+key_prefix = os.environ["METADATA_KEY"]
+previous_manifest = properties.get(f"{key_prefix}_artifact_manifest_sha256", "")
+if previous_manifest == os.environ["PLATFORM_ARTIFACT_MANIFEST_SHA256"]:
+    previous_manifest = ""
+elif (
+    os.environ["ALLOW_REATTESTATION"] != "true"
+    or not isinstance(previous_manifest, str)
+    or not re.fullmatch(r"[0-9a-f]{64}", previous_manifest)
+):
+    raise SystemExit("published image artifact manifest does not match accepted evidence")
 if (
     observed_id != image_id
     or observed_name != image_name
@@ -254,23 +300,37 @@ if (
     or not re.fullmatch(r"[0-9a-f]{32}", observed_checksum)
     or observed_checksum != os.environ["EXPECTED_CHECKSUM"]
     or any(properties.get(key) != value for key, value in expected.items())
-    or properties.get(next(key for key in properties if key.endswith("_artifact_manifest_sha256")), "") != os.environ["PLATFORM_ARTIFACT_MANIFEST_SHA256"]
-    or properties.get(next(key for key in properties if key.endswith("_qcow2_sha256")), "") != os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
-    or properties.get(next(key for key in properties if key.endswith("_nix_closure_sha256")), "") != os.environ["PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256"]
-    or properties.get(next(key for key in properties if key.endswith("_nix_output")), "") != os.environ["PLATFORM_ARTIFACT_NIX_OUTPUT"]
+    or properties.get(f"{key_prefix}_qcow2_sha256", "") != os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
+    or properties.get(f"{key_prefix}_nix_closure_sha256", "") != os.environ["PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256"]
+    or properties.get(f"{key_prefix}_nix_output", "") != os.environ["PLATFORM_ARTIFACT_NIX_OUTPUT"]
 ):
     raise SystemExit("published image identity, owner, active status, checksum, or metadata could not be verified")
 if observed_hash_algorithm is None and observed_hash_value is None:
-    print("download")
+    method = "download"
 elif (
     observed_hash_algorithm == "sha256"
     and observed_hash_value == os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
 ):
-    print("provider")
+    method = "provider"
+elif (
+    observed_hash_algorithm == "sha512"
+    and isinstance(observed_hash_value, str)
+    and re.fullmatch(r"[0-9a-f]{128}", observed_hash_value)
+):
+    # Glance defaults to SHA-512. Keep our independent SHA-256 gate rather
+    # than treating a different provider hash algorithm as a byte mismatch.
+    method = "download"
 else:
     raise SystemExit("published image provider hash is incomplete or differs")
+print(method, previous_manifest)
 PY
-)
+}
+allow_reattestation=false
+if [[ $signed_evidence == true && $existing_count == 1 ]]; then
+  allow_reattestation=true
+fi
+verification=$(verify_observed_image "$allow_reattestation")
+read -r hash_verification previous_manifest <<< "$verification"
 if [[ $hash_verification == download ]]; then
   downloaded=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/published-image.XXXXXX.qcow2")
   trap 'rm -f "$downloaded"' EXIT
@@ -295,5 +355,22 @@ if [[ $hash_verification == download ]]; then
   }
   rm -f "$downloaded"
   trap - EXIT
+fi
+if [[ -n $previous_manifest ]]; then
+  # Only externally signed, already verified evidence can re-attest identical
+  # bytes. The name/UUID/QCOW2 remain unchanged, matching immutable guest config.
+  # No mutation occurs until the independent provider/download SHA256 gate above.
+  "$OSC" image set \
+    --property "${metadata_key}_previous_artifact_manifest_sha256=$previous_manifest" \
+    --property "${metadata_key}_artifact_manifest_sha256=$PLATFORM_ARTIFACT_MANIFEST_SHA256" \
+    "$image_id"
+  observed=$("$OSC" image show "$image_id" -f json -c id -c name -c status -c owner -c checksum -c os_hash_algo -c os_hash_value -c properties)
+  verification=$(verify_observed_image false)
+  read -r final_hash remaining_promotion <<< "$verification"
+  [[ $final_hash == "$hash_verification" && -z $remaining_promotion ]] || {
+    echo 'signed evidence metadata update could not be verified' >&2
+    exit 1
+  }
+  echo "signed-reattestation=verified image=$image_id previous_artifact_manifest_sha256=$previous_manifest"
 fi
 echo "published role=$role image=$image_id status=active checksum=$local_checksum sha256=$hash_verification source_commit=$SOURCE_COMMIT"
