@@ -106,7 +106,9 @@ class RetainedFixedIPTests(unittest.TestCase):
         self.worker_launcher.chmod(0o755)
         provider_type = fixed_ip.Provider
 
-        def provider_factory(platform, *, deadline):
+        def provider_factory(platform, *, deadline, executable=None):
+            if executable is not None:
+                self.assertEqual(executable, str(self.executable))
             provider = provider_type(platform, deadline=deadline, executable=str(self.executable))
             provider.verify = lambda: real_verify(platform, **provider._bounds())
             return provider
@@ -188,6 +190,27 @@ class RetainedFixedIPTests(unittest.TestCase):
     def port(self):
         record = service.get(self.connection, self.app_id)
         return self.state()["ports"][record["port_id"]]
+
+    def test_helper_uses_fixed_authenticated_openstack_command(self):
+        self.assert_success(self.reserve())
+        record = service.get(self.connection, self.app_id)
+        with mock.patch.object(fixed_ip, "Provider") as provider:
+            provider.return_value.show.return_value = {"device_id": None}
+            with self.assertRaises(ValidationError):
+                production._provider_app(
+                    "app.worker.observe",
+                    {
+                        "applicationId": self.app_id,
+                        "slug": "commons",
+                        "retainedPort": service.helper_identity(record),
+                    },
+                )
+            self.assertEqual(provider.call_args.kwargs["executable"], str(self.executable))
+        source = (ROOT / "nix/roles/admin.nix").read_text()
+        self.assertIn(
+            '"L+ ${root}/bin/${namespace}-openstack - - - - ${openstackClient}/bin/platform-openstack"',
+            source,
+        )
 
     def test_plan_explicit_address_outside_pool_and_reserve_idempotency(self):
         plan = self.fixture.router.dispatch(
