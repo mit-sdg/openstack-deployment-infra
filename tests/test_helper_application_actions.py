@@ -172,6 +172,20 @@ class ApplicationActionTests(unittest.TestCase):
         )
         self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
 
+    def test_absent_stable_cleanup_accepts_only_exact_candidate_prefix_fallback(self) -> None:
+        self.nomad.inspection["ID"] = "demo-app-candidate"
+        result = self.actions["app.remove"](
+            {
+                "slug": "demo-app",
+                "jobId": "demo-app",
+                "candidateJobSha256": "0" * 64,
+                "candidateImage": CANDIDATE_IMAGE,
+            }
+        )
+        self.assertTrue(result["jobAbsent"])
+        self.assertEqual(self.nomad.stopped_jobs, set())
+        self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
+
     def test_candidate_cleanup_refuses_identity_drift_without_stopping(self) -> None:
         self.nomad.inspection["ID"] = "demo-app-candidate"
         with self.assertRaisesRegex(HelperActionError, "identity did not match"):

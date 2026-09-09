@@ -274,9 +274,17 @@ def _inspected_job(
             return None
         raise HelperActionError("NOMAD_UNAVAILABLE", "Nomad job inspection was unavailable")
     value = _parse_json(completed.stdout, field="job inspection")
-    if not isinstance(value, dict) or value.get("ID") != job_id:
+    if not isinstance(value, dict):
         raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
-    return value
+    observed_id = value.get("ID")
+    if observed_id == job_id:
+        return value
+    # Nomad resolves an absent stable ID to its sole `-candidate` prefix
+    # match. The platform permits exactly that bounded pair, so this proves
+    # only the requested stable ID is absent; every other mismatch fails.
+    if not job_id.endswith("-candidate") and observed_id == f"{job_id}-candidate":
+        return None
+    raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
 
 
 def _inspected_candidate(
