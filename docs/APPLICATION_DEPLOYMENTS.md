@@ -36,6 +36,7 @@ identity and `sudo -u management-broker`; obtain approval for that scope first.
 Do not loosen socket permissions or grant the operator additional Unix groups.
 
 ```bash
+set -euo pipefail
 umask 077
 NAMESPACE=61040
 SSH_CONFIG=/srv/openstack-platform/.secrets/ssh/config
@@ -216,7 +217,7 @@ while :; do
     *) echo 'Unrecognized operation state; inspect before proceeding' >&2; break ;;
   esac
 done
-jq -e '.status == "succeeded"' operation.json >/dev/null
+jq -es 'length == 1 and .[0].status == "succeeded"' operation.json >/dev/null
 ```
 
 A resumed operation reports `running` and clears its old error while recovery is
