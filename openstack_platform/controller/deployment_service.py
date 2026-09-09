@@ -861,6 +861,11 @@ def _deploy_and_accept_application(
             expected_marker=operation_id,
         ),
     )
+    # Stable outbound IPv4 is a post-acceptance, forward-only handover. Never
+    # destroy the predecessor until its address is verified on the accepted port.
+    from .public_ip_service import reconcile_accepted
+
+    reconcile_accepted(connection, config, spec.application_id, deadline=deadline)
     if updating:
         assert previous is not None and previous_job_id is not None
         _cleanup_deployment(
@@ -1122,6 +1127,9 @@ def _recover_app_deployment(
                 expected_marker=operation_id,
             ),
         )
+        from .public_ip_service import reconcile_accepted
+
+        reconcile_accepted(connection, config, application_id, deadline=deadline)
         if has_predecessor:
             predecessor_job_id = operation.refs.get("predecessor_job_id")
             predecessor_worker_id = operation.refs.get("predecessor_worker_application_id")
