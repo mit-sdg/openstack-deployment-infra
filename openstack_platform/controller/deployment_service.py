@@ -30,8 +30,9 @@ from ..validation import (
 )
 from . import application_runtime as app
 from . import database as db
-from . import image_service, sizing
+from . import image_service, rollback, sizing
 from .deployment_config import DeploymentConfiguration, branch_name
+from .deployment_reads import source_repository
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
     canonical_secret_key,
@@ -67,6 +68,7 @@ class DeploymentRequest:
     request_id: str | None = None
     sizing_plan: dict[str, Any] | None = None
     reuse_deployment_id: str | None = None
+    rollback_plan: dict[str, Any] | None = None
 
 
 RecoveryKind = Literal["candidate-removed", "accepted", "deployment-healthy"]
@@ -766,7 +768,9 @@ def _deploy_and_accept_application(
             candidate_digest=build.image,
             cleanup_state="confirmed",
         )
-        if previous is None or previous.image_digest != build.image:
+        if worker.refs.get("reuse_deployment_id") is None and (
+            previous is None or previous.image_digest != build.image
+        ):
             removed = helper_caller(
                 config,
                 "app.manifest.delete",
@@ -973,7 +977,9 @@ def _recover_app_deployment(
     if operation.phase == "candidate_removed":
         candidate = oci_digest_pin(operation.candidate_digest, field="removed candidate digest")
         previous = db.get_deployment(connection, application_id)
-        if previous is None or previous.image_digest != candidate:
+        if operation.refs.get("reuse_deployment_id") is None and (
+            previous is None or previous.image_digest != candidate
+        ):
             result = helper_caller(
                 config,
                 "app.manifest.delete",
@@ -1234,6 +1240,77 @@ class DeploymentService:
             deadline=selected_deadline,
         )
 
+    def _rollback_preflight(
+        self, application_id: str, attempt: db.DeploymentAttempt, *, deadline: float
+    ) -> None:
+        application = db.get_application(self.connection, application_id)
+        assert application is not None and attempt.configuration is not None
+        manifest = _configuration_manifest(self.connection, application_id, attempt.configuration)
+        _validate_storage_bindings(
+            self.connection,
+            self.config,
+            helper_caller=self.helper_caller,
+            application_id=application_id,
+            application_slug=application.slug,
+            manifest=manifest,
+            deadline=deadline,
+        )
+        expected_prefix = f"{self.config.platform.get('addresses.storage')}:{REGISTRY_PORT}/projects/{application.slug}/app@"
+        if attempt.image_digest is None or not attempt.image_digest.startswith(expected_prefix):
+            raise ValidationError("rollback artifact is outside the application repository")
+        observed = self.helper_caller(
+            self.config,
+            "app.manifest.verify",
+            {"slug": application.slug, "image": attempt.image_digest},
+            deadline=deadline,
+        )
+        if (
+            observed.get("slug") != application.slug
+            or observed.get("image") != attempt.image_digest
+            or observed.get("available") is not True
+        ):
+            raise ValidationError("retained rollback artifact is unavailable")
+
+    def rollback_plan(self, application_id: str, deployment_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + min(30, self.config.policy.limits.process_seconds)
+        with runtime.lock(self.state_directory, f"app-{application_id}", deadline=deadline):
+            unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
+            if unfinished is not None:
+                raise db.UnfinishedOperationError(
+                    unfinished.scope, unfinished.operation_id, unfinished.kind
+                )
+            plan = rollback.plan(self.connection, application_id, deployment_id)
+            self._rollback_preflight(
+                application_id,
+                rollback.target(self.connection, application_id, deployment_id),
+                deadline=deadline,
+            )
+            return plan
+
+    def rollback(
+        self, application_id: str, plan: dict[str, Any], *, confirmation: str, request_id: str
+    ) -> DeploymentOutcome:
+        application = db.get_application(self.connection, application_id)
+        if application is None or confirmation != application.slug:
+            raise ValidationError("rollback requires exact application slug confirmation")
+        prior = rollback.target(self.connection, application_id, plan.get("targetDeploymentId"))
+        repository = source_repository(self.connection, prior)
+        assert repository is not None and prior.requested_ref is not None
+        assert prior.configuration is not None and prior.configuration_revision is not None
+        return self.deploy(
+            DeploymentRequest(
+                application.slug,
+                repository,
+                prior.requested_ref,
+                prior.source_commit,
+                prior.configuration_revision,
+                prior.configuration,
+                request_id,
+                reuse_deployment_id=prior.deployment_id,
+                rollback_plan=plan,
+            )
+        )
+
     def resize(
         self, application_id: str, plan: dict[str, Any], *, confirmation: str, request_id: str
     ) -> DeploymentOutcome:
@@ -1342,6 +1419,7 @@ class DeploymentService:
                         "configuration": json.loads(configuration_json),
                         "sizingPlan": request.sizing_plan,
                         "reuseDeploymentId": request.reuse_deployment_id,
+                        "rollbackPlan": request.rollback_plan,
                     }
                 ),
                 environment.revision,
@@ -1463,12 +1541,17 @@ class DeploymentService:
                 prior = db.get_deployment_attempt(self.connection, request.reuse_deployment_id)
                 if (
                     prior is None
+                    or prior.application_id != application_id
+                    or prior.source_commit != source_commit
+                    or prior.configuration_sha256 != configuration_sha256
                     or prior.status != "succeeded"
                     or prior.image_digest is None
                     or prior.recipe_hash is None
                     or prior.build_log_path is None
                 ):
-                    raise ValidationError("resize source artifact is unavailable")
+                    raise ValidationError(
+                        "retained deployment artifact is unavailable or inconsistent"
+                    )
                 refs = {
                     **operation.refs,
                     "recipe_hash": prior.recipe_hash,
@@ -1596,6 +1679,25 @@ class DeploymentService:
             )
 
         def verify_project() -> None:
+            if request.rollback_plan is not None:
+                if (
+                    request.sizing_plan is not None
+                    or request.reuse_deployment_id
+                    != request.rollback_plan.get("targetDeploymentId")
+                ):
+                    raise ValidationError("rollback must reuse exactly the reviewed deployment")
+                unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
+                if unfinished is None:
+                    rollback.validate_plan(self.connection, application_id, request.rollback_plan)
+                elif unfinished.refs.get("rollback_plan") != request.rollback_plan:
+                    raise db.UnfinishedOperationError(
+                        unfinished.scope, unfinished.operation_id, unfinished.kind
+                    )
+                self._rollback_preflight(
+                    application_id,
+                    rollback.target(self.connection, application_id, request.reuse_deployment_id),
+                    deadline=selected_deadline,
+                )
             if request.sizing_plan is not None:
                 unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
                 if unfinished is None:
@@ -1639,6 +1741,7 @@ class DeploymentService:
             intent_refs={
                 "sizing_plan": request.sizing_plan,
                 "reuse_deployment_id": request.reuse_deployment_id,
+                "rollback_plan": request.rollback_plan,
             },
         )
         if result is None:

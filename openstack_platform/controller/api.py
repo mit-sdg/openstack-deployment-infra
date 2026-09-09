@@ -20,6 +20,7 @@ from . import sizing, status, storage
 from .application_service import ApplicationService
 from .async_operations import AsyncOperationExecutor
 from .deployment_config import parse_configuration
+from .deployment_reads import configuration_snapshot, source_repository
 from .deployment_service import (
     DeploymentDeadlineError,
     DeploymentRequest,
@@ -197,6 +198,8 @@ class ControllerAPI:
             ("POST", "/v1/admin/applications/{id}/public-ip", self._mutate_public_ip),
             ("GET", "/v1/admin/applications/{id}/resize-plan", self._resize_plan),
             ("POST", "/v1/admin/applications/{id}/resize", self._resize),
+            ("GET", "/v1/admin/applications/{id}/rollback-plan", self._rollback_plan),
+            ("POST", "/v1/admin/applications/{id}/rollback", self._rollback),
             ("POST", "/v1/admin/applications/{id}/deployments", self._operator_deployment),
             ("GET", "/v1/admin/operations/{id}", self._get_operation),
             ("GET", "/v1/admin/deployments", self._admin_deployments),
@@ -578,6 +581,49 @@ class ControllerAPI:
             lambda connection, key: DeploymentService(
                 connection, self.config, self.state_directory, helper_caller=self.helper_caller
             ).resize(
+                application.application_id,
+                body["plan"],
+                confirmation=body["confirmation"],
+                request_id=key,
+            ),
+            kind="app.deploy",
+            scope=f"app-{application.application_id}",
+            claimed=claimed,
+        )
+
+    def _rollback_plan(self, request: Request) -> Response:
+        if (
+            request.body is not None
+            or set(request.query) != {"deploymentId"}
+            or len(request.query["deploymentId"]) != 1
+        ):
+            raise HttpError(
+                400, "INVALID_QUERY", "supply exactly one deploymentId query field and no body"
+            )
+        application = self._application(self._path_uuid(request))
+        return Response(
+            200,
+            DeploymentService(
+                self.connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).rollback_plan(application.application_id, request.query["deploymentId"][0]),
+        )
+
+    def _rollback(self, request: Request) -> Response:
+        self._no_query(request)
+        body = self._body(
+            request, allowed={"plan", "confirmation"}, required={"plan", "confirmation"}
+        )
+        if not isinstance(body["plan"], dict):
+            raise ValidationError("rollback plan must be an object")
+        claimed = self._claim(request)
+        if claimed.result_id is not None and not self._is_recovery_result(claimed):
+            return self._operation_response(claimed.result_id, admin=True)
+        application = self._application(self._path_uuid(request))
+        return self._external(
+            request,
+            lambda connection, key: DeploymentService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).rollback(
                 application.application_id,
                 body["plan"],
                 confirmation=body["confirmation"],
@@ -1012,15 +1058,18 @@ class ControllerAPI:
         rows = self.connection.execute(
             "SELECT application.application_id, application.slug, "
             "application.desired_running, application.url, application.created_at, "
-            "application.updated_at, tombstone.deleted_at "
+            "application.updated_at, tombstone.deleted_at, accepted.deployment_id AS active_deployment_id "
             "FROM applications AS application LEFT JOIN application_slug_tombstones "
-            "AS tombstone USING (slug) ORDER BY application.slug, application.application_id"
+            "AS tombstone USING (slug) LEFT JOIN active_deployments AS accepted "
+            "ON accepted.application_id = application.application_id "
+            "ORDER BY application.slug, application.application_id"
         ).fetchall()
         items = [
             {
                 "applicationId": row["application_id"],
                 "slug": row["slug"],
                 "enabled": bool(row["desired_running"]),
+                "activeDeploymentId": row["active_deployment_id"],
                 "url": row["url"],
                 "createdAt": row["created_at"],
                 "updatedAt": row["updated_at"],
@@ -1082,13 +1131,14 @@ class ControllerAPI:
             self._page(request, items, "operationId"),
         )
 
-    @staticmethod
-    def _application_model(application: db.Application) -> dict[str, object]:
+    def _application_model(self, application: db.Application) -> dict[str, object]:
+        active = db.get_active_deployment(self.connection, application.application_id)
         return {
             "applicationId": application.application_id,
             "slug": application.slug,
             "url": application.url,
             "enabled": application.desired_running,
+            "activeDeploymentId": None if active is None else active.deployment_id,
             "sizing": {
                 "workerFlavor": application.worker_flavor,
                 "cpuMHz": application.scheduler_cpu_mhz,
@@ -1098,8 +1148,7 @@ class ControllerAPI:
             "updatedAt": application.updated_at,
         }
 
-    @staticmethod
-    def _deployment_model(attempt: db.DeploymentAttempt) -> dict[str, object]:
+    def _deployment_model(self, attempt: db.DeploymentAttempt) -> dict[str, object]:
         return {
             "deploymentId": attempt.deployment_id,
             "applicationId": attempt.application_id,
@@ -1108,6 +1157,9 @@ class ControllerAPI:
             "repositoryCommit": attempt.source_commit,
             "requestedRef": attempt.requested_ref,
             "configurationRevision": attempt.configuration_revision,
+            "configuration": configuration_snapshot(attempt),
+            "configurationSha256": attempt.configuration_sha256,
+            "sourceRepository": source_repository(self.connection, attempt),
             "environmentRevision": attempt.environment_revision,
             "recipeHash": attempt.recipe_hash,
             "imageDigest": attempt.image_digest,

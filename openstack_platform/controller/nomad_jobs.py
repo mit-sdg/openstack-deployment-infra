@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid as uuid_module
 
@@ -26,7 +27,12 @@ from ..validation import (
     uuid,
 )
 from .application_models import Manifest
-from .storage_contract import canonical_secret_key, canonical_secret_keys
+from .storage_contract import (
+    PLATFORM_ENVIRONMENT_KEYS,
+    canonical_secret_key,
+    canonical_secret_keys,
+    platform_environment_values,
+)
 
 
 def render_nomad_job(
@@ -85,19 +91,26 @@ def render_nomad_job(
         for binding in manifest.storage_bindings
         for output, target in binding.environment
     )
-    storage_keys = sorted(
-        key
-        for binding in manifest.storage_bindings
-        for key in canonical_secret_keys(binding.resource_type, binding.name)
+    excluded_keys = sorted(
+        PLATFORM_ENVIRONMENT_KEYS
+        | {
+            key
+            for binding in manifest.storage_bindings
+            for key in canonical_secret_keys(binding.resource_type, binding.name)
+        }
     )
-    if not storage_keys:
-        runtime_item = "{{ $key }}={{ $value | toJSON }}"
-    else:
-        comparisons = " ".join(f'(ne $key "{key}")' for key in storage_keys)
-        predicate = comparisons if len(storage_keys) == 1 else f"and {comparisons}"
-        runtime_item = (
-            f"{{{{ if {predicate} }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}\n{{{{ end }}}}"
+    comparisons = " ".join(f'(ne $key "{key}")' for key in excluded_keys)
+    runtime_item = (
+        f"{{{{ if and {comparisons} }}}}{{{{ $key }}}}={{{{ $value | toJSON }}}}\n{{{{ end }}}}"
+    )
+    # Candidate-specific derived settings must not restore or mutate the live
+    # secret variable (notably PORT when rolling back a runtime configuration).
+    platform_environment = "\n".join(
+        f"        {key} = {json.dumps(value)}"
+        for key, value in sorted(
+            platform_environment_values(identifier, app_slug, manifest.port).items()
         )
+    )
     job = f'''job "{job_id}" {{
   region      = "{platform.region}"
   datacenters = ["{platform.datacenter}"]
@@ -184,7 +197,7 @@ def render_nomad_job(
       }}
       env {{
         HOST = "0.0.0.0"
-        PORT = "{manifest.port}"
+{platform_environment}
       }}
       template {{
         destination = "secrets/app.env"

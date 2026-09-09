@@ -61,6 +61,70 @@ An unavailable live observation does not erase accepted state. Diagnose the
 named dependency before mutation; do not edit SQLite or provider resources to
 make status appear healthy.
 
+## Roll back an application
+
+Use the privileged controller Unix API to redeploy a retained successful
+application artifact and its immutable configuration without rebuilding. Install
+matching controller/helper releases with `app.manifest.verify`. The app must be
+enabled, and quota must permit both predecessor and candidate workers. Current
+sizing, staff secrets, storage credentials and data remain current. **This does
+not reverse database migrations or restore data.** Confirm that the historical
+application can use the current data before applying.
+
+Run locally on admin as the operator UID/GID admitted to `privileged.sock`.
+Use deployment history/read responses to select a historical successful attempt
+and inspect its `configuration`, `configurationSha256`, `sourceRepository` and
+`imageDigest`. `activeDeploymentId` is authoritative; the latest attempt may have
+failed. A missing source snapshot, deleted artifact, or incompatible current
+storage dependency prevents rollback. Registry retention can make older
+successful attempts unavailable; the controller does not reconstruct them.
+
+```bash
+umask 077
+NAMESPACE=your-installed-namespace
+APP_ID=your-canonical-application-uuid
+TARGET_ID=your-historical-deployment-uuid
+APP_SLUG=your-exact-application-slug
+SOCKET="/run/${NAMESPACE}-controller/privileged.sock"
+BASE="http://localhost/v1/admin/applications/${APP_ID}"
+
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "$BASE/rollback-plan?deploymentId=$TARGET_ID" > rollback-plan.json
+jq . rollback-plan.json
+```
+
+Review both deployment IDs, the historical source/artifact/configuration hash,
+current environment revision, sizing and storage identities. The plan is not an
+artifact or capacity reservation. A changed accepted deployment, environment
+revision, sizing or storage projection requires a fresh review. Apply also
+rechecks the actual registry content and current storage output keys.
+
+```bash
+KEY="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+jq --arg confirmation "$APP_SLUG" \
+  '{plan: ., confirmation: $confirmation}' rollback-plan.json > rollback-request.json
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $KEY" \
+  --data-binary @rollback-request.json "$BASE/rollback"
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "http://localhost/v1/admin/operations/$KEY"
+```
+
+Poll until terminal or `recovery_required`. Verify `succeeded`, the new accepted
+`activeDeploymentId` equal to `$KEY`, and deployment history showing the target
+artifact/configuration hash. The historical attempt remains unchanged; rollback
+creates a new attempt. Verify application health and any existing optional FIP
+association. FIP handover happens after acceptance and before predecessor cleanup;
+ordinary applications retain no FIP reservation.
+
+Candidate health failure removes the candidate and keeps the previous accepted
+workload and historical artifact. If acceptance, FIP handover or cleanup is
+interrupted, retain the request file and `$KEY`, resolve the reported dependency,
+and repeat the identical POST. Do not submit a new key or delete the predecessor
+manually: acceptance may already have committed, and recovery reobserves that
+candidate before completing forward. After completion, remove the two local JSON
+files. No secret values are returned by these reads or plans.
+
 ## Update hosted role image selections
 
 Use the hosted controller's privileged API to select role-image metadata. Run these commands **locally on the admin host as the permitted
