@@ -26,6 +26,7 @@ from .deployment_service import (
 )
 from .environment_service import EnvironmentMutationRequest, EnvironmentService
 from .http import HttpError, Request, Response, Router
+from .image_service import IMAGE_SELECTION_KIND, ImageSelectionService, hosted_role
 from .log_service import LogService
 from .service_support import ServiceDeadlineError
 from .storage_service import StorageMutationRequest, StorageService
@@ -187,6 +188,7 @@ class ControllerAPI:
             ("GET", "/v1/admin/status", self._admin_status),
             ("GET", "/v1/admin/hosts", self._admin_hosts),
             ("GET", "/v1/admin/images", self._admin_images),
+            ("POST", "/v1/admin/images/{role}/selection", self._select_hosted_image),
             ("GET", "/v1/admin/applications", self._admin_applications),
             ("GET", "/v1/admin/applications/{id}/public-ip", self._get_public_ip),
             ("POST", "/v1/admin/applications/{id}/public-ip/plan", self._plan_public_ip),
@@ -238,7 +240,7 @@ class ControllerAPI:
                     raise HttpError(
                         409,
                         "OPERATION_CONFLICT",
-                        "another operation is unfinished for this application",
+                        "another operation is unfinished for this resource scope",
                         operation_id=error.operation_id,
                     ) from None
                 except (DeploymentDeadlineError, ServiceDeadlineError, TimeoutError):
@@ -958,6 +960,23 @@ class ControllerAPI:
             timeout_seconds=self.config.policy.limits.process_seconds,
         )
         return Response(200, {"items": status.infra_list(self.connection, observe=observe)})
+
+    def _select_hosted_image(self, request: Request) -> Response:
+        self._no_query(request)
+        body = self._body(
+            request, allowed={"imageId", "expectedImageId"}, required={"imageId", "expectedImageId"}
+        )
+        role = hosted_role(request.path_parameters["role"])
+        image_id = uuid(body["imageId"], field="image UUID")
+        expected_image_id = uuid(body["expectedImageId"], field="expected current image UUID")
+        return self._external(
+            request,
+            lambda connection, key: ImageSelectionService(
+                connection, self.config, self.state_directory
+            ).select(role, image_id, expected_image_id, request_id=key),
+            kind=IMAGE_SELECTION_KIND,
+            scope="infrastructure",
+        )
 
     def _admin_images(self, request: Request) -> Response:
         self._no_query(request)

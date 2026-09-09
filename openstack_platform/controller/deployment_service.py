@@ -30,7 +30,7 @@ from ..validation import (
 )
 from . import application_runtime as app
 from . import database as db
-from . import sizing
+from . import image_service, sizing
 from .deployment_config import DeploymentConfiguration, branch_name
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
@@ -236,10 +236,9 @@ def _prepare_deployment_build(
     if candidate is None:
         db.checkpoint_deployment_attempt(connection, operation.operation_id, status="building")
         with runtime.lock(state_directory, "infrastructure", deadline=deadline):
-            builder_image = db.get_image_selection(connection, "builder")
-            if builder_image is None:
-                raise ValidationError("select a builder image before deployment")
-            refs = {**refs, "builder_image_id": builder_image.image_id}
+            builder_image_id = uuid(
+                refs.get("builder_image_id"), field="recorded builder image UUID"
+            )
             db.checkpoint_operation(
                 connection,
                 operation.operation_id,
@@ -257,7 +256,7 @@ def _prepare_deployment_build(
                 "commit": source_commit,
                 "configurationRevision": configuration_revision,
                 "configuration": json.loads(configuration.canonical_json()),
-                "builderImageId": builder_image.image_id,
+                "builderImageId": builder_image_id,
                 "runtimeImages": {
                     "bun": config.policy.runtime_images.bun,
                     "node": config.policy.runtime_images.node,
@@ -486,10 +485,7 @@ def _prepare_deployment_worker(
     )
     if worker.get("absent") is True:
         with runtime.lock(state_directory, "infrastructure", deadline=deadline):
-            worker_image = db.get_image_selection(connection, "worker")
-            if worker_image is None:
-                raise ValidationError("select a worker image before deployment")
-            refs = {**refs, "worker_image_id": worker_image.image_id}
+            worker_image_id = uuid(refs.get("worker_image_id"), field="recorded worker image UUID")
             db.checkpoint_operation(
                 connection,
                 operation_id,
@@ -510,7 +506,7 @@ def _prepare_deployment_worker(
             {
                 "applicationId": worker_application_id,
                 "slug": application_slug,
-                "workerImageId": worker_image.image_id,
+                "workerImageId": worker_image_id,
                 "standardFlavor": worker_flavor,
                 **({"flavorId": flavor_plan["flavor_id"]} if flavor_plan is not None else {}),
             },
@@ -1456,6 +1452,13 @@ class DeploymentService:
 
         def prepare_build(operation: db.Operation) -> app.DeploymentBuild:
             configuration, snapshotted_manifest = snapshot(operation.operation_id)
+            operation = image_service.pin_deployment_images(
+                self.connection,
+                self.state_directory,
+                operation,
+                ("worker",) if request.reuse_deployment_id is not None else ("builder", "worker"),
+                deadline=selected_deadline,
+            )
             if request.reuse_deployment_id is not None:
                 prior = db.get_deployment_attempt(self.connection, request.reuse_deployment_id)
                 if (

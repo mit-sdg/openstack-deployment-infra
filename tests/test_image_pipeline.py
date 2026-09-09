@@ -210,10 +210,16 @@ class ImagePipelineTests(unittest.TestCase):
         )
         document["images"]["worker"]["displayName"] += "-unsigned"
         pipeline._json(seed_path, document)
-        with self.assertRaisesRegex(seed_images.SeedFailure, "name does not match"):
+        with self.assertRaisesRegex(seed_images.SeedFailure, "unproven"):
             seed_images.seed(
                 platform_config=build,
                 state_directory=self.directory / "controller",
+                manifest=seed_path,
+            )
+        with self.assertRaisesRegex(seed_images.SeedFailure, "name does not match"):
+            seed_images.seed(
+                platform_config=build,
+                state_directory=self.directory / "fresh-controller",
                 manifest=seed_path,
             )
         changed = json.loads(unsigned.read_text())
