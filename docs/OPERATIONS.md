@@ -12,7 +12,10 @@ admin-host operations. Root is required only for the explicitly marked offline
 hosted-controller restore. Every provider operation is limited to resources
 named by the installed inventory. For per-app worker flavor selection and
 candidate-based resize through the privileged controller API, see
-[Size an application](#size-an-application).
+[Size an application](#size-an-application). For an optional floating IPv4
+reservation on a compatible routed network, see
+[Reserve a stable outbound IPv4](#reserve-a-stable-outbound-ipv4). This does not enable direct
+app ingress or change Cloudflare/TLS.
 
 ## Initialize operator variables
 
@@ -245,6 +248,116 @@ use a new reviewed sizing operation. Disabled accepted apps must be enabled
 before resize. Plans do not reserve quota, and the platform does not copy local
 disk state or resize managed-storage quotas. These examples describe the API;
 production provider behavior still requires a release acceptance exercise.
+
+## Reserve a stable outbound IPv4
+
+Staff can optionally reserve one Neutron floating IPv4 across successful worker
+replacement, resize, and disable/enable. This does not change the application URL,
+Cloudflare, TLS, guest routing, or firewall rules. Direct public app ingress is
+unsupported. Candidate/build workers do not use the reservation; handover is not
+connection-preserving or zero downtime. Applications must start and pass candidate
+health without the reserved source address. A dependency that requires it before
+startup/health is incompatible with this candidate-first handover.
+
+Fixed IPs belong to disposable worker ports, not applications. They may already
+be globally public on provider-routed networks; this feature does not preserve
+those ports, add another NIC, or provision a tenant network/router. Floating-IP
+quota `0` or no matching routed subnet makes this optional feature unavailable,
+even when existing public fixed-IP networking works.
+
+### Check cloud capability
+
+Run locally on admin as the operator identity admitted to `privileged.sock`,
+using matching controller code and a fresh hosted backup. Schema migration 3 adds
+`application_floating_ips`; do not downgrade or restore old state while leaving
+its provider associations unmanaged. The external infrastructure CLI database is
+not the hosted product database.
+
+The cloud must expose exactly one IPv4 worker subnet and one project-owned router
+connecting it to the selected external network with SNAT enabled. The controller
+needs quota/network/subnet/router/port/server/security-group/floating-IP reads
+and the corresponding floating-IP mutation permissions. The target worker must
+retain its exact project-owned worker group, port security, and ingress rules
+restricted to the ingress-tier group. No security rule is changed.
+
+```bash
+umask 077
+APP_ID=your-canonical-application-uuid
+EXTERNAL_NETWORK_ID=your-canonical-external-network-uuid
+SOCKET="/run/${PLATFORM_NAMESPACE}-controller/privileged.sock"
+BASE="http://localhost/v1/admin/applications/${APP_ID}/public-ip"
+jq -n --arg network "$EXTERNAL_NETWORK_ID" \
+  '{externalNetworkId: $network}' > public-ip-plan-request.json
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' \
+  --data-binary @public-ip-plan-request.json "$BASE/plan" > public-ip-plan.json
+jq . public-ip-plan.json
+jq -e '.supported == true' public-ip-plan.json
+```
+
+This plan is read-only, needs no idempotency key, and reserves no quota. Review
+`reasons`, `floatingIpQuota`, `floatingIpsUsed`, and `routerId`. Quota exhaustion
+or missing/ambiguous routed topology blocks allocation before provider mutation;
+malformed/failed observations fail closed. Other operators must not modify these
+resources out of band: Neutron reassociation has no atomic compare-and-set API.
+
+### Allocate, attach, or release
+
+Select one body. `allocate` creates a platform-owned allocation, deleted on
+release/app deletion. `attach` accepts an existing unassociated, project-owned
+floating-IP UUID on the selected external network; release detaches but never
+deletes that supplied allocation. It must not belong to another app reservation.
+
+```bash
+jq -n --arg network "$EXTERNAL_NETWORK_ID" \
+  '{action: "allocate", externalNetworkId: $network}' > public-ip-request.json
+# Alternatively: {"action":"attach","externalNetworkId":"UUID","floatingIpId":"UUID"}
+# To release: {"action":"release"}
+python3 -c 'import uuid; print(uuid.uuid4())' > public-ip-key.txt
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<public-ip-key.txt)" \
+  --data-binary @public-ip-request.json "$BASE" > public-ip-response.json
+STATUS_URL=$(jq -r .statusUrl public-ip-response.json)
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+  "http://localhost${STATUS_URL}" | jq .
+curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" "$BASE" | jq .
+```
+
+HTTP `202` means admitted, not completed. Poll `statusUrl` to a terminal or
+`recovery_required` state; reuse the exact body/key for retries. A new intent
+needs a new key. `GET` reports recorded state, not a fresh probe: check ownership,
+address, phase, current/pending port, and allocation marker. `reserved` is
+unassociated; `active` records a confirmed router mapping on the accepted port.
+Reservations can precede first deployment and survive disable; they may incur
+charges while unused. Disable detaches before worker deletion; healthy enable
+reassociates the reservation. Releasing a platform allocation loses its address.
+
+Verify actual outbound source IPv4 through a controlled endpoint from the
+accepted app—not admin, builder, or preview—and repeat after resize and
+disable/enable. Also verify the original HTTPS app URL. Provider association
+status and offline OSC fixtures do not prove container SNAT or upstream access.
+
+### Recover handover or release
+
+The old worker retains the address until the candidate passes existing health
+and is durably accepted. Then the same floating-IP UUID is reassociated and
+verified before predecessor cleanup. Failure before acceptance does not move it;
+after acceptance handover is forward-only. A failed/ambiguous handover preserves
+the predecessor and leaves the deployment recovery-required. Retry the original
+deployment/resize request, not a new public-IP mutation. Recovery checks candidate
+health and exact old/pending port ownership; unrelated association drift blocks
+mutation. All public-IP and application lifecycle mutations share the app lock.
+
+Allocation journals a unique marker before create. A lost create response can
+adopt only one exact unassociated marker match. Zero or multiple matches remain
+recovery-required: zero is not proof that create cannot finish later. There is
+no automatic repeat-create or force-abandon endpoint. Escalate with the operation,
+reservation, and marker identities; do not edit SQLite or delete similar-looking
+provider resources. A completed reservation accepts a fresh
+`{"action":"reconcile"}` request to verify/converge its recorded association,
+not overwrite unrelated drift. Ambiguous release retains its journal for the
+same-key retry; app deletion does not delete the worker until release completes.
 
 ## Back up all state classes
 

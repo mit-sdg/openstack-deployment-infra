@@ -190,6 +190,9 @@ class ControllerAPI:
             ("GET", "/v1/admin/images", self._admin_images),
             ("POST", "/v1/admin/images/{role}/selection", self._select_hosted_image),
             ("GET", "/v1/admin/applications", self._admin_applications),
+            ("GET", "/v1/admin/applications/{id}/public-ip", self._get_public_ip),
+            ("POST", "/v1/admin/applications/{id}/public-ip/plan", self._plan_public_ip),
+            ("POST", "/v1/admin/applications/{id}/public-ip", self._mutate_public_ip),
             ("GET", "/v1/admin/applications/{id}/resize-plan", self._resize_plan),
             ("POST", "/v1/admin/applications/{id}/resize", self._resize),
             ("POST", "/v1/admin/applications/{id}/deployments", self._operator_deployment),
@@ -877,6 +880,60 @@ class ControllerAPI:
         if dispatch is None:
             raise HttpError(404, "OPERATION_NOT_FOUND", "operation does not exist")
         return Response(200, self._dispatch_model(dispatch))
+
+    def _get_public_ip(self, request: Request) -> Response:
+        from .public_ip_service import model
+
+        self._no_query(request)
+        application = self._application(self._path_uuid(request))
+        return Response(200, model(self.connection, application.application_id))
+
+    def _plan_public_ip(self, request: Request) -> Response:
+        from .public_ip_service import PublicIPService
+
+        self._no_query(request)
+        body = self._body(request, allowed={"externalNetworkId"}, required={"externalNetworkId"})
+        application = self._application(self._path_uuid(request))
+        result = PublicIPService(self.connection, self.config, self.state_directory).plan(
+            application.application_id,
+            uuid(body["externalNetworkId"], field="external network UUID"),
+        )
+        return Response(200, result)
+
+    def _mutate_public_ip(self, request: Request) -> Response:
+        from .public_ip_service import PublicIPService
+
+        self._no_query(request)
+        body = self._body(
+            request, allowed={"action", "externalNetworkId", "floatingIpId"}, required={"action"}
+        )
+        action = body["action"]
+        if action not in ("allocate", "attach", "release", "reconcile"):
+            raise ValidationError("invalid public IP action")
+        expected = {"action"}
+        if action in {"allocate", "attach"}:
+            expected.add("externalNetworkId")
+            uuid(body.get("externalNetworkId"), field="external network UUID")
+        if action == "attach":
+            expected.add("floatingIpId")
+            uuid(body.get("floatingIpId"), field="floating IP UUID")
+        if set(body) != expected:
+            raise ValidationError("public IP action fields are invalid")
+        application = self._application(self._path_uuid(request))
+        return self._external(
+            request,
+            lambda connection, key: PublicIPService(
+                connection, self.config, self.state_directory
+            ).mutate(
+                application.application_id,
+                action=action,
+                network_id=body.get("externalNetworkId"),
+                floating_ip_id=body.get("floatingIpId"),
+                request_id=key,
+            ),
+            kind="app.public-ip",
+            scope=f"app-{application.application_id}",
+        )
 
     def _admin_status(self, request: Request) -> Response:
         self._no_query(request)

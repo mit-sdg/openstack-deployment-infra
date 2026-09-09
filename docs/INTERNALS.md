@@ -284,6 +284,9 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | `GET /v1/admin/images` | Hosted role-image selection records |
 | `POST /v1/admin/images/{role}/selection` | Compare-and-swap exact hosted worker/builder image UUID after provider validation |
 | `GET /v1/admin/applications` | Paginated global application list |
+| `GET /v1/admin/applications/{id}/public-ip` | Recorded optional outbound IPv4 reservation; staff only |
+| `POST /v1/admin/applications/{id}/public-ip/plan` | Read-only quota and routed-network capability check with `{externalNetworkId}` |
+| `POST /v1/admin/applications/{id}/public-ip` | App-locked `allocate`, `attach`, `release`, or `reconcile`; see [public IPv4 operations](OPERATIONS.md#reserve-a-stable-outbound-ipv4) |
 | `GET /v1/admin/applications/{id}/resize-plan` | Observe a sizing plan; requires one `flavor` query parameter |
 | `POST /v1/admin/applications/{id}/resize` | Apply `{plan, confirmation}` to an enabled accepted app, reusing its OCI artifact |
 | `POST /v1/admin/applications/{id}/deployments` | Deploy with the normal deployment fields plus a reviewed `plan` |

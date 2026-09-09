@@ -27,8 +27,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.run_id || 'latest' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   static:
@@ -204,8 +204,9 @@ jobs:
   publication-context:
     name: Detect publishable image changes
     if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.publish)
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish && !inputs.development_publish))
     runs-on: ubuntu-latest
     outputs:
       commit_sha: ${{ steps.context.outputs.commit_sha }}
@@ -219,31 +220,9 @@ jobs:
         id: context
         env:
           BEFORE_SHA: ${{ github.event.before }}
-          COMMIT_SHA: ${{ github.sha }}
-          EVENT_NAME: ${{ github.event_name }}
-          MANUAL_PUBLISH: ${{ inputs.publish }}
         run: |
-          set -euo pipefail
-          publish=false
-          # Documentation inside an image-input directory does not change any
-          # image, so exclude it. Without this a README edit under nix/ rebuilds
-          # and republishes all five role images.
-          publish_paths=(
-            flake.nix flake.lock nix infra openstack_platform deploy
-            pyproject.toml uv.lock LICENSE ':(exclude)*.md'
-          )
-          if [[ $EVENT_NAME == workflow_dispatch && $MANUAL_PUBLISH == true ]]; then
-            publish=true
-          elif [[ $BEFORE_SHA =~ ^0+$ ]]; then
-            if git ls-tree -r --name-only "$COMMIT_SHA" -- "${publish_paths[@]}" | grep -q .; then
-              publish=true
-            fi
-          elif ! git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
-            echo "Previous push commit is unavailable; automatic publication is disabled for this run"
-          elif ! git diff --quiet "$BEFORE_SHA" "$COMMIT_SHA" -- "${publish_paths[@]}"; then
-            publish=true
-          fi
-          printf 'publish=%s\ncommit_sha=%s\n' "$publish" "$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          python3 -m openstack_platform.image_pipeline context \
+            --before "$BEFORE_SHA" >> "$GITHUB_OUTPUT"
 
   build-images:
     name: Build ${{ matrix.role }} image
@@ -251,8 +230,7 @@ jobs:
     if: >-
       always() &&
       inputs.development_publish != true &&
-      (needs.publication-context.outputs.publish != 'true' ||
-       vars.OPENSTACK_PUBLISH_ENABLED != 'true')
+      needs.publication-context.outputs.publish != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -291,25 +269,16 @@ jobs:
           test -n "$qcow"
           tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"
 
-  build-and-publish-images:
-    name: Build ${{ matrix.role }} image
-    needs:
-      - static
-      - generated-recipes
-      - nix-eval
-      - package-tests
-      - role-vm-tests
-      - publication-context
-    if: >-
-      needs.publication-context.outputs.publish == 'true' &&
-      vars.OPENSTACK_PUBLISH_ENABLED == 'true'
+  production-role-builds:
+    name: Build production ${{ matrix.role }} image
+    needs: publication-context
+    if: needs.publication-context.outputs.publish == 'true'
     environment: openstack-images
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     strategy:
       fail-fast: false
-      # Keep provider authentication and Glance mutations serialized.
-      max-parallel: 1
+      max-parallel: 5
       matrix:
         role:
           - admin
@@ -317,148 +286,169 @@ jobs:
           - storage
           - worker
           - builder
-
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ needs.publication-context.outputs.commit_sha }}
-
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install publication and smoke-test tools
+      - name: Install QEMU tools
         run: |
-          tests/install_ci_apt_packages.sh \
-            genisoimage \
-            python3-openstackclient \
-            qemu-system-x86 \
-            qemu-utils
-          if [[ -e /dev/kvm ]]; then
-            sudo chmod 0666 /dev/kvm
-          fi
-
-      - name: Install private deployment configuration
+          tests/install_ci_apt_packages.sh genisoimage qemu-system-x86 qemu-utils
+          if [[ -e /dev/kvm ]]; then sudo chmod 0666 /dev/kvm; fi
+      - name: Install validated inventory outside artifact root
         env:
-          COMMIT_SHA: ${{ needs.publication-context.outputs.commit_sha }}
-          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
+          OPENSTACK_PUBLISH_ENABLED: ${{ vars.OPENSTACK_PUBLISH_ENABLED }}
           PLATFORM_CONFIG_JSON: ${{ secrets.PLATFORM_CONFIG_JSON }}
+          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
+        run: |
+          python3 -m openstack_platform.image_pipeline inventory --output "$RUNNER_TEMP/production-platform.json"
+          echo "PLATFORM_CONFIG=$RUNNER_TEMP/production-platform.json" >> "$GITHUB_ENV"
+      - name: Build and boot one exact role image
+        run: |
+          python3 -m openstack_platform.image_pipeline \
+            --root "$RUNNER_TEMP/production-images" --platform "$PLATFORM_CONFIG" \
+            build-role "${{ matrix.role }}"
+      - name: Retain exact QCOW2 and role evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: production-role-${{ github.run_id }}-${{ matrix.role }}
+          path: ${{ runner.temp }}/production-images
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Retain build and QEMU diagnostics only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: production-logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.role }}
+          path: |
+            ${{ runner.temp }}/production-images/${{ matrix.role }}/build.log
+            ${{ runner.temp }}/production-images/${{ matrix.role }}/qemu.log
+            ${{ runner.temp }}/production-images/${{ matrix.role }}/qemu-serial.log
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Remove private inventory
+        if: always()
+        run: rm -f "$RUNNER_TEMP/production-platform.json"
+
+  publish-images:
+    name: Verify and publish retained production images
+    needs:
+      - static
+      - generated-recipes
+      - nix-eval
+      - package-tests
+      - role-vm-tests
+      - publication-context
+      - production-role-builds
+    if: needs.publication-context.outputs.publish == 'true'
+    environment: openstack-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    concurrency:
+      group: openstack-images-provider
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.publication-context.outputs.commit_sha }}
+      - name: Record protected publication enablement
+        env:
+          ENABLED: ${{ vars.OPENSTACK_PUBLISH_ENABLED }}
+        run: |
+          case "$ENABLED" in
+            true) echo 'OPENSTACK_PUBLISH_ENABLED=true' >> "$GITHUB_ENV" ;;
+            ''|false) echo 'OPENSTACK_PUBLISH_ENABLED=false' >> "$GITHUB_ENV" ;;
+            *) echo 'Invalid OPENSTACK_PUBLISH_ENABLED value' >&2; exit 2 ;;
+          esac
+      - name: Download all five exact role artifacts from this run
+        if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: production-role-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/production-images
+          merge-multiple: true
+      - name: Install validated inventory outside artifact root
+        if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
+        env:
+          PLATFORM_CONFIG_JSON: ${{ secrets.PLATFORM_CONFIG_JSON }}
+          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
+        run: |
+          python3 -m openstack_platform.image_pipeline inventory --output "$RUNNER_TEMP/production-platform.json"
+          echo "PLATFORM_CONFIG=$RUNNER_TEMP/production-platform.json" >> "$GITHUB_ENV"
+      - name: Select explicit production trust policy
+        if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
+        env:
+          OPENSTACK_UNSIGNED_PRODUCTION: ${{ vars.OPENSTACK_UNSIGNED_PRODUCTION }}
           RELEASE_EVIDENCE_URL: ${{ vars.RELEASE_EVIDENCE_URL }}
           RELEASE_EVIDENCE_SHA256: ${{ vars.RELEASE_EVIDENCE_SHA256 }}
           RELEASE_TRUST_ROOT_PEM: ${{ vars.RELEASE_TRUST_ROOT_PEM }}
         run: |
           set -euo pipefail
-          test -n "$OS_PROJECT_ID"
-          test -n "$PLATFORM_CONFIG_JSON"
-          umask 077
-          printf '%s\n' "$PLATFORM_CONFIG_JSON" > config/platform.json
+          case "$OPENSTACK_UNSIGNED_PRODUCTION" in
+            I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES)
+              echo 'PLATFORM_ALLOW_UNSIGNED_PRODUCTION=I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES' >> "$GITHUB_ENV"
+              echo 'WARNING: production signing temporarily disabled; integrity gates remain required' >&2
+              ;;
+            ''|false)
+              # On a first signed run this can fail while an external signer
+              # prepares the retained bytes. Rerun failed jobs, never all builds.
+              for name in RELEASE_EVIDENCE_URL RELEASE_EVIDENCE_SHA256 RELEASE_TRUST_ROOT_PEM; do
+                test -n "${!name}" || {
+                  echo "Signed publication awaits $name; sign retained role artifacts externally, then rerun only this job" >&2
+                  exit 1
+                }
+              done
+              umask 077
+              printf '%s\n' "$RELEASE_TRUST_ROOT_PEM" > "$RUNNER_TEMP/release-trust-root.pem"
+              python3 -m openstack_platform.release_manifest bundle-fetch \
+                --url "$RELEASE_EVIDENCE_URL" --sha256 "$RELEASE_EVIDENCE_SHA256" \
+                --destination "$RUNNER_TEMP/production-images/evidence" \
+                --commit "$GITHUB_SHA" --trust-root "$RUNNER_TEMP/release-trust-root.pem"
+              printf 'PLATFORM_RELEASE_TRUST_ROOT=%s\nPLATFORM_ARTIFACT_TRUST_ROOT=%s\n' \
+                "$RUNNER_TEMP/release-trust-root.pem" "$RUNNER_TEMP/release-trust-root.pem" >> "$GITHUB_ENV"
+              ;;
+            *) echo 'Invalid OPENSTACK_UNSIGNED_PRODUCTION acknowledgement' >&2; exit 2 ;;
+          esac
+      - name: Verify CI gates and seal all-role publication evidence
+        if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
-          from uuid import UUID
-
-          path = Path("config/platform.json")
-          document = json.loads(path.read_text())
-          commit = os.environ["COMMIT_SHA"]
-          if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
-              raise SystemExit("invalid publication commit")
-          try:
-              project_id = str(UUID(os.environ["OS_PROJECT_ID"]))
-          except ValueError as error:
-              raise SystemExit("invalid publication project ID") from error
-          document["projectId"] = project_id
-          image_suffix = commit[:8]
-          document["images"] = {
-              role: f"{name}-{image_suffix}"
-              for role, name in document["images"].items()
-          }
-          path.write_text(json.dumps(document, indent=2) + "\n")
+          from openstack_platform.image_pipeline import GATES
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          Path(os.environ['RUNNER_TEMP'], 'production-ci-gates.json').write_text(
+              json.dumps({name: needs[name]['result'] for name in GATES})
+          )
           PY
-          # Fail here, in seconds, if the stored inventory has drifted from the
-          # schema this commit expects. Without this the first symptom is an
-          # opaque Nix evaluation error an hour into the publish matrix.
-          python3 infra/lib/platform_config.py validate
-          for name in RELEASE_EVIDENCE_URL RELEASE_EVIDENCE_SHA256 RELEASE_TRUST_ROOT_PEM; do
-            test -n "${!name}"
-          done
-          install -d -m 0700 release-evidence-root
-          printf '%s\n' "$RELEASE_TRUST_ROOT_PEM" > release-evidence-root/trust-root.pem
-          chmod 0600 release-evidence-root/trust-root.pem
-          python3 -m openstack_platform.release_manifest bundle-fetch \
-            --url "$RELEASE_EVIDENCE_URL" \
-            --sha256 "$RELEASE_EVIDENCE_SHA256" \
-            --destination release-evidence \
-            --commit "$COMMIT_SHA" \
-            --trust-root release-evidence-root/trust-root.pem
-          project=$(python3 infra/lib/platform_config.py get project)
-          printf 'OS_PROJECT_NAME=%s\n' "$project" >> "$GITHUB_ENV"
-          printf '%s\n' \
-            'PLATFORM_RELEASE_MANIFEST=${{ github.workspace }}/release-evidence/release-manifest.json' \
-            'PLATFORM_ARTIFACT_MANIFEST=${{ github.workspace }}/release-evidence/artifacts/role-artifacts.json' \
-            'PLATFORM_ARTIFACT_SIGNATURE=${{ github.workspace }}/release-evidence/artifacts/role-artifacts.sig' \
-            'PLATFORM_ARTIFACT_TRUST_ROOT=${{ github.workspace }}/release-evidence-root/trust-root.pem' \
-            >> "$GITHUB_ENV"
-
-      - name: Build role image
+          python3 -m openstack_platform.image_pipeline \
+            --root "$RUNNER_TEMP/production-images" --platform "$PLATFORM_CONFIG" \
+            prepare --gates "$RUNNER_TEMP/production-ci-gates.json"
+      - name: Retain verified source provenance and publication receipt
+        if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: production-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/production-images/evidence
+            ${{ runner.temp }}/production-images/publication.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Install publication tools only
+        if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
+        run: tests/install_ci_apt_packages.sh python3-openstackclient
+      - name: Publish the verified retained bytes in role order without rebuilding
+        if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
         env:
-          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
-        run: |
-          nix build --impure --print-build-logs \
-            --out-link "result-${{ matrix.role }}" \
-            ".#${{ matrix.role }}-image"
-
-      - name: Locate role image
-        id: artifact
-        run: |
-          set -euo pipefail
-          qcow=$(find -L "result-${{ matrix.role }}" -type f -name '*.qcow2' -print -quit)
-          test -n "$qcow"
-          sha256sum "$qcow"
-          nix_output=$(readlink -f "result-${{ matrix.role }}")
-          path_info="$RUNNER_TEMP/${{ matrix.role }}.path-info.json"
-          nix path-info --json --recursive "$nix_output" > "$path_info"
-          printf 'qcow=%s\nnix_output=%s\npath_info=%s\n' \
-            "$qcow" "$nix_output" "$path_info" >> "$GITHUB_OUTPUT"
-
-      - name: Verify signed role artifact
-        env:
-          COMMIT_SHA: ${{ needs.publication-context.outputs.commit_sha }}
-          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
-        run: |
-          set -euo pipefail
-          verification=$(python3 -m openstack_platform.release_manifest verify-role \
-            --component-manifest "$PLATFORM_RELEASE_MANIFEST" \
-            --manifest "$PLATFORM_ARTIFACT_MANIFEST" \
-            --signature "$PLATFORM_ARTIFACT_SIGNATURE" \
-            --trust-root "$PLATFORM_ARTIFACT_TRUST_ROOT" \
-            --role "${{ matrix.role }}" \
-            --qcow2 "${{ steps.artifact.outputs.qcow }}" \
-            --path-info "${{ steps.artifact.outputs.path_info }}" \
-            --output-store-path "${{ steps.artifact.outputs.nix_output }}" \
-            --platform "$PLATFORM_CONFIG" \
-            --commit "$COMMIT_SHA")
-          while IFS='=' read -r key value; do
-            case "$key" in
-              artifact_manifest_sha256) name=PLATFORM_ARTIFACT_MANIFEST_SHA256 ;;
-              qcow2_sha256) name=PLATFORM_ARTIFACT_QCOW2_SHA256 ;;
-              nix_closure_sha256) name=PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256 ;;
-              nix_output) name=PLATFORM_ARTIFACT_NIX_OUTPUT ;;
-              *) echo "unexpected artifact verification field" >&2; exit 1 ;;
-            esac
-            printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
-          done <<< "$verification"
-
-      - name: Boot role image with config drive
-        run: tests/smoke_openstack_image.sh "${{ matrix.role }}" "${{ steps.artifact.outputs.qcow }}"
-
-      - name: Check configured image
-        id: image
-        env:
-          COMMIT_SHA: ${{ needs.publication-context.outputs.commit_sha }}
           OS_AUTH_TYPE: password
           OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
-          OS_IDENTITY_API_VERSION: "3"
+          OS_IDENTITY_API_VERSION: '3'
           OS_INTERFACE: public
           OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
           OS_PROJECT_DOMAIN_NAME: Default
@@ -467,63 +457,12 @@ jobs:
           OS_USERNAME: ${{ secrets.OS_USERNAME }}
         run: |
           set -euo pipefail
-          test -n "$OS_AUTH_URL"
-          test -n "$OS_PASSWORD"
-          test -n "$OS_PROJECT_ID"
-          test -n "$OS_USERNAME"
-          token_project_id=$(openstack token issue -f value -c project_id)
-          test "$token_project_id" = "$OS_PROJECT_ID"
-          image_name=$(python3 infra/lib/platform_config.py get "images.${{ matrix.role }}")
-          existing=$(openstack image list --name "$image_name" -f value -c Name)
-          if grep -Fxq "$image_name" <<<"$existing"; then
-            namespace=$(python3 infra/lib/platform_config.py get namespace)
-            source_property="${namespace//-/_}_source_commit"
-            properties=$(openstack image show "$image_name" -f json -c properties)
-            existing_commit=$(
-              PROPERTIES="$properties" SOURCE_PROPERTY="$source_property" python3 - <<'PY'
-          import json
-          import os
-
-          properties = json.loads(os.environ["PROPERTIES"]).get("properties", {})
-          print(properties.get(os.environ["SOURCE_PROPERTY"], ""))
-          PY
-            )
-            if [[ $existing_commit != "$COMMIT_SHA" ]]; then
-              echo "Image-name collision: $image_name does not identify $COMMIT_SHA" >&2
-              exit 1
-            fi
-            echo "Configured image already exists for commit: $image_name"
-            echo 'publish=false' >> "$GITHUB_OUTPUT"
-          else
-            echo "Configured image is new: $image_name"
-            echo 'publish=true' >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish role image
-        if: steps.image.outputs.publish == 'true'
-        env:
-          OS_AUTH_TYPE: password
-          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
-          OS_IDENTITY_API_VERSION: "3"
-          OS_INTERFACE: public
-          OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
-          OS_PROJECT_DOMAIN_NAME: Default
-          OS_PROJECT_ID: ${{ secrets.OS_PROJECT_ID }}
-          OS_USER_DOMAIN_NAME: Default
-          OS_USERNAME: ${{ secrets.OS_USERNAME }}
-          PLATFORM_CONFIG: ${{ github.workspace }}/config/platform.json
-          SOURCE_COMMIT: ${{ needs.publication-context.outputs.commit_sha }}
-        run: |
-          set -euo pipefail
-          infra/openstack/publish_nixos_image.sh \
-            "${{ matrix.role }}" \
-            "${{ steps.artifact.outputs.qcow }}" \
-            "${{ steps.artifact.outputs.nix_output }}" \
-            "${{ steps.artifact.outputs.path_info }}"
-
-      - name: Remove private deployment configuration
+          for name in OS_AUTH_URL OS_PASSWORD OS_PROJECT_ID OS_USERNAME; do test -n "${!name}"; done
+          python3 -m openstack_platform.image_pipeline \
+            --root "$RUNNER_TEMP/production-images" --platform "$PLATFORM_CONFIG" publish
+      - name: Remove private inventory and public trust root
         if: always()
-        run: rm -f config/platform.json
+        run: rm -f "$RUNNER_TEMP/production-platform.json" "$RUNNER_TEMP/release-trust-root.pem"
 
   development-role-evidence:
     name: Build development ${{ matrix.role }} evidence
