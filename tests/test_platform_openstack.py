@@ -417,6 +417,12 @@ class OpenStackTests(unittest.TestCase):
         self.assertLessEqual(timeouts[0], 5.0)
 
     def test_publisher_script_emits_canonical_metadata_and_verifies_project(self) -> None:
+        self._publisher_script(unsigned_production=False)
+
+    def test_publisher_script_supports_explicit_unsigned_production(self) -> None:
+        self._publisher_script(unsigned_production=True)
+
+    def _publisher_script(self, *, unsigned_production: bool) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fake = root / "openstack"
@@ -426,7 +432,12 @@ class OpenStackTests(unittest.TestCase):
             repository, commit = clean_repository(ROOT, root / "repository")
             component_dir = root / "component"
             component_manifest = release_manifest.generate(
-                repository, commit, component_dir, signing_key=None, unsigned=True
+                repository,
+                commit,
+                component_dir,
+                signing_key=None,
+                unsigned=not unsigned_production,
+                unsigned_production=unsigned_production,
             )
             artifact_inputs: dict[str, object] = {}
             worker_output = Path("/nix/store/00000000000000000000000000000000-worker-image")
@@ -467,7 +478,8 @@ class OpenStackTests(unittest.TestCase):
                 inputs_path,
                 artifact_dir,
                 signing_key=None,
-                unsigned=True,
+                unsigned=not unsigned_production,
+                unsigned_production=unsigned_production,
             )
             artifact_manifest = json.loads(artifact_manifest_path.read_text())
             worker_artifact = artifact_manifest["roleArtifacts"]["worker"]
@@ -481,7 +493,7 @@ elif args[:2] == ["project", "show"]:
     print("00000000000040008000000000000000")
     print("example-project")
 elif args[:2] == ["image", "list"]:
-    print("[]")
+    print(json.dumps([{"ID": "11111111-1111-4111-8111-111111111111", "Name": "example-nixos-worker"}] if os.environ.get("FAKE_EXISTING_IMAGE") else []))
 elif args[:2] == ["image", "show"]:
     created = json.loads(pathlib.Path(os.environ["FAKE_LOG"]).read_text())
     properties = {
@@ -489,6 +501,8 @@ elif args[:2] == ["image", "show"]:
         for index, item in enumerate(created)
         if index and created[index - 1] == "--property" and "=" in item
     }
+    if os.environ.get("FAKE_BAD_METADATA"):
+        properties = {key: "wrong" for key in properties}
     image_file = created[created.index("--file") + 1]
     digest = hashlib.md5(pathlib.Path(image_file).read_bytes(), usedforsecurity=False).hexdigest()
     print(json.dumps({
@@ -497,6 +511,8 @@ elif args[:2] == ["image", "show"]:
         "status": "active",
         "owner": "00000000000040008000000000000000",
         "checksum": digest,
+        "os_hash_algo": os.environ.get("FAKE_HASH_ALGO"),
+        "os_hash_value": hashlib.sha512(pathlib.Path(image_file).read_bytes()).hexdigest() if os.environ.get("FAKE_HASH_ALGO") == "sha512" else None,
         "properties": properties,
     }))
 elif args[:2] == ["image", "save"]:
@@ -505,6 +521,8 @@ elif args[:2] == ["image", "save"]:
     destination = args[args.index("--file") + 1]
     shutil.copyfile(source, destination)
 elif args[:2] == ["image", "create"]:
+    if os.environ.get("FAKE_EXISTING_IMAGE"):
+        raise SystemExit("must verify and reuse rather than recreate")
     pathlib.Path(os.environ["FAKE_LOG"]).write_text(json.dumps(args))
     print("11111111-1111-4111-8111-111111111111")
 else:
@@ -521,7 +539,6 @@ else:
                     "FAKE_LOG": str(log),
                     "PLATFORM_RELEASE_MANIFEST": str(component_manifest),
                     "PLATFORM_ARTIFACT_MANIFEST": str(artifact_manifest_path),
-                    "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT": release_manifest.UNSIGNED_ACKNOWLEDGEMENT,
                     "OS_PROJECT_NAME": "example-project",
                     "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
                         artifact_manifest_path.read_bytes()
@@ -531,6 +548,16 @@ else:
                     "PLATFORM_ARTIFACT_NIX_OUTPUT": worker_artifact["nixOutput"],
                 }
             )
+            if unsigned_production:
+                environment["PLATFORM_ALLOW_UNSIGNED_PRODUCTION"] = (
+                    release_manifest.UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT
+                )
+                environment["PLATFORM_ENVIRONMENT"] = "production"
+                environment["FAKE_HASH_ALGO"] = "sha512"
+            else:
+                environment["PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"] = (
+                    release_manifest.UNSIGNED_ACKNOWLEDGEMENT
+                )
             completed = subprocess.run(
                 [
                     str(ROOT / "infra/openstack/publish_nixos_image.sh"),
@@ -557,6 +584,48 @@ else:
             for key, value in expected.items():
                 self.assertIn(f"{key}={value}", properties)
             self.assertIn("hw_qemu_guest_agent=yes", properties)
+            if unsigned_production:
+                retry_environment = {**environment, "FAKE_EXISTING_IMAGE": "1"}
+                retried = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env=retry_environment,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(retried.returncode, 0, retried.stderr.decode())
+                mismatched = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env={**retry_environment, "FAKE_BAD_METADATA": "1"},
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(mismatched.returncode, 0)
+                log.unlink()
+                for changes in (
+                    {"PLATFORM_ALLOW_UNSIGNED_PRODUCTION": ""},
+                    {"PLATFORM_ALLOW_UNSIGNED_PRODUCTION": "true"},
+                    {
+                        "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT": release_manifest.UNSIGNED_ACKNOWLEDGEMENT
+                    },
+                    {"PLATFORM_ARTIFACT_SIGNATURE": "/unexpected/signature"},
+                ):
+                    refused = subprocess.run(
+                        completed.args,
+                        cwd=ROOT,
+                        env={**environment, **changes},
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertFalse(log.exists(), "trust failure reached image creation")
+                image.write_bytes(b"changed after verification")
+                refused = subprocess.run(
+                    completed.args, cwd=ROOT, env=environment, capture_output=True, check=False
+                )
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertFalse(log.exists(), "changed QCOW2 reached image creation")
 
     def test_publisher_and_selector_share_complete_stable_metadata(self) -> None:
         metadata = openstack.publisher_metadata(self.platform, "worker", "a" * 40)

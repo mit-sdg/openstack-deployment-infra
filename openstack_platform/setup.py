@@ -34,6 +34,7 @@ from .contracts import IMAGE_ROLES, OPERATOR_SSH_ALIAS, PERSISTENT_ROLES
 from .installation import OPERATOR_ROOT
 from .release_manifest import (
     ReleaseVerificationError,
+    unsigned_environment,
     verify_artifact_from_environment,
     verify_from_environment,
     verify_role_artifact,
@@ -1057,8 +1058,11 @@ def _release_evidence_arguments(environment: Mapping[str, str]) -> tuple[str | P
         arguments += ("--release-signature", Path(signature))
     if trust_root:
         arguments += ("--release-trust-root", Path(trust_root))
-    if environment.get("PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"):
+    development, production = unsigned_environment(dict(environment))
+    if development:
         arguments += ("--allow-unsigned-development",)
+    if production:
+        arguments += ("--allow-unsigned-production",)
     return arguments
 
 
@@ -2315,6 +2319,7 @@ def run_setup(
         "PLATFORM_RELEASE_SIGNATURE",
         "PLATFORM_RELEASE_TRUST_ROOT",
         "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT",
+        "PLATFORM_ALLOW_UNSIGNED_PRODUCTION",
         "PLATFORM_ARTIFACT_MANIFEST",
         "PLATFORM_ARTIFACT_SIGNATURE",
         "PLATFORM_ARTIFACT_TRUST_ROOT",

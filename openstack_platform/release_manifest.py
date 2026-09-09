@@ -2,7 +2,8 @@
 
 Production manifests are detached-signature verified against an operator-selected
 Ed25519 public key.  Unsigned evidence is accepted only when both the manifest
-and the invocation explicitly identify a non-production development release.
+and the invocation explicitly select development or emergency unsigned production.
+Unsigned production retains integrity evidence but makes no authenticity claim.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ ARTIFACT_FORMAT = "openstack-platform-role-artifacts-v1"
 SBOM_FORMAT = "SPDX-2.3"
 PROVENANCE_FORMAT = "https://in-toto.io/Statement/v1"
 UNSIGNED_ACKNOWLEDGEMENT = "I_UNDERSTAND_THIS_IS_NOT_PRODUCTION"
+UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT = "I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES"
 ROLES = ("admin", "ingress", "storage", "worker", "builder")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -342,11 +344,68 @@ def _verify_checkout(repository: Path, commit: str) -> None:
         _fail("release evidence requires the exact clean source commit")
 
 
+def _generation_trust(
+    signing_key: Path | None, unsigned: bool, unsigned_production: bool
+) -> tuple[str, dict[str, str]]:
+    if sum((signing_key is not None, unsigned, unsigned_production)) != 1:
+        _fail("choose exactly one signing key, unsigned development, or unsigned production mode")
+    if unsigned:
+        return "development-unsigned", {
+            "mode": "development-unsigned",
+            "warning": "NOT FOR PRODUCTION",
+        }
+    if unsigned_production:
+        return "production", {
+            "mode": "production-unsigned",
+            "warning": "SIGNING TEMPORARILY DISABLED",
+        }
+    assert signing_key is not None
+    return "production", {
+        "mode": "production-ed25519",
+        "publicKeySha256": _public_key_sha256(signing_key, private=True),
+    }
+
+
+def unsigned_environment(values: dict[str, str]) -> tuple[bool, bool]:
+    development = values.get("PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT", "")
+    production = values.get("PLATFORM_ALLOW_UNSIGNED_PRODUCTION", "")
+    if development and development != UNSIGNED_ACKNOWLEDGEMENT:
+        _fail("unsigned development acknowledgement is invalid")
+    if production and production != UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT:
+        _fail("unsigned production acknowledgement is invalid")
+    if development and production:
+        _fail("unsigned development and production modes are mutually exclusive")
+    return bool(development), bool(production)
+
+
+def _verify_unsigned_production(
+    trust: dict[str, Any],
+    *,
+    allowed: bool,
+    development: bool,
+    signature: Path | None,
+    trust_root: Path | None,
+) -> None:
+    if (
+        not allowed
+        or development
+        or signature is not None
+        or trust_root is not None
+        or trust != {"mode": "production-unsigned", "warning": "SIGNING TEMPORARILY DISABLED"}
+    ):
+        _fail("unsigned production requires explicit acknowledgement and no signing material")
+
+
 def generate(
-    repository: Path, commit: str, output: Path, *, signing_key: Path | None, unsigned: bool
+    repository: Path,
+    commit: str,
+    output: Path,
+    *,
+    signing_key: Path | None,
+    unsigned: bool,
+    unsigned_production: bool = False,
 ) -> Path:
-    if unsigned == (signing_key is not None):
-        _fail("choose exactly one of a production signing key or unsigned development mode")
+    channel, trust = _generation_trust(signing_key, unsigned, unsigned_production)
     _verify_checkout(repository, commit)
     components = component_set(repository, commit)
     output.mkdir(parents=True, exist_ok=True)
@@ -384,17 +443,9 @@ def generate(
     }
     provenance_path = output / "release.provenance.json"
     provenance_path.write_bytes(_canonical(provenance))
-    if unsigned:
-        trust = {"mode": "development-unsigned", "warning": "NOT FOR PRODUCTION"}
-    else:
-        assert signing_key is not None
-        trust = {
-            "mode": "production-ed25519",
-            "publicKeySha256": _public_key_sha256(signing_key, private=True),
-        }
     manifest = {
         "format": FORMAT,
-        "releaseChannel": "development-unsigned" if unsigned else "production",
+        "releaseChannel": channel,
         "components": components,
         "evidence": {
             "sbom": {"file": sbom_path.name, "sha256": _sha256_file(sbom_path)},
@@ -431,6 +482,7 @@ def verify(
     signature: Path | None,
     trust_root: Path | None,
     allow_unsigned_development: bool = False,
+    allow_unsigned_production: bool = False,
 ) -> dict[str, Any]:
     """Verify trust, evidence, and every local compatibility input."""
     manifest = _load(manifest_path)
@@ -462,8 +514,20 @@ def verify(
                 str(manifest_path),
             ]
         )
+    elif trust.get("mode") == "production-unsigned" and channel == "production":
+        _verify_unsigned_production(
+            trust,
+            allowed=allow_unsigned_production,
+            development=allow_unsigned_development,
+            signature=signature,
+            trust_root=trust_root,
+        )
     elif trust.get("mode") == "development-unsigned" and channel == "development-unsigned":
-        if not allow_unsigned_development or os.environ.get("PLATFORM_ENVIRONMENT") == "production":
+        if (
+            allow_unsigned_production
+            or not allow_unsigned_development
+            or os.environ.get("PLATFORM_ENVIRONMENT") == "production"
+        ):
             _fail("unsigned development release requires explicit non-production acknowledgement")
         if signature is not None or trust_root is not None:
             _fail("unsigned development evidence must not present production trust material")
@@ -579,16 +643,20 @@ def generate_artifact_manifest(
     *,
     signing_key: Path | None,
     unsigned: bool,
+    unsigned_production: bool = False,
 ) -> Path:
     """Generate identities for all five concrete role artifacts.
 
     Unsigned development evidence may aggregate QCOW2 hashes and sizes recorded
-    by isolated role-build jobs. Signed production evidence must hash every
+    by isolated role-build jobs. Both production modes must hash every
     direct QCOW2 itself.
     """
-    if unsigned == (signing_key is not None):
-        _fail("choose exactly one of a production signing key or unsigned development mode")
+    channel, trust = _generation_trust(signing_key, unsigned, unsigned_production)
     component = _load(component_manifest)
+    if unsigned_production and (
+        component.get("releaseChannel") != channel or component.get("trust") != trust
+    ):
+        _fail("unsigned production artifact and component trust must match")
     if component.get("format") != FORMAT:
         _fail("source component manifest format is unsupported")
     components = component.get("components")
@@ -613,7 +681,7 @@ def generate_artifact_manifest(
             qcow2_size = qcow2.stat().st_size
         else:
             if not unsigned:
-                _fail("signed artifact evidence requires direct QCOW2 inputs")
+                _fail("production artifact evidence requires direct QCOW2 inputs")
             qcow2_sha256 = str(value["qcow2Sha256"])
             qcow2_size = int(value["qcow2SizeBytes"])
         records[role] = {
@@ -676,17 +744,9 @@ def generate_artifact_manifest(
     }
     provenance_path = output / "role-artifacts.provenance.json"
     provenance_path.write_bytes(_canonical(provenance))
-    if unsigned:
-        trust = {"mode": "development-unsigned", "warning": "NOT FOR PRODUCTION"}
-    else:
-        assert signing_key is not None
-        trust = {
-            "mode": "production-ed25519",
-            "publicKeySha256": _public_key_sha256(signing_key, private=True),
-        }
     manifest = {
         "format": ARTIFACT_FORMAT,
-        "releaseChannel": "development-unsigned" if unsigned else "production",
+        "releaseChannel": channel,
         "sourceComponentManifest": {
             "sha256": _sha256_file(component_manifest),
             "componentSetSha256": _sha256_bytes(_canonical(components)),
@@ -726,6 +786,7 @@ def _verify_artifact_trust(
     signature: Path | None,
     trust_root: Path | None,
     allow_unsigned_development: bool,
+    allow_unsigned_production: bool = False,
 ) -> None:
     trust = manifest.get("trust")
     channel = manifest.get("releaseChannel")
@@ -753,9 +814,18 @@ def _verify_artifact_trust(
                 str(manifest_path),
             ]
         )
+    elif trust.get("mode") == "production-unsigned" and channel == "production":
+        _verify_unsigned_production(
+            trust,
+            allowed=allow_unsigned_production,
+            development=allow_unsigned_development,
+            signature=signature,
+            trust_root=trust_root,
+        )
     elif trust.get("mode") == "development-unsigned" and channel == "development-unsigned":
         if (
-            not allow_unsigned_development
+            allow_unsigned_production
+            or not allow_unsigned_development
             or os.environ.get("PLATFORM_ENVIRONMENT") == "production"
             or signature is not None
             or trust_root is not None
@@ -772,6 +842,7 @@ def verify_artifact_manifest(
     signature: Path | None,
     trust_root: Path | None,
     allow_unsigned_development: bool = False,
+    allow_unsigned_production: bool = False,
 ) -> dict[str, Any]:
     manifest = _load(manifest_path)
     if manifest.get("format") != ARTIFACT_FORMAT:
@@ -782,8 +853,14 @@ def verify_artifact_manifest(
         signature=signature,
         trust_root=trust_root,
         allow_unsigned_development=allow_unsigned_development,
+        allow_unsigned_production=allow_unsigned_production,
     )
     component = _load(component_manifest)
+    if manifest["trust"]["mode"] == "production-unsigned" and (
+        component.get("releaseChannel") != "production"
+        or component.get("trust") != manifest["trust"]
+    ):
+        _fail("unsigned production artifact and component trust must match")
     components = component.get("components")
     source = manifest.get("sourceComponentManifest")
     if (
@@ -803,28 +880,18 @@ def verify_artifact_manifest(
     for role, record in records.items():
         if (
             not isinstance(record, dict)
-            # Older signed v1 evidence remains verifiable, but setup cannot be
-            # ready without the size-bearing variant.
             or set(record)
-            not in (
-                {"qcow2Sha256", "nixOutput", "nixClosureSha256", "publicationMetadata"},
-                {
-                    "qcow2Sha256",
-                    "qcow2SizeBytes",
-                    "nixOutput",
-                    "nixClosureSha256",
-                    "publicationMetadata",
-                },
-            )
+            != {
+                "qcow2Sha256",
+                "qcow2SizeBytes",
+                "nixOutput",
+                "nixClosureSha256",
+                "publicationMetadata",
+            }
             or not _SHA256.fullmatch(str(record.get("qcow2Sha256")))
-            or (
-                "qcow2SizeBytes" in record
-                and (
-                    isinstance(record["qcow2SizeBytes"], bool)
-                    or not isinstance(record["qcow2SizeBytes"], int)
-                    or record["qcow2SizeBytes"] <= 0
-                )
-            )
+            or isinstance(record["qcow2SizeBytes"], bool)
+            or not isinstance(record["qcow2SizeBytes"], int)
+            or record["qcow2SizeBytes"] <= 0
             or not _SHA256.fullmatch(str(record.get("nixClosureSha256")))
             or not re.fullmatch(r"[a-z0-9]{32}-[^/]{1,160}", str(record.get("nixOutput")))
             or not isinstance(record.get("publicationMetadata"), dict)
@@ -882,10 +949,8 @@ def verify_role_artifact(
         "publicationMetadata": dict(sorted(publication_metadata.items())),
     }
     expected = manifest["roleArtifacts"].get(role)
-    if isinstance(expected, dict) and "qcow2SizeBytes" not in expected:
-        actual.pop("qcow2SizeBytes")
     if expected != actual:
-        _fail(f"built {role} artifact or publication metadata does not match signed evidence")
+        _fail(f"built {role} artifact or publication metadata does not match accepted evidence")
     return actual
 
 
@@ -895,7 +960,7 @@ def verify_artifact_from_environment(
     path = values.get("PLATFORM_ARTIFACT_MANIFEST")
     if not path:
         _fail("PLATFORM_ARTIFACT_MANIFEST is required before setup mutation")
-    acknowledgement = values.get("PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT")
+    development, production = unsigned_environment(values)
     return verify_artifact_manifest(
         component_manifest,
         Path(path),
@@ -905,7 +970,8 @@ def verify_artifact_from_environment(
         trust_root=Path(values["PLATFORM_ARTIFACT_TRUST_ROOT"])
         if values.get("PLATFORM_ARTIFACT_TRUST_ROOT")
         else None,
-        allow_unsigned_development=acknowledgement == UNSIGNED_ACKNOWLEDGEMENT,
+        allow_unsigned_development=development,
+        allow_unsigned_production=production,
     )
 
 
@@ -915,9 +981,7 @@ def verify_from_environment(
     manifest = values.get("PLATFORM_RELEASE_MANIFEST")
     if not manifest:
         _fail("PLATFORM_RELEASE_MANIFEST is required before setup mutation")
-    acknowledgement = values.get("PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT")
-    if acknowledgement and acknowledgement != UNSIGNED_ACKNOWLEDGEMENT:
-        _fail("unsigned development acknowledgement is invalid")
+    development, production = unsigned_environment(values)
     return verify(
         repository,
         Path(manifest),
@@ -928,7 +992,8 @@ def verify_from_environment(
         trust_root=Path(values["PLATFORM_RELEASE_TRUST_ROOT"])
         if values.get("PLATFORM_RELEASE_TRUST_ROOT")
         else None,
-        allow_unsigned_development=acknowledgement == UNSIGNED_ACKNOWLEDGEMENT,
+        allow_unsigned_development=development,
+        allow_unsigned_production=production,
     )
 
 
@@ -1125,6 +1190,7 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--output", type=Path, required=True)
     create.add_argument("--signing-key", type=Path)
     create.add_argument("--unsigned-development", action="store_true")
+    create.add_argument("--unsigned-production", action="store_true")
     check = commands.add_parser("verify")
     check.add_argument("--repository", type=Path, default=Path.cwd())
     check.add_argument("--manifest", type=Path, required=True)
@@ -1132,24 +1198,28 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--signature", type=Path)
     check.add_argument("--trust-root", type=Path)
     check.add_argument("--allow-unsigned-development", action="store_true")
+    check.add_argument("--allow-unsigned-production", action="store_true")
     artifact_create = commands.add_parser("artifact-generate")
     artifact_create.add_argument("--component-manifest", type=Path, required=True)
     artifact_create.add_argument("--inputs", type=Path, required=True)
     artifact_create.add_argument("--output", type=Path, required=True)
     artifact_create.add_argument("--signing-key", type=Path)
     artifact_create.add_argument("--unsigned-development", action="store_true")
+    artifact_create.add_argument("--unsigned-production", action="store_true")
     artifact_check = commands.add_parser("artifact-verify")
     artifact_check.add_argument("--component-manifest", type=Path, required=True)
     artifact_check.add_argument("--manifest", type=Path, required=True)
     artifact_check.add_argument("--signature", type=Path)
     artifact_check.add_argument("--trust-root", type=Path)
     artifact_check.add_argument("--allow-unsigned-development", action="store_true")
+    artifact_check.add_argument("--allow-unsigned-production", action="store_true")
     role_check = commands.add_parser("verify-role")
     role_check.add_argument("--component-manifest", type=Path, required=True)
     role_check.add_argument("--manifest", type=Path, required=True)
     role_check.add_argument("--signature", type=Path)
     role_check.add_argument("--trust-root", type=Path)
     role_check.add_argument("--allow-unsigned-development", action="store_true")
+    role_check.add_argument("--allow-unsigned-production", action="store_true")
     role_check.add_argument("--role", choices=ROLES, required=True)
     role_check.add_argument("--qcow2", type=Path, required=True)
     role_check.add_argument("--path-info", type=Path, required=True)
@@ -1173,6 +1243,7 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             signing_key=args.signing_key,
             unsigned=args.unsigned_development,
+            unsigned_production=args.unsigned_production,
         )
         print(f"release-manifest={path}")
     elif args.command == "verify":
@@ -1183,6 +1254,7 @@ def main(argv: list[str] | None = None) -> int:
             signature=args.signature,
             trust_root=args.trust_root,
             allow_unsigned_development=args.allow_unsigned_development,
+            allow_unsigned_production=args.allow_unsigned_production,
         )
         print("release-manifest=verified")
     elif args.command == "bundle-create":
@@ -1204,6 +1276,7 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             signing_key=args.signing_key,
             unsigned=args.unsigned_development,
+            unsigned_production=args.unsigned_production,
         )
         print(f"artifact-manifest={path}")
     else:
@@ -1213,8 +1286,11 @@ def main(argv: list[str] | None = None) -> int:
             signature=args.signature,
             trust_root=args.trust_root,
             allow_unsigned_development=args.allow_unsigned_development,
+            allow_unsigned_production=args.allow_unsigned_production,
         )
         if args.command == "verify-role":
+            if artifact["sourceCommit"] != args.commit:
+                _fail("role publication commit differs from artifact evidence")
             from .config import load_platform
             from .openstack import publisher_metadata
 

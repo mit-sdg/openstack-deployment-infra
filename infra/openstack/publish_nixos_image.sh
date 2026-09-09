@@ -55,18 +55,38 @@ image_name=$("$CONFIG_HELPER" get "images.$role")
 }
 repository_root=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 artifact_trust_arguments=()
-if [[ -n ${PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT:-} ]]; then
+release_trust_arguments=()
+if [[ -n ${PLATFORM_ALLOW_UNSIGNED_PRODUCTION:-} ]]; then
+  [[ $PLATFORM_ALLOW_UNSIGNED_PRODUCTION == I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES && \
+     -z ${PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT:-} && \
+     -z ${PLATFORM_RELEASE_SIGNATURE:-} && -z ${PLATFORM_RELEASE_TRUST_ROOT:-} && \
+     -z ${PLATFORM_ARTIFACT_SIGNATURE:-} && -z ${PLATFORM_ARTIFACT_TRUST_ROOT:-} ]] || {
+    echo "unsigned production acknowledgement or trust material is inconsistent" >&2
+    exit 2
+  }
+  artifact_trust_arguments+=(--allow-unsigned-production)
+  release_trust_arguments+=(--allow-unsigned-production)
+elif [[ -n ${PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT:-} ]]; then
   [[ $PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT == I_UNDERSTAND_THIS_IS_NOT_PRODUCTION ]] || {
     echo "unsigned artifact acknowledgement is invalid" >&2
     exit 2
   }
   artifact_trust_arguments+=(--allow-unsigned-development)
+  release_trust_arguments+=(--allow-unsigned-development)
 else
   artifact_trust_arguments+=(
     --signature "${PLATFORM_ARTIFACT_SIGNATURE:?PLATFORM_ARTIFACT_SIGNATURE is required}"
     --trust-root "${PLATFORM_ARTIFACT_TRUST_ROOT:?PLATFORM_ARTIFACT_TRUST_ROOT is required}"
   )
+  release_trust_arguments+=(
+    --signature "${PLATFORM_RELEASE_SIGNATURE:?PLATFORM_RELEASE_SIGNATURE is required}"
+    --trust-root "${PLATFORM_RELEASE_TRUST_ROOT:?PLATFORM_RELEASE_TRUST_ROOT is required}"
+  )
 fi
+PYTHONPATH="$repository_root" python3 -m openstack_platform.release_manifest verify \
+  --repository "$repository_root" --commit "$SOURCE_COMMIT" \
+  --manifest "${PLATFORM_RELEASE_MANIFEST:?PLATFORM_RELEASE_MANIFEST is required}" \
+  "${release_trust_arguments[@]}"
 artifact_output=$(
   PYTHONPATH="$repository_root" python3 -m openstack_platform.release_manifest verify-role \
     --component-manifest "${PLATFORM_RELEASE_MANIFEST:?PLATFORM_RELEASE_MANIFEST is required}" \
@@ -85,7 +105,7 @@ mapfile -t verified_artifact <<<"$artifact_output"
    ${verified_artifact[2]:-} == "nix_closure_sha256=$PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256" && \
    ${verified_artifact[3]:-} == "nix_output=$PLATFORM_ARTIFACT_NIX_OUTPUT" && \
    ${#verified_artifact[@]} -eq 4 ]] || {
-  echo "signed role artifact verification did not match publication inputs" >&2
+  echo "role artifact verification did not match publication inputs" >&2
   exit 2
 }
 metadata_output=$(
@@ -149,10 +169,19 @@ if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
     raise SystemExit("OpenStack image inventory is malformed")
 print(sum(row.get("Name") == name for row in rows))
 ' "$image_name" <<<"$existing_images")
-if [[ $existing_count != 0 ]]; then
-  echo "refusing to replace or ambiguously resolve existing image: $image_name" >&2
-  echo "publish a versioned name and update config/platform.json explicitly" >&2
+if [[ $existing_count != 0 && $existing_count != 1 ]]; then
+  echo "refusing to ambiguously resolve existing image: $image_name" >&2
   exit 1
+fi
+# Retry only after checking the complete retained identity below. A matching
+# source commit alone is not evidence that an existing image has these bytes.
+image_id=
+if [[ $existing_count == 1 ]]; then
+  image_id=$(python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+print(next(row["ID"] for row in rows if row.get("Name") == sys.argv[1]))
+' "$image_name" <<<"$existing_images")
 fi
 
 local_checksum=$(python3 - "$image_file" <<'PY'
@@ -174,7 +203,8 @@ PY
   exit 2
 }
 
-image_id=$("$OSC" image create \
+if [[ $existing_count == 0 ]]; then
+  image_id=$("$OSC" image create \
   --disk-format qcow2 \
   --container-format bare \
   --file "$image_file" \
@@ -182,6 +212,7 @@ image_id=$("$OSC" image create \
   "${metadata_properties[@]}" \
   -f value -c id \
   "$image_name")
+fi
 python3 - "$image_id" <<'PY'
 import sys, uuid
 try:
@@ -267,6 +298,14 @@ elif (
     and observed_hash_value == os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
 ):
     print("provider")
+elif (
+    observed_hash_algorithm == "sha512"
+    and isinstance(observed_hash_value, str)
+    and re.fullmatch(r"[0-9a-f]{128}", observed_hash_value)
+):
+    # Glance defaults to SHA-512. Keep our independent SHA-256 gate rather
+    # than treating a different provider hash algorithm as a byte mismatch.
+    print("download")
 else:
     raise SystemExit("published image provider hash is incomplete or differs")
 PY
