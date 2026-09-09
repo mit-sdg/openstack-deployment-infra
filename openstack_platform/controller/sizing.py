@@ -63,8 +63,6 @@ def plan(
     if application is None:
         raise ValidationError("application does not exist")
     active = db.get_active_deployment(connection, application_id)
-    if active is not None and not application.desired_running:
-        raise ValidationError("enable the accepted application before resizing")
     flavor = openstack.observe_flavor_capacity(
         config.platform,
         flavor_reference(reference),
@@ -75,7 +73,9 @@ def plan(
     projection = {
         "applicationId": application_id,
         "deploymentId": None if active is None else active.deployment_id,
+        "activation": "enable-after-healthy-acceptance",
         "current": {
+            "enabled": application.desired_running,
             "flavor": application.worker_flavor,
             "cpuMHz": application.scheduler_cpu_mhz,
             "memoryMiB": application.scheduler_memory_mib,
@@ -103,6 +103,6 @@ def validate_plan(
         raise ValidationError("sizing plan must be an exact plan response")
     reference = flavor_reference(value["flavor"].get("flavor_id"))
     fresh = plan(connection, config, application_id, reference, timeout_seconds=timeout_seconds)
-    if value != fresh:
+    if db.request_fingerprint(value) != db.request_fingerprint(fresh):
         raise ValidationError("sizing plan drifted; obtain and review a fresh plan")
     return fresh

@@ -194,8 +194,10 @@ No direct SQLite writes or OpenStack server resize commands are supported.
 
 ### Plan and resize an accepted application
 
-The app must be enabled and have an accepted deployment. Replacement needs quota
-for both the old worker and the target worker/port simultaneously. Worker disks
+The app must have an accepted deployment. For an enabled app, replacement needs
+quota for both the old worker and target worker/port simultaneously. For an app
+that cannot safely run concurrent processes, use the maintenance procedure below
+instead of overlapping workers. Worker disks
 are disposable: the new VM does not copy the old VM's filesystem. Managed
 PostgreSQL, MongoDB, and S3 resources are unchanged.
 
@@ -216,7 +218,8 @@ curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
 jq . resize-plan.json
 ```
 
-Review `applicationId`, `deploymentId`, `current`, `flavor`, and `reserve`.
+Review `applicationId`, `deploymentId`, `current.enabled`, `flavor`, `reserve`,
+and `activation`. A successful resize enables the app after healthy acceptance.
 The plan is an observation, not a capacity reservation. Apply rechecks the exact
 application/deployment and flavor projection under the application lock. A
 changed plan or provider projection fails before creating a candidate.
@@ -269,6 +272,29 @@ policy. A new worker with insufficient measured capacity fails closed instead
 of silently reducing the allocation. The same plan/apply procedure can shrink
 an app; this is replacement, not Nova's in-place resize/confirm/revert protocol.
 
+### Resize without concurrent application processes
+
+Applications whose database integrity depends on a single process must not use
+rolling overlap. First disable the application through an authorized project
+client (`POST /v1/applications/{id}/disable`, body `{}`, new idempotency key),
+and poll that operation until it succeeds. Disable preserves managed data and
+configuration while confirming removal of the accepted job and worker.
+
+Then obtain a **fresh** sizing plan through the privileged API. Require
+`current.enabled: false`; apply it using the resize procedure above. Changes to
+the enabled state invalidate the plan. Before creating a candidate, the controller
+reobserves the disabled predecessor's exact worker slot and requires absence.
+It reuses the accepted artifact without rebuilding and enables the application
+only after the new worker passes health. A failed candidate leaves the app stopped,
+its previous size unchanged, and its managed data untouched. Fix the dependency
+and submit a fresh reviewed resize request, or explicitly enable the prior size.
+An unknown predecessor observation blocks creation and requires same-key recovery.
+
+This maintenance procedure has downtime from disable until healthy acceptance.
+It does not restore database contents or make an unsafe multi-process application
+safe for rolling deployments. Do not enable the old instance while the maintenance
+resize is running. Keep the normal backup and restore-verification prerequisites.
+
 ### Select a flavor for the first deployment
 
 Declare the app through `POST /v1/applications` on the project socket, then get a
@@ -298,7 +324,8 @@ allocations are not silently reduced to accommodate a smaller worker.
 - **Plan drift or invalid confirmation:** no candidate is created. Obtain and
   review a fresh plan, then submit a new request/key.
 - **Candidate scheduler, application, or public health failure with confirmed
-  cleanup:** the operation is `failed`; the prior accepted size and route remain.
+  cleanup:** the operation is `failed`; the prior accepted size and enabled/stopped
+  state remain.
   The reused accepted artifact is not deleted. Fix the app/dependency, review a
   plan, and use a new key for a new attempt.
 - **Unknown provider/helper result, interrupted acceptance, or unfinished
@@ -311,8 +338,7 @@ allocations are not silently reduced to accommodate a smaller worker.
   `409 IDEMPOTENCY_CONFLICT`.
 
 There is no forced rollback after successful acceptance and predecessor deletion;
-use a new reviewed sizing operation. Disabled accepted apps must be enabled
-before resize. Plans do not reserve quota, and the platform does not copy local
+use a new reviewed sizing operation. Plans do not reserve quota, and the platform does not copy local
 disk state or resize managed-storage quotas. These examples describe the API;
 production provider behavior still requires a release acceptance exercise.
 

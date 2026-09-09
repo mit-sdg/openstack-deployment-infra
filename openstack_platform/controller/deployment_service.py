@@ -533,6 +533,21 @@ def _prepare_deployment_worker(
             raise app.ApplicationError("reviewed flavor capacity or identity drifted")
     # Alternate bounded worker slots so staged and accepted fixed ports coexist.
     previous = db.get_deployment(connection, application_id)
+    current = db.get_application(connection, application_id)
+    if previous is not None and current is not None and not current.desired_running:
+        # A maintenance deployment must not overlap the stopped predecessor.
+        # Confirm physical worker absence, not merely its recorded desired state.
+        predecessor = helper_caller(
+            config,
+            "app.worker.observe",
+            {
+                "applicationId": app.nomad_placement_id(previous.nomad_job),
+                "slug": application_slug,
+            },
+            deadline=deadline,
+        )
+        if predecessor.get("absent") is not True:
+            raise app.ApplicationError("disabled predecessor worker absence is not confirmed")
     if previous is None:
         worker_application_id = application_id
     else:
