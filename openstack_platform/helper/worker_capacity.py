@@ -44,7 +44,16 @@ def observe_capacity(
     nodes = query()
     if not isinstance(nodes, list):
         raise ValidationError("Nomad node inventory is malformed")
-    matches = [node for node in nodes if isinstance(node, dict) and node.get("Name") == server_name]
+    # Nomad retains DOWN registrations after a VM replacement. Exclude only
+    # explicitly DOWN entries, not unknown states: an ambiguous live identity
+    # must still fail closed. Recheck the selected node's readiness below.
+    matches = [
+        node
+        for node in nodes
+        if isinstance(node, dict)
+        and node.get("Name") == server_name
+        and node.get("Status") != "down"
+    ]
     if len(matches) != 1:
         raise ValidationError("worker must resolve to exactly one Nomad node")
     node_id = uuid(matches[0].get("ID"), field="Nomad node ID")

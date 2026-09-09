@@ -126,6 +126,48 @@ class ControllerAPITests(unittest.TestCase):
                 router.dispatch(method, path, {}, None)
             self.assertEqual(raised.exception.code, "NOT_FOUND")
 
+    def test_admitted_retry_does_not_expose_previous_attempt_as_new_failure(self) -> None:
+        application_id = self.create_application().body["applicationId"]
+        identifier = "00000000-0000-4000-8000-000000000090"
+        db.claim_idempotency_request(
+            self.connection, request_id=identifier, request_fingerprint="a" * 64
+        )
+        db.enqueue_operation_dispatch(
+            self.connection,
+            operation_id=identifier,
+            kind="app.deploy",
+            scope=f"app-{application_id}",
+        )
+        db.begin_operation(
+            self.connection,
+            operation_id=identifier,
+            kind="app.deploy",
+            scope=f"app-{application_id}",
+            phase="image_pushed",
+            deadline_at=db.utc_now(),
+            refs={},
+        )
+        db.mark_recovery_required(self.connection, identifier, "previous attempt failed")
+        for dispatch_status in ("pending", "running"):
+            if dispatch_status == "running":
+                db.set_operation_dispatch_status(self.connection, identifier, dispatch_status)
+            for prefix in ("/v1", "/v1/admin"):
+                value = self.dispatch("GET", f"{prefix}/operations/{identifier}").body
+                self.assertEqual(value["status"], "running")
+                self.assertIsNone(value["safeError"])
+            items = self.dispatch("GET", "/v1/admin/operations").body["items"]
+            self.assertEqual(
+                next(item for item in items if item["operationId"] == identifier)["status"],
+                "running",
+            )
+        db.set_operation_dispatch_status(
+            self.connection, identifier, "recovery_required", error="retry failed"
+        )
+        self.assertEqual(
+            self.dispatch("GET", f"/v1/admin/operations/{identifier}").body["status"],
+            "recovery_required",
+        )
+
     def test_database_create_replays_and_changed_input_conflicts(self) -> None:
         first = self.create_application()
         replay = self.create_application()

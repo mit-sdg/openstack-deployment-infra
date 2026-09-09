@@ -9,7 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTS = (ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md")))
 CURRENT_PRODUCT_DOCUMENTS = (
     ROOT / "README.md",
-    *(ROOT / "docs" / name for name in ("DEPLOYMENT.md", "INTERNALS.md", "OPERATIONS.md")),
+    *(
+        ROOT / "docs" / name
+        for name in ("DEPLOYMENT.md", "INTERNALS.md", "OPERATIONS.md", "APPLICATION_DEPLOYMENTS.md")
+    ),
 )
 LINK_RE = re.compile(r"\[[^]]*\]\(([^)]+)\)")
 ROUTE_RE = re.compile(r'\("(GET|POST|PUT|PATCH|DELETE)", "(/v1/[^\"]+)", self\.')
@@ -86,12 +89,13 @@ class DocumentationTests(unittest.TestCase):
         stale = {path for path in listed - tracked if not (ROOT / path).is_file()}
         self.assertFalse(stale, f"tracked-file guide has missing paths: {sorted(stale)}")
 
-    def test_documentation_is_consolidated_into_six_reader_documents(self) -> None:
+    def test_documentation_has_the_reviewed_reader_documents(self) -> None:
         names = {path.name for path in (ROOT / "docs").glob("*.md")}
         self.assertEqual(
             names,
             {
                 "DEPLOYMENT.md",
+                "APPLICATION_DEPLOYMENTS.md",
                 "DEVELOPMENT.md",
                 "INTERNALS.md",
                 "MAINTENANCE.md",
@@ -146,7 +150,7 @@ class DocumentationTests(unittest.TestCase):
         implementation = (ROOT / "openstack_platform" / "controller" / "api.py").read_text()
         internals = (ROOT / "docs" / "INTERNALS.md").read_text()
         routes = set(ROUTE_RE.findall(implementation))
-        self.assertEqual(len(routes), 43)
+        self.assertEqual(len(routes), 44)
         for method, path in routes:
             with self.subTest(method=method, path=path):
                 self.assertIn(f"`{method} {path}`", internals)

@@ -49,6 +49,7 @@ outside Git as described in [Deploy the platform](DEPLOYMENT.md).
 - `docs/DEVELOPMENT.md` — canonical local environment and repository validation workflow.
 - `docs/INTERNALS.md` — implementation architecture, state ownership, control surfaces, internal API, and future management boundary.
 - `docs/MAINTENANCE.md` — maintainer runbook for signed releases, role images, publication, installation, and live acceptance.
+- `docs/APPLICATION_DEPLOYMENTS.md` — authenticated curl workflow for declaration, build-first maintenance deployment, polling, recovery, and retained-artifact rollback without the management UI.
 - `docs/OPERATIONS.md` — operator procedures for health, backup, off-site export, restore, replacement, pruning, troubleshooting, and recovery.
 - `docs/REPOSITORY_GUIDE.md` — this path-by-path source and test index.
 - `docs/architecture-overview.svg` — architecture diagram retained as a reusable implementation visual and syntax-validated in CI.
@@ -173,6 +174,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/deployment_reads.py` — allowlisted immutable configuration and exact per-attempt source repository reads.
 - `openstack_platform/controller/rollback.py` — retained-artifact rollback target validation and compare-and-set review plans.
 - `openstack_platform/controller/deployment_service.py` — coordinates candidate build/deploy/accept/recovery independently of HTTP parsing.
+- `openstack_platform/controller/maintenance.py` — journals and verifies exact accepted predecessor removal after build/preflight, under the deployment's application lock.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
@@ -231,6 +233,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_application_runtime.py` — source, recipe, BuildKit, worker, deployment, cleanup, and retention runtime tests.
 - `tests/test_application_health_observation.py` — accepted health-path/route-marker checks and intentionally disabled application observations.
 - `tests/test_application_sizing.py` — opaque flavor IDs, per-app plans, default preservation, resize acceptance, retries, and rollback tests.
+- `tests/test_application_deployment_docs.py` — Bash syntax and real configuration-schema validation for the operator curl runbook.
 - `tests/test_helper_worker_capacity.py` — production capacity dispatch, pinned Nomad field/worker identity contract, deadlines, and sanitized failures.
 - `tests/test_ci_publication.py` — guards the CI path set that triggers role-image publication.
 - `tests/test_build_failure_cleanup.py` — deterministic build-rejection classification and exact builder/registry absence checks.

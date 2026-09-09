@@ -69,6 +69,7 @@ class DeploymentRequest:
     sizing_plan: dict[str, Any] | None = None
     reuse_deployment_id: str | None = None
     rollback_plan: dict[str, Any] | None = None
+    maintenance: bool = False
 
 
 RecoveryKind = Literal["candidate-removed", "build-rejected", "accepted", "deployment-healthy"]
@@ -1455,6 +1456,8 @@ class DeploymentService:
         *,
         deadline: float | None = None,
     ) -> DeploymentOutcome:
+        if type(request.maintenance) is not bool:
+            raise ValidationError("maintenance consent must be a boolean")
         application_slug = slug(request.application)
         repository = repository_url(request.repository)
         requested_ref = branch_name(request.requested_ref)
@@ -1527,6 +1530,7 @@ class DeploymentService:
                         "sizingPlan": request.sizing_plan,
                         "reuseDeploymentId": request.reuse_deployment_id,
                         "rollbackPlan": request.rollback_plan,
+                        **({"maintenance": True} if request.maintenance else {}),
                     }
                 ),
                 environment.revision,
@@ -1705,6 +1709,62 @@ class DeploymentService:
             )
 
         def prepare_environment(operation_id: str, build: app.DeploymentBuild) -> dict[str, Any]:
+            if request.maintenance:
+                from .maintenance import stop_predecessor
+
+                operation = db.get_operation(self.connection, operation_id)
+                assert operation is not None
+                if operation.refs.get("maintenance_stopped") is not True:
+                    # These checks must happen while the old process still
+                    # serves. Preparation itself never updates its environment.
+                    if request.sizing_plan is not None:
+                        flavor = openstack.observe_flavor_capacity(
+                            self.config.platform,
+                            request.sizing_plan["flavor"]["flavor_id"],
+                            timeout_seconds=_remaining(
+                                selected_deadline, self.config.policy.limits.process_seconds
+                            ),
+                        )
+                        if sizing.flavor_projection(flavor) != request.sizing_plan["flavor"]:
+                            raise app.ApplicationError(
+                                "reviewed flavor drifted before maintenance cutover"
+                            )
+                    from .fixed_ip_service import preflight_cutover
+
+                    preflight_cutover(
+                        self.connection, self.config, application_id, deadline=selected_deadline
+                    )
+                    observed = self.helper_caller(
+                        self.config,
+                        "app.manifest.verify",
+                        {"slug": application_slug, "image": build.image},
+                        deadline=selected_deadline,
+                    )
+                    if (
+                        observed.get("available") is not True
+                        or observed.get("image") != build.image
+                    ):
+                        raise app.ApplicationError("built artifact availability is unconfirmed")
+                    _validate_storage_bindings(
+                        self.connection,
+                        self.config,
+                        helper_caller=self.helper_caller,
+                        application_id=application_id,
+                        application_slug=application_slug,
+                        manifest=build.manifest,
+                        deadline=selected_deadline,
+                    )
+                build = replace(
+                    build,
+                    refs=stop_predecessor(
+                        self.connection,
+                        self.config,
+                        application_id,
+                        operation_id,
+                        helper_caller=self.helper_caller,
+                        deadline=selected_deadline,
+                    ),
+                )
             if request.reuse_deployment_id is not None:
                 return dict(build.refs)
             return _prepare_platform_environment(
@@ -1791,7 +1851,9 @@ class DeploymentService:
             # Accepted-but-interrupted cleanup is forward recovery, not a new
             # overlapping replacement. Every new attempt checks under app lock.
             active = db.get_active_deployment(self.connection, application_id)
-            if active is None or active.deployment_id != selected_request_id:
+            if not request.maintenance and (
+                active is None or active.deployment_id != selected_request_id
+            ):
                 require_maintenance(self.connection, application_id)
             if request.rollback_plan is not None:
                 if (
@@ -1856,6 +1918,7 @@ class DeploymentService:
                 "sizing_plan": request.sizing_plan,
                 "reuse_deployment_id": request.reuse_deployment_id,
                 "rollback_plan": request.rollback_plan,
+                **({"maintenance": True} if request.maintenance else {}),
             },
         )
         if result is None:

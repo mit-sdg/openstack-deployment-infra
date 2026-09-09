@@ -181,6 +181,26 @@ def bind_worker(
     _save(connection, record)
 
 
+def preflight_cutover(
+    connection: sqlite3.Connection, config: Config, application_id: str, *, deadline: float
+) -> None:
+    """Check a reservation before downtime, under the caller's application lock."""
+    record = get(connection, application_id)
+    if record is None:
+        return
+    current = db.get_application(connection, application_id)
+    if current is None or record["phase"] != "reserved":
+        raise ValidationError("retained primary port reservation is not ready for cutover")
+    provider = fixed_ip.Provider(config.platform, deadline=deadline)
+    value = provider.show(record["port_id"])
+    device = value.get("device_id")
+    if not isinstance(device, str) or device not in {"", current.worker_server_id}:
+        raise openstack.DriftError(
+            "retained port is not detached or attached to the accepted worker"
+        )
+    provider.check(value, record, device_id=device)
+
+
 def require_maintenance(connection: sqlite3.Connection, application_id: str) -> None:
     record = get(connection, application_id)
     if record is None:

@@ -33,6 +33,7 @@ from .log_service import LogService
 from .service_support import ServiceDeadlineError
 from .storage_service import StorageMutationRequest, StorageService
 
+API_VERSION = 1
 _MAX_PAGE = 100
 _MAX_LOG_LINES = 1_000
 HelperCaller = Callable[..., Mapping[str, object]]
@@ -189,6 +190,7 @@ class ControllerAPI:
             ("DELETE", "/v1/storage/{id}", self._delete_storage),
             ("GET", "/v1/operations/{id}", self._get_operation),
             ("GET", "/v1/admin/status", self._admin_status),
+            ("GET", "/v1/admin/capabilities", self._capabilities),
             ("GET", "/v1/admin/hosts", self._admin_hosts),
             ("GET", "/v1/admin/images", self._admin_images),
             ("POST", "/v1/admin/images/{role}/selection", self._select_hosted_image),
@@ -636,6 +638,14 @@ class ControllerAPI:
             claimed=claimed,
         )
 
+    def _capabilities(self, request: Request) -> Response:
+        self._no_query(request)
+        if request.body is not None:
+            raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
+        return Response(
+            200, {"apiVersion": API_VERSION, "features": ["maintenance-after-build-v1"]}
+        )
+
     def _operator_deployment(self, request: Request) -> Response:
         self._no_query(request)
         fields = {
@@ -646,7 +656,9 @@ class ControllerAPI:
             "configuration",
             "plan",
         }
-        body = self._body(request, allowed=fields, required=fields)
+        body = self._body(request, allowed=fields | {"maintenance"}, required=fields)
+        if type(body.get("maintenance", False)) is not bool:
+            raise ValidationError("maintenance consent must be a boolean")
         if not isinstance(body["plan"], dict):
             raise ValidationError("sizing plan must be an object")
         application = self._application(self._path_uuid(request))
@@ -665,6 +677,7 @@ class ControllerAPI:
                     configuration,
                     key,
                     body["plan"],
+                    maintenance=body.get("maintenance", False),
                 )
             ),
             kind="app.deploy",
@@ -933,9 +946,9 @@ class ControllerAPI:
             # without holding the API lock throughout unrelated external reads.
             with db.transaction(connection, immediate=False):
                 operation = db.get_operation(connection, identifier)
-                if operation is not None:
-                    return Response(200, self._operation_model(operation))
                 dispatch = db.get_operation_dispatch(connection, identifier)
+                if operation is not None:
+                    return Response(200, self._operation_model(operation, dispatch))
                 if dispatch is None:
                     raise HttpError(404, "OPERATION_NOT_FOUND", "operation does not exist")
                 return Response(200, self._dispatch_model(dispatch))
@@ -1194,7 +1207,12 @@ class ControllerAPI:
             for item in db.list_operation_dispatches(self.connection)
             if item.operation_id not in known
         ]
-        items = [self._operation_model(item) for item in operations]
+        items = [
+            self._operation_model(
+                item, db.get_operation_dispatch(self.connection, item.operation_id)
+            )
+            for item in operations
+        ]
         items.extend(self._dispatch_model(item) for item in queued)
         items.sort(
             key=lambda item: (str(item["updatedAt"]), str(item["operationId"])), reverse=True
@@ -1274,17 +1292,26 @@ class ControllerAPI:
         return result
 
     @staticmethod
-    def _operation_model(operation: db.Operation) -> dict[str, object]:
+    def _operation_model(
+        operation: db.Operation, dispatch: db.OperationDispatch | None = None
+    ) -> dict[str, object]:
+        # Admission of a retry precedes domain preflight/deadline renewal. Do
+        # not present the previous attempt's error as a newly failed retry.
+        retry_active = (
+            operation.status == "recovery_required"
+            and dispatch is not None
+            and dispatch.status in {"pending", "running"}
+        )
         return {
             "operationId": operation.operation_id,
             "kind": operation.kind,
             "scope": operation.scope,
-            "status": operation.status,
+            "status": "running" if retry_active else operation.status,
             "phase": operation.phase,
             "startedAt": operation.started_at,
             "updatedAt": operation.updated_at,
             "deadlineAt": operation.deadline_at,
-            "safeError": operation.safe_error,
+            "safeError": None if retry_active else operation.safe_error,
             "cleanupState": operation.cleanup_state,
         }
 

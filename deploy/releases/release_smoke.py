@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import os
 import re
 import stat
@@ -114,7 +115,7 @@ def smoke_operator(source: Path, launcher: Path, restore_launcher: Path) -> None
             raise SmokeFailure("the installed controller restore launcher rejected --help")
 
 
-def smoke_helper(source: Path) -> None:
+def smoke_helper(source: Path, launcher: Path) -> None:
     expected = _load_action_manifest(source)
     module = importlib.import_module("openstack_platform.helper.main")
     if not callable(getattr(module, "main", None)):
@@ -135,6 +136,25 @@ def smoke_helper(source: Path) -> None:
             raise SmokeFailure(f"the production helper action map omits the {family[:-1]} family")
     if any(not callable(handler) for handler in handlers.values()):
         raise SmokeFailure("the production helper action map contains a non-callable handler")
+
+    # Exercise the installed executable, not just imports with the installer's
+    # Python. An invalid request dispatches no provider/storage action.
+    try:
+        result = subprocess.run(
+            (launcher,), input=b"{}\n", capture_output=True, timeout=30, check=False
+        )
+        response = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise SmokeFailure("the installed helper launcher is unavailable") from error
+    if (
+        result.returncode != 0
+        or not isinstance(response, dict)
+        or response.get("version") != 1
+        or response.get("ok") is not False
+        or not isinstance(response.get("error"), dict)
+        or response["error"].get("code") != "INVALID_REQUEST"
+    ):
+        raise SmokeFailure("the installed helper launcher failed the protocol smoke")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,7 +178,9 @@ def main(argv: list[str] | None = None) -> int:
             args.restore_launcher.resolve(strict=True),
         )
     else:
-        smoke_helper(source)
+        if args.launcher is None:
+            raise SmokeFailure("the helper smoke requires its installed launcher")
+        smoke_helper(source, args.launcher.resolve(strict=True))
     print(f"release-smoke={args.mode}:ok")
     return 0
 

@@ -3,6 +3,9 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
+import subprocess
+import threading
 import time
 import unittest
 import uuid
@@ -18,7 +21,7 @@ from openstack_platform.controller import database as db
 from openstack_platform.controller import fixed_ip_service as service
 from openstack_platform.controller import public_ip_service
 from openstack_platform.controller.api import ControllerAPI
-from openstack_platform.controller.http import HttpError
+from openstack_platform.controller.http import ControllerServer, HttpError
 from openstack_platform.helper import production
 from openstack_platform.validation import ValidationError
 from tests import test_application_sizing as fixtures
@@ -155,6 +158,8 @@ class RetainedFixedIPTests(unittest.TestCase):
         self.state_path.write_text(json.dumps(value))
 
     def helper(self, config, action, values, **kwargs):
+        if observer := getattr(self, "observe_action", None):
+            observer(action, values)
         if action.startswith("app.worker."):
             self.fixture.calls.append((action, copy.deepcopy(values)))
             result = production._provider_app(action, values)
@@ -228,6 +233,9 @@ class RetainedFixedIPTests(unittest.TestCase):
         creates = [a for a in self.state()["calls"] if a[:2] == ["port", "create"]]
         self.assertEqual(len(creates), 1)
         self.assertIn(f"subnet={SUBNET},ip-address={ADDRESS}", creates[0])
+        self.assertNotIn("--enable-port-security", creates[0])
+        self.assertNotIn("--disable-port-security", creates[0])
+        self.assertTrue(self.port()["port_security_enabled"])
         self.assertFalse(
             any(a[0] in {"floating", "router", "quota"} for a in self.state()["calls"])
         )
@@ -274,6 +282,243 @@ class RetainedFixedIPTests(unittest.TestCase):
             service.release_locked(
                 self.connection, self.config, self.app_id, deadline=time.monotonic() + 10
             )
+
+    @unittest.skipUnless(shutil.which("curl"), "curl transport acceptance requires curl")
+    def test_curl_over_unix_socket_repeats_maintenance_fixed_port_deployments(self):
+        socket = str(self.root / "acceptance.sock")
+        connection = db.connect(
+            self.root / "platform.sqlite3", create=False, check_same_thread=False
+        )
+        api = ControllerAPI(connection, self.config, self.root, helper_caller=self.helper)
+        server = ControllerServer(socket, api.router("privileged"))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def curl(path, body=None, key=None):
+            command = [
+                "curl",
+                "--fail-with-body",
+                "--silent",
+                "--show-error",
+                "--unix-socket",
+                socket,
+            ]
+            if body is not None:
+                command += [
+                    "-H",
+                    "Content-Type: application/json",
+                    "-H",
+                    f"Idempotency-Key: {key}",
+                    "--data-binary",
+                    "@-",
+                ]
+            result = subprocess.run(
+                command + ["http://localhost" + path],
+                input=None if body is None else json.dumps(body),
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=True,
+            )
+            return json.loads(result.stdout)
+
+        def post(path, body, key=None):
+            key = key or str(uuid.uuid4())
+            submitted = curl(path, body, key)
+            for _ in range(300):
+                operation = curl(submitted["statusUrl"])
+                if operation["status"] in {"succeeded", "failed", "recovery_required"}:
+                    return key, db.get_operation(self.connection, key)
+                time.sleep(0.2)
+            self.fail("curl deployment polling timed out")
+
+        try:
+            self.assertIn("maintenance-after-build-v1", curl("/v1/admin/capabilities")["features"])
+            with mock.patch.object(self.fixture, "post", side_effect=post):
+                self._exercise_maintenance_cycles()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            api.close()
+            connection.close()
+
+    def test_maintenance_capability_and_consent_are_privileged_and_typed(self):
+        value = self.fixture.router.dispatch("GET", "/v1/admin/capabilities", {}, None).body
+        self.assertIn("maintenance-after-build-v1", value["features"])
+        with self.assertRaises(HttpError):
+            self.fixture.api.router("project").dispatch("GET", "/v1/admin/capabilities", {}, None)
+        for value in (None, 1, "true"):
+            with self.subTest(value=value), self.assertRaises(HttpError):
+                self.fixture.post(
+                    f"/v1/admin/applications/{self.app_id}/deployments",
+                    {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": value},
+                )
+        with self.assertRaises(HttpError):
+            self.fixture.post(
+                f"/v1/applications/{self.app_id}/deployments",
+                {**self.fixture.body, "maintenance": True},
+            )
+        self.assertEqual(self.fixture.calls, [])
+
+    def test_maintenance_flavor_drift_after_build_does_not_stop_predecessor(self):
+        self.assert_success(self.fixture.deploy(self.fixture.plan()))
+        self.assert_success(self.reserve())
+        events = []
+
+        def observe(action, values):
+            events.append(action)
+            if action == "app.build":
+                patch = mock.patch.object(
+                    openstack,
+                    "observe_flavor_capacity",
+                    return_value=replace(fixtures.XL, ram_mib=8192),
+                )
+                patch.start()
+                self.addCleanup(patch.stop)
+
+        self.observe_action = observe
+        _, failed = self.fixture.post(
+            f"/v1/admin/applications/{self.app_id}/deployments",
+            {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
+        )
+        self.assertEqual(failed.status, "recovery_required")
+        self.assertNotIn("app.remove", events)
+        self.assertNotIn("app.worker.delete", events)
+        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
+        self.assertEqual(len(self.state()["servers"]), 1)
+
+    def test_retained_port_drift_is_detected_before_maintenance_stop(self):
+        self.assert_success(self.fixture.deploy(self.fixture.plan()))
+        self.assert_success(self.reserve())
+        pid = self.port()["id"]
+        self.change(lambda state: state["ports"][pid].update(port_security_enabled=False))
+        events = []
+        self.observe_action = lambda action, values: events.append(action)
+        _, failed = self.fixture.post(
+            f"/v1/admin/applications/{self.app_id}/deployments",
+            {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
+        )
+        self.assertEqual(failed.status, "recovery_required")
+        self.assertNotIn("app.remove", events)
+        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
+        self.assertEqual(len(self.state()["servers"]), 1)
+
+    def test_maintenance_builds_while_serving_then_cuts_over_without_overlap(self):
+        self._exercise_maintenance_cycles()
+
+    def _exercise_maintenance_cycles(self):
+        self.assert_success(self.fixture.deploy(self.fixture.plan()))
+        self.assert_success(self.reserve())
+        pid = self.port()["id"]
+        for _ in range(2):
+            previous = db.get_active_deployment(self.connection, self.app_id).deployment_id
+            events = []
+
+            def observe(action, values, events=events, previous=previous):
+                events.append(action)
+                connection = db.connect(self.root / "platform.sqlite3", create=False)
+                try:
+                    if action in {"app.build", "app.manifest.verify"}:
+                        self.assertTrue(db.get_application(connection, self.app_id).desired_running)
+                        self.assertEqual(len(self.state()["servers"]), 1)
+                        self.assertEqual(
+                            db.get_active_deployment(connection, self.app_id).deployment_id,
+                            previous,
+                        )
+                    if action == "app.worker.create":
+                        self.assertFalse(
+                            db.get_application(connection, self.app_id).desired_running
+                        )
+                        self.assertEqual(self.state()["servers"], {})
+                finally:
+                    connection.close()
+
+            self.observe_action = observe
+            self.assert_success(
+                self.fixture.post(
+                    f"/v1/admin/applications/{self.app_id}/deployments",
+                    {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
+                )
+            )
+            self.assertLess(events.index("app.build"), events.index("app.remove"))
+            self.assertLess(events.index("app.worker.delete"), events.index("app.worker.create"))
+            self.assertEqual(db.get_application(self.connection, self.app_id).worker_port_id, pid)
+            self.assertEqual(len(self.state()["servers"]), 1)
+
+    def test_ordinary_maintenance_health_failure_can_enable_previous_accepted_code(self):
+        self.assert_success(self.fixture.deploy(self.fixture.plan()))
+        previous = db.get_active_deployment(self.connection, self.app_id).deployment_id
+        self.fixture.fail_health = True
+        _, failed = self.fixture.post(
+            f"/v1/admin/applications/{self.app_id}/deployments",
+            {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
+        )
+        self.assertEqual(failed.status, "failed", failed.safe_error)
+        self.assertEqual(failed.cleanup_state, "confirmed")
+        self.assertEqual(self.state()["servers"], {})
+        self.assertEqual(
+            db.get_active_deployment(self.connection, self.app_id).deployment_id, previous
+        )
+        self.assertFalse(db.get_application(self.connection, self.app_id).desired_running)
+        self.fixture.fail_health = False
+        self.assert_success(self.fixture.post(f"/v1/applications/{self.app_id}/enable", {}))
+        self.assertEqual(
+            db.get_active_deployment(self.connection, self.app_id).deployment_id, previous
+        )
+        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
+        self.assertEqual(len(self.state()["servers"]), 1)
+
+    def test_maintenance_retry_reuses_build_worker_and_does_not_stop_again(self):
+        self.assert_success(self.fixture.deploy(self.fixture.plan()))
+        self.assert_success(self.reserve())
+        body = {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True}
+        events = []
+        fail = True
+
+        def observe(action, values):
+            nonlocal fail
+            events.append(action)
+            if action == "app.worker.capacity" and fail:
+                fail = False
+                raise RuntimeError("injected capacity outage")
+
+        self.observe_action = observe
+        key, failed = self.fixture.post(f"/v1/admin/applications/{self.app_id}/deployments", body)
+        self.assertEqual(failed.status, "recovery_required")
+        self.assertFalse(db.get_application(self.connection, self.app_id).desired_running)
+        self.assertEqual(len(self.state()["servers"]), 1)
+        events.clear()
+        self.assert_success(
+            self.fixture.post(f"/v1/admin/applications/{self.app_id}/deployments", body, key)
+        )
+        self.assertNotIn("app.build", events)
+        self.assertNotIn("app.remove", events[: events.index("app.deploy")])
+        self.assertNotIn("app.worker.create", events)
+        self.assertIsNone(db.get_operation(self.connection, key).safe_error)
+        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
+
+    def test_maintenance_build_failure_preserves_running_predecessor(self):
+        self.assert_success(self.fixture.deploy(self.fixture.plan()))
+        self.assert_success(self.reserve())
+        before = db.get_application(self.connection, self.app_id)
+        previous = db.get_active_deployment(self.connection, self.app_id).deployment_id
+        events = []
+        self.observe_action = lambda action, values: events.append(action)
+        self.fixture.fail_action = "app.build"
+        key, failed = self.fixture.post(
+            f"/v1/admin/applications/{self.app_id}/deployments",
+            {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
+        )
+        self.assertNotEqual(failed.status, "succeeded")
+        self.assertNotIn("app.remove", events)
+        self.assertNotIn("app.worker.delete", events)
+        self.assertNotIn("app.env.set", events)
+        self.assertEqual(db.get_application(self.connection, self.app_id), before)
+        self.assertEqual(
+            db.get_active_deployment(self.connection, self.app_id).deployment_id, previous
+        )
+        self.assertEqual(len(self.state()["servers"]), 1)
 
     def test_transition_ordinary_reserve_disable_fixed_then_static_redeploy_and_delete(self):
         self.assert_success(self.fixture.deploy(self.fixture.plan()))

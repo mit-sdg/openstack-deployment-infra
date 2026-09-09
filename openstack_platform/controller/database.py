@@ -1356,7 +1356,8 @@ def renew_operation_deadline(
         raise ValidationError("operation deadline is malformed")
     with transaction(connection):
         cursor = connection.execute(
-            "UPDATE operations SET deadline_at = ?, updated_at = ? "
+            "UPDATE operations SET deadline_at = ?, updated_at = ?, "
+            "status = 'running', safe_error = NULL "
             "WHERE operation_id = ? AND status IN ('running','recovery_required')",
             (deadline_at, now or utc_now(), operation_id),
         )

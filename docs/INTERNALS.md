@@ -377,7 +377,8 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | `POST /v1/admin/applications/{id}/resize` | Apply `{plan, confirmation}` to an accepted app, reusing its OCI artifact; disabled apps require predecessor absence and enable only after healthy acceptance |
 | `GET /v1/admin/applications/{id}/rollback-plan` | Read-only retained-artifact plan; requires exactly one `deploymentId` query parameter |
 | `POST /v1/admin/applications/{id}/rollback` | Apply the exact `{plan, confirmation}` through candidate health and acceptance without a build |
-| `POST /v1/admin/applications/{id}/deployments` | Deploy with the normal deployment fields plus a reviewed `plan` |
+| `GET /v1/admin/capabilities` | Controller API version and supported feature names; maintenance clients require `maintenance-after-build-v1` |
+| `POST /v1/admin/applications/{id}/deployments` | Deploy with normal deployment fields plus a reviewed `plan`; optional boolean `maintenance` explicitly authorizes build-first, single-process cutover |
 | `GET /v1/admin/operations/{id}` | Poll an operator mutation on the privileged socket |
 | `GET /v1/admin/deployments` | Paginated global deployment list |
 | `GET /v1/admin/storage` | Paginated global storage list |
@@ -391,6 +392,19 @@ Responses include JSON content type, `Cache-Control: no-store`, and a
 correlation ID. Errors expose only a code, bounded safe summary, correlation ID,
 retryability, and optional blocking operation ID. Provider payloads, stack
 traces, secret values, and private operation references are not returned.
+
+With `maintenance: true`, the accepted process stays enabled during the build
+and artifact/storage preflight. Under the application lock, `maintenance.py`
+journals the predecessor's accepted deployment, job hash/image, placement, server,
+and port before removing it. The worker must be absent before any candidate is
+created. The accepted pointer changes only after healthy acceptance. A retry
+uses the journaled stop checkpoint rather than stopping a newly created candidate.
+The mode is part of the immutable request; it cannot be added to an existing key.
+The project socket cannot request it. See the [curl runbook](APPLICATION_DEPLOYMENTS.md).
+
+Renewing an unfinished operation's deadline also marks the new attempt `running`
+and clears the previous safe error. Failure during that attempt records a new
+`recovery_required` error instead of leaving stale status throughout recovery.
 
 ## SQLite and operation state
 
