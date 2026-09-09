@@ -69,9 +69,12 @@ let
     from backup.registry_artifact import credentials, _runtime_paths
 
     Path("${state}/operator/status/registry-backup-probe-ran").touch()
-    private = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "storage-bootstrap"
+    loaded = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "storage-bootstrap"
+    private = Path("/run/${namespace}-backup-private/storage-bootstrap.env")
     assert _runtime_paths()[0] == private
-    assert stat.S_IMODE(private.stat().st_mode) == 0o400
+    assert private.read_bytes() == loaded.read_bytes()
+    assert stat.S_IMODE(private.stat().st_mode) == 0o600
+    assert stat.S_IMODE(private.parent.stat().st_mode) == 0o700
     assert private.stat().st_uid == os.geteuid()
     assert credentials(private).startswith("Basic ")
     assert Path(os.environ["AGE_KEY"]).is_file()
@@ -343,10 +346,11 @@ let
               machine.succeed("systemctl show ${namespace}-controller.service nomad.service -p LimitCORE --value | grep -vFx infinity")
               machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
               machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'LoadCredential=storage-bootstrap:${root}/secrets/storage-bootstrap.env'")
-              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'REGISTRY_BACKUP_SECRETS=%d/storage-bootstrap'")
-              machine.succeed("systemctl start ${namespace}-platform-backup.service; test -f ${state}/operator/status/registry-backup-probe-ran; rm ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'REGISTRY_BACKUP_SECRETS=%t/${namespace}-backup-private/storage-bootstrap.env'")
+              machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/registry-backup-probe-ran && rm ${state}/operator/status/registry-backup-probe-ran")
               machine.succeed("test $(stat -c %U:%G:%a ${root}/secrets/storage-bootstrap.env) = agentops:platform-controller:640")
               machine.fail("test -e /run/credentials/${namespace}-platform-backup.service/storage-bootstrap")
+              machine.fail("test -e /run/${namespace}-backup-private")
               machine.succeed("chmod 0644 ${root}/secrets/storage-bootstrap.env")
               machine.fail("systemctl start ${namespace}-platform-backup.service")
               machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
@@ -359,7 +363,7 @@ let
               machine.succeed("chown agentops:platform-controller ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.env ${root}/secrets/storage-bootstrap.real; ln -s storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
               machine.fail("systemctl start ${namespace}-platform-backup.service")
               machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
-              machine.succeed("rm ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service; systemctl start ${namespace}-platform-backup.service; test -f ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("rm ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service && systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/registry-backup-probe-ran")
               machine.succeed("! journalctl --boot --output=cat | grep -F controller-secret")
               machine.succeed("systemctl cat nomad.service | grep -F 'LoadCredential=nomad-gossip-key:/etc/${namespace}/secrets/nomad-gossip-key'")
               machine.succeed("systemctl cat nomad.service | grep -F '${namespace}-credential-guard /etc/${namespace}/secrets/nomad-gossip-key root'")

@@ -873,7 +873,7 @@ in
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
         "REGISTRY_ARTIFACT_SCRIPT=${infra}/backup/registry_artifact.py"
-        "REGISTRY_BACKUP_SECRETS=%d/storage-bootstrap"
+        "REGISTRY_BACKUP_SECRETS=%t/${namespace}-backup-private/storage-bootstrap.env"
         "REGISTRY_BACKUP_MAX_FILE_BYTES=1099511627776"
         "REGISTRY_BACKUP_MAX_TOTAL_BYTES=4398046511104"
         "REGISTRY_BACKUP_MAX_MANIFEST_BYTES=67108864"
@@ -890,10 +890,14 @@ in
       ExecStartPre = [
         "${credentialGuard} ${root}/persistent/secrets/backup-age-key.txt ${operatorAccount.name}"
         "${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env"
+        "${pkgs.coreutils}/bin/install -m 0600 %d/storage-bootstrap %t/${namespace}-backup-private/storage-bootstrap.env"
       ];
-      # Controller preparation grants its dedicated group read access to the
-      # shared source. Registry backup consumes only systemd's private copy;
-      # neither the source mode nor the registry parser's checks are relaxed.
+      RuntimeDirectory = "${namespace}-backup-private";
+      RuntimeDirectoryMode = "0700";
+      UMask = "0077";
+      # systemd may grant credential access with ACLs (mode 0440, root-owned).
+      # Stage an owner-only copy in a service-lifetime private runtime directory
+      # rather than weakening the registry parser or changing shared source modes.
       LoadCredential = [
         "backup-age-key:${root}/persistent/secrets/backup-age-key.txt"
         "storage-bootstrap:${root}/secrets/storage-bootstrap.env"

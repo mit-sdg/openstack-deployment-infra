@@ -226,7 +226,7 @@ class RegistryArtifactStreamingTests(unittest.TestCase):
 
     def test_registry_backup_environment_selects_systemd_credential_path(self) -> None:
         config = {"paths": {"root": "/srv/platform"}, "addresses": {"storage": "192.0.2.10"}}
-        private = "/run/credentials/example-platform-backup.service/storage-bootstrap"
+        private = "/run/example-backup-private/storage-bootstrap.env"
         with (
             mock.patch.object(artifact, "load", return_value=config),
             mock.patch.dict(os.environ, {"REGISTRY_BACKUP_SECRETS": private}),
@@ -238,7 +238,16 @@ class RegistryArtifactStreamingTests(unittest.TestCase):
         unit = source.split('systemd.services."${namespace}-platform-backup" = {', 1)[1].split(
             'systemd.timers."${namespace}-platform-backup"', 1
         )[0]
-        self.assertIn('"REGISTRY_BACKUP_SECRETS=%d/storage-bootstrap"', unit)
+        self.assertIn(
+            '"REGISTRY_BACKUP_SECRETS=%t/${namespace}-backup-private/storage-bootstrap.env"', unit
+        )
+        self.assertIn('RuntimeDirectory = "${namespace}-backup-private";', unit)
+        self.assertIn('RuntimeDirectoryMode = "0700";', unit)
+        self.assertIn(
+            '"${pkgs.coreutils}/bin/install -m 0600 %d/storage-bootstrap '
+            '%t/${namespace}-backup-private/storage-bootstrap.env"',
+            unit,
+        )
         self.assertIn('"storage-bootstrap:${root}/secrets/storage-bootstrap.env"', unit)
         self.assertIn('"backup-age-key:${root}/persistent/secrets/backup-age-key.txt"', unit)
         self.assertIn(
