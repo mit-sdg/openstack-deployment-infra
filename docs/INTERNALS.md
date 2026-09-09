@@ -264,11 +264,17 @@ operations, serialized per application. Operation polling uses an independent,
 query-only SQLite read snapshot and does not wait for the API handler lock held
 by slow live observations. Other synchronous handlers still share that lock.
 
-Started work interrupted by controller restart becomes `recovery_required`.
-The caller resumes it by repeating the identical request and key. Request bodies
+Started work with recorded domain intent interrupted by controller restart becomes
+`recovery_required`, preserving its domain checkpoint. A dispatch interrupted
+before any domain intent was recorded becomes a terminal unstarted failure.
+The caller resumes recovery-required work by repeating the identical request and key. Request bodies
 are not retained in the dispatch journal, so secret-bearing environment bodies
 must be supplied again. A new key cannot bypass a recovery-required operation
-on the same application.
+on the same application. New storage dispatch/domain kinds agree; recovery
+requires exact kind and scope matching without legacy-spelling compatibility.
+Older malformed dispatches remain blocked and unchanged. A recorded build rejection
+becomes terminal only after exact builder absence and authenticated build-tag absence; uncertain cleanup is retried
+without rebuilding. No secret-bearing request payload is added to durable state.
 
 Application route observations use the accepted deployment's configured health
 path and exact route marker, not the application's root page. A response from a

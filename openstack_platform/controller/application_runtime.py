@@ -33,7 +33,7 @@ from ..contracts import (
     OPERATOR_ACCOUNT_NAME,
 )
 from ..remote import call_helper
-from ..runtime import bounded_http, ensure_private_directory, lock, run
+from ..runtime import CommandFailure, bounded_http, ensure_private_directory, lock, run
 from ..validation import (
     ValidationError,
     bounded_text,
@@ -160,6 +160,10 @@ def _deadline_timestamp(deadline: float) -> str:
 
 class ApplicationError(RuntimeError):
     """An application operation failed with an operator-safe summary."""
+
+
+class BuildRejected(ApplicationError):
+    """A completed builder command rejected the build; cleanup is not implied."""
 
 
 class DeploymentFailed(ApplicationError):
@@ -1168,16 +1172,28 @@ def execute_builder_build(
         ),
         identity,
     )
-    result = _provider_result(
-        command_runner,
-        build_argv,
-        timeout_seconds=build_timeout,
-        stdout_limit=_MAX_BUILD_METADATA,
-        stderr_limit=build_log_limit,
-        inherit_env=("HOME", "USER", "SSH_AUTH_SOCK"),
-        allow_stderr_truncation=True,
-        stderr_sink=build_log_sink,
-    )
+    try:
+        result = _provider_result(
+            command_runner,
+            build_argv,
+            timeout_seconds=build_timeout,
+            stdout_limit=_MAX_BUILD_METADATA,
+            stderr_limit=build_log_limit,
+            inherit_env=("HOME", "USER", "SSH_AUTH_SOCK"),
+            allow_stderr_truncation=True,
+            stderr_sink=build_log_sink,
+        )
+    except ApplicationError as error:
+        failure = error.__cause__
+        # SSH 255, timeouts, malformed success metadata and lost responses are
+        # unknown outcomes, not deterministic build rejection.
+        if (
+            isinstance(failure, CommandFailure)
+            and failure.result is not None
+            and 1 <= failure.result.returncode < 255
+        ):
+            raise BuildRejected("builder command rejected the application build") from None
+        raise
     parse_build_metadata(result.stdout)
     return BuildExecution(
         metadata=result.stdout,
@@ -1285,13 +1301,17 @@ def build_with_disposable_builder(
     if cleanup_error is not None:
         if isinstance(cleanup_error, (KeyboardInterrupt, SystemExit)):
             raise cleanup_error
+        if isinstance(primary_error, BuildRejected):
+            raise BuildRejected(
+                "application build was rejected; cleanup requires verification"
+            ) from None
         if primary_error is not None:
             raise ApplicationError(
                 "builder operation and server/port cleanup both failed"
             ) from None
         raise ApplicationError("builder server/port cleanup failed") from None
     if primary_error is not None:
-        if isinstance(primary_error, (KeyboardInterrupt, SystemExit)):
+        if isinstance(primary_error, (KeyboardInterrupt, SystemExit, BuildRejected)):
             raise primary_error
         raise ApplicationError(
             "builder operation failed; server and port cleanup completed"
@@ -2102,6 +2122,31 @@ def application_logs(
         args,
         timeout_seconds=timeout_seconds,
     )
+
+
+def confirm_build_manifest_absent(
+    application_slug: str,
+    build_id: str,
+    *,
+    registry_command: Sequence[str],
+    timeout_seconds: float,
+    command_runner: Callable[..., Any] = run,
+) -> None:
+    """Require authenticated absence of the exact per-build publication tag."""
+    repository = f"projects/{slug(application_slug)}/app"
+    identifier = uuid(build_id, field="build ID")
+    command = _fixed_command(registry_command, field_name="registry command")
+    result = _provider_result(
+        command_runner,
+        (*command, "build-absent", repository, identifier),
+        timeout_seconds=timeout_seconds,
+    )
+    observed = _json_object(result.stdout, field_name="build artifact absence")
+    if (
+        observed != {"repository": repository, "buildId": identifier, "absent": True}
+        or observed.get("absent") is not True
+    ):
+        raise ApplicationError("exact build artifact absence was not confirmed")
 
 
 def delete_registry_manifest(

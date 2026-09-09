@@ -53,6 +53,7 @@ class AsyncOperationExecutor:
             if dispatch.status not in {"pending", "running"}:
                 continue
             operation = db.get_operation(connection, dispatch.operation_id)
+            no_domain_intent = operation is None
             if operation is not None and operation.status in {"succeeded", "failed"}:
                 db.set_operation_dispatch_status(connection, dispatch.operation_id, "finished")
                 continue
@@ -69,11 +70,11 @@ class AsyncOperationExecutor:
                 except db.UnfinishedOperationError:
                     operation = None
             if operation is not None and operation.status == "running":
-                if dispatch.status == "pending":
+                if no_domain_intent:
                     db.mark_failed(
                         connection,
                         operation.operation_id,
-                        "queued operation was not started before controller restart",
+                        "operation stopped before recording any domain mutation intent",
                         cleanup_state="not_required",
                     )
                     db.set_operation_dispatch_status(connection, dispatch.operation_id, "finished")

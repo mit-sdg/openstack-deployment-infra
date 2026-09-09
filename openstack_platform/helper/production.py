@@ -50,6 +50,7 @@ from .nomad import NomadClient
 
 APP_ACTIONS = (
     "app.build",
+    "app.build.cleanup",
     "app.build.logs",
     "app.builder.delete",
     "app.deploy",
@@ -71,6 +72,7 @@ APP_ACTIONS = (
 _PROVIDER_APP_ACTIONS = frozenset(
     {
         "app.build",
+        "app.build.cleanup",
         "app.build.logs",
         "app.builder.delete",
         "app.manifest.delete",
@@ -422,6 +424,11 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                     project_id=platform.project_id,
                     build_log_sink=build_log,
                 )
+    except (ValidationError, application.BuildRejected):
+        _write_build_log_state(state_path, "failed")
+        raise HelperActionError(
+            "BUILD_REJECTED", "application source or build was rejected"
+        ) from None
     except BaseException:
         _write_build_log_state(state_path, "failed")
         raise
@@ -446,6 +453,37 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
         return _read_build_log(args)
     runtime = helper_runtime()
     platform = runtime.platform
+    if action == "app.build.cleanup":
+        _exact_args(args, {"buildId", "slug"}, action)
+        build_id = uuid(args["buildId"], field="build ID")
+        app_slug = slug(args["slug"])
+        builder = application.delete_builder(
+            build_id,
+            prefix=platform.prefix,
+            builder_command=application.provider_command(platform, "builder"),
+            timeout_seconds=120,
+            project_name=platform.project_name,
+            project_id=platform.project_id,
+        )
+        if builder.absent is not True:
+            raise HelperActionError(
+                "CLEANUP_UNCONFIRMED", "exact builder absence was not confirmed"
+            )
+        application.confirm_build_manifest_absent(
+            app_slug,
+            build_id,
+            registry_command=(
+                "/run/current-system/sw/bin/python",
+                str(runtime.root / "infra/registry/delete_manifest.py"),
+            ),
+            timeout_seconds=30,
+        )
+        return {
+            "buildId": build_id,
+            "slug": app_slug,
+            "builderAbsent": True,
+            "artifactAbsent": True,
+        }
     if action == "app.builder.delete":
         _exact_args(args, {"buildId"}, action)
         builder = application.delete_builder(

@@ -316,6 +316,46 @@ before resize. Plans do not reserve quota, and the platform does not copy local
 disk state or resize managed-storage quotas. These examples describe the API;
 production provider behavior still requires a release acceptance exercise.
 
+## Retry application and storage operations
+
+Poll the `statusUrl` returned with HTTP 202. Privileged application/storage
+deletions return `/v1/admin/operations/{id}`, which is readable on the same
+privileged socket, including when the original request is replayed after deletion.
+Repeat an unknown or recovery-required request with its identical body and
+`Idempotency-Key`; do not allocate a new key to bypass unfinished scope.
+
+New storage dispatches use the same `storage.create`, `storage.verify`,
+`storage.rotate`, and `storage.remove` kinds as their domain journals. Recovery
+requires exact dispatch/domain kind and scope agreement. There is no dual-spelling
+compatibility path or data migration: an old unfinished `storage.<type>.<action>`
+dispatch paired with a different domain kind remains blocked and unchanged.
+Existing data is preserved. Check for unfinished storage operations before rollout.
+If a malformed dispatch is found, stop and obtain a separately reviewed, bounded
+recovery plan; do not bypass the invariant or edit SQLite as part of this procedure.
+
+A positively reported source/build rejection is recorded before cleanup. The
+controller requires both exact builder/server-port absence and an authenticated
+404 for that build's unique registry publication tag before marking the attempt
+and operation `failed` with confirmed cleanup. That terminal result frees the
+application scope for a corrected commit/configuration with a **new** key.
+Replaying the failed request returns its existing result without rebuilding.
+
+If cleanup, registry availability, or identity checks are uncertain, the operation
+remains `recovery_required`. Identical retries of a recorded rejection perform
+cleanup only, including after controller restart. A present build artifact is not
+deleted or adopted automatically; it requires separate investigation. Unknown
+transport results and malformed success metadata retain the existing deployment
+reconciliation path rather than being called deterministic rejection.
+
+Install matching controller and helper releases: `app.build.cleanup` is a new
+fixed helper action. The admin image must also contain the updated
+`<paths.root>/infra/registry/delete_manifest.py` with `build-absent`; Nix supplies
+that source through the baked `infra` link. An older helper or registry script
+cannot supply the required absence evidence and leaves recovery blocked.
+No runtime worker or managed storage is removed
+by failed-build cleanup. This is not an arbitrary cancellation or forced-unlock
+endpoint.
+
 ## Reserve a stable outbound IPv4
 
 Staff can optionally reserve one Neutron floating IPv4 across successful worker

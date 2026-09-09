@@ -1,4 +1,5 @@
 app.build
+app.build.cleanup
 app.build.logs
 app.builder.delete
 app.deploy
