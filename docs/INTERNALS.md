@@ -230,14 +230,21 @@ method, path, or body returns `409 IDEMPOTENCY_CONFLICT`.
 Database-only application creation returns `201`. External mutations durably
 reserve application scope and return `202` with an operation resource before
 external work. Four workers execute at most 32 admitted running/queued
-operations, serialized per application. Reads and polling use short independent
-SQLite transactions.
+operations, serialized per application. Operation polling uses an independent,
+query-only SQLite read snapshot and does not wait for the API handler lock held
+by slow live observations. Other synchronous handlers still share that lock.
 
 Started work interrupted by controller restart becomes `recovery_required`.
 The caller resumes it by repeating the identical request and key. Request bodies
 are not retained in the dispatch journal, so secret-bearing environment bodies
 must be supplied again. A new key cannot bypass a recovery-required operation
 on the same application.
+
+Application route observations use the accepted deployment's configured health
+path and exact route marker, not the application's root page. A response from a
+different deployment cannot claim healthy status. Intentionally disabled apps
+report stopped state without probing an allocation or public route expected to
+be absent; missing accepted evidence or transport failures remain unknown.
 
 ### Project and privileged routes
 

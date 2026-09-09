@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -17,7 +18,7 @@ from openstack_platform.config import (
 )
 from openstack_platform.controller import database as db
 from openstack_platform.controller.api import ControllerAPI
-from openstack_platform.controller.http import HttpError
+from openstack_platform.controller.http import HttpError, Response
 
 
 class ControllerAPITests(unittest.TestCase):
@@ -467,6 +468,59 @@ class ControllerAPITests(unittest.TestCase):
         self.assertEqual(queued.body["status"], "failed")
         self.assertEqual(queued.body["phase"], "startup_interrupted")
         self.assertEqual(queued.body["cleanupState"], "not_required")
+
+    def test_slow_observation_does_not_block_operation_poll_or_health(self) -> None:
+        identifier = "00000000-0000-4000-8000-000000000070"
+        db.begin_operation(
+            self.connection,
+            operation_id=identifier,
+            kind="app.deploy",
+            scope="app-test-poll",
+            phase="worker_ready",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_observation(_request):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("test observation was not released")
+            return Response(200, {})
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            slow = pool.submit(self.api._safe(slow_observation), None)
+            try:
+                self.assertTrue(entered.wait(2))
+                poll = pool.submit(self.dispatch, "GET", f"/v1/operations/{identifier}")
+                response = poll.result(timeout=2)
+                self.assertEqual(response.body["phase"], "worker_ready")
+                self.assertEqual(self.dispatch("GET", "/v1/health").status, 200)
+            finally:
+                release.set()
+            slow.result(timeout=2)
+
+    def test_both_operation_routes_use_an_independent_query_only_snapshot(self) -> None:
+        identifier = "00000000-0000-4000-8000-000000000071"
+        db.begin_operation(
+            self.connection,
+            operation_id=identifier,
+            kind="app.deploy",
+            scope="app-test-snapshot",
+            phase="worker_ready",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+        original = db.get_operation
+
+        def observe(connection, operation_id):
+            self.assertIsNot(connection, self.connection)
+            self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
+            self.assertTrue(connection.in_transaction)
+            return original(connection, operation_id)
+
+        with mock.patch.object(db, "get_operation", side_effect=observe):
+            for path in (f"/v1/operations/{identifier}", f"/v1/admin/operations/{identifier}"):
+                self.assertEqual(self.dispatch("GET", path).status, 200)
 
     def test_operation_read_omits_refs_and_admin_pagination_is_bounded(self) -> None:
         self.create_application()
