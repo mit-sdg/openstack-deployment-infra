@@ -58,7 +58,12 @@ class WorkerReuseTests(unittest.TestCase):
         if action == "app.worker.create":
             result.update(imageId=values["workerImageId"], absent=False)
         if action == "app.worker.capacity":
-            result = {**self.fixture.workers[values["applicationId"]], **result}
+            result = {
+                **self.fixture.workers[values["applicationId"]],
+                **result,
+                "applicationId": values["applicationId"],
+                "slug": values["slug"],
+            }
         if action == "app.build":
             self.after_build()
         if action == "app.remove":
@@ -297,6 +302,22 @@ class WorkerReuseTests(unittest.TestCase):
             db.get_application(self.connection, self.app_id).worker_server_id,
             before.worker_server_id,
         )
+
+    def test_worker_drift_blocks_acceptance_recovery(self):
+        self.first()
+        self.fail_health_call = 2
+        key, interrupted = self.update()
+        self.assertEqual(interrupted.phase, "deployment_healthy")
+        worker = next(iter(self.fixture.workers.values()))
+        previous_id = worker["serverId"]
+        worker["serverId"] = str(uuid.uuid4())
+        self.fixture.calls.clear()
+        _, blocked = self.update(key)
+        self.assertEqual(blocked.status, "recovery_required")
+        self.assertNotIn("app.health", self.actions())
+        self.assertNotIn("app.worker.delete", self.actions())
+        worker["serverId"] = previous_id
+        self.assert_success(self.update(key))
 
     def test_recovery_after_acceptance_does_not_delete_reused_worker(self):
         before, _ = self.first()

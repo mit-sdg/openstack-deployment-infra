@@ -1149,6 +1149,26 @@ def _recover_app_deployment(
     )
     if recovery_action == "accept_deployment":
         candidate = oci_digest_pin(operation.candidate_digest, field="candidate digest")
+        if operation.refs.get("worker_strategy") == "reuse":
+            recorded = operation.refs.get("reused_worker")
+            active = db.get_active_deployment(connection, application_id)
+            if not isinstance(recorded, dict) or active is None:
+                raise app.ApplicationError("reused worker recovery identity is unavailable")
+            expected = dict(recorded)
+            if active.deployment_id == operation_id:
+                # Acceptance may have committed immediately before a crash;
+                # worker identity must still match even though the pointer moved.
+                expected["deployment_id"] = operation_id
+            worker_reuse.preflight(
+                connection,
+                config,
+                spec,
+                selected_image_id=uuid(recorded.get("image_id"), field="reused worker image UUID"),
+                expected=expected,
+                allow_stopped=operation.refs.get("maintenance_stopped") is True,
+                helper_caller=helper_caller,
+                deadline=deadline,
+            )
         attempt = db.get_deployment_attempt(connection, operation_id)
         if attempt is None or attempt.configuration is None:
             raise app.ApplicationError("deployment configuration snapshot is missing")

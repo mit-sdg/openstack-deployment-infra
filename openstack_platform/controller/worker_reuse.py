@@ -94,6 +94,11 @@ def preflight(
         deadline=deadline,
     )
     require_observation(observed, identity)
+    if (
+        observed.get("applicationId") != identity["placement_id"]
+        or observed.get("slug") != spec.application_slug
+    ):
+        raise ValidationError("reusable worker capacity belongs to a different application")
     cpu, memory = sizing.worker_budget(observed, identity["server_id"], spec.worker_flavor)
     if spec.cpu_mhz > cpu or spec.memory_mib > memory:
         raise ValidationError("pinned allocation exceeds reusable worker capacity after reserve")
