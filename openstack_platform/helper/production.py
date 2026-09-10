@@ -942,6 +942,9 @@ def _lazy_app(action: str) -> Handler:
             _nomad_client(runtime),
             nomad_command=nomad_command,
             trusted_domain=platform.domain,
+            quiesce_directory=(
+                runtime.admin_state / "controller/quiesce" if action == "app.quiesce" else None
+            ),
             public_health_check=lambda application_slug: app_actions._public_health_from_job(
                 application_slug,
                 trusted_domain=platform.domain,

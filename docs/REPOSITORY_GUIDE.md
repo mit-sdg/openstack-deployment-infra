@@ -176,6 +176,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/deployment_service.py` — coordinates candidate build/deploy/accept/recovery independently of HTTP parsing.
 - `openstack_platform/controller/maintenance.py` — journals replacement or same-worker process cutover after build/preflight, under the deployment's application lock.
 - `openstack_platform/controller/worker_reuse.py` — fail-closed same-worker eligibility, capacity, role-image, and retained-port identity checks.
+- `openstack_platform/controller/reuse_cleanup.py` — checkpoints failed candidate process exit before job/artifact cleanup while retaining the accepted worker.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
@@ -199,7 +200,7 @@ cross-cutting boundaries.
 - `openstack_platform/helper/__init__.py` — marks and describes the unprivileged admin-host helper package.
 - `openstack_platform/helper/actions-v1.txt` — release-bound allowlist of protocol-v1 action names the helper may dispatch.
 - `openstack_platform/helper/application_actions.py` — fixed Nomad deployment, health, promotion, log, removal, and environment handlers.
-- `openstack_platform/helper/application_quiesce.py` — confirms exact predecessor client/task exit without purging the evidence before controller checkpointing.
+- `openstack_platform/helper/application_quiesce.py` — journals exact allocation identities and durable client/task exit witnesses before confirming quiescence.
 - `openstack_platform/helper/main.py` — one-request helper dispatcher plus committed backup/retention evidence handling.
 - `openstack_platform/helper/errors.py` — shared safe exception identity for console and Python module entrypoints.
 - `openstack_platform/helper/nomad.py` — Nomad Variable reads and owner-scoped compare-and-set updates.
@@ -237,7 +238,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_application_runtime.py` — source, recipe, BuildKit, worker, deployment, cleanup, and retention runtime tests.
 - `tests/test_application_health_observation.py` — accepted health-path/route-marker checks and intentionally disabled application observations.
 - `tests/test_application_sizing.py` — opaque flavor IDs, per-app plans, default preservation, resize acceptance, retries, and rollback tests.
-- `tests/test_application_quiesce.py` — exact job/process-stop evidence, lost-client rejection, bounded waits, and idempotent quiescence tests.
+- `tests/test_application_quiesce.py` — durable exact allocation-exit evidence, missing/GC record rejection, lost replies, and bounded quiescence tests.
+- `tests/test_exact_submission.py` — create-only Nomad submission and exact retry without overwriting another definition or restarting variables.
 - `tests/test_worker_reuse.py` — Node/Bun worker reuse, explicit policy, eligibility/drift, interrupted cutover, and accepted-artifact recovery tests.
 - `tests/test_worker_reuse_fixed_ip.py` — same-worker updates through the real worker helper with retained primary ports and an offline provider.
 - `tests/test_deployment_timing.py` — operation-scoped timing, context isolation, redaction, and nonfatal diagnostic failures.

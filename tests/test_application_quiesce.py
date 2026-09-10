@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from openstack_platform.contracts import NOMAD_CANDIDATE_IMAGE_KEY, NOMAD_CANDIDATE_JOB_SHA_KEY
 from openstack_platform.helper.application_quiesce import quiesce
@@ -14,8 +17,13 @@ from openstack_platform.validation import ValidationError
 
 class ApplicationQuiesceTests(unittest.TestCase):
     def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
         self.image = "registry.example/projects/any-app/app@sha256:" + "a" * 64
         self.args = {
+            "operationId": "11111111-1111-4111-8111-111111111111",
+            "nodeId": "22222222-2222-4222-8222-222222222222",
             "slug": "any-app",
             "jobId": "any-app",
             "candidateJobSha256": "b" * 64,
@@ -32,6 +40,9 @@ class ApplicationQuiesceTests(unittest.TestCase):
         }
         self.allocations = [
             {
+                "ID": "33333333-3333-4333-8333-333333333333",
+                "NodeID": "22222222-2222-4222-8222-222222222222",
+                "JobVersion": 1,
                 "JobID": "any-app",
                 "DesiredStatus": "stop",
                 "ClientStatus": "complete",
@@ -75,6 +86,7 @@ class ApplicationQuiesceTests(unittest.TestCase):
     def call(self, args=None, timeout=90):
         return quiesce(
             self.args if args is None else args,
+            state_directory=self.root,
             nomad_command=("fixed-nomad",),
             command_runner=self.runner,
             sleep=self.sleep,
@@ -92,7 +104,11 @@ class ApplicationQuiesceTests(unittest.TestCase):
 
         self.on_sleep = finish
         result = self.call()
-        self.assertEqual(result, {**self.args, "jobStopped": True, "allocationsStopped": True})
+        self.assertEqual(
+            {k: v for k, v in result.items() if k != "receiptSha256"},
+            {**self.args, "jobStopped": True, "allocationsStopped": True},
+        )
+        self.assertEqual(len(result["receiptSha256"]), 64)
         self.assertEqual(self.clock, 1)
         self.assertTrue(self.job["Stop"])
         self.assertEqual(sum("stop" in call for call in self.calls), 1)
@@ -147,6 +163,59 @@ class ApplicationQuiesceTests(unittest.TestCase):
         with self.assertRaises(CommandTimedOut):
             self.call(timeout=2)
         self.assertEqual(self.clock, 2)
+
+    def test_empty_inventory_is_never_exit_evidence(self):
+        self.allocations = []
+        with self.assertRaises(HelperActionError) as caught:
+            self.call()
+        self.assertEqual(caught.exception.code, "STOP_UNCONFIRMED")
+        self.assertFalse(any("stop" in call for call in self.calls))
+
+    def test_unwitnessed_allocation_gc_does_not_confirm_exit(self):
+        self.allocations[0]["ClientStatus"] = "running"
+
+        def disappear():
+            self.allocations = []
+
+        self.on_stop = disappear
+        with self.assertRaises(HelperActionError) as caught:
+            self.call()
+        self.assertEqual(caught.exception.code, "STOP_UNCONFIRMED")
+        record = json.loads(next(self.root.glob("*.json")).read_text())
+        self.assertFalse(record["complete"])
+        self.assertFalse(next(iter(record["allocations"].values()))["exited"])
+
+    def test_durable_exit_receipt_survives_lost_reply_and_nomad_gc(self):
+        result = self.call()
+        self.job = None
+        self.allocations = []
+        self.calls.clear()
+        recovered = self.call()
+        self.assertEqual(recovered, result)
+        self.assertFalse(any("stop" in call for call in self.calls))
+
+    def test_stop_never_precedes_durable_allocation_intent(self):
+        with mock.patch(
+            "openstack_platform.helper.application_quiesce.durable.atomic_write",
+            side_effect=OSError("disk unavailable"),
+        ):
+            with self.assertRaises(OSError):
+                self.call()
+        self.assertFalse(any("stop" in call for call in self.calls))
+
+    def test_live_allocation_on_another_node_is_rejected(self):
+        self.allocations[0].update(
+            ClientStatus="running", NodeID="44444444-4444-4444-8444-444444444444"
+        )
+        with self.assertRaises(HelperActionError):
+            self.call()
+        self.assertFalse(any("stop" in call for call in self.calls))
+
+    def test_completed_witness_cannot_authorize_a_reactivated_job(self):
+        self.call()
+        self.job["Stop"] = False
+        with self.assertRaises(HelperActionError):
+            self.call()
 
     def test_strict_arguments(self):
         for args in ({**self.args, "extra": True}, {**self.args, "jobId": "another-app"}):

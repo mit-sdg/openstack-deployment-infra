@@ -41,7 +41,12 @@ class FixedPortWorkerReuseTests(unittest.TestCase):
             self.assertTrue(
                 any(port.get("device_id") in state["servers"] for port in state["ports"].values())
             )
-            return {**args, "jobStopped": True, "allocationsStopped": True}
+            return {
+                **args,
+                "jobStopped": True,
+                "allocationsStopped": True,
+                "receiptSha256": "c" * 64,
+            }
         return self.base.helper(config, action, args, **kwargs)
 
     def assert_success(self, result):

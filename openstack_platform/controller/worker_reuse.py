@@ -29,7 +29,20 @@ _IDENTITY_KEYS = {
     "port_name",
     "image_id",
     "flavor_name",
+    "node_id",
 }
+
+
+def require_replacement_ready(connection: sqlite3.Connection, application_id: str) -> None:
+    current = db.get_application(connection, application_id)
+    if (
+        current is not None
+        and not current.desired_running
+        and (current.worker_server_id is not None or current.worker_port_id is not None)
+    ):
+        raise ValidationError(
+            "enable or disable the retained stopped worker before a replacement deployment or rollback"
+        )
 
 
 def preflight(
@@ -68,10 +81,6 @@ def preflight(
         "image_id": image_id,
         "flavor_name": spec.worker_flavor,
     }
-    if expected is not None and (
-        not isinstance(expected, dict) or set(expected) != _IDENTITY_KEYS or expected != identity
-    ):
-        raise app.ApplicationError("recorded reusable worker identity drifted")
     from .fixed_ip_service import get, helper_identity
 
     retained = get(connection, spec.application_id)
@@ -94,6 +103,11 @@ def preflight(
         deadline=deadline,
     )
     require_observation(observed, identity)
+    identity["node_id"] = uuid(observed.get("nodeId"), field="reusable worker Nomad node ID")
+    if expected is not None and (
+        not isinstance(expected, dict) or set(expected) != _IDENTITY_KEYS or expected != identity
+    ):
+        raise app.ApplicationError("recorded reusable worker identity drifted")
     if (
         observed.get("applicationId") != identity["placement_id"]
         or observed.get("slug") != spec.application_slug

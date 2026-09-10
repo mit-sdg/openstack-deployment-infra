@@ -3,9 +3,11 @@ from __future__ import annotations
 import copy
 import unittest
 import uuid
+from unittest import mock
 
 from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
+from openstack_platform.controller import image_service
 from openstack_platform.controller.api import ControllerAPI
 from openstack_platform.controller.http import HttpError
 from tests import test_application_sizing as sizing_fixtures
@@ -21,6 +23,7 @@ class WorkerReuseTests(unittest.TestCase):
         self.after_build = lambda: None
         self.after_quiesce = lambda: None
         self.after_remove = lambda: None
+        self.after_submit = lambda: None
         self.health_calls = 0
         self.fail_health_call = None
         self.quiesced = set()
@@ -46,7 +49,12 @@ class WorkerReuseTests(unittest.TestCase):
             )
             self.quiesced.add(values["jobId"])
             self.after_quiesce()
-            return {**values, "jobStopped": True, "allocationsStopped": True}
+            return {
+                **values,
+                "jobStopped": True,
+                "allocationsStopped": True,
+                "receiptSha256": "c" * 64,
+            }
         if action == "app.manifest.verify":
             self.fixture.calls.append((action, copy.deepcopy(values)))
             return {**values, "available": True}
@@ -54,9 +62,16 @@ class WorkerReuseTests(unittest.TestCase):
             self.health_calls += 1
             if self.health_calls == self.fail_health_call:
                 raise RuntimeError("injected acceptance observation interruption")
+        if action == "app.deploy" and values.get("requireExact"):
+            job_id = app.nomad_job_id(values["job"], "commons")
+            existing = self.fixture.jobs.get(job_id)
+            if existing is not None and app.nomad_candidate_identity(
+                existing
+            ) != app.nomad_candidate_identity(values["job"]):
+                raise app.ApplicationError("injected exact candidate mismatch")
         result = self.original_helper(config, action, values, **kwargs)
         if action == "app.worker.create":
-            result.update(imageId=values["workerImageId"], absent=False)
+            result.update(imageId=values["workerImageId"], absent=False, nodeId=str(uuid.uuid4()))
         if action == "app.worker.capacity":
             result = {
                 **self.fixture.workers[values["applicationId"]],
@@ -68,6 +83,8 @@ class WorkerReuseTests(unittest.TestCase):
             self.after_build()
         if action == "app.remove":
             self.after_remove()
+        if action == "app.deploy":
+            self.after_submit()
         return result
 
     def first(self, *, runtime="node"):
@@ -287,6 +304,37 @@ class WorkerReuseTests(unittest.TestCase):
         self.assertEqual(self.fixture.workers, {})
         self.assertIsNone(db.get_application(self.connection, self.app_id).worker_server_id)
 
+    def test_replacement_after_failed_reuse_rejects_before_admission_and_disable_still_works(self):
+        self.first()
+        self.fixture.fail_health = True
+        _, failed = self.update()
+        self.assertEqual(failed.status, "failed")
+        self.fixture.fail_health = False
+        self.fixture.calls.clear()
+        _, rejected = self.fixture.deploy()
+        self.assertEqual(rejected.status, "failed")
+        self.assertEqual(self.actions(), [])
+        self.assertIsNone(db.get_unfinished_operation(self.connection, f"app-{self.app_id}"))
+        self.assert_success(self.fixture.post(f"/v1/applications/{self.app_id}/disable", {}))
+
+    def test_pre_image_pin_interruption_can_resume(self):
+        before, _ = self.first()
+        with mock.patch.object(
+            image_service,
+            "pin_deployment_images",
+            side_effect=RuntimeError("interrupted before pins"),
+        ):
+            key, interrupted = self.update()
+        self.assertEqual(interrupted.status, "recovery_required")
+        self.assertEqual(interrupted.phase, "validated")
+        self.assertNotIn("worker_image_id", interrupted.refs)
+        self.assert_success(self.update(key))
+        self.assertEqual(self.actions().count("app.build"), 1)
+        self.assertEqual(
+            db.get_application(self.connection, self.app_id).worker_server_id,
+            before.worker_server_id,
+        )
+
     def test_recovery_after_healthy_checkpoint_does_not_stop_or_rebuild_again(self):
         before, _ = self.first()
         self.fail_health_call = 2
@@ -302,6 +350,74 @@ class WorkerReuseTests(unittest.TestCase):
             db.get_application(self.connection, self.app_id).worker_server_id,
             before.worker_server_id,
         )
+
+    def test_lost_submit_reply_recovers_exact_candidate_without_environment_restart(self):
+        self.first()
+
+        def lose_reply():
+            self.after_submit = lambda: None
+            raise RuntimeError("lost Nomad submission reply")
+
+        self.after_submit = lose_reply
+        key, interrupted = self.update()
+        self.assertEqual(interrupted.phase, "candidate_submitting")
+        self.assertIn("candidate_job_sha256", interrupted.refs)
+        self.fixture.calls.clear()
+        self.assert_success(self.update(key))
+        self.assertNotIn("app.env.set", self.actions())
+        self.assertNotIn("app.build", self.actions())
+        self.assertNotIn("app.quiesce", self.actions())
+        self.assertNotIn("app.worker.create", self.actions())
+        submitted = next(values for action, values in self.fixture.calls if action == "app.deploy")
+        self.assertIs(submitted["requireExact"], True)
+
+    def test_unconfirmed_candidate_stop_keeps_recovery_blocked_and_is_cleanup_only_on_retry(self):
+        self.first()
+        self.fixture.fail_health = True
+        calls = 0
+
+        def lose_candidate_reply():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("lost candidate process-stop reply")
+
+        self.after_quiesce = lose_candidate_reply
+        key, interrupted = self.update()
+        self.assertEqual(interrupted.status, "recovery_required")
+        self.assertEqual(interrupted.phase, "candidate_rejected")
+        self.assertNotIn("candidate_process_stopped", interrupted.refs)
+        self.fixture.calls.clear()
+        _, failed = self.update(key)
+        self.assertEqual(failed.status, "failed")
+        self.assertTrue(failed.refs["candidate_process_stopped"])
+        self.assertNotIn("app.env.set", self.actions())
+        self.assertNotIn("app.deploy", self.actions())
+        self.assertNotIn("app.worker.delete", self.actions())
+        self.assertIn("app.quiesce", self.actions())
+
+    def test_candidate_exit_checkpoint_survives_a_lost_cleanup_reply(self):
+        self.first()
+        self.fixture.fail_health = True
+        calls = 0
+
+        def lose_candidate_reply():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("lost candidate purge reply")
+
+        self.after_remove = lose_candidate_reply
+        key, interrupted = self.update()
+        self.assertEqual(interrupted.status, "recovery_required")
+        self.assertEqual(interrupted.phase, "candidate_rejected")
+        self.assertTrue(interrupted.refs["candidate_process_stopped"])
+        self.fixture.calls.clear()
+        _, failed = self.update(key)
+        self.assertEqual(failed.status, "failed")
+        self.assertNotIn("app.quiesce", self.actions())
+        self.assertNotIn("app.deploy", self.actions())
+        self.assertNotIn("app.env.set", self.actions())
 
     def test_worker_drift_blocks_acceptance_recovery(self):
         self.first()

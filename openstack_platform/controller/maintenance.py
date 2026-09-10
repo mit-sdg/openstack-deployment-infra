@@ -10,6 +10,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 
 from ..config import Config
+from ..validation import sha256_hex
 from . import application_runtime as app
 from . import database as db
 
@@ -89,6 +90,8 @@ def stop_predecessor(
                 config,
                 "app.quiesce",
                 {
+                    "operationId": operation_id,
+                    "nodeId": reusable["node_id"],
                     "slug": current.slug,
                     "jobId": intent["job_id"],
                     "candidateJobSha256": intent["job_sha256"],
@@ -106,6 +109,9 @@ def stop_predecessor(
                 raise app.ApplicationError("exact predecessor process exit is unconfirmed")
             # Purging a Nomad job is not itself proof that its client stopped.
             # Persist positive exit evidence before discarding that job record.
+            refs["maintenance_quiesce_receipt"] = sha256_hex(
+                stopped.get("receiptSha256"), field="process exit receipt SHA-256"
+            )
             refs["maintenance_process_stopped"] = True
             db.checkpoint_operation(connection, operation_id, phase=operation.phase, refs=refs)
     else:

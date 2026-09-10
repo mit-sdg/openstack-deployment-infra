@@ -41,7 +41,9 @@ def plan(
     active = db.get_active_deployment(connection, application_id)
     from .fixed_ip_service import get as get_fixed
     from .fixed_ip_service import require_maintenance
+    from .worker_reuse import require_replacement_ready
 
+    require_replacement_ready(connection, application_id)
     retained = get_fixed(connection, application_id)
     if (
         application is None
