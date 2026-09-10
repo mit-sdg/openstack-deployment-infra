@@ -61,7 +61,7 @@ port_description="managed-by=platform;application-id=$application_id;application
 
 resolve_named_id() {
   local kind=$1 name=$2 payload
-  payload=$("$OSC" "$kind" list --name "$name" -f json -c ID -c Name)
+  payload=$("$OSC" "$kind" list --name "$name" -f json -c ID -c Name) || return
   python3 -c '
 import json,os,sys,uuid
 name,kind=sys.argv[1:]; rows=json.load(sys.stdin)
@@ -122,12 +122,30 @@ print(parsed)
 ' "$resource"
 }
 
+observed_port_address() {
+  python3 -c '
+import json,os,sys
+port=json.load(sys.stdin)["port"]
+# An absent worker deliberately hides its positively verified reservation in
+# the public observation. Its address is still the exact retained identity.
+if port is None and os.environ.get("RETAINED_PORT_JSON"):
+ port=json.loads(os.environ["RETAINED_PORT_JSON"])
+address=port["address"] if isinstance(port,dict) else None
+if not isinstance(address,str) or not address: raise SystemExit("worker port has no fixed address")
+print(address)
+'
+}
+
 wait_for_bootstrap() {
-  local server_id=$1 attempts=${BOOTSTRAP_ATTEMPTS:-90}
+  local server_id=$1 observation=$2 attempts=${BOOTSTRAP_ATTEMPTS:-90}
   local interval=${BOOTSTRAP_POLL_INTERVAL:-10}
   local status log
+  # Seed only the first poll from the just-validated, post-mutation observation.
+  status=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["server"]["status"])' <<<"$observation") || return
   for ((i=1; i<=attempts; i++)); do
-    status=$("$OSC" server show "$server_id" -f value -c status 2>/dev/null || true)
+    if (( i > 1 )); then
+      status=$("$OSC" server show "$server_id" -f value -c status 2>/dev/null || true)
+    fi
     [[ $status != ERROR ]] || { echo "$server_id entered ERROR state" >&2; return 1; }
     log=$("$OSC" console log show "$server_id" 2>/dev/null || true)
     if grep -Fq "$BOOTSTRAP_MARKER" <<<"$log"; then
@@ -190,23 +208,29 @@ raise SystemExit(0 if ok else 1)
   return 1
 }
 
-emit_observation() {
-  local server_json port_json server_id port_id ready=false
-  server_json=$(mktemp); port_json=$(mktemp)
-  server_id=$(server_id_for_name); port_id=$(port_id_for_name)
+emit_observation() (
+  local check_ready=${1:-true} server_json port_json server_id port_id ready=false status
+  server_json=$(mktemp) || return
+  port_json=$(mktemp) || { rm -f "$server_json"; return 1; }
+  trap 'rm -f "$server_json" "$port_json"' EXIT
+  # These guards also apply inside command substitution; cleanup cannot mask
+  # a failed provider read, duplicate-name refusal, or ownership validation.
+  server_id=$(server_id_for_name) || return
+  port_id=$(port_id_for_name) || return
   if [[ -n $server_id ]]; then
     if [[ -n ${RETAINED_PORT_JSON:-} ]]; then
-      "$OSC" server show "$server_id" -f json >"$server_json"
+      "$OSC" server show "$server_id" -f json >"$server_json" || return
       "$OSC" port list --server "$server_id" -f json -c ID | python3 -c '
 import json,sys
 rows=json.load(sys.stdin)
 if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict) or rows[0].get("ID") not in (sys.argv[1],sys.argv[1].replace("-","")):
  raise SystemExit("retained worker must have exactly its primary port")
-' "$port_id"
+' "$port_id" || return
     else
-      "$OSC" server show "$server_id" -f json -c id -c name -c status -c image -c flavor -c properties >"$server_json"
+      "$OSC" server show "$server_id" -f json -c id -c name -c status -c image -c flavor -c properties >"$server_json" || return
     fi
-    if [[ $("$OSC" server show "$server_id" -f value -c status) == ACTIVE ]] &&
+    status=$(python3 -c 'import json,sys; print({str(k).lower():v for k,v in json.load(open(sys.argv[1])).items()}.get("status",""))' "$server_json") || return
+    if [[ $check_ready == true && $status == ACTIVE ]] &&
        "$OSC" console log show --lines 2000 "$server_id" | grep -Fq "$BOOTSTRAP_MARKER"; then ready=true; fi
   else printf 'null' >"$server_json"; fi
   if [[ $ready == true ]]; then
@@ -215,15 +239,15 @@ if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict) or 
   fi
   if [[ -n $port_id ]]; then
     if [[ -n ${RETAINED_PORT_JSON:-} ]]; then
-      "$OSC" port show "$port_id" -f json >"$port_json"
+      "$OSC" port show "$port_id" -f json >"$port_json" || return
     else
-      "$OSC" port show "$port_id" -f json -c id -c name -c device_id -c fixed_ips -c description >"$port_json"
+      "$OSC" port show "$port_id" -f json -c id -c name -c device_id -c fixed_ips -c description >"$port_json" || return
     fi
   else printf 'null' >"$port_json"; fi
   python3 - "$application_id" "$application_slug" "$ready" "$server_json" "$port_json" \
-    "$server_name" "$port_name" "$PLATFORM_METADATA_PREFIX" "$port_description" <<'PY'
+    "$server_name" "$port_name" "$PLATFORM_METADATA_PREFIX" "$port_description" "$server_id" "$port_id" <<'PY'
 import ast,json,os,re,sys,uuid
-application_id,slug,ready,server_path,port_path,server_name,port_name,prefix,description=sys.argv[1:]
+application_id,slug,ready,server_path,port_path,server_name,port_name,prefix,description,server_id,port_id=sys.argv[1:]
 server=json.load(open(server_path)); port=json.load(open(port_path))
 retained=json.loads(os.environ["RETAINED_PORT_JSON"]) if os.environ.get("RETAINED_PORT_JSON") else None
 def provider_id(raw):
@@ -271,6 +295,10 @@ def address(value):
   try: values=ast.literal_eval(values)
   except (SyntaxError,ValueError): values=[]
  return field(values[0],"ip_address") if values else None
+if server_id and (not isinstance(server,dict) or rid(field(server,"id")) != server_id):
+ raise SystemExit("worker server show UUID does not match resolved UUID")
+if port_id and (not isinstance(port,dict) or rid(field(port,"id")) != port_id):
+ raise SystemExit("worker port show UUID does not match resolved UUID")
 server_out=None
 if server is not None:
  sid=rid(field(server,"id")); props=field(server,"properties")
@@ -310,12 +338,11 @@ if port is not None:
 if server_out is not None and port_out is None: raise SystemExit("worker server has no verified fixed port")
 print(json.dumps({"applicationId":application_id,"slug":slug,"server":server_out,"port":port_out,"ready":ready=="true" and server_out is not None and port_out is not None},sort_keys=True,separators=(",",":")))
 PY
-  rm -f "$server_json" "$port_json"
-}
+)
 
 case "$action" in
   delete)
-    observation=$(emit_observation)
+    observation=$(emit_observation false)
     # Resolve independently: an absent optional server must never shift the
     # required-or-optional port UUID into the server's destructive selector.
     server_id=$(observed_resource_id server <<<"$observation")
@@ -324,7 +351,7 @@ case "$action" in
     if [[ -n $server_id ]]; then "$OSC" server delete --wait "$server_id" || failed=true; fi
     if [[ -n $port_id && -z ${RETAINED_PORT_JSON:-} ]]; then "$OSC" port delete "$port_id" || failed=true; fi
     [[ $failed == false ]]
-    emit_observation >/dev/null
+    emit_observation false >/dev/null
     exit
     ;;
   show)
@@ -357,11 +384,14 @@ PY
 
 # Existing worker image/flavor and UUIDs are authoritative. Selection is read
 # only below if no managed worker exists and a new server must be allocated.
-emit_observation >/dev/null
-server_id=$(server_id_for_name)
-port_id=$(port_id_for_name)
+observation=$(emit_observation false)
+server_id=$(observed_resource_id server <<<"$observation")
+port_id=$(observed_resource_id port <<<"$observation")
+# Detached retained ports are validated by emit_observation but intentionally
+# omitted from its public absence result. This selector is local, not a lookup.
+if [[ -n ${RETAINED_PORT_JSON:-} ]]; then port_id=$(port_id_for_name); fi
 if [[ -n $server_id ]]; then
-  wait_for_bootstrap "$server_id"
+  wait_for_bootstrap "$server_id" "$observation"
   wait_for_nomad
   "$OSC" server show "$server_id" -f value -c status -c addresses
   exit 0
@@ -396,9 +426,13 @@ if [[ -z $port_id ]]; then
     "$port_name" >/dev/null
   created_port=true
   echo "created port: $port_name"
+  observation=$(emit_observation false)
+  server_id=$(observed_resource_id server <<<"$observation")
+  [[ -z $server_id ]] || { echo "worker appeared during port creation" >&2; exit 1; }
+  port_id=$(observed_resource_id port <<<"$observation")
 fi
-port_id=$(port_id_for_name)
-worker_ip=$("$OSC" port show "$port_id" -f json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["fixed_ips"][0]["ip_address"])')
+[[ -n $port_id ]] || { echo "worker fixed port UUID could not be resolved" >&2; exit 1; }
+worker_ip=$(observed_port_address <<<"$observation")
 
 umask 077
 tmp=$(mktemp)
@@ -463,7 +497,15 @@ PY
 
 # Reobserve immediately before attaching. An explicit existing --port is Nova's
 # primary NIC with delete_on_termination=false; never ask Nova to allocate it.
-emit_observation >/dev/null
+observation=$(emit_observation false)
+observed_server_id=$(observed_resource_id server <<<"$observation")
+observed_port_id=$(observed_resource_id port <<<"$observation")
+observed_ip=$(observed_port_address <<<"$observation")
+if [[ -n $observed_server_id || $observed_ip != "$worker_ip" ||
+      ( -z ${RETAINED_PORT_JSON:-} && $observed_port_id != "$port_id" ) ]]; then
+  echo "worker server or fixed port changed before attachment" >&2
+  exit 1
+fi
 create_failed=true
 "$OSC" server create \
   --image "$image" \
@@ -475,10 +517,13 @@ create_failed=true
   --wait \
   "$server_name" >/dev/null
 create_failed=false
-server_id=$(server_id_for_name)
+observation=$(emit_observation false)
+server_id=$(observed_resource_id server <<<"$observation")
 [[ -n $server_id ]] || { echo "created worker UUID could not be resolved" >&2; exit 1; }
-emit_observation >/dev/null
+[[ $(observed_resource_id port <<<"$observation") == "$port_id" ]] || {
+  echo "worker fixed port UUID changed during server creation" >&2; exit 1;
+}
 echo "created server: $server_id ($worker_ip)"
-wait_for_bootstrap "$server_id"
+wait_for_bootstrap "$server_id" "$observation"
 wait_for_nomad
 "$OSC" server show "$server_id" -f value -c status -c addresses

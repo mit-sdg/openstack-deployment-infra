@@ -57,7 +57,7 @@ port_description="managed-by=platform;build-id=$build_id"
 
 resolve_named_id() {
   local kind=$1 name=$2 payload
-  payload=$("$OSC" "$kind" list --name "$name" -f json -c ID -c Name)
+  payload=$("$OSC" "$kind" list --name "$name" -f json -c ID -c Name) || return
   python3 -c '
 import json,sys,uuid
 name,kind=sys.argv[1:]
@@ -91,12 +91,27 @@ print(parsed)
 ' "$resource"
 }
 
+observed_port_address() {
+  python3 -c '
+import json,sys
+port=json.load(sys.stdin)["port"]
+address=port["address"] if isinstance(port,dict) else None
+if not isinstance(address,str) or not address: raise SystemExit("builder port has no fixed address")
+print(address)
+'
+}
+
 wait_for_bootstrap() {
-  local server_id=$1 attempts=${BOOTSTRAP_ATTEMPTS:-90}
+  local server_id=$1 observation=$2 attempts=${BOOTSTRAP_ATTEMPTS:-90}
   local interval=${BOOTSTRAP_POLL_INTERVAL:-10}
   local status log
+  # The caller has just validated this server without an intervening mutation.
+  # Only subsequent poll iterations need another provider status read.
+  status=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["server"]["status"])' <<<"$observation") || return
   for ((i=1; i<=attempts; i++)); do
-    status=$("$OSC" server show "$server_id" -f value -c status 2>/dev/null || true)
+    if (( i > 1 )); then
+      status=$("$OSC" server show "$server_id" -f value -c status 2>/dev/null || true)
+    fi
     [[ $status != ERROR ]] || { echo "$server_id entered ERROR state" >&2; return 1; }
     log=$("$OSC" console log show "$server_id" 2>/dev/null || true)
     if grep -Fq "$BOOTSTRAP_MARKER" <<<"$log"; then
@@ -109,22 +124,28 @@ wait_for_bootstrap() {
   return 1
 }
 
-emit_observation() {
-  local server_json port_json server_id port_id ready=false
-  server_json=$(mktemp); port_json=$(mktemp)
-  server_id=$(server_id_for_name); port_id=$(port_id_for_name)
+emit_observation() (
+  local check_ready=${1:-true} server_json port_json server_id port_id ready=false status
+  server_json=$(mktemp) || return
+  port_json=$(mktemp) || { rm -f "$server_json"; return 1; }
+  trap 'rm -f "$server_json" "$port_json"' EXIT
+  # Propagate failures explicitly, including when captured in $(...). Cleanup
+  # must never turn a failed lookup or ownership validation into success.
+  server_id=$(server_id_for_name) || return
+  port_id=$(port_id_for_name) || return
   if [[ -n $server_id ]]; then
-    "$OSC" server show "$server_id" -f json -c id -c name -c status -c image -c flavor -c properties >"$server_json"
-    if [[ $("$OSC" server show "$server_id" -f value -c status) == ACTIVE ]] &&
+    "$OSC" server show "$server_id" -f json -c id -c name -c status -c image -c flavor -c properties >"$server_json" || return
+    status=$(python3 -c 'import json,sys; print({str(k).lower():v for k,v in json.load(open(sys.argv[1])).items()}.get("status",""))' "$server_json") || return
+    if [[ $check_ready == true && $status == ACTIVE ]] &&
        "$OSC" console log show --lines 2000 "$server_id" | grep -Fq "$BOOTSTRAP_MARKER"; then ready=true; fi
   else printf 'null' >"$server_json"; fi
   if [[ -n $port_id ]]; then
-    "$OSC" port show "$port_id" -f json -c id -c name -c device_id -c fixed_ips -c description >"$port_json"
+    "$OSC" port show "$port_id" -f json -c id -c name -c device_id -c fixed_ips -c description >"$port_json" || return
   else printf 'null' >"$port_json"; fi
   python3 - "$build_id" "$ready" "$server_json" "$port_json" "$server_name" "$port_name" \
-    "$PLATFORM_METADATA_PREFIX" "$port_description" <<'PY'
+    "$PLATFORM_METADATA_PREFIX" "$port_description" "$server_id" "$port_id" <<'PY'
 import ast,json,re,sys,uuid
-build_id,ready,server_path,port_path,server_name,port_name,prefix,description=sys.argv[1:]
+build_id,ready,server_path,port_path,server_name,port_name,prefix,description,server_id,port_id=sys.argv[1:]
 server=json.load(open(server_path)); port=json.load(open(port_path))
 def field(value,name,default=None):
  if not isinstance(value,dict): return default
@@ -152,6 +173,10 @@ def address(value):
   try: values=ast.literal_eval(values)
   except (SyntaxError,ValueError): values=[]
  return field(values[0],"ip_address") if values else None
+if server_id and (not isinstance(server,dict) or rid(field(server,"id")) != server_id):
+ raise SystemExit("builder server show UUID does not match resolved UUID")
+if port_id and (not isinstance(port,dict) or rid(field(port,"id")) != port_id):
+ raise SystemExit("builder port show UUID does not match resolved UUID")
 server_out=None
 if server is not None:
  sid=rid(field(server,"id")); props=field(server,"properties")
@@ -170,14 +195,13 @@ if port is not None:
 if server_out is not None and port_out is None: raise SystemExit("builder server has no verified fixed port")
 print(json.dumps({"buildId":build_id,"server":server_out,"port":port_out,"ready":ready=="true" and server_out is not None and port_out is not None},sort_keys=True,separators=(",",":")))
 PY
-  rm -f "$server_json" "$port_json"
-}
+)
 
 case "$action" in
   delete)
     # Resolve once, validate complete ownership/attachment evidence, then mutate
     # only immutable provider UUIDs. Names are never destructive selectors.
-    observation=$(emit_observation)
+    observation=$(emit_observation false)
     # Resolve independently: an absent optional server must never shift the
     # required-or-optional port UUID into the server's destructive selector.
     server_id=$(observed_resource_id server <<<"$observation")
@@ -186,7 +210,7 @@ case "$action" in
     if [[ -n $server_id ]]; then "$OSC" server delete --wait "$server_id" || failed=true; fi
     if [[ -n $port_id ]]; then "$OSC" port delete "$port_id" || failed=true; fi
     [[ $failed == false ]]
-    emit_observation >/dev/null
+    emit_observation false >/dev/null
     exit
     ;;
   show)
@@ -215,10 +239,17 @@ for value in sys.argv[1:]:
     if not owner_private and not controller_group_private:
         raise SystemExit(f"private input is not restricted to its owner or controller group: {value}")
 PY
-# Validate any pre-existing resources before create/reconcile uses them.
-emit_observation >/dev/null
+# Reuse one validated observation until a provider mutation invalidates it.
+# Creation/deletion need ownership evidence, not discarded readiness probes.
+observation=$(emit_observation false)
+server_id=$(observed_resource_id server <<<"$observation")
+port_id=$(observed_resource_id port <<<"$observation")
+if [[ -n $server_id ]]; then
+  wait_for_bootstrap "$server_id" "$observation"
+  "$OSC" server show "$server_id" -f value -c status -c addresses
+  exit 0
+fi
 created_port=false
-port_id=$(port_id_for_name)
 if [[ -z $port_id ]]; then
   "$OSC" port create \
     --network "$NETWORK_NAME" \
@@ -227,17 +258,13 @@ if [[ -z $port_id ]]; then
     "$port_name" >/dev/null
   created_port=true
   echo "created port: $port_name"
+  observation=$(emit_observation false)
+  server_id=$(observed_resource_id server <<<"$observation")
+  [[ -z $server_id ]] || { echo "builder appeared during port creation" >&2; exit 1; }
+  port_id=$(observed_resource_id port <<<"$observation")
 fi
-port_id=$(port_id_for_name)
-builder_ip=$("$OSC" port show "$port_id" -f json | python3 -c 'import json,sys; print(json.load(sys.stdin)["fixed_ips"][0]["ip_address"])')
-
-server_id=$(server_id_for_name)
-if [[ -n $server_id ]]; then
-  emit_observation >/dev/null
-  wait_for_bootstrap "$server_id"
-  "$OSC" server show "$server_id" -f value -c status -c addresses
-  exit 0
-fi
+[[ -n $port_id ]] || { echo "builder fixed port UUID could not be resolved" >&2; exit 1; }
+builder_ip=$(observed_port_address <<<"$observation")
 
 umask 077
 tmp=$(mktemp)
@@ -303,9 +330,12 @@ create_failed=true
   --user-data "$tmp" \
   "$server_name" >/dev/null
 create_failed=false
-server_id=$(server_id_for_name)
+observation=$(emit_observation false)
+server_id=$(observed_resource_id server <<<"$observation")
 [[ -n $server_id ]] || { echo "created builder UUID could not be resolved" >&2; exit 1; }
-emit_observation >/dev/null
+[[ $(observed_resource_id port <<<"$observation") == "$port_id" ]] || {
+  echo "builder fixed port UUID changed during server creation" >&2; exit 1;
+}
 echo "created server: $server_id ($builder_ip)"
-wait_for_bootstrap "$server_id"
+wait_for_bootstrap "$server_id" "$observation"
 "$OSC" server show "$server_id" -f value -c status -c addresses
