@@ -174,7 +174,8 @@ cross-cutting boundaries.
 - `openstack_platform/controller/deployment_reads.py` — allowlisted immutable configuration and exact per-attempt source repository reads.
 - `openstack_platform/controller/rollback.py` — retained-artifact rollback target validation and compare-and-set review plans.
 - `openstack_platform/controller/deployment_service.py` — coordinates candidate build/deploy/accept/recovery independently of HTTP parsing.
-- `openstack_platform/controller/maintenance.py` — journals and verifies exact accepted predecessor removal after build/preflight, under the deployment's application lock.
+- `openstack_platform/controller/maintenance.py` — journals replacement or same-worker process cutover after build/preflight, under the deployment's application lock.
+- `openstack_platform/controller/worker_reuse.py` — fail-closed same-worker eligibility, capacity, role-image, and retained-port identity checks.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
@@ -183,6 +184,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/fixed_ip_service.py` — app-locked retained primary port reservations, generation binding, and uncertain-create recovery.
 - `openstack_platform/controller/public_ip_service.py` — app-scoped floating IPv4 reservation, handover, and release journals.
 - `openstack_platform/controller/main.py` — `openstack-platform-controller` executable composition and startup.
+- `openstack_platform/controller/timing.py` — structured operation/helper timing spans that exclude request bodies, credentials, and error details.
 - `openstack_platform/controller/nomad_jobs.py` — renders generated Nomad jobs and validates job/placement/route identities.
 - `openstack_platform/controller/sizing.py` — reviewed per-app flavor plans and measured capacity budgets with OS/service reserves.
 - `openstack_platform/controller/seed_images.py` — validates seed evidence, preserves retained/journal-proven selections across admin replacement, and seeds missing roles.
@@ -197,6 +199,7 @@ cross-cutting boundaries.
 - `openstack_platform/helper/__init__.py` — marks and describes the unprivileged admin-host helper package.
 - `openstack_platform/helper/actions-v1.txt` — release-bound allowlist of protocol-v1 action names the helper may dispatch.
 - `openstack_platform/helper/application_actions.py` — fixed Nomad deployment, health, promotion, log, removal, and environment handlers.
+- `openstack_platform/helper/application_quiesce.py` — confirms exact predecessor client/task exit without purging the evidence before controller checkpointing.
 - `openstack_platform/helper/main.py` — one-request helper dispatcher plus committed backup/retention evidence handling.
 - `openstack_platform/helper/errors.py` — shared safe exception identity for console and Python module entrypoints.
 - `openstack_platform/helper/nomad.py` — Nomad Variable reads and owner-scoped compare-and-set updates.
@@ -234,6 +237,10 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_application_runtime.py` — source, recipe, BuildKit, worker, deployment, cleanup, and retention runtime tests.
 - `tests/test_application_health_observation.py` — accepted health-path/route-marker checks and intentionally disabled application observations.
 - `tests/test_application_sizing.py` — opaque flavor IDs, per-app plans, default preservation, resize acceptance, retries, and rollback tests.
+- `tests/test_application_quiesce.py` — exact job/process-stop evidence, lost-client rejection, bounded waits, and idempotent quiescence tests.
+- `tests/test_worker_reuse.py` — Node/Bun worker reuse, explicit policy, eligibility/drift, interrupted cutover, and accepted-artifact recovery tests.
+- `tests/test_worker_reuse_fixed_ip.py` — same-worker updates through the real worker helper with retained primary ports and an offline provider.
+- `tests/test_deployment_timing.py` — operation-scoped timing, context isolation, redaction, and nonfatal diagnostic failures.
 - `tests/test_application_deployment_docs.py` — Bash syntax and real configuration-schema validation for the operator curl runbook.
 - `tests/test_helper_worker_capacity.py` — production capacity dispatch, pinned Nomad field/worker identity contract, deadlines, and sanitized failures.
 - `tests/test_ci_publication.py` — guards the CI path set that triggers role-image publication.

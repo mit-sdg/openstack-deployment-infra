@@ -1198,7 +1198,15 @@ def handlers(
     ):
         raise ValueError("helper command bounds must be positive")
     command = _command(nomad_command)
+    from .application_quiesce import quiesce
+
     result: dict[str, Handler] = {
+        "app.quiesce": lambda args: quiesce(
+            args,
+            nomad_command=command,
+            command_runner=command_runner,
+            sleep=sleep,
+        ),
         "app.deploy": _deploy_handler(
             variable_client,
             command_runner=command_runner,

@@ -63,6 +63,7 @@ APP_ACTIONS = (
     "app.manifest.retain",
     "app.manifest.verify",
     "app.promote",
+    "app.quiesce",
     "app.remove",
     "app.worker.capacity",
     "app.worker.create",
@@ -607,7 +608,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 worker.server_name,
                 nomad_command=application.provider_command(platform, "nomad")[0],
             )
-            return {**capacity, "serverId": worker.server_id, "flavorName": worker.flavor_name}
+            return {**_worker_result(worker), **capacity}
         return _worker_result(worker)
     if action == "app.manifest.verify":
         from .registry_artifact import verify_image

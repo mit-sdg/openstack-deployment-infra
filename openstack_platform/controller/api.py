@@ -16,7 +16,7 @@ from ..runtime import safe_summary
 from ..validation import ValidationError, bounded_text, env_key, resource_name, uuid
 from . import application_runtime as app
 from . import database as db
-from . import sizing, status, storage
+from . import sizing, status, storage, timing
 from .application_service import ApplicationService
 from .async_operations import AsyncOperationExecutor
 from .deployment_config import parse_configuration
@@ -64,15 +64,16 @@ class LocalHelperTransport:
             timeout = min(timeout, deadline - time.monotonic())
         if timeout <= 0:
             raise ServiceDeadlineError("operation exceeded its whole-operation deadline")
-        return remote.call_local_helper(
-            action,
-            args,
-            timeout_seconds=timeout,
-            helper_command=self.command,
-            request_limit=config.policy.limits.helper_request_bytes,
-            response_limit=config.policy.limits.helper_response_bytes,
-            stderr_limit=config.policy.limits.stderr_bytes,
-        )
+        with timing.helper(action):
+            return remote.call_local_helper(
+                action,
+                args,
+                timeout_seconds=timeout,
+                helper_command=self.command,
+                request_limit=config.policy.limits.helper_request_bytes,
+                response_limit=config.policy.limits.helper_response_bytes,
+                stderr_limit=config.policy.limits.stderr_bytes,
+            )
 
     def observer(
         self,
@@ -643,7 +644,11 @@ class ControllerAPI:
         if request.body is not None:
             raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
         return Response(
-            200, {"apiVersion": API_VERSION, "features": ["maintenance-after-build-v1"]}
+            200,
+            {
+                "apiVersion": API_VERSION,
+                "features": ["maintenance-after-build-v1", "worker-reuse-v1"],
+            },
         )
 
     def _operator_deployment(self, request: Request) -> Response:
@@ -654,13 +659,20 @@ class ControllerAPI:
             "requestedRef",
             "configurationRevision",
             "configuration",
-            "plan",
         }
-        body = self._body(request, allowed=fields | {"maintenance"}, required=fields)
+        body = self._body(
+            request, allowed=fields | {"maintenance", "workerStrategy", "plan"}, required=fields
+        )
         if type(body.get("maintenance", False)) is not bool:
             raise ValidationError("maintenance consent must be a boolean")
-        if not isinstance(body["plan"], dict):
-            raise ValidationError("sizing plan must be an object")
+        strategy = body.get("workerStrategy", "replace")
+        if not isinstance(strategy, str) or strategy not in {"replace", "reuse"}:
+            raise ValidationError("workerStrategy must be replace or reuse")
+        if strategy == "reuse":
+            if body.get("maintenance") is not True or "plan" in body:
+                raise ValidationError("worker reuse requires maintenance=true and no sizing plan")
+        elif not isinstance(body.get("plan"), dict):
+            raise ValidationError("replacement deployment requires a sizing plan")
         application = self._application(self._path_uuid(request))
         configuration = parse_configuration(body["configuration"])
         return self._external(
@@ -676,8 +688,9 @@ class ControllerAPI:
                     body["configurationRevision"],
                     configuration,
                     key,
-                    body["plan"],
+                    body.get("plan"),
                     maintenance=body.get("maintenance", False),
+                    worker_strategy=strategy,
                 )
             ),
             kind="app.deploy",

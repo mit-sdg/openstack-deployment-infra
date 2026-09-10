@@ -160,6 +160,70 @@ address/port ownership before deploying. On subsequent deployments, reuse that
 reservation; do not release it or allocate another port. Availability outside an
 automatic allocation pool is proven only by successful reservation.
 
+## Update code on the existing worker
+
+An operator can opt into `workerStrategy: "reuse"` for an enabled application
+whose dedicated worker is healthy, uses the selected worker role image, and
+has capacity for the existing allocation. This applies to both Node and Bun.
+It preserves the worker UUID, port, primary address, flavor, and CPU/RAM
+allocation. There is no automatic fallback to replacing infrastructure.
+
+Require matching controller/helper releases and the `worker-reuse-v1`
+capability. The default remains worker replacement. Reuse requires
+`maintenance: true` and **must not include a sizing `plan`**. Use the next
+section for first deployment, resizing, role-image upgrades, or a different
+primary-port reservation.
+
+The old application serves during the build and post-build preflight. The
+controller then stops the exact old job, waits for client-reported task exit,
+checkpoints that evidence, and removes its Nomad job without deleting the VM
+or detaching its port. The new job starts directly on the public route; there
+is no preview/promotion restart. Downtime includes image pull, application
+startup, and health checks. This first reuse path does not pre-pull the image
+while the old process serves, and does not promise a fixed deployment duration.
+
+Use the transport functions, private `RUN` directory, accepted baseline, and
+configuration prepared above. Choose this submission **instead of** the
+replacement submission in the next section:
+
+```bash
+jq -e '.features | index("worker-reuse-v1") != null' capabilities.json >/dev/null
+REPOSITORY=https://github.com/your-org/your-app
+COMMIT=your-full-40-character-commit
+REQUESTED_REF=main
+jq -n --arg repository "$REPOSITORY" --arg commit "$COMMIT" \
+  --arg ref "$REQUESTED_REF" --argjson revision "$CONFIGURATION_REVISION" \
+  --slurpfile config configuration.json \
+  '{repository:$repository,commit:$commit,requestedRef:$ref,
+    configurationRevision:$revision,configuration:$config[0],
+    maintenance:true,workerStrategy:"reuse"}' > deployment.json
+python3 -c 'import uuid; print(uuid.uuid4())' > deployment-key.txt
+admin -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<deployment-key.txt)" --data-binary @- \
+  "$BASE/deployments" < deployment.json > submitted.json
+STATUS_URL=$(jq -er .statusUrl submitted.json)
+```
+
+Continue with [Poll and verify acceptance](#poll-and-verify-acceptance). Check
+that the accepted commit changed and sizing stayed unchanged. For a retained
+primary port, compare the original `portId` and `serverId` with `GET
+"$BASE/fixed-ip"` after acceptance; both must be unchanged.
+
+- An incompatible initial worker is rejected before building or stopping it.
+  Review a replacement deployment with a new request/key if needed.
+- A build failure or post-build drift does not initiate cutover. Unknown
+  outcomes remain `recovery_required`; retry the identical request/key.
+- An uncertain process stop blocks the replacement. Do not manually purge its
+  job: that destroys the evidence needed to verify client exit on retry.
+- After a terminal candidate health failure with confirmed cleanup, the old
+  deployment remains accepted, the application is stopped, and the VM/port
+  remain. Project `POST /v1/applications/{id}/enable` with `{}` and a new key
+  restores the accepted artifact on that worker. Explicit disable/delete can
+  reclaim the retained worker instead. No database or storage rollback occurs.
+
+Finish or reconcile outstanding operations before rolling back platform
+executables; older controllers do not implement this cutover/recovery policy.
+
 ## Plan and submit one immutable deployment
 
 Set the repository, exact reviewed commit, branch label, and target flavor.

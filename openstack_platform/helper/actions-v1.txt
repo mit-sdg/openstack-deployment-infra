@@ -12,6 +12,7 @@ app.manifest.delete
 app.manifest.retain
 app.manifest.verify
 app.promote
+app.quiesce
 app.remove
 app.worker.capacity
 app.worker.create

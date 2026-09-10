@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import database as db
+from . import timing
 
 OperationWork = Callable[[sqlite3.Connection], object]
 
@@ -167,7 +168,8 @@ class AsyncOperationExecutor:
                 operation_id, work = item
                 try:
                     db.set_operation_dispatch_status(connection, operation_id, "running")
-                    work(connection)
+                    with timing.operation(operation_id):
+                        work(connection)
                     operation = db.get_operation(connection, operation_id)
                     if operation is None:
                         dispatch = db.get_operation_dispatch(connection, operation_id)
