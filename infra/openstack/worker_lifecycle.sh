@@ -340,6 +340,45 @@ print(json.dumps({"applicationId":application_id,"slug":slug,"server":server_out
 PY
 )
 
+# Explicit fencing only: a vanished name is not evidence that the expected
+# provider UUID vanished (it may have been renamed). Inventory failure is fatal.
+require_uuid_absent() {
+  local kind=$1 identifier=$2 payload
+  payload=$("$OSC" "$kind" list -f json -c ID) || return
+  python3 -c '
+import json,sys,uuid
+rows=json.load(sys.stdin)
+if not isinstance(rows,list): raise SystemExit("malformed UUID absence inventory")
+for row in rows:
+ if not isinstance(row,dict): raise SystemExit("malformed UUID absence row")
+ raw=next((v for k,v in row.items() if str(k).lower()=="id"),None)
+ parsed=str(uuid.UUID(str(raw)))
+ if raw not in (parsed,parsed.replace("-","")): raise SystemExit("malformed provider UUID")
+ if parsed==sys.argv[1]: raise SystemExit("expected worker resource still exists outside its observed name")
+' "$identifier" <<<"$payload"
+}
+
+verify_delete_target() {
+  local server_id=$1 port_id=$2
+  [[ -n ${EXPECTED_SERVER_ID+x} || -n ${EXPECTED_PORT_ID+x} ]] || return 0
+  python3 - "$server_id" "$port_id" <<'PY' || return
+import json,os,sys,uuid
+server_id,port_id=sys.argv[1:]
+expected_server=os.environ.get("EXPECTED_SERVER_ID")
+expected_port=os.environ.get("EXPECTED_PORT_ID")
+for value in (expected_server,expected_port):
+ if str(uuid.UUID(str(value)))!=value: raise SystemExit("expected worker UUID pair must be canonical")
+if (server_id and server_id!=expected_server) or (port_id and port_id!=expected_port):
+ raise SystemExit("worker UUID does not match expected deletion target")
+if os.environ.get("RETAINED_PORT_JSON") and json.loads(os.environ["RETAINED_PORT_JSON"])["port_id"]!=expected_port:
+ raise SystemExit("retained primary port does not match expected deletion target")
+PY
+  [[ -n $server_id ]] || require_uuid_absent server "$EXPECTED_SERVER_ID" || return
+  if [[ -z $port_id && -z ${RETAINED_PORT_JSON:-} ]]; then
+    require_uuid_absent port "$EXPECTED_PORT_ID" || return
+  fi
+}
+
 case "$action" in
   delete)
     observation=$(emit_observation false)
@@ -347,11 +386,27 @@ case "$action" in
     # required-or-optional port UUID into the server's destructive selector.
     server_id=$(observed_resource_id server <<<"$observation")
     port_id=$(observed_resource_id port <<<"$observation")
+    verify_delete_target "$server_id" "$port_id"
     failed=false
-    if [[ -n $server_id ]]; then "$OSC" server delete --wait "$server_id" || failed=true; fi
+    if [[ -n $server_id ]]; then
+      "$OSC" server delete --wait "$server_id" || failed=true
+      if [[ -n ${EXPECTED_SERVER_ID+x} ]]; then
+        # A guarded ordinary port deletion needs fresh detached ownership after
+        # the server mutation. A lost server-delete reply must be retried first.
+        [[ $failed == false ]] || exit 1
+        observation=$(emit_observation false)
+        server_id=$(observed_resource_id server <<<"$observation")
+        port_id=$(observed_resource_id port <<<"$observation")
+        verify_delete_target "$server_id" "$port_id"
+        [[ -z $server_id ]] || { echo "expected worker still exists after deletion" >&2; exit 1; }
+      fi
+    fi
     if [[ -n $port_id && -z ${RETAINED_PORT_JSON:-} ]]; then "$OSC" port delete "$port_id" || failed=true; fi
     [[ $failed == false ]]
-    emit_observation false >/dev/null
+    observation=$(emit_observation false)
+    server_id=$(observed_resource_id server <<<"$observation")
+    port_id=$(observed_resource_id port <<<"$observation")
+    verify_delete_target "$server_id" "$port_id"
     exit
     ;;
   show)

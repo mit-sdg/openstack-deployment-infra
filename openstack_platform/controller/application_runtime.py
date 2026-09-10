@@ -1576,6 +1576,8 @@ def delete_worker(
     application_slug: str,
     *,
     retained_port: dict[str, Any] | None = None,
+    expected_server_id: str | None = None,
+    expected_port_id: str | None = None,
     prefix: str,
     timeout_seconds: float,
     project_name: str | None = None,
@@ -1586,12 +1588,19 @@ def delete_worker(
     identifier = uuid(application_id, field="application ID")
     app_slug = slug(application_slug)
     command = _fixed_command(worker_command, field_name="worker command")
+    expected = {}
+    if expected_server_id is not None or expected_port_id is not None:
+        expected = {
+            "EXPECTED_SERVER_ID": uuid(expected_server_id, field="expected worker server UUID"),
+            "EXPECTED_PORT_ID": uuid(expected_port_id, field="expected worker port UUID"),
+        }
     _provider_result(
         command_runner,
         (*command, "delete", identifier, app_slug),
         timeout_seconds=timeout_seconds,
         env={
             **_project_environment(project_name, project_id),
+            **expected,
             **(
                 {"RETAINED_PORT_JSON": json.dumps(retained_port, sort_keys=True)}
                 if retained_port is not None

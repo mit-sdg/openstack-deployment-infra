@@ -480,8 +480,26 @@ class ControllerAPI:
 
     def _disable_application(self, request: Request) -> Response:
         self._no_query(request)
-        self._body(request, allowed=set(), allow_absent=True)
+        body = self._body(request, allowed={"interruptedDeploymentId"}, allow_absent=True)
         application = self._application(self._path_uuid(request))
+        if "interruptedDeploymentId" in body:
+            from .reuse_fencing import disable_interrupted_deployment
+
+            interrupted = uuid(body["interruptedDeploymentId"], field="interrupted deployment ID")
+            return self._external(
+                request,
+                lambda connection, key: disable_interrupted_deployment(
+                    connection,
+                    self.config,
+                    self.state_directory,
+                    application.application_id,
+                    interrupted,
+                    request_id=key,
+                    helper_caller=self.helper_caller,
+                ),
+                kind="app.disable.fence",
+                scope=f"app-fence-{application.application_id}",
+            )
         return self._external(
             request,
             lambda connection, key: ApplicationService(

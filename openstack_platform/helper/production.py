@@ -533,10 +533,26 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
         )
         expected = {"applicationId", "slug", "workerImageId", "standardFlavor"}
         if action == "app.worker.delete":
-            if args.keys() not in ({"applicationId", "slug"}, {"applicationId", "slug", "single"}):
+            guarded = {"applicationId", "slug", "single", "expectedServerId", "expectedPortId"}
+            if args.keys() not in (
+                {"applicationId", "slug"},
+                {"applicationId", "slug", "single"},
+                guarded,
+            ):
                 raise HelperActionError("INVALID_ARGS", "app.worker.delete arguments are invalid")
             if not isinstance(args.get("single", False), bool):
                 raise ValidationError("single-worker selector must be boolean")
+            if args.keys() == guarded:
+                if args["single"] is not True:
+                    raise ValidationError("expected worker UUIDs require a single worker slot")
+                worker_options.update(
+                    expected_server_id=uuid(
+                        args["expectedServerId"], field="expected worker server UUID"
+                    ),
+                    expected_port_id=uuid(
+                        args["expectedPortId"], field="expected worker port UUID"
+                    ),
+                )
         else:
             if action == "app.worker.create" and "flavorId" in args:
                 expected.add("flavorId")
