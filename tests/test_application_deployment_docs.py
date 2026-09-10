@@ -27,8 +27,13 @@ class ApplicationDeploymentDocumentationTests(unittest.TestCase):
     def test_example_configuration_uses_the_real_parser(self):
         document = (ROOT / "docs/APPLICATION_DEPLOYMENTS.md").read_text()
         blocks = re.findall(r"```json\n(.*?)\n```", document, re.S)
-        self.assertEqual(len(blocks), 1)
-        configuration = parse_configuration(json.loads(blocks[0]))
-        self.assertEqual(configuration.runtime, "bun")
-        self.assertEqual(configuration.port, 3000)
-        self.assertEqual(configuration.health_path, "/health")
+        self.assertEqual(len(blocks), 2)
+        configurations = [parse_configuration(json.loads(block)) for block in blocks]
+        self.assertEqual(
+            [configuration.runtime for configuration in configurations], ["bun", "node"]
+        )
+        self.assertIsNone(configurations[0].runtime_files)
+        self.assertEqual(configurations[1].runtime_files, ("dist", "node_modules", "package.json"))
+        for configuration in configurations:
+            self.assertEqual(configuration.port, 3000)
+            self.assertEqual(configuration.health_path, "/health")

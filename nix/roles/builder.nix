@@ -93,7 +93,9 @@ in
         "${packages.buildkit}/bin/buildkitd"
         "--addr unix://%t/buildkit/buildkitd.sock"
         "--oci-worker-rootless=true"
-        "--oci-worker-snapshotter=fuse-overlayfs"
+        # Prefer rootless kernel overlayfs on supported kernels/filesystems;
+        # keep fuse-overlayfs installed for BuildKit's automatic fallback.
+        "--oci-worker-snapshotter=auto"
         "--oci-worker-gc"
         "--oci-worker-gc-keepstorage=20000"
       ];

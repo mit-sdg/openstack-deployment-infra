@@ -72,7 +72,22 @@ def _target(
 ) -> dict[str, Any] | None:
     application = db.get_application(connection, application_id)
     deployment = db.get_deployment(connection, application_id)
-    if application is None or deployment is None or not application.desired_running:
+    if application is None or deployment is None:
+        return None
+    # Maintenance can stop the accepted process while retaining its exact VM
+    # and attached address. Desired process state is not worker absence: keep
+    # validating that target so reconciliation cannot strand enable/disable.
+    # Only a fully cleared disabled runtime has no target. Partial identities
+    # must pass the same strict checks below, never become an unbound reservation.
+    if not application.desired_running and all(
+        value is None
+        for value in (
+            application.worker_server_id,
+            application.worker_server_name,
+            application.worker_port_id,
+            application.worker_port_name,
+        )
+    ):
         return None
     slot = app.nomad_placement_id(deployment.nomad_job)
     if slot not in {application_id, *app.deployment_worker_ids(application_id)}:
@@ -158,8 +173,10 @@ def reconcile_accepted(
 ) -> None:
     """After durable healthy acceptance, move/verify before predecessor cleanup.
 
-    An unaccepted candidate never gets this address. This is deliberately a
-    forward-only handover, not a floating-IP rollback of a failed candidate.
+    A replacement worker receives the address only after acceptance. Explicit
+    same-worker maintenance preserves its existing association, including while
+    stopped or before the new process is accepted; there is no handover then.
+    This is not a floating-IP rollback of a failed replacement candidate.
     """
     record = get(connection, application_id)
     if record is None:

@@ -22,7 +22,7 @@ trap cleanup EXIT
 
 resolve_pin() {
   local tagged_image=$1 repository digest
-  podman pull --quiet "$tagged_image" >/dev/null
+  timeout 180 podman pull --quiet "$tagged_image" >/dev/null
   repository=${tagged_image%:*}
   digest=$(podman image inspect --format '{{.Digest}}' "$tagged_image")
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || {
@@ -41,10 +41,12 @@ rm -rf "$recipe_root"
 mkdir -m 0700 "$recipe_root"
 uv run --no-sync python - <<'PY'
 import os
+import shutil
+from dataclasses import replace
 from pathlib import Path
 
-from openstack_platform.controller.application_runtime import Manifest, generate_recipe
 from openstack_platform.config import RuntimeImages
+from openstack_platform.controller.application_runtime import Manifest, generate_recipe
 
 fixtures = Path("tests/fixtures/apps")
 output = Path(".generated-recipes")
@@ -57,26 +59,60 @@ manifests = {
     "node": Manifest("node", (".",), None, "serve", 8080, "/ready"),
 }
 for runtime, manifest in manifests.items():
-    recipe = generate_recipe(manifest, images)
-    destination = output / runtime
-    destination.mkdir(mode=0o700)
-    (destination / "Dockerfile").write_bytes(recipe.dockerfile)
-    print(f"generated-recipe runtime={runtime} recipe-sha256={recipe.sha256}")
+    for slim in (False, True):
+        case = runtime + ("-slim" if slim else "")
+        selected = (
+            replace(manifest, runtime_files=(
+                "package.json",
+                "dist" if runtime == "bun" else "server.js",
+                "nested/assets",
+                "nested/config/message.txt",
+            ))
+            if slim else manifest
+        )
+        recipe = generate_recipe(selected, images)
+        destination = output / case
+        destination.mkdir(mode=0o700)
+        source = destination / "source"
+        shutil.copytree(fixtures / runtime, source)
+        (source / "build-only.txt").write_text("must not ship in slim images")
+        for nested in ("nested/assets", "nested/config"):
+            (source / nested).mkdir(parents=True)
+            (source / nested / "message.txt").write_text("included")
+        (source / "nested/omitted.txt").write_text("must not ship in slim images")
+        (destination / "Dockerfile").write_bytes(recipe.dockerfile)
+        print(f"generated-recipe case={case} recipe-sha256={recipe.sha256}")
 PY
 
-for runtime in bun node; do
-  image="localhost/generated-recipe-$runtime:ci"
+for recipe_case in bun node bun-slim node-slim; do
+  runtime=${recipe_case%%-*}
+  image="localhost/generated-recipe-$recipe_case:ci"
   image_environment=""
-  podman build \
+  timeout 240 podman build \
     --pull=never \
-    --file "$recipe_root/$runtime/Dockerfile" \
+    --file "$recipe_root/$recipe_case/Dockerfile" \
     --tag "$image" \
-    "$root/tests/fixtures/apps/$runtime"
+    "$recipe_root/$recipe_case/source"
   image_environment=$(podman image inspect \
     --format '{{range .Config.Env}}{{println .}}{{end}}' "$image")
   if ! grep --quiet --line-regexp 'NODE_ENV=production' <<<"$image_environment"; then
     echo "generated $runtime image did not fix NODE_ENV=production" >&2
     exit 1
+  fi
+
+  if [[ $recipe_case == *-slim ]]; then
+    check_container="generated-recipe-check-$recipe_case-$$"
+    containers+=("$check_container")
+    timeout 30 podman run --rm --name "$check_container" --entrypoint /bin/sh "$image" -ec '
+      test "$(cat /app/nested/assets/message.txt)" = included
+      test "$(cat /app/nested/config/message.txt)" = included
+      test ! -e /app/build-only.txt
+      test ! -e /app/nested/omitted.txt
+      test ! -e /app/node_modules
+      test ! -e /app/bun.lock
+      test ! -e /app/package-lock.json
+      test ! -e /app/server.ts
+    '
   fi
 
   case $runtime in
@@ -109,6 +145,6 @@ for runtime in bun node; do
     exit 1
   fi
   podman container exists "$container"
-  printf 'generated-recipe runtime=%s build=passed environment=production start=passed health=passed url=%s\n' \
-    "$runtime" "$url"
+  printf 'generated-recipe case=%s build=passed environment=production start=passed health=passed url=%s\n' \
+    "$recipe_case" "$url"
 done

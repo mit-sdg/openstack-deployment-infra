@@ -63,6 +63,7 @@ APP_ACTIONS = (
     "app.manifest.retain",
     "app.manifest.verify",
     "app.promote",
+    "app.quiesce",
     "app.remove",
     "app.worker.capacity",
     "app.worker.create",
@@ -400,6 +401,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                     configuration.start_script,
                     configuration.port,
                     configuration.health_path,
+                    runtime_files=configuration.runtime_files,
                 )
                 recipe = application.generate_recipe(manifest, images)
                 result = application.build_with_disposable_builder(
@@ -531,10 +533,26 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
         )
         expected = {"applicationId", "slug", "workerImageId", "standardFlavor"}
         if action == "app.worker.delete":
-            if args.keys() not in ({"applicationId", "slug"}, {"applicationId", "slug", "single"}):
+            guarded = {"applicationId", "slug", "single", "expectedServerId", "expectedPortId"}
+            if args.keys() not in (
+                {"applicationId", "slug"},
+                {"applicationId", "slug", "single"},
+                guarded,
+            ):
                 raise HelperActionError("INVALID_ARGS", "app.worker.delete arguments are invalid")
             if not isinstance(args.get("single", False), bool):
                 raise ValidationError("single-worker selector must be boolean")
+            if args.keys() == guarded:
+                if args["single"] is not True:
+                    raise ValidationError("expected worker UUIDs require a single worker slot")
+                worker_options.update(
+                    expected_server_id=uuid(
+                        args["expectedServerId"], field="expected worker server UUID"
+                    ),
+                    expected_port_id=uuid(
+                        args["expectedPortId"], field="expected worker port UUID"
+                    ),
+                )
         else:
             if action == "app.worker.create" and "flavorId" in args:
                 expected.add("flavorId")
@@ -607,7 +625,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 worker.server_name,
                 nomad_command=application.provider_command(platform, "nomad")[0],
             )
-            return {**capacity, "serverId": worker.server_id, "flavorName": worker.flavor_name}
+            return {**_worker_result(worker), **capacity}
         return _worker_result(worker)
     if action == "app.manifest.verify":
         from .registry_artifact import verify_image
@@ -941,6 +959,11 @@ def _lazy_app(action: str) -> Handler:
             _nomad_client(runtime),
             nomad_command=nomad_command,
             trusted_domain=platform.domain,
+            quiesce_directory=(
+                runtime.admin_state / "controller/state/quiesce"
+                if action == "app.quiesce"
+                else None
+            ),
             public_health_check=lambda application_slug: app_actions._public_health_from_job(
                 application_slug,
                 trusted_domain=platform.domain,

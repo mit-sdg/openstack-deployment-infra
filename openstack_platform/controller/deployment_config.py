@@ -21,7 +21,7 @@ from ..validation import (
     script_name,
     uuid,
 )
-from .application_models import Manifest, StorageBinding
+from .application_models import Manifest, StorageBinding, runtime_file_paths
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
     RESERVED_ENVIRONMENT_PREFIX,
@@ -50,17 +50,22 @@ class DeploymentConfiguration:
     port: int
     health_path: str
     storage_bindings: tuple[StorageOutputBinding, ...]
+    runtime_files: tuple[str, ...] | None = None
 
     def canonical_json(self) -> str:
+        build: dict[str, Any] = {
+            "runtime": self.runtime,
+            "packages": list(self.packages),
+            "buildScript": self.build_script,
+            "startScript": self.start_script,
+        }
+        # Omission, not null, preserves retained schema-v1 bytes and hashes.
+        if self.runtime_files is not None:
+            build["runtimeFiles"] = list(runtime_file_paths(self.runtime_files))
         return json.dumps(
             {
                 "schemaVersion": self.schema_version,
-                "build": {
-                    "runtime": self.runtime,
-                    "packages": list(self.packages),
-                    "buildScript": self.build_script,
-                    "startScript": self.start_script,
-                },
+                "build": build,
                 "runtime": {"port": self.port, "healthPath": self.health_path},
                 "storageBindings": [
                     {"resourceId": item.resource_id, "outputs": dict(item.outputs)}
@@ -95,13 +100,20 @@ class DeploymentConfiguration:
             port=self.port,
             health_path=self.health_path,
             storage_bindings=tuple(bindings),
+            runtime_files=self.runtime_files,
         )
 
 
-def _object(value: object, expected: set[str], field: str) -> Mapping[str, Any]:
+def _object(
+    value: object,
+    expected: set[str],
+    field: str,
+    *,
+    optional: set[str] | None = None,
+) -> Mapping[str, Any]:
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValidationError(f"{field} must be an object")
-    if set(value) != expected:
+    if not expected <= value.keys() <= expected | (optional or set()):
         raise ValidationError(f"{field} fields are invalid")
     return value
 
@@ -145,7 +157,13 @@ def parse_configuration(payload: bytes | str | Mapping[str, Any]) -> DeploymentC
         document["build"],
         {"runtime", "packages", "buildScript", "startScript"},
         "build configuration",
+        optional={"runtimeFiles"},
     )
+    runtime_files = None
+    if "runtimeFiles" in build:
+        if not isinstance(build["runtimeFiles"], list):
+            raise ValidationError("build runtimeFiles must be an array")
+        runtime_files = runtime_file_paths(build["runtimeFiles"])
     runtime_name = build["runtime"]
     if runtime_name not in _RUNTIMES:
         raise ValidationError("build runtime must be node or bun")
@@ -207,6 +225,7 @@ def parse_configuration(payload: bytes | str | Mapping[str, Any]) -> DeploymentC
         port=port,
         health_path=checked_health,
         storage_bindings=tuple(sorted(bindings, key=lambda item: item.resource_id)),
+        runtime_files=runtime_files,
     )
 
 

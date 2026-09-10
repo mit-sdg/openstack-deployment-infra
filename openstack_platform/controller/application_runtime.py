@@ -52,6 +52,7 @@ from . import database as db
 from .application_models import Manifest as Manifest
 from .application_models import Recipe as Recipe
 from .application_models import StorageBinding as StorageBinding
+from .application_models import runtime_file_paths
 from .nomad_jobs import deployment_worker_ids as deployment_worker_ids
 from .nomad_jobs import nomad_candidate_identity as nomad_candidate_identity
 from .nomad_jobs import nomad_job_id as nomad_job_id
@@ -517,7 +518,7 @@ def acquire_github_commit(
 
 
 def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe:
-    """Generate a deterministic Dockerfile from package-script names and pins."""
+    """Generate a pinned recipe, optionally packaging only selected built paths."""
     start_script = script_name(manifest.start_script)
     build_script = None if manifest.build_script is None else script_name(manifest.build_script)
     if (
@@ -549,10 +550,17 @@ def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe
     packages = tuple(relative_path(value, field="package path") for value in manifest.packages)
     if not packages or len(packages) != len(set(packages)):
         raise ValidationError("application packages must be a non-empty unique list")
+    runtime_files = (
+        None if manifest.runtime_files is None else runtime_file_paths(manifest.runtime_files)
+    )
     lines = [
-        f"FROM {image}",
+        f"FROM {image}" + (" AS build" if runtime_files is not None else ""),
         "WORKDIR /app",
-        "COPY --chown=65532:65532 . /app",
+        (
+            'COPY --chown=65532:65532 [".","/app"]'
+            if runtime_files is not None
+            else "COPY --chown=65532:65532 . /app"
+        ),
     ]
     for package in packages:
         workdir = "/app" if package == "." else f"/app/{package}"
@@ -560,6 +568,16 @@ def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe
     lines.append("WORKDIR /app")
     if build is not None:
         lines.append(f"RUN {build}")
+    if runtime_files is not None:
+        # Use the same base, not the build stage: its source, dependency cache
+        # and intermediate layers must not be exported in the runtime image.
+        lines.extend((f"FROM {image}", "WORKDIR /app"))
+        for relative in runtime_files:
+            path = "/app" if relative == "." else f"/app/{relative}"
+            # An exact destination (no trailing slash) handles both files and
+            # directory contents without flattening nested /app-relative paths.
+            operands = json.dumps([path, path], separators=(",", ":"))
+            lines.append(f"COPY --from=build --chown=65532:65532 {operands}")
     lines.extend(
         (
             "ENV NODE_ENV=production",
@@ -570,17 +588,22 @@ def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe
         )
     )
     content = "\n".join(lines).encode()
+    identity_fields: dict[str, Any] = {
+        "generatorVersion": _RECIPE_GENERATOR_VERSION,
+        "runtime": manifest.runtime,
+        "runtimeImage": image,
+        "packages": list(packages),
+        "build": build_script,
+        "start": start_script,
+        "port": manifest.port,
+        "healthPath": health_path(manifest.health_path),
+    }
+    if runtime_files is not None:
+        # Retained full-image recipes keep their exact v2 identity and bytes.
+        identity_fields["generatorVersion"] = 3
+        identity_fields["runtimeFiles"] = list(runtime_files)
     identity = json.dumps(
-        {
-            "generatorVersion": _RECIPE_GENERATOR_VERSION,
-            "runtime": manifest.runtime,
-            "runtimeImage": image,
-            "packages": list(packages),
-            "build": build_script,
-            "start": start_script,
-            "port": manifest.port,
-            "healthPath": health_path(manifest.health_path),
-        },
+        identity_fields,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -1553,6 +1576,8 @@ def delete_worker(
     application_slug: str,
     *,
     retained_port: dict[str, Any] | None = None,
+    expected_server_id: str | None = None,
+    expected_port_id: str | None = None,
     prefix: str,
     timeout_seconds: float,
     project_name: str | None = None,
@@ -1563,12 +1588,19 @@ def delete_worker(
     identifier = uuid(application_id, field="application ID")
     app_slug = slug(application_slug)
     command = _fixed_command(worker_command, field_name="worker command")
+    expected = {}
+    if expected_server_id is not None or expected_port_id is not None:
+        expected = {
+            "EXPECTED_SERVER_ID": uuid(expected_server_id, field="expected worker server UUID"),
+            "EXPECTED_PORT_ID": uuid(expected_port_id, field="expected worker port UUID"),
+        }
     _provider_result(
         command_runner,
         (*command, "delete", identifier, app_slug),
         timeout_seconds=timeout_seconds,
         env={
             **_project_environment(project_name, project_id),
+            **expected,
             **(
                 {"RETAINED_PORT_JSON": json.dumps(retained_port, sort_keys=True)}
                 if retained_port is not None
@@ -1670,18 +1702,33 @@ def deploy_and_cleanup(
     helper_caller: Callable[..., Mapping[str, Any]] = call_helper,
     public_health_check: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    require_exact: bool = False,
+    cleanup_on_failure: bool = True,
+    resume_only: bool = False,
 ) -> DeploymentResult:
-    """Deploy, observe bounded health, and remove an unhealthy candidate."""
+    """Deploy and observe health; callers retaining the worker own safe cleanup."""
     app_slug = slug(application_slug)
     job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
     if not 1 <= attempts <= 300 or not 0 < poll_interval_seconds <= 30:
         raise ValueError("health observation bounds are invalid")
+    if (
+        type(require_exact) is not bool
+        or type(cleanup_on_failure) is not bool
+        or type(resume_only) is not bool
+        or (resume_only and not require_exact)
+    ):
+        raise ValueError("deployment submission/cleanup selectors must be boolean")
     candidate = nomad_candidate_identity(job)
     job_id = nomad_job_id(job, app_slug)
     deployed = _call_helper(
         helper_caller,
         "app.deploy",
-        {"slug": app_slug, "job": job},
+        {
+            "slug": app_slug,
+            "job": job,
+            **({"requireExact": True} if require_exact else {}),
+            **({"resumeOnly": True} if resume_only else {}),
+        },
         timeout_seconds=helper_timeout_seconds,
     )
     if deployed.get("jobId") != job_id:
@@ -1763,6 +1810,16 @@ def deploy_and_cleanup(
         if observation_number < attempts:
             sleep(poll_interval_seconds)
 
+    if not cleanup_on_failure:
+        raise DeploymentFailed(
+            "deployment health failed; caller must confirm exact candidate process exit",
+            cleanup_succeeded=False,
+            cleanup_evidence={
+                "action": "quiesce-candidate",
+                "confirmed": False,
+                "nomadVersion": version,
+            },
+        ) from failure
     cleanup_succeeded = False
     cleanup_evidence: dict[str, Any] = {}
     try:

@@ -160,6 +160,153 @@ address/port ownership before deploying. On subsequent deployments, reuse that
 reservation; do not release it or allocate another port. Availability outside an
 automatic allocation pool is proven only by successful reservation.
 
+## Package only the runtime files
+
+With matching controller/helper releases advertising `runtime-files-v1`, the
+optional `build.runtimeFiles` list selects which paths from the built `/app`
+tree enter a clean final image. The final image uses the same digest-pinned
+Node/Bun base, runtime user, environment, and start script. Installation and
+build commands are unchanged; no framework or application name is inferred.
+
+For example, an application whose start script runs `node dist/server.js` and
+imports installed dependencies can use:
+
+```json
+{
+  "schemaVersion": 1,
+  "build": {
+    "runtime": "node", "packages": ["."],
+    "buildScript": "build", "startScript": "start",
+    "runtimeFiles": ["package.json", "dist", "node_modules"]
+  },
+  "runtime": {"port": 3000, "healthPath": "/health"},
+  "storageBindings": []
+}
+```
+
+Adjust the list for the actual application: include start-script inputs,
+configuration, assets, native modules, and any dependencies not bundled into the
+output. Paths retain their `/app`-relative locations. A missing path fails the
+build before cutover; omission of a needed runtime file may instead fail at
+startup or when an affected route is used. Test representative application
+behavior as well as the health endpoint.
+
+The list contains 1–32 unique, non-overlapping paths, each at most 1024 literal
+ASCII characters using letters, digits, `.`, `_`, `@`, `+`, `-`, and `/`.
+Absolute paths, empty components, traversal, globbing, and variable expansion
+are rejected. Paths are sorted canonically. `["."]` explicitly selects all of
+`/app`, still excluding build-stage changes elsewhere in the filesystem.
+
+Omit `runtimeFiles` to retain the original full-image recipe and configuration
+fingerprint; `null` and an empty list are invalid. Use that original mode when
+installation modifies required files outside `/app`. This feature does not
+discover dependencies or filter secrets. Increment the configuration revision
+when enabling it. Roll back application artifacts with a controller that can
+read both snapshots; an older platform executable may reject stored
+`runtimeFiles` configurations even though the SQLite schema did not change.
+
+## Update code on the existing worker
+
+An operator can opt into `workerStrategy: "reuse"` for an enabled application
+whose dedicated worker is healthy, uses the selected worker role image, and
+has capacity for the existing allocation. This applies to both Node and Bun.
+It preserves the worker UUID, port, primary address, flavor, and CPU/RAM
+allocation. An existing optional floating IP stays on that same port, including
+while stopped and before the candidate is accepted; this path does not perform
+a post-acceptance IP handover. There is no automatic fallback to replacing infrastructure.
+
+Require matching controller/helper releases and the `worker-reuse-v1`
+capability. The default remains worker replacement. Reuse requires
+`maintenance: true` and **must not include a sizing `plan`**. Use the next
+section for first deployment, resizing, role-image upgrades, or a different
+primary-port reservation.
+
+The old application serves during the build and post-build preflight. The
+controller then stops the exact old job, waits for client-reported task exit,
+persists allocation-exit witnesses and checkpoints that evidence, then removes its Nomad job without deleting the VM
+or detaching its port. The new job starts directly on the public route; there
+is no preview/promotion restart. Downtime includes image pull, application
+startup, and health checks. This first reuse path does not pre-pull the image
+while the old process serves, and does not promise a fixed deployment duration.
+
+Use the transport functions, private `RUN` directory, accepted baseline, and
+configuration prepared above. Choose this submission **instead of** the
+replacement submission in the next section:
+
+```bash
+jq -e '.features | index("worker-reuse-v1") != null' capabilities.json >/dev/null
+REPOSITORY=https://github.com/your-org/your-app
+COMMIT=your-full-40-character-commit
+REQUESTED_REF=main
+jq -n --arg repository "$REPOSITORY" --arg commit "$COMMIT" \
+  --arg ref "$REQUESTED_REF" --argjson revision "$CONFIGURATION_REVISION" \
+  --slurpfile config configuration.json \
+  '{repository:$repository,commit:$commit,requestedRef:$ref,
+    configurationRevision:$revision,configuration:$config[0],
+    maintenance:true,workerStrategy:"reuse"}' > deployment.json
+python3 -c 'import uuid; print(uuid.uuid4())' > deployment-key.txt
+admin -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<deployment-key.txt)" --data-binary @- \
+  "$BASE/deployments" < deployment.json > submitted.json
+STATUS_URL=$(jq -er .statusUrl submitted.json)
+```
+
+Continue with [Poll and verify acceptance](#poll-and-verify-acceptance). Check
+that the accepted commit changed and sizing stayed unchanged. For a retained
+primary port, compare the original `portId` and `serverId` with `GET
+"$BASE/fixed-ip"` after acceptance; both must be unchanged.
+
+- An incompatible initial worker is rejected before building or stopping it.
+  Review a replacement deployment with a new request/key if needed.
+- A build failure or post-build drift does not initiate cutover. Unknown
+  outcomes remain `recovery_required`; retry the identical request/key.
+- An uncertain process stop blocks the replacement. Do not manually purge its
+  job: that destroys the evidence needed to verify client exit on retry.
+  Completed helper witnesses under the controller state's `quiesce/` directory
+  survive lost replies and later Nomad GC. Missing, unwitnessed records are not
+  treated as proof of exit; explicit worker fencing is required if exit evidence
+  cannot be recovered.
+- After a terminal candidate health failure with confirmed cleanup, the old
+  deployment remains accepted, the application is stopped, and the VM/port
+  remain. Project `POST /v1/applications/{id}/enable` with `{}` and a new key
+  restores the accepted artifact on that worker. Explicit disable/delete can
+  reclaim the retained worker instead. No database or storage rollback occurs.
+
+### Fence an interrupted same-worker deployment
+
+When a reuse deployment is `recovery_required` and Nomad has lost unwitnessed
+job/allocation records, do not infer process exit or force a new submission.
+An explicit disable can fence the recorded worker instead. **This deletes that
+VM and any ordinary owned port**, preserves a retained primary port and all
+managed data/accepted artifacts, and leaves the application stopped. Use it
+only when abandoning the interrupted candidate is intended.
+
+The request is scoped to the original deployment UUID and needs a **new**
+idempotency key. It is refused for a running/queued original retry, a different
+app/worker, or a candidate already accepted. A separate fence journal reserves
+the application until physical absence and exact job/builder cleanup are
+confirmed; replaying its request cannot delete a later deployment.
+
+```bash
+INTERRUPTED_DEPLOYMENT=your-interrupted-deployment-uuid
+project "http://localhost/v1/operations/$INTERRUPTED_DEPLOYMENT" > interrupted-operation.json
+jq -e '.kind == "app.deploy" and .status == "recovery_required"' interrupted-operation.json >/dev/null
+jq -n --arg id "$INTERRUPTED_DEPLOYMENT" '{interruptedDeploymentId:$id}' > fence.json
+python3 -c 'import uuid; print(uuid.uuid4())' > fence-key.txt
+project -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<fence-key.txt)" --data-binary @- \
+  "$PROJECT_BASE/disable" < fence.json > fence-submitted.json
+```
+
+Poll the fence response's project `statusUrl`. If fencing is interrupted, retry
+that identical disable body/key, **not** the original deployment. Only after the
+fence succeeds may project `POST /v1/applications/{id}/enable` with `{}` and its
+own key restore the accepted artifact on a newly provisioned worker. A normal
+`disable` body `{}` does not take over an unfinished deployment.
+
+Finish or reconcile outstanding operations before rolling back platform
+executables; older controllers do not implement this cutover/recovery policy.
+
 ## Plan and submit one immutable deployment
 
 Set the repository, exact reviewed commit, branch label, and target flavor.

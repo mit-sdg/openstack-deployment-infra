@@ -30,7 +30,7 @@ from ..validation import (
 )
 from . import application_runtime as app
 from . import database as db
-from . import image_service, rollback, sizing
+from . import image_service, rollback, sizing, worker_reuse
 from .deployment_config import DeploymentConfiguration, branch_name
 from .deployment_reads import source_repository
 from .storage_contract import (
@@ -70,6 +70,7 @@ class DeploymentRequest:
     reuse_deployment_id: str | None = None
     rollback_plan: dict[str, Any] | None = None
     maintenance: bool = False
+    worker_strategy: str = "replace"
 
 
 RecoveryKind = Literal["candidate-removed", "build-rejected", "accepted", "deployment-healthy"]
@@ -736,6 +737,7 @@ def _deploy_and_accept_application(
     helper_caller: HelperCaller,
     operation_id: str,
     deadline: float,
+    resume_submission: bool = False,
 ) -> app.DeploymentResult:
     previous = db.get_deployment(connection, spec.application_id)
     _validate_storage_bindings(
@@ -747,13 +749,23 @@ def _deploy_and_accept_application(
         manifest=build.manifest,
         deadline=deadline,
     )
-    updating = previous is not None
+    reusing = worker.refs.get("worker_strategy") == "reuse"
+    updating = previous is not None and not reusing
     previous_job_id = (
         app.nomad_job_id(previous.nomad_job, spec.application_slug) if previous else None
     )
-    target_candidate_slot = updating and previous_job_id == spec.application_slug
+    # A quiesced same-worker update starts directly on the public route. There
+    # is no live predecessor to protect with a preview, and promoting a second
+    # job definition would unnecessarily restart the fresh process again.
+    target_candidate_slot = (
+        previous_job_id == f"{spec.application_slug}-candidate"
+        if reusing
+        else updating and previous_job_id == spec.application_slug
+    )
     route_priority = (
-        max(100, app.nomad_route_priority(previous.nomad_job) + 100) if previous else 100
+        max(100, app.nomad_route_priority(previous.nomad_job) + 100)
+        if previous and not reusing
+        else 100
     )
     placement = worker.refs.get("worker_application_id", spec.application_id)
     job = app.render_nomad_job(
@@ -793,6 +805,35 @@ def _deploy_and_accept_application(
         else job
     )
 
+    if reusing:
+        intent = app.nomad_candidate_identity(job)
+        operation = db.get_operation(connection, operation_id)
+        assert operation is not None
+        candidate_job_id = app.nomad_job_id(job, spec.application_slug)
+        if (
+            operation.refs.get("candidate_job_sha256", intent[0]) != intent[0]
+            or operation.refs.get("candidate_job_id", candidate_job_id) != candidate_job_id
+        ):
+            raise app.ApplicationError("recorded same-worker candidate definition drifted")
+        worker = replace(
+            worker,
+            refs={
+                **worker.refs,
+                "candidate_job_sha256": intent[0],
+                "candidate_job_id": candidate_job_id,
+                "allocation": {"cpuMHz": spec.cpu_mhz, "memoryMiB": spec.memory_mib},
+            },
+        )
+        # Submission can commit even when its reply is lost. Recovery must
+        # identify that candidate before touching environment or job state.
+        db.checkpoint_operation(
+            connection,
+            operation_id,
+            phase="candidate_submitting",
+            refs=worker.refs,
+            candidate_digest=build.image,
+        )
+
     def observe(deployment_job: str, *, preview: bool) -> app.DeploymentResult:
         return app.deploy_and_cleanup(
             spec.application_slug,
@@ -819,6 +860,9 @@ def _deploy_and_accept_application(
                 expected_marker=operation_id,
             ),
             sleep=lambda seconds: time.sleep(_remaining(deadline, seconds)),
+            require_exact=reusing,
+            cleanup_on_failure=not reusing,
+            resume_only=resume_submission,
         )
 
     active_attempt_job = job
@@ -841,6 +885,36 @@ def _deploy_and_accept_application(
             active_attempt_job = promoted_job
             result = observe(promoted_job, preview=False)
     except app.DeploymentFailed as error:
+        if reusing:
+            from .reuse_cleanup import finish_rejection
+
+            failed_version = error.cleanup_evidence.get("nomadVersion")
+            if type(failed_version) is not int or failed_version < 0:
+                raise app.ApplicationError(
+                    "rejected candidate omitted its exact Nomad version"
+                ) from error
+            worker = replace(
+                worker, refs={**worker.refs, "candidate_nomad_version": failed_version}
+            )
+            db.checkpoint_operation(
+                connection,
+                operation_id,
+                phase="candidate_rejected",
+                refs=worker.refs,
+                candidate_digest=build.image,
+            )
+            finish_rejection(
+                connection,
+                config,
+                operation_id,
+                spec.application_id,
+                spec.application_slug,
+                helper_caller=helper_caller,
+                deadline=deadline,
+            )
+            raise app.ApplicationError(
+                "candidate failed; process exit and cleanup confirmed; accepted worker retained"
+            ) from error
         if not error.cleanup_succeeded:
             raise
         if updating:
@@ -904,7 +978,7 @@ def _deploy_and_accept_application(
         "worker_port_id": worker.port_id,
         "worker_port_name": worker.port_name,
     }
-    if previous is not None and previous_job_id is not None:
+    if updating and previous is not None and previous_job_id is not None:
         accepted_refs.update(
             {
                 "predecessor_job_id": previous_job_id,
@@ -1006,6 +1080,67 @@ def _recover_app_deployment(
     application_id = spec.application_id
     application_slug = spec.application_slug
     operation_id = operation.operation_id
+    if operation.refs.get("worker_strategy") == "reuse" and operation.phase == "candidate_rejected":
+        from .reuse_cleanup import finish_rejection
+
+        finish_rejection(
+            connection,
+            config,
+            operation_id,
+            application_id,
+            application_slug,
+            helper_caller=helper_caller,
+            deadline=deadline,
+        )
+        return DeploymentRecovery(None, "candidate-removed")
+    if (
+        operation.refs.get("worker_strategy") == "reuse"
+        and operation.phase == "candidate_submitting"
+    ):
+        attempt = db.get_deployment_attempt(connection, operation_id)
+        recorded = operation.refs.get("reused_worker")
+        if attempt is None or attempt.configuration is None or not isinstance(recorded, dict):
+            raise app.ApplicationError("submitted reused candidate snapshot is incomplete")
+        worker_reuse.preflight(
+            connection,
+            config,
+            spec,
+            selected_image_id=uuid(recorded.get("image_id"), field="reused worker image UUID"),
+            expected=recorded,
+            allow_stopped=operation.refs.get("maintenance_stopped") is True,
+            helper_caller=helper_caller,
+            deadline=deadline,
+        )
+        manifest = _configuration_manifest(connection, application_id, attempt.configuration)
+        candidate = oci_digest_pin(operation.candidate_digest, field="submitted candidate image")
+        build = app.DeploymentBuild(
+            candidate,
+            manifest,
+            sha256_hex(operation.refs.get("recipe_hash"), field="recipe hash"),
+            relative_path(
+                operation.refs.get("build_log_path"), field="build log path", allow_dot=False
+            ),
+            dict(operation.refs),
+        )
+        worker = app.DeploymentWorker(
+            recorded["server_id"],
+            recorded["server_name"],
+            recorded["port_id"],
+            recorded["port_name"],
+            dict(operation.refs),
+        )
+        _deploy_and_accept_application(
+            connection,
+            config,
+            spec,
+            build,
+            worker,
+            helper_caller=helper_caller,
+            operation_id=operation_id,
+            deadline=deadline,
+            resume_submission=True,
+        )
+        return DeploymentRecovery(None, "accepted")
     if operation.phase == "build_rejected":
         _finish_rejected_build(
             connection,
@@ -1138,6 +1273,26 @@ def _recover_app_deployment(
     )
     if recovery_action == "accept_deployment":
         candidate = oci_digest_pin(operation.candidate_digest, field="candidate digest")
+        if operation.refs.get("worker_strategy") == "reuse":
+            recorded = operation.refs.get("reused_worker")
+            active = db.get_active_deployment(connection, application_id)
+            if not isinstance(recorded, dict) or active is None:
+                raise app.ApplicationError("reused worker recovery identity is unavailable")
+            expected = dict(recorded)
+            if active.deployment_id == operation_id:
+                # Acceptance may have committed immediately before a crash;
+                # worker identity must still match even though the pointer moved.
+                expected["deployment_id"] = operation_id
+            worker_reuse.preflight(
+                connection,
+                config,
+                spec,
+                selected_image_id=uuid(recorded.get("image_id"), field="reused worker image UUID"),
+                expected=expected,
+                allow_stopped=operation.refs.get("maintenance_stopped") is True,
+                helper_caller=helper_caller,
+                deadline=deadline,
+            )
         attempt = db.get_deployment_attempt(connection, operation_id)
         if attempt is None or attempt.configuration is None:
             raise app.ApplicationError("deployment configuration snapshot is missing")
@@ -1458,6 +1613,20 @@ class DeploymentService:
     ) -> DeploymentOutcome:
         if type(request.maintenance) is not bool:
             raise ValidationError("maintenance consent must be a boolean")
+        if not isinstance(request.worker_strategy, str) or request.worker_strategy not in {
+            "replace",
+            "reuse",
+        }:
+            raise ValidationError("worker strategy must be replace or reuse")
+        if request.worker_strategy == "reuse" and (
+            not request.maintenance
+            or request.sizing_plan is not None
+            or request.reuse_deployment_id is not None
+            or request.rollback_plan is not None
+        ):
+            raise ValidationError(
+                "worker reuse requires maintenance consent and an unchanged size source deployment"
+            )
         application_slug = slug(request.application)
         repository = repository_url(request.repository)
         requested_ref = branch_name(request.requested_ref)
@@ -1513,6 +1682,7 @@ class DeploymentService:
             else deadline
         )
         completed_recovery: RecoveryKind | None = None
+        reusable_identity: dict[str, str] | None = None
 
         def deployment_fingerprint() -> tuple[str, int]:
             environment = db.get_environment_revision(self.connection, application_id)
@@ -1531,6 +1701,11 @@ class DeploymentService:
                         "reuseDeploymentId": request.reuse_deployment_id,
                         "rollbackPlan": request.rollback_plan,
                         **({"maintenance": True} if request.maintenance else {}),
+                        **(
+                            {"worker_strategy": "reuse"}
+                            if request.worker_strategy == "reuse"
+                            else {}
+                        ),
                     }
                 ),
                 environment.revision,
@@ -1648,6 +1823,36 @@ class DeploymentService:
                 ("worker",) if request.reuse_deployment_id is not None else ("builder", "worker"),
                 deadline=selected_deadline,
             )
+            if request.worker_strategy == "reuse":
+                assert reusable_identity is not None
+                if operation.refs.get("worker_image_id") != reusable_identity["image_id"]:
+                    # The selection changed between read-only admission and
+                    # pinning, before any build/provider mutation. A new plan
+                    # can be admitted rather than leaving an impossible retry.
+                    message = "selected worker image changed before worker-reuse admission"
+                    db.checkpoint_deployment_attempt(
+                        self.connection,
+                        operation.operation_id,
+                        status="failed",
+                        error=message,
+                        cleanup_state="not_required",
+                    )
+                    db.mark_failed(
+                        self.connection,
+                        operation.operation_id,
+                        message,
+                        cleanup_state="not_required",
+                    )
+                    raise ValidationError(message)
+                db.checkpoint_operation(
+                    self.connection,
+                    operation.operation_id,
+                    phase=operation.phase,
+                    refs={**operation.refs, "reused_worker": reusable_identity},
+                )
+                refreshed = db.get_operation(self.connection, operation.operation_id)
+                assert refreshed is not None
+                operation = refreshed
             if request.reuse_deployment_id is not None:
                 prior = db.get_deployment_attempt(self.connection, request.reuse_deployment_id)
                 if (
@@ -1709,6 +1914,20 @@ class DeploymentService:
             )
 
         def prepare_environment(operation_id: str, build: app.DeploymentBuild) -> dict[str, Any]:
+            nonlocal reusable_identity
+            if request.worker_strategy == "reuse":
+                # Recheck after the potentially long build and on every retry,
+                # while leaving the old application serving until this passes.
+                reusable_identity = worker_reuse.preflight(
+                    self.connection,
+                    self.config,
+                    spec,
+                    selected_image_id=build.refs["worker_image_id"],
+                    expected=build.refs.get("reused_worker"),
+                    allow_stopped=build.refs.get("maintenance_stopped") is True,
+                    helper_caller=self.helper_caller,
+                    deadline=selected_deadline,
+                )
             if request.maintenance:
                 from .maintenance import stop_predecessor
 
@@ -1785,6 +2004,13 @@ class DeploymentService:
         ) -> app.DeploymentWorker:
             nonlocal spec
             db.checkpoint_deployment_attempt(self.connection, operation_id, status="deploying")
+            if request.worker_strategy == "reuse":
+                assert reusable_identity is not None
+                # Preflight already verified provider identity and capacity;
+                # only this app's process was stopped since that observation.
+                return worker_reuse.ready(
+                    self.connection, operation_id, reusable_identity, refs, build.image
+                )
             worker = _prepare_deployment_worker(
                 self.connection,
                 self.config,
@@ -1846,11 +2072,17 @@ class DeploymentService:
             )
 
         def verify_project() -> None:
+            nonlocal reusable_identity
             from .fixed_ip_service import require_maintenance
 
             # Accepted-but-interrupted cleanup is forward recovery, not a new
             # overlapping replacement. Every new attempt checks under app lock.
             active = db.get_active_deployment(self.connection, application_id)
+            if (
+                request.worker_strategy == "replace"
+                and db.get_unfinished_operation(self.connection, f"app-{application_id}") is None
+            ):
+                worker_reuse.require_replacement_ready(self.connection, application_id)
             if not request.maintenance and (
                 active is None or active.deployment_id != selected_request_id
             ):
@@ -1897,6 +2129,45 @@ class DeploymentService:
                     self.config.policy.limits.process_seconds,
                 ),
             )
+            if request.worker_strategy == "reuse":
+                unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
+                if unfinished is not None and unfinished.phase in {
+                    "accepted",
+                    "deployment_healthy",
+                    "candidate_removed",
+                    "candidate_submitting",
+                    "candidate_rejected",
+                }:
+                    return  # Forward recovery uses its exact recorded candidate.
+                if unfinished is not None and "worker_image_id" in unfinished.refs:
+                    selected_worker_image = uuid(
+                        unfinished.refs.get("worker_image_id"), field="recorded worker image UUID"
+                    )
+                else:
+                    if unfinished is not None and (
+                        unfinished.phase != "validated" or unfinished.candidate_digest is not None
+                    ):
+                        raise app.ApplicationError(
+                            "mutated reuse operation omitted its worker image pin"
+                        )
+                    with runtime.lock(
+                        self.state_directory, "infrastructure", deadline=selected_deadline
+                    ):
+                        selection = db.get_image_selection(self.connection, "worker")
+                    if selection is None:
+                        raise ValidationError("select a worker image before worker reuse")
+                    selected_worker_image = selection.image_id
+                reusable_identity = worker_reuse.preflight(
+                    self.connection,
+                    self.config,
+                    spec,
+                    selected_image_id=selected_worker_image,
+                    expected=None if unfinished is None else unfinished.refs.get("reused_worker"),
+                    allow_stopped=unfinished is not None
+                    and unfinished.refs.get("maintenance_stopped") is True,
+                    helper_caller=self.helper_caller,
+                    deadline=selected_deadline,
+                )
 
         result = app.execute_deployment_workflow(
             self.connection,
@@ -1919,6 +2190,7 @@ class DeploymentService:
                 "reuse_deployment_id": request.reuse_deployment_id,
                 "rollback_plan": request.rollback_plan,
                 **({"maintenance": True} if request.maintenance else {}),
+                **({"worker_strategy": "reuse"} if request.worker_strategy == "reuse" else {}),
             },
         )
         if result is None:

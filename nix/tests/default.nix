@@ -453,7 +453,7 @@ let
             ''
               machine.wait_for_unit("default.target", "agentops")
               machine.wait_for_unit("buildkit.service", "agentops")
-              machine.succeed("runuser -u agentops -- env XDG_RUNTIME_DIR=/run/user/1000 ${packages.buildkit}/bin/buildctl --addr unix:///run/user/1000/buildkit/buildkitd.sock debug workers")
+              machine.succeed("runuser -u agentops -- env XDG_RUNTIME_DIR=/run/user/1000 ${packages.buildkit}/bin/buildctl --addr unix:///run/user/1000/buildkit/buildkitd.sock debug workers -v | grep -E 'org.mobyproject.buildkit.worker.snapshotter:[[:space:]]+overlayfs'")
               machine.succeed("test -x /run/current-system/sw/bin/mount.fuse3")
               machine.succeed("${pkgs.iptables}/bin/iptables -C OUTPUT -d ${platform.metadataAddress}/32 -j REJECT")
               machine.succeed("systemctl is-active --quiet ${namespace}-builder-expiry.timer")

@@ -18,6 +18,7 @@ from ..installation import (
     DEFAULT_CONTROLLER_STATE,
 )
 from . import database as db
+from . import timing
 from .api import ControllerAPI
 from .http import ControllerServer, PeerPolicy
 
@@ -70,6 +71,7 @@ def _peer(value: str) -> tuple[int, int]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    timing.configure()
     state_directory = runtime.ensure_private_directory(args.state_directory, create=True)
     platform_path = args.platform_config.resolve(strict=True)
     policy_path = (

@@ -148,6 +148,7 @@ class ApplicationActionTests(unittest.TestCase):
                 "app.health",
                 "app.logs",
                 "app.promote",
+                "app.quiesce",
                 "app.remove",
                 "app.env.set",
                 "app.env.remove",

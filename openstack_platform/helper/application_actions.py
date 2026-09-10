@@ -11,6 +11,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from ..contracts import (
@@ -389,7 +390,22 @@ def _deploy_handler(
     response_limit: int,
 ) -> Handler:
     def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
-        _exact_args(args, {"slug", "job"}, "app.deploy")
+        if set(args) not in (
+            {"slug", "job"},
+            {"slug", "job", "requireExact"},
+            {"slug", "job", "requireExact", "resumeOnly"},
+        ):
+            raise HelperActionError("INVALID_ARGS", "app.deploy arguments are invalid")
+        strict = args.get("requireExact", False)
+        resume_only = args.get("resumeOnly", False)
+        if (
+            type(strict) is not bool
+            or type(resume_only) is not bool
+            or (resume_only and not strict)
+        ):
+            raise ValidationError(
+                "exact submission/resume selectors must be boolean and consistent"
+            )
         application_slug = slug(args["slug"])
         job = bounded_text(args["job"], field="Nomad job", maximum=262_144)
         candidate = nomad_candidate_identity(job)
@@ -402,7 +418,6 @@ def _deploy_handler(
             stderr_limit=65_536,
             check=True,
         )
-        _synchronize_workload_variable(variable_client, application_slug, job_id)
         current = _inspected_candidate(
             job_id,
             command_runner=command_runner,
@@ -411,6 +426,8 @@ def _deploy_handler(
             response_limit=response_limit,
         )
         if current is not None and current[1:] == candidate:
+            if not strict:
+                _synchronize_workload_variable(variable_client, application_slug, job_id)
             return {
                 "slug": application_slug,
                 "jobId": job_id,
@@ -419,8 +436,25 @@ def _deploy_handler(
                 "candidateImage": candidate[1],
                 "submitted": False,
             }
+        if resume_only and current is None:
+            raise HelperActionError(
+                "CANDIDATE_UNCONFIRMED",
+                "submitted candidate was lost; exact worker fencing is required",
+            )
+        if strict and current is not None:
+            raise HelperActionError(
+                "CANDIDATE_MISMATCH", "refusing to replace an unexpected live job"
+            )
+        _synchronize_workload_variable(variable_client, application_slug, job_id)
         command_runner(
-            (*nomad_command, "job", "run", "-detach", "-"),
+            (
+                *nomad_command,
+                "job",
+                "run",
+                *(("-check-index=0",) if strict else ()),
+                "-detach",
+                "-",
+            ),
             timeout_seconds=timeout_seconds,
             stdin=job.encode(),
             stdout_limit=65_536,
@@ -1188,6 +1222,7 @@ def handlers(
     public_health_check: Callable[[str], bool] | None = None,
     trusted_domain: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    quiesce_directory: Path | None = None,
 ) -> dict[str, Handler]:
     """Return all application protocol-v1 handlers for integrator registration."""
     if (
@@ -1198,7 +1233,23 @@ def handlers(
     ):
         raise ValueError("helper command bounds must be positive")
     command = _command(nomad_command)
+    from .application_quiesce import quiesce
+
+    def quiesce_job(args: Mapping[str, Any]) -> Mapping[str, Any]:
+        if quiesce_directory is None:
+            raise HelperActionError(
+                "DEPENDENCY_UNAVAILABLE", "quiesce witness directory is unavailable"
+            )
+        return quiesce(
+            args,
+            state_directory=quiesce_directory,
+            nomad_command=command,
+            command_runner=command_runner,
+            sleep=sleep,
+        )
+
     result: dict[str, Handler] = {
+        "app.quiesce": quiesce_job,
         "app.deploy": _deploy_handler(
             variable_client,
             command_runner=command_runner,
