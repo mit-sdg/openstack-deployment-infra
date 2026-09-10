@@ -160,6 +160,51 @@ address/port ownership before deploying. On subsequent deployments, reuse that
 reservation; do not release it or allocate another port. Availability outside an
 automatic allocation pool is proven only by successful reservation.
 
+## Package only the runtime files
+
+With matching controller/helper releases advertising `runtime-files-v1`, the
+optional `build.runtimeFiles` list selects which paths from the built `/app`
+tree enter a clean final image. The final image uses the same digest-pinned
+Node/Bun base, runtime user, environment, and start script. Installation and
+build commands are unchanged; no framework or application name is inferred.
+
+For example, an application whose start script runs `node dist/server.js` and
+imports installed dependencies can use:
+
+```json
+{
+  "schemaVersion": 1,
+  "build": {
+    "runtime": "node", "packages": ["."],
+    "buildScript": "build", "startScript": "start",
+    "runtimeFiles": ["package.json", "dist", "node_modules"]
+  },
+  "runtime": {"port": 3000, "healthPath": "/health"},
+  "storageBindings": []
+}
+```
+
+Adjust the list for the actual application: include start-script inputs,
+configuration, assets, native modules, and any dependencies not bundled into the
+output. Paths retain their `/app`-relative locations. A missing path fails the
+build before cutover; omission of a needed runtime file may instead fail at
+startup or when an affected route is used. Test representative application
+behavior as well as the health endpoint.
+
+The list contains 1–32 unique, non-overlapping paths, each at most 1024 literal
+ASCII characters using letters, digits, `.`, `_`, `@`, `+`, `-`, and `/`.
+Absolute paths, empty components, traversal, globbing, and variable expansion
+are rejected. Paths are sorted canonically. `["."]` explicitly selects all of
+`/app`, still excluding build-stage changes elsewhere in the filesystem.
+
+Omit `runtimeFiles` to retain the original full-image recipe and configuration
+fingerprint; `null` and an empty list are invalid. Use that original mode when
+installation modifies required files outside `/app`. This feature does not
+discover dependencies or filter secrets. Increment the configuration revision
+when enabling it. Roll back application artifacts with a controller that can
+read both snapshots; an older platform executable may reject stored
+`runtimeFiles` configurations even though the SQLite schema did not change.
+
 ## Update code on the existing worker
 
 An operator can opt into `workerStrategy: "reuse"` for an enabled application
@@ -176,7 +221,7 @@ primary-port reservation.
 
 The old application serves during the build and post-build preflight. The
 controller then stops the exact old job, waits for client-reported task exit,
-checkpoints that evidence, and removes its Nomad job without deleting the VM
+persists allocation-exit witnesses and checkpoints that evidence, then removes its Nomad job without deleting the VM
 or detaching its port. The new job starts directly on the public route; there
 is no preview/promotion restart. Downtime includes image pull, application
 startup, and health checks. This first reuse path does not pre-pull the image
@@ -215,6 +260,10 @@ primary port, compare the original `portId` and `serverId` with `GET
   outcomes remain `recovery_required`; retry the identical request/key.
 - An uncertain process stop blocks the replacement. Do not manually purge its
   job: that destroys the evidence needed to verify client exit on retry.
+  Completed helper witnesses under the controller state's `quiesce/` directory
+  survive lost replies and later Nomad GC. Missing, unwitnessed records are not
+  treated as proof of exit; explicit worker fencing is required if exit evidence
+  cannot be recovered.
 - After a terminal candidate health failure with confirmed cleanup, the old
   deployment remains accepted, the application is stopped, and the VM/port
   remain. Project `POST /v1/applications/{id}/enable` with `{}` and a new key

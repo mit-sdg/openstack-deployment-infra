@@ -647,7 +647,7 @@ class ControllerAPI:
             200,
             {
                 "apiVersion": API_VERSION,
-                "features": ["maintenance-after-build-v1", "worker-reuse-v1"],
+                "features": ["maintenance-after-build-v1", "worker-reuse-v1", "runtime-files-v1"],
             },
         )
 

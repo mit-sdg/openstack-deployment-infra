@@ -242,6 +242,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_exact_submission.py` — create-only Nomad submission and exact retry without overwriting another definition or restarting variables.
 - `tests/test_worker_reuse.py` — Node/Bun worker reuse, explicit policy, eligibility/drift, interrupted cutover, and accepted-artifact recovery tests.
 - `tests/test_worker_reuse_fixed_ip.py` — same-worker updates through the real worker helper with retained primary ports and an offline provider.
+- `tests/test_reuse_exit_integration.py` — controller failure/retry paths using durable quiescence code and explicit Nomad client-state observations.
 - `tests/test_deployment_timing.py` — operation-scoped timing, context isolation, redaction, and nonfatal diagnostic failures.
 - `tests/test_application_deployment_docs.py` — Bash syntax and real configuration-schema validation for the operator curl runbook.
 - `tests/test_helper_worker_capacity.py` — production capacity dispatch, pinned Nomad field/worker identity contract, deadlines, and sanitized failures.
@@ -256,6 +257,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_controller_recovery.py` — storage-kind recovery, rejected-build terminalization, crash/retry, and privileged polling tests.
 - `tests/test_controller_seed_images.py` — hosted image-seed identity, selection, and idempotence tests.
 - `tests/test_deployment_config.py` — typed deployment configuration and Git branch/ref resolution tests.
+- `tests/test_runtime_files.py` — optional literal runtime-file packaging, legacy fingerprint preservation, Node/Bun recipes, and helper propagation.
 - `tests/test_documentation.py` — documentation links, consolidated reader paths, interface claims, route coverage, and repository-index checks.
 - `tests/test_full_loss_recovery_drill.py` — full and verify-only recovery drill command/evidence/failure-boundary tests.
 - `tests/test_hardening_properties.py` — generated property cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
