@@ -39,13 +39,17 @@ def quiesce(
     if set(args) != {
         "operationId",
         "nodeId",
+        "jobVersion",
         "slug",
         "jobId",
         "candidateJobSha256",
         "candidateImage",
     }:
         raise HelperActionError("INVALID_ARGS", "app.quiesce arguments are invalid")
-    identity = {
+    if type(args["jobVersion"]) is not int or not 0 <= args["jobVersion"] <= 1_000_000_000:
+        raise ValidationError("quiesce requires a bounded exact workload version")
+    identity: dict[str, Any] = {
+        "jobVersion": args["jobVersion"],
         "operationId": uuid(args["operationId"], field="operation ID"),
         "nodeId": uuid(args["nodeId"], field="worker Nomad node ID"),
         "slug": slug(args["slug"]),
@@ -82,11 +86,19 @@ def quiesce(
             response_limit=262_144,
         )
         if value is not None:
-            if inspected_job_identity(value, job_id)[1:] != expected:
+            observed_identity = inspected_job_identity(value, job_id)
+            if observed_identity[1:] != expected:
                 raise HelperActionError("CANDIDATE_MISMATCH", "predecessor job identity drifted")
             if type(value.get("Stop")) is not bool:
                 raise HelperActionError(
                     "NOMAD_RESPONSE_INVALID", "predecessor stop state is malformed"
+                )
+            allowed_versions = {identity["jobVersion"]}
+            if value["Stop"]:
+                allowed_versions.add(identity["jobVersion"] + 1)
+            if observed_identity[0] not in allowed_versions:
+                raise HelperActionError(
+                    "CANDIDATE_MISMATCH", "predecessor workload version drifted"
                 )
         return value
 
@@ -110,7 +122,11 @@ def quiesce(
             alloc_id = uuid(row.get("ID"), field="allocation ID")
             node_id = uuid(row.get("NodeID"), field="allocation node ID")
             version = row.get("JobVersion")
-            if type(version) is not int or version < 0 or alloc_id in observed:
+            if (
+                type(version) is not int
+                or not 0 <= version <= identity["jobVersion"]
+                or alloc_id in observed
+            ):
                 raise HelperActionError(
                     "NOMAD_RESPONSE_INVALID", "allocation identity/version is malformed"
                 )
@@ -120,7 +136,7 @@ def quiesce(
                 states = row.get("TaskStates")
                 if (
                     not isinstance(states, dict)
-                    or not states
+                    or set(states) != {"app"}
                     or any(
                         not isinstance(s, dict) or s.get("State") != "dead" for s in states.values()
                     )
@@ -132,12 +148,18 @@ def quiesce(
                 raise HelperActionError(
                     "STOP_UNCONFIRMED", "allocation client exit is unknown; fencing may be required"
                 )
-            elif node_id != identity["nodeId"]:
+            elif node_id != identity["nodeId"] or version != identity["jobVersion"]:
                 raise HelperActionError(
                     "CANDIDATE_MISMATCH", "live allocation belongs to a different worker"
                 )
             observed[alloc_id] = {"nodeId": node_id, "jobVersion": version, "exited": exited}
         return observed
+
+    def has_target(entries: Mapping[str, Mapping[str, Any]]) -> bool:
+        return any(
+            entry["nodeId"] == identity["nodeId"] and entry["jobVersion"] == identity["jobVersion"]
+            for entry in entries.values()
+        )
 
     def persist(record: Mapping[str, Any]) -> str:
         payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
@@ -186,6 +208,10 @@ def quiesce(
                 or type(entry["exited"]) is not bool
             ):
                 raise HelperActionError("INVALID_STATE", "quiesce allocation witness is invalid")
+        if not has_target(record["allocations"]):
+            raise HelperActionError(
+                "INVALID_STATE", "witness omitted the intended workload allocation"
+            )
         if record["complete"] and (
             not record["stopSeen"] or not all(e["exited"] for e in record["allocations"].values())
         ):
@@ -213,16 +239,39 @@ def quiesce(
     # Serialize late/lost-response retries independently of the caller process.
     with lock(root, f"app-{identity['operationId']}", deadline=time.monotonic() + remaining()):
         record = load_receipt()
-        current = inspect()
+        try:
+            current = inspect()
+        except HelperActionError as error:
+            if (
+                record is not None
+                and record["complete"]
+                and error.code in {"CANDIDATE_MISMATCH", "NOMAD_RESPONSE_INVALID"}
+            ):
+                record["complete"] = False
+                persist(record)
+            raise
         if record is not None and record["complete"]:
             if current is not None:
-                if current["Stop"] is not True:
-                    raise HelperActionError("CANDIDATE_MISMATCH", "quiesced job was reactivated")
-                merge(record, allocations())
-                if not all(e["exited"] for e in record["allocations"].values()):
-                    raise HelperActionError(
-                        "STOP_UNCONFIRMED", "quiesced job acquired a new live allocation"
-                    )
+                try:
+                    if current["Stop"] is not True:
+                        raise HelperActionError(
+                            "CANDIDATE_MISMATCH", "quiesced job was reactivated"
+                        )
+                    merge(record, allocations())
+                    if not all(e["exited"] for e in record["allocations"].values()):
+                        raise HelperActionError(
+                            "STOP_UNCONFIRMED", "quiesced job acquired a new live allocation"
+                        )
+                    final = inspect()
+                    if final is None or final["Stop"] is not True:
+                        raise HelperActionError(
+                            "STOP_UNCONFIRMED", "job changed during witness replay"
+                        )
+                except HelperActionError as error:
+                    if error.code != "NOMAD_UNAVAILABLE":
+                        record["complete"] = False
+                        persist(record)
+                    raise
             digest = persist(record)
         else:
             if current is None:
@@ -231,9 +280,10 @@ def quiesce(
                 )
             observed = allocations()
             if record is None:
-                if not observed:
+                if not observed or not has_target(observed):
                     raise HelperActionError(
-                        "STOP_UNCONFIRMED", "empty allocation inventory is not exit evidence"
+                        "STOP_UNCONFIRMED",
+                        "missing current workload allocation is not exit evidence",
                     )
                 record = {
                     "format": 1,
@@ -274,6 +324,14 @@ def quiesce(
                 record["complete"] = bool(observed) and all(
                     e["exited"] for e in record["allocations"].values()
                 )
+                if record["complete"]:
+                    final = inspect()
+                    if final is None or final["Stop"] is not True:
+                        record["complete"] = False
+                        persist(record)
+                        raise HelperActionError(
+                            "STOP_UNCONFIRMED", "job changed before completion was committed"
+                        )
                 digest = persist(record)
                 if record["complete"]:
                     break

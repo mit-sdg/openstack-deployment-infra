@@ -66,6 +66,17 @@ class ExactSubmissionTests(unittest.TestCase):
         synchronize.assert_not_called()
         self.assertFalse(any("run" in argv for argv, _ in self.nomad.calls))
 
+    def test_unknown_retry_requires_present_exact_job_not_a_new_submission(self):
+        self.nomad.inspection["ID"] = "absent-job"
+        with mock.patch.object(
+            application_actions, "_synchronize_workload_variable"
+        ) as synchronize:
+            with self.assertRaises(HelperActionError) as caught:
+                self.action()({**self.args, "resumeOnly": True})
+        self.assertEqual(caught.exception.code, "CANDIDATE_UNCONFIRMED")
+        synchronize.assert_not_called()
+        self.assertFalse(any("run" in argv for argv, _ in self.nomad.calls))
+
     def test_first_submission_uses_atomic_create_only_check(self):
         self.nomad.inspection["ID"] = "absent-job"
 

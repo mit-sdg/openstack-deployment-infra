@@ -57,6 +57,7 @@ def stop_predecessor(
             "deployment_id": accepted.deployment_id,
             "job_id": app.nomad_job_id(deployment.nomad_job, current.slug),
             "job_sha256": deployment.nomad_job_sha256,
+            "nomad_version": deployment.nomad_version,
             "image": deployment.image_digest,
             "placement_id": app.nomad_placement_id(deployment.nomad_job),
             "server_id": current.worker_server_id,
@@ -92,6 +93,7 @@ def stop_predecessor(
                 {
                     "operationId": operation_id,
                     "nodeId": reusable["node_id"],
+                    "jobVersion": intent["nomad_version"],
                     "slug": current.slug,
                     "jobId": intent["job_id"],
                     "candidateJobSha256": intent["job_sha256"],
@@ -100,7 +102,11 @@ def stop_predecessor(
                 deadline=deadline,
             )
             if (
-                stopped.get("jobId") != intent["job_id"]
+                stopped.get("operationId") != operation_id
+                or stopped.get("nodeId") != reusable["node_id"]
+                or type(stopped.get("jobVersion")) is not int
+                or stopped.get("jobVersion") != intent["nomad_version"]
+                or stopped.get("jobId") != intent["job_id"]
                 or stopped.get("candidateJobSha256") != intent["job_sha256"]
                 or stopped.get("candidateImage") != intent["image"]
                 or stopped.get("jobStopped") is not True

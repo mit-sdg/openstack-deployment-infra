@@ -65,6 +65,8 @@ class WorkerReuseTests(unittest.TestCase):
         if action == "app.deploy" and values.get("requireExact"):
             job_id = app.nomad_job_id(values["job"], "commons")
             existing = self.fixture.jobs.get(job_id)
+            if values.get("resumeOnly") and existing is None:
+                raise app.ApplicationError("lost submitted job requires fencing")
             if existing is not None and app.nomad_candidate_identity(
                 existing
             ) != app.nomad_candidate_identity(values["job"]):
@@ -370,6 +372,24 @@ class WorkerReuseTests(unittest.TestCase):
         self.assertNotIn("app.worker.create", self.actions())
         submitted = next(values for action, values in self.fixture.calls if action == "app.deploy")
         self.assertIs(submitted["requireExact"], True)
+
+    def test_lost_submitted_job_cannot_be_recreated_without_fencing(self):
+        self.first()
+
+        def lose_reply():
+            self.after_submit = lambda: None
+            raise RuntimeError("lost submission reply")
+
+        self.after_submit = lose_reply
+        key, interrupted = self.update()
+        self.assertEqual(interrupted.phase, "candidate_submitting")
+        self.fixture.jobs.clear()
+        self.fixture.calls.clear()
+        _, blocked = self.update(key)
+        self.assertEqual(blocked.status, "recovery_required")
+        self.assertEqual(self.fixture.jobs, {})
+        self.assertNotIn("app.env.set", self.actions())
+        self.assertNotIn("app.worker.create", self.actions())
 
     def test_unconfirmed_candidate_stop_keeps_recovery_blocked_and_is_cleanup_only_on_retry(self):
         self.first()

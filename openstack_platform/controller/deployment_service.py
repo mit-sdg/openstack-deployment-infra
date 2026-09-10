@@ -737,6 +737,7 @@ def _deploy_and_accept_application(
     helper_caller: HelperCaller,
     operation_id: str,
     deadline: float,
+    resume_submission: bool = False,
 ) -> app.DeploymentResult:
     previous = db.get_deployment(connection, spec.application_id)
     _validate_storage_bindings(
@@ -861,6 +862,7 @@ def _deploy_and_accept_application(
             sleep=lambda seconds: time.sleep(_remaining(deadline, seconds)),
             require_exact=reusing,
             cleanup_on_failure=not reusing,
+            resume_only=resume_submission,
         )
 
     active_attempt_job = job
@@ -886,6 +888,14 @@ def _deploy_and_accept_application(
         if reusing:
             from .reuse_cleanup import finish_rejection
 
+            failed_version = error.cleanup_evidence.get("nomadVersion")
+            if type(failed_version) is not int or failed_version < 0:
+                raise app.ApplicationError(
+                    "rejected candidate omitted its exact Nomad version"
+                ) from error
+            worker = replace(
+                worker, refs={**worker.refs, "candidate_nomad_version": failed_version}
+            )
             db.checkpoint_operation(
                 connection,
                 operation_id,
@@ -1128,6 +1138,7 @@ def _recover_app_deployment(
             helper_caller=helper_caller,
             operation_id=operation_id,
             deadline=deadline,
+            resume_submission=True,
         )
         return DeploymentRecovery(None, "accepted")
     if operation.phase == "build_rejected":

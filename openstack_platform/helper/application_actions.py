@@ -390,11 +390,22 @@ def _deploy_handler(
     response_limit: int,
 ) -> Handler:
     def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
-        if set(args) not in ({"slug", "job"}, {"slug", "job", "requireExact"}):
+        if set(args) not in (
+            {"slug", "job"},
+            {"slug", "job", "requireExact"},
+            {"slug", "job", "requireExact", "resumeOnly"},
+        ):
             raise HelperActionError("INVALID_ARGS", "app.deploy arguments are invalid")
         strict = args.get("requireExact", False)
-        if type(strict) is not bool:
-            raise ValidationError("exact submission selector must be boolean")
+        resume_only = args.get("resumeOnly", False)
+        if (
+            type(strict) is not bool
+            or type(resume_only) is not bool
+            or (resume_only and not strict)
+        ):
+            raise ValidationError(
+                "exact submission/resume selectors must be boolean and consistent"
+            )
         application_slug = slug(args["slug"])
         job = bounded_text(args["job"], field="Nomad job", maximum=262_144)
         candidate = nomad_candidate_identity(job)
@@ -425,6 +436,11 @@ def _deploy_handler(
                 "candidateImage": candidate[1],
                 "submitted": False,
             }
+        if resume_only and current is None:
+            raise HelperActionError(
+                "CANDIDATE_UNCONFIRMED",
+                "submitted candidate was lost; exact worker fencing is required",
+            )
         if strict and current is not None:
             raise HelperActionError(
                 "CANDIDATE_MISMATCH", "refusing to replace an unexpected live job"

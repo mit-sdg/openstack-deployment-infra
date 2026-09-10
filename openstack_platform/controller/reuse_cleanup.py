@@ -42,6 +42,9 @@ def finish_rejection(
         raise app.ApplicationError("rejected reused candidate identity is incomplete")
     image = oci_digest_pin(operation.candidate_digest, field="rejected candidate image")
     job_hash = sha256_hex(refs.get("candidate_job_sha256"), field="rejected candidate job SHA-256")
+    version = refs.get("candidate_nomad_version")
+    if type(version) is not int or version < 0:
+        raise app.ApplicationError("rejected candidate Nomad version is unavailable")
     observed = helper_caller(
         config,
         "app.worker.observe",
@@ -56,6 +59,7 @@ def finish_rejection(
             {
                 "operationId": operation_id,
                 "nodeId": worker["node_id"],
+                "jobVersion": version,
                 "slug": application_slug,
                 "jobId": job_id,
                 "candidateJobSha256": job_hash,
@@ -64,7 +68,11 @@ def finish_rejection(
             deadline=deadline,
         )
         if (
-            stopped.get("jobId") != job_id
+            stopped.get("operationId") != operation_id
+            or stopped.get("nodeId") != worker["node_id"]
+            or type(stopped.get("jobVersion")) is not int
+            or stopped.get("jobVersion") != version
+            or stopped.get("jobId") != job_id
             or stopped.get("candidateJobSha256") != job_hash
             or stopped.get("candidateImage") != image
             or stopped.get("jobStopped") is not True

@@ -1695,20 +1695,31 @@ def deploy_and_cleanup(
     sleep: Callable[[float], None] = time.sleep,
     require_exact: bool = False,
     cleanup_on_failure: bool = True,
+    resume_only: bool = False,
 ) -> DeploymentResult:
     """Deploy and observe health; callers retaining the worker own safe cleanup."""
     app_slug = slug(application_slug)
     job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
     if not 1 <= attempts <= 300 or not 0 < poll_interval_seconds <= 30:
         raise ValueError("health observation bounds are invalid")
-    if type(require_exact) is not bool or type(cleanup_on_failure) is not bool:
+    if (
+        type(require_exact) is not bool
+        or type(cleanup_on_failure) is not bool
+        or type(resume_only) is not bool
+        or (resume_only and not require_exact)
+    ):
         raise ValueError("deployment submission/cleanup selectors must be boolean")
     candidate = nomad_candidate_identity(job)
     job_id = nomad_job_id(job, app_slug)
     deployed = _call_helper(
         helper_caller,
         "app.deploy",
-        {"slug": app_slug, "job": job, **({"requireExact": True} if require_exact else {})},
+        {
+            "slug": app_slug,
+            "job": job,
+            **({"requireExact": True} if require_exact else {}),
+            **({"resumeOnly": True} if resume_only else {}),
+        },
         timeout_seconds=helper_timeout_seconds,
     )
     if deployed.get("jobId") != job_id:
@@ -1794,7 +1805,11 @@ def deploy_and_cleanup(
         raise DeploymentFailed(
             "deployment health failed; caller must confirm exact candidate process exit",
             cleanup_succeeded=False,
-            cleanup_evidence={"action": "quiesce-candidate", "confirmed": False},
+            cleanup_evidence={
+                "action": "quiesce-candidate",
+                "confirmed": False,
+                "nomadVersion": version,
+            },
         ) from failure
     cleanup_succeeded = False
     cleanup_evidence: dict[str, Any] = {}

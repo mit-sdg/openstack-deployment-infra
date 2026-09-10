@@ -24,6 +24,7 @@ class ApplicationQuiesceTests(unittest.TestCase):
         self.args = {
             "operationId": "11111111-1111-4111-8111-111111111111",
             "nodeId": "22222222-2222-4222-8222-222222222222",
+            "jobVersion": 1,
             "slug": "any-app",
             "jobId": "any-app",
             "candidateJobSha256": "b" * 64,
@@ -216,6 +217,39 @@ class ApplicationQuiesceTests(unittest.TestCase):
         self.job["Stop"] = False
         with self.assertRaises(HelperActionError):
             self.call()
+
+    def test_historical_rows_cannot_witness_the_current_workload(self):
+        self.job["Version"] = 2
+        self.args["jobVersion"] = 2
+        self.allocations[0]["NodeID"] = "44444444-4444-4444-8444-444444444444"
+        with self.assertRaises(HelperActionError):
+            self.call()
+        self.assertFalse(any("stop" in call for call in self.calls))
+
+    def test_an_unrelated_dead_task_is_not_app_exit_evidence(self):
+        self.allocations[0]["TaskStates"] = {"unrelated-task": {"State": "dead"}}
+        with self.assertRaises(HelperActionError):
+            self.call()
+        self.assertFalse(any("stop" in call for call in self.calls))
+
+    def test_reactivation_during_last_observation_cannot_commit_completion(self):
+        runner = self.runner
+        reads = 0
+
+        def changing(argv, **bounds):
+            nonlocal reads
+            result = runner(argv, **bounds)
+            if "allocs" in argv:
+                reads += 1
+                if reads == 2:
+                    self.job["Stop"] = False
+            return result
+
+        with mock.patch.object(self, "runner", side_effect=changing):
+            with self.assertRaises(HelperActionError):
+                self.call()
+        record = json.loads(next(self.root.glob("*.json")).read_text())
+        self.assertFalse(record["complete"])
 
     def test_strict_arguments(self):
         for args in ({**self.args, "extra": True}, {**self.args, "jobId": "another-app"}):
