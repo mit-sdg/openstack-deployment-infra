@@ -22,8 +22,9 @@ from ..remote import (
     encode_success,
     parse_request,
 )
-from ..runtime import ensure_private_directory, safe_summary, write_private_stack_diagnostic
-from ..validation import ValidationError, bounded_text, safe_code
+from ..runtime import ensure_private_directory, write_private_stack_diagnostic
+from ..validation import ValidationError
+from .errors import HelperActionError as HelperActionError
 
 Handler = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 _ZERO_REQUEST_ID = "00000000-0000-0000-0000-000000000000"
@@ -31,19 +32,6 @@ _BACKUP_NAME = re.compile(r"platform-[0-9]{8}T[0-9]{6}Z\.sqlite3\.age")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _COMPACT_UTC = re.compile(r"20[0-9]{6}T[0-9]{6}Z")
 _AGE_HEADER = b"age-encryption.org/v1\n"
-
-
-class HelperActionError(RuntimeError):
-    """A deliberate safe failure returned to the controller."""
-
-    def __init__(self, code: str, message: str) -> None:
-        self.code = safe_code(code)
-        self.message = bounded_text(
-            safe_summary(message),
-            field="helper error message",
-            maximum=1_024,
-        )
-        super().__init__(self.message)
 
 
 def _regular_private_file(path: Path) -> os.stat_result:

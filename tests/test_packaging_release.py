@@ -158,6 +158,31 @@ class ReleaseArchiveVerificationTests(unittest.TestCase):
 
 
 class HelperRuntimePathTests(unittest.TestCase):
+    def test_module_entrypoint_preserves_typed_production_errors(self) -> None:
+        environment = {
+            **os.environ,
+            "PLATFORM_CONFIG": str(ROOT / "config/platform.example.json"),
+            "PYTHONPATH": str(ROOT),
+        }
+        request = {
+            "version": 1,
+            "requestId": "00000000-0000-4000-8000-000000000091",
+            "action": "app.build",
+            "args": {},
+        }
+        result = subprocess.run(
+            [sys.executable, "-P", "-m", "openstack_platform.helper.main"],
+            input=json.dumps(request),
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        response = json.loads(result.stdout)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "INVALID_ARGS")
+
     def test_namespace_paths_and_diagnostics_come_from_live_shared_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             platform_path = Path(temporary) / "platform.json"

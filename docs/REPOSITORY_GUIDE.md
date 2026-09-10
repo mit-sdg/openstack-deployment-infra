@@ -198,6 +198,7 @@ cross-cutting boundaries.
 - `openstack_platform/helper/actions-v1.txt` — release-bound allowlist of protocol-v1 action names the helper may dispatch.
 - `openstack_platform/helper/application_actions.py` — fixed Nomad deployment, health, promotion, log, removal, and environment handlers.
 - `openstack_platform/helper/main.py` — one-request helper dispatcher plus committed backup/retention evidence handling.
+- `openstack_platform/helper/errors.py` — shared safe exception identity for console and Python module entrypoints.
 - `openstack_platform/helper/nomad.py` — Nomad Variable reads and owner-scoped compare-and-set updates.
 - `openstack_platform/helper/worker_capacity.py` — exact owned Nomad node readiness and allocatable CPU/RAM observations.
 - `openstack_platform/helper/production.py` — lazily constructs concrete production handlers and trusted local service clients.
