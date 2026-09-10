@@ -52,6 +52,7 @@ from . import database as db
 from .application_models import Manifest as Manifest
 from .application_models import Recipe as Recipe
 from .application_models import StorageBinding as StorageBinding
+from .application_models import runtime_file_paths
 from .nomad_jobs import deployment_worker_ids as deployment_worker_ids
 from .nomad_jobs import nomad_candidate_identity as nomad_candidate_identity
 from .nomad_jobs import nomad_job_id as nomad_job_id
@@ -517,7 +518,7 @@ def acquire_github_commit(
 
 
 def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe:
-    """Generate a deterministic Dockerfile from package-script names and pins."""
+    """Generate a pinned recipe, optionally packaging only selected built paths."""
     start_script = script_name(manifest.start_script)
     build_script = None if manifest.build_script is None else script_name(manifest.build_script)
     if (
@@ -549,10 +550,17 @@ def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe
     packages = tuple(relative_path(value, field="package path") for value in manifest.packages)
     if not packages or len(packages) != len(set(packages)):
         raise ValidationError("application packages must be a non-empty unique list")
+    runtime_files = (
+        None if manifest.runtime_files is None else runtime_file_paths(manifest.runtime_files)
+    )
     lines = [
-        f"FROM {image}",
+        f"FROM {image}" + (" AS build" if runtime_files is not None else ""),
         "WORKDIR /app",
-        "COPY --chown=65532:65532 . /app",
+        (
+            'COPY --chown=65532:65532 [".","/app"]'
+            if runtime_files is not None
+            else "COPY --chown=65532:65532 . /app"
+        ),
     ]
     for package in packages:
         workdir = "/app" if package == "." else f"/app/{package}"
@@ -560,6 +568,16 @@ def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe
     lines.append("WORKDIR /app")
     if build is not None:
         lines.append(f"RUN {build}")
+    if runtime_files is not None:
+        # Use the same base, not the build stage: its source, dependency cache
+        # and intermediate layers must not be exported in the runtime image.
+        lines.extend((f"FROM {image}", "WORKDIR /app"))
+        for relative in runtime_files:
+            path = "/app" if relative == "." else f"/app/{relative}"
+            # An exact destination (no trailing slash) handles both files and
+            # directory contents without flattening nested /app-relative paths.
+            operands = json.dumps([path, path], separators=(",", ":"))
+            lines.append(f"COPY --from=build --chown=65532:65532 {operands}")
     lines.extend(
         (
             "ENV NODE_ENV=production",
@@ -570,17 +588,22 @@ def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe
         )
     )
     content = "\n".join(lines).encode()
+    identity_fields: dict[str, Any] = {
+        "generatorVersion": _RECIPE_GENERATOR_VERSION,
+        "runtime": manifest.runtime,
+        "runtimeImage": image,
+        "packages": list(packages),
+        "build": build_script,
+        "start": start_script,
+        "port": manifest.port,
+        "healthPath": health_path(manifest.health_path),
+    }
+    if runtime_files is not None:
+        # Retained full-image recipes keep their exact v2 identity and bytes.
+        identity_fields["generatorVersion"] = 3
+        identity_fields["runtimeFiles"] = list(runtime_files)
     identity = json.dumps(
-        {
-            "generatorVersion": _RECIPE_GENERATOR_VERSION,
-            "runtime": manifest.runtime,
-            "runtimeImage": image,
-            "packages": list(packages),
-            "build": build_script,
-            "start": start_script,
-            "port": manifest.port,
-            "healthPath": health_path(manifest.health_path),
-        },
+        identity_fields,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()

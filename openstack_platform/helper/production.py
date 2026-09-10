@@ -401,6 +401,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                     configuration.start_script,
                     configuration.port,
                     configuration.health_path,
+                    runtime_files=configuration.runtime_files,
                 )
                 recipe = application.generate_recipe(manifest, images)
                 result = application.build_with_disposable_builder(
