@@ -66,6 +66,42 @@ An unavailable live observation does not erase accepted state. Diagnose the
 named dependency before mutation; do not edit SQLite or provider resources to
 make status appear healthy.
 
+## Measure deployment latency
+
+Measure end-to-end latency from the client's POST submission until the operation
+reports `succeeded`, not only from the deployment attempt's `requestedAt`.
+Read-only admission/preflight can precede creation of the domain journal.
+Compare the same source commit, configuration, runtime image, and worker policy
+when assessing a performance change.
+
+The controller emits JSON `operation.started`/`operation.finished` and
+`helper.started`/`helper.finished` events to its systemd journal. Events contain
+the operation UUID, timestamp, fixed helper action, elapsed seconds, and a
+`returned` flag. They exclude request bodies, environment values, provider
+payloads, and exception text. `returned: true` means the call returned without
+raising, **not** that the deployment was accepted; the operation API remains
+authoritative.
+
+On admin, with authorized journal-read access, inspect the relevant time window
+and select one operation's timing events:
+
+```bash
+OPERATION_ID=your-operation-uuid
+journalctl -u "$PLATFORM_NAMESPACE-controller.service" \
+  --since '2026-09-10 00:00:00 UTC' --until '2026-09-11 00:00:00 UTC' \
+  --output=json --no-pager |
+  jq --arg id "$OPERATION_ID" '
+    .MESSAGE | fromjson? | select(type == "object") |
+    select(.operationId == $id) |
+    {event,at,action,elapsedSeconds,returned}'
+```
+
+Replace the example window with the deployment's actual timestamps. BuildKit
+step durations remain in project `GET /v1/deployments/{operationId}/build-log`;
+that log contains application output and must be captured privately. Distinguish
+dependency installation, the configured build script, image-layer export, and
+registry push rather than calling the entire helper interval compilation.
+
 ## Roll back an application
 
 Use the privileged controller Unix API to redeploy a retained successful
