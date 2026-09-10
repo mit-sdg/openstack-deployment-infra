@@ -211,7 +211,9 @@ An operator can opt into `workerStrategy: "reuse"` for an enabled application
 whose dedicated worker is healthy, uses the selected worker role image, and
 has capacity for the existing allocation. This applies to both Node and Bun.
 It preserves the worker UUID, port, primary address, flavor, and CPU/RAM
-allocation. There is no automatic fallback to replacing infrastructure.
+allocation. An existing optional floating IP stays on that same port, including
+while stopped and before the candidate is accepted; this path does not perform
+a post-acceptance IP handover. There is no automatic fallback to replacing infrastructure.
 
 Require matching controller/helper releases and the `worker-reuse-v1`
 capability. The default remains worker replacement. Reuse requires
@@ -269,6 +271,38 @@ primary port, compare the original `portId` and `serverId` with `GET
   remain. Project `POST /v1/applications/{id}/enable` with `{}` and a new key
   restores the accepted artifact on that worker. Explicit disable/delete can
   reclaim the retained worker instead. No database or storage rollback occurs.
+
+### Fence an interrupted same-worker deployment
+
+When a reuse deployment is `recovery_required` and Nomad has lost unwitnessed
+job/allocation records, do not infer process exit or force a new submission.
+An explicit disable can fence the recorded worker instead. **This deletes that
+VM and any ordinary owned port**, preserves a retained primary port and all
+managed data/accepted artifacts, and leaves the application stopped. Use it
+only when abandoning the interrupted candidate is intended.
+
+The request is scoped to the original deployment UUID and needs a **new**
+idempotency key. It is refused for a running/queued original retry, a different
+app/worker, or a candidate already accepted. A separate fence journal reserves
+the application until physical absence and exact job/builder cleanup are
+confirmed; replaying its request cannot delete a later deployment.
+
+```bash
+INTERRUPTED_DEPLOYMENT=your-interrupted-deployment-uuid
+project "http://localhost/v1/operations/$INTERRUPTED_DEPLOYMENT" > interrupted-operation.json
+jq -e '.kind == "app.deploy" and .status == "recovery_required"' interrupted-operation.json >/dev/null
+jq -n --arg id "$INTERRUPTED_DEPLOYMENT" '{interruptedDeploymentId:$id}' > fence.json
+python3 -c 'import uuid; print(uuid.uuid4())' > fence-key.txt
+project -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<fence-key.txt)" --data-binary @- \
+  "$PROJECT_BASE/disable" < fence.json > fence-submitted.json
+```
+
+Poll the fence response's project `statusUrl`. If fencing is interrupted, retry
+that identical disable body/key, **not** the original deployment. Only after the
+fence succeeds may project `POST /v1/applications/{id}/enable` with `{}` and its
+own key restore the accepted artifact on a newly provisioned worker. A normal
+`disable` body `{}` does not take over an unfinished deployment.
 
 Finish or reconcile outstanding operations before rolling back platform
 executables; older controllers do not implement this cutover/recovery policy.

@@ -173,8 +173,10 @@ def reconcile_accepted(
 ) -> None:
     """After durable healthy acceptance, move/verify before predecessor cleanup.
 
-    An unaccepted candidate never gets this address. This is deliberately a
-    forward-only handover, not a floating-IP rollback of a failed candidate.
+    A replacement worker receives the address only after acceptance. Explicit
+    same-worker maintenance preserves its existing association, including while
+    stopped or before the new process is accepted; there is no handover then.
+    This is not a floating-IP rollback of a failed replacement candidate.
     """
     record = get(connection, application_id)
     if record is None:
