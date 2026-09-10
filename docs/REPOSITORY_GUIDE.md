@@ -21,6 +21,8 @@ account, port, path, and protocol constants.
 - `pyproject.toml` — declares the Python package, Python 3.14 requirement, console entry points, dependencies, build settings, and static-tool configuration.
 - `uv.lock` — generated, exact Python dependency resolution used by development, CI, and release inputs.
 
+- `package.json` — temporary root entrypoint for the disposable live Bun acceptance fixture; not a platform deployment wrapper.
+
 ## Example configuration
 
 These files are sanitized schemas/examples. Real inventory and credentials stay
