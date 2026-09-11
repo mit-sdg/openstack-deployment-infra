@@ -164,7 +164,11 @@ class ApplicationService:
                 raise ValidationError("application does not exist")
             deployment = db.get_deployment(self.connection, current.application_id)
             unfinished = db.get_unfinished_operation(self.connection, scope)
-            if not current.desired_running and unfinished is None:
+            if (
+                not current.desired_running
+                and current.worker_server_id is None
+                and unfinished is None
+            ):
                 return ApplicationLifecycleChanged(current.application_id, current.slug, "disabled")
             if deployment is None:
                 if unfinished is not None:

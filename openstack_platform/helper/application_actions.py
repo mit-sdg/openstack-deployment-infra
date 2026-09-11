@@ -403,14 +403,20 @@ def _deploy_handler(
             check=True,
         )
         _synchronize_workload_variable(variable_client, application_slug, job_id)
-        current = _inspected_candidate(
+        inspected = _inspected_job(
             job_id,
             command_runner=command_runner,
             nomad_command=nomad_command,
             timeout_seconds=timeout_seconds,
             response_limit=response_limit,
         )
-        if current is not None and current[1:] == candidate:
+        current = None if inspected is None else inspected_job_identity(inspected, job_id)
+        if (
+            current is not None
+            and current[1:] == candidate
+            and inspected is not None
+            and inspected.get("Stop") is not True
+        ):
             return {
                 "slug": application_slug,
                 "jobId": job_id,
@@ -697,6 +703,74 @@ def _logs_handler(
             "followed": follow,
             "deadlineReached": timed_out,
         }
+
+    return handle
+
+
+def _stop_handler(
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+    sleep: Callable[[float], None],
+) -> Handler:
+    """Quiesce an exact job without purging its allocation/stop evidence.
+
+    Deregistration, DesiredStatus=stop, and ClientStatus=lost do not prove that
+    processes have exited. Only a stopped job with terminal client allocations
+    permits the controller to reuse the host for another application version.
+    """
+
+    def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
+        _exact_args(args, {"slug", "jobId", "candidateJobSha256", "candidateImage"}, "app.stop")
+        application_slug = slug(args["slug"])
+        job_id = args["jobId"]
+        if job_id not in {application_slug, f"{application_slug}-candidate"}:
+            raise ValidationError("Nomad job ID is not an application deployment job")
+        expected = (
+            sha256_hex(args["candidateJobSha256"], field="candidate job SHA-256"),
+            oci_digest_pin(args["candidateImage"], field="candidate image"),
+        )
+        deadline = time.monotonic() + timeout_seconds
+
+        def bounds() -> dict[str, Any]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HelperActionError("STOP_UNCONFIRMED", "allocation stop deadline reached")
+            return dict(
+                command_runner=command_runner,
+                nomad_command=nomad_command,
+                timeout_seconds=remaining,
+                response_limit=65_536,
+            )
+
+        def inspect() -> Mapping[str, Any]:
+            value = _inspected_job(job_id, **bounds())
+            if value is None or inspected_job_identity(value, job_id)[1:] != expected:
+                raise HelperActionError(
+                    "STOP_UNCONFIRMED", "exact job stop identity is unavailable"
+                )
+            return value
+
+        before = inspect()
+        if before.get("Stop") is not True:
+            command_runner(
+                (*nomad_command, "job", "stop", "-detach", "-yes", job_id),
+                timeout_seconds=bounds()["timeout_seconds"],
+                stdout_limit=65_536,
+                stderr_limit=65_536,
+                check=True,
+            )
+        while True:
+            current = inspect()
+            allocations = _allocations(job_id, **bounds())
+            if len(allocations) > 128 or any(item.get("JobID") != job_id for item in allocations):
+                raise HelperActionError("STOP_UNCONFIRMED", "allocation identity is malformed")
+            if current.get("Stop") is True and all(
+                item.get("ClientStatus") in {"complete", "failed"} for item in allocations
+            ):
+                return {"slug": application_slug, "jobId": job_id, "jobStopped": True}
+            sleep(min(1, bounds()["timeout_seconds"]))
 
     return handle
 
@@ -1224,6 +1298,12 @@ def handlers(
             nomad_command=command,
             timeout_seconds=timeout_seconds,
             response_limit=response_limit,
+        ),
+        "app.stop": _stop_handler(
+            command_runner=command_runner,
+            nomad_command=command,
+            timeout_seconds=timeout_seconds,
+            sleep=sleep,
         ),
         "app.remove": _remove_handler(
             variable_client,

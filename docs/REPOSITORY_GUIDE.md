@@ -174,7 +174,8 @@ cross-cutting boundaries.
 - `openstack_platform/controller/deployment_reads.py` — allowlisted immutable configuration and exact per-attempt source repository reads.
 - `openstack_platform/controller/rollback.py` — retained-artifact rollback target validation and compare-and-set review plans.
 - `openstack_platform/controller/deployment_service.py` — coordinates candidate build/deploy/accept/recovery independently of HTTP parsing.
-- `openstack_platform/controller/maintenance.py` — journals and verifies exact accepted predecessor removal after build/preflight, under the deployment's application lock.
+- `openstack_platform/controller/maintenance.py` — journals verified process stop and optional worker removal after build/preflight, under the deployment's application lock.
+- `openstack_platform/controller/worker_reuse.py` — read-only exact accepted-worker identity, image, and capacity validation for same-worker deployments.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
@@ -273,7 +274,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_platform_foundation_validation_config.py` — shared validators plus inventory/policy parsing and rejection tests.
 - `tests/test_platform_host_keys.py` — console fingerprint, keyscan, known-hosts matching, drift, and atomic pin tests.
 - `tests/test_platform_openstack.py` — image selection/pruning and persistent-host power/replacement/recovery provider tests.
-- `tests/test_fixed_ip.py` — retained primary port HTTP/helper/shell lifecycle, drift, compact UUID, maintenance, and lost-response integration tests.
+- `tests/test_fixed_ip.py` — retained primary port HTTP/helper/shell lifecycle, reuse without provider mutation, drift, compact UUID, maintenance, and lost-response integration tests.
+- `tests/test_worker_reuse.py` — opt-in same-worker releases, retained-image rollback, quiescence checkpoints, drift, failure cleanup, and controller restart tests.
 - `tests/test_public_ip.py` — offline floating IPv4 capability, ownership, retry, handover, and release tests.
 - `tests/test_platform_restore.py` — encrypted/plain offline restore validation, operation-state, permissions, and atomicity tests.
 - `tests/test_platform_services.py` — application, deployment, environment, storage, log, and helper-failure service tests.

@@ -171,6 +171,15 @@ class RetainedFixedIPTests(unittest.TestCase):
             elif action == "app.worker.delete":
                 self.fixture.workers.pop(values["applicationId"], None)
             return result
+        if action == "app.stop":
+            job = self.fixture.jobs.get(values["jobId"])
+            if job is None or app.nomad_candidate_identity(job) != (
+                values["candidateJobSha256"],
+                values["candidateImage"],
+            ):
+                raise app.ApplicationError("exact stop identity unavailable")
+            self.fixture.calls.append((action, copy.deepcopy(values)))
+            return {"jobStopped": True}
         if action == "app.manifest.verify":
             return {**values, "available": True}
         if action == "app.env.list":
@@ -195,6 +204,53 @@ class RetainedFixedIPTests(unittest.TestCase):
     def port(self):
         record = service.get(self.connection, self.app_id)
         return self.state()["ports"][record["port_id"]]
+
+    def test_reuse_failure_and_rollback_preserve_primary_ip_without_provider_mutations(self):
+        self.assert_success(self.reserve())
+        first = self.assert_success(self.fixture.deploy())
+        original_port = copy.deepcopy(self.port())
+        original_record = service.get(self.connection, self.app_id)
+        server_id = db.get_application(self.connection, self.app_id).worker_server_id
+        calls = len(self.state()["calls"])
+        base = f"/v1/admin/applications/{self.app_id}"
+        body = {**self.fixture.body, "maintenance": True, "reuseWorker": True, "commit": "b" * 40}
+        self.assert_success(self.fixture.post(base + "/deployments", body))
+        self.fixture.fail_health = True
+        _, failed = self.fixture.post(base + "/deployments", {**body, "commit": "c" * 40})
+        self.assertEqual(failed.status, "failed", failed.safe_error)
+        self.assertEqual(self.fixture.jobs, {})
+        self.fixture.fail_health = False
+        plan = self.fixture.router.dispatch(
+            "GET", base + f"/rollback-plan?deploymentId={first}&reuseWorker=true", {}, None
+        ).body
+        self.assert_success(
+            self.fixture.post(base + "/rollback", {"plan": plan, "confirmation": "commons"})
+        )
+        self.assertEqual(
+            db.get_application(self.connection, self.app_id).worker_server_id, server_id
+        )
+        self.assertEqual(self.port(), original_port)
+        self.assertEqual(service.get(self.connection, self.app_id), original_record)
+        self.assertEqual(set(self.state()["servers"]), {server_id})
+        for command in self.state()["calls"][calls:]:
+            self.assertFalse(
+                set(command)
+                & {"create", "delete", "set", "unset", "resize", "rebuild", "add", "remove"},
+                command,
+            )
+        self.assertEqual(len(self.fixture.jobs), 1)
+
+    def test_reuse_cannot_implicitly_migrate_an_ordinary_worker_to_a_reserved_port(self):
+        self.assert_success(self.fixture.deploy())
+        self.assert_success(self.reserve())
+        before = copy.deepcopy(self.state())
+        _, rejected = self.fixture.post(
+            f"/v1/admin/applications/{self.app_id}/deployments",
+            {**self.fixture.body, "maintenance": True, "reuseWorker": True},
+        )
+        self.assertEqual(rejected.status, "failed")
+        self.assertEqual(self.state(), before)
+        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
 
     def test_helper_uses_fixed_authenticated_openstack_command(self):
         self.assert_success(self.reserve())

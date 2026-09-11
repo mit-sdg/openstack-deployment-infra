@@ -10,7 +10,8 @@ the artifact while the accepted application serves, then stops the exact accepte
 job and worker before starting its replacement. This avoids concurrent application
 processes, but **does not provide zero downtime**: worker boot and application
 startup occur during the cutover. A retained primary IPv4 cannot attach to both
-workers simultaneously.
+workers simultaneously. For routine code updates, [reuse the existing worker](#reuse-the-existing-worker-for-code-updates)
+to avoid VM replacement while retaining its port and IP.
 
 ## Preconditions and access
 
@@ -160,7 +161,58 @@ address/port ownership before deploying. On subsequent deployments, reuse that
 reservation; do not release it or allocate another port. Availability outside an
 automatic allocation pool is proven only by successful reservation.
 
-## Plan and submit one immutable deployment
+## Reuse the existing worker for code updates
+
+Use this opt-in path for an application with an accepted deployment and a ready
+worker, including an already-attached retained primary IPv4. It keeps the exact
+server, port, worker image, flavor, and scheduler allocation. It does not migrate
+an ordinary worker onto a newly reserved port. First deployment, resizing, and
+worker image upgrades use the [replacement path below](#plan-and-submit-a-worker-replacement).
+
+Install matching controller/helper releases through the supported admin-image
+upgrade and take a fresh hosted-controller backup first. The controller must
+advertise `reuse-worker-v1`; its helper must support `app.stop`. Workers need no
+new SSH service or build tools. Do not downgrade the controller with unfinished
+reuse operations or stopped applications whose workers are retained.
+
+Builds still run on isolated builders while the accepted app serves. After
+artifact/storage and exact worker/capacity checks, the controller confirms the
+old Nomad allocations have stopped, removes the old job, and starts the new job
+on the same worker. **There is downtime** for image pulling, process startup,
+and health checks, but no worker deletion/boot wait. Review migration safety;
+this mode does not permit concurrent application versions or roll back data.
+
+Using the protected request directory, application variables, and configuration
+prepared above:
+
+```bash
+jq -e '.features | index("reuse-worker-v1") != null' capabilities.json >/dev/null
+REPOSITORY=https://github.com/your-org/your-app
+COMMIT=your-full-40-character-commit
+REQUESTED_REF=main
+jq -n --arg repository "$REPOSITORY" --arg commit "$COMMIT" \
+  --arg ref "$REQUESTED_REF" --argjson revision "$CONFIGURATION_REVISION" \
+  --slurpfile config configuration.json \
+  '{repository:$repository,commit:$commit,requestedRef:$ref,
+    configurationRevision:$revision,configuration:$config[0],
+    maintenance:true,reuseWorker:true}' > deployment.json
+python3 -c 'import uuid; print(uuid.uuid4())' > deployment-key.txt
+admin -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<deployment-key.txt)" --data-binary @- \
+  "$BASE/deployments" < deployment.json > submitted.json
+STATUS_URL=$(jq -er .statusUrl submitted.json)
+```
+
+Do not include a sizing `plan`, even for the same flavor. Both flags must be
+JSON booleans. Omitted `reuseWorker` preserves the existing replacement behavior;
+reuse validation failure never falls back to creating a different worker.
+Continue with [polling and verification](#poll-and-verify-acceptance), not the
+replacement submission below. Compare the worker server/port UUIDs with the
+baseline and verify the actual outbound source IP and required SMTP connectivity
+from the accepted application. Code updates do not refresh the OS; schedule
+worker replacement separately.
+
+## Plan and submit a worker replacement
 
 Set the repository, exact reviewed commit, branch label, and target flavor.
 Use the existing flavor when retaining sizing; `4200` is this environment's
@@ -196,7 +248,7 @@ STATUS_URL=$(jq -er .statusUrl submitted.json)
 `maintenance` is optional and defaults to false. Only the privileged deployment
 route accepts it. Ordinary rolling deployment is appropriate only when the app
 supports concurrent versions/processes and the network arrangement allows overlap.
-Retained-primary-port deployments require maintenance or an already-disabled app.
+Retained-primary-port replacements require maintenance or an already-disabled app.
 No endpoint implicitly infers single-process safety from an application name.
 
 ## Poll and verify acceptance
@@ -259,8 +311,11 @@ Worker-local files are disposable; managed data is not copied between workers.
   restore the dependency, then repeat the submission command above. A changed
   request/key must not bypass the blocked application scope. Recovery reuses
   retained build/worker evidence when available and rechecks candidate health.
-- **`failed` with confirmed cleanup:** the operation is terminal. Review a new
-  plan/key for a new attempt, or restore the accepted application with project
+- **`failed` with confirmed cleanup:** the operation is terminal. For reuse
+  failures after cutover, the candidate job is removed but the worker remains, the accepted pointer is
+  unchanged, and the application is recorded stopped. Use the same-worker
+  rollback below or submit a new reuse request/key. For replacement, review a
+  new plan/key or restore the accepted application with project
   `POST /v1/applications/{id}/enable`, body `{}`, its own key, then poll.
 - **Lost response:** repeating the same POST/key returns or resumes the existing
   operation. A changed body with that key is a conflict, not a new deployment.
@@ -271,7 +326,36 @@ Capture them privately; application logs can contain sensitive values. There is
 no `GET /v1/admin/deployments/{id}` route. Use the project read above, or filter
 the paginated `GET /v1/admin/deployments` list.
 
-To roll back an **already accepted** deployment for a single-process app:
+### Roll back on the same worker
+
+For a reuse deployment, **do not disable the application first**: explicit disable
+still deletes the worker, including a worker retained after a failed deployment.
+Resolve unfinished operations with their original request/key, confirm database
+compatibility, then obtain a fresh plan. Set `PREVIOUS` to a complete successful
+deployment for this application. After a failed cutover, it may be the still-
+accepted deployment whose process is now stopped.
+
+```bash
+admin "$BASE/rollback-plan?deploymentId=$PREVIOUS&reuseWorker=true" > rollback-plan.json
+jq -n --slurpfile plan rollback-plan.json --arg slug "$SLUG" \
+  '{plan:$plan[0],confirmation:$slug}' > rollback.json
+python3 -c 'import uuid; print(uuid.uuid4())' > rollback-key.txt
+admin -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<rollback-key.txt)" --data-binary @- \
+  "$BASE/rollback" < rollback.json > rollback-submitted.json
+STATUS_URL=$(jq -er .statusUrl rollback-submitted.json)
+```
+
+Poll with the same privileged polling procedure. Verify the accepted artifact,
+application health, and unchanged server/port/IP. This uses the retained image
+without building, keeps current secrets and sizing, and never restores database
+contents. The reviewed plan's `reuseWorker: true` plus slug confirmation authorizes
+the single-process downtime. Missing/drifted worker identity blocks reuse rather
+than provisioning a replacement.
+
+### Roll back by replacing the worker
+
+To roll back an **already accepted** deployment for a single-process app using replacement:
 resolve any unfinished operation first; confirm database compatibility; disable
 through the project API and poll success; then fetch a **fresh** privileged
 `GET "$BASE/rollback-plan?deploymentId=$PREVIOUS"`. Submit

@@ -456,7 +456,11 @@ its disposable port are unchanged. For new source, use explicit
 [`maintenance: true`](APPLICATION_DEPLOYMENTS.md) so the controller builds first
 and disables the predecessor only at cutover. For standalone resize or rollback,
 disable the application before obtaining the plan. Replacements require observed
-predecessor absence and never overlap workers. Enable also refuses to substitute the port while an old
+predecessor absence and never overlap workers. For code-only updates, the opt-in
+[same-worker deployment and rollback](APPLICATION_DEPLOYMENTS.md#reuse-the-existing-worker-for-code-updates)
+keeps the attached server/port/IP and stops only the application, avoiding worker
+boot downtime. It requires a ready existing worker and cannot migrate an ordinary
+worker to a newly reserved port. Enable also refuses to substitute the port while an old
 ordinary worker remains. Existing per-application flavor and scheduler sizing
 remain pinned. After acceptance, verify the same `portId`/`address`, application
 health at its original HTTPS URL, and connectivity to required dependencies.

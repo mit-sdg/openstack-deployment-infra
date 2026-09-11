@@ -241,6 +241,41 @@ class PublicIPTests(unittest.TestCase):
         self.assertEqual(operation.status, "succeeded", operation.safe_error)
         return key
 
+    def test_worker_reuse_keeps_existing_floating_ip_association_without_mutation(self):
+        helper = self.fixture.api.helper_caller
+
+        def wrapped(config, action, values, **bounds):
+            if action == "app.stop":
+                return {"jobStopped": True}
+            if action == "app.manifest.verify":
+                return {**values, "available": True}
+            if action == "app.env.list":
+                return {"keys": []}
+            result = helper(config, action, values, **bounds)
+            if action == "app.worker.create":
+                result["imageId"] = values["workerImageId"]
+            return result
+
+        self.fixture.api.helper_caller = wrapped
+        self.deploy()
+        self.mutate("allocate")
+        before = copy.deepcopy(self.cloud.fips)
+        workers = copy.deepcopy(self.fixture.workers)
+        self.cloud.mutations.clear()
+        self.fixture.calls.clear()
+        _, operation = self.fixture.post(
+            f"/v1/admin/applications/{self.app_id}/deployments",
+            {**self.fixture.body, "reuseWorker": True, "maintenance": True},
+        )
+        self.assertEqual(operation.status, "succeeded", operation.safe_error)
+        self.assertEqual(self.cloud.fips, before)
+        self.assertEqual(self.cloud.mutations, [])
+        self.assertEqual(self.fixture.workers, workers)
+        self.assertFalse(
+            {"app.worker.create", "app.worker.delete"}
+            & {action for action, _ in self.fixture.calls}
+        )
+
     def test_default_deploy_resize_disable_enable_delete_never_contacts_floating_ip_provider(self):
         self.deploy()
         _, operation = self.fixture.resize(self.fixture.plan())
