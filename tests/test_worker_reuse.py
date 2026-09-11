@@ -189,6 +189,30 @@ class WorkerReuseTests(unittest.TestCase):
             self.assertEqual(len(self.f.calls), calls)
         self.no_worker_mutations()
 
+    def test_reuse_cutover_checks_capacity_once_for_deploy_and_rollback(self):
+        previous = self.initial()
+        current = db.get_application(self.connection, self.app_id)
+        allocation = {
+            "cpuMHz": current.scheduler_cpu_mhz,
+            "memoryMiB": current.scheduler_memory_mib,
+        }
+        self.f.body["commit"] = "b" * 40
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback):
+                plan = self.plan(previous) if rollback else None
+                self.f.calls.clear()
+                _, operation = self.rollback(plan) if rollback else self.release()
+                self.success(operation)
+                actions = [action for action, _ in self.f.calls]
+                stopped = actions.index("app.stop")
+                submitted = actions.index("app.deploy", stopped + 1)
+                self.assertEqual(
+                    [a for a in actions[stopped + 1 : submitted] if a.startswith("app.worker.")],
+                    ["app.worker.observe", "app.worker.capacity"],
+                )
+                self.assertEqual(operation.refs["allocation"], allocation)
+                self.no_worker_mutations()
+
     def test_replacement_after_reuse_selects_a_different_worker_not_the_job_named_slot(self):
         self.initial()
         self.success(self.f.deploy()[1])
@@ -284,6 +308,29 @@ class WorkerReuseTests(unittest.TestCase):
                 self.success(self.release(key=key)[1])
                 jobs = copy.deepcopy(self.f.jobs)
                 self.f.calls.clear()
+        self.no_worker_mutations()
+
+    def test_capacity_drop_after_stop_still_blocks_reuse_and_can_recover(self):
+        previous = self.initial()
+        workers = copy.deepcopy(self.f.workers)
+
+        def drop_capacity(action, _values):
+            if action == "app.stop":
+                self.f.capacity_override = (100, 64)
+
+        self.after = drop_capacity
+        key, operation = self.release()
+        self.assertEqual(operation.status, "recovery_required")
+        self.assertTrue(operation.refs["maintenance_stopped"])
+        self.assertNotIn("app.deploy", [action for action, _ in self.f.calls])
+        self.assertEqual(self.f.workers, workers)
+        self.assertEqual(
+            db.get_active_deployment(self.connection, self.app_id).deployment_id, previous
+        )
+        self.after = lambda _action, _values: None
+        self.f.capacity_override = None
+        self.success(self.release(key=key)[1])
+        self.assertEqual(self.f.workers, workers)
         self.no_worker_mutations()
 
     def test_failed_start_preserves_worker_and_can_restore_current_accepted_digest(self):

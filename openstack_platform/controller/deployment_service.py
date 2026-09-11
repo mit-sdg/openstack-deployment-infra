@@ -1861,6 +1861,7 @@ class DeploymentService:
                     helper_caller=self.helper_caller,
                     deadline=selected_deadline,
                 )
+                # observe() already validated capacity against the pinned allocation.
                 worker = worker_reuse.prepared(selected, refs)
             else:
                 worker = _prepare_deployment_worker(
@@ -1879,23 +1880,26 @@ class DeploymentService:
                     refs=refs,
                     deadline=selected_deadline,
                 )
-            capacity = self.helper_caller(
-                self.config,
-                "app.worker.capacity",
-                {"applicationId": worker.refs["worker_application_id"], "slug": application_slug},
-                deadline=selected_deadline,
-            )
-            cpu, memory = sizing.worker_budget(capacity, worker.server_id, spec.worker_flavor)
-            if request.sizing_plan is not None and "allocation" not in refs:
-                # Do not allocate RAM beyond the reviewed provider flavor even
-                # if a malformed guest observation claims additional capacity.
-                ram = request.sizing_plan["flavor"]["ram_mib"]
-                memory = min(memory, ram - sizing.reserve(ram, sizing.MEMORY_RESERVE_MIB))
-                spec = replace(spec, cpu_mhz=cpu, memory_mib=memory)
-            if spec.cpu_mhz > cpu or spec.memory_mib > memory:
-                raise app.ApplicationError(
-                    "pinned allocation exceeds worker capacity after reserve"
+                capacity = self.helper_caller(
+                    self.config,
+                    "app.worker.capacity",
+                    {
+                        "applicationId": worker.refs["worker_application_id"],
+                        "slug": application_slug,
+                    },
+                    deadline=selected_deadline,
                 )
+                cpu, memory = sizing.worker_budget(capacity, worker.server_id, spec.worker_flavor)
+                if request.sizing_plan is not None and "allocation" not in refs:
+                    # Do not allocate RAM beyond the reviewed provider flavor even
+                    # if a malformed guest observation claims additional capacity.
+                    ram = request.sizing_plan["flavor"]["ram_mib"]
+                    memory = min(memory, ram - sizing.reserve(ram, sizing.MEMORY_RESERVE_MIB))
+                    spec = replace(spec, cpu_mhz=cpu, memory_mib=memory)
+                if spec.cpu_mhz > cpu or spec.memory_mib > memory:
+                    raise app.ApplicationError(
+                        "pinned allocation exceeds worker capacity after reserve"
+                    )
             refs = {
                 **worker.refs,
                 "allocation": {"cpuMHz": spec.cpu_mhz, "memoryMiB": spec.memory_mib},
