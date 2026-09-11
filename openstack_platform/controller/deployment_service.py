@@ -1404,7 +1404,10 @@ class DeploymentService:
     def rollback_plan(
         self, application_id: str, deployment_id: str, *, reuse_worker: bool = False
     ) -> dict[str, Any]:
-        deadline = time.monotonic() + min(30, self.config.policy.limits.process_seconds)
+        # Reuse adds sequential provider identity and capacity observations before
+        # the existing storage/artifact checks; a shared 30s budget is too short.
+        plan_seconds = 120 if reuse_worker else 30
+        deadline = time.monotonic() + min(plan_seconds, self.config.policy.limits.process_seconds)
         with runtime.lock(self.state_directory, f"app-{application_id}", deadline=deadline):
             unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
             if unfinished is not None:
