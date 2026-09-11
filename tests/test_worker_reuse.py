@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import unittest
 import uuid
+from dataclasses import replace
 from unittest import mock
 
 from openstack_platform import remote
@@ -315,6 +316,58 @@ class WorkerReuseTests(unittest.TestCase):
             & {a for a, _ in self.f.calls}
         )
         self.no_worker_mutations()
+
+    def test_rollback_plan_budget_covers_sequential_checks_and_respects_policy(self):
+        previous = self.initial()
+        self.success(self.release()[1])
+        for reuse, limit, budget, succeeds in (
+            (True, 300, 120, True),
+            (True, 75, 75, True),
+            (True, 45, 45, False),
+            (False, 300, 30, True),
+            (False, 20, 20, True),
+        ):
+            with self.subTest(reuse=reuse, limit=limit):
+                clock = [100.0]
+                deadlines = []
+                self.f.calls.clear()
+                config = replace(
+                    self.f.config,
+                    policy=replace(
+                        self.f.config.policy,
+                        limits=replace(self.f.config.policy.limits, process_seconds=limit),
+                    ),
+                )
+
+                def slow_read(
+                    config, action, values, *, deadline, clock=clock, deadlines=deadlines
+                ):
+                    deadlines.append(deadline)
+                    clock[0] += {
+                        "app.worker.observe": 27,
+                        "app.worker.capacity": 27,
+                        "app.manifest.verify": 6,
+                    }[action]
+                    if clock[0] >= deadline:
+                        raise TimeoutError("read-only preflight budget exhausted")
+                    return self.helper(config, action, values, deadline=deadline)
+
+                service = DeploymentService(
+                    self.connection, config, self.f.root, helper_caller=slow_read
+                )
+                with mock.patch(
+                    "openstack_platform.controller.deployment_service.time.monotonic",
+                    side_effect=lambda clock=clock: clock[0],
+                ):
+                    if succeeds:
+                        plan = service.rollback_plan(self.app_id, previous, reuse_worker=reuse)
+                        self.assertEqual(plan.get("reuseWorker", False), reuse)
+                    else:
+                        with self.assertRaises(TimeoutError):
+                            service.rollback_plan(self.app_id, previous, reuse_worker=reuse)
+                self.assertTrue(deadlines)
+                self.assertEqual(set(deadlines), {100.0 + budget})
+                self.no_worker_mutations()
 
     def test_rollback_old_version_uses_same_worker_and_current_secrets(self):
         previous = self.initial()

@@ -333,7 +333,10 @@ still deletes the worker, including a worker retained after a failed deployment.
 Resolve unfinished operations with their original request/key, confirm database
 compatibility, then obtain a fresh plan. Set `PREVIOUS` to a complete successful
 deployment for this application. After a failed cutover, it may be the still-
-accepted deployment whose process is now stopped.
+accepted deployment whose process is now stopped. Planning performs sequential live
+worker identity, capacity, storage, and artifact checks. Allow a client timeout
+above its shared 120-second maximum; a lower operator process limit still applies.
+A planning timeout does not authorize disabling the app or skipping those checks.
 
 ```bash
 admin "$BASE/rollback-plan?deploymentId=$PREVIOUS&reuseWorker=true" > rollback-plan.json
