@@ -598,18 +598,25 @@ class ControllerAPI:
     def _rollback_plan(self, request: Request) -> Response:
         if (
             request.body is not None
-            or set(request.query) != {"deploymentId"}
+            or set(request.query) not in ({"deploymentId"}, {"deploymentId", "reuseWorker"})
             or len(request.query["deploymentId"]) != 1
+            or request.query.get("reuseWorker", ("false",)) not in (("true",), ("false",))
         ):
             raise HttpError(
-                400, "INVALID_QUERY", "supply exactly one deploymentId query field and no body"
+                400,
+                "INVALID_QUERY",
+                "supply deploymentId and optional boolean reuseWorker, with no body",
             )
         application = self._application(self._path_uuid(request))
         return Response(
             200,
             DeploymentService(
                 self.connection, self.config, self.state_directory, helper_caller=self.helper_caller
-            ).rollback_plan(application.application_id, request.query["deploymentId"][0]),
+            ).rollback_plan(
+                application.application_id,
+                request.query["deploymentId"][0],
+                reuse_worker=request.query.get("reuseWorker") == ("true",),
+            ),
         )
 
     def _rollback(self, request: Request) -> Response:
@@ -643,7 +650,11 @@ class ControllerAPI:
         if request.body is not None:
             raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
         return Response(
-            200, {"apiVersion": API_VERSION, "features": ["maintenance-after-build-v1"]}
+            200,
+            {
+                "apiVersion": API_VERSION,
+                "features": ["maintenance-after-build-v1", "reuse-worker-v1"],
+            },
         )
 
     def _operator_deployment(self, request: Request) -> Response:
@@ -654,13 +665,22 @@ class ControllerAPI:
             "requestedRef",
             "configurationRevision",
             "configuration",
-            "plan",
         }
-        body = self._body(request, allowed=fields | {"maintenance"}, required=fields)
-        if type(body.get("maintenance", False)) is not bool:
-            raise ValidationError("maintenance consent must be a boolean")
-        if not isinstance(body["plan"], dict):
-            raise ValidationError("sizing plan must be an object")
+        body = self._body(
+            request, allowed=fields | {"plan", "maintenance", "reuseWorker"}, required=fields
+        )
+        if (
+            type(body.get("maintenance", False)) is not bool
+            or type(body.get("reuseWorker", False)) is not bool
+        ):
+            raise ValidationError("maintenance and worker reuse consent must be boolean")
+        if body.get("reuseWorker", False):
+            if body.get("maintenance") is not True or "plan" in body:
+                raise ValidationError(
+                    "worker reuse requires maintenance consent and no sizing plan"
+                )
+        elif not isinstance(body.get("plan"), dict):
+            raise ValidationError("replacement requires a sizing plan object")
         application = self._application(self._path_uuid(request))
         configuration = parse_configuration(body["configuration"])
         return self._external(
@@ -676,8 +696,9 @@ class ControllerAPI:
                     body["configurationRevision"],
                     configuration,
                     key,
-                    body["plan"],
+                    body.get("plan"),
                     maintenance=body.get("maintenance", False),
+                    reuse_worker=body.get("reuseWorker", False),
                 )
             ),
             kind="app.deploy",

@@ -727,7 +727,17 @@ class OperatorIntegrationTests(unittest.TestCase):
             source_commit="a" * 40,
             recipe_hash="b" * 64,
             image_digest=DIGEST,
-            nomad_job='job "demo-app" {\n}',
+            nomad_job=app.render_nomad_job(
+                application_id=APP_ID,
+                application_slug="demo-app",
+                image=DIGEST,
+                manifest=app.Manifest("node", (".",), None, "serve", 8080, "/ready"),
+                platform=configured.platform,
+                cpu_mhz=1000,
+                memory_mib=2048,
+                source_commit="a" * 40,
+                recipe_hash="b" * 64,
+            ),
             nomad_version=3,
             build_log_path="logs/stable.log",
         )
@@ -832,6 +842,8 @@ class OperatorIntegrationTests(unittest.TestCase):
                     "cpuMHz": 1800,
                     "memoryMiB": 3072,
                 }
+            if action == "app.worker.delete":
+                return {"absent": True}
             if action == "app.manifest.delete":
                 if fail_candidate_cleanup[0]:
                     fail_candidate_cleanup[0] = False
@@ -854,6 +866,7 @@ class OperatorIntegrationTests(unittest.TestCase):
             self.assertEqual(recovered.recovered, "candidate-removed")
         self.assertEqual(actions.count("app.build"), 1)
         self.assertEqual(actions.count("app.manifest.delete"), 2)
+        self.assertEqual(actions.count("app.worker.delete"), 1)
         deploy.assert_called_once()
         connection = db.connect(self.state / "platform.sqlite3")
         try:

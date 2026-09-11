@@ -5,6 +5,7 @@ import json
 import unittest
 from collections.abc import Mapping
 from types import SimpleNamespace
+from unittest import mock
 
 from openstack_platform.config import PlatformConfig
 from openstack_platform.controller.application_runtime import (
@@ -149,6 +150,7 @@ class ApplicationActionTests(unittest.TestCase):
                 "app.logs",
                 "app.promote",
                 "app.remove",
+                "app.stop",
                 "app.env.set",
                 "app.env.remove",
                 "app.env.list",
@@ -482,6 +484,13 @@ class ApplicationActionTests(unittest.TestCase):
             )
         )
         self.assertTrue(all(call[1]["stdin"] == job.encode() for call in validation_calls))
+        # An interrupted quiesce can leave the same definition registered but
+        # stopped. Identity equality alone must not suppress re-submission.
+        assert current is not None
+        current["Stop"] = True
+        restarted = actions["app.deploy"]({"slug": "demo-app", "job": job})
+        self.assertTrue(restarted["submitted"])
+        self.assertEqual(submitted, 2)
 
     def test_public_health_rejects_a_nomad_route_outside_the_trusted_domain(self) -> None:
         inspection = {
@@ -1011,6 +1020,94 @@ class ApplicationActionTests(unittest.TestCase):
                 }
             )
         self.assertEqual(len(self.nomad.calls), count)
+
+
+class StopActionTests(unittest.TestCase):
+    def setUp(self):
+        self.variables = FakeVariableClient()
+        self.nomad = FakeNomad(self.variables)
+        self.nomad.allocations[0]["JobID"] = "demo-app"
+        self.clock = 0.0
+        self.statuses = ["running", "complete"]
+        self.args = {
+            "slug": "demo-app",
+            "jobId": "demo-app",
+            "candidateJobSha256": CANDIDATE_SHA,
+            "candidateImage": CANDIDATE_IMAGE,
+        }
+        self.actions = handlers(
+            self.variables,
+            nomad_command=("fixed-nomad-wrapper",),
+            command_runner=self.run_nomad,
+            timeout_seconds=3,
+            sleep=self.sleep,
+        )
+        patch = mock.patch(
+            "openstack_platform.helper.application_actions.time.monotonic",
+            side_effect=lambda: self.clock,
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def sleep(self, seconds):
+        self.clock += seconds
+
+    def run_nomad(self, argv, **bounds):
+        if "stop" in argv:
+            self.nomad.inspection["Stop"] = True
+            self.nomad.allocations[0]["DesiredStatus"] = "stop"
+        if "allocs" in argv and self.statuses:
+            self.nomad.allocations[0]["ClientStatus"] = self.statuses[0]
+            if len(self.statuses) > 1:
+                self.statuses.pop(0)
+        return self.nomad(argv, **bounds)
+
+    def test_stop_waits_for_terminal_clients_and_keeps_evidence_and_variables(self):
+        self.assertTrue(self.actions["app.stop"](self.args)["jobStopped"])
+        self.assertEqual(self.clock, 1)
+        self.assertTrue(self.nomad.inspection["Stop"])
+        commands = [argv for argv, _ in self.nomad.calls]
+        self.assertIn(
+            ("fixed-nomad-wrapper", "job", "stop", "-detach", "-yes", "demo-app"), commands
+        )
+        self.assertFalse(any("-purge" in argv or "purge" in argv for argv in commands))
+        self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
+        self.nomad.calls.clear()
+        self.assertTrue(self.actions["app.stop"](self.args)["jobStopped"])
+        self.assertFalse(any("stop" in argv for argv, _ in self.nomad.calls))
+
+    def test_running_pending_lost_and_unknown_clients_never_count_as_stopped(self):
+        for status in ("running", "pending", "lost", "unknown", None):
+            with self.subTest(status=status):
+                self.clock = 0
+                self.statuses = [status]
+                with self.assertRaisesRegex(HelperActionError, "deadline"):
+                    self.actions["app.stop"](self.args)
+                self.assertEqual(self.clock, 3)
+        self.assertFalse(any("purge" in argv or "-purge" in argv for argv, _ in self.nomad.calls))
+
+    def test_wrong_job_allocation_or_definition_identity_fails_closed(self):
+        self.nomad.inspection["Meta"]["platform_candidate_job_sha256"] = "f" * 64
+        with self.assertRaisesRegex(HelperActionError, "identity"):
+            self.actions["app.stop"](self.args)
+        self.assertFalse(any("stop" in argv for argv, _ in self.nomad.calls))
+        self.nomad.inspection["Meta"]["platform_candidate_job_sha256"] = CANDIDATE_SHA
+        self.nomad.allocations[0]["JobID"] = "unrelated"
+        with self.assertRaisesRegex(HelperActionError, "allocation identity"):
+            self.actions["app.stop"](self.args)
+        self.nomad.inspection["ID"] = "demo-app-candidate"
+        with self.assertRaisesRegex(HelperActionError, "identity"):
+            self.actions["app.stop"](self.args)
+
+    def test_stop_requires_exact_identity_and_no_caller_selected_command(self):
+        for args in (
+            {"slug": "demo-app"},
+            {**self.args, "jobId": "other"},
+            {**self.args, "command": "anything"},
+        ):
+            with self.assertRaises((HelperActionError, ValidationError)):
+                self.actions["app.stop"](args)
+        self.assertEqual(self.nomad.calls, [])
 
 
 if __name__ == "__main__":

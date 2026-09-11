@@ -35,8 +35,14 @@ def target(
 
 
 def plan(
-    connection: sqlite3.Connection, application_id: str, deployment_id: object
+    connection: sqlite3.Connection,
+    application_id: str,
+    deployment_id: object,
+    *,
+    reuse_worker: bool = False,
 ) -> dict[str, Any]:
+    if type(reuse_worker) is not bool:
+        raise ValidationError("worker reuse consent must be boolean")
     application = db.get_application(connection, application_id)
     active = db.get_active_deployment(connection, application_id)
     from .fixed_ip_service import get as get_fixed
@@ -46,15 +52,17 @@ def plan(
     if (
         application is None
         or active is None
-        or (retained is None and not application.desired_running)
+        or (not reuse_worker and retained is None and not application.desired_running)
     ):
         raise ValidationError(
             "rollback requires an enabled application with an accepted deployment"
         )
-    if retained is not None:
+    if retained is not None and not reuse_worker:
         require_maintenance(connection, application_id)
     attempt = target(connection, application_id, deployment_id)
-    if active.deployment_id == attempt.deployment_id:
+    if active.deployment_id == attempt.deployment_id and not (
+        reuse_worker and not application.desired_running
+    ):
         raise ValidationError("rollback target is already the active deployment")
     environment = db.get_environment_revision(connection, application_id)
     if environment is None:
@@ -96,13 +104,22 @@ def plan(
             "portId": retained["port_id"],
             "reservationId": retained["request_id"],
         }
+    if reuse_worker:
+        from .worker_reuse import identity
+
+        projection.update(reuseWorker=True, worker=identity(connection, application_id))
     return {**projection, "fingerprint": db.request_fingerprint(projection)}
 
 
 def validate_plan(connection: sqlite3.Connection, application_id: str, value: object) -> None:
     if not isinstance(value, dict):
         raise ValidationError("rollback plan must be an exact plan response")
-    fresh = plan(connection, application_id, value.get("targetDeploymentId"))
+    fresh = plan(
+        connection,
+        application_id,
+        value.get("targetDeploymentId"),
+        reuse_worker=value.get("reuseWorker", False),
+    )
     # JSON booleans/floats must not compare equal to integer revision/budget fields.
     if db.request_fingerprint(value) != db.request_fingerprint(fresh):
         raise ValidationError("rollback plan drifted; obtain and review a fresh plan")

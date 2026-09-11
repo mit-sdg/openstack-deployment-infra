@@ -146,7 +146,8 @@ supported browser caller today. For a deployment request the controller:
 4. acquires the exact source snapshot and transfers a generated recipe;
 5. runs rootless BuildKit and records the pushed immutable OCI digest;
 6. deletes and verifies the builder and its fixed port;
-7. creates or verifies the application's dedicated worker;
+7. creates the application's dedicated worker, or verifies the exact accepted
+   worker for an opt-in reuse deployment;
 8. submits the generated Nomad job and candidate route;
 9. accepts only after scheduler, application, and public-route health pass; and
 10. removes a failed candidate with bounded cleanup while preserving the prior
@@ -375,10 +376,10 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | `POST /v1/admin/applications/{id}/public-ip` | App-locked `allocate`, `attach`, `release`, or `reconcile`; see [public IPv4 operations](OPERATIONS.md#reserve-a-stable-outbound-ipv4) |
 | `GET /v1/admin/applications/{id}/resize-plan` | Observe a sizing plan; requires one `flavor` query parameter |
 | `POST /v1/admin/applications/{id}/resize` | Apply `{plan, confirmation}` to an accepted app, reusing its OCI artifact; disabled apps require predecessor absence and enable only after healthy acceptance |
-| `GET /v1/admin/applications/{id}/rollback-plan` | Read-only retained-artifact plan; requires exactly one `deploymentId` query parameter |
+| `GET /v1/admin/applications/{id}/rollback-plan` | Read-only retained-artifact plan; requires `deploymentId`, with optional `reuseWorker=true\|false` (default false) |
 | `POST /v1/admin/applications/{id}/rollback` | Apply the exact `{plan, confirmation}` through candidate health and acceptance without a build |
-| `GET /v1/admin/capabilities` | Controller API version and supported feature names; maintenance clients require `maintenance-after-build-v1` |
-| `POST /v1/admin/applications/{id}/deployments` | Deploy with normal deployment fields plus a reviewed `plan`; optional boolean `maintenance` explicitly authorizes build-first, single-process cutover |
+| `GET /v1/admin/capabilities` | Controller API version and supported features: `maintenance-after-build-v1` and `reuse-worker-v1` |
+| `POST /v1/admin/applications/{id}/deployments` | Replacement requires normal deployment fields and a reviewed sizing `plan`; optional boolean `maintenance` authorizes single-process cutover. Reuse instead requires `maintenance:true,reuseWorker:true` and forbids a sizing plan |
 | `GET /v1/admin/operations/{id}` | Poll an operator mutation on the privileged socket |
 | `GET /v1/admin/deployments` | Paginated global deployment list |
 | `GET /v1/admin/storage` | Paginated global storage list |
@@ -396,11 +397,24 @@ traces, secret values, and private operation references are not returned.
 With `maintenance: true`, the accepted process stays enabled during the build
 and artifact/storage preflight. Under the application lock, `maintenance.py`
 journals the predecessor's accepted deployment, job hash/image, placement, server,
-and port before removing it. The worker must be absent before any candidate is
-created. The accepted pointer changes only after healthy acceptance. A retry
-uses the journaled stop checkpoint rather than stopping a newly created candidate.
-The mode is part of the immutable request; it cannot be added to an existing key.
-The project socket cannot request it. See the [curl runbook](APPLICATION_DEPLOYMENTS.md).
+and port before removing it. In replacement mode, the worker must be absent
+before any candidate is created. The accepted pointer changes only after healthy
+acceptance. A retry uses the journaled stop checkpoint rather than stopping a
+newly created candidate. The modes are part of the immutable request; neither
+can be added to an existing key. The project socket cannot request them.
+
+With `reuseWorker: true`, `worker_reuse.py` pins the actual existing image and
+worker identity, preserves sizing, and rechecks readiness/capacity before stop.
+The helper's exact-identity `app.stop` leaves a stopped Nomad job until terminal
+client allocations are confirmed; desired-stop or lost allocations are not proof.
+The controller journals quiescence before purging that job. Failed-candidate
+cleanup also quiesces before purge and never deletes the reused worker. A failed
+cutover leaves the accepted pointer intact and records the app stopped while
+retaining its worker identity. Explicit disable still removes that worker.
+Rollback plans with `reuseWorker=true` bind the worker identity and can restore
+the stopped accepted artifact on the same worker. No provider create/delete or IP
+handover is performed for reuse; OS/flavor changes remain explicit replacements.
+See the [curl runbook](APPLICATION_DEPLOYMENTS.md#reuse-the-existing-worker-for-code-updates).
 
 Renewing an unfinished operation's deadline also marks the new attempt `running`
 and clears the previous safe error. Failure during that attempt records a new
