@@ -178,7 +178,13 @@ reuse operations or stopped applications whose workers are retained.
 Builds still run on isolated builders while the accepted app serves. After
 artifact/storage and exact worker/capacity checks, the controller confirms the
 old Nomad allocations have stopped, removes the old job, and starts the new job
-on the same worker. **There is downtime** for image pulling, process startup,
+on the same worker. New running-to-running reuse operations route the replacement
+directly to the normal hostname after confirmed predecessor stop, without the
+rolling path's preview/promotion cycle. Worker identity and capacity are checked
+together, with fresh validation both before and after stop. These jobs can use
+an exact digest-pinned image already cached on the worker; a cache miss still
+pulls it. No second application process is warmed in advance.
+**There is downtime** for image pulling, process startup,
 and health checks, but no worker deletion/boot wait. Review migration safety;
 this mode does not permit concurrent application versions or roll back data.
 

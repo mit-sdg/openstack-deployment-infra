@@ -751,12 +751,16 @@ def _deploy_and_accept_application(
         deadline=deadline,
     )
     updating = previous is not None
+    direct = worker_reuse.direct_route(worker.refs)
+    needs_promotion = updating and not direct
     previous_job_id = (
         app.nomad_job_id(previous.nomad_job, spec.application_slug) if previous else None
     )
     target_candidate_slot = updating and previous_job_id == spec.application_slug
     route_priority = (
-        max(100, app.nomad_route_priority(previous.nomad_job) + 100) if previous else 100
+        max(100, app.nomad_route_priority(previous.nomad_job) + 100)
+        if previous and needs_promotion
+        else 100
     )
     placement = worker.refs.get("worker_application_id", spec.application_id)
     job = app.render_nomad_job(
@@ -771,8 +775,9 @@ def _deploy_and_accept_application(
         recipe_hash=build.recipe_hash,
         candidate=target_candidate_slot,
         placement_id=placement,
-        staged=updating,
+        staged=needs_promotion,
         route_marker=operation_id,
+        force_pull=not direct,
     )
     promoted_job = (
         app.render_nomad_job(
@@ -792,7 +797,7 @@ def _deploy_and_accept_application(
             route_marker=operation_id,
             route_priority=route_priority,
         )
-        if updating
+        if needs_promotion
         else job
     )
 
@@ -834,9 +839,9 @@ def _deploy_and_accept_application(
         )
 
     try:
-        result = observe(job, preview=updating)
+        result = observe(job, preview=needs_promotion)
         candidate_identity = app.nomad_candidate_identity(job)
-        if updating:
+        if needs_promotion:
             assert previous is not None
             result = app.promote_candidate(
                 spec.application_slug,
@@ -1176,6 +1181,7 @@ def _recover_app_deployment(
         if accepted_job_id not in {application_slug, f"{application_slug}-candidate"}:
             raise app.ApplicationError("healthy deployment recovery job ID was invalid")
         has_predecessor = operation.refs.get("predecessor_job_id") is not None
+        direct = worker_reuse.direct_route(operation.refs)
         recipe_hash = sha256_hex(operation.refs.get("recipe_hash"), field="recipe hash")
         job = app.render_nomad_job(
             application_id=application_id,
@@ -1189,10 +1195,11 @@ def _recover_app_deployment(
             recipe_hash=recipe_hash,
             candidate=accepted_job_id.endswith("-candidate"),
             placement_id=operation.refs.get("worker_application_id", application_id),
-            staged=has_predecessor,
-            promoted=has_predecessor,
+            staged=has_predecessor and not direct,
+            promoted=has_predecessor and not direct,
             route_marker=operation_id,
             route_priority=operation.refs.get("route_priority", 100),
+            force_pull=not direct,
         )
         candidate_identity = app.nomad_candidate_identity(job)
         if (
@@ -1684,6 +1691,21 @@ class DeploymentService:
         def prepare_build(operation: db.Operation) -> app.DeploymentBuild:
             configuration, snapshotted_manifest = snapshot(operation.operation_id)
             if request.reuse_worker:
+                current = db.get_application(self.connection, application_id)
+                if (
+                    operation.phase == "validated"
+                    and current is not None
+                    and current.desired_running
+                ):
+                    # Select before any candidate can exist, not on a retry after
+                    # submission. Old in-flight operations retain their rendering.
+                    operation = db.checkpoint_operation(
+                        self.connection,
+                        operation.operation_id,
+                        phase=operation.phase,
+                        refs={"direct_reuse": True},
+                        merge_refs=True,
+                    )
                 selected = worker_reuse.observe(
                     self.connection,
                     self.config,

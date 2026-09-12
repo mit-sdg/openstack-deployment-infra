@@ -406,7 +406,14 @@ can be added to an existing key. The project socket cannot request them.
 With `reuseWorker: true`, `worker_reuse.py` pins the actual existing image and
 worker identity, preserves sizing, and rechecks readiness/capacity before stop.
 The helper's exact-identity `app.stop` leaves a stopped Nomad job until terminal
-client allocations are confirmed; desired-stop or lost allocations are not proof.
+client allocations are confirmed; empty evidence, desired-stop or lost allocations
+are not proof. `app.worker.capacity` includes the allowlisted worker observation,
+so each readiness/capacity validation needs only one provider lookup sequence.
+New running-to-running operations select `direct_reuse` before building; only
+journaled quiescence and stopped state authorize direct canonical routing and
+`force_pull=false` for the digest-pinned image. Recovery preserves this choice;
+older in-flight operations and already-stopped restorations keep their existing
+preview/promotion rendering. Ordinary rolling jobs remain unchanged.
 The controller journals quiescence before purging that job. Failed-candidate
 cleanup also quiesces before purge and never deletes the reused worker. A failed
 cutover leaves the accepted pointer intact and records the app stopped while
