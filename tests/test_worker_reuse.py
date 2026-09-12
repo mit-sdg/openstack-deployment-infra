@@ -11,6 +11,7 @@ from unittest import mock
 from openstack_platform import remote
 from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
+from openstack_platform.controller import worker_reuse
 from openstack_platform.controller.api import ControllerAPI
 from openstack_platform.controller.deployment_config import parse_configuration
 from openstack_platform.controller.deployment_service import DeploymentRequest, DeploymentService
@@ -208,9 +209,17 @@ class WorkerReuseTests(unittest.TestCase):
                 submitted = actions.index("app.deploy", stopped + 1)
                 self.assertEqual(
                     [a for a in actions[stopped + 1 : submitted] if a.startswith("app.worker.")],
-                    ["app.worker.observe", "app.worker.capacity"],
+                    ["app.worker.capacity"],
                 )
                 self.assertEqual(operation.refs["allocation"], allocation)
+                self.assertEqual(actions.count("app.worker.capacity"), 3)
+                self.assertNotIn("app.worker.observe", actions)
+                self.assertNotIn("app.promote", actions)
+                self.assertEqual(actions.count("app.deploy"), 1)
+                job = next(iter(self.f.jobs.values()))
+                self.assertNotIn("-preview", job)
+                self.assertIn("force_pull      = false", job)
+                self.assertTrue(operation.refs["direct_reuse"])
                 self.no_worker_mutations()
 
     def test_replacement_after_reuse_selects_a_different_worker_not_the_job_named_slot(self):
@@ -370,7 +379,8 @@ class WorkerReuseTests(unittest.TestCase):
         for reuse, limit, budget, succeeds in (
             (True, 300, 120, True),
             (True, 75, 75, True),
-            (True, 45, 45, False),
+            (True, 45, 45, True),
+            (True, 30, 30, False),
             (False, 300, 30, True),
             (False, 20, 20, True),
         ):
@@ -434,12 +444,10 @@ class WorkerReuseTests(unittest.TestCase):
         self.assertNotIn("app.build", [a for a, _ in self.f.calls])
         self.no_worker_mutations()
 
-    def test_lost_stop_remove_submit_and_promotion_responses_recover_without_duplicate_workers(
-        self,
-    ):
+    def test_lost_stop_remove_and_submit_responses_recover_without_duplicate_workers(self):
         self.initial()
         workers = copy.deepcopy(self.f.workers)
-        for action_to_fail in ("app.stop", "app.remove", "app.deploy", "app.promote"):
+        for action_to_fail in ("app.stop", "app.remove", "app.deploy"):
             with self.subTest(action=action_to_fail):
 
                 def lose(action, _values, action_to_fail=action_to_fail):
@@ -455,6 +463,90 @@ class WorkerReuseTests(unittest.TestCase):
                 self.success(self.release(body, key)[1])
                 self.assertEqual(self.f.workers, workers)
                 self.assertEqual(len(self.f.jobs), 1)
+        self.no_worker_mutations()
+
+    def test_direct_route_requires_explicit_mode_and_all_durable_stop_evidence(self):
+        proof = dict.fromkeys(
+            (
+                "direct_reuse",
+                "reuse_worker",
+                "maintenance",
+                "maintenance_quiesced",
+                "maintenance_stopped",
+            ),
+            True,
+        )
+        self.assertTrue(worker_reuse.direct_route(proof))
+        self.assertFalse(worker_reuse.direct_route({}))
+        for field in proof:
+            for value in (False, None, "true", 1):
+                with self.subTest(field=field, value=value):
+                    invalid = {**proof, field: value}
+                    if field == "direct_reuse" and value is False:
+                        self.assertFalse(worker_reuse.direct_route(invalid))
+                    else:
+                        with self.assertRaises(app.ApplicationError):
+                            worker_reuse.direct_route(invalid)
+
+    def test_old_inflight_promoted_job_keeps_its_rendering_during_recovery(self):
+        self.initial()
+
+        def lose(action, _values):
+            if action == "app.promote":
+                self.after = lambda _action, _values: None
+                raise app.ApplicationError("lost legacy promotion response")
+
+        self.after = lose
+        with mock.patch.object(worker_reuse, "direct_route", return_value=False):
+            key, operation = self.release()
+        self.assertEqual(operation.status, "recovery_required")
+        # Reproduce a pre-upgrade journal: its jobs are staged/promoted and the
+        # new rendering selector was never recorded. No live-state repair.
+        refs = dict(operation.refs)
+        del refs["direct_reuse"]
+        db.checkpoint_operation(self.connection, key, phase=operation.phase, refs=refs)
+        self.restart()
+        self.success(self.release(key=key)[1])
+        job = next(iter(self.f.jobs.values()))
+        self.assertIn("-preview", job)
+        self.assertIn("force_pull      = true", job)
+        self.no_worker_mutations()
+
+    def test_old_healthy_checkpoint_preserves_its_generated_job_on_upgrade(self):
+        self.initial()
+        original = db.checkpoint_deployment_attempt
+
+        def fail_accept(*args, **kwargs):
+            if kwargs.get("status") == "succeeded":
+                raise db.DatabaseError("legacy acceptance interrupted")
+            return original(*args, **kwargs)
+
+        with (
+            mock.patch.object(worker_reuse, "direct_route", return_value=False),
+            mock.patch.object(db, "checkpoint_deployment_attempt", side_effect=fail_accept),
+        ):
+            key, operation = self.release()
+        self.assertEqual(operation.phase, "deployment_healthy")
+        jobs = copy.deepcopy(self.f.jobs)
+        refs = dict(operation.refs)
+        del refs["direct_reuse"]
+        db.checkpoint_operation(self.connection, key, phase=operation.phase, refs=refs)
+        self.restart()
+        self.f.calls.clear()
+        self.success(self.release(key=key)[1])
+        self.assertEqual(self.f.jobs, jobs)
+        self.assertNotIn("app.deploy", [a for a, _ in self.f.calls])
+        self.no_worker_mutations()
+
+    def test_direct_route_still_requires_canonical_public_health(self):
+        self.initial()
+        with mock.patch.object(app, "check_public_health", return_value=True) as health:
+            key, operation = self.release()
+        self.success(operation)
+        self.assertGreaterEqual(health.call_count, 2)
+        for call in health.call_args_list:
+            self.assertFalse(call.kwargs.get("preview", False))
+            self.assertEqual(call.kwargs["expected_marker"], key)
         self.no_worker_mutations()
 
     def restart(self):

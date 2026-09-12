@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from typing import Any
 
 from ..config import Config
@@ -64,7 +65,9 @@ def observe(
     current = db.get_application(connection, application_id)
     assert current is not None
     arguments = {"applicationId": selected["slot_id"], "slug": current.slug}
-    worker = helper_caller(config, "app.worker.observe", arguments, deadline=deadline)
+    # Capacity already includes the exact provider observation. Keep one fresh
+    # snapshot, rather than repeating the entire provider lookup in two helpers.
+    worker = helper_caller(config, "app.worker.capacity", arguments, deadline=deadline)
     fields = {
         "serverId": "server_id",
         "serverName": "server_name",
@@ -81,10 +84,28 @@ def observe(
     selected["image_id"] = uuid(worker.get("imageId"), field="reused worker image UUID")
     if expected is not None and selected != expected:
         raise app.ApplicationError("reused worker image drifted")
-    capacity = helper_caller(config, "app.worker.capacity", arguments, deadline=deadline)
-    cpu, memory = sizing.worker_budget(capacity, selected["server_id"], selected["flavor"])
+    cpu, memory = sizing.worker_budget(worker, selected["server_id"], selected["flavor"])
     if selected["cpu_mhz"] > cpu or selected["memory_mib"] > memory:
         raise app.ApplicationError("pinned allocation exceeds reused worker capacity after reserve")
+    return selected
+
+
+def direct_route(refs: Mapping[str, Any]) -> bool:
+    """Old operations keep their rendering; new direct routes require durable stop proof."""
+    selected = refs.get("direct_reuse", False)
+    if type(selected) is not bool or (
+        selected
+        and any(
+            refs.get(key) is not True
+            for key in (
+                "reuse_worker",
+                "maintenance",
+                "maintenance_quiesced",
+                "maintenance_stopped",
+            )
+        )
+    ):
+        raise app.ApplicationError("direct reuse requires confirmed predecessor stop")
     return selected
 
 

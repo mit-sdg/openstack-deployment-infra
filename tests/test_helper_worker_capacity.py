@@ -127,9 +127,17 @@ class ProductionWorkerCapacityTests(unittest.TestCase):
         self.assertEqual(
             response["result"],
             {
-                "nodeId": NODE_ID,
+                "applicationId": self.worker_id,
+                "slug": "commons",
                 "serverId": SERVER_ID,
+                "serverName": self.server_name,
+                "portId": PORT_ID,
+                "portName": f"{self.server_name}-v4",
+                "imageId": REQUEST_ID,
                 "flavorName": "xl.4core",
+                "ready": True,
+                "absent": False,
+                "nodeId": NODE_ID,
                 "cpuMHz": 9000,
                 "memoryMiB": 14400,
                 "totalCpuMHz": 10000,

@@ -52,14 +52,15 @@ def render_nomad_job(
     promoted: bool = False,
     route_marker: str | None = None,
     route_priority: int = 100,
+    force_pull: bool = True,
 ) -> str:
     """Render one stable or isolated candidate Nomad job."""
     identifier = uuid(application_id, field="application ID")
     placement = uuid(placement_id or identifier, field="placement ID")
     marker_id = uuid(route_marker or identifier, field="route marker")
     app_slug = slug(application_slug)
-    if not all(isinstance(value, bool) for value in (candidate, staged, promoted)):
-        raise ValidationError("deployment route selectors must be boolean")
+    if not all(isinstance(value, bool) for value in (candidate, staged, promoted, force_pull)):
+        raise ValidationError("deployment route and pull selectors must be boolean")
     if promoted and not staged:
         raise ValidationError("only a staged job can be route-promoted")
     if isinstance(route_priority, bool) or not 100 <= route_priority <= 1_000_000_000:
@@ -183,7 +184,7 @@ def render_nomad_job(
       config {{
         image           = "{image_pin}"
         ports           = ["http"]
-        force_pull      = true
+        force_pull      = {json.dumps(force_pull)}
         readonly_rootfs = true
         security_opt    = ["no-new-privileges:true"]
         cap_drop        = ["all"]

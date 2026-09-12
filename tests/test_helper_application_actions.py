@@ -1086,6 +1086,14 @@ class StopActionTests(unittest.TestCase):
                 self.assertEqual(self.clock, 3)
         self.assertFalse(any("purge" in argv or "-purge" in argv for argv, _ in self.nomad.calls))
 
+    def test_missing_allocation_evidence_is_not_process_exit_proof(self):
+        self.statuses = []
+        self.nomad.inspection["Stop"] = True
+        self.nomad.allocations = []
+        with self.assertRaisesRegex(HelperActionError, "allocation identity"):
+            self.actions["app.stop"](self.args)
+        self.assertFalse(any("purge" in argv or "-purge" in argv for argv, _ in self.nomad.calls))
+
     def test_wrong_job_allocation_or_definition_identity_fails_closed(self):
         self.nomad.inspection["Meta"]["platform_candidate_job_sha256"] = "f" * 64
         with self.assertRaisesRegex(HelperActionError, "identity"):

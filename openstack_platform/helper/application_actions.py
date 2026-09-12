@@ -764,7 +764,11 @@ def _stop_handler(
         while True:
             current = inspect()
             allocations = _allocations(job_id, **bounds())
-            if len(allocations) > 128 or any(item.get("JobID") != job_id for item in allocations):
+            if (
+                not allocations
+                or len(allocations) > 128
+                or any(item.get("JobID") != job_id for item in allocations)
+            ):
                 raise HelperActionError("STOP_UNCONFIRMED", "allocation identity is malformed")
             if current.get("Stop") is True and all(
                 item.get("ClientStatus") in {"complete", "failed"} for item in allocations

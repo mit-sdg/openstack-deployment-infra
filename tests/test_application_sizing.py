@@ -138,7 +138,9 @@ class ApplicationSizingTests(unittest.TestCase):
             self.workers[values["applicationId"]] = worker
             return worker
         if action == "app.worker.capacity":
-            worker = self.workers[values["applicationId"]]
+            worker = self.workers.get(values["applicationId"])
+            if worker is None:
+                return {"absent": True}
             budget = (
                 sizing.capacity_budget(10000, 16000)
                 if worker["flavorName"] == XL.name
@@ -146,8 +148,7 @@ class ApplicationSizingTests(unittest.TestCase):
             )
             cpu, ram = self.capacity_override or budget
             return {
-                "serverId": worker["serverId"],
-                "flavorName": worker["flavorName"],
+                **worker,
                 "cpuMHz": cpu,
                 "memoryMiB": ram,
             }
