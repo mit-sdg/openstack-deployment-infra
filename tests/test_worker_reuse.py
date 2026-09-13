@@ -104,6 +104,7 @@ class WorkerReuseTests(unittest.TestCase):
             {**self.body(), "reuseWorker": 1},
             {**self.body(), "reuseWorker": "true"},
             {**self.body(), "plan": self.f.plan()},
+            {**self.body(), "acceptedServerId": str(uuid.uuid4())},
         ):
             with self.subTest(body=invalid), self.assertRaises(HttpError):
                 self.release(invalid)
@@ -213,6 +214,13 @@ class WorkerReuseTests(unittest.TestCase):
                 )
                 self.assertEqual(operation.refs["allocation"], allocation)
                 self.assertEqual(actions.count("app.worker.capacity"), 3)
+                for action, values in self.f.calls:
+                    if action == "app.worker.capacity":
+                        self.assertEqual(values["acceptedServerId"], current.worker_server_id)
+                        self.assertEqual(
+                            values["applicationId"],
+                            worker_reuse.identity(self.connection, self.app_id)["slot_id"],
+                        )
                 self.assertNotIn("app.worker.observe", actions)
                 self.assertNotIn("app.promote", actions)
                 self.assertEqual(actions.count("app.deploy"), 1)

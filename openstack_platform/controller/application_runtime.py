@@ -224,6 +224,8 @@ class WorkerObservation:
     image_id: str | None
     flavor_name: str | None
     ready: bool
+    # Provider liveness alone is NOT provisioning or scheduler readiness.
+    provider_active: bool = False
 
     @property
     def absent(self) -> bool:
@@ -1419,6 +1421,7 @@ def parse_worker_observation(
         image_id,
         flavor_name,
         ready,
+        provider_active=server is not None and server["status"] == "ACTIVE",
     )
 
 

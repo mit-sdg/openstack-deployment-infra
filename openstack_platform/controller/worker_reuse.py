@@ -64,7 +64,13 @@ def observe(
         raise app.ApplicationError("reused worker identity or allocation drifted")
     current = db.get_application(connection, application_id)
     assert current is not None
-    arguments = {"applicationId": selected["slot_id"], "slug": current.slug}
+    arguments = {
+        "applicationId": selected["slot_id"],
+        "slug": current.slug,
+        # Only the durable accepted deployment can authorize this read mode;
+        # callers cannot supply a readiness bypass or nominate a new worker.
+        "acceptedServerId": selected["server_id"],
+    }
     # Capacity already includes the exact provider observation. Keep one fresh
     # snapshot, rather than repeating the entire provider lookup in two helpers.
     worker = helper_caller(config, "app.worker.capacity", arguments, deadline=deadline)

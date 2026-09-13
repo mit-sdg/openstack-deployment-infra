@@ -557,6 +557,27 @@ class ProviderCommandTests(unittest.TestCase):
         self.assertEqual(observed.image_id, old_image)
         create_call = next(call for call in calls if "create" in call[0])
         self.assertEqual(create_call[1]["env"], {"NOMAD": "fixed-nomad-wrapper"})
+        payload["ready"] = False
+        for status in ("ACTIVE", "BUILD", "ERROR", "SHUTOFF", "PAUSED", "UNKNOWN", "active", ""):
+            with self.subTest(status=status):
+                payload["server"]["status"] = status
+                observed = parse_worker_observation(
+                    json.dumps(payload),
+                    application_id=APP_ID,
+                    application_slug="demo-app",
+                    prefix="example",
+                )
+                self.assertEqual(observed.provider_active, status == "ACTIVE")
+                self.assertFalse(observed.ready, "provider liveness must not imply readiness")
+        payload.update(server=None, port=None)
+        self.assertFalse(
+            parse_worker_observation(
+                json.dumps(payload),
+                application_id=APP_ID,
+                application_slug="demo-app",
+                prefix="example",
+            ).provider_active
+        )
 
     def test_observations_reject_name_collisions_with_wrong_metadata_or_attachment(self) -> None:
         builder = {

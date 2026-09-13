@@ -409,6 +409,16 @@ The helper's exact-identity `app.stop` leaves a stopped Nomad job until terminal
 client allocations are confirmed; empty evidence, desired-stop or lost allocations
 are not proof. `app.worker.capacity` includes the allowlisted worker observation,
 so each readiness/capacity validation needs only one provider lookup sequence.
+For reuse, the controller derives the helper-only `acceptedServerId` from the
+accepted deployment's recorded worker, not from deployment request fields. That
+exact server must still be Nova `ACTIVE`, with freshly verified provider ownership,
+port attachment, Nomad identity, eligibility, Docker health and capacity. The
+helper can then report readiness without a historical console bootstrap marker,
+which may have expired from Nova's bounded console buffer. Ordinary provisioning
+and observations retain their bootstrap gate; create/delete/observe actions reject
+`acceptedServerId`. Missing accepted identity, provider drift or failed live checks
+still block reuse, including after predecessor stop. No new worker is provisioned
+by this read mode.
 New running-to-running operations select `direct_reuse` before building; only
 journaled quiescence and stopped state authorize direct canonical routing and
 `force_pull=false` for the digest-pinned image. Recovery preserves this choice;

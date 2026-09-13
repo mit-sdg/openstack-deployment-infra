@@ -122,7 +122,11 @@ if a[:2] in (["port", "show"], ["server", "show"]):
         finish(value.get("status", "ACTIVE"))
     finish(value)
 if a[:3] == ["console", "log", "show"]:
-    finish(s["namespace"] + " NixOS Nomad worker provisioning data installed")
+    finish(
+        s["namespace"] + " NixOS Nomad worker provisioning data installed"
+        if s.get("bootstrap_marker", True)
+        else "recent console output no longer contains provisioning history"
+    )
 if a[:2] == ["port", "create"]:
     fault("port.create")
     fixed = (
