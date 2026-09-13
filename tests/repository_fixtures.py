@@ -31,6 +31,10 @@ def clean_repository(source: Path, destination: Path) -> tuple[Path, str]:
         else:
             shutil.copy2(source_path, target)
     subprocess.run(["git", "init", "--quiet"], cwd=destination, check=True)
+    # A test owns this directory only until synchronous cleanup. Git's detached
+    # auto-maintenance must not race that cleanup by writing back into .git.
+    for key, value in (("maintenance.auto", "false"), ("gc.auto", "0")):
+        subprocess.run(["git", "config", "--local", key, value], cwd=destination, check=True)
     subprocess.run(["git", "add", "--all"], cwd=destination, check=True)
     subprocess.run(
         [

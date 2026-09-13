@@ -34,6 +34,35 @@ class ReleaseManifestTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_temporary_repository_does_not_launch_background_git_maintenance(self) -> None:
+        trace = self.root / "git-trace.jsonl"
+        config = self.root / "gitconfig"
+        config.write_text("[maintenance]\n auto = true\n[gc]\n auto = 1\n autoDetach = true\n")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GIT_CONFIG_GLOBAL": str(config),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TRACE2_EVENT": str(trace),
+            },
+        ):
+            repository, commit = clean_repository(ROOT, self.root / "isolated")
+            observed = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(observed.stdout, "")
+        self.assertEqual(len(commit), 40)
+        children = [
+            event.get("argv", [])
+            for line in trace.read_text().splitlines()
+            if (event := json.loads(line)).get("event") == "child_start"
+        ]
+        self.assertFalse(any("maintenance" in args or "gc" in args for args in children), children)
+
     def test_production_signature_binds_every_component_and_evidence_file(self) -> None:
         key = self.root / "key.pem"
         public = self.root / "trust-root.pem"
