@@ -119,7 +119,9 @@ if a[:2] in (["port", "show"], ["server", "show"]):
     if value is None:
         finish(status=1)
     if "value" in a:
-        finish(value.get("status", "ACTIVE"))
+        if s.get("status_probe_failure"):
+            finish(status=1)
+        finish(s.get("status_probe_value", value.get("status", "ACTIVE")))
     finish(value)
 if a[:3] == ["console", "log", "show"]:
     finish(

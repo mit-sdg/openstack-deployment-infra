@@ -243,6 +243,29 @@ class RetainedFixedIPTests(unittest.TestCase):
             )
         self.assertEqual(len(self.fixture.jobs), 1)
 
+    def test_accepted_readiness_does_not_mask_a_failed_or_negative_later_nova_status(self):
+        self.assert_success(self.fixture.deploy())
+        current = db.get_application(self.connection, self.app_id)
+        slot = app.nomad_placement_id(db.get_deployment(self.connection, self.app_id).nomad_job)
+        args = {
+            "applicationId": slot,
+            "slug": "commons",
+            "acceptedServerId": current.worker_server_id,
+        }
+        # The initial full Nova snapshot is ACTIVE; the later status read is
+        # negative or unavailable while Nomad still reports ready. Do not use
+        # the older positive sample to hide either outcome.
+        for mutation in ({"status_probe_value": "SHUTOFF"}, {"status_probe_failure": True}):
+            with self.subTest(mutation=mutation):
+                self.change(
+                    lambda s: s.update(status_probe_value="ACTIVE", status_probe_failure=False)
+                )
+                self.change(
+                    lambda s, mutation=mutation: s.update(bootstrap_marker=False, **mutation)
+                )
+                with self.assertRaisesRegex(ValidationError, "not ready"):
+                    production._provider_app("app.worker.capacity", args)
+
     def test_missing_bootstrap_marker_does_not_relax_ordinary_worker_readiness(self):
         self.assert_success(self.fixture.deploy())
         current = db.get_application(self.connection, self.app_id)

@@ -191,7 +191,7 @@ raise SystemExit(0 if ok else 1)
 }
 
 emit_observation() {
-  local server_json port_json server_id port_id ready=false
+  local server_json port_json server_id port_id ready=false status=""
   server_json=$(mktemp); port_json=$(mktemp)
   server_id=$(server_id_for_name); port_id=$(port_id_for_name)
   if [[ -n $server_id ]]; then
@@ -206,7 +206,10 @@ if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict) or 
     else
       "$OSC" server show "$server_id" -f json -c id -c name -c status -c image -c flavor -c properties >"$server_json"
     fi
-    if [[ $("$OSC" server show "$server_id" -f value -c status) == ACTIVE ]] &&
+    # Preserve the latest liveness evidence, including an unknown result after
+    # failure. Never let the earlier full snapshot hide a newer negative read.
+    status=$("$OSC" server show "$server_id" -f value -c status) || status=""
+    if [[ $status == ACTIVE ]] &&
        "$OSC" console log show --lines 2000 "$server_id" | grep -Fq "$BOOTSTRAP_MARKER"; then ready=true; fi
   else printf 'null' >"$server_json"; fi
   if [[ $ready == true ]]; then
@@ -220,10 +223,10 @@ if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict) or 
       "$OSC" port show "$port_id" -f json -c id -c name -c device_id -c fixed_ips -c description >"$port_json"
     fi
   else printf 'null' >"$port_json"; fi
-  python3 - "$application_id" "$application_slug" "$ready" "$server_json" "$port_json" \
+  python3 - "$application_id" "$application_slug" "$ready" "$status" "$server_json" "$port_json" \
     "$server_name" "$port_name" "$PLATFORM_METADATA_PREFIX" "$port_description" <<'PY'
 import ast,json,os,re,sys,uuid
-application_id,slug,ready,server_path,port_path,server_name,port_name,prefix,description=sys.argv[1:]
+application_id,slug,ready,status,server_path,port_path,server_name,port_name,prefix,description=sys.argv[1:]
 server=json.load(open(server_path)); port=json.load(open(port_path))
 retained=json.loads(os.environ["RETAINED_PORT_JSON"]) if os.environ.get("RETAINED_PORT_JSON") else None
 def provider_id(raw):
@@ -277,7 +280,7 @@ if server is not None:
  expected={f"{prefix}_managed_by":"platform",f"{prefix}_application_id":application_id,f"{prefix}_application_slug":slug}
  if sid is None or field(server,"name") != server_name or any(prop(props,k) != v for k,v in expected.items()):
   raise SystemExit("refusing worker with mismatched full application metadata or managed-by identity")
- server_out={"id":sid,"name":server_name,"status":str(field(server,"status","")),"imageId":image_id(field(server,"image")),"flavorName":flavor(field(server,"flavor")),"managedBy":"platform","applicationId":application_id,"applicationSlug":slug}
+ server_out={"id":sid,"name":server_name,"status":status,"imageId":image_id(field(server,"image")),"flavorName":flavor(field(server,"flavor")),"managedBy":"platform","applicationId":application_id,"applicationSlug":slug}
 port_out=None
 if retained is not None:
  if server_out is not None and field(server,"project_id",field(server,"tenant_id"))!=retained["project_id"]:
