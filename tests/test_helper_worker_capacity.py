@@ -13,6 +13,7 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -50,6 +51,7 @@ class ProductionWorkerCapacityTests(unittest.TestCase):
             REQUEST_ID,
             "xl.4core",
             True,
+            provider_active=True,
         )
         # api.Node and api.NodeListStub in Nomad 2.0.5; extra provider details
         # must not escape the allowlisted helper capacity result.
@@ -100,11 +102,11 @@ class ProductionWorkerCapacityTests(unittest.TestCase):
         payload = json.dumps(value).encode() if not self.malformed_json else SENTINEL.encode()
         return runtime.CommandResult(tuple(argv), 0, payload, b"", self.truncated, False)
 
-    def dispatch(self, extra_args=None):
+    def dispatch(self, extra_args=None, *, action="app.worker.capacity"):
         request = {
             "version": 1,
             "requestId": REQUEST_ID,
-            "action": "app.worker.capacity",
+            "action": action,
             "args": {"applicationId": self.worker_id, "slug": "commons", **(extra_args or {})},
         }
         output = io.BytesIO()
@@ -166,6 +168,38 @@ class ProductionWorkerCapacityTests(unittest.TestCase):
         )
         self.assertEqual(self.calls[0][1]["stdout_limit"], 1_048_576)
 
+    def test_accepted_server_readiness_requires_fresh_provider_and_nomad_evidence(self):
+        self.observe_worker.return_value = replace(self.worker, ready=False)
+        self.assertFalse(self.dispatch()["ok"], "unaccepted workers still require bootstrap")
+        response = self.dispatch({"acceptedServerId": SERVER_ID})
+        self.assertTrue(response["ok"], response)
+        self.assertTrue(response["result"]["ready"])
+        self.assertEqual(response["result"]["serverId"], SERVER_ID)
+        self.assertNotIn("provider_active", response["result"])
+        for mutation in (
+            {"server_id": REQUEST_ID},
+            {"server_id": None, "port_id": None},
+            {"provider_active": False},
+        ):
+            with self.subTest(mutation=mutation):
+                self.observe_worker.return_value = replace(self.worker, **mutation)
+                self.calls.clear()
+                self.assertFalse(self.dispatch({"acceptedServerId": SERVER_ID})["ok"])
+                self.assertEqual(self.calls, [], "must reject before querying Nomad")
+
+    def test_accepted_identity_is_typed_and_cannot_relax_creation_observation_or_deletion(self):
+        for invalid in (None, True, 1, "", "new-worker", SERVER_ID.replace("-", "")):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(self.dispatch({"acceptedServerId": invalid})["ok"])
+        for action in ("app.worker.create", "app.worker.observe", "app.worker.delete"):
+            fields = {"acceptedServerId": SERVER_ID}
+            if action == "app.worker.create":
+                fields.update(workerImageId=REQUEST_ID, standardFlavor="xl.4core")
+            with self.subTest(action=action):
+                self.assertFalse(self.dispatch(fields, action=action)["ok"])
+        self.observe_worker.assert_not_called()
+        self.assertEqual(self.calls, [])
+
     def test_replacement_ignores_only_explicitly_down_registrations(self):
         ready = copy.deepcopy(self.nodes[0])
         stale = {"ID": REQUEST_ID, "Name": self.server_name, "Status": "down"}
@@ -213,10 +247,14 @@ class ProductionWorkerCapacityTests(unittest.TestCase):
             self.node = {**original, **mutation}
             with self.subTest(mutation=mutation):
                 self.assertFalse(self.dispatch()["ok"])
+                self.observe_worker.return_value = replace(self.worker, ready=False)
+                self.assertFalse(self.dispatch({"acceptedServerId": SERVER_ID})["ok"])
+                self.observe_worker.return_value = self.worker
         self.node = original
         for nodes in ([], self.nodes * 2):
             self.nodes = nodes
             self.assertFalse(self.dispatch()["ok"])
+            self.assertFalse(self.dispatch({"acceptedServerId": SERVER_ID})["ok"])
         self.observe_worker.return_value = app.WorkerObservation(
             self.worker_id,
             "commons",

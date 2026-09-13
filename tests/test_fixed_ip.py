@@ -208,6 +208,9 @@ class RetainedFixedIPTests(unittest.TestCase):
     def test_reuse_failure_and_rollback_preserve_primary_ip_without_provider_mutations(self):
         self.assert_success(self.reserve())
         first = self.assert_success(self.fixture.deploy())
+        # Nova's bounded console is not durable provisioning evidence. After
+        # acceptance it may lose the marker, including during stopped recovery.
+        self.change(lambda s: s.update(bootstrap_marker=False))
         original_port = copy.deepcopy(self.port())
         original_record = service.get(self.connection, self.app_id)
         server_id = db.get_application(self.connection, self.app_id).worker_server_id
@@ -239,6 +242,26 @@ class RetainedFixedIPTests(unittest.TestCase):
                 command,
             )
         self.assertEqual(len(self.fixture.jobs), 1)
+
+    def test_missing_bootstrap_marker_does_not_relax_ordinary_worker_readiness(self):
+        self.assert_success(self.fixture.deploy())
+        current = db.get_application(self.connection, self.app_id)
+        slot = app.nomad_placement_id(db.get_deployment(self.connection, self.app_id).nomad_job)
+        self.change(lambda s: s.update(bootstrap_marker=False))
+        args = {"applicationId": slot, "slug": "commons"}
+        self.assertFalse(production._provider_app("app.worker.observe", args)["ready"])
+        with self.assertRaisesRegex(ValidationError, "not ready"):
+            production._provider_app("app.worker.capacity", args)
+        # No accepted identity is supplied by ordinary provisioning. Even a
+        # previously created server cannot skip its bootstrap gate that way.
+        calls = len(self.state()["calls"])
+        with self.assertRaises(app.ApplicationError):
+            production._provider_app(
+                "app.worker.create",
+                {**args, "workerImageId": str(uuid.uuid4()), "standardFlavor": "worker-small"},
+            )
+        self.assertEqual(set(self.state()["servers"]), {current.worker_server_id})
+        self.assertFalse(any("create" in c for c in self.state()["calls"][calls:]))
 
     def test_reuse_cannot_implicitly_migrate_an_ordinary_worker_to_a_reserved_port(self):
         self.assert_success(self.fixture.deploy())

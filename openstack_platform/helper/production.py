@@ -531,6 +531,9 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             {"retained_port": retained_port} if retained_port is not None else {}
         )
         expected = {"applicationId", "slug", "workerImageId", "standardFlavor"}
+        accepted_server_id = None
+        if action == "app.worker.capacity" and "acceptedServerId" in args:
+            accepted_server_id = uuid(args["acceptedServerId"], field="accepted worker server UUID")
         if action == "app.worker.delete":
             if args.keys() not in ({"applicationId", "slug"}, {"applicationId", "slug", "single"}):
                 raise HelperActionError("INVALID_ARGS", "app.worker.delete arguments are invalid")
@@ -541,7 +544,10 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 expected.add("flavorId")
             _exact_args(
                 args,
-                expected if action == "app.worker.create" else {"applicationId", "slug"},
+                expected
+                if action == "app.worker.create"
+                else {"applicationId", "slug"}
+                | ({"acceptedServerId"} if accepted_server_id is not None else set()),
                 action,
             )
         if action == "app.worker.create":
@@ -599,7 +605,15 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
         if action == "app.worker.capacity":
             from .worker_capacity import observe_capacity
 
-            if not worker.ready or worker.server_id is None:
+            # Console history can expire after acceptance. For that exact server
+            # only, require fresh provider liveness plus the full Nomad check
+            # below instead. New/unaccepted workers still need bootstrap proof.
+            ready = (
+                worker.ready
+                if accepted_server_id is None
+                else worker.server_id == accepted_server_id and worker.provider_active is True
+            )
+            if not ready or worker.server_id is None:
                 raise ValidationError("worker is not ready for capacity observation")
             capacity = observe_capacity(
                 platform,
@@ -608,7 +622,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                 worker.server_name,
                 nomad_command=application.provider_command(platform, "nomad")[0],
             )
-            return {**_worker_result(worker), **capacity}
+            return {**_worker_result(worker), **capacity, "ready": True}
         return _worker_result(worker)
     if action == "app.manifest.verify":
         from .registry_artifact import verify_image
