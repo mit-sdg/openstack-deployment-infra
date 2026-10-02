@@ -81,9 +81,13 @@ let
   testPki = pkgs.runCommand "${namespace}-test-pki" { nativeBuildInputs = [ pkgs.openssl ]; } ''
         set -euo pipefail
         install -d -m 0755 "$out"
+        # Python 3.13+ verifies with VERIFY_X509_STRICT, which rejects a CA
+        # certificate without an explicit keyCertSign key usage.
         openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 2 \
           -keyout "$out/ca-key.pem" -out "$out/ca.pem" \
-          -subj "/CN=Platform VM Test CA/O=Platform Tests" >/dev/null 2>&1
+          -subj "/CN=Platform VM Test CA/O=Platform Tests" \
+          -addext "basicConstraints=critical,CA:TRUE" \
+          -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
 
         issue() {
           name=$1
