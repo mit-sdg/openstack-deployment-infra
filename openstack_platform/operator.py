@@ -31,6 +31,8 @@ from .contracts import CONTROLLER_BACKUP_DIRECTORY
 from .controller import application_runtime as app
 from .controller import database as db
 from .controller import status, storage
+from .dashboard import server as dashboard_server
+from .dashboard import sources as dashboard_sources
 from .installation import DEFAULT_OPERATOR_INVENTORY, OPERATOR_ROOT, OPERATOR_STATE
 from .validation import ValidationError, bounded_text, commit, sha256_hex, uuid
 
@@ -41,6 +43,10 @@ EXIT_CONFLICT = 3
 EXIT_UNAVAILABLE = 4
 
 _MAX_LOG_LINES = 2_000
+_DASHBOARD_INTERVAL = (30, 900)
+# Each dashboard refresh bounds one provider call well below the operator's
+# whole-command deadline so a slow cloud cannot stall the refresh loop.
+_DASHBOARD_PROVIDER_SECONDS = 20
 _DEFAULT_STATE = OPERATOR_STATE
 _DEFAULT_PLATFORM = Path(os.environ.get("PLATFORM_CONFIG", str(DEFAULT_OPERATOR_INVENTORY)))
 _ACTIVE_COMMAND_DEADLINE: ContextVar[float | None] = ContextVar(
@@ -90,6 +96,17 @@ def _lines(value: str) -> int:
     return parsed
 
 
+def _dashboard_interval(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("interval must be an integer") from error
+    minimum, maximum = _DASHBOARD_INTERVAL
+    if not minimum <= parsed <= maximum:
+        raise argparse.ArgumentTypeError(f"interval must be from {minimum} through {maximum}")
+    return parsed
+
+
 def _add_global_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--platform-config", type=Path, default=_DEFAULT_PLATFORM)
     parser.add_argument("--state-directory", type=Path, default=_DEFAULT_STATE)
@@ -124,6 +141,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     commands.add_parser("status", help="show accepted state and bounded live availability")
+    dashboard = commands.add_parser(
+        "dashboard", help="serve a read-only status dashboard on a private Unix socket"
+    )
+    dashboard.add_argument(
+        "--socket",
+        type=Path,
+        help="Unix socket to serve (default: STATE_DIRECTORY/run/dashboard.sock)",
+    )
+    dashboard.add_argument(
+        "--interval",
+        type=_dashboard_interval,
+        default=60,
+        help="seconds between platform refreshes (30-900, default 60)",
+    )
     commands.add_parser("backup", help="back up and encrypt controller SQLite state")
     restore_command = commands.add_parser(
         "restore", help="verify and atomically replace controller SQLite state offline"
@@ -357,6 +388,39 @@ def _status_command(connection: sqlite3.Connection, config: Config, *, output: A
                 observations["unhealthy"],
             ),
         ),
+        output=output,
+    )
+
+
+def _dashboard(args: argparse.Namespace, config: Config, *, output: Any) -> None:
+    """Serve the read-only dashboard until interrupted."""
+
+    def read_operator() -> dashboard_sources.OperatorReads:
+        try:
+            with _database(args, deadline=time.monotonic() + 30) as connection:
+                observe = status.infrastructure_observer(
+                    config.platform,
+                    connection,
+                    timeout_seconds=min(
+                        _DASHBOARD_PROVIDER_SECONDS, config.policy.limits.process_seconds
+                    ),
+                )
+                return dashboard_sources.parse_operator_reads(
+                    status.infra_list(connection, observe=observe),
+                    status.incomplete_operations(connection),
+                )
+        except runtime.LockBusy:
+            raise dashboard_sources.SourceError(
+                "operator state is locked by another command"
+            ) from None
+        except (db.DatabaseError, sqlite3.Error, ValidationError, OSError, runtime.RuntimeFailure):
+            raise dashboard_sources.SourceError("operator state could not be read") from None
+
+    dashboard_server.run_operator_dashboard(
+        config,
+        read_operator=read_operator,
+        socket_path=args.socket or args.state_directory / "run" / "dashboard.sock",
+        interval_seconds=args.interval,
         output=output,
     )
 
@@ -1180,6 +1244,11 @@ def dispatch(
         return
     command_started = time.monotonic()
     config = _load_config(args)
+    if args.command == "dashboard":
+        # The dashboard is long-running; it opens short operator-state reads
+        # per refresh instead of holding one command-scoped connection.
+        _dashboard(args, config, output=stdout)
+        return
     deadline = command_started + config.policy.limits.process_seconds
     with _database(args, deadline=deadline) as connection:
         if args.command == "status":
