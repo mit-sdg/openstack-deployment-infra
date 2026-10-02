@@ -190,19 +190,47 @@ class CommonsClient:
 
         def worker() -> None:
             try:
-                # Resolve separately only to name the stalled phase and the
-                # candidate addresses in logs; the connection resolves again.
-                for *_rest, sockaddr in socket.getaddrinfo(
+                candidates = socket.getaddrinfo(
                     parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
-                ):
+                )
+                for *_rest, sockaddr in candidates:
                     if str(sockaddr[0]) not in addresses:
                         addresses.append(str(sockaddr[0]))
                 phase[0] = "connect"
-                connection.connect()
+                # Give each candidate a fair share of the remaining deadline, so
+                # one unreachable address (for example filtered IPv6) cannot
+                # starve the others. TLS then gets whatever time is left.
+                connected = None
+                for index, (family, kind, proto, _name, sockaddr) in enumerate(candidates):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    candidate = socket.socket(family, kind, proto)
+                    candidate.settimeout(remaining / (len(candidates) - index))
+                    try:
+                        candidate.connect(sockaddr)
+                    except OSError as error:
+                        candidate.close()
+                        failure[:] = [describe(error)]
+                        continue
+                    connected = candidate
+                    break
+                if connected is None:
+                    # failure holds the last candidate's connect error.
+                    if not failure:
+                        failure.append("connect-deadline")
+                    if not cancelled.is_set():
+                        result.put_nowait(False)
+                    return
+                phase[0] = "tls"
+                connected.settimeout(max(0.001, deadline - time.monotonic()))
+                connection.sock = self.context.wrap_socket(
+                    connected, server_hostname=parsed.hostname
+                )
                 if not cancelled.is_set():
                     result.put_nowait(True)
             except Exception as error:
-                failure.append(describe(error))
+                failure[:] = [describe(error)]
                 if not cancelled.is_set():
                     result.put_nowait(False)
             finally:

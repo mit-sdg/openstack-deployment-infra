@@ -31,15 +31,14 @@ from tests.test_management import ManagementCase
 
 class IdentityTests(ManagementCase):
     def client(self, **overrides):
+        options = {"connect_seconds": 0.2, "read_seconds": 0.2, **overrides}
         return CommonsClient(
             IdentityConfig(
                 self.config.commons_origin,
                 self.config.identity_socket,
                 development=True,
                 development_ca=self.root / "ca.pem",
-                connect_seconds=0.2,
-                read_seconds=0.2,
-                **overrides,
+                **options,
             )
         )
 
@@ -181,9 +180,13 @@ class IdentityTests(ManagementCase):
     ) -> None:
         client = self.client()
         before = self.commons.calls
-        with patch.object(
-            http.client.HTTPSConnection, "connect", side_effect=lambda: time.sleep(0.5)
-        ):
+        resolve = socket.getaddrinfo
+
+        def slow_resolve(*args, **kwargs):
+            time.sleep(0.5)
+            return resolve(*args, **kwargs)
+
+        with patch.object(socket, "getaddrinfo", side_effect=slow_resolve):
             started = time.monotonic()
             self.assertEqual(
                 client.authenticate({"username": "alice", "password": "p"})[0], "unavailable"
@@ -195,6 +198,41 @@ class IdentityTests(ManagementCase):
             (200, {"ready": True}),
         )
         self.assertEqual(self.commons.calls, before)
+
+    def test_blackholed_first_address_does_not_starve_the_next(self) -> None:
+        # A listener whose accept queue is full silently drops new SYNs, like a
+        # filtered IPv6 path. It is offered first, before the real class app.
+        blackhole = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blackhole.bind(("127.0.0.1", 0))
+        blackhole.listen(0)
+        queued = []
+        for _ in range(4):
+            filler = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            filler.setblocking(False)
+            filler.connect_ex(blackhole.getsockname())
+            queued.append(filler)
+        time.sleep(0.05)
+        resolve = socket.getaddrinfo
+
+        def candidates(host, port, *args, **kwargs):
+            real = resolve(host, port, socket.AF_INET, socket.SOCK_STREAM)
+            dropped = (real[0][0], real[0][1], real[0][2], "", blackhole.getsockname())
+            return [dropped, *real]
+
+        try:
+            client = self.client(connect_seconds=1.0)
+            with patch.object(socket, "getaddrinfo", side_effect=candidates):
+                started = time.monotonic()
+                error, user = client.authenticate(
+                    {"username": "alice", "password": "local-alice-password"}
+                )
+            self.assertIsNone(error)
+            self.assertEqual(user["username"], "alice")
+            self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            for filler in queued:
+                filler.close()
+            blackhole.close()
 
     def test_connection_slot_queues_within_shared_connect_deadline(self) -> None:
         client = self.client()
