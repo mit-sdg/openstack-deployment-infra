@@ -153,7 +153,7 @@ cross-cutting boundaries.
 - `openstack_platform/ingress_credentials.py` — validates per-replacement protected connector-token files and stages ingress user-data without a credential store.
 - `openstack_platform/installation.py` — central definitions of installed filesystem locations used by entry points.
 - `openstack_platform/openstack.py` — bounded provider operations for images and persistent-host power/replacement lifecycle.
-- `openstack_platform/operator.py` — `openstack-platform` command parser and operator-level setup/status/backup/restore/infra orchestration.
+- `openstack_platform/operator.py` — `openstack-platform` command parser and operator-level setup/status/dashboard/backup/restore/infra orchestration.
 - `openstack_platform/recovery_bundle.py` — append-only off-site bundle export, verification, import, discovery, and scheduled-export status.
 - `openstack_platform/release_manifest.py` — deterministic compatibility manifests, SBOM/provenance, signatures, artifact binding, and evidence bundles.
 - `openstack_platform/remote.py` — protocol-v1 request/response validation and pinned local or SSH helper invocation.
@@ -207,6 +207,20 @@ cross-cutting boundaries.
 - `openstack_platform/helper/registry_artifact.py` — bounded read-only manifest and blob availability checks within one application registry repository.
 - `openstack_platform/helper/storage.py` — trusted provider operations for PostgreSQL, MongoDB, and Garage/S3 resources and credentials.
 
+### Read-only operator dashboard
+
+- `openstack_platform/dashboard/__init__.py` — marks and describes the read-only operator dashboard package.
+- `openstack_platform/dashboard/model.py` — pure projection of dashboard evidence into role, application, operation, check, and issue status.
+- `openstack_platform/dashboard/preview.py` — loopback preview that renders synthetic evidence through the production parsers and projection.
+- `openstack_platform/dashboard/server.py` — private Unix-socket HTTP server, static asset allowlist, security headers, and `dashboard` command composition.
+- `openstack_platform/dashboard/service.py` — single-flight refresh loop, last-good source retention, route-check history, and snapshot serialization.
+- `openstack_platform/dashboard/sources.py` — fixed admin reader, strict parsers for privileged and operator reads, and public route probes.
+- `openstack_platform/dashboard/static/dashboard.css` — dashboard layout, light and dark themes, and responsive desktop and mobile styles.
+- `openstack_platform/dashboard/static/dashboard.js` — browser renderer that polls the cached snapshot and builds the view with DOM APIs.
+- `openstack_platform/dashboard/static/favicon.svg` — dashboard browser icon.
+- `openstack_platform/dashboard/static/index.html` — dashboard document shell and icon sprite.
+- `openstack_platform/dashboard/static/theme.js` — applies a saved light or dark preference before first paint.
+
 ## Tests
 
 Fixture applications are deliberately small but executable; JSON provider
@@ -248,6 +262,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_controller_images.py` — hosted image selection CAS, provider validation, recovery, capability, and pinned provisioning tests.
 - `tests/test_controller_recovery.py` — storage-kind recovery, rejected-build terminalization, crash/retry, and privileged polling tests.
 - `tests/test_controller_seed_images.py` — hosted image-seed identity, selection, and idempotence tests.
+- `tests/test_dashboard.py` — dashboard admin reader, parser, probe, status projection, refresh, HTTP security, command, static asset, and release-identity tests.
 - `tests/test_deployment_config.py` — typed deployment configuration and Git branch/ref resolution tests.
 - `tests/test_documentation.py` — documentation links, consolidated reader paths, interface claims, route coverage, and repository-index checks.
 - `tests/test_full_loss_recovery_drill.py` — full and verify-only recovery drill command/evidence/failure-boundary tests.

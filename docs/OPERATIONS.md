@@ -66,6 +66,97 @@ An unavailable live observation does not erase accepted state. Diagnose the
 named dependency before mutation; do not edit SQLite or provider resources to
 make status appear healthy.
 
+## Open the read-only dashboard
+
+The `dashboard` command serves a browser view of the five roles, every hosted
+application, recent operations, and the admin platform-health checks. It has no
+mutation routes. It runs as the owner of `/srv/openstack-platform`, uses the same
+pinned `platform-admin` bridge as `status`, and listens only on a private Unix
+socket. You reach it through an SSH session that logs in as that operator.
+
+The socket admits any process running as the operator account, and the page
+shows global administrator reads. Do not publish it through a tunnel, reverse
+proxy, or shared port: the dashboard has no user authentication of its own.
+
+1. On the management host, start the dashboard as a transient user unit. The
+   unit restarts after a failure but does not return after a host reboot; run
+   the command again after a reboot. It keeps running after you log out only
+   while lingering is enabled for the operator account:
+   `loginctl show-user "$USER" --property=Linger` must print `Linger=yes`.
+
+   ```bash
+   systemd-run --user --unit=openstack-platform-dashboard --collect \
+     --property=Restart=on-failure "$PLATFORM_CLI" dashboard
+   systemctl --user is-active openstack-platform-dashboard
+   ```
+
+   The default socket is `/srv/openstack-platform/state/run/dashboard.sock`.
+   `--interval SECONDS` (30–900, default 60) sets the refresh period. Stop the
+   dashboard with `systemctl --user stop openstack-platform-dashboard`.
+
+2. On your workstation, forward a local port to the socket. Replace
+   `OPERATOR_HOST` with the SSH destination that logs in as the operator, then
+   open `http://localhost:8470`:
+
+   ```bash
+   ssh -N -L 127.0.0.1:8470:/srv/openstack-platform/state/run/dashboard.sock OPERATOR_HOST
+   ```
+
+   Any free local port works. The dashboard rejects requests whose `Host` is not
+   `localhost`, `127.0.0.1`, or `[::1]`.
+
+3. Verify the view. The first refresh can take up to a minute. Afterwards the
+   overview reports `Checked` with a time, and the footer lists `Controller`,
+   `OpenStack`, `Health timer`, and `Public routes` with recent times and green
+   markers. The role and application counts must agree with `$PLATFORM_CLI status`.
+
+Each refresh opens one SSH session to admin. That session sends only `GET`
+requests to the database-backed privileged routes (`capabilities`, `images`,
+`applications`, the two newest pages of `deployments`, `storage`, and the three
+newest pages of `operations`), reads the five-minute platform-health snapshot,
+and checks the controller units. If one of those reads fails, the dashboard
+keeps that section's last successful records and labels their age. It never calls `/v1/admin/status` or `/v1/admin/hosts`, which
+hold the controller's shared API lock while they probe providers and helpers.
+Server state comes from the same operator-state and provider reads as
+`infra list`. Public routes are probed without credentials or redirects. The
+refresh button only wakes the next refresh, at most once every 10 seconds.
+
+Application statuses mean:
+
+| Status | Evidence |
+| --- | --- |
+| Serving | The accepted health path returned 2xx with that deployment's `X-Platform-Deployment` marker (jobs rendered without an explicit marker use the application ID) |
+| Unverified | A 2xx response lacked the marker or named another deployment |
+| Failing | The health path returned another status (including a redirect) or no response |
+| Deploying, Starting, Stopping, Updating | An operation is running for the application; route failures are expected during cutover |
+| Needs recovery | An operation, deployment attempt, or storage resource is `recovery_required`; resume the operation with its original request and key |
+| Not deployed | The application is enabled but has no accepted deployment |
+| Unknown | The route could not be checked: the accepted deployment is older than the 200 newest attempts, or no health path is recorded |
+| Stopped | The application is disabled, so its route is not probed |
+
+A role is `Unverified` when some of its evidence is missing, for example when
+the platform-health timer skipped later checks after an earlier failure. A
+value shown as `Last seen …` comes from the last successful read because the
+current read failed; the failed source also appears under `Needs attention`.
+The health snapshot is stale after 15 minutes. The bars under each health check
+show up to 24 checks made by this dashboard process since it started.
+
+If the page does not show what you expect:
+
+- **`Controller API: Unreachable`:** run `$PLATFORM_CLI status`. If it reports
+  the hosted controller as unavailable, repair the admin bridge or controller
+  before relying on application data; the dashboard keeps the last controller
+  records and labels their age.
+- **`Platform health — Snapshot is stale` or `Snapshot unavailable`:** run
+  `ssh -F "$SSH_CONFIG" platform-admin -- systemctl status "$PLATFORM_NAMESPACE-platform-health.timer"`
+  and repair the timer or its last failed run.
+- **`OpenStack — Server state unavailable`:** run `$PLATFORM_CLI infra list`.
+  `unknown` live states there point to the protected provider wrapper or the
+  OpenStack API.
+- **`Lost contact with the dashboard service`:** the SSH forward or the
+  dashboard process stopped. Check `systemctl --user status
+  openstack-platform-dashboard`, then reconnect the forward.
+
 ## Roll back an application
 
 Use the privileged controller Unix API to redeploy a retained successful

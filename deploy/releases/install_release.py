@@ -778,12 +778,17 @@ def _install_user_units(
         _write_text(destination / name, rendered, 0o600)
 
 
+# Keep identical to openstack_platform.release_manifest.OPERATOR_WHEEL_SUFFIXES;
+# this verifier cannot import candidate code before trust is established.
+_OPERATOR_WHEEL_SUFFIXES = (".py", ".txt", ".html", ".css", ".js", ".svg")
+
+
 def _candidate_wheel_inputs_sha256(source: Path) -> str:
     paths = [source / "pyproject.toml", source / "infra/lib/platform_contract.json"]
     paths.extend(
         path
         for path in (source / "openstack_platform").rglob("*")
-        if path.is_file() and path.suffix in (".py", ".txt")
+        if path.is_file() and path.suffix in _OPERATOR_WHEEL_SUFFIXES
     )
     digest = hashlib.sha256(b"operator-wheel-inputs-v1\0")
     for path in sorted(paths, key=lambda item: item.relative_to(source).as_posix()):

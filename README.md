@@ -21,6 +21,8 @@ Today, an operator can create and recover a platform with:
 - persistent admin, ingress, and storage hosts;
 - replaceable application workers and single-use builders;
 - exact-image and persistent-host lifecycle controls;
+- a read-only operator dashboard for role, application, operation, and
+  platform-health status;
 - separate encrypted backups for controller, operator, broker identity/ownership
   state, and managed data, including retained application images; and
 - a local controller and locally tested owner portal with isolated identity checks.
@@ -38,8 +40,9 @@ contract.
 
 - [Deploy the platform](docs/DEPLOYMENT.md) — what the platform creates, what it
   supports, its security model, setup, ingress, and verification.
-- [Operate and recover it](docs/OPERATIONS.md) — health, backups, off-site
-  export, restore, host replacement, pruning, and troubleshooting.
+- [Operate and recover it](docs/OPERATIONS.md) — health, the read-only
+  dashboard, backups, off-site export, restore, host replacement, pruning, and
+  troubleshooting.
 - [Platform internals](docs/INTERNALS.md) — component ownership, state,
   controller/helper boundaries, internal API, and the owner portal.
 - [Release and platform maintenance](docs/MAINTENANCE.md) — signed releases,

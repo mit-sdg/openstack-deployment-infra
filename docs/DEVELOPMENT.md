@@ -44,6 +44,23 @@ uv run python -m compileall -q openstack_platform deploy infra tests
 Vulture succeeds silently when it finds no code at or above the configured
 confidence threshold.
 
+## Preview the operator dashboard
+
+Serve the dashboard with synthetic evidence, then open `http://localhost:8470`:
+
+```sh
+uv run python -m openstack_platform.dashboard.preview --scenario mixed
+```
+
+The preview listens on loopback TCP, reads only
+`config/platform.example.json`, and never contacts OpenStack or an admin host.
+Its fixtures pass through the production parsers and status rules. Scenarios
+are `mixed` (the default), `healthy`, `outage`, `unreachable` (admin reads fail
+after the first refresh), and `empty`. `--port`, `--interval`, and `--delay`
+(seconds added to each refresh, for the loading state) adjust it. The preview
+re-reads `openstack_platform/dashboard/static/` on every request; restart it
+after Python changes.
+
 ## Run shell and document checks
 
 Bash syntax can be checked without provider credentials:
