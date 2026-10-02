@@ -198,7 +198,7 @@ let
       ${packages.controllerPackage}/bin/openstack-platform-controller-seed-images \
       --platform-config /etc/${namespace}/platform.json \
       --state-directory ${controllerState} \
-      --manifest "$image_seed"
+      --manifest ${lib.escapeShellArg controllerImageSelections}
   '';
 in
 {
