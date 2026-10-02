@@ -864,6 +864,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _inventory_path(path: Path) -> Path:
+    """Resolve the NixOS /etc inventory symlink, as the controller does.
+
+    On the admin image /etc/<namespace>/platform.json links into the read-only
+    store, and the direct-file loader would otherwise refuse it.
+    """
+    return path.resolve(strict=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -894,13 +903,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"offsite-import={result} verified=true")
         elif args.command == "scheduled-export":
             result = scheduled_export(
-                args.platform_config,
+                _inventory_path(args.platform_config),
                 args.config,
                 args.receipt,
             )
             print(f"offsite-scheduled-export={result.name} verified=true")
         else:
-            value = recovery_status(args.platform_config, args.config, args.receipt)
+            value = recovery_status(
+                _inventory_path(args.platform_config), args.config, args.receipt
+            )
             print(json.dumps(value, sort_keys=True, separators=(",", ":")))
         return 0
     except (RecoveryBundleError, ValidationError, OSError) as error:
