@@ -59,6 +59,7 @@
         storage-image = configurations.storage.config.system.build.openstackImage;
         worker-image = configurations.worker.config.system.build.openstackImage;
         builder-image = configurations.builder.config.system.build.openstackImage;
+        root-path-preflight = rolePackages.rootPathPreflight;
         inherit (rolePackages)
           age
           python

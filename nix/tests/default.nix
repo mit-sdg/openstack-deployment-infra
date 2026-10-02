@@ -77,7 +77,7 @@ let
         ["${pkgs.podman}/bin/podman", "unshare", "${pkgs.coreutils}/bin/true"],
         check=True, capture_output=True, timeout=30,
     )
-    loaded = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "storage-bootstrap"
+    loaded = Path("${state}/operator/secrets/storage-bootstrap.env")
     private = Path("/run/${namespace}-backup-private/storage-bootstrap.env")
     assert _runtime_paths()[0] == private
     assert private.read_bytes() == loaded.read_bytes()
@@ -165,7 +165,7 @@ let
 
           systemd.services = lib.mkMerge [
             (lib.mkIf (role == "admin") {
-              # Exercise the real backup unit's User, Environment, LoadCredential
+              # Exercise the real backup unit's User, Environment, private copy
               # and source guards without contacting any managed service.
               "${namespace}-platform-backup".serviceConfig.ExecStart =
                 lib.mkForce "${packages.python}/bin/python ${registryBackupCredentialProbe}";
@@ -353,7 +353,7 @@ let
               machine.succeed("! grep -R -a -F controller-secret ${state}/controller ${backups}/${constants.directories.controllerBackup}")
               machine.succeed("systemctl show ${namespace}-controller.service nomad.service -p LimitCORE --value | grep -vFx infinity")
               machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
-              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'LoadCredential=storage-bootstrap:${root}/secrets/storage-bootstrap.env'")
+              machine.succeed("! systemctl cat ${namespace}-platform-backup.service | grep -F 'LoadCredential='")
               machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'REGISTRY_BACKUP_SECRETS=%t/${namespace}-backup-private/storage-bootstrap.env'")
               machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/registry-backup-probe-ran && rm ${state}/operator/status/registry-backup-probe-ran")
               machine.succeed("test $(stat -c %U:%G:%a ${root}/secrets/storage-bootstrap.env) = agentops:platform-controller:640")

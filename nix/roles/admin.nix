@@ -119,7 +119,7 @@ let
       --platform-config ${platformJson} \
       "''${recovery_arguments[@]}" \
       --yes
-    ${pkgs.coreutils}/bin/rm -f -- "$input"
+    ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input"
   '';
 
   openstackClient = pkgs.writeShellScriptBin "platform-openstack" ''
@@ -186,67 +186,13 @@ let
       BUILDER_OPERATOR_PUBLIC_KEY=${root}/secrets/builder_operator_ed25519.pub \
       ${infra}/openstack/builder_lifecycle.sh "$@"
   '';
+  hostPaths = pkgs.writeShellScript "${namespace}-host-paths" ''
+    exec ${packages.platformPython}/bin/python -I -B ${../../openstack_platform/host_paths.py} "$@"
+  '';
   prepareController = pkgs.writeShellScript "${namespace}-prepare-controller" ''
     set -euo pipefail
 
-    policy_source=${lib.escapeShellArg operatorPolicy}
-    policy=${lib.escapeShellArg controllerPolicy}
-    image_source=${lib.escapeShellArg operatorImageSelections}
-    image_seed=${lib.escapeShellArg controllerImageSelections}
-    test -f "$policy_source" && test ! -L "$policy_source"
-    test "$(stat -c %U:%a "$policy_source")" = ${operatorAccount.name}:600
-    test -f "$image_source" && test ! -L "$image_source"
-    test "$(stat -c %U:%a "$image_source")" = ${operatorAccount.name}:600
-    install -m 0600 -o ${controllerUser} -g ${controllerGroup} \
-      "$policy_source" "$policy"
-    install -m 0600 -o ${controllerUser} -g ${controllerGroup} \
-      "$image_source" "$image_seed"
-
-    normalize_private() {
-      path=$1
-      test -f "$path" && test ! -L "$path"
-      identity=$(stat -c %U:%G:%a "$path")
-      case "$identity" in
-        ${operatorAccount.name}:${operatorAccount.name}:600|${operatorAccount.name}:${controllerGroup}:640) ;;
-        *) echo "controller credential ownership or mode is invalid" >&2; exit 1 ;;
-      esac
-      chgrp ${controllerGroup} "$path"
-      chmod 0640 "$path"
-    }
-
-    # Keep credentials operator-owned while granting only the dedicated
-    # controller group read/traverse access. Accept both the initial transfer
-    # mode and the already-prepared mode so path activation and reboot repeat.
-    tree=${lib.escapeShellArg "${operatorRoot}/secrets"}
-    test -d "$tree" && test ! -L "$tree"
-    case "$(stat -c %U:%G:%a "$tree")" in
-      ${operatorAccount.name}:${operatorAccount.name}:700|${operatorAccount.name}:${controllerGroup}:750) ;;
-      *) echo "controller credential directory ownership or mode is invalid" >&2; exit 1 ;;
-    esac
-    chgrp ${controllerGroup} "$tree"
-    chmod 0750 "$tree"
-    for name in openstack.env nomad-tokens.env storage-bootstrap.env builder_operator_ed25519; do
-      normalize_private "$tree/$name"
-    done
-    public_key="$tree/builder_operator_ed25519.pub"
-    test -f "$public_key" && test ! -L "$public_key"
-    test "$(stat -c %U:%a "$public_key")" = ${operatorAccount.name}:644
-
-    provisioning="$tree/provisioning-pki"
-    test -d "$provisioning" && test ! -L "$provisioning"
-    case "$(stat -c %U:%G:%a "$provisioning")" in
-      ${operatorAccount.name}:${operatorAccount.name}:700|${operatorAccount.name}:${controllerGroup}:750) ;;
-      *) echo "provisioning credential directory ownership or mode is invalid" >&2; exit 1 ;;
-    esac
-    chgrp ${controllerGroup} "$provisioning"
-    chmod 0750 "$provisioning"
-    normalize_private "$provisioning/nomad-cli-key.pem"
-    normalize_private "$provisioning/nomad-worker-key.pem"
-    for name in internal-ca.pem nomad-cli.pem nomad-worker.pem; do
-      path="$provisioning/$name"
-      test -f "$path" && test ! -L "$path"
-      test "$(stat -c %U:%a "$path")" = ${operatorAccount.name}:644
-    done
+    ${hostPaths} apply --plan ${packages.rootPathPlan}
 
     ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- \
       ${packages.controllerPackage}/bin/openstack-platform-controller-seed-images \
@@ -334,6 +280,7 @@ in
     packages.python
     packages.platformPython
     packages.releaseInstaller
+    packages.rootPathPreflight
     openstackClient
     nomadCli
     workerCli
@@ -407,8 +354,7 @@ in
     "d ${backups} 0710 ${operatorAccount.name} ${controllerGroup} -"
     "d ${controllerBackupRoot} 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${controllerBackupRoot}/.staging 0700 ${operatorAccount.name} ${operatorAccount.name} -"
-    "d ${hostedControllerBackupRoot} 0750 ${controllerUser} ${operatorAccount.name} -"
-    "d ${hostedControllerBackupRoot}/.staging 0750 ${controllerUser} ${operatorAccount.name} -"
+    "d ${hostedControllerBackupRoot} :0750 :${controllerUser} :${operatorAccount.name} -"
     "L+ ${root}/persistent - - - - ${operatorRoot}"
     "d ${root}/bin 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "L+ ${root}/infra - - - - ${infra}"
@@ -867,7 +813,7 @@ in
       Environment = [
         "AGE=${pkgs.age}/bin/age"
         "AGE_KEYGEN=${pkgs.age}/bin/age-keygen"
-        "AGE_KEY=%d/backup-age-key"
+        "AGE_KEY=${operatorRoot}/secrets/backup-age-key.txt"
         "PLATFORM_CONFIG=/etc/${namespace}/platform.json"
         "BACKUP_ROOT=${backups}/${namespace}"
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
@@ -892,18 +838,14 @@ in
       ExecStartPre = [
         "${credentialGuard} ${root}/persistent/secrets/backup-age-key.txt ${operatorAccount.name}"
         "${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env"
-        "${pkgs.coreutils}/bin/install -m 0600 %d/storage-bootstrap %t/${namespace}-backup-private/storage-bootstrap.env"
+        "${pkgs.coreutils}/bin/install -m 0600 ${operatorRoot}/secrets/storage-bootstrap.env %t/${namespace}-backup-private/storage-bootstrap.env"
       ];
       RuntimeDirectory = "${namespace}-backup-private";
       RuntimeDirectoryMode = "0700";
       UMask = "0077";
-      # systemd may grant credential access with ACLs (mode 0440, root-owned).
-      # Stage an owner-only copy in a service-lifetime private runtime directory
-      # rather than weakening the registry parser or changing shared source modes.
-      LoadCredential = [
-        "backup-age-key:${root}/persistent/secrets/backup-age-key.txt"
-        "storage-bootstrap:${root}/secrets/storage-bootstrap.env"
-      ];
+      # Read operator-controlled inputs as the operator. Root must not copy
+      # an attacker-selected source into credentials accessible to this UID.
+      # The registry parser still gets a private mode-0600 runtime copy.
       LimitCORE = 0;
       ExecStart = "${infra}/backup/run_platform_backup.sh";
     };

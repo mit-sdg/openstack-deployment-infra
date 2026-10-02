@@ -93,6 +93,28 @@ let
     ps.pymongo
   ]);
 
+  rootPathPlan = pkgs.writeText "${platform.namespace}-controller-path-plan.json" (
+    builtins.toJSON (
+      import ../lib/controller-paths.nix {
+        inherit platform;
+        constants = import ../lib/constants.nix;
+      }
+    )
+  );
+  rootPathPreflight = pkgs.symlinkJoin {
+    name = "${platform.namespace}-root-path-preflight";
+    paths = [
+      (pkgs.writeShellScriptBin "openstack-platform-root-path-preflight" ''
+        exec ${platformPython}/bin/python -I -B ${../../openstack_platform/host_paths.py} preflight --plan ${rootPathPlan} "$@"
+      '')
+      (pkgs.runCommand "${platform.namespace}-root-path-review-files" { } ''
+        mkdir -p "$out/share/root-path-preflight"
+        cp ${../../openstack_platform/host_paths.py} "$out/share/root-path-preflight/host_paths.py"
+        cp ${rootPathPlan} "$out/share/root-path-preflight/controller-path-plan.json"
+      '')
+    ];
+  };
+
   controllerPackage = pkgs.python314Packages.buildPythonApplication {
     pname = "openstack-platform-controller";
     version = "0.1.0";
@@ -165,6 +187,8 @@ in
     buildkit
     python
     platformPython
+    rootPathPlan
+    rootPathPreflight
     controllerPackage
     releaseInstaller
     helperLauncher
