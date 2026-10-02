@@ -1,0 +1,463 @@
+"""Project-socket double with immutable source and deterministic fault fixtures."""
+
+from __future__ import annotations
+
+import os
+import socket
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from ...controller.deployment_config import parse_configuration
+from ...controller.http import (
+    ControllerRequestHandler,
+    ControllerServer,
+    HttpError,
+    Request,
+    Response,
+    Router,
+)
+from ...validation import ValidationError, slug, uuid
+from ..common import canonical, digest, strict_json, utc
+
+
+class FakeController:
+    def __init__(self, state_file: Path | None = None) -> None:
+        self.apps: dict[str, dict[str, Any]] = {}
+        self.deployments: dict[str, dict[str, Any]] = {}
+        self.operations: dict[str, dict[str, Any]] = {}
+        self.keys: dict[str, tuple[str, Response]] = {}
+        self.calls: list[tuple[str, str, str | None]] = []
+        self.lock = threading.RLock()
+        self.drop_next = False
+        self.failed_next = False
+        self.recovery_next = False
+        self.delay = 0.6
+        self.error_next: tuple[int, str] | None = None
+        self.state_file = state_file
+        if state_file is not None and state_file.is_file():
+            if state_file.is_symlink() or state_file.stat().st_size > 1048576:
+                raise ValueError("invalid fake controller state")
+            saved = strict_json(state_file.read_bytes())
+            self.apps, self.deployments, self.operations = (
+                saved["apps"],
+                saved["deployments"],
+                saved["operations"],
+            )
+            self.keys = {
+                key: (
+                    value["fingerprint"],
+                    Response(value["status"], value["body"], value.get("headers")),
+                )
+                for key, value in saved["keys"].items()
+            }
+            # Upgrade only old local fixture checkpoints to the audited wire
+            # projection. No controller or broker product records are adopted.
+            for app in self.apps.values():
+                app.setdefault(
+                    "sizing", {"workerFlavor": "worker-small", "cpuMHz": 500, "memoryMiB": 512}
+                )
+                app["live"].setdefault("available", True)
+                app["live"]["checkedAt"] = utc(app["live"].get("checkedAt"))
+                if app.get("deployment"):
+                    app["deployment"].setdefault(
+                        "imageDigest", "registry.example.com/app@sha256:" + "a" * 64
+                    )
+                    app["deployment"].setdefault("nomadVersion", 1)
+                    app["deployment"].setdefault(
+                        "lastHealthyAt", app["deployment"].get("acceptedAt")
+                    )
+            for item in self.deployments.values():
+                for name in ("requestedAt", "updatedAt", "acceptedAt", "lastHealthyAt"):
+                    item[name] = utc(item.get(name))
+                item["snapshotKind"] = "strict"
+                item.setdefault("environmentRevision", 0)
+                item.setdefault("recipeHash", None)
+                item.setdefault("nomadVersion", None)
+                if item.get("cleanupState") == "complete":
+                    item["cleanupState"] = "confirmed"
+            for item in self.operations.values():
+                item.setdefault("kind", "app.deploy")
+                item.setdefault("startedAt", utc(item.get("updatedAt")))
+                item.setdefault("deadlineAt", None)
+                item.setdefault("safeError", None)
+                item["updatedAt"] = utc(item.get("updatedAt"))
+                if item.get("cleanupState") == "complete":
+                    item["cleanupState"] = "confirmed"
+
+    def persist(self) -> None:
+        if self.state_file is None:
+            return
+        value = {
+            "apps": self.apps,
+            "deployments": self.deployments,
+            "operations": self.operations,
+            "keys": {
+                key: {
+                    "fingerprint": fp,
+                    "status": response.status,
+                    "body": response.body,
+                    "headers": response.headers,
+                }
+                for key, (fp, response) in self.keys.items()
+            },
+        }
+        temporary = self.state_file.with_suffix(".candidate")
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+        )
+        try:
+            with os.fdopen(descriptor, "w") as stream:
+                stream.write(canonical(value))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.state_file)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def router(self) -> Router:
+        router = Router()
+        routes = [
+            ("POST", "/v1/applications", self.create),
+            ("GET", "/v1/applications/{app}", self.app),
+            ("POST", "/v1/applications/{app}/deployments", self.deploy),
+            ("GET", "/v1/applications/{app}/deployments", self.history),
+            ("GET", "/v1/deployments/{deployment}", self.deployment),
+            ("GET", "/v1/deployments/{deployment}/build-log", self.log),
+            ("GET", "/v1/operations/{operation}", self.operation),
+        ]
+        for method, path, handler in routes:
+
+            def locked(request: Request, handler: Any = handler) -> Response:
+                with self.lock:
+                    self.calls.append(
+                        (request.method, request.path, request.headers.get("idempotency-key"))
+                    )
+                    if self.error_next:
+                        status, code = self.error_next
+                        self.error_next = None
+                        raise HttpError(
+                            status,
+                            code,
+                            "Fixture dependency unavailable.",
+                            retryable=status >= 500,
+                            operation_id="00000000-0000-4000-8000-000000000001"
+                            if code == "OPERATION_CONFLICT"
+                            else None,
+                        )
+                    try:
+                        for identifier in request.path_parameters.values():
+                            uuid(identifier)
+                        return handler(request)  # type: ignore[no-any-return]
+                    except ValidationError:
+                        raise HttpError(
+                            400, "INVALID_REQUEST", "Request validation failed."
+                        ) from None
+
+            router.add(method, path, locked)
+        return router
+
+    def server(self, path: Path) -> ControllerServer:
+        fixture = self
+
+        class FaultHandler(ControllerRequestHandler):
+            def _write(self, response: Response, correlation_id: str) -> None:
+                if self.command == "POST" and self.path.endswith("/deployments"):
+                    with fixture.lock:
+                        drop = fixture.drop_next
+                        fixture.drop_next = False
+                    if drop:
+                        self.close_connection = True
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        return
+                super()._write(response, correlation_id)
+
+        server = ControllerServer(str(path), self.router())
+        server.RequestHandlerClass = FaultHandler
+        return server
+
+    def replay(self, request: Request) -> Response | None:
+        key = request.idempotency_key()
+        fingerprint = digest(
+            canonical({"method": request.method, "path": request.path, "body": request.body})
+        )
+        found = self.keys.get(key)
+        if found and found[0] != fingerprint:
+            raise HttpError(409, "IDEMPOTENCY_CONFLICT", "Changed request under the same key.")
+        return None if found is None else found[1]
+
+    def remember(self, request: Request, response: Response) -> Response:
+        self.keys[request.idempotency_key()] = (
+            digest(
+                canonical({"method": request.method, "path": request.path, "body": request.body})
+            ),
+            response,
+        )
+        self.persist()
+        return response
+
+    def create(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay:
+            return replay
+        body = self.body(request, {"slug"})
+        slug(body["slug"])
+        if any(app["slug"] == body["slug"] for app in self.apps.values()):
+            raise HttpError(400, "INVALID_REQUEST", "Application already exists.")
+        identifier = request.idempotency_key()
+        app = {
+            "applicationId": identifier,
+            "slug": body["slug"],
+            "url": f"https://{body['slug']}.apps.example.com",
+            "desiredRunning": False,
+            "activeDeploymentId": None,
+            "deployment": None,
+            "sizing": {"workerFlavor": "worker-small", "cpuMHz": 500, "memoryMiB": 512},
+            "live": {
+                "schedulerAvailable": True,
+                "available": True,
+                "routeAvailable": False,
+                "schedulerState": "stopped",
+                "allocationHealthy": None,
+                "routeHealthy": None,
+                "checkedAt": utc(time.time()),
+            },
+        }
+        self.apps[identifier] = app
+        created = {
+            key: app[key]
+            for key in ("applicationId", "slug", "url", "activeDeploymentId", "sizing")
+        }
+        created.update(enabled=False, createdAt=utc(time.time()), updatedAt=utc(time.time()))
+        return self.remember(
+            request, Response(201, created, {"Location": f"/v1/applications/{identifier}"})
+        )
+
+    def app(self, request: Request) -> Response:
+        app = self.apps.get(request.path_parameters["app"])
+        if app is None:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        return Response(200, app.copy())
+
+    def deploy(self, request: Request) -> Response:
+        replay = self.replay(request)
+        identifier = request.idempotency_key()
+        if replay:
+            operation = self.operations[identifier]
+            if operation["status"] == "recovery_required":
+                operation.update(status="running", phase="building", ready=time.time() + self.delay)
+            return replay
+        body = self.body(
+            request,
+            {"repository", "commit", "requestedRef", "configurationRevision", "configuration"},
+        )
+        app_id = request.path_parameters["app"]
+        if app_id not in self.apps:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        for operation in self.operations.values():
+            if operation["scope"] == f"app-{app_id}" and operation["status"] in {
+                "running",
+                "recovery_required",
+            }:
+                raise HttpError(
+                    409,
+                    "OPERATION_CONFLICT",
+                    "Another operation is unfinished for this resource scope.",
+                    operation_id=operation["operationId"],
+                )
+        configuration = parse_configuration(body["configuration"])
+        self.deployments[identifier] = {
+            "deploymentId": identifier,
+            "applicationId": app_id,
+            "status": "running",
+            "snapshotKind": "strict",
+            "repositoryCommit": body["commit"],
+            "sourceRepository": body["repository"],
+            "requestedRef": body["requestedRef"],
+            "configurationRevision": body["configurationRevision"],
+            "configuration": body["configuration"],
+            "configurationSha256": digest(configuration.canonical_json()),
+            "environmentRevision": 0,
+            "recipeHash": None,
+            "nomadVersion": None,
+            "imageDigest": None,
+            "safeError": None,
+            "cleanupState": "pending",
+            "requestedAt": utc(time.time()),
+            "updatedAt": utc(time.time()),
+            "acceptedAt": None,
+            "lastHealthyAt": None,
+        }
+        self.operations[identifier] = {
+            "operationId": identifier,
+            "scope": f"app-{app_id}",
+            "kind": "app.deploy",
+            "status": "running",
+            "phase": "building",
+            "cleanupState": "pending",
+            "startedAt": utc(time.time()),
+            "updatedAt": utc(time.time()),
+            "deadlineAt": utc(time.time() + 30),
+            "safeError": None,
+            "ready": time.time() + self.delay,
+            "fixtureFail": self.failed_next,
+            "fixtureRecovery": self.recovery_next,
+        }
+        self.failed_next = self.recovery_next = False
+        return self.remember(
+            request,
+            Response(
+                202,
+                {
+                    "operationId": identifier,
+                    "statusUrl": f"/v1/operations/{identifier}",
+                    "result": {"kind": "operation", "id": identifier},
+                },
+                {"Location": f"/v1/operations/{identifier}"},
+            ),
+        )
+
+    def operation(self, request: Request) -> Response:
+        identifier = request.path_parameters["operation"]
+        operation = self.operations.get(identifier)
+        if operation is None:
+            raise HttpError(404, "OPERATION_NOT_FOUND", "Operation does not exist.")
+        if operation["status"] == "running" and time.time() >= operation["ready"]:
+            attempt = self.deployments[identifier]
+            if operation["fixtureRecovery"]:
+                operation.update(
+                    status="recovery_required", phase="startup_interrupted", fixtureRecovery=False
+                )
+            else:
+                failed = operation["fixtureFail"]
+                operation.update(
+                    status="failed" if failed else "succeeded",
+                    phase="build_rejected" if failed else "accepted",
+                    cleanupState="confirmed",
+                    updatedAt=utc(time.time()),
+                )
+                attempt.update(
+                    status=operation["status"], cleanupState="confirmed", updatedAt=utc(time.time())
+                )
+                if not failed:
+                    attempt.update(
+                        acceptedAt=utc(time.time()),
+                        lastHealthyAt=utc(time.time()),
+                        recipeHash="b" * 64,
+                        nomadVersion=1,
+                        imageDigest="registry.example.com/app@sha256:" + "a" * 64,
+                    )
+                    app = self.apps[attempt["applicationId"]]
+                    app.update(
+                        activeDeploymentId=identifier,
+                        desiredRunning=True,
+                        deployment={
+                            "deploymentId": identifier,
+                            "sourceCommit": attempt["repositoryCommit"],
+                            "acceptedAt": utc(time.time()),
+                            "lastHealthyAt": utc(time.time()),
+                            "imageDigest": attempt["imageDigest"],
+                            "nomadVersion": 1,
+                        },
+                        live={
+                            "schedulerAvailable": True,
+                            "available": True,
+                            "routeAvailable": True,
+                            "schedulerState": "running",
+                            "allocationHealthy": True,
+                            "routeHealthy": True,
+                            "checkedAt": utc(time.time()),
+                        },
+                    )
+        self.persist()
+        return Response(
+            200,
+            {
+                key: value
+                for key, value in operation.items()
+                if key not in {"ready", "fixtureFail", "fixtureRecovery"}
+            },
+        )
+
+    def history(self, request: Request) -> Response:
+        items = [
+            attempt
+            for attempt in self.deployments.values()
+            if attempt["applicationId"] == request.path_parameters["app"]
+        ]
+        items.sort(key=lambda attempt: attempt["requestedAt"], reverse=True)
+        if request.path_parameters["app"] not in self.apps:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        return Response(200, self.page(request, items))
+
+    def deployment(self, request: Request) -> Response:
+        attempt = self.deployments.get(request.path_parameters["deployment"])
+        if attempt is None:
+            raise HttpError(404, "DEPLOYMENT_NOT_FOUND", "Deployment does not exist.")
+        return Response(200, attempt.copy())
+
+    def log(self, request: Request) -> Response:
+        identifier = request.path_parameters["deployment"]
+        if identifier not in self.deployments:
+            raise HttpError(404, "DEPLOYMENT_NOT_FOUND", "Deployment does not exist.")
+        if set(request.query) - {"lines", "offset"} or any(
+            len(values) != 1 or not values[0] for values in request.query.values()
+        ):
+            raise HttpError(400, "INVALID_QUERY", "Log query is invalid.")
+        try:
+            lines = int(request.query.get("lines", ("200",))[0])
+            offset = int(request.query.get("offset", ("0",))[0])
+        except ValueError:
+            raise HttpError(400, "INVALID_QUERY", "Log bounds are invalid.") from None
+        if not 1 <= lines <= 1000 or not 0 <= offset <= 1000000:
+            raise HttpError(400, "INVALID_QUERY", "Log bounds are outside the configured limits.")
+        log = "Preparing exact source snapshot…\nInstalling locked dependencies…\nRunning package scripts…\nImage published. Waiting for health checks.\n"
+        return Response(
+            200,
+            {
+                "deploymentId": identifier,
+                "text": log[offset:],
+                "state": "running"
+                if self.deployments[identifier]["status"] == "running"
+                else "failed"
+                if self.deployments[identifier]["status"] == "failed"
+                else "complete",
+                "nextOffset": len(log),
+                "truncated": False,
+            },
+        )
+
+    @staticmethod
+    def body(request: Request, fields: set[str]) -> dict[str, Any]:
+        if not isinstance(request.body, dict) or set(request.body) != fields:
+            raise HttpError(400, "INVALID_BODY", "Request body fields are invalid.")
+        return request.body
+
+    @staticmethod
+    def page(request: Request, items: list[dict[str, Any]]) -> dict[str, Any]:
+        if set(request.query) - {"limit", "cursor"} or any(
+            len(v) != 1 or not v[0] for v in request.query.values()
+        ):
+            raise HttpError(400, "INVALID_QUERY", "Pagination query is invalid.")
+        try:
+            limit = int(request.query.get("limit", ("50",))[0])
+        except ValueError:
+            raise HttpError(400, "INVALID_QUERY", "Page limit is invalid.") from None
+        if not 1 <= limit <= 100:
+            raise HttpError(400, "INVALID_QUERY", "Page limit must be 1–100.")
+        cursor = request.query.get("cursor", (None,))[0]
+        start = 0
+        if cursor is not None:
+            uuid(cursor)
+            indexes = [i for i, item in enumerate(items) if item["deploymentId"] == cursor]
+            if not indexes:
+                raise HttpError(400, "INVALID_QUERY", "Pagination cursor is unknown.")
+            start = indexes[0] + 1
+        selected = items[start : start + limit]
+        more = start + limit < len(items)
+        return {
+            "items": selected,
+            "nextCursor": selected[-1]["deploymentId"] if more and selected else None,
+            "truncated": more,
+        }

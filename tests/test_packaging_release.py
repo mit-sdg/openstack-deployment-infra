@@ -711,6 +711,18 @@ class ReleaseInstallerTests(unittest.TestCase):
             text=True,
         )
 
+    def test_management_host_guard_preserves_helper_and_operator_unsigned_development(self) -> None:
+        repository, commit = self._repository()
+        with mock.patch.dict(os.environ, {"PLATFORM_MANAGEMENT_ENVIRONMENT": "production"}):
+            previous = os.environ.pop("PLATFORM_ENVIRONMENT", None)
+            try:
+                for mode in ("helper", "operator"):
+                    result = self._install(repository, commit, mode)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            finally:
+                if previous is not None:
+                    os.environ["PLATFORM_ENVIRONMENT"] = previous
+
     def test_operator_install_is_commit_addressed_and_idempotent(self) -> None:
         repository, commit = self._repository()
         first = self._install(repository, commit, "operator", install_units=True)

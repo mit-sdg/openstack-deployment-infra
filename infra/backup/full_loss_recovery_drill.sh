@@ -29,6 +29,7 @@ RECOVERY=${RECOVERY_COMMAND:-openstack-platform-recovery}
 AGE=${AGE:-age}
 OPERATOR_RESTORE_LAUNCHER=${OPERATOR_RESTORE_LAUNCHER:-openstack-platform-restore}
 HOSTED_RESTORE_LAUNCHER=${HOSTED_RESTORE_LAUNCHER:-openstack-platform-controller-restore}
+BROKER_RESTORE_LAUNCHER=${BROKER_RESTORE_LAUNCHER:-openstack-platform-management-broker-backup}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 MANAGED_RESTORE_LAUNCHER=${MANAGED_RESTORE_LAUNCHER:-$SCRIPT_DIR/restore_managed_data.sh}
 REGISTRY_ARTIFACT_SCRIPT=${REGISTRY_ARTIFACT_SCRIPT:-$SCRIPT_DIR/registry_artifact.py}
@@ -59,6 +60,14 @@ finally:
  connection.close()
 PY
 done
+
+if [[ -d $IMPORTED/management-broker ]]; then
+  source=$(find "$IMPORTED/management-broker" -maxdepth 1 -type f -name '*.sqlite3.age' -print -quit)
+  [[ -n $source ]]
+  "$AGE" --decrypt --identity "$CONTROLLER_IDENTITY" --output "$scratch/management-broker.sqlite3" "$source"
+  chmod 0600 "$scratch/management-broker.sqlite3"
+  "$BROKER_RESTORE_LAUNCHER" verify "$scratch/management-broker.sqlite3"
+fi
 
 managed="$IMPORTED/managed-data"
 "$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/registry.age" | \
@@ -114,6 +123,13 @@ hosted_output="$(
 printf '%s\n' "$hosted_output"
 grep -Eq '^restore=verified schema-version=[0-9]+ integrity=ok$' <<<"$hosted_output"
 
+if [[ -f $scratch/management-broker.sqlite3 ]]; then
+  broker_state="$WORK/replacements/management-broker"
+  install -d -m 0700 "$broker_state"
+  "$BROKER_RESTORE_LAUNCHER" restore "$scratch/management-broker.sqlite3" --destination "$broker_state/management.sqlite3" --yes
+  "$BROKER_RESTORE_LAUNCHER" verify "$broker_state/management.sqlite3"
+fi
+
 # Prove useful records came through the replacement files, in addition to the
 # launchers' deployment-identity, complete-schema, integrity, foreign-key, and
 # unfinished-operation validation.
@@ -156,9 +172,9 @@ managed_output="$(PLATFORM_CONFIG="$PLATFORM_CONFIG" AGE_KEY="$MANAGED_IDENTITY"
 printf '%s\n' "$managed_output"
 grep -Eq '^managed-data-restore=verified source=' <<<"$managed_output"
 
-python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" <<'PY'
+python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" <<'PY'
 import json,os,sys
-path,bundle,counts=sys.argv[1:]
+path,bundle,counts,broker_path=sys.argv[1:]
 evidence={
  "bundle":bundle,
  "controllerState":{
@@ -172,6 +188,14 @@ evidence={
  "records":json.loads(counts),
  "registryArtifacts":"restored",
 }
+if os.path.isfile(broker_path):
+ import sqlite3
+ connection=sqlite3.connect(f"file:{broker_path}?mode=ro",uri=True)
+ try:
+  if connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]:
+   raise SystemExit("restored broker authentication state was not invalidated")
+  evidence["managementBroker"]={"integrity":"ok","sessions":"invalidated"}
+ finally:connection.close()
 descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_CLOEXEC|os.O_NOFOLLOW,0o600)
 with os.fdopen(descriptor,"w") as output:
  json.dump(evidence,output,sort_keys=True,separators=(",",":")); output.write("\n")

@@ -15,6 +15,7 @@ let
   infra = pkgs.runCommand "${namespace}-infra" { } ''
     mkdir -p "$out"
     cp -R ${../../infra}/. "$out/"
+    cp ${../../openstack_platform/owner_portal_config.py} "$out/lib/owner_portal_config.py"
     chmod -R u+w "$out"
     patchShebangs "$out"
   '';
@@ -32,6 +33,15 @@ let
   managementWebUser = managementWebAccount.name;
   managementBrokerAccount = constants.accounts.managementBroker;
   managementBrokerUser = managementBrokerAccount.name;
+  managementIdentityAccount = constants.accounts.managementIdentity;
+  managementIdentityUser = managementIdentityAccount.name;
+  managementIdentityRuntime = "${namespace}-management-identity";
+  managementIdentitySocket = "/run/${managementIdentityRuntime}/identity.sock";
+  managementIdentityEgress =
+    if (platform.ownerPortal.identityEgressCidrs or [ ]) != [ ] then
+      platform.ownerPortal.identityEgressCidrs
+    else
+      constants.inventory.identityDefaultEgress;
   operatorAccount = constants.accounts.operator;
   platformAdminAccount = constants.accounts.platformAdmin;
   nomadAccount = constants.accounts.nomad;
@@ -48,12 +58,152 @@ let
   controllerPrivilegedSocket = "/run/${controllerSocketDirectory}/privileged.sock";
   managementWebState = "${state}/management-web";
   managementWebReleaseRoot = "${state}/management-web-releases";
-  managementWebExecutable = "${managementWebReleaseRoot}/current/bin/management-web";
+  managementActiveRoot = "${state}/management-active";
+  managementWebExecutable = "${managementActiveRoot}/current/web/bin/management-web";
   managementBrokerState = "${state}/management-broker";
   managementBrokerReleaseRoot = "${state}/management-broker-releases";
-  managementBrokerExecutable = "${managementBrokerReleaseRoot}/current/bin/management-broker";
+  managementBrokerExecutable = "${managementActiveRoot}/current/broker/bin/management-broker";
   managementBrokerRuntime = "${namespace}-management-broker";
   managementBrokerSocket = "/run/${managementBrokerRuntime}/broker.sock";
+  managementBrokerConfig = "${managementActiveRoot}/current/broker/config/management.json";
+  managementIdentityExecutable = "${managementActiveRoot}/current/broker/bin/management-identity";
+  managementIdentityConfig = "${managementActiveRoot}/current/broker/config/identity.json";
+  managementWebConfig = "${managementActiveRoot}/current/web/config/management.json";
+  managementBackupRoot = "${backups}/${constants.directories.managementBrokerBackup}";
+  managementBackupRecipient = "${managementBrokerReleaseRoot}/config/backup-recipient.txt";
+  managementActivationMarker = "${managementBrokerReleaseRoot}/activate-request";
+  managementRestoreInput = "${managementBrokerState}/restore-input.sqlite3";
+  # Apply only these mounted-volume rules after the corresponding mount is up.
+  # tmpfiles refuses unsafe symlink/ownership transitions and uses handles for
+  # metadata changes, unlike GNU install on writable directory trees.
+  managementDirectories = pkgs.writeText "${namespace}-management-directories.conf" ''
+    d ${managementBrokerReleaseRoot} :2750 :${operatorAccount.name} :${managementBrokerUser} -
+    d ${managementBrokerReleaseRoot}/releases :2750 :${operatorAccount.name} :${managementBrokerUser} -
+    d ${managementBrokerReleaseRoot}/config :2750 :${operatorAccount.name} :${managementBrokerUser} -
+    d ${managementWebReleaseRoot} :2750 :${operatorAccount.name} :${managementWebUser} -
+    d ${managementWebReleaseRoot}/releases :2750 :${operatorAccount.name} :${managementWebUser} -
+    d ${managementWebReleaseRoot}/config :2750 :${operatorAccount.name} :${managementWebUser} -
+    d ${managementActiveRoot} :0755 :root :root -
+    d ${managementBrokerState} :0700 :${managementBrokerUser} :${managementBrokerUser} -
+    d ${managementWebState} :0700 :${managementWebUser} :${managementWebUser} -
+  '';
+  managementBackupDirectories = pkgs.writeText "${namespace}-management-backup-directories.conf" ''
+    d ${managementBackupRoot} :2750 :${managementBrokerUser} :${operatorAccount.name} -
+  '';
+  managementIdentityDirectory = pkgs.writeText "${namespace}-management-identity-directory.conf" ''
+    d /run/${managementIdentityRuntime} 0750 ${managementIdentityUser} ${managementBrokerUser} -
+  '';
+  managementBrokerDirectory = pkgs.writeText "${namespace}-management-broker-directory.conf" ''
+    d /run/${managementBrokerRuntime} 0750 ${managementBrokerUser} ${managementWebUser} -
+  '';
+  hostPaths = pkgs.writeShellScript "${namespace}-host-paths" ''
+    exec ${packages.platformPython}/bin/python -I -B ${../../openstack_platform/host_paths.py} "$@"
+  '';
+  checkDirectory = path: uid: gid: mode: ''
+    ${hostPaths} directory-check ${lib.escapeShellArg path} --uid ${toString uid} --gid ${toString gid} --mode ${mode} --ancestor-uid ${toString operatorAccount.uid}
+  '';
+  managementIdentityPrepare = pkgs.writeShellScript "${namespace}-management-identity-runtime-prepare" ''
+    set -euo pipefail
+    ${pkgs.systemd}/bin/systemd-tmpfiles --create ${managementIdentityDirectory}
+    ${checkDirectory "/run/${managementIdentityRuntime}" managementIdentityAccount.uid
+      managementBrokerAccount.gid
+      "0750"
+    }
+  '';
+  managementBrokerPrepare = pkgs.writeShellScript "${namespace}-management-broker-runtime-prepare" ''
+    set -euo pipefail
+    ${pkgs.systemd}/bin/systemd-tmpfiles --create ${managementBrokerDirectory}
+    ${checkDirectory "/run/${managementBrokerRuntime}" managementBrokerAccount.uid
+      managementWebAccount.gid
+      "0750"
+    }
+  '';
+  managementBackupLauncher = pkgs.writeShellScriptBin "openstack-platform-management-broker-backup" ''
+    exec ${packages.controllerPackage}/bin/openstack-platform-management-broker-backup "$@"
+  '';
+  managementConfigLauncher = pkgs.writeShellScriptBin "openstack-platform-management-config" ''
+    exec ${packages.controllerPackage}/bin/openstack-platform-management-config "$@"
+  '';
+  managementRollbackLauncher = pkgs.writeShellScriptBin "openstack-platform-management-reactivate" ''
+    export PLATFORM_ENVIRONMENT=production
+    exec ${packages.controllerPackage}/bin/openstack-platform-management-reactivate "$@"
+  '';
+  managementRestore = pkgs.writeShellScriptBin "openstack-platform-management-broker-restore" ''
+    set -euo pipefail
+    [[ $(id -u) == 0 && $# == 1 && $1 == --yes ]] || {
+      echo "usage (recovery console root): openstack-platform-management-broker-restore --yes" >&2
+      exit 77
+    }
+    ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg state}
+    for unit in \
+      ${namespace}-management-identity.service \
+      ${namespace}-management-web.service \
+      ${namespace}-management-web.path \
+      ${namespace}-management-broker.service \
+      ${namespace}-management-broker.path \
+      ${namespace}-management-activate.path \
+      ${namespace}-management-activate.service \
+      ${namespace}-management-broker-backup.service \
+      ${namespace}-management-broker-backup.timer; do
+      if ${pkgs.systemd}/bin/systemctl is-active --quiet "$unit"; then
+        echo "refusing restore while $unit is active" >&2
+        exit 69
+      fi
+    done
+    input=${lib.escapeShellArg managementRestoreInput}
+    [[ -f "$input" && ! -L "$input" ]]
+    [[ $(stat -c %U:%a "$input") == ${managementBrokerUser}:600 ]]
+    ${pkgs.util-linux}/bin/runuser -u ${managementBrokerUser} -- \
+      ${packages.controllerPackage}/bin/openstack-platform-management-broker-backup restore "$input" \
+      --destination ${managementBrokerState}/management.sqlite3 \
+      --config ${managementBrokerConfig} --yes
+    ${pkgs.util-linux}/bin/runuser -u ${managementBrokerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input"
+  '';
+  managementPrepare = pkgs.writeShellScript "${namespace}-management-prepare" ''
+    set -euo pipefail
+    ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg state}
+    ${pkgs.systemd}/bin/systemd-tmpfiles --create ${managementDirectories}
+    ${checkDirectory managementBrokerReleaseRoot operatorAccount.uid managementBrokerAccount.gid "2750"}
+    ${checkDirectory "${managementBrokerReleaseRoot}/releases" operatorAccount.uid
+      managementBrokerAccount.gid
+      "2750"
+    }
+    ${checkDirectory "${managementBrokerReleaseRoot}/config" operatorAccount.uid
+      managementBrokerAccount.gid
+      "2750"
+    }
+    ${checkDirectory managementWebReleaseRoot operatorAccount.uid managementWebAccount.gid "2750"}
+    ${checkDirectory "${managementWebReleaseRoot}/releases" operatorAccount.uid managementWebAccount.gid
+      "2750"
+    }
+    ${checkDirectory "${managementWebReleaseRoot}/config" operatorAccount.uid managementWebAccount.gid
+      "2750"
+    }
+    ${checkDirectory managementActiveRoot 0 0 "0755"}
+    ${checkDirectory managementBrokerState managementBrokerAccount.uid managementBrokerAccount.gid
+      "0700"
+    }
+    ${checkDirectory managementWebState managementWebAccount.uid managementWebAccount.gid "0700"}
+  '';
+  managementBackupPrepare = pkgs.writeShellScript "${namespace}-management-backup-prepare" ''
+    set -euo pipefail
+    ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg backups}
+    ${pkgs.systemd}/bin/systemd-tmpfiles --create ${managementBackupDirectories}
+    ${checkDirectory managementBackupRoot managementBrokerAccount.uid operatorAccount.gid "2750"}
+  '';
+  managementActivate = pkgs.writeShellScript "${namespace}-management-activate" ''
+    set -euo pipefail
+    ${packages.platformPython}/bin/python -I -B ${../../openstack_platform/management/activation.py} \
+      --state ${lib.escapeShellArg state} \
+      --operator-uid ${toString operatorAccount.uid} \
+      --broker-gid ${toString managementBrokerAccount.gid} \
+      --web-gid ${toString managementWebAccount.gid}
+    identity_status=0
+    ${pkgs.systemd}/bin/systemctl restart ${namespace}-management-identity.service || identity_status=$?
+    ${pkgs.systemd}/bin/systemctl restart ${namespace}-management-broker.service
+    ${pkgs.systemd}/bin/systemctl restart ${namespace}-management-web.service
+    exit "$identity_status"
+  '';
   helperReleaseMarker = "${helperReleaseRoot}/current/.complete";
   credentialGuard = pkgs.writeShellScript "${namespace}-credential-guard" ''
     set -euo pipefail
@@ -186,9 +336,6 @@ let
       BUILDER_OPERATOR_PUBLIC_KEY=${root}/secrets/builder_operator_ed25519.pub \
       ${infra}/openstack/builder_lifecycle.sh "$@"
   '';
-  hostPaths = pkgs.writeShellScript "${namespace}-host-paths" ''
-    exec ${packages.platformPython}/bin/python -I -B ${../../openstack_platform/host_paths.py} "$@"
-  '';
   prepareController = pkgs.writeShellScript "${namespace}-prepare-controller" ''
     set -euo pipefail
 
@@ -219,6 +366,7 @@ in
   users.groups.${controllerGroup}.gid = controllerAccount.gid;
   users.groups.${managementWebUser}.gid = managementWebAccount.gid;
   users.groups.${managementBrokerUser}.gid = managementBrokerAccount.gid;
+  users.groups.${managementIdentityUser}.gid = managementIdentityAccount.gid;
   users.groups.${platformAdminAccount.name}.gid = platformAdminAccount.gid;
   users.groups.${nomadAccount.name}.gid = nomadAccount.gid;
   users.users.${operatorAccount.name}.extraGroups = [
@@ -246,6 +394,14 @@ in
     group = managementBrokerUser;
     extraGroups = [ controllerSocketGroup ];
   };
+  users.users.${managementIdentityUser} = {
+    isSystemUser = true;
+    uid = managementIdentityAccount.uid;
+    group = managementIdentityUser;
+    extraGroups = [ managementBrokerUser ];
+  };
+  # Redundant with pinned nixpkgs' networkd default; explicit for identity DNS.
+  services.resolved.enable = true;
   users.users.${nomadAccount.name} = {
     isSystemUser = true;
     uid = nomadAccount.uid;
@@ -279,8 +435,12 @@ in
     packages.nomad
     packages.python
     packages.platformPython
+    packages.managementPython
     packages.releaseInstaller
     packages.rootPathPreflight
+    managementBackupLauncher
+    managementConfigLauncher
+    managementRollbackLauncher
     openstackClient
     nomadCli
     workerCli
@@ -288,6 +448,7 @@ in
     pinBuilderHostKeyCli
     setupOperatorBridgeCli
     hostedControllerRestore
+    managementRestore
   ];
 
   environment.etc."${namespace}/nomad/10-server.hcl".text = ''
@@ -341,10 +502,6 @@ in
     "d ${controllerState} 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerRoot}/build-logs 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerRoot}/helper-diagnostics 0700 ${controllerUser} ${controllerGroup} -"
-    "d ${managementWebState} 0700 ${managementWebUser} ${managementWebUser} -"
-    "d ${managementWebReleaseRoot} 0750 ${operatorAccount.name} ${managementWebUser} -"
-    "d ${managementBrokerState} 0700 ${managementBrokerUser} ${managementBrokerUser} -"
-    "d ${managementBrokerReleaseRoot} 0750 ${operatorAccount.name} ${managementBrokerUser} -"
     "d ${operatorRoot} 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${operatorRoot}/secrets 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${operatorRoot}/status 0750 ${operatorAccount.name} ${operatorAccount.name} -"
@@ -570,19 +727,112 @@ in
     };
   };
 
+  systemd.services."${namespace}-management-prepare" = {
+    wantedBy = [ "multi-user.target" ];
+    requires = [ stateMountUnit ];
+    after = [
+      stateMountUnit
+      "systemd-tmpfiles-setup.service"
+    ];
+    unitConfig.RequiresMountsFor = [ state ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = managementPrepare;
+    };
+  };
+
+  # Sole network-capable credential integration. No authoritative state access.
+  systemd.services."${namespace}-management-identity" = {
+    wants = [ "network-online.target" ];
+    after = [
+      "${namespace}-management-prepare.service"
+      "network-online.target"
+      "systemd-resolved.service"
+    ];
+    requires = [
+      "${namespace}-management-prepare.service"
+      "systemd-resolved.service"
+    ];
+    unitConfig.RequiresMountsFor = [ state ];
+    unitConfig.ConditionPathExists = [
+      managementIdentityExecutable
+      managementIdentityConfig
+    ];
+    serviceConfig = {
+      Type = "simple";
+      User = managementIdentityUser;
+      Group = managementIdentityUser;
+      SupplementaryGroups = [ managementBrokerUser ];
+      RuntimeDirectory = managementIdentityRuntime;
+      RuntimeDirectoryMode = "0750";
+      ExecStartPre = "+${managementIdentityPrepare}";
+      ExecStart = managementIdentityExecutable;
+      UMask = "0077";
+      LimitCORE = 0;
+      Restart = "on-failure";
+      NoNewPrivileges = true;
+      CapabilityBoundingSet = "";
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      PrivateTmp = true;
+      PrivateDevices = true;
+      MemoryDenyWriteExecute = true;
+      RestrictAddressFamilies = [
+        "AF_UNIX"
+        "AF_INET"
+        "AF_INET6"
+      ];
+      RestrictNamespaces = true;
+      RestrictSUIDSGID = true;
+      IPAddressDeny = "any";
+      # CF destinations plus the system resolver's loopback DNS stub only.
+      IPAddressAllow = managementIdentityEgress ++ [
+        "127.0.0.53/32"
+        "127.0.0.54/32"
+      ];
+      SocketBindDeny = "any";
+      InaccessiblePaths = [
+        managementBrokerState
+        managementWebState
+        operatorRoot
+        controllerRoot
+        "-/run/${controllerSocketDirectory}"
+        "/etc/${namespace}/pki"
+        "/etc/${namespace}/secrets"
+      ];
+      ReadOnlyPaths = [ managementBrokerReleaseRoot ];
+    };
+  };
+
   # The trusted broker owns authorization/session/project state and is the only
   # future management component permitted to reach the controller. It has no
   # TCP access; authentication and source resolution require a separately
   # reviewed typed Unix integration service.
   systemd.services."${namespace}-management-broker" = {
     description = "Trusted ${platform.displayName} management authorization broker";
-    after = [ "${namespace}-controller.service" ];
-    requires = [ "${namespace}-controller.service" ];
-    unitConfig.ConditionPathExists = managementBrokerExecutable;
+    # Identity availability affects new sign-ins, never existing owner sessions.
+    wants = [ "${namespace}-management-identity.service" ];
+    after = [
+      "${namespace}-controller.service"
+      "${namespace}-management-identity.service"
+      "${namespace}-management-prepare.service"
+    ];
+    requires = [
+      "${namespace}-controller.service"
+      "${namespace}-management-prepare.service"
+    ];
+    unitConfig.ConditionPathExists = [
+      managementBrokerExecutable
+      managementBrokerConfig
+    ];
+    unitConfig.RequiresMountsFor = [ state ];
     environment = {
       CONTROLLER_PROJECT_SOCKET = controllerSocket;
       MANAGEMENT_BROKER_SOCKET = managementBrokerSocket;
       MANAGEMENT_STATE_DIRECTORY = managementBrokerState;
+      MANAGEMENT_CONFIG = managementBrokerConfig;
+      MANAGEMENT_PYTHON = "/run/current-system/sw/bin/management-python3.14";
     };
     serviceConfig = {
       Type = "simple";
@@ -594,9 +844,11 @@ in
         managementWebUser
       ];
       RuntimeDirectory = managementBrokerRuntime;
-      RuntimeDirectoryMode = "0755";
+      RuntimeDirectoryMode = "0750";
+      ExecStartPre = "+${managementBrokerPrepare}";
       ExecStart = managementBrokerExecutable;
-      UMask = "0007";
+      UMask = "0077";
+      LimitCORE = 0;
       Restart = "on-failure";
       NoNewPrivileges = true;
       CapabilityBoundingSet = "";
@@ -633,10 +885,16 @@ in
     description = "Browser-facing ${platform.displayName} management application";
     after = [ "${namespace}-management-broker.service" ];
     requires = [ "${namespace}-management-broker.service" ];
-    unitConfig.ConditionPathExists = managementWebExecutable;
+    unitConfig.ConditionPathExists = [
+      managementWebExecutable
+      managementWebConfig
+    ];
+    unitConfig.RequiresMountsFor = [ state ];
     environment = {
       MANAGEMENT_BROKER_SOCKET = managementBrokerSocket;
       MANAGEMENT_WEB_STATE_DIRECTORY = managementWebState;
+      MANAGEMENT_CONFIG = managementWebConfig;
+      MANAGEMENT_PYTHON = "/run/current-system/sw/bin/management-python3.14";
     };
     serviceConfig = {
       Type = "simple";
@@ -645,6 +903,7 @@ in
       Group = managementWebUser;
       ExecStart = managementWebExecutable;
       UMask = "0077";
+      LimitCORE = 0;
       Restart = "on-failure";
       NoNewPrivileges = true;
       CapabilityBoundingSet = "";
@@ -685,6 +944,9 @@ in
 
   systemd.paths."${namespace}-management-broker" = {
     wantedBy = [ "multi-user.target" ];
+    requires = [ "${namespace}-management-prepare.service" ];
+    after = [ "${namespace}-management-prepare.service" ];
+    unitConfig.RequiresMountsFor = [ state ];
     pathConfig = {
       PathExists = managementBrokerExecutable;
       Unit = "${namespace}-management-broker.service";
@@ -693,9 +955,100 @@ in
 
   systemd.paths."${namespace}-management-web" = {
     wantedBy = [ "multi-user.target" ];
+    requires = [ "${namespace}-management-prepare.service" ];
+    after = [ "${namespace}-management-prepare.service" ];
+    unitConfig.RequiresMountsFor = [ state ];
     pathConfig = {
       PathExists = managementWebExecutable;
       Unit = "${namespace}-management-web.service";
+    };
+  };
+
+  # Validate both staged descriptors against the operator's marker, atomically
+  # select a root-owned active pair, then restart the fixed units.
+  systemd.services."${namespace}-management-activate" = {
+    unitConfig.RequiresMountsFor = [ state ];
+    after = [ "${namespace}-management-prepare.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = managementActivate;
+    };
+  };
+  systemd.paths."${namespace}-management-activate" = {
+    wantedBy = [ "multi-user.target" ];
+    requires = [ "${namespace}-management-prepare.service" ];
+    after = [ "${namespace}-management-prepare.service" ];
+    unitConfig.RequiresMountsFor = [ state ];
+    pathConfig = {
+      PathChanged = managementActivationMarker;
+      Unit = "${namespace}-management-activate.service";
+    };
+  };
+
+  systemd.services."${namespace}-management-broker-backup" = {
+    after = [
+      "${namespace}-management-broker.service"
+      "${namespace}-management-prepare.service"
+      backupMountUnit
+    ];
+    requires = [
+      "${namespace}-management-prepare.service"
+      stateMountUnit
+      backupMountUnit
+    ];
+    unitConfig.RequiresMountsFor = [
+      state
+      backups
+    ];
+    unitConfig.ConditionPathExists = [
+      "${managementBrokerState}/management.sqlite3"
+      managementBackupRecipient
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = managementBrokerUser;
+      Group = operatorAccount.name;
+      SupplementaryGroups = [
+        managementBrokerUser
+        controllerGroup
+      ];
+      UMask = "0077";
+      LimitCORE = 0;
+      ExecStartPre = "+${managementBackupPrepare}";
+      NoNewPrivileges = true;
+      MemoryDenyWriteExecute = true;
+      RestrictAddressFamilies = [ "AF_UNIX" ];
+      IPAddressDeny = "any";
+      PrivateTmp = true;
+      PrivateDevices = true;
+      ProtectHome = true;
+      ProtectSystem = "strict";
+      InaccessiblePaths = [
+        operatorRoot
+        controllerRoot
+        controllerPrivilegedSocket
+      ];
+      ReadOnlyPaths = [ managementBackupRecipient ];
+      # Online SQLite snapshots may need private WAL/SHM sidecar access.
+      ReadWritePaths = [
+        "-${managementBackupRoot}"
+        managementBrokerState
+      ];
+      ExecStart = lib.concatStringsSep " " [
+        "${packages.controllerPackage}/bin/openstack-platform-management-broker-backup backup"
+        "--database ${managementBrokerState}/management.sqlite3"
+        "--destination ${managementBackupRoot}"
+        "--recipient-file ${managementBackupRecipient}"
+        "--age ${pkgs.age}/bin/age"
+      ];
+    };
+  };
+  systemd.timers."${namespace}-management-broker-backup" = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 02:30:00 UTC";
+      RandomizedDelaySec = "15m";
+      Persistent = true;
     };
   };
 
@@ -864,6 +1217,7 @@ in
     after = [
       backupMountUnit
       "${namespace}-hosted-controller-backup.service"
+      "${namespace}-management-broker-backup.service"
       "${namespace}-platform-backup.service"
     ];
     requires = [ backupMountUnit ];

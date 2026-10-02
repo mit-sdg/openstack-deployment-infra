@@ -24,12 +24,45 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .config import load_platform
-from .contracts import CONTROLLER_BACKUP_DIRECTORY, HOSTED_CONTROLLER_BACKUP_DIRECTORY
+from .config import PlatformConfig, load_platform
+from .contracts import (
+    CONTROLLER_BACKUP_DIRECTORY,
+    HOSTED_CONTROLLER_BACKUP_DIRECTORY,
+    MANAGEMENT_BROKER_BACKUP_DIRECTORY,
+)
 from .validation import ValidationError
 
 _FORMAT = "openstack-platform-offsite-recovery-v1"
 _COMPONENTS = ("hosted-controller", "operator-state", "managed-data")
+_MANAGEMENT_FORMAT = "openstack-platform-offsite-recovery-v2"
+_MANAGEMENT_COMPONENTS = (*_COMPONENTS, "management-broker")
+
+
+def bundle_components(manifest: dict[str, Any]) -> tuple[str, ...]:
+    return _MANAGEMENT_COMPONENTS if manifest["format"] == _MANAGEMENT_FORMAT else _COMPONENTS
+
+
+def _management_backup_required(platform: PlatformConfig) -> bool:
+    state = platform.get("paths.adminState")
+    if not isinstance(state, str):
+        return False
+    root = Path(state)
+    # The operator cannot traverse the broker's mode-0700 private state.
+    # A retained active selector implies broker state even if its payload was
+    # removed. Staging a first install also requires evidence before activation.
+    # Missing/broken release files must not weaken recovery requirements.
+    return (
+        any(
+            os.path.lexists(root / name)
+            for name in (
+                "management-active/current",
+                "management-broker-releases/current",
+            )
+        )
+        or (root / "management-broker/management.sqlite3").exists()
+    )
+
+
 # Fresh managed-data volumes default to 500 GiB. Configurable streaming bounds
 # allow mature deployments while retaining hard limits against runaway mounts.
 _HARD_MAX_FILE_BYTES = 4 * 1024**4
@@ -193,7 +226,7 @@ def _validate_component(
     observed: dict[str, str] = {}
     by_name = {path.name: path for path in files}
     names = set(by_name)
-    if name in {"hosted-controller", "operator-state"}:
+    if name in {"hosted-controller", "operator-state", "management-broker"}:
         ciphertext = [item for item in names if item.endswith(".sqlite3.age")]
         if (
             len(ciphertext) != 1
@@ -211,14 +244,19 @@ def _validate_component(
         if by_name[selected + ".sha256"].read_text() != f"{digest}  {selected}\n":
             _fail(f"{name} committed checksum does not match")
         manifest_path = by_name[selected + ".manifest"]
-        if name == "hosted-controller":
+        if name in {"hosted-controller", "management-broker"}:
             try:
                 manifest = json.loads(manifest_path.read_text())
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
                 raise RecoveryBundleError("hosted-controller manifest is malformed") from error
             if (
                 not isinstance(manifest, dict)
-                or manifest.get("format") != "openstack-platform-hosted-controller-backup-v1"
+                or manifest.get("format")
+                != (
+                    "openstack-platform-management-broker-backup-v1"
+                    if name == "management-broker"
+                    else "openstack-platform-hosted-controller-backup-v1"
+                )
                 or manifest.get("name") != selected
                 or manifest.get("sha256") != digest
             ):
@@ -315,7 +353,7 @@ def _write_receipt(path: Path, manifest: dict[str, Any]) -> None:
     _directory(path.parent, private_owner=True)
     payload = _manifest_bytes(
         {
-            "format": _FORMAT,
+            "format": manifest["format"],
             "bundle": manifest["bundle"],
             "deployment": manifest["deployment"],
             "exportedAt": manifest["createdAt"],
@@ -350,7 +388,7 @@ def export_bundle(
 ) -> Path:
     """Copy three selected committed evidence sets into one append-only bundle."""
     _directory(destination_root, private_owner=True)
-    if set(sources) != set(_COMPONENTS):
+    if set(sources) not in (set(_COMPONENTS), set(_MANAGEMENT_COMPONENTS)):
         raise ValueError("all recovery components must be supplied exactly once")
     if not _NAME.fullmatch(deployment):
         _fail("deployment identifier is malformed")
@@ -365,7 +403,7 @@ def export_bundle(
     total = 0
     try:
         staging.mkdir(mode=0o700)
-        for component in _COMPONENTS:
+        for component in _MANAGEMENT_COMPONENTS if "management-broker" in sources else _COMPONENTS:
             selected = _selected_component_files(component, sources[component], bounds=bounds)
             _validate_component(component, selected, bounds=bounds)
             component_root = staging / component
@@ -388,7 +426,7 @@ def export_bundle(
         checksums = "".join(f"{item['sha256']}  {item['path']}\n" for item in inventory).encode()
         _write_new(staging / "SHA256SUMS", checksums)
         manifest = {
-            "format": _FORMAT,
+            "format": _MANAGEMENT_FORMAT if "management-broker" in sources else _FORMAT,
             "bundle": bundle_name,
             "deployment": deployment,
             "createdAt": timestamp,
@@ -430,7 +468,7 @@ def _load_manifest(bundle: Path) -> dict[str, Any]:
         value = json.loads(path.read_bytes())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RecoveryBundleError("recovery manifest is malformed") from error
-    if not isinstance(value, dict) or value.get("format") != _FORMAT:
+    if not isinstance(value, dict) or value.get("format") not in {_FORMAT, _MANAGEMENT_FORMAT}:
         _fail("recovery manifest format is unsupported")
     if value.get("bundle") != bundle.name or not isinstance(value.get("files"), list):
         _fail("recovery manifest identity or inventory is malformed")
@@ -457,12 +495,13 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
     manifest = _load_manifest(bundle)
     bounds = _manifest_bounds(manifest)
     records = manifest["files"]
-    if not 1 <= len(records) <= len(_COMPONENTS) * _MAX_FILES:
+    components = bundle_components(manifest)
+    if not 1 <= len(records) <= len(components) * _MAX_FILES:
         _fail("recovery manifest file count is invalid")
     actual: set[str] = set()
     observed_digests: dict[str, str] = {}
     total = 0
-    for component in _COMPONENTS:
+    for component in components:
         component_root = bundle / component
         selected = _files(component_root, bounds=bounds)
         component_digests = _validate_component(component, selected, bounds=bounds)
@@ -478,7 +517,7 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
         if (
             not isinstance(name, str)
             or name.count("/") != 1
-            or name.split("/", 1)[0] not in _COMPONENTS
+            or name.split("/", 1)[0] not in components
             or not _NAME.fullmatch(name.split("/", 1)[1])
             or isinstance(size, bool)
             or not isinstance(size, int)
@@ -524,7 +563,7 @@ def import_bundle(bundle: Path, destination_root: Path) -> Path:
         _fail("recovery import staging path already exists")
     try:
         staging.mkdir(mode=0o700)
-        for component in _COMPONENTS:
+        for component in bundle_components(manifest):
             target_root = staging / component
             target_root.mkdir(mode=0o700)
             for source in _files(bundle / component, bounds=bounds):
@@ -657,7 +696,7 @@ def validate_offsite_sink(
 
 
 def discover_latest_sources(
-    backup_root: Path, namespace: str, *, bounds: Bounds
+    backup_root: Path, namespace: str, *, bounds: Bounds, require_management: bool = False
 ) -> dict[str, Path]:
     _directory(backup_root, private_owner=False)
     managed_root = backup_root / namespace
@@ -678,6 +717,9 @@ def discover_latest_sources(
         "operator-state": backup_root / CONTROLLER_BACKUP_DIRECTORY,
         "managed-data": managed,
     }
+    broker_root = backup_root / MANAGEMENT_BROKER_BACKUP_DIRECTORY
+    if require_management or (broker_root.is_dir() and any(broker_root.glob("*.manifest"))):
+        sources["management-broker"] = broker_root
     for component, root in sources.items():
         selected = _selected_component_files(component, root, bounds=bounds)
         _validate_component(component, selected, bounds=bounds)
@@ -705,7 +747,12 @@ def scheduled_export(
         mountinfo_path=mountinfo_path,
         device_resolver=device_resolver,
     )
-    sources = discover_latest_sources(backup_root, platform.namespace, bounds=config.bounds)
+    sources = discover_latest_sources(
+        backup_root,
+        platform.namespace,
+        bounds=config.bounds,
+        require_management=_management_backup_required(platform),
+    )
     return export_bundle(
         config.destination,
         sources,
@@ -749,7 +796,7 @@ def recovery_status(
         raise RecoveryBundleError("off-site export receipt is malformed") from error
     if (
         not isinstance(value, dict)
-        or value.get("format") != _FORMAT
+        or value.get("format") not in {_FORMAT, _MANAGEMENT_FORMAT}
         or value.get("deployment") != platform.namespace
         or not isinstance(value.get("bundle"), str)
         or not _NAME.fullmatch(value["bundle"])
@@ -768,6 +815,10 @@ def recovery_status(
     bundle = config.destination / value["bundle"]
     manifest = _load_manifest(bundle)
     _manifest_bounds(manifest)
+    if _management_backup_required(platform) and manifest["format"] != _MANAGEMENT_FORMAT:
+        _fail("initialized management broker requires a fourth-class off-site bundle")
+    if value["format"] != manifest["format"]:
+        _fail("off-site receipt format does not match the retained bundle")
     if hashlib.sha256(_manifest_bytes(manifest)).hexdigest() != value["manifestSha256"]:
         _fail("off-site receipt does not match the retained bundle")
     return {
@@ -791,6 +842,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--hosted-controller", type=Path, required=True)
     export.add_argument("--operator-state", type=Path, required=True)
     export.add_argument("--managed-data", type=Path, required=True)
+    export.add_argument("--management-broker", type=Path)
     export.add_argument("--receipt", type=Path)
     verify = commands.add_parser("verify", help="verify an off-site bundle without decrypting it")
     verify.add_argument("bundle", type=Path)
@@ -822,6 +874,11 @@ def main(argv: list[str] | None = None) -> int:
                     "hosted-controller": args.hosted_controller,
                     "operator-state": args.operator_state,
                     "managed-data": args.managed_data,
+                    **(
+                        {"management-broker": args.management_broker}
+                        if args.management_broker is not None
+                        else {}
+                    ),
                 },
                 deployment=args.deployment,
                 receipt=args.receipt,

@@ -103,5 +103,11 @@
     "adminState": "/srv/app-platform-state",
     "backups": "/srv/app-platform-backups",
     "data": "/srv/app-platform-data"
+  },
+  "ownerPortal": {
+    "enabled": false,
+    "commonsOrigin": "https://class.example.com",
+    "identityEgressCidrs": [],
+    "classLabel": "class account"
   }
 }

@@ -92,6 +92,11 @@ let
     ps.psycopg
     ps.pymongo
   ]);
+  # The OpenStack CLI also ships Python 3.14. Use an unambiguous stable name,
+  # rather than relying on the system profile's colliding python3.14 links.
+  managementPython = pkgs.writeShellScriptBin "management-python3.14" ''
+    exec ${platformPython}/bin/python "$@"
+  '';
 
   rootPathPlan = pkgs.writeText "${platform.namespace}-controller-path-plan.json" (
     builtins.toJSON (
@@ -144,7 +149,8 @@ let
       platformPython
     ];
     text = ''
-      exec ${platformPython}/bin/python ${../../deploy/releases/install_release.py} "$@"
+      export PLATFORM_MANAGEMENT_ENVIRONMENT=production
+      exec ${platformPython}/bin/python -I ${../../deploy/releases/install_release.py} "$@"
     '';
   };
 
@@ -187,6 +193,7 @@ in
     buildkit
     python
     platformPython
+    managementPython
     rootPathPlan
     rootPathPreflight
     controllerPackage

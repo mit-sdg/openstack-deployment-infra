@@ -5,10 +5,13 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 
-def clean_repository(source: Path, destination: Path) -> tuple[Path, str]:
+def clean_repository(
+    source: Path, destination: Path, *, mutate: Callable[[Path], None] | None = None
+) -> tuple[Path, str]:
     """Commit the current tracked/non-ignored source into a private test repository."""
     destination.mkdir(mode=0o700)
     listed = subprocess.run(
@@ -30,6 +33,8 @@ def clean_repository(source: Path, destination: Path) -> tuple[Path, str]:
             target.symlink_to(os.readlink(source_path))
         else:
             shutil.copy2(source_path, target)
+    if mutate is not None:
+        mutate(destination)
     subprocess.run(["git", "init", "--quiet"], cwd=destination, check=True)
     # A test owns this directory only until synchronous cleanup. Git's detached
     # auto-maintenance must not race that cleanup by writing back into .git.

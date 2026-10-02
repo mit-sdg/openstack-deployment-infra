@@ -19,7 +19,9 @@ class ContractError(RuntimeError):
 
 
 def _contract_bytes() -> bytes:
-    packaged = files("openstack_platform").joinpath("platform_contract.json")
+    # Candidate installers load us under a verified private package namespace.
+    # Resolve its resources, never an ambient package with the public name.
+    packaged = files(__package__).joinpath("platform_contract.json")
     if packaged.is_file():
         return packaged.read_bytes()
     source = Path(__file__).resolve().parents[1] / "infra/lib/platform_contract.json"
@@ -130,6 +132,9 @@ CONTROLLER_BACKUP_DIRECTORY = _string(
 )
 HOSTED_CONTROLLER_BACKUP_DIRECTORY = _string(
     _DIRECTORIES.get("hostedControllerBackup"), "directories.hostedControllerBackup"
+)
+MANAGEMENT_BROKER_BACKUP_DIRECTORY = _string(
+    _DIRECTORIES.get("managementBrokerBackup"), "directories.managementBrokerBackup"
 )
 
 INSTALLATION_OPERATOR_ROOT = _string(_INSTALLATION.get("operatorRoot"), "installation.operatorRoot")

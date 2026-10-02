@@ -7,6 +7,54 @@ let
   state = platform.paths.adminState;
   backups = platform.paths.backups;
   packages = import ../pkgs { inherit pkgs platform; };
+  managementIdentityBootstrap = pkgs.writeText "management-identity-bootstrap.py" ''
+    import sys
+    sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
+    from openstack_platform.management.identity.main import main
+    main()
+  '';
+  managementIdentityProbe = pkgs.writeText "management-identity-probe.py" ''
+    import os
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
+    from openstack_platform.management.broker.client import ProjectClient
+    from openstack_platform.controller.http import ControllerServer, PeerPolicy, Response, Router
+    proof=Path("${state}/management-broker/identity-sandbox-ok")
+    # Verify the integration once, then permit restart during identity outages.
+    if not proof.exists():
+        status, result = ProjectClient(Path("/run/${namespace}-management-identity/identity.sock")).request("POST", "/v1/authenticate", {"username":"alice","password":"vm-fixture"})
+        assert status == 200 and result["data"]["subject"] == "11111111-1111-4111-8111-111111111111"
+        assert "email" not in result["data"]
+        proof.write_text("verified\n")
+        os.chmod(proof,0o600)
+    router = Router()
+    router.add("GET", "/v1/health", lambda request: Response(200, {"status":"ok"}))
+    server = ControllerServer("/run/${namespace}-management-broker/broker.sock", router,
+        peer_policy=PeerPolicy(frozenset({(${toString constants.accounts.managementWeb.uid}, ${toString constants.accounts.managementWeb.gid})})), socket_gid=${toString constants.accounts.managementWeb.gid})
+    server.serve_forever()
+  '';
+  managementFakeCommons = pkgs.writeText "vm-fake-commons.py" ''
+    import json, ssl
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            body=json.loads(self.rfile.read(min(4096,int(self.headers.get("Content-Length","0")))))
+            accepted=self.path=="/api/auth/authenticate" and body=={"username":"alice","password":"vm-fixture"}
+            value={"user":"11111111-1111-4111-8111-111111111111","username":"alice","displayName":"Alice","email":"alice@example.com"} if accepted else {"error":"UNAUTHORIZED"}
+            raw=json.dumps(value).encode()
+            self.send_response(200 if accepted else 401)
+            self.send_header("Content-Type","application/json")
+            self.send_header("Cache-Control","no-store")
+            self.send_header("Content-Length",str(len(raw)))
+            self.end_headers(); self.wfile.write(raw)
+    server=HTTPServer(("127.0.0.1",9444),Handler)
+    context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain("${testPki}/commons.pem","${testPki}/commons-key.pem")
+    server.socket=context.wrap_socket(server.socket,server_side=True)
+    server.serve_forever()
+  '';
   imageCompatibilityHash = builtins.hashString "sha256" (
     builtins.toJSON {
       format = 1;
@@ -53,6 +101,7 @@ let
           'DNS:client.global.nomad,DNS:localhost'
         issue nomad-ingress client.global.nomad clientAuth \
           'DNS:client.global.nomad,DNS:localhost'
+        issue commons class.example.com serverAuth 'DNS:class.example.com,DNS:localhost,IP:127.0.0.1'
         issue storage storage.example.internal serverAuth \
           'DNS:storage.example.internal,DNS:s3.example.internal,DNS:localhost,IP:127.0.0.1'
         cat "$out/storage.pem" "$out/storage-key.pem" > "$out/mongodb-combined.pem"
@@ -131,6 +180,8 @@ let
             cores = 2;
           };
 
+          security.pki.certificateFiles = lib.optionals (role == "admin") [ "${testPki}/ca.pem" ];
+          networking.hosts = lib.mkIf (role == "admin") { "127.0.0.1" = [ "class.example.com" ]; };
           services.cloud-init.settings.datasource_list = lib.mkForce [ "None" ];
 
           # The test VM supplies disposable local mounts in place of
@@ -169,6 +220,11 @@ let
               # and source guards without contacting any managed service.
               "${namespace}-platform-backup".serviceConfig.ExecStart =
                 lib.mkForce "${packages.python}/bin/python ${registryBackupCredentialProbe}";
+              "${namespace}-management-identity".serviceConfig.IPAddressAllow = lib.mkForce [ "127.0.0.1/32" ];
+              "vm-fake-commons" = {
+                wantedBy = [ "multi-user.target" ];
+                serviceConfig.ExecStart = "${packages.platformPython}/bin/python ${managementFakeCommons}";
+              };
               nomad.preStart = lib.mkForce ''
                 install -d -m 0750 -o nomad -g nomad ${platform.paths.adminState}/nomad
                 install -d -m 0700 -o nomad -g nomad /run/${namespace}-nomad
@@ -390,6 +446,130 @@ let
               machine.succeed("! systemctl cat ${namespace}-management-web.service | grep -F 'CONTROLLER_PROJECT_SOCKET='")
               machine.succeed("systemctl show ${namespace}-management-web.service -p IPAddressDeny --value | grep -F 0.0.0.0/0")
               machine.succeed("systemctl show ${namespace}-management-web.service -p InaccessiblePaths --value | grep -F '${state}/operator'")
+              machine.wait_for_unit("${namespace}-management-prepare.service")
+              # Root preparation must not chmod/chown a target reached through
+              # an operator-controlled release/config or backup directory link.
+              victim = "${state}/root-preparation-victim"
+              machine.succeed(f"install -d -m 0755 -o root -g root {victim}; printf 'protected fixture\\n' > {victim}/sentinel; chmod 0600 {victim}/sentinel")
+              for child in ("config", "releases"):
+                  path = f"${state}/management-broker-releases/{child}"
+                  for kind in ("symlink", "fifo", "file"):
+                      create = f"ln -s {victim} {path}" if kind == "symlink" else (f"mkfifo {path}" if kind == "fifo" else f"touch {path}")
+                      machine.succeed(f"runuser -u agentops -- sh -c 'mv {path} {path}.saved; {create}'")
+                      machine.fail("systemctl restart ${namespace}-management-prepare.service")
+                      machine.succeed(f"test $(stat -c %u:%g:%a {victim}) = 0:0:755; grep -Fx 'protected fixture' {victim}/sentinel; test ! -e {victim}/platform.json")
+                      machine.succeed(f"runuser -u agentops -- sh -c 'rm {path}; mv {path}.saved {path}'; systemctl reset-failed ${namespace}-management-prepare.service")
+              machine.succeed("systemctl reset-failed ${namespace}-management-prepare.service; systemctl restart ${namespace}-management-prepare.service")
+              backup_prepare = machine.succeed("systemctl cat ${namespace}-management-broker-backup.service | sed -n 's/^ExecStartPre=+//p'").strip()
+              machine.succeed(backup_prepare)
+              backup_dir = "${backups}/${constants.directories.managementBrokerBackup}"
+              machine.succeed(f"runuser -u agentops -- sh -c 'mv {backup_dir} {backup_dir}.saved; ln -s {victim} {backup_dir}'")
+              machine.fail(backup_prepare)
+              machine.succeed(f"test $(stat -c %u:%g:%a {victim}) = 0:0:755; grep -Fx 'protected fixture' {victim}/sentinel")
+              machine.succeed(f"runuser -u agentops -- sh -c 'rm {backup_dir}; mv {backup_dir}.saved {backup_dir}'")
+              # Existing operator-owned directories must not be given to a service.
+              machine.succeed(f"runuser -u agentops -- sh -c 'mv {backup_dir} {backup_dir}.saved; mkdir -m 2750 {backup_dir}'")
+              backup_metadata = machine.succeed(f"stat -c %u:%g:%a:%h {backup_dir}").strip()
+              machine.fail(backup_prepare)
+              assert machine.succeed(f"stat -c %u:%g:%a:%h {backup_dir}").strip() == backup_metadata
+              machine.succeed(f"runuser -u agentops -- sh -c 'rmdir {backup_dir}; mv {backup_dir}.saved {backup_dir}'")
+              backup_mount = machine.succeed("systemd-escape --path --suffix=mount ${backups}").strip()
+              machine.succeed(f"! systemctl show ${namespace}-management-prepare.service -p Requires -p After -p RequiresMountsFor | grep -F '{backup_mount}'")
+              machine.succeed("systemctl show ${namespace}-management-prepare.service -p RequiresMountsFor --value | grep -Fx '${state}'")
+              machine.succeed("systemctl show ${namespace}-management-broker-backup.service -p RequiresMountsFor --value | tr ' ' '\\n' | grep -Fx '${backups}'")
+              machine.succeed("systemctl cat ${namespace}-management-broker-backup.service | grep -F 'ExecStartPre=+'")
+              for component in ("web", "broker"):
+                  machine.succeed(f"test $(stat -c %U:%G:%a ${state}/management-{component}-releases) = agentops:management-{component}:2750")
+                  machine.succeed(f"test ! -e ${state}/management-{component}-releases/config/platform.json")
+                  machine.succeed(f"systemctl show ${namespace}-management-{component}.service -p LimitCORE --value | grep -Fx 0")
+                  machine.succeed(f"systemctl show ${namespace}-management-{component}.service -p UMask --value | grep -Fx 0077")
+                  machine.succeed(f"systemctl cat ${namespace}-management-{component}.service | grep -F RequiresMountsFor=${state}")
+              # Complete fixture pairs follow the same staged/active/config
+              # layout as installed releases; only their entrypoints are doubles.
+              import json
+              commit = "a" * 40
+              pair = "b" * 64
+              descriptor = json.dumps({"sourceCommit": commit, "pairIdentity": pair, "compatibility": {"brokerProtocolVersion": 2, "webProtocolVersion": 2, "authProtocolVersion": 2, "brokerSchemaVersion": 2, "controllerApiVersion": 1}}, separators=(",", ":"))
+              for component in ("broker", "web"):
+                  release = f"${state}/management-{component}-releases/releases/vm-test"
+                  machine.succeed(f"install -d -m 2750 -o agentops -g management-{component} {release} {release}/bin {release}/config {release}/evidence")
+                  machine.succeed(f"install -m 0440 -o agentops -g management-{component} /etc/${namespace}/platform.json {release}/config/platform.json")
+                  machine.succeed(f"printf '%s\\n' '{commit}' > {release}/.complete; printf '%s\\n' '{descriptor}' > {release}/evidence/management-artifacts.json; printf '{{}}\\n' > {release}/config/management.json")
+                  machine.succeed(f"chown agentops:management-{component} {release}/.complete {release}/evidence/management-artifacts.json {release}/config/management.json; chmod 0440 {release}/.complete {release}/evidence/management-artifacts.json {release}/config/management.json")
+                  machine.succeed(f"ln -s releases/vm-test ${state}/management-{component}-releases/current; chown -h agentops:management-{component} ${state}/management-{component}-releases/current")
+              machine.succeed("printf '#!/bin/sh\\nexec /run/current-system/sw/bin/management-python3.14 ${managementIdentityProbe}\\n' > ${state}/management-broker-releases/releases/vm-test/bin/management-broker")
+              machine.succeed("printf '#!/bin/sh\\nexec /run/current-system/sw/bin/management-python3.14 ${managementIdentityBootstrap} --config ${state}/management-active/current/broker/config/identity.json\\n' > ${state}/management-broker-releases/releases/vm-test/bin/management-identity")
+              machine.succeed("chown agentops:management-broker ${state}/management-broker-releases/releases/vm-test/bin/*; chmod 0550 ${state}/management-broker-releases/releases/vm-test/bin/*")
+              machine.succeed("printf '%s\\n' '{\"commonsOrigin\":\"https://class.example.com:9444\",\"socket\":\"/run/${namespace}-management-identity/identity.sock\",\"development\":false}' > ${state}/management-broker-releases/releases/vm-test/config/identity.json; chown agentops:management-broker ${state}/management-broker-releases/releases/vm-test/config/identity.json; chmod 0440 ${state}/management-broker-releases/releases/vm-test/config/identity.json")
+              machine.succeed("printf '#!/bin/sh\\nexec sleep infinity\\n' > ${state}/management-web-releases/releases/vm-test/bin/management-web; chown agentops:management-web ${state}/management-web-releases/releases/vm-test/bin/management-web; chmod 0550 ${state}/management-web-releases/releases/vm-test/bin/management-web")
+              machine.succeed("install -m 0600 -o agentops -g management-broker /dev/null ${state}/management-broker-releases/.install.lock")
+              machine.wait_for_unit("vm-fake-commons.service")
+              machine.succeed(f"runuser -u agentops -- sh -c 'umask 0027; printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
+              machine.wait_for_unit("${namespace}-management-broker.service")
+              machine.wait_until_succeeds("test -f ${state}/management-broker/identity-sandbox-ok")
+              machine.succeed("systemctl show ${namespace}-management-broker.service -p MemoryDenyWriteExecute --value | grep -Fx yes")
+              machine.succeed("systemctl show ${namespace}-management-broker.service -p RestrictAddressFamilies --value | grep -Fx AF_UNIX")
+              machine.succeed("systemctl show ${namespace}-management-broker.service -p IPAddressDeny --value | grep -F 0.0.0.0/0")
+              machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-broker) = management-broker:management-web:750")
+              machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-broker/broker.sock) = management-broker:management-web:660")
+              machine.succeed("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-management-broker/broker.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'")
+              machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-identity/identity.sock) = management-identity:management-broker:660")
+              machine.succeed("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-management-identity/identity.sock http://localhost/v1/health")
+              machine.fail("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-management-identity/identity.sock http://localhost/v1/health")
+              machine.fail("runuser -u management-identity -- cat ${state}/management-broker/identity-sandbox-ok")
+              machine.succeed("systemctl show ${namespace}-management-identity.service -p InaccessiblePaths --value | grep -F '${state}/management-broker'")
+              machine.succeed("systemctl is-enabled ${namespace}-management-broker-backup.timer")
+              machine.fail("runuser -u management-web -- systemctl restart ${namespace}-management-broker.service")
+              machine.fail("runuser -u management-broker -- systemctl restart ${namespace}-management-web.service")
+              machine.succeed("systemctl cat ${namespace}-management-activate.path | grep -F 'PathChanged=${state}/management-broker-releases/activate-request'")
+              machine.wait_for_unit("${namespace}-management-web.service")
+              machine.succeed("systemctl cat ${namespace}-management-web.service | grep -F '${state}/management-active/current/web/bin/management-web'")
+              machine.succeed("runuser -u management-web -- cat ${state}/management-active/current/web/config/platform.json >/dev/null")
+              machine.fail("runuser -u management-web -- cat ${state}/management-active/current/broker/config/platform.json")
+              machine.succeed("! grep -F PLATFORM_ENVIRONMENT= /etc/profile")
+              selected_pair = machine.succeed("readlink ${state}/management-active/current").strip()
+              # A staged broker upgrade remains inactive through service and
+              # boot-path restarts. The VM state mount is disposable tmpfs.
+              next_descriptor = descriptor.replace(pair, "c" * 64)
+              next_broker = "${state}/management-broker-releases/releases/vm-next"
+              machine.succeed(f"cp -a ${state}/management-broker-releases/releases/vm-test {next_broker}; printf '%s\\n' '{next_descriptor}' > {next_broker}/evidence/management-artifacts.json")
+              machine.succeed("ln -sfn releases/vm-next ${state}/management-broker-releases/current; chown -h agentops:management-broker ${state}/management-broker-releases/current")
+              machine.succeed(f"runuser -u agentops -- sh -c 'printf \"{commit}\\n{'c' * 64}\\n\" > ${state}/management-broker-releases/activate-request'")
+              machine.fail("systemctl restart ${namespace}-management-activate.service")
+              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
+              machine.succeed("systemctl restart ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-broker.service ${namespace}-management-web.service")
+              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
+              machine.succeed("test $(readlink -f ${state}/management-active/current/broker) = ${state}/management-broker-releases/releases/vm-test")
+              machine.succeed("ln -sfn releases/vm-test ${state}/management-broker-releases/current; chown -h agentops:management-broker ${state}/management-broker-releases/current; systemctl reset-failed ${namespace}-management-activate.service")
+              machine.succeed(f"runuser -u agentops -- sh -c 'printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
+              machine.succeed("systemctl show ${namespace}-management-broker.service -p Wants --value | tr ' ' '\\n' | grep -Fx '${namespace}-management-identity.service'")
+              machine.succeed("systemctl show ${namespace}-management-broker.service -p After --value | tr ' ' '\\n' | grep -Fx '${namespace}-management-identity.service'")
+              machine.succeed("! systemctl show ${namespace}-management-broker.service -p Requires --value | tr ' ' '\\n' | grep -Fx '${namespace}-management-identity.service'")
+              # A real identity start failure preserves existing broker/web units
+              # and does not prevent starting the broker again.
+              machine.succeed("cp -p ${state}/management-broker-releases/releases/vm-test/config/identity.json ${state}/management-broker-releases/releases/vm-test/config/identity.vm-save; printf '{}\\n' > ${state}/management-broker-releases/releases/vm-test/config/identity.json")
+              machine.fail("systemctl restart ${namespace}-management-identity.service")
+              machine.succeed("systemctl is-active ${namespace}-management-broker.service ${namespace}-management-web.service")
+              machine.succeed("systemctl restart ${namespace}-management-broker.service; systemctl start ${namespace}-management-web.service")
+              machine.succeed("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-management-broker/broker.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'")
+              machine.succeed("mv ${state}/management-broker-releases/releases/vm-test/config/identity.vm-save ${state}/management-broker-releases/releases/vm-test/config/identity.json; systemctl reset-failed ${namespace}-management-identity.service; systemctl restart ${namespace}-management-identity.service")
+              before = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
+              machine.succeed(f"runuser -u agentops -- sh -c 'umask 0027; printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
+              machine.wait_until_succeeds(f"test $(systemctl show ${namespace}-management-broker.service -p MainPID --value) != {before}")
+              machine.wait_for_unit("${namespace}-management-web.service")
+              machine.succeed("test $(systemctl show ${namespace}-management-activate.service -p Result --value) = success")
+              before = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
+              machine.succeed(f"runuser -u agentops -- sh -c 'printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
+              machine.wait_until_succeeds(f"test $(systemctl show ${namespace}-management-broker.service -p MainPID --value) != {before}")
+              machine.wait_for_unit("${namespace}-management-web.service")
+              machine.fail("openstack-platform-management-broker-restore --yes")
+              # Backup outages must not pull down the owner portal.
+              machine.succeed(f"systemctl stop '{backup_mount}'; systemctl mask --runtime '{backup_mount}'")
+              machine.succeed("systemctl restart ${namespace}-management-broker.service ${namespace}-management-web.service")
+              machine.wait_for_unit("${namespace}-management-broker.service")
+              machine.wait_for_unit("${namespace}-management-web.service")
+              machine.fail("systemctl start ${namespace}-management-broker-backup.service")
+              machine.succeed(f"systemctl unmask --runtime '{backup_mount}'; systemctl start '{backup_mount}'")
               machine.succeed("${pkgs.iptables}/bin/iptables -C nixos-fw -p tcp -s ${platform.addresses.ingress}/32 --dport 8080 -j nixos-fw-accept")
               machine.fail("${pkgs.curl}/bin/curl --fail --silent --max-time 1 http://127.0.0.1:8080/")
               machine.succeed("${root}/bin/openstack-platform-helper </dev/null | grep -F INVALID_REQUEST")
@@ -430,6 +610,9 @@ let
               machine.succeed("grep -F 'http://${platform.addresses.admin}:8080' /etc/traefik/dynamic/platform.yaml")
               machine.succeed("grep -F 'http://192.0.2.14:4444' /etc/traefik/dynamic/platform.yaml")
               machine.succeed("grep -F '127.0.0.1:80' /etc/traefik/traefik.yaml")
+              machine.fail("grep -F referrerPolicy /etc/traefik/dynamic/platform.yaml")
+              machine.succeed("grep -F contentTypeNosniff /etc/traefik/dynamic/platform.yaml")
+              machine.succeed("grep -F frameDeny /etc/traefik/dynamic/platform.yaml")
               # A hostile client reaching a non-loopback origin address cannot
               # select the management router merely by supplying its Host.
               machine.fail("ip=$(hostname -I | awk '{print $1}'); ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --header 'Host: ${platform.domain}' http://$ip/")

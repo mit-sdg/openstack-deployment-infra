@@ -64,6 +64,15 @@ def load() -> dict[str, Any]:
         raise ValueError(f"platform config is missing keys: {', '.join(sorted(missing))}")
 
     validate(document)
+    validator = LIB_DIRECTORY / "owner_portal_config.py"
+    if not validator.exists():
+        validator = LIB_DIRECTORY.parents[1] / "openstack_platform/owner_portal_config.py"
+    spec = importlib.util.spec_from_file_location("owner_portal_inventory", validator)
+    if spec is None or spec.loader is None:
+        raise ValueError("owner portal validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.validate(document.get("ownerPortal", {"enabled": False}))
     ingress = document.get("publicIngress")
     if not isinstance(ingress, dict) or set(ingress) != {"mode", "providerCidrs"}:
         raise ValueError("publicIngress must contain exactly mode and providerCidrs")

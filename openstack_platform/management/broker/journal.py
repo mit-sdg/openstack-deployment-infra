@@ -1,0 +1,191 @@
+"""Durable intent admission and bounded same-key controller reconciliation."""
+
+from __future__ import annotations
+
+import logging
+import sys
+import threading
+import time
+from typing import Any
+
+from ..common import canonical, strict_json, utc
+from .client import ControllerUnavailable, ProjectClient
+from .database import Database
+
+
+def report_exception(error: Exception, intent_id: str = "recovery-scan") -> None:
+    # A dedicated message-only handler never formats exception values/tracebacks,
+    # which could contain submitted bodies or credential material.
+    logger = logging.getLogger("management.journal")
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+        logger.propagate = False
+    logger.error("journal exception=%s intent=%s", type(error).__name__, intent_id)
+
+
+class Journal:
+    def __init__(self, database: Database, client: ProjectClient) -> None:
+        self.database, self.client = database, client
+        self.stop_event = threading.Event()
+        self.wake = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self.run, name="management-recovery", daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.stop_event.set()
+        self.wake.set()
+        if self.thread:
+            self.thread.join(timeout=self.client.timeout + 2)
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.reconcile()
+            except Exception as error:
+                report_exception(error)
+            self.wake.wait(0.25)
+            self.wake.clear()
+
+    def reconcile(self) -> None:
+        now = time.time()
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT intents.id FROM intents JOIN users ON users.id=intents.user_id WHERE intents.state IN ('prepared','unknown','accepted') AND next_retry<=? AND lease<=? AND users.enabled=1 ORDER BY intents.created LIMIT 4",
+                (now, now),
+            ).fetchall()
+        for row in rows:
+            try:
+                self.dispatch(row["id"])
+            except Exception as error:
+                report_exception(error, row["id"])
+
+    def dispatch(self, identifier: str) -> None:
+        now = time.time()
+        with self.database.connect(write=True) as db:
+            row = db.execute("SELECT * FROM intents WHERE id=?", (identifier,)).fetchone()
+            if (
+                row is None
+                or row["state"] not in {"prepared", "unknown", "accepted"}
+                or row["lease"] > now
+            ):
+                return
+            db.execute(
+                "UPDATE intents SET lease=?, attempts=attempts+1 WHERE id=?",
+                (now + self.client.timeout + 5, identifier),
+            )
+            intent = dict(row)
+        operation_id = intent["operation_id"]
+        state = "accepted" if intent["state"] == "accepted" and operation_id else "unknown"
+        operation = (
+            None if intent["operation"] is None else strict_json(intent["operation"].encode())
+        )
+        error = None
+        try:
+            if intent["state"] == "accepted" and operation_id:
+                status, result = self.client.request("GET", f"/v1/operations/{operation_id}")
+                if (
+                    status != 200
+                    or result.get("operationId") != operation_id
+                    or result.get("status")
+                    not in {"running", "succeeded", "failed", "recovery_required"}
+                ):
+                    raise ControllerUnavailable("invalid operation evidence")
+                if result.get("scope") != f"app-{intent['app_id']}":
+                    raise ControllerUnavailable("mismatched operation scope")
+                operation = {
+                    key: result.get(key)
+                    for key in ("operationId", "status", "phase", "cleanupState", "updatedAt")
+                }
+                state = (
+                    "accepted"
+                    if result["status"] == "running"
+                    else "blocked"
+                    if result["status"] == "recovery_required"
+                    else result["status"]
+                )
+                if state == "failed":
+                    error = "The controller rejected this operation. Review the build output."
+                if state in {"succeeded", "failed"} and result.get("cleanupState") not in {
+                    "confirmed",
+                    "not_required",
+                }:
+                    # An uncertain cleanup is still a held application scope.
+                    state = "blocked"
+                    error = "Cleanup requires controller recovery."
+            else:
+                status, result = self.client.request(
+                    intent["method"],
+                    intent["path"],
+                    strict_json(intent["body"].encode()),
+                    intent["controller_key"],
+                )
+                if status == 201 and intent["kind"] == "create_app":
+                    if result.get("applicationId") != intent["app_id"]:
+                        raise ControllerUnavailable("mismatched application identity")
+                    state = "succeeded"
+                elif status == 202:
+                    if result.get("operationId") != intent["controller_key"]:
+                        raise ControllerUnavailable("mismatched operation identity")
+                    operation_id, state = result["operationId"], "accepted"
+                elif status in {400, 404, 409, 413, 415, 422}:
+                    code = result.get("error", {}).get("code")
+                    if code in {"RECOVERY_REQUIRED", "UNFINISHED_OPERATION", "OPERATION_CONFLICT"}:
+                        state, error = "blocked", "This application requires controller recovery."
+                    else:
+                        state, error = (
+                            "failed",
+                            "The request was rejected. The slug may be unavailable or the input invalid.",
+                        )
+                else:
+                    raise ControllerUnavailable("unknown controller admission")
+        except ControllerUnavailable as failure:
+            report_exception(failure, identifier)
+        now = time.time()
+        with self.database.connect(write=True) as db:
+            db.execute(
+                "UPDATE intents SET state=?,operation_id=?,operation=?,safe_error=?,updated=?,next_retry=?,lease=0 WHERE id=?",
+                (
+                    state,
+                    operation_id,
+                    None if operation is None else canonical(operation),
+                    error,
+                    now,
+                    now + min(10, 0.5 * 2 ** min(intent["attempts"], 4)),
+                    identifier,
+                ),
+            )
+            if intent["kind"] == "create_app":
+                if state == "succeeded":
+                    db.execute("UPDATE apps SET lifecycle='ready' WHERE id=?", (intent["app_id"],))
+                elif state == "failed":
+                    db.execute(
+                        "UPDATE apps SET lifecycle='rejected' WHERE id=?", (intent["app_id"],)
+                    )
+            if state in {"succeeded", "failed", "blocked"} and state != intent["state"]:
+                db.execute("UPDATE observations SET updated=0 WHERE app_id=?", (intent["app_id"],))
+                db.execute(
+                    "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
+                    (intent["user_id"], intent["app_id"], identifier, state, now),
+                )
+
+
+def intent_model(row: Any) -> dict[str, Any]:
+    body = strict_json(row["body"].encode())
+    return {
+        "intentId": row["id"],
+        "appId": row["app_id"],
+        "kind": row["kind"],
+        "state": row["state"],
+        "operationId": row["operation_id"],
+        "operation": None if row["operation"] is None else strict_json(row["operation"].encode()),
+        "statusUrl": f"/api/v1/intents/{row['id']}",
+        "safeError": row["safe_error"],
+        "createdAt": utc(row["created"]),
+        "updatedAt": utc(row["updated"]),
+        "commit": body.get("commit") if row["kind"] == "deploy" else None,
+    }

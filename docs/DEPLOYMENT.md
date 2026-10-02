@@ -11,27 +11,26 @@ The repository can create and operate the infrastructure, including role
 images, persistent hosts, ingress, managed data services, backups, recovery
 tooling, and the local application controller.
 
-The browser management UI and its authentication service do not exist yet.
-There is therefore no supported application-owner workflow today. A successful
-installation is an operator-managed platform foundation, not a finished hosted
-product. The operator CLI deliberately contains no application or database
-commands, and installing an old release is not a supported way to add them.
+The owner portal is implemented but not deployed. There is therefore no
+supported live application-owner workflow today. Infrastructure setup remains
+an operator-managed foundation. Portal release installation and live acceptance
+must be reviewed separately before students can use it.
 
-> **TODO:** implement the management UI, authorization broker, and external
-> authentication integration described below. Until then, treat application
-> lifecycle support as an internal controller capability rather than a user
-> feature.
+Students sign in with their class username/password, checked server-side against
+the configured Commons HTTPS authenticate endpoint. Commons bb78c5e is the
+implemented contract; this model needs no signed identity assertion or registered
+signing key. Configure the Commons origin and identity egress before rollout.
+Password changes and Commons archiving do not revoke existing portal sessions,
+which expire after 8 h absolute or 30 min idle. Passwords are not saved or logged
+by the portal. No Commons code is maintained in this repository.
 
-When the management UI is added, an application owner will be able to create a
-project, point it at a public GitHub repository, choose a Node or Bun package
-and package scripts, add write-only environment values, request PostgreSQL,
-MongoDB, or S3 storage, and follow deployment progress. The UI will send typed
-requests to the local controller; it will not give users OpenStack, SSH, Nomad,
-registry, or database-administrator credentials.
-
-The planned first version does not include private repositories, Dockerfiles,
-arbitrary build commands, custom domains, teams, previews, scaling, scheduled
-jobs, shell access, database consoles, or credential export.
+The locally tested owner slice creates individual apps within staff quotas,
+configures a public GitHub repository and Node/Bun settings, deploys an exact
+commit and shows status, health, history and build logs. It grants no SSH,
+OpenStack, Nomad, registry or storage-administrator credentials. Environment
+variables, storage lifecycle, enable/disable and runtime logs are later work.
+Private repositories, Dockerfiles, arbitrary build commands, custom domains,
+teams, scaling, shell access and credential export remain outside this slice.
 
 ## What appears in OpenStack
 
@@ -69,7 +68,7 @@ selected flavors and volume type must exist in the target cloud. Setup can
 choose the smallest visible flavor that meets a role baseline, but fixed
 addresses are always explicit.
 
-Workers are replaceable and hold no durable data. The future management
+Workers are replaceable and hold no durable data. The implemented management
 workflow will create one worker for each enabled application. Builders are
 single-use machines: they receive one source snapshot, build it with rootless
 BuildKit, push an immutable image, and are then deleted with their fixed port.
@@ -122,7 +121,7 @@ independent controls that limit what each component can do:
   rejected.
 - **Local control API.** The application controller listens on Unix sockets,
   not a public TCP port. Linux peer credentials separate ordinary project
-  operations from destructive operator operations. The future browser renderer
+  operations from destructive operator operations. The browser renderer
   will not be able to open either controller socket directly.
 - **Typed application input.** The controller accepts a public,
   credential-free GitHub URL, exact commit, supported package scripts, runtime
@@ -397,7 +396,7 @@ test "$(curl --fail --show-error --silent \
 
 Both units must be active. The exact `OK` response verifies DNS, certificate
 validation, provider forwarding, preserved host routing, and Traefik. It does
-not imply that the future login or management UI exists.
+not establish that the owner portal has been deployed or accepted live.
 
 Complete all three backup classes and their restore checks in [Operate and
 recover a deployment](OPERATIONS.md#back-up-all-state-classes) before treating

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -794,8 +795,8 @@ def _candidate_wheel_inputs_sha256(source: Path) -> str:
     return digest.hexdigest()
 
 
-def _trusted_manifest_preflight(
-    source: Path,
+def _authenticate_manifest(
+    document: dict[str, Any],
     manifest: Path,
     *,
     signature: Path | None,
@@ -803,16 +804,9 @@ def _trusted_manifest_preflight(
     allow_unsigned_development: bool,
     allow_unsigned_production: bool = False,
 ) -> None:
-    """Establish trust and verifier integrity without candidate code execution."""
-    try:
-        document = json.loads(manifest.read_bytes(), object_pairs_hook=_reject_duplicate_pairs)
-        trust = document["trust"]
-        channel = document["releaseChannel"]
-        expected_wheel = document["components"]["operatorWheel"]["sha256"]
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise InstallFailure("release compatibility manifest is malformed") from error
-    if not isinstance(trust, dict) or not _SHA256.fullmatch(str(expected_wheel)):
-        _fail("release compatibility manifest trust or wheel identity is malformed")
+    trust, channel = document.get("trust"), document.get("releaseChannel")
+    if not isinstance(trust, dict):
+        _fail("release trust policy is malformed")
     if trust.get("mode") == "production-ed25519" and channel == "production":
         if signature is None or trust_root is None:
             _fail("production release requires a signature and explicit trust root")
@@ -882,6 +876,34 @@ def _trusted_manifest_preflight(
             _fail("unsigned development release requires explicit non-production mode")
     else:
         _fail("release trust mode and channel are inconsistent")
+
+
+def _trusted_manifest_preflight(
+    source: Path,
+    manifest: Path,
+    *,
+    signature: Path | None,
+    trust_root: Path | None,
+    allow_unsigned_development: bool,
+    allow_unsigned_production: bool = False,
+) -> None:
+    """Establish trust and verifier integrity without candidate code execution."""
+    try:
+        document = json.loads(manifest.read_bytes(), object_pairs_hook=_reject_duplicate_pairs)
+        trust = document["trust"]
+        expected_wheel = document["components"]["operatorWheel"]["sha256"]
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise InstallFailure("release compatibility manifest is malformed") from error
+    if not isinstance(trust, dict) or not _SHA256.fullmatch(str(expected_wheel)):
+        _fail("release compatibility manifest trust or wheel identity is malformed")
+    _authenticate_manifest(
+        document,
+        manifest,
+        signature=signature,
+        trust_root=trust_root,
+        allow_unsigned_development=allow_unsigned_development,
+        allow_unsigned_production=allow_unsigned_production,
+    )
     if _candidate_wheel_inputs_sha256(source) != expected_wheel:
         _fail("release candidate verifier or wheel inputs do not match the trusted manifest")
 
@@ -1019,6 +1041,218 @@ def _build_source_archive(source: Path, commit: str, output: Path) -> None:
     _run(("git", "-C", source, "archive", "--format=tar", f"--output={output}", commit))
 
 
+def _management_members(data: bytes) -> dict[str, bytes]:
+    if len(data) > 128 * 1024**2:
+        _fail("management archive exceeds its byte limit")
+    result: dict[str, bytes] = {}
+    seen: set[str] = set()
+    total = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as bundle:
+            for index, member in enumerate(bundle):
+                name = member.name.rstrip("/") if member.isdir() else member.name
+                path = Path(name)
+                if (
+                    index >= 4096
+                    or not name
+                    or len(name) > 256
+                    or path.is_absolute()
+                    or path.as_posix() != name
+                    or ".." in path.parts
+                    or {".git", ".tmp", "node_modules", "__pycache__"}.intersection(path.parts)
+                    or "\\" in name
+                    or not re.fullmatch(r"[A-Za-z0-9_./-]+", name)
+                ):
+                    _fail("management archive has an unsafe member or too many members")
+                if name in seen:
+                    _fail("management archive has duplicate members")
+                seen.add(name)
+                if not member.isfile() and not member.isdir():
+                    _fail("management archive must be link-free and contain only files/directories")
+                if member.isdir():
+                    continue
+                total += member.size
+                if not 0 <= member.size <= 32 * 1024**2 or total > 128 * 1024**2:
+                    _fail("management archive unpacked size exceeds limits")
+                stream = bundle.extractfile(member)
+                if stream is None:
+                    _fail("management archive data is missing")
+                raw = stream.read(member.size + 1)
+                if len(raw) != member.size:
+                    _fail("management archive is truncated")
+                result[name] = raw
+    except tarfile.TarError as error:
+        raise InstallFailure("management archive is malformed or truncated") from error
+    return result
+
+
+def _management_input(path: Path, maximum: int = 16 * 1024**2) -> bytes:
+    """Read an owned direct input once; all later checks use these frozen bytes."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as stream:
+            meta = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(meta.st_mode)
+                or meta.st_uid != os.geteuid()
+                or meta.st_size > maximum
+            ):
+                _fail("management input must be a bounded direct file owned by the installer")
+            raw = stream.read(maximum + 1)
+            if len(raw) != meta.st_size or len(raw) > maximum:
+                _fail("management input size changed during reading")
+            return raw
+    except OSError as error:
+        raise InstallFailure("management input is unavailable or indirect") from error
+
+
+def _management_json(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise InstallFailure("management evidence is invalid JSON") from error
+    if not isinstance(value, dict):
+        _fail("management evidence must be an object")
+    return value
+
+
+def _install_management(args: argparse.Namespace) -> Path:
+    if (
+        args.archive is None
+        or args.source is not None
+        or args.management_manifest is None
+        or args.release_manifest is None
+    ):
+        _fail("management modes require --archive, --management-manifest and --release-manifest")
+    archive = _management_input(Path(args.archive), 128 * 1024**2)
+    inputs = {
+        "release-manifest.json": _management_input(Path(args.release_manifest), _JSON_MAX_BYTES),
+        "management-artifacts.json": _management_input(
+            Path(args.management_manifest), _JSON_MAX_BYTES
+        ),
+    }
+    source = _management_json(inputs["release-manifest.json"])
+    management = _management_json(inputs["management-artifacts.json"])
+    for document, parent, prefix in (
+        (source, Path(args.release_manifest).parent, "release"),
+        (management, Path(args.management_manifest).parent, "management"),
+    ):
+        rows = document.get("evidence")
+        if not isinstance(rows, dict) or set(rows) != {"sbom", "provenance"}:
+            _fail("management evidence set differs")
+        for kind in ("sbom", "provenance"):
+            name = f"{prefix}.{kind}.json"
+            row = rows[kind]
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"file", "sha256"}
+                or row["file"] != name
+                or Path(str(row["file"])).name != row["file"]
+            ):
+                _fail("management evidence name is outside its allowlist")
+            inputs[name] = _management_input(parent / name)
+            if hashlib.sha256(inputs[name]).hexdigest() != row["sha256"]:
+                _fail("management evidence hash differs")
+    for name, path in (
+        ("release-manifest.sig", args.release_signature),
+        ("management-artifacts.sig", args.management_signature),
+        ("release-trust-root.pem", args.release_trust_root),
+    ):
+        if path is not None:
+            inputs[name] = _management_input(Path(path), 16384)
+    compatibility = {
+        "brokerProtocolVersion": 2,
+        "webProtocolVersion": 2,
+        "authProtocolVersion": 2,
+        "brokerSchemaVersion": 2,
+        "controllerApiVersion": 1,
+    }
+    if (
+        management.get("format") != "openstack-platform-management-artifacts-v1"
+        or management.get("sourceCommit") != args.commit
+        or management.get("sourceManifestSha256")
+        != hashlib.sha256(inputs["release-manifest.json"]).hexdigest()
+        or management.get("trust") != source.get("trust")
+        or management.get("releaseChannel") != source.get("releaseChannel")
+        or management.get("compatibility") != compatibility
+        or any(type(value) is not int for value in management.get("compatibility", {}).values())
+    ):
+        _fail("management source, trust or compatibility binding differs")
+    expected = management["archives"][args.mode]
+    if (
+        hashlib.sha256(archive).hexdigest() != expected["sha256"]
+        or len(archive) != expected["bytes"]
+        or args.archive_sha256 != expected["sha256"]
+    ):
+        _fail("management archive hash differs from authenticated evidence")
+    files = _management_members(archive)
+    inventory = {
+        name: {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+        for name, raw in files.items()
+    }
+    if inventory != expected["files"] or "source.tar" not in files:
+        _fail("management archive inventory differs from authenticated evidence")
+    with tempfile.TemporaryDirectory(prefix="management-release-preflight-") as directory:
+        scratch = Path(directory)
+        frozen = scratch / "evidence"
+        frozen.mkdir(mode=0o700)
+        for name, raw in inputs.items():
+            (frozen / name).write_bytes(raw)
+            (frozen / name).chmod(0o400)
+        source_manifest = frozen / "release-manifest.json"
+        management_manifest = frozen / "management-artifacts.json"
+        policy: dict[str, Any] = dict(
+            signature=frozen / "release-manifest.sig" if args.release_signature else None,
+            trust_root=frozen / "release-trust-root.pem" if args.release_trust_root else None,
+            allow_unsigned_development=bool(args.allow_unsigned_development),
+            allow_unsigned_production=bool(args.allow_unsigned_production),
+        )
+        _authenticate_manifest(source, source_manifest, **policy)
+        management_policy = {
+            **policy,
+            "signature": frozen / "management-artifacts.sig" if args.management_signature else None,
+        }
+        _authenticate_manifest(management, management_manifest, **management_policy)
+        source_tar = scratch / "source.tar"
+        source_tar.write_bytes(files["source.tar"])
+        if _archive_commit(source_tar) != args.commit:
+            _fail("management source archive commit differs")
+        source_files = _management_members(files["source.tar"])
+        candidate = scratch / "source"
+        candidate.mkdir(mode=0o700)
+        for name, raw in source_files.items():
+            target = candidate / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        _trusted_manifest_preflight(candidate, source_manifest, **policy)
+        # Execute only the authenticated candidate namespace; never an ambient
+        # openstack_platform. All verifier inputs are our private frozen copies.
+        namespace = "_verified_management_release_" + Path(directory).name.replace("-", "_")
+        spec = importlib.util.spec_from_file_location(
+            namespace,
+            candidate / "openstack_platform/__init__.py",
+            submodule_search_locations=[str(candidate / "openstack_platform")],
+        )
+        if spec is None or spec.loader is None:
+            _fail("management package is unavailable")
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[namespace] = package
+        spec.loader.exec_module(package)
+        module = importlib.import_module(namespace + ".release_manifest")
+        verified_source = module.verify(
+            candidate, source_manifest, expected_commit=args.commit, **policy
+        )
+        artifacts = importlib.import_module(namespace + ".management_release")
+        verified_management = artifacts.verify(
+            source_manifest, management_manifest, **management_policy
+        )
+        if verified_source != source or verified_management != management:
+            _fail("candidate verification result differs from frozen evidence")
+        artifacts.verify_files(files, management, args.mode, source_files)
+        installation = importlib.import_module(namespace + ".management.installation")
+        return cast(Path, installation.install(args, management, files, inputs))
+
+
 def install(args: argparse.Namespace) -> Path:
     if os.geteuid() == 0 or os.environ.get("SUDO_USER"):
         _fail("run the release installer as the unprivileged platform owner")
@@ -1026,6 +1260,20 @@ def install(args: argparse.Namespace) -> Path:
     commit: str = args.commit
     if not _COMMIT.fullmatch(commit):
         _fail("commit must be a full lowercase source commit")
+    if mode in {"broker", "web"}:
+        # The admin wrapper scopes its production policy to portal modes.
+        # Keep helper/operator environment semantics unchanged, including the
+        # explicit unsigned-development path used by existing SSH deployment.
+        prior = os.environ.get("PLATFORM_ENVIRONMENT")
+        if os.environ.get("PLATFORM_MANAGEMENT_ENVIRONMENT") == "production":
+            os.environ["PLATFORM_ENVIRONMENT"] = "production"
+        try:
+            return _install_management(args)
+        finally:
+            if prior is None:
+                os.environ.pop("PLATFORM_ENVIRONMENT", None)
+            else:
+                os.environ["PLATFORM_ENVIRONMENT"] = prior
     _preflight_release_gate(args, commit)
 
     defaults = _DEFAULTS.get(mode)
@@ -1238,12 +1486,14 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Install and atomically select a complete operator or helper release."
     )
-    parser.add_argument("--mode", choices=("operator", "helper"), required=True)
+    parser.add_argument("--mode", choices=("operator", "helper", "broker", "web"), required=True)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--source", type=Path)
     source.add_argument("--archive", type=Path)
     parser.add_argument("--archive-sha256")
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--management-manifest", type=Path)
+    parser.add_argument("--management-signature", type=Path)
     parser.add_argument("--release-manifest", type=Path)
     parser.add_argument("--release-signature", type=Path)
     parser.add_argument("--release-trust-root", type=Path)

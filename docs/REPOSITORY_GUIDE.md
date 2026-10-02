@@ -36,7 +36,7 @@ outside Git as described in [Deploy the platform](DEPLOYMENT.md).
 - `deploy/releases/bootstrap_operator_runtime.sh` — bootstraps pinned release tooling below `/srv/openstack-platform` as its unprivileged owner.
 - `deploy/releases/deploy_helper_release.sh` — transfers and installs one commit-addressed helper release through the pinned admin bridge.
 - `deploy/releases/install_operator_config.py` — atomically installs validated non-secret operator configuration without privilege escalation.
-- `deploy/releases/install_release.py` — verifies, extracts, smoke-tests, and atomically selects immutable operator or helper release archives.
+- `deploy/releases/install_release.py` — verifies, extracts, smoke-tests, and selects operator/helper or staged broker/web release archives.
 - `deploy/releases/migrate_legacy_controller.py` — authenticates and imports terminal legacy controller state into a private current-schema hosted-controller candidate.
 - `deploy/releases/release_smoke.py` — checks the operator entry point or the helper action manifest/handler composition before release selection.
 - `deploy/releases/setup_operator_bridge.py` — preflights, writes, and validates the pinned SSH/OpenStack bridge between operator and admin hosts.
@@ -226,7 +226,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/fixtures/retained_openstack.py` — offline OSC/Nomad process double for real worker helper and lifecycle integration tests.
 - `tests/install_ci_apt_packages.sh` — bounded retry wrapper for fixed CI-only APT package installation.
 - `tests/product_fixtures.py` — reusable builders for accepted application/deployment product state.
-- `tests/repository_fixtures.py` — creates clean temporary Git repositories from the current worktree for release-sensitive tests.
+- `tests/repository_fixtures.py` — creates clean temporary Git repositories, with optional fixture substitutions before the fixture commit, for release-sensitive tests.
 - `tests/smoke_generated_recipes.sh` — generates, builds, starts, and health-checks real Node and Bun recipes with rootless Podman.
 - `tests/smoke_openstack_image.sh` — boots an exact role QCOW2 with QEMU/config-drive and waits for its completion marker.
 
@@ -287,6 +287,91 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_role_artifact_manifest.py` — post-build QCOW2/Nix closure/publication artifact evidence and tamper tests.
 - `tests/test_verify_persistent_host.py` — exact provider projection validation for safely reusing persistent hosts.
 
+## Local owner portal slice
+
+- `openstack_platform/host_paths.py` — handle-based root controller file copying and credential metadata preparation, with no-follow component traversal.
+- `nix/lib/controller-paths.nix` — one controller preparation plan shared by read-only preflight and handle-based application.
+- `tests/test_host_paths.py` — symlink, hardlink, FIFO, wrong-owner and replacement-race coverage for root preparation helpers.
+- `openstack_platform/management/__init__.py` — marks the owner management boundary without loading optional dependencies.
+- `openstack_platform/management/common.py` — strict JSON/base64url, canonical data, digests, opaque tokens, and UTC presentation helpers.
+- `openstack_platform/management/config.py` — validates closed management configuration and loopback development constraints.
+- `openstack_platform/management/broker/__init__.py` — marks the authoritative owner broker package.
+- `openstack_platform/management/broker/api.py` — closed owner routes, ownership, quota admission, configuration snapshots, and authorized controller reads.
+- `openstack_platform/management/broker/auth.py` — login flows, replay prevention, browser-bound completion, opaque sessions, CSRF, and logout.
+- `openstack_platform/management/broker/client.py` — fixed bounded Unix HTTP client with no TCP fallback.
+- `openstack_platform/management/broker/database.py` — private broker SQLite schema, migration evidence/locking, and short transactions.
+- `openstack_platform/management/broker/journal.py` — durable intent leases, same-key retries, operation polling, and recovery states.
+- `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
+- `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
+- `openstack_platform/management/web/server.py` — bounded HTTP, static serving, closed broker forwarding, typed cookie directives, and CSP/security headers.
+- `openstack_platform/management/web/main.py` — static web entry point without development-provider imports.
+- `openstack_platform/management/dev/__init__.py` — marks explicitly local development doubles.
+- `openstack_platform/management/dev/__main__.py` — loopback HTTPS/Vite harness with in-memory signing/TLS keys and controlled lifecycle.
+- `openstack_platform/management/dev/controller.py` — real project-socket double with immutable fixture deployments, checkpoints, and lost-response/recovery faults.
+- `tests/test_management.py` — offline broker authentication, ownership/quota race, intent recovery, and web/Unix transport tests.
+- `frontend/owner-portal/package.json` — exact frontend and browser-test dependencies plus local scripts.
+- `frontend/owner-portal/package-lock.json` — locked npm graph for Node 24 development and builds.
+- `frontend/owner-portal/tsconfig.json` — strict frontend and smoke-test TypeScript checks.
+- `frontend/owner-portal/vite.config.ts` — React production build, local API proxy, and Vitest configuration.
+- `frontend/owner-portal/playwright.config.ts` — cached-Chromium HTTPS smoke with worktree-confined output.
+- `frontend/owner-portal/index.html` — static external-script entry document and origin-preserving HTML referrer policy.
+- `frontend/owner-portal/public/theme.js` — external pre-paint light/dark preference script.
+- `frontend/owner-portal/public/favicon.svg` — code-native portal mark.
+- `frontend/owner-portal/src/main.tsx` — React root and in-memory TanStack Query setup.
+- `frontend/owner-portal/src/api.ts` — typed API/response validation, same-key CSRF retry, and typed settings validation.
+- `frontend/owner-portal/src/App.tsx` — accessible owner routes, configuration, exact-commit review, status/history, and build logs.
+- `frontend/owner-portal/src/app.css` — external dashboard-language tokens, light/dark themes, cards, responsive tables/forms, and drawer styling.
+- `frontend/owner-portal/src/test-setup.ts` — Vitest DOM assertions and component cleanup.
+- `frontend/owner-portal/src/App.test.tsx` — configuration behavior, errors, status semantics, API decoding, and CSRF retry tests.
+- `frontend/owner-portal/e2e/owner-flow.spec.ts` — two-owner HTTPS product smoke, lost-response recovery, strict CSP, and sanitized visual evidence.
+
+- `frontend/owner-portal/.prettierrc.json` — pinned frontend formatter policy with print width 100.
+- `frontend/owner-portal/src/components/AppFrame.tsx` — shared owner AppFrame component and presentation behavior.
+- `frontend/owner-portal/src/components/BoundaryText.tsx` — shared owner BoundaryText component and presentation behavior.
+- `frontend/owner-portal/src/components/DeploymentRow.tsx` — shared owner DeploymentRow component and presentation behavior.
+- `frontend/owner-portal/src/components/Feedback.tsx` — shared owner Feedback component and presentation behavior.
+- `frontend/owner-portal/src/components/Mark.tsx` — shared owner Mark component and presentation behavior.
+- `frontend/owner-portal/src/components/Operation.tsx` — shared owner Operation component and presentation behavior.
+- `frontend/owner-portal/src/components/Status.tsx` — shared owner Status component and presentation behavior.
+- `frontend/owner-portal/src/components/ThemeButton.tsx` — shared owner ThemeButton component and presentation behavior.
+- `frontend/owner-portal/src/components/presentation.test.tsx` — shared owner presentation.test component and presentation behavior.
+- `frontend/owner-portal/src/hooks/useIntentPolling.ts` — owner useIntentPolling lifecycle and data-fetching hook.
+- `frontend/owner-portal/src/hooks/useSession.ts` — owner useSession lifecycle and data-fetching hook.
+- `frontend/owner-portal/src/pages/Configuration.tsx` — owner configuration page module.
+- `frontend/owner-portal/src/pages/Dashboard.tsx` — owner dashboard page module.
+- `frontend/owner-portal/src/pages/Deploy.tsx` — owner deploy page module.
+- `frontend/owner-portal/src/pages/Deployment.tsx` — owner deployment page module.
+- `frontend/owner-portal/src/pages/History.tsx` — owner history page module.
+- `frontend/owner-portal/src/pages/NewApp.tsx` — owner newapp page module.
+- `frontend/owner-portal/src/pages/Overview.tsx` — owner overview page module.
+- `frontend/owner-portal/src/pages/SignIn.tsx` — owner signin page module.
+- `frontend/owner-portal/src/shell/PortalShell.tsx` — responsive portal shell, navigation, theme, and session controls.
+- `frontend/owner-portal/src/utils/presentation.ts` — owner date, commit, health, and operation phase presentation helpers.
+- `openstack_platform/management/broker/anonymous.py` — private HMAC key, stateless expiring anonymous challenges, and bounded per-client-address limits.
+- `tests/test_management_contract.py` — real project-socket broker contract and fake/real wire-shape, errors, cleanup, and read evidence.
+- `openstack_platform/management/backup.py` — online SQLite backup, encrypted evidence, verification and offline session-invalidating restore.
+- `tests/test_management_backup.py` — fourth-class backup, off-site compatibility, restore guards and full-loss drill tests.
+- `tests/test_management_platform.py` — explicit ingress identity configuration and Nix hosting boundary checks.
+
+- `tests/collect_owner_portal_artifacts.py` — bounded CI upload collector for fixture screenshots and sanitized API failure metadata.
+- `tests/test_owner_portal_artifacts.py` — artifact whitelist, credential-field removal, symlink and size-bound coverage.
+
+- `openstack_platform/owner_portal_config.py` — dependency-free public Commons inventory validation.
+- `openstack_platform/management/settings.py` — operator rendering of production broker/web/identity configs.
+- `openstack_platform/management/identity/__init__.py` — identity integration package boundary.
+- `openstack_platform/management/identity/client.py` — bounded system-CA HTTPS Commons client and typed contract.
+- `openstack_platform/management/identity/main.py` — broker-only Unix identity process and configuration-only readiness.
+- `openstack_platform/management/dev/commons.py` — loopback HTTPS Commons bb78c5e contract double.
+- `tests/test_management_identity.py` — Commons contract, TLS/peer limits and schema-2 migration evidence.
+
+- `openstack_platform/management_release.py` — commit-bound broker/web archives and authenticated asset compatibility evidence.
+- `openstack_platform/management/entry.py` — isolated release-local service startup and no-network candidate smoke.
+- `openstack_platform/management/installation.py` — group-inheriting staging, immutable payload/config checks, staged selection and pair activation requests.
+- `openstack_platform/management/activation.py` — admin-image root activation validates the requested staged pair and atomically selects one active pair.
+- `openstack_platform/management/rollback.py` — operator re-verification, smoke and normal activation request for a retained compatible pair and its own config snapshot.
+- `frontend/owner-portal/scripts/build-receipt.mjs` — Node/Git/npm-lock and actual Vite output receipt.
+- `tests/test_management_releases.py` — artifact trust, hostile archives, real-filesystem installation and explicit Node build integration.
+
 ## Keeping this guide current
 
 When adding, deleting, or renaming a tracked file, update this guide in the same
@@ -294,7 +379,3 @@ change. `tests/test_documentation.py` checks that every path returned by
 `git ls-files` has one backtick-delimited entry here. The check allows a new,
 not-yet-added guide entry during local editing, but CI verifies it once the file
 is tracked.
-
-- `openstack_platform/host_paths.py` — handle-based root controller file copying and credential metadata preparation, with no-follow component traversal.
-- `nix/lib/controller-paths.nix` — one controller preparation plan shared by read-only preflight and handle-based application.
-- `tests/test_host_paths.py` — symlink, hardlink, FIFO, wrong-owner and replacement-race coverage for root preparation helpers.

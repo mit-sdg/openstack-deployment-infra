@@ -17,6 +17,9 @@ __pycache__/
 node_modules/
 .next/
 *.tsbuildinfo
+frontend/owner-portal/dist/
+frontend/owner-portal/test-results/
+frontend/owner-portal/playwright-report/
 
 # Local environment and operational output
 .env
@@ -30,3 +33,5 @@ result
 result-*
 .direnv/
 .tmp/
+
+/frontend/owner-portal/build-receipt.json

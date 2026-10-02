@@ -148,11 +148,12 @@ class ControllerHostingStaticTests(unittest.TestCase):
         ]
         management = source[
             source.index('systemd.services."${namespace}-management-web"') : source.index(
-                'systemd.services."${namespace}-controller-readiness"'
+                'systemd.paths."${namespace}-management-broker"'
             )
         ]
         self.assertIn("CONTROLLER_PROJECT_SOCKET = controllerSocket;", broker)
-        self.assertIn("unitConfig.ConditionPathExists = managementBrokerExecutable;", broker)
+        self.assertIn("managementBrokerExecutable", broker)
+        self.assertIn("managementBrokerConfig", broker)
         self.assertIn("ExecCondition =", broker)
         self.assertNotIn("ConditionPathIsExecutable", broker)
         self.assertNotIn('wantedBy = [ "multi-user.target" ];', broker)
@@ -183,14 +184,15 @@ class ControllerHostingStaticTests(unittest.TestCase):
         self.assertNotIn("PathExists = operatorImageSelections;", controller_activation)
         self.assertIn('Unit = "${namespace}-controller-activate.service";', controller_activation)
         self.assertNotIn("controllerPrivilegedSocket", management)
-        self.assertIn("unitConfig.ConditionPathExists = managementWebExecutable;", management)
+        self.assertIn("managementWebExecutable", management)
+        self.assertIn("managementWebConfig", management)
         self.assertNotIn("ConditionPathIsExecutable", management)
         self.assertNotIn(
             'wantedBy = [ "multi-user.target" ];',
             management.split('systemd.paths."${namespace}-management-broker"', 1)[0],
         )
-        self.assertIn("PathExists = managementBrokerExecutable;", management)
-        self.assertIn("PathExists = managementWebExecutable;", management)
+        self.assertIn("PathExists = managementBrokerExecutable;", source)
+        self.assertIn("PathExists = managementWebExecutable;", source)
 
     def test_controller_credentials_are_repeatably_normalized_for_lifecycle_wrappers(self) -> None:
         source = ADMIN.read_text(encoding="utf-8")

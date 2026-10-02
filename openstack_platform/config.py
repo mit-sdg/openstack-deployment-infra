@@ -272,6 +272,12 @@ def load_platform(path: str | Path) -> PlatformConfig:
     _required_inventory_paths(document)
     _validate_public_ingress(document)
 
+    from .owner_portal_config import validate as validate_owner_portal
+
+    try:
+        validate_owner_portal(document.get("ownerPortal", {"enabled": False}))
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
     project_name = _text(document["project"], field="project")
     project_id = uuid(document["projectId"], field="projectId")
     prefix = _text(document["prefix"], field="prefix", pattern=_PREFIX)
