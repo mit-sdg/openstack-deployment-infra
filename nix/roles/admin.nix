@@ -941,10 +941,12 @@ in
     };
   };
 
+  # Path units default to Before=paths.target, which precedes basic.target. They
+  # must not order after a regular service such as management-prepare (itself
+  # after basic.target): that forms a boot ordering cycle that systemd breaks by
+  # dropping an arbitrary job. The triggered services require preparation.
   systemd.paths."${namespace}-management-broker" = {
     wantedBy = [ "multi-user.target" ];
-    requires = [ "${namespace}-management-prepare.service" ];
-    after = [ "${namespace}-management-prepare.service" ];
     unitConfig.RequiresMountsFor = [ state ];
     pathConfig = {
       PathExists = managementBrokerExecutable;
@@ -954,8 +956,6 @@ in
 
   systemd.paths."${namespace}-management-web" = {
     wantedBy = [ "multi-user.target" ];
-    requires = [ "${namespace}-management-prepare.service" ];
-    after = [ "${namespace}-management-prepare.service" ];
     unitConfig.RequiresMountsFor = [ state ];
     pathConfig = {
       PathExists = managementWebExecutable;
@@ -967,6 +967,7 @@ in
   # select a root-owned active pair, then restart the fixed units.
   systemd.services."${namespace}-management-activate" = {
     unitConfig.RequiresMountsFor = [ state ];
+    requires = [ "${namespace}-management-prepare.service" ];
     after = [ "${namespace}-management-prepare.service" ];
     serviceConfig = {
       Type = "oneshot";
@@ -975,8 +976,6 @@ in
   };
   systemd.paths."${namespace}-management-activate" = {
     wantedBy = [ "multi-user.target" ];
-    requires = [ "${namespace}-management-prepare.service" ];
-    after = [ "${namespace}-management-prepare.service" ];
     unitConfig.RequiresMountsFor = [ state ];
     pathConfig = {
       PathChanged = managementActivationMarker;

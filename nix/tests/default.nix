@@ -398,6 +398,9 @@ let
         ${
           if role == "admin" then
             ''
+              # systemd silently drops a job to break an ordering cycle; never
+              # accept a boot that needed that.
+              machine.succeed("! journalctl --boot --output=cat | grep -F 'Found ordering cycle'")
               machine.wait_for_unit("nomad.service")
               machine.wait_for_unit("${namespace}-admin-readiness.service")
               machine.wait_for_unit("${namespace}-controller.service")
