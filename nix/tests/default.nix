@@ -24,17 +24,19 @@ let
     proof=Path("${state}/management-broker/identity-sandbox-ok")
     # Verify the integration once, then permit restart during identity outages.
     if not proof.exists():
-        client = ProjectClient(Path("/run/${namespace}-management-identity/identity.sock"), timeout=2)
+        client = ProjectClient(Path("/run/${namespace}-management-identity/identity.sock"), timeout=10)
         deadline = time.monotonic() + 30
+        last = "no attempt"
         while True:
             try:
                 status, result = client.request("POST", "/v1/authenticate", {"username":"alice","password":"vm-fixture"})
+                last = f"status={status} error={result.get('error', {}).get('code') if isinstance(result, dict) else None}"
                 if status != 503:
                     break
-            except ControllerUnavailable:
-                pass
+            except ControllerUnavailable as error:
+                last = f"unavailable: {type(error).__name__}: {error}"
             if time.monotonic() >= deadline:
-                raise RuntimeError("identity/Commons did not become ready in the VM")
+                raise RuntimeError(f"identity/Commons did not become ready in the VM ({last})")
             time.sleep(0.1)
         assert status == 200 and result["data"]["subject"] == "11111111-1111-4111-8111-111111111111"
         assert "email" not in result["data"]
@@ -537,7 +539,7 @@ let
               machine.wait_for_unit("${namespace}-management-broker.service")
               # Record reachability from outside the sandbox before waiting, so a
               # failure separates host DNS/TLS problems from sandbox restrictions.
-              print(machine.execute("getent hosts class.example.com; ${pkgs.curl}/bin/curl -sS --max-time 5 -o /dev/null -w 'commons-http=%{http_code}\\n' -H 'Content-Type: application/json' --data '{\"username\":\"alice\",\"password\":\"vm-fixture\"}' https://class.example.com:9444/api/auth/authenticate; ls -ln /run/${namespace}-management-identity; id management-broker")[1])
+              print(machine.execute("getent hosts class.example.com; ${pkgs.curl}/bin/curl -sS --max-time 5 -o /dev/null -w 'commons-http=%{http_code}\\n' -H 'Content-Type: application/json' --data '{\"username\":\"alice\",\"password\":\"vm-fixture\"}' https://class.example.com:9444/api/auth/authenticate; ls -ln /run/${namespace}-management-identity; id management-broker; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\\nidentity-http=%{http_code}\\n' --unix-socket /run/${namespace}-management-identity/identity.sock -H 'Content-Type: application/json' --data '{\"username\":\"alice\",\"password\":\"vm-fixture\"}' http://localhost/v1/authenticate; journalctl -b --no-pager -o cat -u ${namespace}-management-identity.service | tail -n 20")[1])
               machine.wait_until_succeeds("test -f ${state}/management-broker/identity-sandbox-ok")
               broker_health = "runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket /run/${namespace}-management-broker/broker.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'"
               machine.wait_until_succeeds(broker_health)
