@@ -36,6 +36,8 @@ let
     echo "== root-health"; ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nroot-health-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
     echo "== health"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nhealth-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
     echo "== authenticate"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\nidentity-http=%{http_code}\n' --unix-socket "$sock" -H 'Content-Type: application/json' --data "$body" http://localhost/v1/authenticate
+    echo "== tcp-from-identity"; ${pkgs.iproute2}/bin/ss -tanp | grep -F "pid=$pid," || echo "no identity tcp sockets"
+    echo "== resolve-in-identity"; systemd-run --wait --pipe --quiet -p User=management-identity ${packages.platformPython}/bin/python -c 'import socket; print(sorted({a[4][0] for a in socket.getaddrinfo("class.example.com", 9444, type=socket.SOCK_STREAM)}))' 2>&1 | tail -n 1
     echo "== unit-ip"; systemctl show "$unit" -p IPAddressAllow -p IPAddressDeny -p SocketBindDeny -p RestrictAddressFamilies
     probe='import socket; s=socket.create_connection(("class.example.com", 9444), 3); print("tcp-ok", s.getpeername())'
     for props in none ip bind both; do
