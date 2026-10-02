@@ -15,8 +15,8 @@ let
   infra = pkgs.runCommand "${namespace}-infra" { } ''
     mkdir -p "$out"
     cp -R ${../../infra}/. "$out/"
-    cp ${../../openstack_platform/owner_portal_config.py} "$out/lib/owner_portal_config.py"
     chmod -R u+w "$out"
+    cp ${../../openstack_platform/owner_portal_config.py} "$out/lib/owner_portal_config.py"
     patchShebangs "$out"
   '';
   state = platform.paths.adminState;

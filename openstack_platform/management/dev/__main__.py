@@ -8,7 +8,9 @@ import os
 import signal
 import ssl
 import subprocess
+import tempfile
 import threading
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -121,8 +123,22 @@ def main() -> None:
     ):
         parser.error("choose distinct unprivileged loopback ports")
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
-    socket_root = root / "sockets"
-    socket_root.mkdir(mode=0o700, exist_ok=True)
+    assets = Path.cwd() / "frontend/owner-portal/dist"
+    if not args.vite and not (assets / "index.html").is_file():
+        parser.error("build frontend/owner-portal before starting HTTPS or static HTTP mode")
+    with ExitStack() as resources:
+        # Linux sun_path is 108 bytes including its terminator. Ignore TMPDIR:
+        # it can be as long as the checkout. mkdtemp creates a fresh owned 0700
+        # directory, removed even when a later service fails during startup.
+        socket_root = resources.enter_context(
+            tempfile.TemporaryDirectory(prefix=f"owner-portal-sockets-{os.geteuid()}-", dir="/tmp")
+        )
+        run(args, root, Path(socket_root), assets, resources)
+
+
+def run(
+    args: argparse.Namespace, root: Path, socket_root: Path, assets: Path, resources: ExitStack
+) -> None:
     scheme = "http" if args.http else "https"
     origin = f"{scheme}://127.0.0.1:{args.port}"
     commons_origin = f"https://localhost:{args.provider_port}"
@@ -153,16 +169,19 @@ def main() -> None:
             broker_peer=(os.geteuid(), os.getegid()),
         )
     )
+    resources.callback(identity.server_close)
     fixture = FakeController(root / "controller.json")
     controller = fixture.server(config.controller_socket)
+    resources.callback(controller.server_close)
     broker, broker_server = serve(config)
-    assets = Path.cwd() / "frontend/owner-portal/dist"
-    if not args.vite and not (assets / "index.html").is_file():
-        parser.error("build frontend/owner-portal before starting HTTPS or static HTTP mode")
+    resources.callback(broker.journal.close)
+    resources.callback(broker_server.server_close)
     web = HarnessWeb(
         ("127.0.0.1", 0 if args.vite else args.port), config, assets, tls=tls, fixture=fixture
     )
+    resources.callback(web.server_close)
     provider = Commons(("127.0.0.1", args.provider_port), config, assets, tls=commons_tls)
+    resources.callback(provider.server_close)
     servers = [controller, identity, broker_server, web, provider]
     threads = [
         threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
@@ -177,8 +196,9 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        for thread in threads:
+        for server, thread in zip(servers, threads, strict=True):
             thread.start()
+            resources.callback(server.shutdown)
         if args.vite:
             environment = {
                 **os.environ,
@@ -227,10 +247,6 @@ def main() -> None:
             except subprocess.TimeoutExpired:
                 os.killpg(vite.pid, signal.SIGKILL)
                 vite.wait(timeout=5)
-        broker.journal.close()
-        for server in servers:
-            server.shutdown()
-            server.server_close()
 
 
 if __name__ == "__main__":

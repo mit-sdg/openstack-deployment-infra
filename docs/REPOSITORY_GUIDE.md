@@ -363,6 +363,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/identity/main.py` — broker-only Unix identity process and configuration-only readiness.
 - `openstack_platform/management/dev/commons.py` — loopback HTTPS Commons bb78c5e contract double.
 - `tests/test_management_identity.py` — Commons contract, TLS/peer limits and schema-2 migration evidence.
+- `tests/test_management_dev.py` — long-checkout socket binding, private development directories, path limits and partial-startup cleanup.
 
 - `openstack_platform/management_release.py` — commit-bound broker/web archives and authenticated asset compatibility evidence.
 - `openstack_platform/management/entry.py` — isolated release-local service startup and no-network candidate smoke.

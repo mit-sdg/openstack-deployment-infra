@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..common import strict_json
-from ..config import management_peer, origin
+from ..config import development_socket_path, management_peer, origin, socket_path_length
 
 # A class of 200 signing in over a minute averages fewer than four requests/s.
 # 64 outbound exchanges leave headroom for bursts; 128 local requests allow a
@@ -69,12 +69,15 @@ class IdentityConfig:
         if "developmentCa" in value and not development:
             raise ValueError("production identity must use system CAs")
         socket_path = Path(value["socket"])
-        if not socket_path.is_absolute() or socket_path.is_symlink():
-            raise ValueError("identity socket must be a canonical direct path")
-        if development and not socket_path.resolve().is_relative_to(
-            (Path.cwd() / ".tmp").resolve()
+        if (
+            not socket_path.is_absolute()
+            or str(socket_path) != os.path.normpath(socket_path)
+            or socket_path.is_symlink()
         ):
-            raise ValueError("development socket must be in .tmp")
+            raise ValueError("identity socket must be a canonical direct path")
+        socket_path_length(socket_path, "identity")
+        if development and not development_socket_path(socket_path):
+            raise ValueError("development sockets require .tmp or a private harness directory")
         ca_path = Path(ca) if ca is not None else None
         if ca_path and (
             ca_path.is_symlink()

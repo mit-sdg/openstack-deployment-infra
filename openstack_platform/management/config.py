@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -12,6 +13,34 @@ from urllib.parse import urlsplit
 from .. import contracts
 from ..config import load_platform
 from .common import strict_json, text
+
+
+def development_socket_path(path: Path) -> bool:
+    """Allow worktree sockets or the harness's private, short temporary directory."""
+    if path.resolve().is_relative_to((Path.cwd() / ".tmp").resolve()):
+        return True
+    parent = path.parent
+    if (
+        parent.parent != Path("/tmp")
+        or not parent.name.startswith(f"owner-portal-sockets-{os.geteuid()}-")
+        or parent.resolve() != parent
+    ):
+        return False
+    try:
+        metadata = parent.lstat()
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == os.geteuid()
+        and stat.S_IMODE(metadata.st_mode) == 0o700
+    )
+
+
+def socket_path_length(path: Path, name: str) -> None:
+    length = len(os.fsencode(path))
+    if length > 107:
+        raise ValueError(f"{name} Unix socket path is {length} bytes; maximum is 107: {path}")
 
 
 def management_peer(account: str) -> tuple[int, int]:
@@ -140,10 +169,16 @@ class Config:
                 or candidate.is_symlink()
             ):
                 raise ValueError("canonical absolute management paths required")
-            if development and not candidate.resolve().is_relative_to(
-                (Path.cwd() / ".tmp").resolve()
-            ):
-                raise ValueError("development state must be in this worktree .tmp")
+            if name != "stateDirectory":
+                socket_path_length(candidate, name)
+            if development:
+                if name == "stateDirectory":
+                    if not candidate.resolve().is_relative_to((Path.cwd() / ".tmp").resolve()):
+                        raise ValueError("development state must be in this worktree .tmp")
+                elif not development_socket_path(candidate):
+                    raise ValueError(
+                        "development sockets require .tmp or a private harness directory"
+                    )
             paths.append(candidate)
         limits = []
         for name, default in (

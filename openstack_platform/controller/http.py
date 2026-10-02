@@ -222,6 +222,9 @@ def prepare_socket_path(socket_path: str) -> None:
     path = os.path.abspath(socket_path)
     if path != socket_path or len(path.encode()) > 4_096:
         raise ValueError("controller socket path must be canonical and absolute")
+    length = len(os.fsencode(path))
+    if length > 107:
+        raise ValueError(f"Unix socket path is {length} bytes; maximum is 107: {path}")
     parent = os.path.dirname(path)
     metadata = os.lstat(parent)
     if (

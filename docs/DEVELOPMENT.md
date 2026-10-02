@@ -130,8 +130,13 @@ deploy a full lowercase 40-character hexadecimal fixture commit. Build output,
 health and deployment results are simulated. Example application URLs use
 example.com and are not local endpoints.
 
-State, public development CA, configs and sockets live below
-`.tmp/owner-portal-credentials`. Ctrl-C stops every server and Vite child. Schema
+State, public development CA and configs live below
+`.tmp/owner-portal-credentials`. The three Unix sockets use a fresh current-user
+directory `/tmp/owner-portal-sockets-<uid>-<random>` with mode 0700, so long checkout
+paths cannot exceed Linux's 107-byte socket-path limit. Development configuration
+accepts sockets only below this worktree's `.tmp` or in such a private directory;
+state and the public CA remain confined to `.tmp`. Ctrl-C stops every server and
+Vite child and removes the socket directory; startup failures also remove it. Schema
 2 preserves ownership, quotas, intents and audit while removing legacy assertion
 flows/replays and key IDs and invalidating sessions. Legacy fixtures whose
 subjects were usernames are not reassigned by name to Commons UUIDs; use a fresh
