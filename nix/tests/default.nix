@@ -28,6 +28,12 @@ let
     echo "== socket"; ls -ln /run/${namespace}-management-identity; id management-broker
     pid=$(systemctl show -p MainPID --value "$unit"); echo "identity-pid=$pid"
     grep -E '^(State|Threads):' "/proc/$pid/status"
+    echo "== paths"; stat -c '%n %U:%G %a inode=%i type=%F' /run /run/${namespace}-management-identity "$sock"
+    echo "== listening"; ${pkgs.iproute2}/bin/ss -xlpn | grep -F management-identity || echo "no listener on identity path"
+    echo "== fds"; ls -l "/proc/$pid/fd" 2>&1 | grep -F socket || true
+    echo "== mountinfo"; grep -F management-identity "/proc/$pid/mountinfo" || echo "no identity-specific mount"
+    echo "== connect-errno"; runuser -u management-broker -- ${packages.platformPython}/bin/python -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print('broker connect ok')" "$sock" 2>&1 | tail -n 1
+    echo "== root-health"; ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nroot-health-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
     echo "== health"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nhealth-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
     echo "== authenticate"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\nidentity-http=%{http_code}\n' --unix-socket "$sock" -H 'Content-Type: application/json' --data "$body" http://localhost/v1/authenticate
     echo "== stacks"; kill -USR1 "$pid"; sleep 1; cat /run/${namespace}-management-identity/stacks.txt
