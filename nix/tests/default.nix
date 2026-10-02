@@ -8,10 +8,30 @@ let
   backups = platform.paths.backups;
   packages = import ../pkgs { inherit pkgs platform; };
   managementIdentityBootstrap = pkgs.writeText "management-identity-bootstrap.py" ''
+    import faulthandler
+    import signal
     import sys
+    # Test-only: SIGUSR1 dumps every thread's stack without stopping the service.
+    stacks = open("/run/${namespace}-management-identity/stacks.txt", "w")
+    faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
     sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
     from openstack_platform.management.identity.main import main
     main()
+  '';
+  managementIdentityDiagnostics = pkgs.writeShellScript "management-identity-diagnostics" ''
+    set -u
+    unit=${namespace}-management-identity.service
+    sock=/run/${namespace}-management-identity/identity.sock
+    body='{"username":"alice","password":"vm-fixture"}'
+    echo "== dns"; getent hosts class.example.com
+    echo "== commons"; ${pkgs.curl}/bin/curl -sS --max-time 5 -o /dev/null -w 'commons-http=%{http_code}\n' -H 'Content-Type: application/json' --data "$body" https://class.example.com:9444/api/auth/authenticate
+    echo "== socket"; ls -ln /run/${namespace}-management-identity; id management-broker
+    pid=$(systemctl show -p MainPID --value "$unit"); echo "identity-pid=$pid"
+    grep -E '^(State|Threads):' "/proc/$pid/status"
+    echo "== health"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nhealth-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
+    echo "== authenticate"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\nidentity-http=%{http_code}\n' --unix-socket "$sock" -H 'Content-Type: application/json' --data "$body" http://localhost/v1/authenticate
+    echo "== stacks"; kill -USR1 "$pid"; sleep 1; cat /run/${namespace}-management-identity/stacks.txt
+    echo "== journal"; journalctl --no-pager -o short-monotonic -u "$unit" | tail -n 40
   '';
   managementIdentityProbe = pkgs.writeText "management-identity-probe.py" ''
     import os
@@ -539,7 +559,7 @@ let
               machine.wait_for_unit("${namespace}-management-broker.service")
               # Record reachability from outside the sandbox before waiting, so a
               # failure separates host DNS/TLS problems from sandbox restrictions.
-              print(machine.execute("getent hosts class.example.com; ${pkgs.curl}/bin/curl -sS --max-time 5 -o /dev/null -w 'commons-http=%{http_code}\\n' -H 'Content-Type: application/json' --data '{\"username\":\"alice\",\"password\":\"vm-fixture\"}' https://class.example.com:9444/api/auth/authenticate; ls -ln /run/${namespace}-management-identity; id management-broker; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\\nidentity-http=%{http_code}\\n' --unix-socket /run/${namespace}-management-identity/identity.sock -H 'Content-Type: application/json' --data '{\"username\":\"alice\",\"password\":\"vm-fixture\"}' http://localhost/v1/authenticate; journalctl -b --no-pager -o cat -u ${namespace}-management-identity.service | tail -n 20")[1])
+              print(machine.execute("${managementIdentityDiagnostics} 2>&1")[1])
               machine.wait_until_succeeds("test -f ${state}/management-broker/identity-sandbox-ok")
               broker_health = "runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket /run/${namespace}-management-broker/broker.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'"
               machine.wait_until_succeeds(broker_health)
