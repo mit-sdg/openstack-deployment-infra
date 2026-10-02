@@ -532,6 +532,9 @@ let
                   machine.wait_for_unit(f"${namespace}-management-{component}.path")
               machine.succeed(f"runuser -u agentops -- sh -c 'umask 0027; printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
               machine.wait_for_unit("${namespace}-management-broker.service")
+              # Record reachability from outside the sandbox before waiting, so a
+              # failure separates host DNS/TLS problems from sandbox restrictions.
+              print(machine.execute("getent hosts class.example.com; ${pkgs.curl}/bin/curl -sS --max-time 5 -o /dev/null -w 'commons-http=%{http_code}\\n' -H 'Content-Type: application/json' --data '{\"username\":\"alice\",\"password\":\"vm-fixture\"}' https://class.example.com:9444/api/auth/authenticate; ls -ln /run/${namespace}-management-identity; id management-broker")[1])
               machine.wait_until_succeeds("test -f ${state}/management-broker/identity-sandbox-ok")
               broker_health = "runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket /run/${namespace}-management-broker/broker.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'"
               machine.wait_until_succeeds(broker_health)

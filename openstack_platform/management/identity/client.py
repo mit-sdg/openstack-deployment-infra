@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import http.client
 import json
 import queue
 import socket
 import ssl
+import sys
 import threading
 import time
 import uuid
@@ -21,6 +23,24 @@ from ..config import development_socket_path, management_peer, origin, socket_pa
 # 64 outbound exchanges leave headroom for bursts; 128 local requests allow a
 # bounded waiting queue and stay within the Unix transport's peer-policy ceiling.
 IDENTITY_CONNECTIONS = 64
+
+
+def describe(error: BaseException) -> str:
+    """Name a failure for operators without echoing credentials or response bodies."""
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return f"tls-verify:{error.verify_message}"
+    if isinstance(error, ssl.SSLError):
+        return f"tls:{error.reason or type(error).__name__}"
+    if isinstance(error, socket.gaierror):
+        return f"dns:{error.errno}"
+    if isinstance(error, OSError) and error.errno is not None:
+        return f"{type(error).__name__}:{errno.errorcode.get(error.errno, error.errno)}"
+    return type(error).__name__
+
+
+def unavailable(reason: str) -> tuple[str, None]:
+    print(f"identity-check=unavailable reason={reason}", file=sys.stderr, flush=True)
+    return "unavailable", None
 
 
 def credentials(value: object) -> dict[str, str]:
@@ -147,9 +167,11 @@ class CommonsClient:
             deadline if deadline is not None else time.monotonic() + self.config.connect_seconds
         )
         if not self.connect_capacity.acquire(timeout=max(0, deadline - time.monotonic())):
+            unavailable("connect-capacity")
             return None
         if time.monotonic() >= deadline:
             self.connect_capacity.release()
+            unavailable("connect-deadline")
             return None
         parsed = urlsplit(self.config.commons_origin)
         if parsed.hostname is None:
@@ -162,13 +184,15 @@ class CommonsClient:
         )
         result: queue.Queue[bool] = queue.Queue(maxsize=1)
         cancelled = threading.Event()
+        failure: list[str] = []
 
         def worker() -> None:
             try:
                 connection.connect()
                 if not cancelled.is_set():
                     result.put_nowait(True)
-            except Exception:
+            except Exception as error:
+                failure.append(describe(error))
                 if not cancelled.is_set():
                     result.put_nowait(False)
             finally:
@@ -182,9 +206,11 @@ class CommonsClient:
         except queue.Empty:
             cancelled.set()
             connection.close()
+            unavailable("connect-timeout")
             return None
         if not ok:
             connection.close()
+            unavailable("connect:" + (failure[0] if failure else "unknown"))
             return None
         return connection
 
@@ -195,7 +221,7 @@ class CommonsClient:
             return "invalid_request", None
         deadline = time.monotonic() + self.config.connect_seconds
         if not self.request_capacity.acquire(timeout=max(0, deadline - time.monotonic())):
-            return "unavailable", None
+            return unavailable("request-capacity")
         try:
             return self.exchange(checked, deadline)
         finally:
@@ -210,7 +236,7 @@ class CommonsClient:
         sock = connection.sock
         if sock is None:
             connection.close()
-            return "unavailable", None
+            return unavailable("no-socket")
 
         def expire() -> None:
             try:
@@ -239,22 +265,22 @@ class CommonsClient:
                 != "application/json"
                 or response.getheader("Content-Encoding", "identity") != "identity"
             ):
-                return "unavailable", None
+                return unavailable(f"content-type status={response.status}")
             length = response.getheader("Content-Length")
             if length is not None and (
                 not length.isdecimal() or int(length) > self.config.response_bytes
             ):
-                return "unavailable", None
+                return unavailable(f"content-length status={response.status}")
             raw = response.read(self.config.response_bytes + 1)
             if len(raw) > self.config.response_bytes:
-                return "unavailable", None
+                return unavailable(f"oversize status={response.status}")
             body = strict_json(raw)
             if response.status in {400, 401, 403}:
                 expected = {400: "INVALID_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN"}[
                     response.status
                 ]
                 if body != {"error": expected}:
-                    return "unavailable", None
+                    return unavailable(f"error-body status={response.status}")
                 return {
                     400: "invalid_request",
                     401: "invalid_credentials",
@@ -265,7 +291,7 @@ class CommonsClient:
                 or not isinstance(body, dict)
                 or set(body) != {"user", "username", "displayName", "email"}
             ):
-                return "unavailable", None
+                return unavailable(f"response-shape status={response.status}")
             if any(
                 not isinstance(body[name], str) or len(body[name]) > limit
                 for name, limit in (
@@ -275,17 +301,17 @@ class CommonsClient:
                     ("email", 320),
                 )
             ):
-                return "unavailable", None
+                return unavailable("response-bounds")
             subject = str(uuid.UUID(body["user"]))
             if subject != body["user"] or body["username"] != checked["username"]:
-                return "unavailable", None
+                return unavailable("identity-mismatch")
             return None, {
                 "subject": subject,
                 "username": body["username"],
                 "displayName": body["displayName"] or body["username"],
             }
-        except Exception:
-            return "unavailable", None
+        except Exception as error:
+            return unavailable(describe(error))
         finally:
             timer.cancel()
             connection.close()
