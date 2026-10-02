@@ -36,6 +36,18 @@ let
     echo "== root-health"; ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nroot-health-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
     echo "== health"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nhealth-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
     echo "== authenticate"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\nidentity-http=%{http_code}\n' --unix-socket "$sock" -H 'Content-Type: application/json' --data "$body" http://localhost/v1/authenticate
+    echo "== unit-ip"; systemctl show "$unit" -p IPAddressAllow -p IPAddressDeny -p SocketBindDeny -p RestrictAddressFamilies
+    probe='import socket; s=socket.create_connection(("class.example.com", 9444), 3); print("tcp-ok", s.getpeername())'
+    for props in none ip bind both; do
+      case "$props" in
+        none) set -- ;;
+        ip) set -- -p IPAddressDeny=any -p IPAddressAllow=127.0.0.1/32 ;;
+        bind) set -- -p SocketBindDeny=any ;;
+        both) set -- -p IPAddressDeny=any -p IPAddressAllow=127.0.0.1/32 -p SocketBindDeny=any ;;
+      esac
+      echo "== sandbox-probe $props"
+      systemd-run --wait --pipe --quiet -p User=management-identity "$@" ${packages.platformPython}/bin/python -c "$probe" 2>&1 | tail -n 1
+    done
     echo "== stacks"; kill -USR1 "$pid"; sleep 1; cat /run/${namespace}-management-identity/stacks.txt
     echo "== journal"; journalctl --no-pager -o short-monotonic -u "$unit" | tail -n 40
   '';
