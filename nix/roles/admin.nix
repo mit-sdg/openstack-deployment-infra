@@ -761,8 +761,12 @@ in
     serviceConfig = {
       Type = "simple";
       User = managementIdentityUser;
-      Group = managementIdentityUser;
-      SupplementaryGroups = [ managementBrokerUser ];
+      # systemd re-owns RuntimeDirectory to User:Group before each command, so
+      # the group shared with the broker must be the primary group (as for the
+      # controller socket). This grants nothing beyond the former supplementary
+      # broker group; nothing checks the identity service's own gid.
+      Group = managementBrokerUser;
+      SupplementaryGroups = [ managementIdentityUser ];
       RuntimeDirectory = managementIdentityRuntime;
       RuntimeDirectoryMode = "0750";
       ExecStartPre = "+${managementIdentityPrepare}";
@@ -842,8 +846,12 @@ in
         controllerSocketGroup
         managementWebUser
       ];
-      RuntimeDirectory = managementBrokerRuntime;
-      RuntimeDirectoryMode = "0750";
+      # Not a RuntimeDirectory: systemd would re-own it to management-broker's
+      # primary group before ExecStart, locking out web. The broker's primary
+      # gid must stay fixed because the controller and identity peer checks
+      # depend on it. The privileged pre-start creates and verifies the
+      # directory as management-broker:management-web 0750, and the socket
+      # helper removes a stale socket on restart.
       ExecStartPre = "+${managementBrokerPrepare}";
       ExecStart = managementBrokerExecutable;
       UMask = "0077";
@@ -873,7 +881,10 @@ in
         controllerPrivilegedSocket
       ];
       ReadOnlyPaths = [ managementBrokerReleaseRoot ];
-      ReadWritePaths = [ managementBrokerState ];
+      ReadWritePaths = [
+        managementBrokerState
+        "/run/${managementBrokerRuntime}"
+      ];
     };
   };
 

@@ -575,6 +575,7 @@ let
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-broker) = management-broker:management-web:750")
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-broker/broker.sock) = management-broker:management-web:660")
               machine.succeed(broker_health)
+              machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-identity) = management-identity:management-broker:750")
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-identity/identity.sock) = management-identity:management-broker:660")
               machine.succeed("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-management-identity/identity.sock http://localhost/v1/health")
               machine.fail("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-management-identity/identity.sock http://localhost/v1/health")
