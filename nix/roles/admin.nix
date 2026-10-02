@@ -883,7 +883,9 @@ in
       ReadOnlyPaths = [ managementBrokerReleaseRoot ];
       ReadWritePaths = [
         managementBrokerState
-        "/run/${managementBrokerRuntime}"
+        # "-": ExecCondition runs in this namespace before ExecStartPre has
+        # created the directory; a missing required path aborts the start.
+        "-/run/${managementBrokerRuntime}"
       ];
     };
   };

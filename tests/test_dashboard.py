@@ -928,6 +928,24 @@ class ServerTests(unittest.TestCase):
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
     ) -> tuple[int, dict[str, str], bytes]:
+        if body is not None:
+            # The server may answer and close before reading a rejected body;
+            # http.client sends the body in a second write that can then hit
+            # EPIPE. Send the whole request in one write instead.
+            lines = [f"{method} {path} HTTP/1.1", "Host: localhost:8470"]
+            lines += [f"{name}: {value}" for name, value in (headers or {}).items()]
+            lines += [f"Content-Length: {len(body)}", "Connection: close", "", ""]
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw:
+                raw.settimeout(5)
+                raw.connect(self.socket_path)
+                raw.sendall("\r\n".join(lines).encode() + body)
+                reply = http.client.HTTPResponse(raw)
+                reply.begin()
+                return (
+                    reply.status,
+                    {k.lower(): v for k, v in reply.getheaders()},
+                    reply.read(),
+                )
         connection = UnixHTTPConnection(self.socket_path)
         try:
             connection.request(
