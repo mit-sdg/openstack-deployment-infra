@@ -249,6 +249,7 @@ openstack-platform setup check --env-file PATH [--cloudflare-token-file PATH] [-
 openstack-platform setup --env-file PATH [--workspace PATH]
   [--cloudflare-token-file PATH] --apply
 openstack-platform status
+openstack-platform dashboard [--socket PATH] [--interval SECONDS]
 openstack-platform backup
 openstack-platform restore BACKUP [--age-identity IDENTITY] --yes
 openstack-platform infra list
@@ -267,6 +268,32 @@ openstack-platform infra replace admin|ingress|storage --yes
 records. Image selection records exact provider UUID, source commit, and
 compatibility identity. Pruning is plan-first and protects selected,
 server-referenced, unfinished-operation, and retained-history images.
+
+`dashboard` serves a read-only browser view until interrupted. It binds a
+mode-`0600` Unix socket, by default `STATE_DIRECTORY/run/dashboard.sock` in a
+mode-`0700` directory, and admits only peers with the operator's UID and
+requests with a loopback `Host`. Every `--interval` seconds (30–900, default
+60) one refresh gathers three sources:
+
+- one pinned admin SSH session running a fixed reader that sends `GET` requests
+  to `/v1/admin/capabilities`, `/images`, `/applications`, `/deployments` (the
+  two newest 100-item pages), `/storage`, and `/operations` (the three newest
+  pages) on the privileged socket, reads the platform-health timer snapshot,
+  and runs `systemctl is-active` for the controller and readiness units;
+- the operator-state `infra list` projection with a 20-second provider bound;
+  and
+- credential-free HTTPS probes of public ingress and of each enabled
+  application's accepted health path, each bounded by a wall-clock timeout. A
+  probe counts as serving only with that deployment's `X-Platform-Deployment`
+  marker, or the application ID that jobs rendered without an explicit marker
+  carry, matching deployment acceptance.
+
+The reader never calls `/v1/admin/status` or `/v1/admin/hosts`, because both
+hold the controller's shared API lock during live provider and helper
+observations. A failed source, or a failed section of the admin read, keeps
+its last successful records with their age. Apart from static assets and `GET /api/snapshot`, the only route is
+`POST /api/refresh`, which wakes the next refresh at most every 10 seconds and
+requires a same-origin custom header.
 
 The installed restore launcher targets external operator state at
 `/srv/openstack-platform/state/platform.sqlite3`. Its dedicated
@@ -514,6 +541,12 @@ browser -> HTTPS ingress -> management-web renderer
 
 operator-side privileged client --------------------> controller privileged.sock
 ```
+
+The read-only operator dashboard (`openstack-platform dashboard`) is an
+operator-side privileged client, not this management application. It runs as
+the operator, reads privileged administrator routes through the pinned alias,
+serves only the operator's private Unix socket, and has no accounts, sessions,
+or mutation routes.
 
 `management-web` is an untrusted renderer. It owns no authoritative session or
 project state, cannot open a controller socket, and can reach only the broker's

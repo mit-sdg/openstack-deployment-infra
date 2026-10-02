@@ -34,7 +34,8 @@ python3 -m openstack_platform.release_manifest verify \
 ```
 
 The component manifest binds the full source commit, implementation contract,
-`uv.lock`, deterministic wheel inputs, helper action manifest, controller API
+`uv.lock`, deterministic wheel inputs (packaged Python, text, and dashboard
+browser assets), helper action manifest, controller API
 and schema versions, and the explicit not-shipped UI placeholder. Its SPDX 2.3
 SBOM describes the Python component set.
 
