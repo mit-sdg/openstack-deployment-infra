@@ -185,9 +185,14 @@ class CommonsClient:
         result: queue.Queue[bool] = queue.Queue(maxsize=1)
         cancelled = threading.Event()
         failure: list[str] = []
+        phase = ["dns"]
 
         def worker() -> None:
             try:
+                # Resolve separately only to name the stalled phase in logs; the
+                # connection below resolves again (normally from the NSS cache).
+                socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+                phase[0] = "connect"
                 connection.connect()
                 if not cancelled.is_set():
                     result.put_nowait(True)
@@ -206,7 +211,7 @@ class CommonsClient:
         except queue.Empty:
             cancelled.set()
             connection.close()
-            unavailable("connect-timeout")
+            unavailable(f"connect-timeout:phase={phase[0]}")
             return None
         if not ok:
             connection.close()

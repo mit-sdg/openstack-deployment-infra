@@ -75,10 +75,19 @@ let
     server.serve_forever()
   '';
   managementFakeCommons = pkgs.writeText "vm-fake-commons.py" ''
-    import json, ssl
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import json, socket, ssl, sys
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain("${testPki}/commons.pem","${testPki}/commons-key.pem")
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args): pass
+        timeout=10
+        def setup(self):
+            # Handshake per connection thread, never inside accept().
+            self.request.settimeout(10)
+            self.request=context.wrap_socket(self.request,server_side=True)
+            super().setup()
+        def log_message(self, format, *args):
+            print("fake-commons "+(format % args),file=sys.stderr,flush=True)
         def do_POST(self):
             body=json.loads(self.rfile.read(min(4096,int(self.headers.get("Content-Length","0")))))
             accepted=self.path=="/api/auth/authenticate" and body=={"username":"alice","password":"vm-fixture"}
@@ -89,10 +98,8 @@ let
             self.send_header("Cache-Control","no-store")
             self.send_header("Content-Length",str(len(raw)))
             self.end_headers(); self.wfile.write(raw)
-    server=HTTPServer(("127.0.0.1",9444),Handler)
-    context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain("${testPki}/commons.pem","${testPki}/commons-key.pem")
-    server.socket=context.wrap_socket(server.socket,server_side=True)
+    server=ThreadingHTTPServer(("127.0.0.1",9444),Handler)
+    server.daemon_threads=True
     server.serve_forever()
   '';
   imageCompatibilityHash = builtins.hashString "sha256" (
@@ -265,7 +272,13 @@ let
               "${namespace}-platform-backup".serviceConfig.ExecStart =
                 lib.mkForce "${packages.python}/bin/python ${registryBackupCredentialProbe}";
               "${namespace}-management-identity".serviceConfig = {
-                IPAddressAllow = lib.mkForce [ "127.0.0.1/32" ];
+                # Mirror production: the fake class app on loopback plus the
+                # local resolver stubs used for name resolution.
+                IPAddressAllow = lib.mkForce [
+                  "127.0.0.1/32"
+                  "127.0.0.53/32"
+                  "127.0.0.54/32"
+                ];
                 # Keep a deliberately broken Type=simple process failed so the
                 # outage assertion can observe it without racing automatic retries.
                 Restart = lib.mkForce "no";
