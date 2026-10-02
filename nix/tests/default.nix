@@ -37,19 +37,6 @@ let
     echo "== health"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nhealth-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
     echo "== authenticate"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\nidentity-http=%{http_code}\n' --unix-socket "$sock" -H 'Content-Type: application/json' --data "$body" http://localhost/v1/authenticate
     echo "== tcp-from-identity"; ${pkgs.iproute2}/bin/ss -tanp | grep -F "pid=$pid," || echo "no identity tcp sockets"
-    echo "== resolve-in-identity"; systemd-run --wait --pipe --quiet -p User=management-identity ${packages.platformPython}/bin/python -c 'import socket; print(sorted({a[4][0] for a in socket.getaddrinfo("class.example.com", 9444, type=socket.SOCK_STREAM)}))' 2>&1 | tail -n 1
-    echo "== unit-ip"; systemctl show "$unit" -p IPAddressAllow -p IPAddressDeny -p SocketBindDeny -p RestrictAddressFamilies
-    probe='import socket; s=socket.create_connection(("class.example.com", 9444), 3); print("tcp-ok", s.getpeername())'
-    for props in none ip bind both; do
-      case "$props" in
-        none) set -- ;;
-        ip) set -- -p IPAddressDeny=any -p IPAddressAllow=127.0.0.1/32 ;;
-        bind) set -- -p SocketBindDeny=any ;;
-        both) set -- -p IPAddressDeny=any -p IPAddressAllow=127.0.0.1/32 -p SocketBindDeny=any ;;
-      esac
-      echo "== sandbox-probe $props"
-      systemd-run --wait --pipe --quiet -p User=management-identity "$@" ${packages.platformPython}/bin/python -c "$probe" 2>&1 | tail -n 1
-    done
     echo "== stacks"; kill -USR1 "$pid"; sleep 1; cat /run/${namespace}-management-identity/stacks.txt
     echo "== journal"; journalctl --no-pager -o short-monotonic -u "$unit" | tail -n 40
   '';
@@ -667,13 +654,16 @@ let
               machine.wait_until_succeeds(broker_health)
               machine.fail("openstack-platform-management-broker-restore --yes")
               # Backup outages must not pull down the owner portal.
-              machine.succeed(f"systemctl stop '{backup_mount}'; systemctl mask --runtime '{backup_mount}'")
+              # "mask --runtime" cannot override NixOS units in /etc; a runtime
+              # drop-in can. A failing Assert keeps the volume unstartable.
+              machine.succeed(f"systemctl stop '{backup_mount}'; install -d '/run/systemd/system/{backup_mount}.d'; printf '[Unit]\\nAssertPathExists=/run/vm-test-backup-outage-never-exists\\n' > '/run/systemd/system/{backup_mount}.d/outage.conf'; systemctl daemon-reload")
+              machine.fail(f"systemctl start '{backup_mount}'")
               machine.succeed("systemctl restart ${namespace}-management-broker.service ${namespace}-management-web.service")
               machine.wait_for_unit("${namespace}-management-broker.service")
               machine.wait_for_unit("${namespace}-management-web.service")
               machine.wait_until_succeeds(broker_health)
               machine.fail("systemctl start ${namespace}-management-broker-backup.service")
-              machine.succeed(f"systemctl unmask --runtime '{backup_mount}'; systemctl start '{backup_mount}'")
+              machine.succeed(f"rm -r '/run/systemd/system/{backup_mount}.d'; systemctl daemon-reload; systemctl reset-failed '{backup_mount}'; systemctl start '{backup_mount}'")
               # Remounting disposable tmpfs loses its fixture directories.
               # Recreate only backup paths before the remaining assertions.
               machine.succeed("${pkgs.systemd}/bin/systemd-tmpfiles --create --prefix=${backups}")
