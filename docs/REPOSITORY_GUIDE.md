@@ -82,6 +82,7 @@ operator, the helper, CI, or systemd. They are not a second public CLI.
 ### Shared infrastructure libraries
 
 - `infra/lib/http.py` — bounded HTTP request and JSON helpers used by monitoring and backup scripts.
+- `infra/lib/owner_portal_config.py` — byte-identical copy of the owner-portal inventory validator, so infra shipped without the Python package can still validate platform configuration.
 - `infra/lib/platform-config.sh` — shell adapter that loads an allowlisted NUL-delimited projection of platform configuration.
 - `infra/lib/platform_config.py` — validates and projects non-secret platform configuration for shell consumers.
 - `infra/lib/platform_contract.json` — canonical cross-component roles, ports, accounts, executables, paths, protocols, and inventory keys.

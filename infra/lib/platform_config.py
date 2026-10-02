@@ -64,9 +64,9 @@ def load() -> dict[str, Any]:
         raise ValueError(f"platform config is missing keys: {', '.join(sorted(missing))}")
 
     validate(document)
+    # Infra is shipped without the Python package (for example as a raw store
+    # copy on storage), so its validator copy must live beside this file.
     validator = LIB_DIRECTORY / "owner_portal_config.py"
-    if not validator.exists():
-        validator = LIB_DIRECTORY.parents[1] / "openstack_platform/owner_portal_config.py"
     spec = importlib.util.spec_from_file_location("owner_portal_inventory", validator)
     if spec is None or spec.loader is None:
         raise ValueError("owner portal validator is unavailable")

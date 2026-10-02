@@ -16,7 +16,6 @@ let
     mkdir -p "$out"
     cp -R ${../../infra}/. "$out/"
     chmod -R u+w "$out"
-    cp ${../../openstack_platform/owner_portal_config.py} "$out/lib/owner_portal_config.py"
     patchShebangs "$out"
   '';
   state = platform.paths.adminState;

@@ -10,6 +10,13 @@ from tests.test_management import ROOT, ManagementCase
 
 
 class ManagementPlatformTests(ManagementCase):
+    def test_infra_validator_copy_matches_package(self) -> None:
+        # Storage and other roles ship infra/ without openstack_platform/.
+        self.assertEqual(
+            (ROOT / "infra/lib/owner_portal_config.py").read_bytes(),
+            (ROOT / "openstack_platform/owner_portal_config.py").read_bytes(),
+        )
+
     def production_config(self) -> dict:
         from openstack_platform.config import load_platform
         from openstack_platform.management.settings import configuration
