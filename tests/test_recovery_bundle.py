@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from openstack_platform import recovery_bundle
 
@@ -180,6 +181,32 @@ class RecoveryBundleTests(unittest.TestCase):
                 mountinfo_path=mountinfo,
             )
         self.assertFalse(receipt.exists())
+
+    def test_cli_resolves_the_nixos_inventory_symlink(self) -> None:
+        real = self.root / "platform.json"
+        real.write_text("{}")
+        link = self.root / "etc-platform.json"
+        link.symlink_to(real)
+        seen: list[Path] = []
+        files = ["--config", str(self.root / "c.json"), "--receipt", str(self.root / "r.json")]
+        with patch.object(
+            recovery_bundle,
+            "recovery_status",
+            side_effect=lambda path, *_rest: seen.append(path) or {"configured": False},
+        ):
+            self.assertEqual(
+                recovery_bundle.main(["status", "--platform-config", str(link), *files]), 0
+            )
+        with patch.object(
+            recovery_bundle,
+            "scheduled_export",
+            side_effect=lambda path, *_rest: seen.append(path) or Path("bundle"),
+        ):
+            self.assertEqual(
+                recovery_bundle.main(["scheduled-export", "--platform-config", str(link), *files]),
+                0,
+            )
+        self.assertEqual(seen, [real.resolve(), real.resolve()])
 
     def test_status_refuses_unmounted_and_stale_sink(self) -> None:
         platform, config, mountinfo = self._scheduled_environment()
