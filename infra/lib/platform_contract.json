@@ -1,8 +1,18 @@
 {
   "version": 1,
   "roles": {
-    "all": ["admin", "ingress", "storage", "worker", "builder"],
-    "persistent": ["admin", "ingress", "storage"]
+    "all": [
+      "admin",
+      "ingress",
+      "storage",
+      "worker",
+      "builder"
+    ],
+    "persistent": [
+      "admin",
+      "ingress",
+      "storage"
+    ]
   },
   "ports": {
     "ssh": 22,
@@ -22,21 +32,57 @@
     "mongodb": 27017
   },
   "accounts": {
-    "operator": {"name": "agentops", "uid": 1000, "gid": 1000},
-    "recovery": {"name": "ubuntu", "uid": 1001, "gid": 1001},
-    "controller": {"name": "platform-controller", "uid": 997, "gid": 985},
-    "controllerSocket": {"name": "controller-api", "gid": 984},
-    "managementWeb": {"name": "management-web", "uid": 998, "gid": 986},
-    "managementBroker": {"name": "management-broker", "uid": 996, "gid": 983},
-    "platformAdmin": {"name": "platform-admin", "gid": 987},
-    "nomad": {"name": "nomad", "uid": 999, "gid": 988}
+    "operator": {
+      "name": "agentops",
+      "uid": 1000,
+      "gid": 1000
+    },
+    "recovery": {
+      "name": "ubuntu",
+      "uid": 1001,
+      "gid": 1001
+    },
+    "controller": {
+      "name": "platform-controller",
+      "uid": 997,
+      "gid": 985
+    },
+    "controllerSocket": {
+      "name": "controller-api",
+      "gid": 984
+    },
+    "managementWeb": {
+      "name": "management-web",
+      "uid": 998,
+      "gid": 986
+    },
+    "managementBroker": {
+      "name": "management-broker",
+      "uid": 996,
+      "gid": 983
+    },
+    "platformAdmin": {
+      "name": "platform-admin",
+      "gid": 987
+    },
+    "nomad": {
+      "name": "nomad",
+      "uid": 999,
+      "gid": 988
+    },
+    "managementIdentity": {
+      "name": "management-identity",
+      "uid": 995,
+      "gid": 989
+    }
   },
   "executables": {
     "builder": "openstack-platform-builder"
   },
   "directories": {
     "controllerBackup": "controller",
-    "hostedControllerBackup": "hosted-controller"
+    "hostedControllerBackup": "hosted-controller",
+    "managementBrokerBackup": "management-broker"
   },
   "installation": {
     "operatorRoot": "/srv/openstack-platform",
@@ -63,35 +109,151 @@
   },
   "inventory": {
     "allowedTopLevel": [
-      "project", "projectId", "displayName", "organization", "prefix", "namespace",
-      "domain", "recoveryDomains", "staticIngressRoutes", "publicIngress", "datacenter", "region",
-      "network", "internalNames", "pki", "operatorCidr", "metadataAddress",
-      "addresses", "hosts", "ports", "volumes", "images", "flavors", "versions",
-      "checksums", "containers", "paths"
+      "project",
+      "projectId",
+      "displayName",
+      "organization",
+      "prefix",
+      "namespace",
+      "domain",
+      "recoveryDomains",
+      "staticIngressRoutes",
+      "publicIngress",
+      "datacenter",
+      "region",
+      "network",
+      "internalNames",
+      "pki",
+      "operatorCidr",
+      "metadataAddress",
+      "addresses",
+      "hosts",
+      "ports",
+      "volumes",
+      "images",
+      "flavors",
+      "versions",
+      "checksums",
+      "containers",
+      "paths",
+      "ownerPortal"
     ],
     "requiredTopLevel": [
-      "project", "projectId", "displayName", "organization", "prefix", "namespace",
-      "domain", "recoveryDomains", "publicIngress", "datacenter", "region", "network", "internalNames",
-      "pki", "operatorCidr", "metadataAddress", "addresses", "hosts", "ports",
-      "volumes", "images", "flavors", "versions", "checksums", "containers", "paths"
+      "project",
+      "projectId",
+      "displayName",
+      "organization",
+      "prefix",
+      "namespace",
+      "domain",
+      "recoveryDomains",
+      "publicIngress",
+      "datacenter",
+      "region",
+      "network",
+      "internalNames",
+      "pki",
+      "operatorCidr",
+      "metadataAddress",
+      "addresses",
+      "hosts",
+      "ports",
+      "volumes",
+      "images",
+      "flavors",
+      "versions",
+      "checksums",
+      "containers",
+      "paths"
     ],
     "requiredPaths": [
-      "project", "projectId", "displayName", "organization", "prefix", "namespace",
-      "pki.internalCaFile", "domain", "recoveryDomains.0", "recoveryDomains.1",
-      "publicIngress.mode", "publicIngress.providerCidrs", "datacenter", "region", "network", "internalNames.storage",
-      "internalNames.objectStorage", "operatorCidr", "metadataAddress",
-      "addresses.admin", "addresses.ingress", "addresses.storage", "hosts.admin",
-      "hosts.ingress", "hosts.storage", "ports.admin", "ports.ingress", "ports.storage",
-      "volumes.adminState.name", "volumes.adminState.label", "volumes.adminState.sizeGiB",
-      "volumes.backup.name", "volumes.backup.label", "volumes.backup.sizeGiB",
-      "volumes.data.name", "volumes.data.label", "volumes.data.sizeGiB", "volumes.data.type",
-      "images.admin", "images.ingress", "images.storage", "images.worker", "images.builder",
-      "flavors.admin", "flavors.ingress", "flavors.storage", "flavors.worker", "flavors.builder",
-      "versions.nomad", "versions.traefik", "versions.buildkit",
-      "checksums.nomadLinuxAmd64Zip", "checksums.traefikLinuxAmd64TarGz",
-      "checksums.buildkitLinuxAmd64TarGz", "containers.postgres", "containers.mongodb",
-      "containers.garage", "containers.registry", "containers.cloudflared",
-      "paths.root", "paths.adminState", "paths.backups", "paths.data"
+      "project",
+      "projectId",
+      "displayName",
+      "organization",
+      "prefix",
+      "namespace",
+      "pki.internalCaFile",
+      "domain",
+      "recoveryDomains.0",
+      "recoveryDomains.1",
+      "publicIngress.mode",
+      "publicIngress.providerCidrs",
+      "datacenter",
+      "region",
+      "network",
+      "internalNames.storage",
+      "internalNames.objectStorage",
+      "operatorCidr",
+      "metadataAddress",
+      "addresses.admin",
+      "addresses.ingress",
+      "addresses.storage",
+      "hosts.admin",
+      "hosts.ingress",
+      "hosts.storage",
+      "ports.admin",
+      "ports.ingress",
+      "ports.storage",
+      "volumes.adminState.name",
+      "volumes.adminState.label",
+      "volumes.adminState.sizeGiB",
+      "volumes.backup.name",
+      "volumes.backup.label",
+      "volumes.backup.sizeGiB",
+      "volumes.data.name",
+      "volumes.data.label",
+      "volumes.data.sizeGiB",
+      "volumes.data.type",
+      "images.admin",
+      "images.ingress",
+      "images.storage",
+      "images.worker",
+      "images.builder",
+      "flavors.admin",
+      "flavors.ingress",
+      "flavors.storage",
+      "flavors.worker",
+      "flavors.builder",
+      "versions.nomad",
+      "versions.traefik",
+      "versions.buildkit",
+      "checksums.nomadLinuxAmd64Zip",
+      "checksums.traefikLinuxAmd64TarGz",
+      "checksums.buildkitLinuxAmd64TarGz",
+      "containers.postgres",
+      "containers.mongodb",
+      "containers.garage",
+      "containers.registry",
+      "containers.cloudflared",
+      "paths.root",
+      "paths.adminState",
+      "paths.backups",
+      "paths.data"
+    ],
+    "identityDefaultEgress": [
+      "173.245.48.0/20",
+      "103.21.244.0/22",
+      "103.22.200.0/22",
+      "103.31.4.0/22",
+      "141.101.64.0/18",
+      "108.162.192.0/18",
+      "190.93.240.0/20",
+      "188.114.96.0/20",
+      "197.234.240.0/22",
+      "198.41.128.0/17",
+      "162.158.0.0/15",
+      "104.16.0.0/13",
+      "104.24.0.0/14",
+      "172.64.0.0/13",
+      "131.0.72.0/22",
+      "2400:cb00::/32",
+      "2606:4700::/32",
+      "2803:f800::/32",
+      "2405:b500::/32",
+      "2405:8100::/32",
+      "2a06:98c0::/29",
+      "2c0f:f248::/32"
     ]
   }
 }

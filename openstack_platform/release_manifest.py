@@ -121,7 +121,9 @@ def _files(root: Path, directory: str, suffixes: tuple[str, ...]) -> list[Path]:
     ]
 
 
-def component_set(repository: Path, commit: str) -> dict[str, Any]:
+def component_set(
+    repository: Path, commit: str, *, ui_build: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Return the canonical compatibility projection for one source commit."""
     if not _COMMIT.fullmatch(commit):
         _fail("source commit must be a full lowercase Git commit")
@@ -159,8 +161,81 @@ def component_set(repository: Path, commit: str) -> dict[str, Any]:
         }
         for role in ROLES
     }
-    ui_placeholder = {"status": "not-shipped", "contractVersion": 0}
-    ui_placeholder["identity"] = _sha256_bytes(_canonical(ui_placeholder))
+    frontend = [
+        path
+        for path in _files(
+            repository,
+            "frontend/owner-portal",
+            (".ts", ".tsx", ".css", ".html", ".js", ".mjs", ".json"),
+        )
+        if not {"dist", "node_modules", "test-results"}.intersection(
+            path.relative_to(repository / "frontend/owner-portal").parts
+        )
+        and path.name != "build-receipt.json"
+    ]
+    npm_lock = repository / "frontend/owner-portal/package-lock.json"
+    management_files = [
+        path
+        for path in _files(repository, "openstack_platform/management", (".py",))
+        if "dev" not in path.relative_to(repository / "openstack_platform/management").parts
+    ]
+    ui: dict[str, Any] = {
+        "status": "shipped",
+        "contractVersion": 1,
+        "frontendSha256": _tree_hash(repository, frontend, domain="owner-frontend-v1"),
+        "npmLockSha256": _sha256_file(npm_lock) if npm_lock.exists() else None,
+        "managementSha256": _tree_hash(repository, management_files, domain="owner-management-v1"),
+        "brokerSha256": _tree_hash(
+            repository,
+            [
+                path
+                for path in management_files
+                if "broker" in path.relative_to(repository / "openstack_platform/management").parts
+                or "identity"
+                in path.relative_to(repository / "openstack_platform/management").parts
+                or path.parent.name == "management"
+            ],
+            domain="owner-broker-v2",
+        ),
+        "webSha256": _tree_hash(
+            repository,
+            [
+                path
+                for path in management_files
+                if "web" in path.relative_to(repository / "openstack_platform/management").parts
+                or path.name == "client.py"
+                or path.parent.name == "management"
+            ],
+            domain="owner-web-v2",
+        ),
+        "authProtocolVersion": 2,
+        "brokerProtocolVersion": 2,
+        "webProtocolVersion": 2,
+        "brokerSchemaVersion": 2,
+        "controllerApiVersion": 1,
+        "artifactEvidenceFormat": "openstack-platform-management-artifacts-v1",
+        "build": ui_build,
+    }
+    if ui_build is not None:
+        if (
+            set(ui_build) != {"nodeVersion", "assetManifestSha256", "assets"}
+            or not re.fullmatch(r"24\.[0-9]+\.[0-9]+", str(ui_build["nodeVersion"]))
+            or not _SHA256.fullmatch(str(ui_build["assetManifestSha256"]))
+            or not isinstance(ui_build["assets"], dict)
+            or not ui_build["assets"]
+        ):
+            _fail("UI build evidence is invalid")
+        for name, record in ui_build["assets"].items():
+            if (
+                not isinstance(name, str)
+                or not isinstance(record, dict)
+                or set(record) != {"sha256", "bytes"}
+                or not _SHA256.fullmatch(str(record["sha256"]))
+                or type(record["bytes"]) is not int
+                or not 0 <= record["bytes"] <= _MAX_BUNDLE_FILE
+            ):
+                _fail("UI asset evidence is invalid")
+    ui["identity"] = _sha256_bytes(_canonical(ui))
     return {
         "sourceCommit": commit,
         "contract": {"version": 1, "sha256": _sha256_file(contract)},
@@ -175,7 +250,7 @@ def component_set(repository: Path, commit: str) -> dict[str, Any]:
             "schemaVersion": max(versions),
             "sha256": _tree_hash(repository, controller_files, domain="controller-v1"),
         },
-        "ui": ui_placeholder,
+        "ui": ui,
         "roleImages": roles,
     }
 
@@ -186,6 +261,39 @@ def _packages(lockfile: Path) -> list[dict[str, str]]:
         r'(?ms)^\[\[package\]\].*?^name = "([^"]+)"\s*\nversion = "([^"]+)"', text
     )
     return [{"name": name, "version": version} for name, version in sorted(set(packages))]
+
+
+def npm_spdx_packages(lockfile: Path) -> list[dict[str, Any]]:
+    if not lockfile.exists():
+        return []
+    lock = _load(lockfile)
+    records = lock.get("packages")
+    if lock.get("lockfileVersion") != 3 or not isinstance(records, dict):
+        _fail("npm lock must have a complete version-3 package graph")
+    result = []
+    for path, record in sorted(records.items()):
+        if not path:
+            continue
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("version"), str)
+            or not isinstance(record.get("integrity"), str)
+        ):
+            _fail("npm lock package is not version/integrity pinned")
+        name = record.get("name") or path.split("node_modules/")[-1]
+        package = _spdx_package(
+            name, record["version"], reference=f"pkg:npm/{name}@{record['version']}"
+        )
+        package["externalRefs"] = [
+            {
+                "referenceCategory": "PACKAGE-MANAGER",
+                "referenceType": "purl",
+                "referenceLocator": f"pkg:npm/{name}@{record['version']}",
+            }
+        ]
+        package["comment"] = "npm integrity: " + record["integrity"]
+        result.append(package)
+    return result
 
 
 def _spdx_package(name: str, version: str, *, reference: str) -> dict[str, Any]:
@@ -410,20 +518,35 @@ def generate(
     signing_key: Path | None,
     unsigned: bool,
     unsigned_production: bool = False,
+    ui_build: dict[str, Any] | None = None,
 ) -> Path:
     channel, trust = _generation_trust(signing_key, unsigned, unsigned_production)
     _verify_checkout(repository, commit)
-    components = component_set(repository, commit)
+    components = component_set(repository, commit, ui_build=ui_build)
     output.mkdir(parents=True, exist_ok=True)
     sbom = _spdx_document(
         commit,
-        _python_spdx_packages(repository / "uv.lock"),
+        [
+            *_python_spdx_packages(repository / "uv.lock"),
+            *npm_spdx_packages(repository / "frontend/owner-portal/package-lock.json"),
+            *(
+                [
+                    _spdx_package(
+                        "node",
+                        ui_build["nodeVersion"],
+                        reference="pkg:generic/node@" + ui_build["nodeVersion"],
+                    )
+                ]
+                if ui_build
+                else []
+            ),
+        ],
         name="openstack-platform-python",
     )
     sbom_path = output / "release.sbom.json"
     sbom_path.write_bytes(_canonical(sbom))
     component_digest = _sha256_bytes(_canonical(components))
-    provenance = {
+    provenance: dict[str, Any] = {
         "_type": PROVENANCE_FORMAT,
         "subject": [
             {
@@ -447,6 +570,8 @@ def generate(
             "runDetails": {"builder": {"id": "openstack-platform-release-manifest-v1"}},
         },
     }
+    if ui_build:
+        provenance["predicate"]["buildDefinition"]["externalParameters"]["uiBuild"] = ui_build
     provenance_path = output / "release.provenance.json"
     provenance_path.write_bytes(_canonical(provenance))
     manifest = {
@@ -541,7 +666,8 @@ def verify(
         _fail("release trust mode and channel are inconsistent")
 
     components = manifest.get("components")
-    if components != component_set(repository, expected_commit):
+    build = components.get("ui", {}).get("build") if isinstance(components, dict) else None
+    if components != component_set(repository, expected_commit, ui_build=build):
         _fail(
             "release component set does not match source, contract, lockfile, schema, API, UI, helper, or role images"
         )

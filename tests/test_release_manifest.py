@@ -85,7 +85,11 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertEqual(set(components["roleImages"]), set(release_manifest.ROLES))
         self.assertEqual(components["controller"]["apiVersion"], 1)
         self.assertGreaterEqual(components["controller"]["schemaVersion"], 1)
-        self.assertEqual(components["ui"]["status"], "not-shipped")
+        self.assertEqual(components["ui"]["status"], "shipped")
+        self.assertEqual(components["ui"]["authProtocolVersion"], 2)
+        self.assertEqual(
+            components["ui"]["artifactEvidenceFormat"], "openstack-platform-management-artifacts-v1"
+        )
         self.assertEqual(document["releaseChannel"], "production")
 
     def test_manifest_signature_and_sbom_tampering_are_rejected(self) -> None:
@@ -189,6 +193,18 @@ class ReleaseManifestTests(unittest.TestCase):
                     trust_root=None,
                     allow_unsigned_development=True,
                 )
+
+    def test_management_identities_ignore_checkout_and_tmpdir_component_names(self) -> None:
+        expected = release_manifest.component_set(self.repository, self.commit)["ui"]
+        for name in ("broker", "identity", "web", "dev"):
+            with self.subTest(parent=name):
+                parent = self.root / name
+                parent.mkdir()
+                copy = parent / "checkout"
+                shutil.copytree(self.repository, copy)
+                with mock.patch.dict(os.environ, {"TMPDIR": str(parent)}):
+                    actual = release_manifest.component_set(copy, self.commit)["ui"]
+                self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":

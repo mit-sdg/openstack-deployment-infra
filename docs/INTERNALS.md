@@ -2,7 +2,7 @@
 
 This document is for maintainers building or integrating platform components.
 It describes ownership, process boundaries, state, internal interfaces, and the
-future management application. Deployment operators should start with [Deploy
+owner portal. Deployment operators should start with [Deploy
 the platform](DEPLOYMENT.md); exact backup and recovery commands are in
 [Operations](OPERATIONS.md).
 
@@ -102,7 +102,7 @@ The admin role exposes two mode-`0660` Unix sockets:
 The server authenticates every connection with Linux `SO_PEERCRED` before
 parsing HTTP. HTTP input cannot select or upgrade a socket capability. The
 transport authenticates the local host process, not a browser user; ownership,
-quota, session, and CSRF decisions belong to the future management broker.
+quota, session, and CSRF decisions belong to the management broker.
 
 ## Greenfield setup flow
 
@@ -134,8 +134,8 @@ phase.
 
 ## Application lifecycle
 
-The implemented controller supports a future management caller, but there is no
-supported browser caller today. For a deployment request the controller:
+The implemented controller is used by the locally tested owner portal; that
+browser product is not deployed yet. For a deployment request the controller:
 
 1. validates the application UUID/slug, public credential-free GitHub URL,
    requested ref, exact commit, configuration revision, and closed typed
@@ -525,21 +525,17 @@ The internal CA authenticates retained role/service relationships. Its private
 material and deployment credentials are supplied after image build and are not
 stored in public source or the Nix store.
 
-## Future management application
+## Owner portal
 
-> **TODO:** implement the sync-engine management application and its external
-> authentication application. The host identities and controller project
-> boundary exist; browser login, user/project ownership, quota, sessions, audit,
-> and the UI do not.
-
-The intended process chain is:
+The Python broker/web/identity services and React/TypeScript UI are implemented,
+with local controller/Commons doubles, release artifacts and installer checks.
+The portal is not deployed; live sign-in and platform acceptance remain separate.
 
 ```text
-browser -> HTTPS ingress -> management-web renderer
-                            -> typed Unix request -> management-broker
-                                                     -> controller project.sock
-
-operator-side privileged client --------------------> controller privileged.sock
+browser -> HTTPS ingress -> management-web -> broker.sock -> management-broker
+                                                      | -> controller project.sock
+                                                      | -> identity.sock -> management-identity -> HTTPS Commons
+operator-side privileged client -------------------------> controller privileged.sock
 ```
 
 The read-only operator dashboard (`openstack-platform dashboard`) is an
@@ -548,45 +544,68 @@ the operator, reads privileged administrator routes through the pinned alias,
 serves only the operator's private Unix socket, and has no accounts, sessions,
 or mutation routes.
 
-`management-web` is an untrusted renderer. It owns no authoritative session or
-project state, cannot open a controller socket, and can reach only the broker's
-Unix socket. `management-broker` owns sessions, users, project ownership, quota,
-desired state, audit records, idempotency keys, and reconciliation. It is the
-exact peer accepted by `project.sock`, has no TCP/IP access, and cannot open the
-privileged socket. Neither process can read controller SQLite, cloud/Nomad
-credentials, storage administrator credentials, builder/backup keys, age
-identities, helper diagnostics, or build logs directly.
+Socket SO_PEERCRED authenticates the local host process, not a browser user.
+Web owns no authoritative state and cannot reach identity/controller sockets or
+broker SQLite. Broker owns users, sessions, ownership, quota, intent journal and
+audit; it remains network-denied and is the controller project peer. The fixed
+identity service admits only broker and checks one configured Commons HTTPS
+origin. Its network sandbox allows configured/default Cloudflare CIDRs and the
+local resolver; broker/operator/controller state and PKI/secrets are inaccessible.
 
-The authentication integration will exchange a short-lived, single-use browser
-code and accept only Ed25519 JWTs with configured key ID, issuer, audience,
-subject, role, issue time, and expiry. The browser receives an opaque
-server-side session cookie using the `__Host-` prefix, `Secure`, `HttpOnly`,
-`SameSite=Lax`, and no `Domain`. Cookie-authenticated mutations require exact
-origin and session-bound CSRF verification.
+Commons bb78c5e accepts an exact username/password JSON credential check. Identity
+uses verified system TLS, bounded connect/read/size limits, no redirects/proxies,
+strict duplicate-free JSON, canonical UUID and exact fields. It drops email and
+returns only stable subject, username and display name, or a typed opaque error.
+Passwords remain transient in browser/web/broker/identity request memory and are
+never stored, audited, logged or echoed. Only development can trust a loopback CA. Identity queues within a shared
+three-second admission/connect deadline, with 64 outbound exchanges and 128
+local request slots. Broker wants identity without requiring it; identity startup
+failure leaves existing portal sessions available.
+No class-app cookies/session or browser-relayed identity result is accepted.
 
-The broker and controller databases do not share a transaction. The broker
-records intent and a canonical UUID idempotency key before calling the
-controller. Timeout or disconnect is an unknown result: reconciliation repeats
-the identical request/key or polls the known operation, never allocates a new
-key for the same intent.
+Sign-in is same-origin JSON with an anonymous HMAC CSRF token and Strict binder
+cookie. Sessions are opaque server-side records: __Host-/Secure/HttpOnly/Lax,
+Path=/, no Domain, 8 h absolute and 30 min idle. Mutations check exact Origin and
+session CSRF. Password changes and Commons archiving do not end already issued
+portal sessions; logout, local revocation, expiry and restore do. Per-address
+admission and fixed 60-second failure budgets per exact username and address
+bucket reduce abuse. Five failures block further checks from that bucket before
+identity is contacted, including correct passwords, until the window expires.
+Outstanding checks reserve budget so concurrency cannot bypass it. Other
+addresses remain unaffected and rejections never extend the window. Users are individual invited class accounts,
+identified by Commons origin and stable UUID rather than mutable username.
 
-The planned UI includes:
+The owner API exposes only their own apps/config/deployments/build logs/intents,
+returning 404 for another owner's IDs. Defaults are two apps and one external
+mutation per owner, with staff overrides. Broker transactions reserve ownership
+and quota and persist the intent plus a separate controller idempotency key before
+calling project.sock. Unknown outcomes repeat that exact key/request; known 202
+operations are polled. Only terminal confirmed/not_required cleanup settles an
+intent; recovery-required/unknown cleanup holds it. Broker/controller do not share
+a transaction. No ownership is inferred from a slug or reassigned by username.
 
-- a project dashboard with quota and observed operation state;
-- immutable slug/stable URL, public GitHub repository, and preferred branch;
-- typed Node/Bun package, package-script, port, health, and storage-binding
-  configuration;
-- separate save and exact-commit deploy actions with bounded build history;
-- write-only environment add/remove/import with no reveal or export;
-- PostgreSQL, MongoDB, and S3 create/label/verify/rotate without credential
-  display; and
-- enable and disable actions.
+The UI supports sign-in, my apps/quota/create, public repository/preferred branch,
+typed Node/Bun settings, full-SHA review/deploy, observed status/health, history and
+build logs. React assets are external static files under strict CSP; admin runs
+Python only. Environment values, managed storage, enable/disable and runtime logs
+remain later work. Deletion and global administrator reads remain operator-only.
 
-Cascade application deletion, provider-backed storage deletion, and global
-administrator reads remain absent from the browser UI. They require a separate
-reviewed privileged operator client. Secret submissions and authentication
-JWTs must bypass any framework event/action persistence that would record their
-values.
+Schema 2 checks immutable migration records, removes assertion flows/replays and
+session key IDs, invalidates authentication and preserves users/apps/quota/intents/
+audit. Unknown schemas/checksums/realms fail closed. Online SQLite snapshots are
+age-encrypted as the fourth backup class. Four-class off-site bundles coexist with
+legacy three-class evidence, and restore invalidates sessions/anonymous challenges.
+
+Broker and web archives bind exact source commit, source tar, runtime files,
+built web asset hashes/manifest, npm/Python locks, Node build version, SBOM,
+provenance, schema and protocol compatibility. They share the helper release's
+Ed25519/channel trust policy. Source hashes authenticate code, while signed
+artifact evidence separately authenticates generated bytes. Trusted wheel/verifier,
+archive bounds and compatibility are checked before candidate code executes.
+Installation preserves setgid service groups, smokes before .complete/current,
+keeps prior releases and activates only a matching broker/web pair, including
+identity inside the broker release. See maintenance and operations for review,
+upgrade and schema-aware rollback requirements.
 
 ## Failure invariants
 

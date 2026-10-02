@@ -1238,7 +1238,7 @@ credentials while diagnosing a failure.
   compatibility, provider ownership/status, or server image projection and
   create a new plan. Do not overwrite a tested image name or broaden the delete
   set manually.
-- **A backup or restore check fails:** identify which of the three backup
+- **A backup or restore check fails:** identify which of the four backup
   classes failed, retain its evidence, and correct the named executable,
   identity, mount, checksum, archive, schema, or integrity dependency. Rerun the
   same bounded tool; never publish staged ciphertext manually or overwrite live
@@ -1260,7 +1260,7 @@ non-secret identities, operation/correlation ID, phase, failed check, checksum,
 and readiness result. Keep provider payloads, credentials, secret values, and
 age identity contents out of logs and tickets.
 
-## Preflight admin image path metadata
+## Preflight metadata before an admin image upgrade
 
 Before an admin image upgrade, the operator must arrange the mandatory
 [candidate root-path preflight](MAINTENANCE.md#preflight-controller-paths-before-an-admin-image-upgrade)
@@ -1271,3 +1271,119 @@ replacement until every expected/observed metadata refusal is resolved and the
 candidate reports `root-path-preflight=ok refusals=0`. Keep the report with the
 change review. No new operator sudo access is introduced.
 
+## Owner portal operations
+
+The portal is not deployed yet. These are the supported repository procedures
+for a reviewed installation; they do not establish live acceptance. Keep broker
+and controller backups before changing releases or authentication realm. Operator
+controls remain outside the student UI.
+
+The validated `ownerPortal` inventory section carries `enabled`, `commonsOrigin`,
+optional identity egress CIDRs/class label and quota/rate/session limits. The
+production renderer is `openstack-platform-management-config --platform-config
+PATH`. It writes prepared broker/web/identity configs below the operator-owned
+setgid roots, copying validated inventory as the operator; root does not write
+these inventories at boot. These mode-0640 files are available for inspection
+and do not change running releases. The
+installer resolves the NixOS inventory symlink and creates release-local mode-0440
+config and inventory snapshots for the target component. Each service reads its
+own group-readable files without development trust. Apply inventory changes by
+installing both components and activating the resulting pair. Enable only after
+the Commons origin is confirmed. Production
+uses system CAs; no provider signing keys are used by this credential protocol.
+CA updates belong to the admin image, not a per-account key rotation.
+
+Defaults are two apps and one held external mutation per owner. Configuration
+changes affect owners without a `quotas` override; disabled apps still count.
+Staff may maintain `quotas(user_id,apps,concurrent)` and revoke
+`users.enabled`/`sessions` in the private broker DB through an offline recovery
+console as the broker identity. Stop portal/backup admissions, use a transaction
+with the immutable user ID, and record a safe audit action; never edit ownership
+by username or provide a global read/revocation endpoint in the portal. A local
+revocation rejects existing sessions immediately. Commons archiving/password
+changes affect new logins only; already issued sessions retain the 8 h/30 min
+expiry contract unless locally revoked.
+
+The fourth backup class is `management-broker`: consistent SQLite online backup,
+age encryption with the hosted-controller escrow recipient, committed checksum/
+manifest last, and four-class off-site v2 evidence. Legacy v1 bundles remain
+readable. An active or staged broker selection requires this class for healthy
+export/status, including a broken selector whose release files disappeared.
+Checking both keeps recovery evidence mandatory before first activation and
+while staging changes independently of an active pair. The
+broker HMAC key is not restored; sessions and CSRF are removed. To replace state,
+stop identity/broker/web, their activation/path units and broker backup timer/
+service. Decrypt to broker-owned mode-0600 `management-broker/restore-input.sqlite3`
+and use `openstack-platform-management-broker-restore --yes` from the recovery
+console. It checks the mounted state volume and stopped units and invalidates
+authentication. Take a new backup after verification; do not manually publish
+staging ciphertext. Portal availability is independent of the backup mount.
+
+Install reviewed broker then web archives using the explicit modes described in
+maintenance. Each candidate smokes before its staged `current` selection changes;
+failed installation preserves prior configuration bytes. The operator marker
+identifies a commit and pair. The root oneshot validates both staged descriptors,
+complete markers and identical inventory snapshots under the install lock before
+atomically selecting `management-active/current`. It then restarts the three
+fixed identity/broker/web units; services gain no systemctl rights. One-sided
+installation, a mismatched marker, restart or reboot cannot select a mixed pair.
+Keep prior complete releases, config snapshots and signed evidence. If activation fails, retain safe
+unit/operation IDs and inspect readiness/configuration/TLS/group/compatibility,
+without capturing credential bodies. An unknown deploy outcome repeats its
+original controller key or polls the recorded operation.
+
+### Reactivate a retained portal pair
+
+Stop admissions and back up the broker/controller databases first. Review the
+actual database migration evidence and the retained pair's authentication realm.
+The command supports schema 2 and protocol 2 with controller API 1; it refuses
+schema-incompatible retained or active descriptors. It cannot inspect the
+broker's private database as the operator. An incompatible database needs an
+explicit forward repair or verified offline restore, which invalidates sessions
+and may require reconciliation of controller/ownership backup skew.
+
+Use the existing admin image command as the unprivileged operator. Set STATE
+from the reviewed inventory's `paths.adminState`, NS to its namespace, and each
+release variable to a complete directory basename under that component's
+`releases` directory (commit-pair-prefix-inventory-hash, without slashes):
+
+```sh
+STATE=/srv/app-platform-state
+NS=your-installed-namespace
+BROKER_RELEASE=REVIEWED_BROKER_RELEASE_BASENAME
+WEB_RELEASE=REVIEWED_WEB_RELEASE_BASENAME
+openstack-platform-management-reactivate \
+  --platform-config "/etc/$NS/platform.json" \
+  --broker-release "$BROKER_RELEASE" --web-release "$WEB_RELEASE"
+```
+
+The command verifies retained signatures/channel policy, complete markers,
+payload hashes/layout, groups/modes, matching descriptors/config snapshots and
+deployment identity, then smokes both candidates without a live database or
+network call. It keeps the retained inventory/config bytes; reinstalling an
+archive would instead snapshot the current inventory. Validation failure leaves
+selectors and the activation request unchanged. Success changes both staged
+selectors under the install lock and writes the normal mode-0640 marker;
+`management-reactivation=requested` does not establish successful activation.
+The fixed root oneshot still validates and selects the pair.
+Dangling or incomplete active selections and duplicate descriptor keys are
+refused before a new request can bypass active-schema review.
+
+After the activation request completes, verify the active selections and unit
+results from the recovery console, then check broker/web readiness and take a
+new backup before reopening admissions:
+
+```sh
+test "$(readlink -f "$STATE/management-active/current/broker")" = \
+  "$STATE/management-broker-releases/releases/$BROKER_RELEASE"
+test "$(readlink -f "$STATE/management-active/current/web")" = \
+  "$STATE/management-web-releases/releases/$WEB_RELEASE"
+systemctl show "$NS-management-activate.service" -p Result
+systemctl is-active "$NS-management-broker.service" "$NS-management-web.service"
+```
+
+If the active paths did not change, inspect the activation unit's result and
+fixed unit logs without credential bodies. Repair mismatched/missing evidence,
+unsafe ownership, configuration or compatibility before requesting activation
+again. Keep the prior active pair until readiness succeeds; services have no
+systemctl capability. These procedures remain unaccepted on a live host.

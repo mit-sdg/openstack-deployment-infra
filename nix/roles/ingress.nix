@@ -138,7 +138,8 @@ let
       // staticIngressServices;
       middlewares.platform-security-headers.headers = {
         contentTypeNosniff = true;
-        referrerPolicy = "no-referrer";
+        # Preserve management-web's origin-safe HTML policy and no-referrer
+        # API policy. Overriding this header breaks native sign-in POSTs.
         frameDeny = true;
       };
     };

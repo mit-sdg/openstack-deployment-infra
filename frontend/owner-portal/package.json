@@ -1,0 +1,37 @@
+{
+  "name": "owner-portal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "vite build && node scripts/build-receipt.mjs",
+    "smoke": "playwright test",
+    "format:check": "prettier --check src e2e scripts public/theme.js *.ts *.json index.html"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.104.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "wouter": "3.13.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.57.0",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "26.6.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "jsdom": "30.1.1",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "vite": "8.3.2",
+    "vitest": "5.0.3"
+  }
+}

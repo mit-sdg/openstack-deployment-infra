@@ -110,13 +110,12 @@ class DocumentationTests(unittest.TestCase):
         deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text()
         normalized = " ".join(deployment.split())
 
-        self.assertIn(
-            "browser management UI and its authentication service do not exist", normalized
-        )
+        self.assertIn("owner portal is implemented but not deployed", normalized)
         self.assertIn("What appears in OpenStack", deployment)
         self.assertIn("Why the deployment boundary is safer", deployment)
-        self.assertIn("Future management application", (ROOT / "docs" / "INTERNALS.md").read_text())
-        self.assertIn("TODO", deployment)
+        self.assertIn("Owner portal", (ROOT / "docs" / "INTERNALS.md").read_text())
+        self.assertIn("Commons", deployment)
+        self.assertIn("Password changes", deployment)
         self.assertNotIn("`GET /v1/", deployment)
         self.assertNotIn("`POST /v1/", deployment)
 
