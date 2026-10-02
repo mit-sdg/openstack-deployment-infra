@@ -44,9 +44,11 @@ EXIT_UNAVAILABLE = 4
 
 _MAX_LOG_LINES = 2_000
 _DASHBOARD_INTERVAL = (30, 900)
-# Each dashboard refresh bounds one provider call well below the operator's
-# whole-command deadline so a slow cloud cannot stall the refresh loop.
-_DASHBOARD_PROVIDER_SECONDS = 20
+# Each dashboard refresh bounds one provider call below the operator's
+# whole-command deadline so a slow cloud cannot stall the refresh loop. The
+# persistent-host lookup took ~26 s on the live cloud; 20 s left admin, ingress
+# and storage permanently unverified.
+_DASHBOARD_PROVIDER_SECONDS = 60
 _DEFAULT_STATE = OPERATOR_STATE
 _DEFAULT_PLATFORM = Path(os.environ.get("PLATFORM_CONFIG", str(DEFAULT_OPERATOR_INVENTORY)))
 _ACTIVE_COMMAND_DEADLINE: ContextVar[float | None] = ContextVar(
