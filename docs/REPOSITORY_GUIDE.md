@@ -294,3 +294,7 @@ change. `tests/test_documentation.py` checks that every path returned by
 `git ls-files` has one backtick-delimited entry here. The check allows a new,
 not-yet-added guide entry during local editing, but CI verifies it once the file
 is tracked.
+
+- `openstack_platform/host_paths.py` — handle-based root controller file copying and credential metadata preparation, with no-follow component traversal.
+- `nix/lib/controller-paths.nix` — one controller preparation plan shared by read-only preflight and handle-based application.
+- `tests/test_host_paths.py` — symlink, hardlink, FIFO, wrong-owner and replacement-race coverage for root preparation helpers.

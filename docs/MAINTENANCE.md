@@ -737,3 +737,55 @@ Evidence records may contain bounded resource identities, hashes, readiness
 results, timestamps, correlation IDs, and reviewer approval. They must not
 contain credentials, provider payloads, age identities, secret values, or
 backup contents.
+
+## Preflight controller paths before an admin image upgrade
+
+Run this read-only check from the exact reviewed candidate before **every admin
+image replacement**. Use the same inventory and fixed account IDs as the new
+image. On the build machine, with `PLATFORM_CONFIG` pointing to that inventory:
+
+```sh
+nix build --impure .#root-path-preflight --out-link .tmp/root-path-preflight
+```
+
+The result's `share/root-path-preflight/` contains `host_paths.py` and the public
+`controller-path-plan.json`. Review the paths/account IDs and transfer both
+files through the existing approved administration process. On the existing
+admin host, the approved recovery console administrator places them in a
+root-controlled directory such as `/run/root-path-review` and runs:
+
+```sh
+python3.14 -I -B /run/root-path-review/host_paths.py preflight \
+  --plan /run/root-path-review/controller-path-plan.json
+```
+
+The image also exposes `openstack-platform-root-path-preflight` for repeating
+the installed plan. Root is needed to traverse the controller's private paths;
+the operator account cannot inspect them. Use the existing console/admin route,
+without adding operator sudo permission or changing access modes for inspection.
+The tool reads metadata only: it does not read credential contents, create/copy
+files, change modes/owners, replace selectors or start/stop units. It reports all
+rejected paths with expected values and observed `uid:gid:mode:nlink`, plus type
+and size. Inaccessible or missing components are reported as unavailable, with
+the blocking path. Exit zero and `root-path-preflight=ok refusals=0` are mandatory
+before proceeding. Keep the metadata-only report with the image change review.
+
+If refused, defer the image upgrade. Investigate each observed mismatch and
+repair only the reviewed paths through the existing administration procedure;
+then rerun the exact candidate plan. Do not apply blanket recursive chown/chmod
+to the state volume. The check does not validate JSON contents, TLS trust,
+database migrations, provider state or helper compatibility; their existing
+upgrade checks still apply. Changes after preflight are checked again during
+preparation, using the same plan and held file descriptors.
+
+The remaining metadata requirements have these purposes:
+
+| Path / operation | Requirement and reason |
+| --- | --- |
+| Every ancestor | Direct directory, owned by root or the relevant account; holds traversal within the administered namespace. Links are never followed. |
+| Policy/image copy source | Regular operator-owned mode-0600 file, up to 1 MiB; same privacy rule as before, with bounded copying compatible with existing JSON/seed limits. Group and link count are unrestricted because source inodes are read only. |
+| Controller copy directory | Controller owner, no group/other write; prevents another principal from changing the copy destination namespace. Group and other mode bits are unrestricted. |
+| Existing copy destination | Absent or any non-directory entry; replacement never opens or modifies its inode. UID/GID/mode/link count are irrelevant, including symlinks and hardlinks. |
+| Private credentials/directories | Operator owner and private modes 0600/0640 or 0700/0750. Group is unrestricted without group access; group-readable/traversable cases admit only operator/controller groups. Metadata-mutated regular files must have one link to prevent changes to aliases outside the reviewed path. |
+| Public PEM/.pub | Direct regular operator-owned 0644 file. Any group and link count, matching the previous read-only contract. |
+

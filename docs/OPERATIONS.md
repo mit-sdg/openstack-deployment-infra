@@ -1168,3 +1168,15 @@ Record only bounded safe evidence in the private operations system: exact
 non-secret identities, operation/correlation ID, phase, failed check, checksum,
 and readiness result. Keep provider payloads, credentials, secret values, and
 age identity contents out of logs and tickets.
+
+## Preflight admin image path metadata
+
+Before an admin image upgrade, the operator must arrange the mandatory
+[candidate root-path preflight](MAINTENANCE.md#preflight-controller-paths-before-an-admin-image-upgrade)
+through the existing approved recovery-console administrator. Use the new
+image's reviewed plan on the old host. Root is required only for private path
+traversal; the check reads no credential contents and makes no changes. Defer
+replacement until every expected/observed metadata refusal is resolved and the
+candidate reports `root-path-preflight=ok refusals=0`. Keep the report with the
+change review. No new operator sudo access is introduced.
+

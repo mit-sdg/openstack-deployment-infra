@@ -194,8 +194,12 @@ class ControllerHostingStaticTests(unittest.TestCase):
 
     def test_controller_credentials_are_repeatably_normalized_for_lifecycle_wrappers(self) -> None:
         source = ADMIN.read_text(encoding="utf-8")
-        prepare = source[source.index("normalize_private()") : source.index("in\n{")]
-        self.assertIn("${operatorAccount.name}:${controllerGroup}:640", prepare)
+        prepare = source[source.index("prepareController =") : source.index("in\n{")]
+        self.assertIn("${hostPaths} apply --plan ${packages.rootPathPlan}", prepare)
+        plan = (ROOT / "nix/lib/controller-paths.nix").read_text()
+        self.assertIn("allowedModes = [ 384 416 ]", " ".join(plan.split()))
+        self.assertIn("controller.gid", plan)
+        prepare += plan
         self.assertIn("nomad-cli-key.pem", prepare)
         self.assertIn("nomad-worker-key.pem", prepare)
         self.assertIn("builder_operator_ed25519.pub", prepare)

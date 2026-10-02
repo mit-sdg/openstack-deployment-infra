@@ -224,7 +224,7 @@ class RegistryArtifactStreamingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "direct private file"):
                 artifact.credentials(link)
 
-    def test_registry_backup_environment_selects_systemd_credential_path(self) -> None:
+    def test_registry_backup_environment_selects_private_runtime_copy(self) -> None:
         config = {"paths": {"root": "/srv/platform"}, "addresses": {"storage": "192.0.2.10"}}
         private = "/run/example-backup-private/storage-bootstrap.env"
         with (
@@ -245,12 +245,15 @@ class RegistryArtifactStreamingTests(unittest.TestCase):
         self.assertIn('RuntimeDirectoryMode = "0700";', unit)
         self.assertIn('"PATH=/run/wrappers/bin:${', unit)
         self.assertIn(
-            '"${pkgs.coreutils}/bin/install -m 0600 %d/storage-bootstrap '
+            '"${pkgs.coreutils}/bin/install -m 0600 ${operatorRoot}/secrets/storage-bootstrap.env '
             '%t/${namespace}-backup-private/storage-bootstrap.env"',
             unit,
         )
-        self.assertIn('"storage-bootstrap:${root}/secrets/storage-bootstrap.env"', unit)
-        self.assertIn('"backup-age-key:${root}/persistent/secrets/backup-age-key.txt"', unit)
+        self.assertIn("User = operatorAccount.name;", unit)
+        self.assertIn("Group = operatorAccount.name;", unit)
+        self.assertNotIn("LoadCredential", unit)
+        self.assertNotIn('"+${', unit)
+        self.assertIn('"AGE_KEY=${operatorRoot}/secrets/backup-age-key.txt"', unit)
         self.assertIn(
             '"${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env"', unit
         )
