@@ -1,0 +1,64 @@
+/* Admin and account pages. Tokens only; see frontend/DESIGN.md. */
+
+/* Short ID with a small copy button, for tables and detail lists. */
+.admin-id {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+  min-width: 0;
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-sm);
+}
+.admin-id__copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ui-space-6);
+  height: var(--ui-space-6);
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text-subtle);
+  transition:
+    background-color var(--ui-duration-fast) var(--ui-ease),
+    color var(--ui-duration-fast) var(--ui-ease);
+}
+.admin-id__copy:hover {
+  background: var(--ui-surface-hover);
+  color: var(--ui-text);
+}
+.admin-id__copy:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 1px;
+}
+@media (pointer: coarse) {
+  .admin-id__copy {
+    width: var(--ui-space-10);
+    height: var(--ui-space-10);
+  }
+}
+
+/* A heading for a group of controls inside a dialog. */
+.admin-group-title {
+  font-size: var(--ui-text-md);
+  font-weight: var(--ui-weight-semibold);
+}
+
+/* Authenticator key: grouped characters that copy as one value. */
+.admin-secret {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-1) var(--ui-space-3);
+  padding: var(--ui-space-3) var(--ui-space-4);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-subtle);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-lg);
+}
+
+/* A field and its button on one line, aligned to the control. */
+.admin-inline-form {
+  align-items: flex-end;
+}

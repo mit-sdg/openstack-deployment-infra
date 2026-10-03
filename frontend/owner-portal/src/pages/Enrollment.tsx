@@ -1,8 +1,23 @@
+import {
+  Alert,
+  AuthLayout,
+  Button,
+  Checkbox,
+  ErrorAlert,
+  Field,
+  Hint,
+  Icon,
+  Input,
+  LoadingRows,
+  PasswordInput,
+  buttonClass,
+} from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'wouter';
 import { clearCredentials } from '../api';
-import { ErrorNotice, Loading } from '../components/Feedback';
+import { authOptionsQuery } from '../authOptions';
+import './admin/admin.css';
 
 async function post(path: string, body: unknown) {
   const response = await fetch(path, {
@@ -17,15 +32,59 @@ async function post(path: string, body: unknown) {
     throw new Error(
       typeof payload.error?.summary === 'string'
         ? payload.error.summary
-        : 'Enrollment could not complete.',
+        : 'Setup couldn’t finish. Reload the page and try again.',
     );
   return payload.data;
 }
+
+const titles: Record<string, string> = {
+  bootstrap: 'Set up your admin account',
+  'password-reset': 'Reset your password',
+  'totp-reset': 'Set up your authenticator',
+  invite: 'Set up your account',
+};
+
+/** Groups of four characters; copying the text gives the key without spaces. */
+function Secret({ value }: { value: string }) {
+  return (
+    <code className="admin-secret" data-testid="totp-secret">
+      {value.match(/.{1,4}/g)?.map((group, index) => (
+        <span key={index}>{group}</span>
+      ))}
+    </code>
+  );
+}
+
+function CopySecret({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  return (
+    <Button
+      size="sm"
+      icon={copied ? 'check' : 'copy'}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          setCopied(true);
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setCopied(false), 2000);
+        } catch {
+          // Clipboard blocked: the key stays visible to type in.
+        }
+      }}
+    >
+      {copied ? 'Copied' : 'Copy key'}
+    </Button>
+  );
+}
+
 export function Enrollment() {
   const [token] = useState(() => window.location.hash.slice(1));
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
+  const [visible, setVisible] = useState(false);
   const [totp, setTotp] = useState('');
   const [enabled, setEnabled] = useState(false);
   const [stage, setStage] = useState<{
@@ -38,20 +97,8 @@ export function Enrollment() {
   useEffect(() => {
     window.history.replaceState(null, '', window.location.pathname);
   }, []);
-  const options = useQuery({
-    queryKey: ['enrollment-options'],
-    queryFn: async () => {
-      const response = await fetch('/auth/options', {
-        credentials: 'same-origin',
-        cache: 'no-store',
-      });
-      const data = (await response.json()).data;
-      if (!response.ok || typeof data?.csrfToken !== 'string')
-        throw new Error('Enrollment is temporarily unavailable.');
-      return data as { csrfToken: string };
-    },
-    retry: false,
-  });
+  // Shared with the shell, which shows the platform name from it.
+  const options = useQuery({ ...authOptionsQuery, retry: false });
   const info = useQuery({
     queryKey: ['enrollment-info'],
     enabled: !!options.data && !!token,
@@ -61,7 +108,7 @@ export function Enrollment() {
   const begin = useMutation({
     mutationFn: async () => {
       if (info.data.purpose !== 'totp-reset' && new TextEncoder().encode(password).length > 1024)
-        throw new Error('Password exceeds 1024 bytes.');
+        throw new Error('Use a shorter password: at most 1024 bytes.');
       return post('/auth/enroll', {
         token,
         csrfToken: options.data!.csrfToken,
@@ -75,6 +122,7 @@ export function Enrollment() {
     onSuccess: (value) => {
       setStage(value);
       setPassword('');
+      setVisible(false);
       setTotp('');
     },
   });
@@ -100,143 +148,164 @@ export function Enrollment() {
     if (stage) finish.mutate();
     else begin.mutate();
   }
+  const footer = (
+    <Link href="/sign-in" className="ui-link">
+      Back to sign in
+    </Link>
+  );
   if (!token && !stage)
-    return <ErrorNotice error={new Error('Open the complete setup or invitation link.')} />;
-  if (options.isPending || info.isPending) return <Loading />;
-  if (options.error || info.error) return <ErrorNotice error={options.error ?? info.error} />;
-  const resetTotp = info.data?.purpose === 'totp-reset';
-  return (
-    <section className="card overview-card">
-      <span className="eyebrow">Local portal account</span>
-      <h1>
-        {info.data?.purpose === 'bootstrap'
-          ? 'Set up an admin account'
-          : resetTotp
-            ? 'Reset authentication codes'
-            : info.data?.purpose === 'password-reset'
-              ? 'Reset your password'
-              : 'Accept your invitation'}
-      </h1>
-      <ErrorNotice error={begin.error ?? finish.error} />
-      <form onSubmit={submit}>
-        {!stage ? (
-          <>
-            {info.data.username ? (
-              <p>
-                Account: <strong>{info.data.username}</strong>
-              </p>
-            ) : (
-              <>
-                <div className="field">
-                  <label htmlFor="enroll-name">Local username</label>
-                  <input
-                    id="enroll-name"
-                    autoComplete="username"
-                    maxLength={32}
-                    required
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="enroll-display">Display name</label>
-                  <input
-                    id="enroll-display"
-                    maxLength={256}
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                  />
-                </div>
-              </>
-            )}
-            {!resetTotp && (
-              <div className="field">
-                <label htmlFor="enroll-password">New password</label>
-                <input
-                  id="enroll-password"
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={12}
-                  maxLength={1024}
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-                <p className="field-help">
-                  At least 12 characters, at most 1024 UTF-8 bytes. Do not include the username.
-                </p>
+    return (
+      <AuthLayout title="Set up your account" footer={footer}>
+        <Alert tone="danger" title="This link is incomplete">
+          Open the full setup link you were sent, or ask an admin for a new one.
+        </Alert>
+      </AuthLayout>
+    );
+  if (options.isPending || info.isPending)
+    return (
+      <AuthLayout title="Set up your account" footer={footer}>
+        <LoadingRows rows={3} />
+      </AuthLayout>
+    );
+  if (options.error || info.error)
+    return (
+      <AuthLayout title="Set up your account" footer={footer}>
+        <ErrorAlert error={options.error ?? info.error} />
+      </AuthLayout>
+    );
+  const purpose: string = info.data?.purpose ?? 'invite';
+  const resetTotp = purpose === 'totp-reset';
+  const admin = info.data.role === 'admin';
+  if (stage)
+    return (
+      <AuthLayout
+        title={stage.totpSecret ? 'Add your authenticator' : 'Finish setup'}
+        footer={footer}
+      >
+        <ErrorAlert error={finish.error} />
+        <form className="ui-stack ui-gap-4" onSubmit={submit} aria-busy={finish.isPending}>
+          {stage.totpSecret ? (
+            <>
+              <Hint>
+                Add this key to an authenticator app, then enter the 6-digit code it shows. The key
+                is shown only once.
+              </Hint>
+              <Secret value={stage.totpSecret} />
+              <div className="ui-cluster ui-gap-2">
+                <CopySecret value={stage.totpSecret} />
+                {stage.otpauthUri && (
+                  <a href={stage.otpauthUri} className={buttonClass({ size: 'sm' })}>
+                    <Icon name="external" />
+                    Open in authenticator
+                  </a>
+                )}
               </div>
-            )}
-            {info.data.purpose === 'password-reset' && info.data.totpEnabled && (
-              <div className="field">
-                <label htmlFor="existing-code">Current authentication code</label>
-                <input
-                  id="existing-code"
+              <Field label="Authentication code" id="new-code">
+                <Input
                   inputMode="numeric"
+                  autoComplete="one-time-code"
                   maxLength={6}
                   required
                   value={totp}
-                  onChange={(e) => setTotp(e.target.value)}
+                  onChange={(event) => setTotp(event.target.value)}
+                  disabled={finish.isPending}
                 />
-              </div>
-            )}
-            {info.data.purpose === 'invite' && info.data.role !== 'admin' && (
-              <label>
-                <input
-                  type="checkbox"
-                  checked={enabled}
-                  onChange={(e) => setEnabled(e.target.checked)}
-                />{' '}
-                Enable authentication codes (TOTP)
-              </label>
-            )}
-            {info.data.role === 'admin' && (
-              <p>Admin accounts require authentication-code enrollment before they can sign in.</p>
-            )}
-            <button className="button button-primary" disabled={begin.isPending}>
-              {begin.isPending ? 'Preparing…' : 'Continue'}
-            </button>
-          </>
+              </Field>
+            </>
+          ) : (
+            <p>Your account is ready.</p>
+          )}
+          <Button type="submit" variant="primary" block loading={finish.isPending}>
+            Finish setup
+          </Button>
+        </form>
+      </AuthLayout>
+    );
+  return (
+    <AuthLayout title={titles[purpose] ?? titles.invite} footer={footer}>
+      <ErrorAlert error={begin.error} />
+      <form className="ui-stack ui-gap-4" onSubmit={submit} aria-busy={begin.isPending}>
+        {info.data.username ? (
+          <Field label="Username" id="enroll-name">
+            <Input autoComplete="username" readOnly value={info.data.username} />
+          </Field>
         ) : (
           <>
-            {stage.totpSecret ? (
-              <>
-                <h2>Enroll authentication codes</h2>
-                <p>
-                  Add this key to your authenticator. It is shown only once; save it before
-                  continuing.
-                </p>
-                <code className="mono" data-testid="totp-secret">
-                  {stage.totpSecret}
-                </code>
-                <p>
-                  {stage.otpauthUri && <a href={stage.otpauthUri}>Open in your authenticator</a>}
-                </p>
-                <div className="field">
-                  <label htmlFor="new-code">Authentication code</label>
-                  <input
-                    id="new-code"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    required
-                    value={totp}
-                    onChange={(e) => setTotp(e.target.value)}
-                  />
-                </div>
-              </>
-            ) : (
-              <p>Your account is ready to activate.</p>
-            )}
-            <button className="button button-primary" disabled={finish.isPending}>
-              {finish.isPending ? 'Verifying…' : 'Finish enrollment'}
-            </button>
+            <Field label="Username" id="enroll-name">
+              <Input
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
+                maxLength={32}
+                required
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                disabled={begin.isPending}
+              />
+            </Field>
+            <Field label="Display name" id="enroll-display" optional>
+              <Input
+                autoComplete="name"
+                maxLength={256}
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                disabled={begin.isPending}
+              />
+            </Field>
           </>
         )}
+        {!resetTotp && (
+          <Field
+            label="New password"
+            id="enroll-password"
+            hint="At least 12 characters. Don’t include your username."
+          >
+            <PasswordInput
+              autoComplete="new-password"
+              minLength={12}
+              maxLength={1024}
+              required
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              disabled={begin.isPending}
+              revealed={visible}
+              onRevealedChange={setVisible}
+            />
+          </Field>
+        )}
+        {purpose === 'password-reset' && info.data.totpEnabled && (
+          <Field
+            label="Current authentication code"
+            id="existing-code"
+            hint="The 6-digit code from your authenticator app."
+          >
+            <Input
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              required
+              value={totp}
+              onChange={(event) => setTotp(event.target.value)}
+              disabled={begin.isPending}
+            />
+          </Field>
+        )}
+        {purpose === 'invite' && !admin && (
+          <Checkbox
+            label="Use an authenticator app"
+            description="Ask for a 6-digit code each time you sign in."
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+            disabled={begin.isPending}
+          />
+        )}
+        {admin && !resetTotp && (
+          <Hint>Admin accounts need an authenticator app. You’ll add it on the next step.</Hint>
+        )}
+        <Button type="submit" variant="primary" block loading={begin.isPending}>
+          Continue
+        </Button>
       </form>
-      <p>
-        <Link href="/sign-in">Return to sign-in</Link>
-      </p>
-    </section>
+    </AuthLayout>
   );
 }
