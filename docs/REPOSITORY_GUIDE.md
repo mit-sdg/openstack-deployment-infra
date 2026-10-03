@@ -326,12 +326,12 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/dev/controller.py` — real project-socket double with immutable fixture deployments, checkpoints, and lost-response/recovery faults.
 - `tests/test_management.py` — offline broker authentication, ownership/quota race, intent recovery, and web/Unix transport tests.
 - `frontend/owner-portal/package.json` — exact frontend and browser-test dependencies plus local scripts.
-- `frontend/owner-portal/package-lock.json` — locked npm graph for Node 24 development and builds.
+- `frontend/package-lock.json` — one locked npm graph for the frontend workspaces.
 - `frontend/owner-portal/tsconfig.json` — strict frontend and smoke-test TypeScript checks.
 - `frontend/owner-portal/vite.config.ts` — React production build, local API proxy, and Vitest configuration.
 - `frontend/owner-portal/playwright.config.ts` — cached-Chromium HTTPS smoke with worktree-confined output.
 - `frontend/owner-portal/index.html` — static external-script entry document and origin-preserving HTML referrer policy.
-- `frontend/owner-portal/public/theme.js` — external pre-paint light/dark preference script.
+- `frontend/shared/src/theme.js` — external pre-paint script with an app-specific preference key.
 - `frontend/owner-portal/public/favicon.svg` — code-native portal mark.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory TanStack Query setup.
 - `frontend/owner-portal/src/api.ts` — typed API/response validation, same-key CSRF retry, and typed settings validation.
@@ -396,3 +396,23 @@ change. `tests/test_documentation.py` checks that every path returned by
 `git ls-files` has one backtick-delimited entry here. The check allows a new,
 not-yet-added guide entry during local editing, but CI verifies it once the file
 is tracked.
+
+## Shared frontend presentation
+
+- `frontend/package.json` — pinned Node/npm root workspace and all-frontend checks.
+- `frontend/scripts/check-source.mjs` — TypeScript AST checks for first-party CSP and app import boundaries.
+- `frontend/shared/package.json` — source-only shared presentation exports and React peer dependency.
+- `frontend/shared/src/BoundaryText.tsx` — text-only line-break opportunities for URLs and paths.
+- `frontend/shared/src/Feedback.tsx` — parameterized empty/loading/error presentation and focus policy.
+- `frontend/shared/src/Layout.tsx` — presentation-only card, activity row and shell slots.
+- `frontend/shared/src/Mark.tsx` — common code-native SVG brand mark.
+- `frontend/shared/src/StatusBadge.tsx` — explicit label/tone status presentation with an optional indicator.
+- `frontend/shared/src/ThemeButton.tsx` — system/light/dark selection with an app-specific storage key.
+- `frontend/shared/src/index.ts` — explicit shared presentation export surface.
+- `frontend/shared/src/presentation.test.tsx` — escaped text and independent theme-preference checks.
+- `frontend/shared/src/primitives.css` — shared base controls, cards, statuses and preference rules.
+- `frontend/shared/src/test-setup.ts` — shared test DOM cleanup and preference reset.
+- `frontend/shared/src/tokens.css` — common light/dark surface, typography and status tokens.
+- `frontend/shared/tsconfig.json` — strict shared component TypeScript checks.
+- `frontend/shared/vite.config.ts` — shared component Vitest browser-like test configuration.
+- `frontend/scripts/theme-plugin.ts` — emits the shared external theme bootstrap and serves it in the portal Vite preview.

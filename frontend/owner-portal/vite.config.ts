@@ -1,8 +1,10 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import { themePlugin } from '../scripts/theme-plugin';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), themePlugin()],
+  resolve: { dedupe: ['react', 'react-dom'] },
   build: { manifest: true, sourcemap: false },
   server: {
     proxy: Object.fromEntries(

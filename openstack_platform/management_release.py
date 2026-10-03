@@ -144,7 +144,7 @@ def build_snapshot(repository: Path, commit: str) -> tuple[dict[str, Any], dict[
         or receipt.get("dirty") is not False
         or receipt.get("sourceCommit") != commit
         or receipt.get("npmLockSha256")
-        != evidence._sha256_file(repository / "frontend/owner-portal/package-lock.json")
+        != evidence._sha256_file(evidence.frontend_lockfile(repository))
     ):
         raise ValueError("management build receipt is dirty, stale or mismatched")
     root = repository / "frontend/owner-portal/dist"

@@ -120,12 +120,19 @@ through a broker-only Unix identity service to Commons over HTTPS. No password
 is stored, audited or logged. The harness replaces Commons and the controller
 with loopback doubles; it does not call any live platform or class application.
 
-Use Python 3.14 and Node 24:
+Use Python 3.14, Node 24.19.0 and npm 11.17.0. The source-only UI package and
+owner portal are npm workspaces rooted in `frontend/`, with one lockfile.
+Shared UI components contain presentation only; owner routing and API calls
+remain in the portal. Run the import/CSP source check after frontend edits:
 
 ```sh
 uv sync --frozen
 export PATH=/home/agent/.local/node-v24.19.0/bin:$PATH
-npm --prefix frontend/owner-portal ci
+npm --prefix frontend ci
+npm --prefix frontend run check:source
+npm --prefix frontend run format:check --workspaces
+npm --prefix frontend run typecheck
+npm --prefix frontend test
 npm --prefix frontend/owner-portal run format:check
 npm --prefix frontend/owner-portal run typecheck
 npm --prefix frontend/owner-portal test

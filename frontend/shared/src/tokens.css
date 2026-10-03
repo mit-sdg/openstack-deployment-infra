@@ -1,0 +1,77 @@
+:root {
+  color-scheme: light;
+  --bg: #f5f5f3;
+  --surface: #fff;
+  --surface-2: #f7f7f5;
+  --surface-3: #eeeeeb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-3: #6b6a65;
+  --border: rgba(11, 11, 11, 0.09);
+  --border-strong: rgba(11, 11, 11, 0.16);
+  --action: #246bc1;
+  --action-hover: #1c5cab;
+  --accent: #2a78d6;
+  --accent-ink: #1c5cab;
+  --accent-soft: rgba(42, 120, 214, 0.1);
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --warning: #fab219;
+  --info: #2a78d6;
+  --warning-soft: rgba(250, 178, 25, 0.18);
+  --neutral: #898781;
+  --good-soft: rgba(12, 163, 12, 0.1);
+  --critical-soft: rgba(208, 59, 59, 0.1);
+  --info-soft: rgba(42, 120, 214, 0.1);
+  --neutral-soft: rgba(137, 135, 129, 0.13);
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.04);
+  --radius: 12px;
+  --gutter: 28px;
+  --page-width: 1320px;
+  --font:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0e0e0d;
+    --surface: #161615;
+    --surface-2: #1d1d1c;
+    --surface-3: #262624;
+    --ink: #f4f4f2;
+    --ink-2: #c3c2b7;
+    --ink-3: #9a9991;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.15);
+    --accent: #3987e5;
+    --accent-ink: #6da7ec;
+    --accent-soft: rgba(57, 135, 229, 0.16);
+    --good-soft: rgba(12, 163, 12, 0.18);
+    --critical-soft: rgba(208, 59, 59, 0.2);
+    --info-soft: rgba(57, 135, 229, 0.18);
+    --neutral-soft: rgba(137, 135, 129, 0.18);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e0e0d;
+  --surface: #161615;
+  --surface-2: #1d1d1c;
+  --surface-3: #262624;
+  --ink: #f4f4f2;
+  --ink-2: #c3c2b7;
+  --ink-3: #9a9991;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --accent: #3987e5;
+  --accent-ink: #6da7ec;
+  --accent-soft: rgba(57, 135, 229, 0.16);
+  --good-soft: rgba(12, 163, 12, 0.18);
+  --critical-soft: rgba(208, 59, 59, 0.2);
+  --info-soft: rgba(57, 135, 229, 0.18);
+  --neutral-soft: rgba(137, 135, 129, 0.18);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}

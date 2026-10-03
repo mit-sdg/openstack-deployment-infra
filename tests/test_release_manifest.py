@@ -206,6 +206,44 @@ class ReleaseManifestTests(unittest.TestCase):
                     actual = release_manifest.component_set(copy, self.commit)["ui"]
                 self.assertEqual(actual, expected)
 
+    def test_workspace_sbom_binds_local_sources_and_requires_registry_integrity(self) -> None:
+        repository, _commit = clean_repository(ROOT, self.root / "workspace")
+        lockfile = repository / "frontend/package-lock.json"
+        packages = release_manifest.npm_spdx_packages(lockfile)
+        shared = next(row for row in packages if row["name"] == "@openstack-platform/ui")
+        self.assertRegex(shared["comment"], r"workspace source sha256: [0-9a-f]{64}")
+        source = repository / "frontend/shared/src/Mark.tsx"
+        source.write_text(source.read_text() + "\n// changed shared source\n")
+        changed = release_manifest.npm_spdx_packages(lockfile)
+        self.assertNotEqual(
+            shared["comment"],
+            next(row for row in changed if row["name"] == shared["name"])["comment"],
+        )
+        document = json.loads(lockfile.read_bytes())
+        registry = next(row for row in document["packages"].values() if "integrity" in row)
+        registry.pop("integrity")
+        lockfile.write_text(json.dumps(document))
+        with self.assertRaisesRegex(release_manifest.ReleaseVerificationError, "integrity"):
+            release_manifest.npm_spdx_packages(lockfile)
+
+    def test_workspace_links_cannot_escape_the_declared_packages(self) -> None:
+        repository, _commit = clean_repository(ROOT, self.root / "workspace")
+        lockfile = repository / "frontend/package-lock.json"
+        document = json.loads(lockfile.read_bytes())
+        link = document["packages"]["node_modules/@openstack-platform/ui"]
+        link["resolved"] = "../outside"
+        lockfile.write_text(json.dumps(document))
+        with self.assertRaisesRegex(release_manifest.ReleaseVerificationError, "workspace link"):
+            release_manifest.npm_spdx_packages(lockfile)
+
+    def test_owner_identity_includes_shared_source_and_workspace_configuration(self) -> None:
+        repository, commit = clean_repository(ROOT, self.root / "workspace")
+        before = release_manifest.component_set(repository, commit)["ui"]["frontendSha256"]
+        source = repository / "frontend/shared/src/Mark.tsx"
+        source.write_text(source.read_text() + "\n// shared change\n")
+        after = release_manifest.component_set(repository, commit)["ui"]["frontendSha256"]
+        self.assertNotEqual(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()

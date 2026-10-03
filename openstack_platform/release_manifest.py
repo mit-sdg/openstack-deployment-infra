@@ -121,6 +121,26 @@ def _files(root: Path, directory: str, suffixes: tuple[str, ...]) -> list[Path]:
     ]
 
 
+def frontend_lockfile(repository: Path) -> Path:
+    """Select the workspace lock, with retained pre-workspace releases supported."""
+    workspace = repository / "frontend/package-lock.json"
+    return (
+        workspace if workspace.exists() else repository / "frontend/owner-portal/package-lock.json"
+    )
+
+
+def _frontend_inputs(repository: Path, directories: tuple[str, ...]) -> list[Path]:
+    suffixes = (".ts", ".tsx", ".css", ".html", ".js", ".mjs", ".json", ".svg")
+    excluded = {"dist", "node_modules", "test-results", "playwright-report"}
+    return [
+        path
+        for directory in directories
+        for path in _files(repository, directory, suffixes)
+        if not excluded.intersection(path.relative_to(repository / directory).parts)
+        and path.name != "build-receipt.json"
+    ]
+
+
 def component_set(
     repository: Path, commit: str, *, ui_build: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -161,19 +181,13 @@ def component_set(
         }
         for role in ROLES
     }
-    frontend = [
-        path
-        for path in _files(
-            repository,
-            "frontend/owner-portal",
-            (".ts", ".tsx", ".css", ".html", ".js", ".mjs", ".json"),
-        )
-        if not {"dist", "node_modules", "test-results"}.intersection(
-            path.relative_to(repository / "frontend/owner-portal").parts
-        )
-        and path.name != "build-receipt.json"
-    ]
-    npm_lock = repository / "frontend/owner-portal/package-lock.json"
+    frontend = _frontend_inputs(
+        repository, ("frontend/owner-portal", "frontend/shared", "frontend/scripts")
+    )
+    workspace_manifest = repository / "frontend/package.json"
+    if workspace_manifest.exists():
+        frontend.append(workspace_manifest)
+    npm_lock = frontend_lockfile(repository)
     management_files = [
         path
         for path in _files(repository, "openstack_platform/management", (".py",))
@@ -270,14 +284,58 @@ def npm_spdx_packages(lockfile: Path) -> list[dict[str, Any]]:
     records = lock.get("packages")
     if lock.get("lockfileVersion") != 3 or not isinstance(records, dict):
         _fail("npm lock must have a complete version-3 package graph")
+    root_package = records.get("", {})
+    if not isinstance(root_package, dict):
+        _fail("npm lock root package must be an object")
+    workspaces = root_package.get("workspaces", [])
+    if not isinstance(workspaces, list) or any(
+        not isinstance(path, str) or path not in {"shared", "owner-portal", "operator-dashboard"}
+        for path in workspaces
+    ):
+        _fail("npm workspace paths are unsupported")
+    if workspaces and _load(lockfile.parent / "package.json").get("workspaces") != workspaces:
+        _fail("npm workspace graph differs from the workspace manifest")
     result = []
     for path, record in sorted(records.items()):
         if not path:
             continue
+        if not isinstance(record, dict):
+            _fail("npm lock package must be an object")
+        if record.get("link") is True:
+            target = record.get("resolved")
+            if (
+                not isinstance(target, str)
+                or target not in workspaces
+                or not isinstance(records.get(target), dict)
+            ):
+                _fail("npm workspace link is outside the declared source packages")
+            package_manifest = _load(lockfile.parent / target / "package.json")
+            if path != "node_modules/" + str(package_manifest.get("name")):
+                _fail("npm workspace link name differs from its source package")
+            continue
+        if path in workspaces:
+            package_manifest = _load(lockfile.parent / path / "package.json")
+            if record.get("version") != package_manifest.get("version") or (
+                "name" in record and record["name"] != package_manifest.get("name")
+            ):
+                _fail("npm workspace package differs from its source manifest")
+            name, version = package_manifest.get("name"), package_manifest.get("version")
+            if not isinstance(name, str) or not isinstance(version, str):
+                _fail("npm workspace package requires a name and version")
+            package = _spdx_package(name, version, reference=f"pkg:npm/{name}@{version}")
+            inputs = _frontend_inputs(lockfile.parent, (path,))
+            if any(file.is_symlink() for file in inputs):
+                _fail("npm workspace source must not contain links")
+            package["comment"] = "workspace source sha256: " + _tree_hash(
+                lockfile.parent, inputs, domain="npm-workspace-source-v1"
+            )
+            result.append(package)
+            continue
         if (
-            not isinstance(record, dict)
+            not path.startswith("node_modules/")
             or not isinstance(record.get("version"), str)
             or not isinstance(record.get("integrity"), str)
+            or not record["integrity"]
         ):
             _fail("npm lock package is not version/integrity pinned")
         name = record.get("name") or path.split("node_modules/")[-1]
@@ -528,7 +586,7 @@ def generate(
         commit,
         [
             *_python_spdx_packages(repository / "uv.lock"),
-            *npm_spdx_packages(repository / "frontend/owner-portal/package-lock.json"),
+            *npm_spdx_packages(frontend_lockfile(repository)),
             *(
                 [
                     _spdx_package(
