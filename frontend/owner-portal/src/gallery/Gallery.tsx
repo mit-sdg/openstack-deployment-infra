@@ -10,15 +10,23 @@ import {
   Checkbox,
   CodeBlock,
   CopyField,
+  CopyId,
+  Icon,
+  RelativeTime,
+  StatusText,
+  buttonClass,
   DataTable,
   Dialog,
   EmptyState,
   Field,
   Fieldset,
   Grid,
-  Hint,
   IconButton,
   InlineStatus,
+  LoadError,
+  PageHeaderSkeleton,
+  PageSkeleton,
+  SectionSkeleton,
   Input,
   KeyValueList,
   List,
@@ -68,6 +76,76 @@ const rows: Row[] = [
     when: '—',
   },
 ];
+type Owner = { id: string; name: string; username: string; enabled: boolean; seen: string };
+const ago = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();
+const owners: Owner[] = [
+  {
+    id: '22222222-2222-4222-8222-222222222222',
+    name: 'Alice Student',
+    username: 'alice',
+    enabled: true,
+    seen: ago(21),
+  },
+  {
+    id: '33333333-3333-4333-8333-333333333333',
+    name: 'Bob Student',
+    username: 'bob',
+    enabled: false,
+    seen: ago(60 * 26),
+  },
+];
+// Compact phone rows: name and status on one line, username and time under it.
+const ownerColumns: Column<Owner>[] = [
+  {
+    key: 'name',
+    header: 'Name',
+    mobile: 'title',
+    cell: (owner) => (
+      <a href="#data" className="ui-link ui-link--plain">
+        {owner.name}
+      </a>
+    ),
+  },
+  {
+    key: 'status',
+    header: 'Status',
+    mobile: 'trailing',
+    cell: (owner) => <Status state={owner.enabled ? 'active' : 'disabled'} />,
+  },
+  {
+    key: 'username',
+    header: 'Username',
+    mobile: 'secondary',
+    cell: (owner) => <span className="ui-text-muted">{owner.username}</span>,
+  },
+  {
+    key: 'id',
+    header: 'ID',
+    mobile: 'hidden',
+    cell: (owner) => <CopyId value={owner.id} label="owner ID" />,
+  },
+  {
+    key: 'seen',
+    header: 'Last sign-in',
+    mobile: 'meta',
+    cell: (owner) => (
+      <span className="ui-text-muted">
+        <RelativeTime value={owner.seen} />
+      </span>
+    ),
+  },
+];
+const deploymentStates = [
+  'queued',
+  'building',
+  'deploying',
+  'live',
+  'succeeded',
+  'failed',
+  'recovery_required',
+  'rolled_back',
+];
+
 const columns: Column<Row>[] = [
   {
     key: 'name',
@@ -86,7 +164,16 @@ const columns: Column<Row>[] = [
     cell: (row) => <Status state={row.state} />,
   },
   { key: 'url', header: 'URL', cell: (row) => <span className="ui-text-muted">{row.url}</span> },
-  { key: 'commit', header: 'Deployed commit', cell: (row) => <code>{row.commit}</code> },
+  {
+    key: 'commit',
+    header: 'Deployed commit',
+    cell: (row) =>
+      row.commit === 'Not deployed' ? (
+        <span className="ui-text-subtle">Not deployed</span>
+      ) : (
+        <code>{row.commit}</code>
+      ),
+  },
   {
     key: 'when',
     header: 'Last deployed',
@@ -372,8 +459,8 @@ export function Gallery() {
                   { value: 'a', label: 'Class account' },
                   { value: 'b', label: 'Local account' },
                 ]}
+                hint="Help text sits 6px under its control, in the one hint style."
               />
-              <Hint>Help text in the one consistent style.</Hint>
             </Stack>
           </Section>
 
@@ -389,7 +476,7 @@ export function Gallery() {
           <Section title="Compact list" flush actions={<Button size="sm">View all</Button>}>
             <List label="Activity" density="compact">
               <ListItem
-                title="Deploy"
+                title="Deployed"
                 meta={
                   <>
                     <a href="#data" className="ui-link">
@@ -401,7 +488,7 @@ export function Gallery() {
                 }
               />
               <ListItem
-                title="Set environment variable"
+                title="Setting variable"
                 meta={
                   <>
                     <a href="#data" className="ui-link">
@@ -415,7 +502,7 @@ export function Gallery() {
                 trailing={<Status state="accepted" />}
               />
               <ListItem
-                title="Deploy"
+                title="Deployment"
                 meta={
                   <>
                     <a href="#data" className="ui-link">
@@ -470,6 +557,42 @@ export function Gallery() {
               />
             </Section>
           </Grid>
+          <Section
+            title="Owners"
+            flush
+            actions={
+              <a href="#data" className={buttonClass({ variant: 'ghost', size: 'sm' })}>
+                View all
+                <Icon name="chevron-right" />
+              </a>
+            }
+          >
+            <DataTable
+              label="Owners"
+              columns={ownerColumns}
+              rows={owners}
+              rowKey={(owner) => owner.id}
+              onRowClick={() => {}}
+            />
+          </Section>
+          <Section title="Statuses and values">
+            <Example label="Expected">
+              <StatusText>Healthy</StatusText>
+              <Status state="active" />
+              <Status state="live" />
+            </Example>
+            <Example label="Deployments">
+              {deploymentStates.map((state) => (
+                <Status key={state} state={state} />
+              ))}
+            </Example>
+            <Example label="IDs and times">
+              <CopyId value="22222222-2222-4222-8222-222222222222" label="owner ID" />
+              <CopyId value="a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0" label="commit" length={9} />
+              <RelativeTime value={ago(21)} />
+              <RelativeTime value={null} empty="Never" />
+            </Example>
+          </Section>
           <Section title="Code and log">
             <CodeBlock label="Example">{'npm ci\nnpm run build'}</CodeBlock>
             <CodeBlock label="Build log" variant="log">
@@ -496,7 +619,11 @@ export function Gallery() {
               >
                 {tone === 'danger'
                   ? 'The health check did not pass. Check the build log, then deploy again.'
-                  : `An ${tone} message says what happened and what to do.`}
+                  : {
+                      info: 'An info message says what happened and what to do.',
+                      success: 'A success message confirms what changed.',
+                      warning: 'A warning says what might go wrong and how to avoid it.',
+                    }[tone as 'info' | 'success' | 'warning']}
               </Alert>
             ))}
             <Example label="Overlays">
@@ -513,6 +640,16 @@ export function Gallery() {
             <div className="ui-card">
               <LoadingRows />
             </div>
+            <LoadError onRetry={() => {}}>
+              Couldn’t load your apps. Try again in a minute.
+            </LoadError>
+          </Section>
+          <Section title="Page skeleton">
+            <PageSkeleton label="Loading example">
+              <PageHeaderSkeleton meta actions={1} />
+              <SectionSkeleton variant="table" columns={5} rows={2} />
+              <SectionSkeleton title variant="list" density="compact" rows={3} />
+            </PageSkeleton>
           </Section>
           <div className="ui-card">
             <EmptyState

@@ -18,6 +18,9 @@
   --ui-border-strong: light-dark(#d4d4d8, #3a3a40);
   --ui-border-hover: light-dark(#a1a1aa, #52525b);
   --ui-row-hover: light-dark(#fafafa, #17171a);
+  /* Segmented control: the selected option is raised in both themes. */
+  --ui-segment-track: light-dark(#e9e9ec, #1f1f23);
+  --ui-segment-selected: light-dark(#ffffff, #3a3a40);
   --ui-text: light-dark(#18181b, #f4f4f5);
   --ui-text-muted: light-dark(#52525b, #a1a1aa);
   --ui-text-subtle: light-dark(#6b6b74, #8d8d96);
@@ -134,6 +137,8 @@
   --ui-icon-size: 16px;
 
   /* Shape and depth. */
+  /* xs is only for 16px controls (checkboxes). */
+  --ui-radius-xs: 4px;
   --ui-radius-sm: 6px;
   --ui-radius-md: 8px;
   --ui-radius-lg: 12px;

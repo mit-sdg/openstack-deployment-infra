@@ -1,8 +1,11 @@
 /*
  * Pre-redesign styles for owner-portal pages that have not been rebuilt on
  * the design system yet. They sit in the "legacy" cascade layer, so ui-*
- * components always win. Do not add rules here; delete this file once no
- * page renders legacy class names (see frontend/DESIGN.md, "Migration").
+ * components always win. Element rules (headings, labels, inputs…) are
+ * fenced with :not(:is(.ui-page, .ui-auth, .ui-dialog) *), so nothing here
+ * reaches content rendered inside Page, AuthLayout or Dialog; base rules
+ * (body, links, focus) come only from ui.css. Do not add rules here; delete
+ * this file once no page renders legacy class names (DESIGN.md, Migration).
  */
 :root {
   --bg: var(--ui-bg);
@@ -37,78 +40,31 @@
   --page-width: 1320px;
 }
 @layer legacy {
-  *,
-  *::before,
-  *::after {
-    box-sizing: border-box;
-  }
-  html {
-    scroll-padding-top: 90px;
-  }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--ink);
-    font: 14px/1.6 var(--font);
-    -webkit-font-smoothing: antialiased;
-  }
-  #root {
-    min-height: 100dvh;
-    display: flex;
-    flex-direction: column;
-  }
-  h1,
-  h2,
-  h3,
-  p {
+  h1:not(:is(.ui-page, .ui-auth, .ui-dialog) *),
+  h2:not(:is(.ui-page, .ui-auth, .ui-dialog) *),
+  h3:not(:is(.ui-page, .ui-auth, .ui-dialog) *),
+  p:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     margin: 0;
   }
-  h1 {
+  h1:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     font-size: 32px;
     line-height: 1.2;
     letter-spacing: -0.035em;
     font-weight: 680;
   }
-  h2 {
+  h2:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     font-size: 19px;
     line-height: 1.3;
     letter-spacing: -0.015em;
     font-weight: 650;
   }
-  h3 {
+  h3:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     font-size: 16px;
     font-weight: 650;
   }
-  a {
-    color: var(--accent-ink);
-    text-decoration: none;
-  }
-  a:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-  button,
-  input,
-  textarea {
-    font: inherit;
-    color: inherit;
-  }
-  button,
-  a,
-  input,
-  textarea {
-    touch-action: manipulation;
-  }
-  button {
-    cursor: pointer;
-  }
-  button:disabled {
+  button:disabled:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     opacity: 0.55;
     cursor: default;
-  }
-  :focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 3px;
   }
   .sr-only {
     position: absolute;
@@ -377,12 +333,6 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation: none !important;
-      transition: none !important;
-    }
   }
   @media (forced-colors: active) {
     .status,
@@ -779,15 +729,15 @@
   .full {
     grid-column: 1/-1;
   }
-  label,
-  legend {
+  label:not(:is(.ui-page, .ui-auth, .ui-dialog) *),
+  legend:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     display: block;
     font-size: 12px;
     font-weight: 600;
     margin-bottom: 9px;
   }
-  input:not([type='radio']):not([type='hidden']),
-  textarea {
+  input:not([type='radio']):not([type='hidden']):not(:is(.ui-page, .ui-auth, .ui-dialog) *),
+  textarea:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     display: block;
     width: 100%;
     min-height: 44px;
@@ -798,11 +748,11 @@
     font-size: 13px;
     line-height: 1.5;
   }
-  textarea {
+  textarea:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     resize: vertical;
     font-family: var(--mono);
   }
-  input::placeholder {
+  input:not(:is(.ui-page, .ui-auth, .ui-dialog) *)::placeholder {
     color: var(--ink-3);
     opacity: 1;
   }
@@ -1171,7 +1121,7 @@
     .page-heading > .button {
       width: 100%;
     }
-    h1 {
+    h1:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
       font-size: 27px;
     }
     .page-heading p {
@@ -1394,12 +1344,6 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation: none !important;
-      transition: none !important;
-    }
   }
   @media (forced-colors: active) {
     .status,
@@ -1491,7 +1435,7 @@
   .table-scroll {
     overflow-x: auto;
   }
-  fieldset {
+  fieldset:not(:is(.ui-page, .ui-auth, .ui-dialog) *) {
     min-width: 0;
   }
 }
