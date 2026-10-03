@@ -26,8 +26,9 @@ export type Column<T> = {
  * the table semantics when CSS changes the display of rows and cells.
  *
  * With onRowClick the whole row is clickable (hover state and a chevron).
- * Keep a real link in the first column: it is the keyboard and screen
- * reader target, and supports opening in a new tab.
+ * Keep a real link in the "title" column: it is the keyboard and screen
+ * reader target and supports opening in a new tab. On phones that link
+ * stretches over the whole stacked card, so the card is one tap target.
  */
 export function DataTable<T>({
   label,
@@ -117,7 +118,7 @@ export function DataTable<T>({
                 <td
                   role="cell"
                   aria-hidden="true"
-                  data-mobile="hidden"
+                  data-mobile="chevron"
                   className="ui-table__chevron-cell"
                 >
                   <Icon name="chevron-right" className="ui-table__chevron" />

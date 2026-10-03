@@ -13,6 +13,7 @@ import {
   DataTable,
   Dialog,
   ErrorAlert,
+  LoadError,
   Field,
   Input,
   PasswordInput,
@@ -359,5 +360,31 @@ describe("compact values", () => {
       "data-mobile",
       "meta",
     );
+  });
+});
+
+describe("round 3 pieces", () => {
+  it("describes a segmented control with its hint", () => {
+    render(
+      <SegmentedControl
+        label="Method"
+        name="m"
+        value="a"
+        onChange={() => {}}
+        options={[{ value: "a", label: "A" }]}
+        hint="Pick one."
+      />,
+    );
+    expect(
+      screen.getByRole("group", { name: "Method" }),
+    ).toHaveAccessibleDescription("Pick one.");
+  });
+  it("announces load errors with Retry without stealing focus", () => {
+    const retry = vi.fn();
+    render(<LoadError onRetry={retry}>Couldn't load your apps.</LoadError>);
+    const alert = screen.getByRole("alert");
+    expect(alert).not.toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledOnce();
   });
 });
