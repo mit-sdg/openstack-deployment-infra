@@ -205,9 +205,7 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     }),
   ).toBeAttached({ timeout: operationTimeout });
   await expect(
-    environmentSection
-      .getByRole('listitem')
-      .filter({ has: page.getByText('API_TOKEN', { exact: true }) }),
+    variables.getByRole('listitem').filter({ has: page.getByText('API_TOKEN', { exact: true }) }),
   ).toHaveCount(0, { timeout: operationTimeout });
   await Promise.all(pending);
   expect(received.join('')).not.toContain(sentinel);
