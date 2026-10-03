@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import http.client
 import io
+import threading
 import uuid
 from unittest import mock
 
@@ -465,6 +467,54 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
 
 
 class ResourceWebTransportTests(management.ManagementCase):
+    def test_http_delete_dispatches_only_the_environment_route(self):
+        from urllib.parse import urlsplit
+
+        from openstack_platform.management.web.server import WebServer
+
+        web = WebServer(("127.0.0.1", 0), self.config, self.root)
+        thread = threading.Thread(
+            target=web.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        self.addCleanup(web.server_close)
+        self.addCleanup(web.shutdown)
+        app = str(uuid.uuid4())
+        connection = http.client.HTTPConnection("127.0.0.1", web.server_port)
+        self.addCleanup(connection.close)
+        with mock.patch.object(
+            web.broker, "request", return_value=(202, {"data": {"state": "accepted"}})
+        ) as request:
+            connection.request(
+                "DELETE",
+                f"/api/v1/apps/{app}/environment/API_TOKEN",
+                "{}",
+                {
+                    "Host": urlsplit(self.config.portal_origin).netloc,
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 202)
+            response.read()
+            self.assertEqual(
+                request.call_args.args[:2], ("DELETE", f"/v1/apps/{app}/environment/API_TOKEN")
+            )
+            count = request.call_count
+            connection.request(
+                "DELETE",
+                f"/api/v1/apps/{app}/storage/{uuid.uuid4()}",
+                "{}",
+                {
+                    "Host": urlsplit(self.config.portal_origin).netloc,
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 404)
+            response.read()
+            self.assertEqual(request.call_count, count)
+
     def test_exact_resource_paths_forward_and_neighbors_fail_closed(self):
         from openstack_platform.management.web.server import WebServer
 

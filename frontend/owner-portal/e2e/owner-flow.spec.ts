@@ -109,7 +109,9 @@ for (const [mode, viewport, colorScheme] of [
       await page.getByLabel('Application port').fill('3000');
       await page.getByLabel('Health path').fill('/health');
       await page.getByRole('button', { name: 'Save configuration' }).click();
-      await expect(page.getByRole('status')).toContainText('Settings saved.');
+      await expect(page.getByRole('status').filter({ hasText: 'Settings saved.' })).toContainText(
+        'Settings saved.',
+      );
       await expect
         .poll(
           async () =>

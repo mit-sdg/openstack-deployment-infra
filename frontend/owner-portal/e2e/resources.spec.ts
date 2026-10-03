@@ -109,6 +109,15 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
       { timeout: 15000 },
     )
     .toBe(true);
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('button', { name: 'Delete API_TOKEN' }).click();
+  await expect
+    .poll(async () =>
+      (await (await page.request.get(`/api/v1/apps/${id}/environment`)).json()).data.items.map(
+        (item: { name: string }) => item.name,
+      ),
+    )
+    .not.toContain('API_TOKEN');
   await Promise.all(pending);
   expect(received.join('')).not.toContain(sentinel);
 });
