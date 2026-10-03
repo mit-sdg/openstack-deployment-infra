@@ -135,7 +135,8 @@ uv run python -m openstack_platform.management.dev
 
 Open `https://127.0.0.1:9443/sign-in` and accept the disposable loopback
 certificate. Fixture credentials are `alice` / `local-alice-password`, `bob` /
-`local-bob-password`, and archived `carol` / `local-carol-password`. They are
+`local-bob-password`, archived `carol` / `local-carol-password`, and instructor
+`taylor` / `local-taylor-password`. They are
 public test data, never real class credentials. The fake Commons authenticate
 server always uses HTTPS, including when the portal uses HTTP/Vite. The identity
 client trusts only the harness's public development CA in development mode.
@@ -154,7 +155,7 @@ paths cannot exceed Linux's 107-byte socket-path limit. Development configuratio
 accepts sockets only below this worktree's `.tmp` or in such a private directory;
 state and the public CA remain confined to `.tmp`. Ctrl-C stops every server and
 Vite child and removes the socket directory; startup failures also remove it. Schema
-2 preserves ownership, quotas, intents and audit while removing legacy assertion
+3 preserves ownership, quotas, intents and audit while removing legacy assertion
 flows/replays and key IDs and invalidating sessions. Legacy fixtures whose
 subjects were usernames are not reassigned by name to Commons UUIDs; use a fresh
 harness directory for the new contract. Unknown schemas or checksum/realm
@@ -197,6 +198,41 @@ access, restricted to configured CIDRs or the checked-in Cloudflare ranges plus
 the local systemd-resolved DNS stub. Review the provider ranges when updating the
 inventory. Web accepts only ingress and its overwritten `cf-connecting-ip`;
 X-Forwarded-For and X-Real-Ip never choose rate-limit buckets.
+
+### Exercise staff and owner sign-in modes
+
+The loopback harness explicitly enrolls the Taylor fixture before starting its
+broker socket. Production databases still start with no grants; production
+entry points never import the harness. Open `/signin?mode=staff` and enter the
+Taylor credentials for the read-only catalog. Use ordinary `/sign-in` for its
+own-app workspace. A fresh credential exchange creates each session kind; two
+browser contexts can hold both. An owner session never gains staff permission
+from a grant or a forged role header. The Bob fixture's successful password
+check in staff mode gets only the generic account-unavailability error.
+
+Directory/catalog pages page through local metadata without per-row controller
+calls. Detail and operations pages poll every 15 seconds while visible, pause
+in hidden tabs and end after idle/absolute expiry. Staff GETs require session
+CSRF and reject supplied foreign Origin/Fetch Metadata. Owner mutations and
+configuration/log/intents reads reject a staff session, even for its own app.
+Tests include direct API mutation attempts, joint session revocation, secret
+sentinels in nested cache/upstream payloads, strict decoding, paging and audit
+failure. Staff fixture screenshots are saved locally under
+`.tmp/owner-portal-playwright/screenshots`; traces, video and credential captures
+remain disabled. The existing upload collector keeps its explicit owner-fixture
+whitelist; staff screenshots are for local review.
+
+For manual offline enrollment/reset, stop the local harness first. Use
+`uv run python -m openstack_platform.management.broker.staff_admin --config
+.tmp/owner-portal-credentials/config.json inspect --user-id USER_UUID`, then
+`grant`, `renew` or `revoke` with `--user-id`, the verified loopback `--issuer`,
+fixture `--subject`, safe `--review`, and optional `--days 1..90`. The helper
+refuses an existing broker socket. Starting the harness regrants the Taylor
+fixture; a fresh explicit `.tmp` state directory resets all fixture data without
+altering production policy. See the
+[production recovery procedure](OPERATIONS.md#enroll-or-revoke-a-portal-staff-account)
+for stable identity verification and unit coordination. Playwright's grant
+changes use only its loopback test-owned DB, never a public grant endpoint.
 
 ## Verify the portal
 

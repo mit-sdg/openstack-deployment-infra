@@ -395,10 +395,10 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | `GET /v1/admin/images` | Hosted role-image selection records |
 | `POST /v1/admin/images/{role}/selection` | Compare-and-swap exact hosted role-image metadata after provider validation; only worker/builder affect hosted provisioning |
 | `GET /v1/admin/applications` | Paginated global application list |
-| `GET /v1/admin/applications/{id}/fixed-ip` | Reservation state; reserved ports include fresh exact attachment evidence; staff only |
+| `GET /v1/admin/applications/{id}/fixed-ip` | Reservation state; reserved ports include fresh exact attachment evidence; deployment operators only |
 | `POST /v1/admin/applications/{id}/fixed-ip/plan` | Read-only primary-port plan with `{networkId, subnetId, address}`; availability unproven until reservation |
 | `POST /v1/admin/applications/{id}/fixed-ip` | App-locked `{action:"reserve", networkId, subnetId, address}` or `{action:"release"}`; see [retained primary IPv4](OPERATIONS.md#retain-a-worker-primary-fixed-ipv4) |
-| `GET /v1/admin/applications/{id}/public-ip` | Recorded optional outbound IPv4 reservation; staff only |
+| `GET /v1/admin/applications/{id}/public-ip` | Recorded optional outbound IPv4 reservation; deployment operators only |
 | `POST /v1/admin/applications/{id}/public-ip/plan` | Read-only quota and routed-network capability check with `{externalNetworkId}` |
 | `POST /v1/admin/applications/{id}/public-ip` | App-locked `allocate`, `attach`, `release`, or `reconcile`; see [public IPv4 operations](OPERATIONS.md#reserve-a-stable-outbound-ipv4) |
 | `GET /v1/admin/applications/{id}/resize-plan` | Observe a sizing plan; requires one `flavor` query parameter |
@@ -565,7 +565,7 @@ No class-app cookies/session or browser-relayed identity result is accepted.
 
 Sign-in is same-origin JSON with an anonymous HMAC CSRF token and Strict binder
 cookie. Sessions are opaque server-side records: __Host-/Secure/HttpOnly/Lax,
-Path=/, no Domain, 8 h absolute and 30 min idle. Mutations check exact Origin and
+Path=/, no Domain, 8 h absolute and 30 min idle for owners. Mutations check exact Origin and
 session CSRF. Password changes and Commons archiving do not end already issued
 portal sessions; logout, local revocation, expiry and restore do. Per-address
 admission and fixed 60-second failure budgets per exact username and address
@@ -590,11 +590,113 @@ build logs. React assets are external static files under strict CSP; admin runs
 Python only. Environment values, managed storage, enable/disable and runtime logs
 remain later work. Deletion and global administrator reads remain operator-only.
 
-Schema 2 checks immutable migration records, removes assertion flows/replays and
-session key IDs, invalidates authentication and preserves users/apps/quota/intents/
-audit. Unknown schemas/checksums/realms fail closed. Online SQLite snapshots are
+### Read-only portal staff view
+
+`POST /auth/login` (broker `/v1/auth/login`) accepts an optional `mode` of
+`owner` (default) or `staff`, alongside username/password and anonymous CSRF.
+Only after Commons accepts the password does staff mode check a live grant for
+that immutable `(issuer, subject)` broker user. Missing/disabled/expired grants
+get `STAFF_UNAVAILABLE`, a generic account-availability error. A successful staff
+login returns `/staff/owners` and creates an immutable `staff_read` session.
+Owner mode remains available to all enabled accounts, including allowlisted
+staff; its scope and writes are restricted to the caller's own apps as before.
+There is no impersonation, session upgrade or role toggle. A fresh credential
+exchange is required to enter either mode. Separate browser contexts can hold
+both kinds; granting, renewing or revoking membership deletes all of that user's
+sessions and CSRF in one transaction.
+
+Staff sessions have 1 h absolute and 10 min request-idle limits, capped by a
+shorter configured owner limit. They recheck user enabled state, grant
+enabled/expiry/realm/generation and session expiry on every request. Staff reads
+require session-bound CSRF even on GET; a supplied Origin must match exactly,
+and supplied Fetch Metadata must be `same-origin`. Bootstrap issues CSRF without
+a previous token, rejecting supplied cross-site Origin/Fetch Metadata. There is
+no CORS. All owner routes reject staff session kinds, including configuration,
+build logs, intents and every mutation. Logout may delete authentication state;
+read bookkeeping may update session activity, sanitized cache, rate counters
+and private audit, but never admit/resume an intent or mutate an application.
+
+Only the following browser GET routes exist, mapping to broker paths after
+removing `/api`:
+
+| Route | Query fields | Visible data and source |
+| --- | --- | --- |
+| `/api/v1/staff/owners` | `limit`, `cursor` | Broker user ID, username, display name, local enabled flag; only accounts known to the portal. |
+| `/api/v1/staff/owners/{owner}` | None | The same identity plus effective app/concurrent-deployment quota limits, used and reserved counts from broker quotas/apps/intents and inventory defaults. |
+| `/api/v1/staff/apps` | `limit`, `cursor`, optional `ownerId` | Broker app/owner IDs, slug, lifecycle, saved revision, creation time, sanitized repository URL from the current saved configuration. Rejected create attempts remain visible; they do not consume app quota. |
+| `/api/v1/staff/apps/{app}` | None | Catalog fields plus public URL, desired-running flag, accepted deployment ID/commit/time, coarse process/route health, observation time and stale flag, from one project API app read or its last validated cache. |
+| `/api/v1/staff/apps/{app}/deployments` | `limit`, `cursor` | Per-app project API deployment IDs, app IDs, status, commit, settings revision, cleanup state and requested/updated/accepted/last-healthy times. |
+| `/api/v1/staff/apps/{app}/deployments/{deployment}` | None | The same snapshot fields after checking both requested deployment ID and broker-known parent app association. |
+| `/api/v1/staff/operations` | `limit`, `cursor`, optional `ownerId`/`applicationId` | Broker intent/app/owner IDs, kind/state, coarse stage, cleanup status, creation/update/status-observation time and fixed attention enum. Only broker create/save/deploy intents appear; no controller poll is triggered by this read. |
+
+Repository/public URLs must be HTTPS, at most 512 characters, with no userinfo,
+query, fragment or control characters; invalid values become null. Missing
+commit/timestamp/revision evidence remains null. Health is healthy, unhealthy,
+stopped or unknown; stale observations display unknown health. Unrecognized
+phases/cleanup states map to unknown, never to success. Accepted state survives
+an unavailable live observation. Staff cannot list the entire Commons directory,
+operator-created apps absent from broker ownership, or operator-only operations.
+
+Staff responses use separate recursive field allowlists (`broker/staff.py`),
+never the broader owner serializers. Exclusions include subject/issuer/email and
+other users' sessions, credentials/secrets, ref/branch, all other configuration,
+environment names/values/revisions, storage identifiers/bindings/credentials,
+all logs, raw intent bodies/keys, raw operation IDs/refs/scope/phase/errors/status
+URLs, registry images/digests, worker/provider/IP/sizing/host/capacity records,
+backups/recovery/install state and every privileged administrator payload.
+Deployment UUIDs can coincide with operation UUIDs; they are allowed resource
+identifiers and grant no controller capability.
+
+The broker remains the existing project peer. Project API permits known-app,
+known-deployment and known-operation reads but has no global application,
+deployment or operation list. Global `/v1/admin/*` lists remain privileged;
+the client and host sandbox reject them. Enumeration begins with the broker DB,
+then known app IDs authorize fixed GET paths. App lists fetch no per-row health.
+One staff request can perform at most one upstream read, and staff share one
+upstream slot out of the existing four client slots. Per-app controller history
+currently materializes all attempts before paging; staff history refresh is
+manual and controller behavior/privileges are unchanged.
+
+Staff pages use the same React app/shell, themes, feedback and presentation
+components. Staff navigation covers owners, applications and operations; owner
+navigation and mutation components do not mount in staff mode. Directory pages
+refresh manually; detail/operation polling runs every 15 seconds while visible,
+pauses in hidden tabs, and stops after repeated failures. Idle/absolute expiry,
+logout and access loss cancel queries and clear private in-memory data/CSRF;
+query caches are never persisted. `/signin?mode=staff` is credential entry, not
+an authenticated role switch.
+
+All staff collections default to 25 records and cap at 50, with scoped UUID
+cursors and indexed local keyset paging. Unknown/duplicate/empty query fields,
+GET bodies and invalid IDs are rejected. Responses cap at 256 KiB. Fixed read
+limits are 60/minute per user (burst 10), 120/minute per validated address bucket
+(burst 20), two concurrent reads per user and eight globally. IPv6 addresses
+share /64 buckets. Limiter state is bounded (100 users/4096 addresses) and
+process-local; restart resets it. 429/503 responses carry a 30-second retry
+delay. These bound cost/response volume, not eventual disclosure: a compromised
+staff credential can enumerate the entire approved course metadata catalog and
+also mint an ordinary owner session for its own apps. It cannot widen owner
+write scope. Commons password/archival changes still affect new logins only.
+
+Successful staff reads recheck authorization and commit a private read audit
+before sending data. Audit/dependency failure returns 503 without metadata;
+revocation during an upstream call suppresses a result at the final check.
+Already authorized/in-flight responses cannot be retracted. Recovery-console
+quiescing supplies the incident cutover. Grant management and audit maintenance
+remain [offline operations](OPERATIONS.md#enroll-or-revoke-a-portal-staff-account).
+
+Schema 3 preserves immutable migration-1/2 checksums and invalidates all sessions,
+adding grants, session kinds/generation, indexed staff paging and private read/
+membership audits. Enrollment defaults to empty, lasts at most 90 days and caps
+at 100 enabled members. Unknown schemas/checksums/realms fail closed. Online SQLite snapshots are
 age-encrypted as the fourth backup class. Four-class off-site bundles coexist with
-legacy three-class evidence, and restore invalidates sessions/anonymous challenges.
+legacy three-class evidence, and restore invalidates sessions/anonymous challenges
+and disables all restored staff grants with incremented generations. Regranting
+requires independent identity review; old backup policy never silently restores
+staff access. Read audits retain 30 days with bounded daily pruning on read
+traffic and a 2-million-row cap; cap/commit failure denies staff reads, while
+owner APIs have no audit-cap authorization dependency. Shared DB/disk failure
+can affect both kinds of access.
 
 Broker and web archives bind exact source commit, source tar, runtime files,
 built web asset hashes/manifest, npm/Python locks, Node build version, SBOM,

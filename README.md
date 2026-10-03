@@ -13,8 +13,13 @@ implemented but not deployed, so there is not yet a supported workflow for
 application owners on a live platform. Students will sign in with their class
 username/password, checked server-side with Commons; the merged authenticate
 endpoint must be configured and pass live acceptance before availability is
-claimed. Existing portal sessions expire after 8 h absolute or 30 min idle;
-Commons password changes/archiving do not revoke them.
+claimed. Owner sessions expire after 8 h absolute or 30 min idle. Allowlisted
+instructors and TAs can re-enter their credentials for a separate read-only staff
+view of the broker-known catalog; staff sessions expire after 1 h or 10 min idle.
+Commons password changes/archiving do not revoke issued sessions. Enrollment,
+quota changes and revocation remain recovery-console operations; the operator
+dashboard and privileged platform data remain separate. See
+[owner portal operations](docs/OPERATIONS.md#owner-portal-operations).
 
 Today, an operator can create and recover a platform with:
 

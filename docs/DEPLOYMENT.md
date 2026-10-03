@@ -21,7 +21,9 @@ the configured Commons HTTPS authenticate endpoint. Commons bb78c5e is the
 implemented contract; this model needs no signed identity assertion or registered
 signing key. Configure the Commons origin and identity egress before rollout.
 Password changes and Commons archiving do not revoke existing portal sessions,
-which expire after 8 h absolute or 30 min idle. Passwords are not saved or logged
+which expire after 8 h absolute or 30 min idle for owners. Staff credential entry
+creates a separate read-only session capped at 1 h absolute and 10 min idle.
+Passwords are not saved or logged
 by the portal. No Commons code is maintained in this repository.
 
 The locally tested owner slice creates individual apps within staff quotas,
@@ -31,6 +33,16 @@ OpenStack, Nomad, registry or storage-administrator credentials. Environment
 variables, storage lifecycle, enable/disable and runtime logs are later work.
 Private repositories, Dockerfiles, arbitrary build commands, custom domains,
 teams, scaling, shell access and credential export remain outside this slice.
+
+The same public portal has a read-only view for allowlisted course instructors
+and TAs: portal-known owners, effective quotas, app metadata and sanitized saved
+repository URLs, deployment history, and portal operation status. It contains no
+environment/configuration values, credentials, logs, or privileged operator data.
+Staff can still manage their own apps through a separately authenticated owner
+session. An owner session cannot gain staff access without a fresh password
+check. The broker DB allowlist starts empty and is maintained from the
+[recovery console](OPERATIONS.md#enroll-or-revoke-a-portal-staff-account).
+No controller capability or host sandbox is widened for this view.
 
 ## What appears in OpenStack
 

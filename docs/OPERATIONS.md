@@ -1295,14 +1295,148 @@ CA updates belong to the admin image, not a per-account key rotation.
 
 Defaults are two apps and one held external mutation per owner. Configuration
 changes affect owners without a `quotas` override; disabled apps still count.
-Staff may maintain `quotas(user_id,apps,concurrent)` and revoke
+Recovery-console administrators may maintain `quotas(user_id,apps,concurrent)` and revoke
 `users.enabled`/`sessions` in the private broker DB through an offline recovery
 console as the broker identity. Stop portal/backup admissions, use a transaction
 with the immutable user ID, and record a safe audit action; never edit ownership
-by username or provide a global read/revocation endpoint in the portal. A local
-revocation rejects existing sessions immediately. Commons archiving/password
-changes affect new logins only; already issued sessions retain the 8 h/30 min
-expiry contract unless locally revoked.
+by username. The portal's only cross-owner read exception is the explicitly
+allowlisted, bounded staff metadata view of this broker's catalog. Global
+controller administrator reads, quota edits, grants, revocations, ownership
+corrections and recovery actions remain outside the public portal. A local
+revocation rejects existing sessions at the next authorization check. Commons
+archiving/password changes affect new logins only; issued owner sessions retain
+the 8 h/30 min contract, staff sessions 1 h/10 min, unless locally revoked.
+
+### Enroll or revoke a portal staff account
+
+Use a reviewed schema-3/protocol-3 active broker/web pair and the existing
+approved recovery console. The allowlist is private broker DB state, empty on
+initial migration; editing membership needs no inventory rebuild or host
+replacement. The recovery administrator performs service control, then runs
+the typed helper as `management-broker`. This grants no new operator sudo rights.
+The helper performs no network exchange and refuses a running broker socket,
+another process identity, a mismatched realm, unsafe DB ownership/mode, or an
+unsupported schema. Never use a mutable username as the enrollment key.
+
+First have the intended account sign in through owner mode so Commons establishes
+its stable `(issuer, subject)` record. Take a verified broker backup and retain
+its evidence before editing grants. From the admin recovery console, set `NS` to
+the inventory namespace and `STATE` to `paths.adminState`, then quiesce all portal
+admissions, activation watchers and broker backups. The following service control
+runs as the existing recovery-console administrator:
+
+```sh
+systemctl stop "$NS-management-activate.path" \
+  "$NS-management-broker.path" "$NS-management-web.path" \
+  "$NS-management-broker-backup.timer"
+systemctl stop "$NS-management-activate.service" \
+  "$NS-management-web.service" "$NS-management-identity.service" \
+  "$NS-management-broker.service" "$NS-management-broker-backup.service"
+BROKER_RELEASE=$(readlink -f "$STATE/management-active/current/broker")
+test -n "$BROKER_RELEASE"
+test ! -e "/run/$NS-management-broker/broker.sock"
+```
+
+Obtain the immutable broker user UUID from the private DB/recovery records, not
+from a username lookup that could select a reused identity. Set `STAFF_USER_ID`
+to that UUID. Inspect the record with the release-local helper:
+
+```sh
+sudo -u management-broker -- /run/current-system/sw/bin/management-python3.14 \
+  -I -B "$BROKER_RELEASE/runtime/openstack_platform/management/entry.py" staff-admin \
+  --config "$BROKER_RELEASE/config/management.json" \
+  --requirements "$BROKER_RELEASE/requirements.json" inspect --user-id "$STAFF_USER_ID"
+```
+
+Independently verify its `issuer` and canonical `subject` UUID against the course's
+trusted Commons administration records. The helper's own output alone is not
+independent verification. Confirm the person is currently an instructor or TA.
+Set `COMMONS_ORIGIN` and `COMMONS_SUBJECT` to those verified values and
+`STAFF_REVIEW` to a non-secret review reference (1–80 letters, digits, dots,
+underscores, slashes or hyphens, starting with a letter/digit). Do not put a
+password or credential in any argument or review reference.
+
+```sh
+sudo -u management-broker -- /run/current-system/sw/bin/management-python3.14 \
+  -I -B "$BROKER_RELEASE/runtime/openstack_platform/management/entry.py" staff-admin \
+  --config "$BROKER_RELEASE/config/management.json" \
+  --requirements "$BROKER_RELEASE/requirements.json" grant \
+  --user-id "$STAFF_USER_ID" --issuer "$COMMONS_ORIGIN" \
+  --subject "$COMMONS_SUBJECT" --review "$STAFF_REVIEW" --days 90
+```
+
+Use `renew` with the same verified identity and review arguments to extend an
+existing grant, or `revoke` to disable it. Grants/renewals accept 1–90 days,
+default 90, and at most 100 enabled memberships. An expired membership still
+occupies an enabled slot until revoked. Disabled portal accounts cannot be
+granted/renewed. An identity mismatch or membership-limit failure rolls back the
+transaction. Successful grant, renewal and revocation each increment generation,
+delete **all** owner and staff sessions/CSRF for that user, and record a private
+grant audit. A revoked staff session never becomes an owner session.
+
+Verify with the same release invocation using `list` instead of `grant` and omit
+the identity/change arguments. It returns at most 100 membership records and a
+`truncated` flag; inspect the target's generation/enabled state directly in the
+private DB if older disabled records exceed that list. Keep the review evidence.
+After a removal, the account may still sign in as an ordinary owner unless
+`users.enabled` is also disabled through the existing recovery procedure. For a
+full-account revocation, disable it and delete all sessions in one transaction.
+
+Take a fresh verified backup, then reopen the fixed units from the recovery
+console:
+
+```sh
+systemctl start "$NS-management-broker-backup.service"
+systemctl show "$NS-management-broker-backup.service" -p Result
+systemctl start "$NS-management-identity.service" "$NS-management-broker.service" \
+  "$NS-management-web.service"
+systemctl start "$NS-management-activate.path" "$NS-management-broker.path" \
+  "$NS-management-web.path" "$NS-management-broker-backup.timer"
+systemctl is-active "$NS-management-broker.service" "$NS-management-web.service"
+```
+
+The user must re-enter credentials using **Staff sign-in** (`/signin?mode=staff`).
+An ordinary owner login remains available to an allowlisted account and has only
+its own app permissions. A successful password check without a live grant gets
+the generic “not available for this account” staff error. Test the intended
+mode's navigation and rejected writes before declaring live acceptance. Two
+browser contexts may hold owner and staff sessions concurrently; one browser's
+new login replaces its previous cookie/session.
+
+Every staff read checks account, immutable session kind, grant expiry/generation,
+session expiry and session CSRF. Revocation committed during a dependency read
+is checked again before its result/audit commits. A response authorized before
+a later revocation may already be in flight; quiescing web is the hard incident
+cutover. A stolen staff password also permits ordinary own-app owner access;
+it does not permit writes to other owners' apps.
+
+### Review staff reads and recover audit capacity
+
+Staff reads record actor ID, correlation UUID, fixed route, validated resource/
+filter IDs, page bound/cursor presence, row count, outcome/status, stale flag and
+time in `staff_read_audit`. They never record passwords, cookies, CSRF, raw
+queries, response bodies, logs or controller operation references. Membership
+changes have separate `staff_grant_audit` evidence. Read audits are private to
+recovery access; the staff portal exposes no audit endpoint.
+
+Read-audit retention is 30 days. Read traffic triggers bounded pruning batches
+of at most 1000 expired rows after the daily interval; if a batch is full, later
+reads continue pruning. Inactive databases can retain expired rows until the
+next maintenance/read. At 2 million retained read-audit rows, or when a read audit
+cannot commit, staff reads return 503 without metadata. The audit row cap does
+not deny owner APIs; a shared DB/disk failure can affect both modes. Repeated
+throttled denials are aggregated, not written on
+every retry. Encrypted backups retain their own history independently.
+
+If the cap is reached, stop admissions/backups using the procedure above. Export
+the private audit rows to the approved private recovery evidence destination.
+Prune reviewed/expired rows in one broker-identity SQLite transaction and
+recompute `staff_read_state.row_count` with `SELECT COUNT(*) FROM
+staff_read_audit`; do not reset the counter without removing/exporting the rows.
+Set `pruned_at` to the maintenance timestamp, verify integrity/counts and take a
+new backup before reopening. Never delete recent evidence merely to admit more
+automated staff requests. Staff throttling returns 429, dependency/audit failure
+503, with a bounded 30-second retry delay; wait for that delay before retrying.
 
 The fourth backup class is `management-broker`: consistent SQLite online backup,
 age encryption with the hosted-controller escrow recipient, committed checksum/
@@ -1311,7 +1445,10 @@ readable. An active or staged broker selection requires this class for healthy
 export/status, including a broken selector whose release files disappeared.
 Checking both keeps recovery evidence mandatory before first activation and
 while staging changes independently of an active pair. The
-broker HMAC key is not restored; sessions and CSRF are removed. To replace state,
+broker HMAC key is not restored; sessions and CSRF are removed. Schema-3 restores
+disable every restored staff grant and increment its generation; independently
+review and regrant staff membership before reopening staff access. This prevents
+an old backup from restoring a removed account's privilege. To replace state,
 stop identity/broker/web, their activation/path units and broker backup timer/
 service. Decrypt to broker-owned mode-0600 `management-broker/restore-input.sqlite3`
 and use `openstack-platform-management-broker-restore --yes` from the recovery
@@ -1336,7 +1473,7 @@ original controller key or polls the recorded operation.
 
 Stop admissions and back up the broker/controller databases first. Review the
 actual database migration evidence and the retained pair's authentication realm.
-The command supports schema 2 and protocol 2 with controller API 1; it refuses
+The command supports schema 3 and protocol 3 with controller API 1; it refuses
 schema-incompatible retained or active descriptors. It cannot inspect the
 broker's private database as the operator. An incompatible database needs an
 explicit forward repair or verified offline restore, which invalidates sessions

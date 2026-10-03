@@ -910,12 +910,36 @@ Units and boot path watchers run exclusively through that active selector.
 Selecting the first half leaves activation pending; restarts or reboot retain the
 previous active pair. A rejected marker leaves the active pair unchanged. Stop
 admissions during a coordinated upgrade, back up first, and review
-schema 2/protocol 2/controller API 1. Schema migration is forward and checksum
+schema 3/protocol 3/controller API 1. Schema migration is forward and checksum
 validated; archive selection never performs a blind schema downgrade. Retain the
 pair's source manifest, descriptor, signatures, trust root, SBOM/provenance and
 checksummed archives for rollback review. The GitHub frontend job builds/verifies
 unsigned development archives after its HTTPS smoke at the same source commit;
 it performs no publication.
+
+Schema 3 migrates schemas 1/2 forward while preserving the original migration
+checksums, users, ownership, quotas, configurations and intents. It invalidates
+all sessions, adds empty staff grants and separate session kinds/generations,
+read/membership audit and paging indexes. Coordinate broker/web/auth protocol 3
+in source manifest, archive requirements, isolated smoke, standalone installer,
+root activation and retained-pair validation. The admin image must contain the
+matching activation code before a protocol-3 pair can be selected; keep the
+[admin image preflight](#preflight-controller-paths-before-an-admin-image-upgrade)
+and replacement procedure. This changes no controller API, socket privilege or
+management-unit isolation.
+
+Take a verified schema-2 backup before upgrading, quiesce admissions/backup and
+activation watchers, install a matching reviewed pair, verify schema-3 readiness
+and take a fresh backup before reopening. Users re-enter credentials. A schema-2
+binary or protocol-2 pair is not a compatible rollback after migration;
+retained-pair activation refuses it. Any schema downgrade needs separate offline
+recovery review, including ownership/intents admitted after the backup. Restoring
+schema-3 evidence deletes authentication and disables every restored staff grant
+with a new generation. Independently review and regrant membership; an older
+backup must not silently resurrect staff privilege. New grants/renewals/removals
+use the [typed recovery helper](OPERATIONS.md#enroll-or-revoke-a-portal-staff-account),
+not an image rebuild or a browser action. The portal remains locally verified,
+not deployed or live-accepted.
 
 Admin management preparation uses scoped `systemd-tmpfiles` configurations after
 the state/backup mounts are present. It never runs path-based `install -d`, chown
