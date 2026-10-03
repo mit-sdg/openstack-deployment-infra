@@ -22,7 +22,7 @@ import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useOwnerIntents } from '../hooks/useIntentPolling';
-import { healthy, short } from '../utils/presentation';
+import { ownerAppState, short } from '../utils/presentation';
 
 const columns: Column<AppRecord>[] = [
   {
@@ -39,7 +39,7 @@ const columns: Column<AppRecord>[] = [
     key: 'status',
     header: 'Status',
     mobile: 'trailing',
-    cell: (app) => <Status state={app.lifecycleState === 'creating' ? 'creating' : healthy(app)} />,
+    cell: (app) => <Status state={ownerAppState(app)} />,
   },
   {
     key: 'url',

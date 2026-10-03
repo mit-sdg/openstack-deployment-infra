@@ -135,6 +135,15 @@ const ownerColumns: Column<Owner>[] = [
     ),
   },
 ];
+const appStates = [
+  'creating',
+  'rejected',
+  'not_deployed',
+  'stopped',
+  'healthy',
+  'unhealthy',
+  'unknown',
+];
 const deploymentStates = [
   'queued',
   'building',
@@ -550,7 +559,11 @@ export function Gallery() {
             <Section title="Key-value list">
               <KeyValueList
                 items={[
-                  { label: 'Repository', value: 'github.com/example/student-app' },
+                  {
+                    label: 'Repository',
+                    value: 'https://github.com/example/student-app-with-a-long-name',
+                  },
+                  { label: 'Status', value: <Status state="not_deployed" /> },
                   { label: 'Branch', value: 'main' },
                   { label: 'Runtime', value: 'Node.js' },
                 ]}
@@ -580,6 +593,11 @@ export function Gallery() {
               <StatusText>Healthy</StatusText>
               <Status state="active" />
               <Status state="live" />
+            </Example>
+            <Example label="Apps">
+              {appStates.map((state) => (
+                <Status key={state} state={state} />
+              ))}
             </Example>
             <Example label="Deployments">
               {deploymentStates.map((state) => (

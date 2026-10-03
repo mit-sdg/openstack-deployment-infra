@@ -104,7 +104,28 @@ class ReadLimits:
             return True
 
 
-def enum(value: object, allowed: set[str]) -> str:
+# Every intent kind the broker records (owner, staff-owned and admin
+# mutations). Staff activity shows the kind only, never names or values. The
+# portal's activity titles cover exactly this set (owner-portal tests read it).
+INTENT_KINDS = frozenset(
+    {
+        "create_app",
+        "save_configuration",
+        "deploy",
+        "env_set",
+        "env_delete",
+        "storage_create",
+        "storage_verify",
+        "storage_rotate",
+        "storage_delete",
+        "adopt_app",
+        "app_enable",
+        "app_disable",
+    }
+)
+
+
+def enum(value: object, allowed: set[str] | frozenset[str]) -> str:
     return value if isinstance(value, str) and value in allowed else "unknown"
 
 
@@ -591,7 +612,7 @@ class StaffReads:
             "intentId": identifier(row["id"]),
             "applicationId": identifier(row["app_id"]),
             "ownerId": identifier(row["user_id"]),
-            "kind": enum(row["kind"], {"create_app", "save_configuration", "deploy"}),
+            "kind": enum(row["kind"], INTENT_KINDS),
             "state": state,
             "stage": stage,
             "cleanupState": enum(

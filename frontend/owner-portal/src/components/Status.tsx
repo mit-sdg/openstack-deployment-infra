@@ -27,6 +27,7 @@ const labels: Record<string, string> = {
   stopped: 'Stopped',
   disabled: 'Disabled',
   rolled_back: 'Rolled back',
+  not_deployed: 'Not deployed',
 };
 const tones: Record<string, Tone> = {
   succeeded: 'success',

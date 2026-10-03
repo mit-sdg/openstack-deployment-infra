@@ -23,7 +23,7 @@ from openstack_platform.management.broker.database import (
 from openstack_platform.management.broker.staff import ReadLimits
 from openstack_platform.management.broker.staff_policy import public_url
 from openstack_platform.management.common import canonical, digest
-from tests.test_management import ManagementCase
+from tests.test_management import ROOT, ManagementCase
 
 
 class StaffTests(ManagementCase):
@@ -83,6 +83,52 @@ class StaffTests(ManagementCase):
         )
         with self.broker.database.connect() as db:
             self.assertEqual(db.execute("SELECT row_count FROM staff_read_state").fetchone()[0], 3)
+
+    def test_operations_project_every_intent_kind(self) -> None:
+        import re
+        import time
+        import uuid
+
+        from openstack_platform.management.broker.staff import INTENT_KINDS
+
+        app = self.create()
+        self.staff()
+        now = time.time()
+        with self.broker.database.connect(write=True) as db:
+            for kind in sorted(INTENT_KINDS):
+                db.execute(
+                    "INSERT INTO intents(id,user_id,app_id,kind,client_key,controller_key,fingerprint,method,path,body,state,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,'succeeded',?,?)",
+                    (
+                        str(uuid.uuid4()),
+                        self.alice,
+                        app,
+                        kind,
+                        str(uuid.uuid4()),
+                        str(uuid.uuid4()),
+                        "f",
+                        "POST",
+                        "/v1/x",
+                        "{}",
+                        now,
+                        now,
+                    ),
+                )
+        page = self.call("GET", "/v1/staff/operations?limit=50", owner="alice").body["data"]
+        self.assertTrue({item["kind"] for item in page["items"]} >= INTENT_KINDS)
+        self.assertNotIn("unknown", {item["kind"] for item in page["items"]})
+        # Every kind named in the broker's SQL or passed to record() is known.
+        broker = ROOT / "openstack_platform/management/broker"
+        named = set()
+        for source in broker.glob("*.py"):
+            for line in source.read_text().splitlines():
+                if "intents" not in line:
+                    continue
+                for listing in re.findall(r"kind IN \(([^)]*)\)", line):
+                    named |= set(re.findall(r"'([a-z_]+)'", listing))
+                named |= set(re.findall(r"kind='([a-z_]+)'", line))
+        named |= {"create_app", "save_configuration", "deploy", "adopt_app"}
+        named |= {"storage_verify", "storage_rotate", "app_enable", "app_disable"}
+        self.assertLessEqual(named, INTENT_KINDS)
 
     def test_csrf_origin_fetch_metadata_and_closed_queries(self) -> None:
         self.staff()

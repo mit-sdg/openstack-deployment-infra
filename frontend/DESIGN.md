@@ -185,6 +185,11 @@ The portal adds a few shared pieces in `owner-portal/src/components`:
   `Section` `actions` as a small ghost button:
   `<Link className={buttonClass({ variant: "ghost", size: "sm" })}>View all <Icon name="chevron-right" /></Link>`.
   Show it only when there is more; there is no footer variant.
+- **Details:** use `KeyValueList`. On phones each pair is one line, label
+  left and value right, like stacked table cards; text values over 28
+  characters, or items with `stacked`, put the value under the label.
+- **Table rows** are a fixed `--ui-table-row-height` (48px) whether or not
+  they hold a badge.
 - **IDs and times:** show long IDs with `CopyId` (8 characters; commits 9)
   and times with `RelativeTime`, which keeps the exact time in the tooltip
   and a `<time dateTime>`. Use `CopyField` for values people paste whole,
@@ -237,6 +242,26 @@ Badges are for states that need attention. The expected state is quiet.
 - Use the portal `Status` component for every state so labels, tones and this
   rule stay consistent. Add new states to `components/Status.tsx`; don't map
   them in pages.
+
+### Status vocabulary
+
+One word per state, everywhere. Pages pass a state key to the portal
+`Status` component; they never write their own labels.
+
+| Thing            | States (label)                                                                                                                                                                   |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| App              | creating (Creating), rejected (Not created), not_deployed (Not deployed), stopped (Stopped), healthy (Healthy), unhealthy (Unhealthy), unknown (Unknown)                         |
+| Deployment       | queued (Queued), building (Building), deploying (Deploying), live (Live), succeeded (Succeeded), failed (Failed), recovery_required (Needs attention), rolled_back (Rolled back) |
+| Activity         | prepared (Queued), accepted (In progress), succeeded (Succeeded), failed (Failed), blocked (Needs attention), unknown (Unknown)                                                  |
+| Account          | active (Active), disabled (Disabled)                                                                                                                                             |
+| Storage resource | ready (Ready), creating (Creating), failed (Failed)                                                                                                                              |
+
+- **An app shows one state**, from `appState` (staff/admin records) or
+  `ownerAppState` (owner records) in `utils/presentation.ts`, in this order:
+  lifecycle (Creating, Not created), then first deploy (Not deployed), then
+  runtime (Stopped, Healthy, Unhealthy, Unknown when stale). App lists,
+  app headers and details all use it. "Ready" is a lifecycle detail and is
+  never shown for an app.
 
 ## Copy rules
 

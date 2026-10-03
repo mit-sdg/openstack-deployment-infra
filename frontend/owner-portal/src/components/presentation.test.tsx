@@ -5,7 +5,15 @@ import { BoundaryText } from './BoundaryText';
 import { Operation } from './Operation';
 import { ThemeButton } from './ThemeButton';
 import { Status } from './Status';
-import { activityTitle, humanPhase, relativeTime } from '../utils/presentation';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import {
+  activityTitle,
+  activityTitles,
+  appState,
+  humanPhase,
+  relativeTime,
+} from '../utils/presentation';
 
 describe('reviewed owner presentation', () => {
   it('renders activity with app, commit, relative time and humanized progress', () => {
@@ -79,6 +87,36 @@ describe('reviewed owner presentation', () => {
     expect(activityTitle('deploy', 'failed')).toBe('Deployment');
     expect(activityTitle('create_app', 'succeeded')).toBe('App created');
     expect(activityTitle('env_set', 'succeeded')).toBe('Variable set');
-    expect(activityTitle('something_new', 'succeeded')).toBe('Settings saved');
+    expect(activityTitle('something_new', 'succeeded')).toBe('Change made');
+  });
+  it('titles every intent kind the broker records', () => {
+    // INTENT_KINDS in the broker is the source of truth for activity kinds.
+    // Tests run from the owner-portal workspace directory.
+    const source = readFileSync(
+      resolve(process.cwd(), '../../openstack_platform/management/broker/staff.py'),
+      'utf8',
+    );
+    const block = source.slice(source.indexOf('INTENT_KINDS = frozenset('));
+    const kinds = [...block.slice(0, block.indexOf(')')).matchAll(/"([a-z_]+)"/g)].map(
+      (match) => match[1],
+    );
+    expect(kinds.length).toBeGreaterThanOrEqual(12);
+    expect(Object.keys(activityTitles).sort()).toEqual([...kinds].sort());
+  });
+  it('gives every app one state word, in lifecycle, deploy, runtime order', () => {
+    const app = {
+      lifecycle: 'ready',
+      deployed: true,
+      running: true,
+      stale: false,
+      health: 'healthy' as const,
+    };
+    expect(appState({ ...app, lifecycle: 'creating' })).toBe('creating');
+    expect(appState({ ...app, lifecycle: 'rejected' })).toBe('rejected');
+    expect(appState({ ...app, deployed: false })).toBe('not_deployed');
+    expect(appState({ ...app, running: false })).toBe('stopped');
+    expect(appState({ ...app, stale: true })).toBe('unknown');
+    expect(appState({ ...app, health: 'unhealthy' })).toBe('unhealthy');
+    expect(appState(app)).toBe('healthy');
   });
 });
