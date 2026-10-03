@@ -1292,10 +1292,10 @@ change review. No new operator sudo access is introduced.
 The controller update permits the public storage output names `password` and
 `secret_access_key` in validated deployment bindings. It changes controller code
 and requires an administrator-approved admin image replacement; merging or
-building an image does not authorize deploying it. Keep the release-only broker
-mitigation until the updated image is deployed and verified, then install a later
-broker release that re-enables those outputs. This controller change does not
-modify broker defaults or enable bindings in the portal on its own.
+building an image does not authorize deploying it. Deploy the updated image before the broker release that restores every binding
+output. The portal can then bind individual PostgreSQL passwords and S3 secret
+keys; PostgreSQL's DATABASE_URL already includes its password. This controller
+change does not modify broker defaults on its own.
 
 Canonical fingerprint bytes are unchanged. Existing valid accepted or in-flight
 operations can be retried with the identical body and key after the controller

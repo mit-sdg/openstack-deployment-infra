@@ -16,7 +16,6 @@ export type StorageResource = {
   createdAt: string;
   verifiedAt: string | null;
   defaultBindings: Record<string, string>;
-  unavailableBindings?: Record<string, string>;
 };
 export type Environment = {
   revision: number;
