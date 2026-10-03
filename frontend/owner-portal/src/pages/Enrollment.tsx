@@ -19,6 +19,7 @@ import { clearCredentials } from '../api';
 import { authOptionsQuery } from '../authOptions';
 import { Mark } from '../components/Mark';
 import './admin/admin.css';
+import { QrCode } from './admin/QrCode';
 
 async function post(path: string, body: unknown) {
   const response = await fetch(path, {
@@ -191,18 +192,27 @@ export function Enrollment() {
           {stage.totpSecret ? (
             <>
               <Hint>
-                Add this key to an authenticator app, then enter the 6‑digit code it shows. The key
-                is shown only once.
+                {stage.otpauthUri
+                  ? 'Scan this code with an authenticator app, then enter the 6‑digit code it shows. It’s shown only once.'
+                  : 'Add this key to an authenticator app, then enter the 6‑digit code it shows. It’s shown only once.'}
               </Hint>
-              <Secret value={stage.totpSecret} />
-              <div className="ui-cluster ui-gap-2">
-                <CopySecret value={stage.totpSecret} />
-                {stage.otpauthUri && (
-                  <a href={stage.otpauthUri} className={buttonClass({ size: 'sm' })}>
-                    <Icon name="external" />
-                    Open in authenticator
-                  </a>
-                )}
+              {stage.otpauthUri && (
+                <div className="admin-qr-frame">
+                  <QrCode value={stage.otpauthUri} label="QR code for your authenticator app" />
+                </div>
+              )}
+              <div className="ui-stack ui-gap-2">
+                {stage.otpauthUri && <p className="ui-text-sm ui-text-muted">Or enter this key:</p>}
+                <Secret value={stage.totpSecret} />
+                <div className="ui-cluster ui-gap-2">
+                  <CopySecret value={stage.totpSecret} />
+                  {stage.otpauthUri && (
+                    <a href={stage.otpauthUri} className={buttonClass({ size: 'sm' })}>
+                      <Icon name="external" />
+                      Open in authenticator
+                    </a>
+                  )}
+                </div>
               </div>
               <Field label="Authentication code" id="new-code">
                 <Input

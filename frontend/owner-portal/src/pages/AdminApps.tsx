@@ -3,6 +3,7 @@ import {
   BoundaryText,
   Button,
   Checkbox,
+  CopyId,
   DataTable,
   Dialog,
   EmptyState,
@@ -14,8 +15,11 @@ import {
   ListItem,
   Page,
   PageHeader,
+  PageHeaderSkeleton,
   PageSkeleton,
+  RelativeTime,
   Section,
+  SectionSkeleton,
   Select,
   Textarea,
   backLinkClass,
@@ -29,19 +33,12 @@ import { Link, Route, Switch, useLocation } from 'wouter';
 import { ApiError, type StorageResource } from '../api';
 import { adminAppsApi, type CatalogApp, type ManagedApp } from '../adminAppsApi';
 import { ConfigurationForm } from './Configuration';
+import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useIntentPolling } from '../hooks/useIntentPolling';
-import { healthy, relativeTime, short } from '../utils/presentation';
-import {
-  AccountName,
-  CopyId,
-  OwnerPicker,
-  friendly,
-  shown,
-  useAccountNames,
-  useStepUp,
-} from './admin/common';
+import { healthy } from '../utils/presentation';
+import { OwnerPicker, friendly, shown, useStepUp } from './admin/common';
 
 const signInWarning = 'This app provides sign-in for the portal';
 const storageNames: Record<StorageResource['type'], string> = {
@@ -69,7 +66,6 @@ function ManagedCatalog() {
     queryKey: ['admin', 'apps', cursor],
     queryFn: () => adminAppsApi.list(cursor),
   });
-  const names = useAccountNames();
   const stepUp = useStepUp();
   const columns: Column<CatalogApp>[] = [
     {
@@ -77,33 +73,51 @@ function ManagedCatalog() {
       header: 'Name',
       mobile: 'title',
       cell: (app) => (
-        <>
-          <Link href={`/admin/apps/${app.applicationId}`} className="ui-link ui-link--plain">
-            {app.slug}
-          </Link>
-          <span className="admin-phone-only ui-text-muted ui-text-sm">
-            <AccountName id={app.ownerId} names={names} label="owner ID" />
-          </span>
-        </>
+        <Link href={`/admin/apps/${app.applicationId}`} className="ui-link ui-link--plain">
+          {app.slug}
+        </Link>
       ),
     },
     {
       key: 'status',
       header: 'Status',
       mobile: 'trailing',
-      // Ready is the norm: only states that need attention get a badge.
-      cell: (app) =>
-        app.lifecycleState === 'ready' ? (
-          <span className="ui-sr-only">Ready</span>
-        ) : (
-          <Status state={app.lifecycleState} />
-        ),
+      cell: (app) => <Status state={app.lifecycleState} />,
     },
     {
       key: 'owner',
       header: 'Owner',
+      mobile: 'secondary',
+      cell: (app) => <span title={app.ownerUsername}>{app.ownerDisplayName}</span>,
+    },
+    {
+      key: 'url',
+      header: 'URL',
+      // Phones: the whole card opens the app, so the URL stays on its page.
       mobile: 'hidden',
-      cell: (app) => <AccountName id={app.ownerId} names={names} label="owner ID" />,
+      cell: (app) =>
+        app.url ? (
+          <a
+            className="ui-link ui-text-sm"
+            href={app.url}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <BoundaryText text={new URL(app.url).hostname} />
+          </a>
+        ) : (
+          <span className="ui-text-subtle">—</span>
+        ),
+    },
+    {
+      key: 'deployed',
+      header: 'Last deployed',
+      mobile: 'meta',
+      cell: (app) => (
+        <span className="ui-text-muted">
+          <RelativeTime value={app.lastDeployedAt} empty="Not deployed" />
+        </span>
+      ),
     },
     {
       key: 'id',
@@ -112,21 +126,30 @@ function ManagedCatalog() {
       cell: (app) => <CopyId value={app.applicationId} label="app ID" />,
     },
   ];
-  if (catalog.isPending) return <PageSkeleton />;
+  const header = (
+    <PageHeader
+      title="All apps"
+      actions={
+        <>
+          <Button onClick={() => setDialog('adopt')}>Adopt app</Button>
+          <Button variant="primary" icon="plus" onClick={() => setDialog('create')}>
+            Create app
+          </Button>
+        </>
+      }
+    />
+  );
+  if (catalog.isPending)
+    return (
+      <PageSkeleton label="Loading apps…">
+        <PageHeaderSkeleton actions={2} />
+        <SectionSkeleton variant="table" columns={6} rows={3} />
+      </PageSkeleton>
+    );
   return (
     <Page>
-      <PageHeader
-        title="All apps"
-        actions={
-          <>
-            <Button onClick={() => setDialog('adopt')}>Adopt app</Button>
-            <Button variant="primary" icon="plus" onClick={() => setDialog('create')}>
-              Create app
-            </Button>
-          </>
-        }
-      />
-      <ErrorAlert error={friendly(catalog.error)} focus={false} />
+      {header}
+      {catalog.error && <QueryError query={catalog} what="apps" />}
       {catalog.data &&
         (catalog.data.items.length || cursor ? (
           <Section
@@ -151,12 +174,7 @@ function ManagedCatalog() {
           >
             <DataTable
               label="All apps"
-              columns={columns.filter(
-                // Ready is the norm: show the column only when a row needs attention.
-                (column) =>
-                  column.key !== 'status' ||
-                  catalog.data!.items.some((app) => app.lifecycleState !== 'ready'),
-              )}
+              columns={columns}
               rows={catalog.data.items}
               rowKey={(app) => app.applicationId}
               onRowClick={(app) => navigate(`/admin/apps/${app.applicationId}`)}
@@ -367,7 +385,6 @@ function ManagedApplication({ id }: { id: string }) {
     queryKey: ['admin', 'storage', id],
     queryFn: () => service.storage(id),
   });
-  const names = useAccountNames();
   const stepUp = useStepUp();
   const [action, setAction] = useState<Action>(null);
   const [intentId, setIntentId] = useState<string | null>(null);
@@ -382,13 +399,20 @@ function ManagedApplication({ id }: { id: string }) {
     setAction(null);
     refresh();
   };
-  if (app.isPending || settings.isPending) return <PageSkeleton />;
   const back = (
     <Link href="/admin/apps" className={backLinkClass}>
       <Icon name="arrow-left" />
       All apps
     </Link>
   );
+  if (app.isPending || settings.isPending)
+    return (
+      <PageSkeleton label="Loading app…">
+        <PageHeaderSkeleton meta actions={2} />
+        <SectionSkeleton title rows={3} />
+        <SectionSkeleton title rows={4} />
+      </PageSkeleton>
+    );
   if (app.error || settings.error) {
     const missing = app.error instanceof ApiError && app.error.status === 404;
     return (
@@ -401,7 +425,7 @@ function ManagedApplication({ id }: { id: string }) {
             </EmptyState>
           </div>
         ) : (
-          <ErrorAlert error={friendly(app.error ?? settings.error)} focus={false} />
+          <QueryError query={app.error ? app : settings} what="this app" />
         )}
       </Page>
     );
@@ -414,7 +438,7 @@ function ManagedApplication({ id }: { id: string }) {
       <PageHeader
         title={data.slug}
         back={back}
-        meta={state !== 'healthy' && <Status state={state} />}
+        meta={<Status state={state} />}
         actions={
           <>
             <Button onClick={() => setAction('state')}>
@@ -437,7 +461,7 @@ function ManagedApplication({ id }: { id: string }) {
           items={[
             {
               label: 'Owner',
-              value: <AccountName id={data.ownerId} names={names} label="owner ID" />,
+              value: <span title={data.ownerUsername}>{data.ownerDisplayName}</span>,
             },
             {
               label: 'URL',
@@ -452,16 +476,11 @@ function ManagedApplication({ id }: { id: string }) {
             {
               label: 'Last deployed',
               value: data.acceptedDeployment ? (
-                <span>
-                  <code className="ui-mono">{short(data.acceptedDeployment.sourceCommit)}</code>
-                  {' · '}
-                  <time
-                    className="ui-text-muted"
-                    dateTime={data.acceptedDeployment.acceptedAt}
-                    title={new Date(data.acceptedDeployment.acceptedAt).toLocaleString()}
-                  >
-                    {relativeTime(data.acceptedDeployment.acceptedAt)}
-                  </time>
+                <span className="ui-cluster ui-gap-2">
+                  <CopyId value={data.acceptedDeployment.sourceCommit} label="commit" length={9} />
+                  <span className="ui-text-muted">
+                    <RelativeTime value={data.acceptedDeployment.acceptedAt} />
+                  </span>
                 </span>
               ) : (
                 <span className="ui-text-subtle">Not deployed</span>
@@ -472,7 +491,7 @@ function ManagedApplication({ id }: { id: string }) {
           ]}
         />
       </Section>
-      <ErrorAlert error={operation.error} focus={false} />
+      {operation.error && <QueryError query={operation} what="the latest change" />}
       {operation.data && (
         <Section title="Latest change" flush>
           <OperationList label="Latest change">

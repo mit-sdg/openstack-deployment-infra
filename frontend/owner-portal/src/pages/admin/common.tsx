@@ -4,7 +4,6 @@ import {
   Field,
   Fieldset,
   Hint,
-  Icon,
   Input,
   PasswordInput,
   Radio,
@@ -12,7 +11,7 @@ import {
   LoadingRows,
 } from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useState, type FormEvent } from 'react';
 import { ApiError, type Session } from '../../api';
 import { adminApi, type Account } from '../../adminApi';
 import { authOptionsQuery } from '../../authOptions';
@@ -183,38 +182,6 @@ function StepUpDialog({
   );
 }
 
-/** First 8 characters of an ID with a button that copies the whole ID. */
-export function CopyId({ value, label }: { value: string; label: string }) {
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<number>(undefined);
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-  return (
-    <span className="admin-id">
-      <code className="ui-mono" title={value}>
-        {value.slice(0, 8)}
-      </code>
-      <button
-        type="button"
-        className="admin-id__copy"
-        aria-label={copied ? 'Copied' : `Copy ${label}`}
-        title={`Copy ${label}`}
-        onClick={async () => {
-          try {
-            await navigator.clipboard.writeText(value);
-            setCopied(true);
-            window.clearTimeout(timer.current);
-            timer.current = window.setTimeout(() => setCopied(false), 2000);
-          } catch {
-            // Clipboard blocked: the full ID stays available in the title.
-          }
-        }}
-      >
-        <Icon name={copied ? 'check' : 'copy'} />
-      </button>
-    </span>
-  );
-}
-
 /** Value that settles after the person stops typing. */
 export function useDebounced<T>(value: T, delay = 300) {
   const [settled, setSettled] = useState(value);
@@ -223,37 +190,6 @@ export function useDebounced<T>(value: T, delay = 300) {
     return () => window.clearTimeout(timer);
   }, [value, delay]);
   return settled;
-}
-
-/** Names for the most recent accounts, to show people instead of IDs. */
-export function useAccountNames() {
-  const accounts = useQuery({
-    queryKey: ['accounts', 'names'],
-    queryFn: () => adminApi.accounts('', undefined, 50),
-    retry: false,
-  });
-  const names = new Map<string, Account>();
-  for (const account of accounts.data?.items ?? []) names.set(account.userId, account);
-  return names;
-}
-
-/** An account's name, or its short ID when it isn't among the loaded accounts. */
-export function AccountName({
-  id,
-  names,
-  label = 'account ID',
-}: {
-  id: string | null;
-  names: Map<string, Account>;
-  label?: string;
-}) {
-  if (!id) return <span className="ui-text-subtle">—</span>;
-  const account = names.get(id);
-  return account ? (
-    <span title={account.username}>{account.displayName}</span>
-  ) : (
-    <CopyId value={id} label={label} />
-  );
 }
 
 /** Display name for the class sign-in method, as sentence case. */

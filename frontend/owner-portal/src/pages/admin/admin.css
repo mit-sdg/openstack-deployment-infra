@@ -1,44 +1,5 @@
 /* Admin and account pages. Tokens only; see frontend/DESIGN.md. */
 
-/* Short ID with a small copy button, for tables and detail lists. */
-.admin-id {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--ui-space-1);
-  min-width: 0;
-  color: var(--ui-text-muted);
-  font-size: var(--ui-text-sm);
-}
-.admin-id__copy {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--ui-space-6);
-  height: var(--ui-space-6);
-  padding: 0;
-  border: 0;
-  border-radius: var(--ui-radius-sm);
-  background: transparent;
-  color: var(--ui-text-subtle);
-  transition:
-    background-color var(--ui-duration-fast) var(--ui-ease),
-    color var(--ui-duration-fast) var(--ui-ease);
-}
-.admin-id__copy:hover {
-  background: var(--ui-surface-hover);
-  color: var(--ui-text);
-}
-.admin-id__copy:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 1px;
-}
-@media (pointer: coarse) {
-  .admin-id__copy {
-    width: var(--ui-control-height);
-    height: var(--ui-control-height);
-  }
-}
-
 /* A heading for a group of controls inside a dialog. */
 .admin-group-title {
   font-size: var(--ui-text-md);
@@ -63,25 +24,6 @@
   align-items: flex-end;
 }
 
-/*
- * Phone rows: a table's primary line plus muted secondary text, instead of a
- * labeled line per column. Pair with mobile: 'hidden' on those columns.
- */
-.admin-phone-only,
-.admin-phone-only-inline {
-  display: none;
-}
-@media (max-width: 640px) {
-  .admin-phone-only {
-    display: block;
-    margin-top: var(--ui-space-1);
-    font-weight: var(--ui-weight-regular);
-  }
-  .admin-phone-only-inline {
-    display: inline;
-  }
-}
-
 /* A row title that opens a dialog: looks like the row's link. */
 .admin-row-button {
   padding: 0;
@@ -99,4 +41,28 @@
   outline: 2px solid var(--ui-focus);
   outline-offset: 2px;
   border-radius: var(--ui-radius-sm);
+}
+
+/*
+ * QR code for authenticator setup. Scanners need dark modules on a light
+ * plate in every theme, so these two colors are fixed on purpose: the plate
+ * uses the white on-accent token and the modules are black.
+ */
+.admin-qr {
+  display: block;
+  width: 100%;
+  max-width: calc(var(--ui-space-16) * 3);
+  height: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+}
+.admin-qr__plate {
+  fill: var(--ui-on-accent);
+}
+.admin-qr__modules {
+  fill: #000;
+}
+.admin-qr-frame {
+  display: flex;
+  justify-content: center;
 }

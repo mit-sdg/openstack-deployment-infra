@@ -1,8 +1,8 @@
 import {
   Alert,
-  Badge,
   Button,
   CopyField,
+  CopyId,
   DataTable,
   Dialog,
   EmptyState,
@@ -13,55 +13,38 @@ import {
   KeyValueList,
   Page,
   PageHeader,
+  PageHeaderSkeleton,
   PageSkeleton,
+  RelativeTime,
   Section,
+  SectionSkeleton,
   Select,
   Stack,
   useToast,
   type Column,
-  type Tone,
 } from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { adminApi, type Account, type AdminAudit } from '../adminApi';
-import { relativeTime } from '../utils/presentation';
-import {
-  AccountName,
-  CopyId,
-  friendly,
-  roleNames,
-  useAccountNames,
-  useDebounced,
-  useProviderLabel,
-  useStepUp,
-} from './admin/common';
+import { QueryError } from '../components/Feedback';
+import { Status } from '../components/Status';
+import { friendly, roleNames, useDebounced, useProviderLabel, useStepUp } from './admin/common';
 
 const linkHint = 'Send it privately. It works once and expires in 72 hours.';
 
 function When({ value }: { value: string | null }) {
-  return value ? (
-    <time className="ui-text-muted" dateTime={value} title={new Date(value).toLocaleString()}>
-      {relativeTime(value)}
-    </time>
-  ) : (
-    <span className="ui-text-subtle">Never</span>
+  return (
+    <span className="ui-text-muted">
+      <RelativeTime value={value} empty="Never" />
+    </span>
   );
 }
 
-function accountState(account: Account): { label: string; tone: Tone } {
-  if (!account.enabled) return { label: 'Disabled', tone: 'neutral' };
-  if (account.status === 'pending') return { label: 'Setup pending', tone: 'warning' };
-  return { label: 'Active', tone: 'success' };
-}
-
-/** Active is the norm: only states that need attention get a badge. */
+/** Active is the expected state; the portal Status keeps it quiet. */
 function AccountState({ account }: { account: Account }) {
-  const state = accountState(account);
-  return account.enabled && account.status === 'active' ? (
-    <span className="ui-sr-only">{state.label}</span>
-  ) : (
-    <Badge tone={state.tone}>{state.label}</Badge>
-  );
+  if (!account.enabled) return <Status state="disabled" />;
+  if (account.status === 'pending') return <Status state="pending" label="Setup pending" />;
+  return <Status state="active" />;
 }
 
 export function AccountsPage() {
@@ -84,19 +67,9 @@ export function AccountsPage() {
       header: 'Name',
       mobile: 'title',
       cell: (account) => (
-        <span className="ui-stack ui-gap-1">
-          <button type="button" className="admin-row-button" onClick={() => setManaging(account)}>
-            {account.displayName}
-          </button>
-          <span className="ui-text-muted ui-text-sm">
-            {account.username}
-            <span className="admin-phone-only-inline">
-              {' · '}
-              {roleNames[account.role]} ·{' '}
-              {account.lastSignIn ? <When value={account.lastSignIn} /> : 'never signed in'}
-            </span>
-          </span>
-        </span>
+        <button type="button" className="admin-row-button" onClick={() => setManaging(account)}>
+          {account.displayName}
+        </button>
       ),
     },
     {
@@ -106,9 +79,15 @@ export function AccountsPage() {
       cell: (account) => <AccountState account={account} />,
     },
     {
+      key: 'username',
+      header: 'Username',
+      mobile: 'secondary',
+      cell: (account) => <span className="ui-text-muted">{account.username}</span>,
+    },
+    {
       key: 'role',
       header: 'Role',
-      mobile: 'hidden',
+      mobile: 'meta',
       cell: (account) => roleNames[account.role],
     },
     {
@@ -136,7 +115,13 @@ export function AccountsPage() {
       cell: (account) => <When value={account.lastSignIn} />,
     },
   ];
-  if (accounts.isPending && !accounts.data) return <PageSkeleton />;
+  if (accounts.isPending && !accounts.data)
+    return (
+      <PageSkeleton label="Loading accounts…">
+        <PageHeaderSkeleton actions={1} />
+        <SectionSkeleton variant="table" columns={7} rows={5} />
+      </PageSkeleton>
+    );
   const items = accounts.data?.items ?? [];
   // Keep the dialog on fresh data after a change.
   const current = managing && (items.find((a) => a.userId === managing.userId) ?? managing);
@@ -164,7 +149,7 @@ export function AccountsPage() {
           }}
         />
       </Grid>
-      <ErrorAlert error={friendly(accounts.error)} focus={false} />
+      {accounts.error && <QueryError query={accounts} what="accounts" />}
       {accounts.data &&
         (items.length ? (
           <Section
@@ -190,12 +175,7 @@ export function AccountsPage() {
           >
             <DataTable
               label="Accounts"
-              columns={columns.filter(
-                // Active is the norm: show the column only when a row needs attention.
-                (column) =>
-                  column.key !== 'status' ||
-                  items.some((account) => !account.enabled || account.status !== 'active'),
-              )}
+              columns={columns}
               rows={items}
               rowKey={(account) => account.userId}
               onRowClick={setManaging}
@@ -401,7 +381,6 @@ function ManageDialog({
       void client.invalidateQueries({ queryKey: ['accounts'] });
     },
   });
-  const state = accountState(account);
   const busy = change.isPending ? change.variables?.action : null;
   function action(name: string, value?: unknown) {
     change.mutate({ action: name, value });
@@ -418,15 +397,7 @@ function ManageDialog({
         columns={2}
         items={[
           { label: 'Username', value: account.username },
-          {
-            label: 'Status',
-            value:
-              state.tone === 'success' ? (
-                state.label
-              ) : (
-                <Badge tone={state.tone}>{state.label}</Badge>
-              ),
-          },
+          { label: 'Status', value: <AccountState account={account} /> },
           {
             label: 'Sign-in',
             value: local
@@ -603,44 +574,52 @@ function auditDetails(row: AdminAudit) {
   return parts.join(' · ');
 }
 
+/** A person in the log: their name, with the username as the tooltip. */
+function Person({
+  id,
+  username,
+  displayName,
+}: {
+  id: string | null;
+  username: string | null;
+  displayName: string | null;
+}) {
+  if (!id) return <span className="ui-text-subtle">—</span>;
+  if (!displayName) return <CopyId value={id} label="account ID" />;
+  return <span title={username ?? undefined}>{displayName}</span>;
+}
+
 export function AdminAuditPage() {
   const [cursor, setCursor] = useState<string>();
-  const names = useAccountNames();
   const audit = useQuery({
     queryKey: ['admin-audit', cursor],
     queryFn: () => adminApi.audit(cursor),
     retry: false,
   });
-  const by = (row: AdminAudit) => <AccountName id={row.actorId} names={names} />;
+  const target = (row: AdminAudit) => (
+    <Person id={row.targetId} username={row.targetUsername} displayName={row.targetDisplayName} />
+  );
   const columns: Column<AdminAudit>[] = [
+    { key: 'action', header: 'Action', mobile: 'title', cell: (row) => auditLabel(row) },
     {
-      key: 'action',
-      header: 'Action',
-      mobile: 'title',
-      cell: (row) => {
-        const details = auditDetails(row);
-        return (
-          <>
-            <span>{auditLabel(row)}</span>
-            <span className="admin-phone-only ui-text-muted ui-text-sm">
-              <AccountName id={row.targetId} names={names} />
-              {details && ` · ${details}`}
-            </span>
-          </>
-        );
-      },
+      key: 'when',
+      header: 'When',
+      mobile: 'trailing',
+      cell: (row) => <When value={row.createdAt} />,
     },
+    { key: 'target', header: 'Account', mobile: 'secondary', cell: target },
     {
-      key: 'target',
-      header: 'Account',
+      key: 'actor',
+      header: 'By',
       mobile: 'hidden',
-      cell: (row) => <AccountName id={row.targetId} names={names} />,
+      cell: (row) => (
+        <Person id={row.actorId} username={row.actorUsername} displayName={row.actorDisplayName} />
+      ),
     },
-    { key: 'actor', header: 'By', mobile: 'hidden', cell: by },
     {
       key: 'details',
       header: 'Details',
-      mobile: 'hidden',
+      mobile: 'meta',
       cell: (row) => {
         const text = auditDetails(row);
         const app = row.details.applicationId;
@@ -656,19 +635,18 @@ export function AdminAuditPage() {
         );
       },
     },
-    {
-      key: 'when',
-      header: 'When',
-      mobile: 'trailing',
-      align: 'end',
-      cell: (row) => <When value={row.createdAt} />,
-    },
   ];
-  if (audit.isPending) return <PageSkeleton />;
+  if (audit.isPending)
+    return (
+      <PageSkeleton label="Loading the audit log…">
+        <PageHeaderSkeleton />
+        <SectionSkeleton variant="table" columns={5} rows={8} />
+      </PageSkeleton>
+    );
   return (
     <Page>
       <PageHeader title="Audit log" />
-      <ErrorAlert error={friendly(audit.error)} focus={false} />
+      {audit.error && <QueryError query={audit} what="the audit log" />}
       {audit.data &&
         (audit.data.items.length ? (
           <Section

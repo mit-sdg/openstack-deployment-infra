@@ -35,6 +35,8 @@ const detail: ManagedApp = {
   applicationId: id,
   slug: 'class-fixture',
   ownerId: id,
+  ownerUsername: 'admin',
+  ownerDisplayName: 'Admin',
   identityProvider: true,
   requiresMaintenance: true,
   savedRevision: 7,
