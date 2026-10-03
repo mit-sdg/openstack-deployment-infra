@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import sqlite3
 import time
 import uuid
@@ -93,9 +95,28 @@ def mutate_environment(self: Broker, request: Request) -> Response:
             raise HttpError(400, "INVALID_REQUEST", "Environment deletion takes no fields.")
         body, kind = {}, "env_delete"
     key = request.idempotency_key()
-    fingerprint = digest(canonical({"method": request.method, "path": request.path, "body": body}))
+    material = canonical({"method": request.method, "path": request.path, "body": body})
+    if kind == "env_set":
+        # A DB copy must not provide an offline oracle for low-entropy values.
+        # Separate this MAC from the anonymous challenge/CSRF purposes while
+        # retaining the existing private key's crash-durable lifecycle.
+        subkey = hmac.digest(
+            self.auth.anonymous.key, b"owner-portal/env-fingerprint/v1", hashlib.sha256
+        )
+        fingerprint = hmac.new(subkey, material.encode(), hashlib.sha256).hexdigest()
+    else:
+        fingerprint = digest(material)
     with self.database.connect(write=True) as db:
-        existing = self.existing(db, user["id"], key, fingerprint)
+        try:
+            existing = self.existing(db, user["id"], key, fingerprint)
+        except HttpError as error:
+            if kind != "env_set" or error.code != "IDEMPOTENCY_CONFLICT":
+                raise
+            raise HttpError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "This environment request key belongs to a different request, or its fingerprint key changed after restore. Use a new request key after any in-flight operation has finished or been reconciled.",
+            ) from None
         if existing is None:
             cfg = db.execute(
                 "SELECT configuration FROM configurations WHERE app_id=? AND revision=(SELECT revision FROM apps WHERE id=?)",

@@ -1384,8 +1384,17 @@ stop identity/broker/web, their activation/path units and broker backup timer/
 service. Decrypt to broker-owned mode-0600 `management-broker/restore-input.sqlite3`
 and use `openstack-platform-management-broker-restore --yes` from the recovery
 console. It checks the mounted state volume and stopped units and invalidates
-authentication. Take a new backup after verification; do not manually publish
-staging ciphertext. Portal availability is independent of the backup mount.
+authentication. The next broker startup generates a new private anonymous key,
+which also changes the domain-separated environment fingerprint subkey. An
+identical environment edit retried with its pre-restore request key returns
+`IDEMPOTENCY_CONFLICT` and asks for a new request key. Accepted operations still
+poll to completion without their values; unknown or recovery-required
+environment intents keep their application scope held and require administrator
+reconciliation before a new edit can proceed. Do not force those intents to
+success or discard an uncertain controller operation merely to release quota.
+Non-secret storage/configuration fingerprints are unaffected by the key change.
+Take a new backup after verification; do not manually publish staging ciphertext.
+Portal availability is independent of the backup mount.
 
 Install reviewed broker then web archives using the explicit modes described in
 maintenance. Each candidate smokes before its staged `current` selection changes;

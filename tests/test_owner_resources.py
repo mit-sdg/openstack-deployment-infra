@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
+import hmac
 import http.client
 import io
+import sqlite3
 import threading
 import uuid
 from unittest import mock
@@ -14,6 +17,7 @@ from openstack_platform import management_release
 from openstack_platform.controller import database as controller_db
 from openstack_platform.controller.http import HttpError
 from openstack_platform.management import activation
+from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker.api import DEFAULT_CONFIGURATION, Broker
 from openstack_platform.management.broker.client import ControllerUnavailable
 from openstack_platform.management.common import canonical
@@ -290,9 +294,51 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
                 ],
                 [],
             )
+        material = canonical(
+            {
+                "method": "PUT",
+                "path": f"/v1/apps/{self.app_id}/environment/API_TOKEN",
+                "body": {"value": sentinel},
+            }
+        )
+        subkey = hmac.digest(
+            self.broker.auth.anonymous.key, b"owner-portal/env-fingerprint/v1", hashlib.sha256
+        )
+        expected = hmac.new(subkey, material.encode(), hashlib.sha256).hexdigest()
         with self.broker.database.connect() as db:
             dump = "\n".join(db.iterdump())
-        self.assertNotIn(sentinel, canonical(responses) + dump + logs.getvalue())
+            intents = [dict(row) for row in db.execute("SELECT * FROM intents")]
+            audit = [dict(row) for row in db.execute("SELECT * FROM audit")]
+        stored = next(row for row in intents if row["id"] == intent["intentId"])
+        self.assertEqual(stored["fingerprint"], expected)
+        deleted_row = next(row for row in intents if row["id"] == deleted["intentId"])
+        # Deletion carries no value and keeps its existing unkeyed fingerprint.
+        self.assertEqual(
+            deleted_row["fingerprint"],
+            hashlib.sha256(
+                canonical(
+                    {
+                        "method": "DELETE",
+                        "path": f"/v1/apps/{self.app_id}/environment/API_TOKEN",
+                        "body": {},
+                    }
+                ).encode()
+            ).hexdigest(),
+        )
+        stored_text = (
+            canonical(responses) + dump + canonical(intents) + canonical(audit) + logs.getvalue()
+        )
+        self.assertNotIn(sentinel, stored_text)
+        database_bytes = b"".join(
+            path.read_bytes()
+            for path in self.broker.database.path.parent.glob("management.sqlite3*")
+        )
+        self.assertNotIn(sentinel.encode(), database_bytes)
+        for raw in (sentinel, canonical({"value": sentinel}), material):
+            plain = hashlib.sha256(raw.encode())
+            self.assertNotIn(plain.hexdigest(), stored_text)
+            self.assertNotIn(plain.hexdigest().encode(), database_bytes)
+            self.assertNotIn(plain.digest(), database_bytes)
         self.assertIn("env_set:API_TOKEN", dump)
         for name in ("PORT", "STORAGE__TOKEN", "lowercase", "A" * 129):
             self.assert_error(
@@ -396,6 +442,66 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
         ).body["data"]
         self.assertEqual(retry["intentId"], intent["intentId"])
         self.assertEqual(self.finish(retry)["state"], "succeeded")
+
+    def restart_broker(self):
+        self.broker.journal.close()
+        self.broker = Broker(self.config)
+        self.broker.client.path = self.real_socket
+        self.broker.client.timeout = 5
+        self.router = self.broker.router()
+
+    def test_environment_mac_replays_after_restart_and_conflicts_on_changed_value(self):
+        key = str(uuid.uuid4())
+        path = f"/v1/apps/{self.app_id}/environment/TOKEN"
+        intent = self.call("PUT", path, {"value": "low-entropy"}, "alice", key).body["data"]
+        self.assertEqual(self.finish(intent)["state"], "succeeded")
+        self.restart_broker()
+        with mock.patch.object(
+            self.broker.client, "request", wraps=self.broker.client.request
+        ) as request:
+            replay = self.call("PUT", path, {"value": "low-entropy"}, "alice", key).body["data"]
+            self.assertEqual(replay["intentId"], intent["intentId"])
+            self.assertEqual(replay["state"], "succeeded")
+            request.assert_not_called()
+        self.assert_error(
+            "IDEMPOTENCY_CONFLICT",
+            lambda: self.call("PUT", path, {"value": "changed"}, "alice", key),
+        )
+
+    def test_restore_key_change_conflicts_with_inflight_environment_retry(self):
+        key = str(uuid.uuid4())
+        path = f"/v1/apps/{self.app_id}/environment/TOKEN"
+        with mock.patch.object(
+            self.broker.client, "request", side_effect=ControllerUnavailable("lost admission")
+        ):
+            intent = self.call("PUT", path, {"value": "low-entropy"}, "alice", key).body["data"]
+        self.assertEqual(intent["state"], "unknown")
+        with self.broker.database.connect() as db:
+            fingerprint = db.execute(
+                "SELECT fingerprint FROM intents WHERE id=?", (intent["intentId"],)
+            ).fetchone()[0]
+            with sqlite3.connect(self.root / "restore.sqlite3") as backup:
+                db.backup(backup)
+        source = self.root / "restore.sqlite3"
+        source.chmod(0o600)
+        self.broker.journal.close()
+        restore_database(source, self.broker.database.path)
+        self.assertFalse((self.config.state_directory / "anonymous.key").exists())
+        self.restart_broker()
+        self.login()
+        with self.assertRaises(HttpError) as caught:
+            self.call("PUT", path, {"value": "low-entropy"}, "alice", key)
+        self.assertEqual(caught.exception.code, "IDEMPOTENCY_CONFLICT")
+        self.assertIn("after restore", caught.exception.summary)
+        self.assertIn("new request key", caught.exception.summary)
+        with self.broker.database.connect() as db:
+            row = db.execute("SELECT * FROM intents WHERE id=?", (intent["intentId"],)).fetchone()
+            self.assertEqual(row["fingerprint"], fingerprint)
+            self.assertEqual(row["state"], "unknown")
+        # Restore does not silently release an unresolved application scope.
+        self.assert_error(
+            "APP_BUSY", lambda: self.call("PUT", path, {"value": "low-entropy"}, "alice")
+        )
 
     def test_storage_failed_provisioning_reports_progress_and_same_key_recovery(self):
         self.real.reject = True

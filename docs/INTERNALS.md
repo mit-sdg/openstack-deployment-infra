@@ -601,7 +601,14 @@ type, label, status, created/verified times and output-to-environment defaults.
 Provider IDs, connection strings and credential values are excluded. Environment
 values pass directly to project.sock; only names, actions and request fingerprints
 are persisted in broker intents/audit. They are never included in portal errors or
-logs. Accepted edits are polled without values. A lost environment admission or
+logs. Value-bearing environment request fingerprints use HMAC-SHA256 with a
+subkey derived from the private, crash-durable `anonymous.key` using
+`owner-portal/env-fingerprint/v1` as the domain separator. A broker DB copy or
+backup does not contain the key or a plain value/request digest for offline
+value guessing. Non-secret fingerprints, including environment deletion,
+storage and configuration, retain their existing SHA-256 format.
+
+Accepted edits are polled without values. A lost environment admission or
 controller recovery requires resubmitting the original key and value because
 neither journal stores the body. Such intents are excluded from automatic replay;
 they cannot starve background recovery of other operations. Environment writes
@@ -628,6 +635,13 @@ session key IDs, invalidates authentication and preserves users/apps/quota/inten
 audit. Unknown schemas/checksums/realms fail closed. Online SQLite snapshots are
 age-encrypted as the fourth backup class. Four-class off-site bundles coexist with
 legacy three-class evidence, and restore invalidates sessions/anonymous challenges.
+Restore removes `anonymous.key`; broker startup generates a new key. Existing
+environment-write fingerprints are not rewritten. Repeating an identical edit
+with its old request key then returns `IDEMPOTENCY_CONFLICT`, explaining the
+possible key change and asking for a new request key. Accepted operations can
+still be polled without a value. Unknown or recovery-required intents retain
+their held application scope and need administrator reconciliation before a new
+request can proceed; a key change does not bypass that guard.
 
 Broker and web archives bind exact source commit, source tar, runtime files,
 built web asset hashes/manifest, npm/Python locks, Node build version, SBOM,
