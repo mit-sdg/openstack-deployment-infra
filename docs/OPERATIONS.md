@@ -1287,6 +1287,24 @@ replacement until every expected/observed metadata refusal is resolved and the
 candidate reports `root-path-preflight=ok refusals=0`. Keep the report with the
 change review. No new operator sudo access is introduced.
 
+## Storage binding fingerprint controller update
+
+The controller update permits the public storage output names `password` and
+`secret_access_key` in validated deployment bindings. It changes controller code
+and requires an administrator-approved admin image replacement; merging or
+building an image does not authorize deploying it. Keep the release-only broker
+mitigation until the updated image is deployed and verified, then install a later
+broker release that re-enables those outputs. This controller change does not
+modify broker defaults or enable bindings in the portal on its own.
+
+Canonical fingerprint bytes are unchanged. Existing valid accepted or in-flight
+operations can be retried with the identical body and key after the controller
+restart/recovery procedure. Do not retry with a changed configuration under the
+old key. A request rejected before admission has no controller operation to resume;
+submit it again after the controller update. In the portal, start a new deployment
+request because the broker's earlier rejected intent is terminal. Operation-ref secret filtering remains
+strict outside the validated public bindings.
+
 ## Owner portal operations
 
 The portal is not deployed yet. These are the supported repository procedures

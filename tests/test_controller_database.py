@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -650,6 +653,93 @@ class ControllerDatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "secret material"):
             db.request_fingerprint({"api_token": "must-not-be-persisted"})
         self.assertNotIn(b"must-not-be-persisted", self.path.read_bytes())
+
+    def test_binding_metadata_keeps_original_fingerprint_bytes_and_ref_filter_strict(self) -> None:
+        from openstack_platform.controller.storage_contract import OUTPUT_ENVIRONMENT_KEYS
+
+        self.migrate()
+        configuration = {
+            "schemaVersion": 1,
+            "build": {
+                "runtime": "node",
+                "packages": ["."],
+                "buildScript": None,
+                "startScript": "start",
+            },
+            "runtime": {"port": 3000, "healthPath": "/health"},
+            "storageBindings": [{"resourceId": APP_ID, "outputs": {"url": "DATABASE_URL"}}],
+        }
+        request = {"method": "POST", "body": {"configuration": configuration}}
+        original = copy.deepcopy(request)
+        expected = hashlib.sha256(
+            json.dumps(
+                request, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(db.request_fingerprint(request), expected)
+        db.claim_idempotency_request(
+            self.connection, request_id=REQUEST_ID, request_fingerprint=expected
+        )
+        db.complete_idempotency_request(
+            self.connection,
+            request_id=REQUEST_ID,
+            result_kind="deployment",
+            result_id=DEPLOYMENT_ID,
+        )
+        replay = db.claim_idempotency_request(
+            self.connection,
+            request_id=REQUEST_ID,
+            request_fingerprint=db.request_fingerprint(request),
+        )
+        self.assertEqual(replay.result_id, DEPLOYMENT_ID)
+        self.assertEqual(request, original)
+        for resource_type, outputs in OUTPUT_ENVIRONMENT_KEYS.items():
+            with self.subTest(resource_type=resource_type):
+                current = copy.deepcopy(request)
+                current["body"]["configuration"]["storageBindings"][0]["outputs"] = dict(outputs)
+                expected = hashlib.sha256(
+                    json.dumps(
+                        current,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                        allow_nan=False,
+                    ).encode()
+                ).hexdigest()
+                self.assertEqual(db.request_fingerprint(current), expected)
+                self.assertEqual(
+                    db.request_fingerprint(current["body"]),
+                    hashlib.sha256(
+                        json.dumps(
+                            current["body"],
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                            allow_nan=False,
+                        ).encode()
+                    ).hexdigest(),
+                )
+                # Public output identifiers do not become acceptable operation refs.
+                if resource_type in {"postgres", "s3"}:
+                    with self.assertRaisesRegex(ValidationError, "secret material"):
+                        db._refs_json(current["body"])
+        for field in ("password", "database_password", "secret_access_key", "api_token"):
+            current = copy.deepcopy(request)
+            current["body"][field] = "genuine-secret-value"
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ValidationError, "secret material"),
+            ):
+                db.request_fingerprint(current)
+        for output, target in (
+            ("database_password", "PGPASSWORD"),
+            ("password", "genuine-secret-value"),
+            ("password", "PORT"),
+        ):
+            current = copy.deepcopy(request)
+            current["body"]["configuration"]["storageBindings"][0]["outputs"] = {output: target}
+            with self.subTest(output=output, target=target), self.assertRaises(ValidationError):
+                db.request_fingerprint(current)
 
     def test_environment_revision_storage_identity_and_slug_tombstone(self) -> None:
         self.migrate()

@@ -325,6 +325,17 @@ Every mutation requires a canonical lowercase UUID `Idempotency-Key`. Repeating
 an identical request replays the recorded result. Reusing the key with changed
 method, path, or body returns `409 IDEMPOTENCY_CONFLICT`.
 
+Request fingerprint validation treats strictly parsed deployment configurations as
+public metadata. Supported storage output names and validated environment targets
+are represented as sorted `[output, target]` pairs in a validation copy, so
+PostgreSQL `password` and S3 `secret_access_key` identifiers are accepted without
+relaxing secret-key filtering elsewhere. Operation-ref filtering is unchanged.
+The fingerprint still hashes the original canonical JSON bytes, preserving
+identical-request replay and existing idempotency records; normalization does not
+change hashes for requests admitted by an older controller. Requests previously
+rejected before claiming a key have no prior operation to replay. The shared
+validator covers both API admission and DeploymentService's repeated fingerprint.
+
 Database-only application creation returns `201`. External mutations durably
 reserve application scope and return `202` with an operation resource before
 external work. Four workers execute at most 32 admitted running/queued
