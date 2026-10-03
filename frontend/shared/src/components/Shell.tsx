@@ -58,7 +58,7 @@ export function AppShell({
         Skip to content
       </a>
       <header className="ui-header" ref={header}>
-        <div className="ui-header__inner">
+        <div className="ui-container ui-header__inner">
           <div className="ui-header__brand">{brand}</div>
           {nav && (
             <nav className="ui-nav ui-header__nav" aria-label="Main">
@@ -84,7 +84,7 @@ export function AppShell({
         {phoneNav && (
           <nav
             id={panelId}
-            className="ui-header__panel"
+            className="ui-container ui-header__panel"
             aria-label="Main"
             hidden={!open}
             onClick={(event) => {
@@ -96,11 +96,15 @@ export function AppShell({
           </nav>
         )}
       </header>
-      {subnav && <div className="ui-subnav">{subnav}</div>}
+      {subnav && (
+        <div className="ui-subnav">
+          <div className="ui-container">{subnav}</div>
+        </div>
+      )}
       <main
         id="main"
         tabIndex={-1}
-        className={`ui-main ${mainClassName}`.trim()}
+        className={`ui-main ui-container ${mainClassName}`.trim()}
       >
         {children}
       </main>

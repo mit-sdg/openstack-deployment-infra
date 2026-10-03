@@ -13,27 +13,117 @@ their patterns.
 ## Foundations
 
 All values come from `shared/src/tokens.css`. Never hardcode a color, size or
-duration in a page.
+duration in a page; if a value you need is missing, ask for a token.
 
-| Group    | Tokens                                                                                                             |
-| -------- | ------------------------------------------------------------------------------------------------------------------ |
-| Surfaces | `--ui-bg` (page), `--ui-surface` (cards), `--ui-surface-subtle`, `--ui-surface-hover`, `--ui-surface-active`       |
-| Text     | `--ui-text`, `--ui-text-muted` (secondary), `--ui-text-subtle` (labels, hints). All pass WCAG AA on every surface. |
-| Lines    | `--ui-border`, `--ui-border-strong` (inputs, secondary buttons)                                                    |
-| Accent   | `--ui-accent-solid` (primary buttons), `--ui-accent-text` (links), `--ui-accent-subtle`, `--ui-focus`              |
-| Status   | `--ui-{success,warning,danger,info}-text`, `-subtle` and the base color for dots and icons                         |
-| Type     | System font stack (nothing is downloaded). Sizes `--ui-text-xs` 12 to `--ui-text-2xl` 24. Weights 400, 500, 600.   |
-| Spacing  | 4px grid: `--ui-space-1` (4px) to `--ui-space-16` (64px)                                                           |
-| Shape    | `--ui-radius-sm` 6, `-md` 8 (controls), `-lg` 12 (cards, dialogs); `--ui-shadow-xs` to `-lg`                       |
-| Motion   | `--ui-duration-fast` 120ms, `--ui-duration` 200ms, `--ui-ease`. Reduced motion turns animation off.                |
-| Layout   | `--ui-control-height` 36px (44px on phones and touch screens), `--ui-page-width` 1200px, `--ui-narrow-width` 680px |
+### Color
+
+| Group    | Tokens                                                                                                       |
+| -------- | ------------------------------------------------------------------------------------------------------------ |
+| Surfaces | `--ui-bg` (page), `--ui-surface` (cards), `--ui-surface-subtle`, `--ui-surface-hover`, `--ui-surface-active` |
+| Text     | `--ui-text`, `--ui-text-muted` (secondary), `--ui-text-subtle` (labels, hints). All pass WCAG AA.            |
+| Lines    | `--ui-border`, `--ui-border-strong` (inputs, secondary buttons), `--ui-border-hover`                         |
+| Accent   | `--ui-accent-solid` (primary buttons), `--ui-accent-text` (links), `--ui-accent-subtle`, `--ui-focus`        |
+| Status   | `--ui-{success,warning,danger,info}-text`, `-subtle` and the base color for dots and icons                   |
 
 Colors use `light-dark()`. The theme follows the OS unless the theme toggle has
-set `data-theme` on `<html>`; `theme.js` restores that choice before first paint.
+set `data-theme` on `<html>`; `theme.js` restores that choice before first
+paint.
+
+### Type
+
+Inter (UI) and JetBrains Mono (code) are self-hosted from
+`@fontsource-variable/inter` and `@fontsource-variable/jetbrains-mono` (SIL Open
+Font License 1.1, pinned in `frontend/package-lock.json`). `shared/src/fonts.css`
+loads only the Latin variable-weight files with `font-display: swap`, plus a
+metric-matched local fallback so text doesn't shift when the font arrives.
+
+| Step  | Size / line height | Tracking | Use                                           |
+| ----- | ------------------ | -------- | --------------------------------------------- |
+| `2xl` | 24 / 32            | -0.019em | Page title (20 / 28 on phones)                |
+| `xl`  | 20 / 28            | -0.017em | Sign-in title                                 |
+| `lg`  | 16 / 24            | -0.011em | Section, dialog and empty-state titles; brand |
+| `md`  | 14 / 20            | -0.006em | Body, buttons, inputs, table cells (base)     |
+| `sm`  | 13 / 20            | -0.003em | Labels, hints, meta lines, small buttons      |
+| `xs`  | 12 / 16            | 0        | Table headers, badges, "Optional"             |
+
+Weights: 400 for text, 500 for labels, buttons, links and row titles, 600 for
+headings. Code is JetBrains Mono at 0.93em. Use `ui-tabular` only on
+cells that hold just numbers: tabular figures also widen Inter's hyphens.
+
+### Spacing and layout
+
+Everything sits on a 4px grid (`--ui-space-1` 4px … `--ui-space-16` 64px).
+These are the only layout values pages should use:
+
+| Token                        | Desktop                   | Phone (≤640px) | Where                                                  |
+| ---------------------------- | ------------------------- | -------------- | ------------------------------------------------------ |
+| `--ui-gutter`                | 32px (24px at 641–1023px) | 16px           | Left/right page edge for header, tabs, content         |
+| `--ui-content-width`         | 1120px                    | —              | Max content width                                      |
+| `--ui-narrow-width`          | 640px                     | —              | `Page width="narrow"` (single forms)                   |
+| `--ui-header-height`         | 56px                      | 56px           | Top bar                                                |
+| `--ui-tabbar-height`         | 44px                      | 44px           | Section tabs and `TabNav`                              |
+| `--ui-page-padding-top`      | 32px                      | 24px           | Header/tabs to page header                             |
+| `--ui-page-padding-bottom`   | 64px                      | 48px           | Below the last section                                 |
+| `--ui-page-gap`              | 24px                      | 20px           | Page header to content; section to section             |
+| `--ui-card-padding`          | 20px                      | 16px           | Card/section padding; first/last table cell; list rows |
+| `--ui-card-gap`              | 16px                      | 16px           | Between blocks inside a section body                   |
+| `--ui-section-header-height` | 56px                      | 56px           | Section header (title + actions)                       |
+| `--ui-cell-padding-y` / `-x` | 12px / 16px               | stacked rows   | Table cells                                            |
+| `--ui-row-padding-y`         | 12px (compact: 10px)      | same           | List rows                                              |
+| `--ui-field-label-gap`       | 6px                       | 6px            | Label to control, control to hint/error                |
+| `--ui-field-gap`             | 16px                      | 16px           | Field to field (`Stack gap={4}`, `Grid`)               |
+| `--ui-group-gap`             | 24px                      | 24px           | Group to group in a form (`Stack gap={6}`)             |
+| `--ui-control-height`        | 36px                      | 44px           | Buttons, inputs, selects, segmented control            |
+| `--ui-control-height-sm`     | 32px                      | 44px           | Small buttons, header nav links                        |
+| `--ui-control-padding-x`     | 14px (small: 10px)        | same           | Button sides                                           |
+| `--ui-input-padding-x`       | 12px                      | 12px           | Input sides                                            |
+| `--ui-badge-height`          | 22px                      | 22px           | Badges                                                 |
+
+Touch screens of any width also get 44px controls.
+
+Alignment rules:
+
+- Header brand, section tabs and page content share one container: the left
+  edge is always `--ui-gutter`. Don't add horizontal margins to pages.
+- Inside a card, text starts at `--ui-card-padding`: section titles, table
+  first-column text, list rows and form fields all line up.
+- Vertical rhythm is fixed: page header, `--ui-page-gap`, section,
+  `--ui-page-gap`, section. Don't add margins between sections; put them in
+  a `Page`.
+- Same size, same height: a medium button, input, select and segmented control
+  are all `--ui-control-height` tall and line up in a row.
+
+### Shape, focus and states
+
+- Radii: `--ui-radius-sm` 6px (segments, menu items), `--ui-radius-md` 8px
+  (controls, alerts, code), `--ui-radius-lg` 12px (cards, dialogs, menus),
+  `--ui-radius-full` (badges, avatars).
+- Borders are 1px `--ui-border` on surfaces and `--ui-border-strong` on
+  controls.
+- Focus: one 2px `--ui-focus` outline, 2px offset, on every control (inset
+  inside menus, tabs and segmented controls).
+- States: hover uses `--ui-surface-hover` (or the `-hover` solid), pressed uses
+  `--ui-surface-active` (or the `-active` solid), disabled is 50% opacity with
+  a not-allowed cursor and no hover change.
+- Motion: `--ui-duration-fast` 120ms for hovers, `--ui-duration` 200ms for
+  overlays. Reduced motion turns animation off.
 
 Styles live in cascade layers: `ui-base` (resets), `legacy` (pre-redesign page
 CSS, see [Migration](#migration)) and `ui` (components). Components always win
 over legacy rules.
+
+### Gallery
+
+`owner-portal/gallery.html` shows every component in its variants and states.
+Only the Vite dev server serves it; the production build has one entry
+(`index.html`), so it never ships. Run:
+
+```sh
+npm --prefix frontend/owner-portal run dev -- --port 9605 --strictPort
+```
+
+Open `http://127.0.0.1:9605/gallery.html` (it needs no backend). Use the theme
+toggle in its header, or screenshot it with `colorScheme` light and dark.
 
 ## Components
 
@@ -69,6 +159,9 @@ The portal adds a few shared pieces in `owner-portal/src/components`:
 - **One page, one `PageHeader`.** Title and actions only. Put status next to the
   title with `meta`. A back link goes in `back` as
   `<Link className={backLinkClass}>`. No eyebrow labels and no subtitle.
+- **Counts and limits** ("1 of 2") go in `PageHeader` `meta` as a neutral
+  `Badge` without a dot, never as a caption under the title. Keep header
+  actions to one or two buttons so the row fits at 390px.
 - **One primary button per view.** Other actions are `secondary` or `ghost`.
   Destructive actions use `danger` and a confirming `Dialog` that names the
   thing being removed.
@@ -76,11 +169,15 @@ The portal adds a few shared pieces in `owner-portal/src/components`:
   control. Put form actions in the `Section` `footer`, primary last. Use
   `loading` on the submit button while the request runs. Show field problems
   with `error`, and request failures with `ErrorAlert` above the actions.
-- **Tables:** use `DataTable` for records people compare across rows. Give each
+- **Tables:** use `DataTable` for records people compare across rows. When a
+  row opens a detail page, pass `onRowClick` and keep a link in the first
+  column. Give each
   column a plain `header` and choose its phone layout (`title`, `trailing`,
   `field`, `hidden`). Put tables in `<Section flush>`.
-- **Lists:** use `List` for feeds. `meta` holds facts (`app · commit · time`),
-  not sentences. Separators are added automatically.
+- **Lists:** use `List` for collections and `density="compact"` for feeds.
+  `meta` holds facts (`app · commit · time`), not sentences. Separators are
+  added automatically and dropped on phones. In feeds, badge only states that
+  need attention (in progress, failed, needs attention), never success.
 - **Empty states** say what will appear and offer the next action. Show only one
   create action on a page.
 - **Loading:** skeletons, not "Loading…" text. Keep layout stable while

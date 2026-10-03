@@ -114,8 +114,44 @@ describe('app list', () => {
       'rel',
       'noopener noreferrer',
     );
-    expect(screen.getByText('1 of 2 apps')).toBeVisible();
+    expect(screen.getByText('1 of 2')).toHaveTextContent('1 of 2 apps used');
     expect(screen.getByRole('link', { name: 'Create app' })).toHaveAttribute('href', '/apps/new');
+  });
+  it('opens an app from anywhere on its row', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
+    mockApps([app]);
+    vi.spyOn(api, 'app').mockReturnValue(new Promise(() => {}));
+    show('/apps');
+    fireEvent.click(await screen.findByText('abcdef012'));
+    await waitFor(() => expect(window.location.pathname).toBe('/apps/app-1'));
+  });
+  it('badges only activity that is not a success', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
+    mockApps([app]);
+    const base = {
+      appId: 'app-1',
+      appSlug: 'student-project',
+      commit: null,
+      createdAt: new Date().toISOString(),
+      kind: 'deploy',
+      operationId: null,
+      operation: null,
+      safeError: null,
+    };
+    vi.mocked(api.intents).mockResolvedValue({
+      items: [
+        { ...base, intentId: 'ok', state: 'succeeded' },
+        { ...base, intentId: 'bad', state: 'failed', safeError: 'The build failed.' },
+      ],
+      nextCursor: null,
+      truncated: false,
+    });
+    show('/apps');
+    const feed = await screen.findByRole('list', { name: 'Recent activity' });
+    await within(feed).findByText('Failed');
+    expect(within(feed).getByText('Succeeded')).toHaveClass('ui-sr-only');
+    expect(within(feed).getAllByText(/Succeeded|Failed/)).toHaveLength(2);
+    expect(within(feed).getByText('The build failed.')).toBeVisible();
   });
   it('offers one create action when there are no apps', async () => {
     vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
