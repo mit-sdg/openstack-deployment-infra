@@ -9,10 +9,10 @@ import {
   ActivityItem,
   AppLink,
   FilterChip,
+  LIST,
   Loaded,
   OwnerLink,
   pager,
-  Refresh,
   useRead,
 } from './common';
 
@@ -30,14 +30,14 @@ function ActivityPage({ search }: { search: string }) {
   const activity = useRead(
     ['operations', ownerId, applicationId, cursor],
     (signal) => staffApi.operations(ownerId, applicationId, cursor, signal),
-    { poll: true },
+    { poll: LIST },
   );
   const rows = activity.data?.items;
   const ownerName = useOwnerName(ownerId, rows);
   const appName = rows?.[0]?.applicationSlug;
   return (
     <Page>
-      <PageHeader title="Activity" actions={<Refresh queries={[activity]} />} />
+      <PageHeader title="Activity" />
       {ownerId && (
         <FilterChip
           label="Owner"
@@ -55,7 +55,7 @@ function ActivityPage({ search }: { search: string }) {
         />
       )}
       <Section flush aria-label="Activity" footer={pager(activity.data, cursor, setCursor)}>
-        <Loaded query={activity}>
+        <Loaded query={activity} what="activity" rows={5}>
           {(page) =>
             page.items.length ? (
               <OperationList label="Activity">

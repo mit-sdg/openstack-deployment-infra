@@ -1,50 +1,56 @@
 import {
-  ErrorAlert,
+  CopyId,
   KeyValueList,
   Page,
   PageHeader,
   PageSkeleton,
+  RelativeTime,
   Section,
+  SectionSkeleton,
 } from '@openstack-platform/ui';
 import { useState } from 'react';
+import { QueryError } from '../../components/Feedback';
+import { Status } from '../../components/Status';
 import { staffApi } from '../../staffApi';
 import {
   AppLink,
   Back,
-  CopyId,
-  DeploymentStatus,
+  DETAIL,
   DeploymentTable,
+  DetailHeaderSkeleton,
+  duration,
+  isMissing,
+  LIST,
   Loaded,
+  Missing,
   pager,
-  Refresh,
-  When,
   useCachedApp,
   useRead,
 } from './common';
 
-const cleanup: Record<string, string> = {
-  confirmed: 'Done',
-  not_required: 'Not needed',
-  pending: 'Pending',
-  unknown: 'Unknown',
-};
-
 export function StaffHistory({ id }: { id: string }) {
   const [cursor, setCursor] = useState<string>();
-  const history = useRead(['history', id, cursor], (signal) =>
-    staffApi.deployments(id, cursor, signal),
+  const history = useRead(
+    ['history', id, cursor],
+    (signal) => staffApi.deployments(id, cursor, signal),
+    { poll: LIST },
   );
   // Name and live deployment come from the app page's cache when possible.
   const app = useCachedApp(id, !history.isPending);
+  if (isMissing(history.error))
+    return (
+      <Missing title="App not found" href="/staff/apps" action="Go to all apps">
+        It may have been deleted. Check the address, or go back to the app list.
+      </Missing>
+    );
   return (
     <Page>
       <PageHeader
         title="Deployments"
         back={<Back href={`/staff/apps/${id}`}>{app.data?.slug ?? 'App'}</Back>}
-        actions={<Refresh queries={[history]} />}
       />
       <Section flush aria-label="Deployments" footer={pager(history.data, cursor, setCursor)}>
-        <Loaded query={history}>
+        <Loaded query={history} what="deployments">
           {(page) => (
             <DeploymentTable app={id} live={app.data?.activeDeploymentId} rows={page.items} />
           )}
@@ -58,27 +64,39 @@ export function StaffDeploymentPage({ id, deployment }: { id: string; deployment
   const result = useRead(
     ['deployment', id, deployment],
     (signal) => staffApi.deployment(id, deployment, signal),
-    { poll: true },
+    { poll: DETAIL },
   );
   const app = useCachedApp(id, !result.isPending);
   const back = <Back href={`/staff/apps/${id}/deployments`}>Deployments</Back>;
-  if (result.isPending) return <PageSkeleton />;
+  if (result.isPending)
+    return (
+      <PageSkeleton label="Loading deployment…">
+        <DetailHeaderSkeleton back={back} meta />
+        <SectionSkeleton title rows={3} />
+      </PageSkeleton>
+    );
+  if (isMissing(result.error))
+    return (
+      <Missing
+        title="Deployment not found"
+        href={`/staff/apps/${id}/deployments`}
+        action="Go to deployments"
+      >
+        Check the address, or go back to this app's deployments.
+      </Missing>
+    );
   if (result.error)
     return (
       <Page>
-        <PageHeader title="Deployment" back={back} actions={<Refresh queries={[result]} />} />
-        <ErrorAlert error={result.error} />
+        <PageHeader title="Deployment" back={back} />
+        <QueryError query={result} what="this deployment" />
       </Page>
     );
   const data = result.data;
+  const took = duration(data);
   return (
     <Page>
-      <PageHeader
-        title="Deployment"
-        back={back}
-        meta={<DeploymentStatus status={data.status} />}
-        actions={<Refresh queries={[result]} />}
-      />
+      <PageHeader title="Deployment" back={back} meta={<Status state={data.status} />} />
       <Section title="Details">
         <KeyValueList
           columns={2}
@@ -95,16 +113,16 @@ export function StaffDeploymentPage({ id, deployment }: { id: string; deployment
                 <span className="ui-text-subtle">Unknown</span>
               ),
             },
+            { label: 'Started', value: <RelativeTime value={data.requestedAt} /> },
             {
-              label: 'Settings version',
-              value: data.configurationRevision ?? <span className="ui-text-subtle">Unknown</span>,
+              label: 'Went live',
+              value: <RelativeTime value={data.acceptedAt} empty="Not live" />,
             },
-            { label: 'Started', value: <When value={data.requestedAt} /> },
-            { label: 'Went live', value: <When value={data.acceptedAt} empty="Not live" /> },
-            { label: 'Last healthy', value: <When value={data.lastHealthyAt} /> },
-            { label: 'Updated', value: <When value={data.updatedAt} /> },
-            { label: 'Cleanup', value: cleanup[data.cleanupState] ?? 'Unknown' },
-            { label: 'Deployment ID', value: <CopyId value={deployment} label="deployment ID" /> },
+            {
+              label: 'Took',
+              value: took ?? <span className="ui-text-subtle">—</span>,
+            },
+            { label: 'ID', value: <CopyId value={deployment} label="deployment ID" /> },
           ]}
         />
       </Section>

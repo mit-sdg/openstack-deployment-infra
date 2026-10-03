@@ -2,34 +2,40 @@ import {
   Alert,
   BoundaryText,
   Cluster,
-  ErrorAlert,
+  CopyId,
   KeyValueList,
   Page,
   PageHeader,
   PageSkeleton,
+  RelativeTime,
   Section,
+  SectionSkeleton,
 } from '@openstack-platform/ui';
 import { Link, useSearch } from 'wouter';
+import { QueryError } from '../../components/Feedback';
 import { OperationList } from '../../components/Operation';
+import { Status } from '../../components/Status';
 import { staffApi } from '../../staffApi';
 import { short } from '../../utils/presentation';
 import {
   ActivityEmpty,
   ActivityItem,
-  AppHealth,
+  appState,
   Back,
-  CopyId,
+  DETAIL,
   DeploymentTable,
-  Loaded,
+  DetailHeaderSkeleton,
   FilterChip,
-  HealthValue,
+  isMissing,
+  LIST,
+  Loaded,
+  Missing,
   OwnerLink,
-  Preview,
-  Refresh,
   Repository,
-  When,
+  useFollow,
   useOwner,
   useRead,
+  viewAll,
 } from './common';
 import { AppsSection, useAppPage } from './Owners';
 
@@ -44,11 +50,11 @@ export function useOwnerName(
 
 export function StaffApps() {
   const ownerId = new URLSearchParams(useSearch()).get('ownerId') ?? undefined;
-  const page = useAppPage(ownerId);
+  const page = useAppPage(ownerId, { poll: LIST });
   const name = useOwnerName(ownerId, page.query.data?.items);
   return (
     <Page>
-      <PageHeader title="All apps" actions={<Refresh queries={[page.query]} />} />
+      <PageHeader title="All apps" />
       {ownerId && (
         <FilterChip
           label="Owner"
@@ -62,7 +68,7 @@ export function StaffApps() {
 }
 
 export function StaffAppPage({ id }: { id: string }) {
-  const app = useRead(['app', id], (signal) => staffApi.app(id, signal), { poll: true });
+  const app = useRead(['app', id], (signal) => staffApi.app(id, signal), { poll: DETAIL });
   const deployments = useRead(
     ['history', id, undefined],
     (signal) => staffApi.deployments(id, undefined, signal),
@@ -71,27 +77,40 @@ export function StaffAppPage({ id }: { id: string }) {
   const activity = useRead(
     ['operations', undefined, id, undefined],
     (signal) => staffApi.operations(undefined, id, undefined, signal),
-    { poll: true, enabled: app.isSuccess && !deployments.isPending },
+    { enabled: app.isSuccess && !deployments.isPending },
   );
+  useFollow(app, [deployments, activity]);
   const ownerName = useOwnerName(app.data?.ownerId, activity.data?.items);
   const back = <Back href="/staff/apps">All apps</Back>;
-  if (app.isPending) return <PageSkeleton />;
+  if (app.isPending)
+    return (
+      <PageSkeleton label="Loading app…">
+        <DetailHeaderSkeleton back={back} meta extra />
+        <SectionSkeleton title rows={3} />
+        <SectionSkeleton title variant="table" columns={4} rows={1} />
+        <SectionSkeleton title variant="list" density="compact" rows={3} />
+      </PageSkeleton>
+    );
+  if (isMissing(app.error))
+    return (
+      <Missing title="App not found" href="/staff/apps" action="Go to all apps">
+        It may have been deleted. Check the address, or go back to the app list.
+      </Missing>
+    );
   if (app.error)
     return (
       <Page>
-        <PageHeader title="App" back={back} actions={<Refresh queries={[app]} />} />
-        <ErrorAlert error={app.error} />
+        <PageHeader title="App" back={back} />
+        <QueryError query={app} what="this app" />
       </Page>
     );
   const data = app.data;
+  const { process, route } = data.health;
+  // The title badge already says how the app is; split it only when the checks disagree.
+  const split = data.lifecycleState === 'ready' && !data.stale && process !== route;
   return (
     <Page>
-      <PageHeader
-        title={data.slug}
-        back={back}
-        meta={<AppHealth app={data} />}
-        actions={<Refresh queries={[app, deployments, activity]} />}
-      >
+      <PageHeader title={data.slug} back={back} meta={<Status state={appState(data)} />}>
         {data.url && (
           <a
             className="ui-link ui-text-sm"
@@ -104,9 +123,7 @@ export function StaffAppPage({ id }: { id: string }) {
         )}
       </PageHeader>
       {data.stale && data.lifecycleState === 'ready' && (
-        <Alert tone="warning">
-          Health information is out of date. It updates every 15 seconds.
-        </Alert>
+        <Alert tone="warning">Health is unknown right now. This page checks again shortly.</Alert>
       )}
       <Section title="Details">
         <KeyValueList
@@ -120,9 +137,9 @@ export function StaffAppPage({ id }: { id: string }) {
                 <CopyId value={data.ownerId} label="owner ID" />
               ),
             },
-            { label: 'Created', value: <When value={data.createdAt} /> },
+            { label: 'Created', value: <RelativeTime value={data.createdAt} /> },
             { label: 'Repository', value: <Repository url={data.repository} /> },
-            { label: 'App ID', value: <CopyId value={id} label="app ID" /> },
+            { label: 'ID', value: <CopyId value={id} label="app ID" /> },
             {
               label: 'Deployed commit',
               value: data.acceptedDeployment ? (
@@ -134,7 +151,7 @@ export function StaffAppPage({ id }: { id: string }) {
                     <code>{short(data.acceptedDeployment.sourceCommit)}</code>
                   </Link>
                   <span className="ui-text-muted">
-                    <When value={data.acceptedDeployment.acceptedAt} />
+                    <RelativeTime value={data.acceptedDeployment.acceptedAt} />
                   </span>
                 </Cluster>
               ) : (
@@ -143,19 +160,26 @@ export function StaffAppPage({ id }: { id: string }) {
             },
             {
               label: 'Health checked',
-              value: <When value={data.observedAt} empty="Not checked yet" />,
+              value: <RelativeTime value={data.observedAt} empty="Not checked yet" />,
             },
-            { label: 'App health', value: <HealthValue state={data.health.process} /> },
-            { label: 'URL health', value: <HealthValue state={data.health.route} /> },
+            ...(split
+              ? [
+                  { label: 'App', value: <Status state={process} /> },
+                  { label: 'Public URL', value: <Status state={route} /> },
+                ]
+              : []),
           ]}
         />
       </Section>
-      <Preview
+      <Section
         title="Deployments"
-        href={`/staff/apps/${id}/deployments`}
-        more={(deployments.data?.items.length ?? 0) > 5}
+        flush
+        actions={viewAll(
+          `/staff/apps/${id}/deployments`,
+          (deployments.data?.items.length ?? 0) > 5,
+        )}
       >
-        <Loaded query={deployments}>
+        <Loaded query={deployments} what="deployments" rows={1}>
           {(page) => (
             <DeploymentTable
               app={id}
@@ -164,13 +188,16 @@ export function StaffAppPage({ id }: { id: string }) {
             />
           )}
         </Loaded>
-      </Preview>
-      <Preview
+      </Section>
+      <Section
         title="Recent activity"
-        href={`/staff/operations?applicationId=${id}`}
-        more={(activity.data?.items.length ?? 0) > 5}
+        flush
+        actions={viewAll(
+          `/staff/operations?applicationId=${id}`,
+          (activity.data?.items.length ?? 0) > 5,
+        )}
       >
-        <Loaded query={activity}>
+        <Loaded query={activity} what="recent activity">
           {(page) =>
             page.items.length ? (
               <OperationList label="Recent activity">
@@ -183,7 +210,7 @@ export function StaffAppPage({ id }: { id: string }) {
             )
           }
         </Loaded>
-      </Preview>
+      </Section>
     </Page>
   );
 }

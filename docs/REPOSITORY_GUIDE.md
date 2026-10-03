@@ -338,12 +338,11 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory TanStack Query setup.
 - `frontend/owner-portal/src/staffApi.ts` — strict staff metadata types/decoders and CSRF-bearing, cancellable GET reads.
 - `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff route table and session-activity provider.
-- `frontend/owner-portal/src/pages/staff/common.tsx` — staff read hook with chained reads, refresh, paging, IDs, statuses, table columns and activity rows.
+- `frontend/owner-portal/src/pages/staff/common.tsx` — staff polling and chained reads, paging, load and not-found states, table columns and activity rows.
 - `frontend/owner-portal/src/pages/staff/Owners.tsx` — staff owner list and owner page with quotas, apps and recent activity.
-- `frontend/owner-portal/src/pages/staff/Apps.tsx` — staff app list with owner filter and app page with health, deployments and activity.
+- `frontend/owner-portal/src/pages/staff/Apps.tsx` — staff app list (owner filter) and app page with health, deployments and activity.
 - `frontend/owner-portal/src/pages/staff/Deployments.tsx` — staff deployment history and deployment pages.
 - `frontend/owner-portal/src/pages/staff/Activity.tsx` — staff activity feed with owner and app filters.
-- `frontend/owner-portal/src/pages/staff/staff.css` — token-only staff page styles for compact IDs and two-line phone rows.
 - `frontend/owner-portal/src/Staff.test.tsx` — mode navigation, credential entry, decoder, CSRF, cache clearing and inactivity tests.
 - `frontend/owner-portal/e2e/staff-flow.spec.ts` — loopback staff/owner coexistence, denied writes, joint revocation, expiry and CSP/browser evidence.
 - `frontend/owner-portal/src/api.ts` — typed API/response validation, same-key CSRF retry, and typed settings validation.

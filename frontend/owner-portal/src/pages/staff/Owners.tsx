@@ -1,32 +1,38 @@
 import {
   Badge,
   Cluster,
+  CopyId,
   DataTable,
   EmptyState,
   KeyValueList,
   Page,
   PageHeader,
   PageSkeleton,
-  ErrorAlert,
   Section,
+  SectionSkeleton,
   type Column,
 } from '@openstack-platform/ui';
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
+import { QueryError } from '../../components/Feedback';
 import { OperationList } from '../../components/Operation';
+import { Status } from '../../components/Status';
 import { staffApi, type StaffOwner } from '../../staffApi';
 import {
   ActivityEmpty,
   ActivityItem,
   appColumns,
   Back,
-  CopyId,
+  DETAIL,
+  DetailHeaderSkeleton,
+  isMissing,
+  LIST,
   Loaded,
-  PhoneDetail,
+  Missing,
   pager,
-  Preview,
-  Refresh,
+  useFollow,
   useRead,
+  viewAll,
 } from './common';
 
 const roles = { staff: 'Staff', admin: 'Admin' } as const;
@@ -41,7 +47,7 @@ function AccountBadges({ owner }: { owner: StaffOwner }) {
           {roles[owner.role]}
         </Badge>
       )}
-      {!owner.portalEnabled && <Badge tone="warning">Disabled</Badge>}
+      {!owner.portalEnabled && <Status state="disabled" />}
     </Cluster>
   );
 }
@@ -52,37 +58,38 @@ const ownerColumns: Column<StaffOwner>[] = [
     header: 'Name',
     mobile: 'title',
     cell: (owner) => (
-      <>
-        <Link href={`/staff/owners/${owner.ownerId}`} className="ui-link ui-link--plain">
-          {owner.displayName}
-        </Link>
-        <PhoneDetail>{owner.username}</PhoneDetail>
-      </>
+      <Link href={`/staff/owners/${owner.ownerId}`} className="ui-link ui-link--plain">
+        {owner.displayName}
+      </Link>
     ),
   },
   {
     key: 'username',
     header: 'Username',
-    mobile: 'hidden',
+    mobile: 'secondary',
     cell: (owner) => <span className="ui-text-muted">{owner.username}</span>,
   },
   {
     key: 'account',
     header: 'Account',
+    hideHeader: true,
     mobile: 'trailing',
     cell: (owner) => <AccountBadges owner={owner} />,
   },
 ];
 
+/** Owner accounts only: the server leaves out staff and admins. */
 export function StaffOwners() {
   const [cursor, setCursor] = useState<string>();
-  const owners = useRead(['owners', cursor], (signal) => staffApi.owners(cursor, signal));
+  const owners = useRead(['owners', cursor], (signal) => staffApi.owners(cursor, signal, 'owner'), {
+    poll: LIST,
+  });
   const [, navigate] = useLocation();
   return (
     <Page>
-      <PageHeader title="Owners" actions={<Refresh queries={[owners]} />} />
+      <PageHeader title="Owners" />
       <Section flush aria-label="Owners" footer={pager(owners.data, cursor, setCursor)}>
-        <Loaded query={owners}>
+        <Loaded query={owners} what="owners" rows={5}>
           {(page) => (
             <DataTable
               label="Owners"
@@ -104,12 +111,12 @@ export function StaffOwners() {
 }
 
 /** One page of apps for an owner, or of every app. */
-export function useAppPage(ownerId?: string, enabled = true) {
+export function useAppPage(ownerId?: string, { enabled = true, poll = 0 } = {}) {
   const [cursor, setCursor] = useState<string>();
   const query = useRead(
     ['apps', ownerId, cursor],
     (signal) => staffApi.apps(ownerId, cursor, signal),
-    { enabled },
+    { enabled, poll },
   );
   return { query, cursor, setCursor };
 }
@@ -133,7 +140,7 @@ export function AppsSection({
       flush
       footer={pager(query.data, cursor, setCursor)}
     >
-      <Loaded query={query}>
+      <Loaded query={query} what="apps" rows={title ? 1 : 5}>
         {(page) => (
           <DataTable
             label="Apps"
@@ -156,51 +163,59 @@ export function AppsSection({
 }
 
 export function StaffOwnerPage({ id }: { id: string }) {
-  const owner = useRead(['owner', id], (signal) => staffApi.owner(id, signal));
-  const catalog = useAppPage(id, !owner.isPending);
+  const owner = useRead(['owner', id], (signal) => staffApi.owner(id, signal), { poll: DETAIL });
+  const catalog = useAppPage(id, { enabled: owner.isSuccess });
   const activity = useRead(
     ['operations', id, undefined, undefined],
     (signal) => staffApi.operations(id, undefined, undefined, signal),
-    { poll: true, enabled: !catalog.query.isPending },
+    { enabled: owner.isSuccess && !catalog.query.isPending },
   );
-  if (owner.isPending) return <PageSkeleton />;
+  useFollow(owner, [catalog.query, activity]);
   const back = <Back href="/staff/owners">Owners</Back>;
+  if (owner.isPending)
+    return (
+      <PageSkeleton label="Loading owner…">
+        <DetailHeaderSkeleton back={back} />
+        <SectionSkeleton title rows={2} />
+        <SectionSkeleton title variant="table" columns={3} rows={1} />
+        <SectionSkeleton title variant="list" density="compact" rows={3} />
+      </PageSkeleton>
+    );
+  if (isMissing(owner.error))
+    return (
+      <Missing title="Owner not found" href="/staff/owners" action="Go to owners">
+        Check the address, or go back to the owner list.
+      </Missing>
+    );
   if (owner.error)
     return (
       <Page>
-        <PageHeader title="Owner" back={back} actions={<Refresh queries={[owner]} />} />
-        <ErrorAlert error={owner.error} />
+        <PageHeader title="Owner" back={back} />
+        <QueryError query={owner} what="this owner" />
       </Page>
     );
   const data = owner.data;
-  const quota = (kind: keyof typeof data.quota) =>
-    `${data.quota[kind].used + data.quota[kind].reserved} of ${data.quota[kind].limit}`;
+  const apps = data.quota.apps;
   return (
     <Page>
-      <PageHeader
-        title={data.displayName}
-        back={back}
-        meta={<AccountBadges owner={data} />}
-        actions={<Refresh queries={[owner, catalog.query, activity]} />}
-      />
+      <PageHeader title={data.displayName} back={back} meta={<AccountBadges owner={data} />} />
       <Section title="Details">
         <KeyValueList
           columns={2}
           items={[
             { label: 'Username', value: data.username },
-            { label: 'Apps', value: quota('apps') },
-            { label: 'Owner ID', value: <CopyId value={id} label="owner ID" /> },
-            { label: 'Changes in progress', value: quota('concurrentOperations') },
+            { label: 'Apps', value: `${apps.used + apps.reserved} of ${apps.limit}` },
+            { label: 'ID', value: <CopyId value={id} label="owner ID" /> },
           ]}
         />
       </Section>
       <AppsSection page={catalog} title="Apps" filtered />
-      <Preview
+      <Section
         title="Recent activity"
-        href={`/staff/operations?ownerId=${id}`}
-        more={(activity.data?.items.length ?? 0) > 5}
+        flush
+        actions={viewAll(`/staff/operations?ownerId=${id}`, (activity.data?.items.length ?? 0) > 5)}
       >
-        <Loaded query={activity}>
+        <Loaded query={activity} what="recent activity">
           {(page) =>
             page.items.length ? (
               <OperationList label="Recent activity">
@@ -213,7 +228,7 @@ export function StaffOwnerPage({ id }: { id: string }) {
             )
           }
         </Loaded>
-      </Preview>
+      </Section>
     </Page>
   );
 }

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { api, clearCredentials, type Session } from './api';
+import { api, ApiError, clearCredentials, type Session } from './api';
 import { StaffPages } from './pages/Staff';
 import { staffApi } from './staffApi';
 
@@ -248,12 +248,12 @@ describe('staff detail pages', () => {
     expect(screen.getByText('Healthy').closest('.ui-badge')).toBeNull();
     expect(screen.queryByText(appId)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy app ID' })).toBeVisible();
-    // Read-only: refresh and copy are the only buttons.
+    // Read-only and polled quietly: copying the ID is the only button.
     expect(
       screen
         .getAllByRole('button')
         .map((button) => button.textContent || button.getAttribute('aria-label')),
-    ).toEqual(['Refresh', 'Copy app ID']);
+    ).toEqual(['Copy app ID']);
   });
   it('shows activity in plain words without resume actions', async () => {
     vi.spyOn(staffApi, 'operations').mockResolvedValue({
@@ -283,7 +283,7 @@ describe('staff detail pages', () => {
     const apps = vi.spyOn(staffApi, 'apps');
     staffPage('/staff/operations');
     expect(await screen.findByRole('heading', { name: 'Activity' })).toBeVisible();
-    expect(await screen.findByText('Save settings')).toBeVisible();
+    expect(await screen.findByText('Settings change')).toBeVisible();
     expect(await screen.findByRole('link', { name: 'weather-dashboard' })).toBeVisible();
     expect(await screen.findByRole('link', { name: 'Alice Student' })).toBeVisible();
     // Names come with the rows: no directory reads.
@@ -295,7 +295,7 @@ describe('staff detail pages', () => {
     expect(screen.queryByText(/controller|intent|operation/i)).not.toBeInTheDocument();
   });
   it('badges only staff roles and disabled accounts in the owner list', async () => {
-    vi.spyOn(staffApi, 'owners').mockResolvedValue({
+    const owners = vi.spyOn(staffApi, 'owners').mockResolvedValue({
       items: [
         owner,
         {
@@ -321,7 +321,8 @@ describe('staff detail pages', () => {
     expect(screen.getByText('Staff')).toBeVisible();
     expect(screen.getByText('Disabled')).toBeVisible();
     expect(screen.queryByText('Active')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Refresh' })).toHaveClass('ui-button--ghost');
+    expect(owners).toHaveBeenCalledWith(undefined, expect.anything(), 'owner');
+    expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
   });
   it('lists every app with its owner name from the row', async () => {
     vi.spyOn(staffApi, 'apps').mockResolvedValue({
@@ -337,6 +338,64 @@ describe('staff detail pages', () => {
     );
     expect(owners).not.toHaveBeenCalled();
   });
+  it('shows an unknown owner like an unknown page, without an alert', async () => {
+    vi.spyOn(staffApi, 'owner').mockRejectedValue(
+      new ApiError(404, 'NOT_FOUND', 'Owner not found.'),
+    );
+    staffPage(`/staff/owners/${ownerId}`);
+    expect(await screen.findByRole('heading', { name: 'Owner not found' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Go to owners' })).toHaveAttribute(
+      'href',
+      '/staff/owners',
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+  it('says what to do when a page fails to load and retries on request', async () => {
+    const apps = vi
+      .spyOn(staffApi, 'apps')
+      .mockRejectedValueOnce(new ApiError(503, 'STATE_UNAVAILABLE', 'Unavailable.', 30))
+      .mockResolvedValueOnce({ items: [appRow], nextCursor: null, truncated: false });
+    staffPage('/staff/apps');
+    expect(await screen.findByRole('heading', { name: 'All apps' })).toBeVisible();
+    expect(await screen.findByText("Couldn't load apps. Try again in a minute.")).toBeVisible();
+    const retry = screen.getByRole('button', { name: 'Retry' });
+    expect(retry).toBeEnabled();
+    expect(document.activeElement).not.toBe(screen.getByRole('alert'));
+    fireEvent.click(retry);
+    expect(await screen.findByRole('link', { name: 'weather-dashboard' })).toBeVisible();
+    expect(apps).toHaveBeenCalledTimes(2);
+  });
+  it('names every activity kind as an event', async () => {
+    const base = {
+      applicationId: appId,
+      applicationSlug: 'weather-dashboard',
+      ownerId,
+      ...ownerName,
+      stage: 'settled',
+      cleanupState: 'confirmed',
+      createdAt: new Date().toISOString(),
+      updatedAt: null,
+      statusObservedAt: null,
+      attention: 'none',
+      controllerErrorCode: null,
+      guidance: null,
+    };
+    vi.spyOn(staffApi, 'operations').mockResolvedValue({
+      items: [
+        { ...base, intentId: userId, kind: 'env_set', state: 'succeeded' },
+        { ...base, intentId: ownerId, kind: 'storage_create', state: 'succeeded' },
+        { ...base, intentId: appId, kind: 'deploy', state: 'failed', attention: 'failed' },
+      ],
+      nextCursor: null,
+      truncated: false,
+    });
+    staffPage('/staff/operations');
+    expect(await screen.findByText('Variable set')).toBeVisible();
+    expect(screen.getByText('Storage added')).toBeVisible();
+    expect(screen.getByText('Deployment')).toBeVisible();
+    expect(screen.getByText('Failed')).toBeVisible();
+    expect(screen.queryByText('Other change')).not.toBeInTheDocument();
+  });
   it('pages through owners with the server cursor', async () => {
     const next = '55555555-5555-4555-8555-555555555555';
     const owners = vi
@@ -346,7 +405,7 @@ describe('staff detail pages', () => {
     staffPage('/staff/owners');
     fireEvent.click(await screen.findByRole('button', { name: 'Next page' }));
     expect(await screen.findByRole('heading', { name: 'No owners yet' })).toBeVisible();
-    expect(owners).toHaveBeenLastCalledWith(next, expect.anything());
+    expect(owners).toHaveBeenLastCalledWith(next, expect.anything(), 'owner');
     expect(screen.getByRole('button', { name: 'First page' })).toBeVisible();
   });
 });

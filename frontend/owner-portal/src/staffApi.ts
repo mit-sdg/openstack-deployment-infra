@@ -168,7 +168,21 @@ const operation = (v: unknown) =>
     applicationSlug: text(40),
     ownerId: id,
     ...ownerName,
-    kind: state('create_app', 'save_configuration', 'deploy', 'unknown'),
+    kind: state(
+      'create_app',
+      'save_configuration',
+      'deploy',
+      'adopt_app',
+      'env_set',
+      'env_delete',
+      'storage_create',
+      'storage_verify',
+      'storage_rotate',
+      'storage_delete',
+      'app_enable',
+      'app_disable',
+      'unknown',
+    ),
     state: state('prepared', 'unknown', 'accepted', 'succeeded', 'failed', 'blocked'),
     stage: state('queued', 'building', 'deploying', 'verifying', 'settled', 'recovery', 'unknown'),
     cleanupState: cleanup,
@@ -206,8 +220,14 @@ function query(values: Record<string, string | undefined>) {
   return params.size ? `?${params}` : '';
 }
 export const staffApi = {
-  owners: (cursor?: string, signal?: AbortSignal) =>
-    request('/staff/owners' + query({ cursor }), (v) => page(v, owner), undefined, false, signal),
+  owners: (cursor?: string, signal?: AbortSignal, role?: StaffOwner['role']) =>
+    request(
+      '/staff/owners' + query({ role, cursor }),
+      (v) => page(v, owner),
+      undefined,
+      false,
+      signal,
+    ),
   owner: (ownerId: string, signal?: AbortSignal) =>
     request(
       `/staff/owners/${ownerId}`,

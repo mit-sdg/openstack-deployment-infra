@@ -3,19 +3,20 @@ import {
   Cluster,
   DataTable,
   EmptyState,
-  ErrorAlert,
   Icon,
   ListItem,
   LoadingRows,
-  Section,
+  RelativeTime,
+  Skeleton,
   backLinkClass,
   buttonClass,
   type Column,
 } from '@openstack-platform/ui';
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'wouter';
 import { ApiError, type Page } from '../../api';
+import { QueryError } from '../../components/Feedback';
 import { Status } from '../../components/Status';
 import {
   staffApi,
@@ -24,8 +25,7 @@ import {
   type StaffDeployment,
   type StaffOperation,
 } from '../../staffApi';
-import { relativeTime, short } from '../../utils/presentation';
-import './staff.css';
+import { activityTitle, short } from '../../utils/presentation';
 
 export const StaffContext = createContext({ userId: '', active: true });
 
@@ -57,10 +57,18 @@ export function useActive() {
   return active;
 }
 
+/** Poll intervals: lists every 30 seconds, detail pages every 15. */
+export const LIST = 30000;
+export const DETAIL = 15000;
+
+// The broker allows two active staff reads per account and one controller
+// observation at a time. So each page has one head query that polls and
+// refetches on focus; related reads start once the one before has settled
+// (`enabled`) and refetch one after another when the head updates (useFollow).
 export function useRead<T>(
   key: (string | undefined)[],
   read: (signal: AbortSignal) => Promise<T>,
-  { poll = false, enabled = true, staleTime = 0 } = {},
+  { poll = 0, enabled = true, staleTime = 0 } = {},
 ) {
   const { userId, active } = useContext(StaffContext);
   return useQuery({
@@ -69,20 +77,37 @@ export function useRead<T>(
     enabled: active && enabled,
     staleTime,
     retry: false,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: poll > 0,
     refetchInterval: (query) =>
       !active || !poll || query.state.errorUpdateCount >= 3
         ? false
         : query.state.error instanceof ApiError
-          ? Math.max(15000, query.state.error.retryAfterSeconds * 1000)
-          : 15000,
+          ? Math.max(poll, query.state.error.retryAfterSeconds * 1000)
+          : poll,
     refetchIntervalInBackground: false,
   });
 }
 
-// The broker allows two active staff reads per account and one controller
-// observation at a time, so pages chain related reads with `enabled`: each
-// starts once the one before it has settled.
+/** Refetches related sections one at a time after the page's head query updates. */
+export function useFollow(head: UseQueryResult<unknown>, followers: UseQueryResult<unknown>[]) {
+  const latest = useRef(followers);
+  latest.current = followers;
+  const seen = useRef(head.dataUpdatedAt);
+  useEffect(() => {
+    if (head.dataUpdatedAt === seen.current) return;
+    seen.current = head.dataUpdatedAt;
+    let cancelled = false;
+    void (async () => {
+      for (const query of latest.current) {
+        if (cancelled) return;
+        if (!query.isPending) await query.refetch();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [head.dataUpdatedAt]);
+}
 
 const lookup = { staleTime: 60000 };
 export function useOwner(id: string | undefined, enabled = true) {
@@ -94,35 +119,6 @@ export function useOwner(id: string | undefined, enabled = true) {
 /** The app record, read from cache when the app page loaded it recently. */
 export function useCachedApp(id: string, enabled = true) {
   return useRead(['app', id], (signal) => staffApi.app(id, signal), { ...lookup, enabled });
-}
-
-/** Refetches one after another to stay inside the broker's read limits. */
-export function Refresh({ queries }: { queries: UseQueryResult<unknown>[] }) {
-  const [now, setNow] = useState(Date.now());
-  const until = Math.max(
-    0,
-    ...queries.map((query) =>
-      query.error instanceof ApiError && [429, 503].includes(query.error.status)
-        ? query.errorUpdatedAt + query.error.retryAfterSeconds * 1000
-        : 0,
-    ),
-  );
-  useEffect(() => {
-    const timer = window.setTimeout(() => setNow(Date.now()), Math.max(0, until - Date.now()));
-    return () => window.clearTimeout(timer);
-  }, [until]);
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      onClick={async () => {
-        for (const query of queries) await query.refetch();
-      }}
-      disabled={queries.some((query) => query.isFetching) || now < until}
-    >
-      Refresh
-    </Button>
-  );
 }
 
 /** Section footer for a paged list, or null when there is one page. */
@@ -149,22 +145,59 @@ export function pager(
   );
 }
 
-/** A section body for a query: rows while loading, an alert on failure. */
+/** A section body for a query: rows while loading, a retryable error on failure. */
 export function Loaded<T>({
   query,
+  what,
+  rows,
   children,
 }: {
   query: UseQueryResult<T>;
+  /** What failed to load, e.g. "recent activity". */
+  what: string;
+  rows?: number;
   children: (data: T) => ReactNode;
 }) {
-  if (query.isPending) return <LoadingRows />;
+  if (query.isPending) return <LoadingRows rows={rows} />;
   if (query.error)
     return (
       <div className="ui-section__body">
-        <ErrorAlert error={query.error} focus={false} />
+        <QueryError query={query} what={what} />
       </div>
     );
   return <>{children(query.data)}</>;
+}
+
+/** True when a detail read failed because the record doesn't exist (any more). */
+export function isMissing(error: unknown) {
+  return error instanceof ApiError && [404, 410].includes(error.status);
+}
+
+/** Unknown or deleted owner, app or deployment: the same shape as an unknown route. */
+export function Missing({
+  title,
+  href,
+  action,
+  children,
+}: {
+  title: string;
+  href: string;
+  action: string;
+  children: ReactNode;
+}) {
+  return (
+    <EmptyState
+      title={title}
+      icon="search"
+      action={
+        <Link href={href} className={buttonClass()}>
+          {action}
+        </Link>
+      }
+    >
+      {children}
+    </EmptyState>
+  );
 }
 
 export function Back({ href, children }: { href: string; children: ReactNode }) {
@@ -176,51 +209,35 @@ export function Back({ href, children }: { href: string; children: ReactNode }) 
   );
 }
 
-export function When({ value, empty = '—' }: { value: string | null | undefined; empty?: string }) {
-  if (!value) return <span className="ui-text-subtle">{empty}</span>;
-  return (
-    <time dateTime={value} title={new Date(value).toLocaleString()}>
-      {relativeTime(value)}
-    </time>
-  );
-}
-
-/** First block of an ID with a button that copies the whole ID. */
-export function CopyId({
-  value,
-  label,
-  length = 8,
+/**
+ * Loading header for a detail page: the real back link, then placeholders
+ * for the title, its badge and an optional line under it (candidate for a
+ * `back` prop on PageHeaderSkeleton).
+ */
+export function DetailHeaderSkeleton({
+  back,
+  meta = false,
+  extra = false,
 }: {
-  value: string;
-  label: string;
-  /** Characters shown; commits use 9 to match the rest of the portal. */
-  length?: number;
+  back: ReactNode;
+  meta?: boolean;
+  extra?: boolean;
 }) {
-  const [copied, setCopied] = useState(false);
   return (
-    <span className="staff-id">
-      <code title={value}>{value.slice(0, length)}</code>
-      <button
-        type="button"
-        className="staff-id__copy"
-        aria-label={`Copy ${label}`}
-        title={`Copy ${label}`}
-        onClick={async () => {
-          try {
-            await navigator.clipboard.writeText(value);
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 2000);
-          } catch {
-            // Clipboard access denied; the full ID stays in the tooltip.
-          }
-        }}
-      >
-        <Icon name={copied ? 'check' : 'copy'} />
-      </button>
-      <span className="ui-sr-only" role="status">
-        {copied ? 'Copied to clipboard' : ''}
-      </span>
-    </span>
+    <div className="ui-page-header">
+      <div className="ui-page-header__back">{back}</div>
+      <div className="ui-page-header__row" aria-hidden="true">
+        <div className="ui-page-header__title">
+          <span className="ui-skeleton ui-skeleton--heading" />
+          {meta && <span className="ui-skeleton ui-skeleton--badge" />}
+        </div>
+      </div>
+      {extra && (
+        <div className="ui-page-header__extra" aria-hidden="true">
+          <Skeleton width="quarter" />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -238,14 +255,6 @@ export function AppLink({ id, name }: { id: string; name: string }) {
       {name}
     </Link>
   );
-}
-
-/**
- * Secondary text under a table row's title, shown only on phones, where the
- * columns it summarises are hidden (candidate for DataTable in shared).
- */
-export function PhoneDetail({ children }: { children: ReactNode }) {
-  return <span className="staff-row-detail">{children}</span>;
 }
 
 /** Shows only a filter that is set, with a way to clear it. */
@@ -270,72 +279,36 @@ export function FilterChip({
   );
 }
 
-export function Lifecycle({ state }: { state: string }) {
-  return state === 'rejected' ? (
-    <Status state="failed" label="Not created" />
-  ) : (
-    <Status state={state} />
-  );
-}
-
-/** One badge for an app: being created, health, or stopped. */
-export function AppHealth({ app }: { app: StaffApp }) {
-  if (app.lifecycleState !== 'ready') return <Lifecycle state={app.lifecycleState} />;
+/**
+ * The app page's one status word: lifecycle first, then health from the
+ * latest check. Lists only know the lifecycle, so they show a status only
+ * while an app is being created or when it wasn't created.
+ */
+export function appState(app: StaffApp) {
+  if (app.lifecycleState !== 'ready') return app.lifecycleState;
   const { process, route } = app.health;
-  if (app.stale) return <Status state="unknown" />;
-  if (!app.desiredRunning || process === 'stopped') return <Status state="stopped" />;
-  if (process === 'healthy' && route === 'healthy') return <Status state="healthy" />;
-  if (process === 'unhealthy' || route === 'unhealthy') return <Status state="unhealthy" />;
-  return <Status state="unknown" />;
+  if (app.stale) return 'unknown';
+  if (!app.desiredRunning || process === 'stopped') return 'stopped';
+  if (process === 'healthy' && route === 'healthy') return 'healthy';
+  if (process === 'unhealthy' || route === 'unhealthy') return 'unhealthy';
+  return 'unknown';
 }
 
-/** One health check as a detail value: plain text, a badge only when it needs a look. */
-export function HealthValue({ state }: { state: string }) {
-  if (state === 'healthy') return <>Healthy</>;
-  if (state === 'stopped') return <>Stopped</>;
-  return <Status state={state} label={state === 'unknown' ? 'Unknown' : undefined} />;
-}
-
-const deploymentStates: Record<string, [string, string]> = {
-  queued: ['prepared', 'Queued'],
-  building: ['accepted', 'Building'],
-  deploying: ['accepted', 'Deploying'],
-  succeeded: ['succeeded', 'Succeeded'],
-  failed: ['failed', 'Failed'],
-  recovery_required: ['blocked', 'Needs attention'],
-};
-export function DeploymentStatus({ status }: { status: string }) {
-  const [state, label] = deploymentStates[status] ?? ['unknown', 'Unknown'];
-  return <Status state={state} label={label} />;
-}
-
-/** App table columns; without the owner column, phones show two-line rows. */
+/** App table columns. Without the owner column, phones show two-line rows. */
 export function appColumns(showOwner: boolean): Column<StaffAppRow>[] {
-  const detail = showOwner ? 'field' : 'hidden';
   return [
     {
       key: 'name',
       header: 'Name',
       mobile: 'title',
       cell: (app) => (
-        <>
+        <Cluster gap={2}>
           <Link href={`/staff/apps/${app.applicationId}`} className="ui-link ui-link--plain">
             {app.slug}
           </Link>
-          {!showOwner && (
-            <PhoneDetail>
-              {repositoryName(app.repository) ?? 'No repository'}
-              {app.createdAt && ` · ${relativeTime(app.createdAt)}`}
-            </PhoneDetail>
-          )}
-        </>
+          {app.lifecycleState !== 'ready' && <Status state={app.lifecycleState} />}
+        </Cluster>
       ),
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      mobile: 'trailing',
-      cell: (app) => <Lifecycle state={app.lifecycleState} />,
     },
     ...(showOwner
       ? [
@@ -349,20 +322,19 @@ export function appColumns(showOwner: boolean): Column<StaffAppRow>[] {
     {
       key: 'repository',
       header: 'Repository',
-      mobile: detail,
+      mobile: showOwner ? 'field' : 'secondary',
       cell: (app) => <Repository url={app.repository} />,
     },
     {
       key: 'created',
       header: 'Created',
-      mobile: detail,
-      cell: (app) => <When value={app.createdAt} />,
+      mobile: showOwner ? 'field' : 'meta',
+      cell: (app) => <RelativeTime value={app.createdAt} />,
     },
   ];
 }
 
-function repositoryName(url: string | null) {
-  if (!url) return null;
+function repositoryName(url: string) {
   const { hostname, pathname } = new URL(url);
   const path = pathname.replace(/^\/|\.git$|\/$/g, '');
   return hostname === 'github.com' && path ? path : hostname + (path ? `/${path}` : '');
@@ -393,10 +365,7 @@ export function deploymentColumns(app: string, live?: string | null): Column<Sta
               {deployment.repositoryCommit ? short(deployment.repositoryCommit) : 'Unknown'}
             </code>
           </Link>
-          {deployment.deploymentId === live && <Status state="running" label="Live" />}
-          {deployment.requestedAt && (
-            <PhoneDetail>Started {relativeTime(deployment.requestedAt)}</PhoneDetail>
-          )}
+          {deployment.deploymentId === live && <Status state="live" />}
         </Cluster>
       ),
     },
@@ -404,19 +373,19 @@ export function deploymentColumns(app: string, live?: string | null): Column<Sta
       key: 'status',
       header: 'Status',
       mobile: 'trailing',
-      cell: (deployment) => <DeploymentStatus status={deployment.status} />,
+      cell: (deployment) => <Status state={deployment.status} />,
     },
     {
       key: 'requested',
       header: 'Started',
-      mobile: 'hidden',
-      cell: (deployment) => <When value={deployment.requestedAt} />,
+      mobile: 'meta',
+      cell: (deployment) => <RelativeTime value={deployment.requestedAt} />,
     },
     {
       key: 'accepted',
       header: 'Went live',
       mobile: 'hidden',
-      cell: (deployment) => <When value={deployment.acceptedAt} />,
+      cell: (deployment) => <RelativeTime value={deployment.acceptedAt} />,
     },
   ];
 }
@@ -447,10 +416,25 @@ export function DeploymentTable({
   );
 }
 
-const kinds: Record<string, string> = {
-  create_app: 'Create app',
-  save_configuration: 'Save settings',
-  deploy: 'Deploy',
+/** How long a deployment took: from start until it went live, or until it stopped. */
+export function duration(deployment: StaffDeployment) {
+  const end =
+    deployment.acceptedAt ??
+    (['failed', 'recovery_required'].includes(deployment.status) ? deployment.updatedAt : null);
+  if (!deployment.requestedAt || !end) return null;
+  const seconds = Math.max(
+    0,
+    Math.round((Date.parse(end) - Date.parse(deployment.requestedAt)) / 1000),
+  );
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? '' : 's'}`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
+// Staff activity kinds that the shared titles name under another key.
+const titleKinds: Record<string, string> = {
+  app_enable: 'lifecycle',
+  app_disable: 'lifecycle',
 };
 const stages: Record<string, string> = {
   queued: 'Waiting to build',
@@ -480,23 +464,16 @@ export function ActivityItem({
   const problem = ['failed', 'blocked'].includes(item.state);
   return (
     <ListItem
-      title={kinds[item.kind] ?? 'Other change'}
+      title={activityTitle(titleKinds[item.kind] ?? item.kind, item.state)}
       meta={
         <>
           {showApp && <AppLink id={item.applicationId} name={item.applicationSlug} />}
           {showOwner && <OwnerLink id={item.ownerId} name={item.ownerDisplayName} />}
           {progress && <span>{progress}</span>}
-          <When value={item.createdAt} />
+          <RelativeTime value={item.createdAt} />
         </>
       }
-      trailing={
-        // Success is the norm in feeds: no badge, but screen readers hear it.
-        item.state === 'succeeded' ? (
-          <span className="ui-sr-only">Succeeded</span>
-        ) : (
-          <Status state={item.state} />
-        )
-      }
+      trailing={<Status state={item.state} quiet="hidden" />}
     >
       {(item.guidance || item.controllerErrorCode) && (
         <p className={`ui-text-sm ${problem ? 'ui-text-danger' : 'ui-text-muted'}`}>
@@ -523,31 +500,12 @@ export function ActivityEmpty({ filtered }: { filtered?: boolean }) {
   );
 }
 
-/** Titled section with a "View all" link to the full list. */
-export function Preview({
-  title,
-  href,
-  more,
-  children,
-}: {
-  title: string;
-  href: string;
-  more: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <Section
-      title={title}
-      flush
-      actions={
-        more && (
-          <Link href={href} className="ui-link ui-text-sm">
-            View all
-          </Link>
-        )
-      }
-    >
-      {children}
-    </Section>
-  );
+/** "View all" for a section that previews a longer list (DESIGN.md). */
+export function viewAll(href: string, more: boolean) {
+  return more ? (
+    <Link href={href} className={buttonClass({ variant: 'ghost', size: 'sm' })}>
+      View all
+      <Icon name="chevron-right" />
+    </Link>
+  ) : undefined;
 }
