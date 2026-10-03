@@ -1,5 +1,6 @@
 import {
   Alert,
+  Badge,
   BoundaryText,
   DataTable,
   EmptyState,
@@ -13,7 +14,7 @@ import {
   type Column,
 } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
-import { Link } from 'wouter';
+import { Link, useLocation } from 'wouter';
 import { api, type AppRecord } from '../api';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
@@ -80,6 +81,7 @@ const columns: Column<AppRecord>[] = [
 export function Dashboard() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 5000 });
   const intents = useOwnerIntents();
+  const [, navigate] = useLocation();
   if (apps.isPending) return <PageSkeleton />;
   if (apps.error) return <ErrorAlert error={apps.error} />;
   const { items, quota } = apps.data;
@@ -95,16 +97,15 @@ export function Dashboard() {
     <Page>
       <PageHeader
         title="Apps"
-        actions={
+        meta={
           items.length > 0 && (
-            <>
-              <span className="ui-text-muted ui-text-sm">
-                {used} of {quota.apps.limit} apps
-              </span>
-              {!full && create}
-            </>
+            <Badge tone="neutral" dot={false}>
+              {used} of {quota.apps.limit}
+              <span className="ui-sr-only"> apps used</span>
+            </Badge>
           )
         }
+        actions={items.length > 0 && !full && create}
       />
       {full && items.length > 0 && (
         <Alert tone="info">
@@ -118,6 +119,7 @@ export function Dashboard() {
             columns={columns}
             rows={items}
             rowKey={(app) => app.applicationId}
+            onRowClick={(app) => navigate(`/apps/${app.applicationId}`)}
           />
         </Section>
       ) : (

@@ -87,7 +87,7 @@ describe('staff navigation and sign-in', () => {
     const client = show('/staff/owners');
     await screen.findByText(owner.displayName);
     act(() => window.dispatchEvent(new Event('portal-session-ended')));
-    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: /^Sign in/ })).toBeVisible();
     expect(screen.queryByText(owner.displayName)).not.toBeInTheDocument();
     expect(client.getQueryCache().findAll({ queryKey: ['staff'] })).toHaveLength(0);
   });
