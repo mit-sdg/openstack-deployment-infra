@@ -731,16 +731,21 @@ a:hover {
   align-items: center;
   gap: 6px;
   margin-top: 5px;
-  overflow: hidden;
   color: var(--ink-3);
   font-size: 12.5px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .stat__sub .sicon {
   width: 13px;
   height: 13px;
+}
+
+/* Ellipsis applies to the text item; the flex row itself cannot show one. */
+.stat__sub > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Issues */
@@ -1955,6 +1960,17 @@ a:hover {
 
   .stat__value {
     font-size: 24px;
+  }
+
+  /* Narrow tiles wrap captions such as "off-site check failed" in full. */
+  .stat__sub {
+    align-items: flex-start;
+    white-space: normal;
+  }
+
+  .stat__sub .sicon {
+    flex: none;
+    margin-top: 2px;
   }
 
   .roles {

@@ -4,6 +4,24 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 const screenshots = path.resolve("../../.tmp/dashboard-screenshots/after");
+async function expectStatCaptionsToFit(page: Page) {
+  const captions = await page
+    .locator(".stat__sub > span:last-child")
+    .evaluateAll((elements) =>
+      elements.map((element) => ({
+        text: element.textContent,
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      })),
+    );
+  expect(captions).toHaveLength(4);
+  for (const caption of captions) {
+    expect(
+      caption.scrollWidth,
+      `Stat caption: ${caption.text}`,
+    ).toBeLessThanOrEqual(caption.clientWidth + 1);
+  }
+}
 async function monitor(page: Page, origin = "http://127.0.0.1:8480") {
   const violations: string[] = [],
     unexpected: string[] = [],
@@ -56,6 +74,10 @@ for (const width of [320, 390, 768, 1440])
         ).toBeVisible();
         await expect(page.locator(".role-card")).toHaveCount(5);
         await expect(page.getByRole("table")).toBeVisible();
+        await expect(
+          page.getByText("off-site copy verified", { exact: true }),
+        ).toBeVisible();
+        await expectStatCaptionsToFit(page);
         for (const title of [
           "Needs attention",
           "Infrastructure roles",
@@ -144,6 +166,7 @@ for (const width of [320, 390, 768, 1440])
           const response = await route.fetch();
           const data = await response.json();
           if (data.state === "ready") {
+            data.summary.counts.backup.offsite = "failed";
             const app = data.applications[0];
             app.slug = "long-fixture-name-".repeat(12);
             app.id = "identifier-".repeat(20);
@@ -158,6 +181,21 @@ for (const width of [320, 390, 768, 1440])
             name: /long-fixture-name-.*Open details/,
           }),
         ).toBeVisible();
+        const backupCaption = page
+          .locator(".stat__sub")
+          .filter({ hasText: "off-site check failed" });
+        await expect(backupCaption).toBeVisible();
+        await expect(
+          backupCaption.locator('.sicon[data-tone="warning"]'),
+        ).toBeVisible();
+        await expectStatCaptionsToFit(page);
+        await page.screenshot({
+          path: path.join(
+            screenshots,
+            `${width}-${colorScheme}-offsite-failed.png`,
+          ),
+          fullPage: true,
+        });
         expect(
           await page.evaluate(
             () => document.documentElement.scrollWidth <= innerWidth,

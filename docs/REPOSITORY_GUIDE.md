@@ -440,5 +440,5 @@ is tracked.
 - `frontend/shared/tsconfig.json` — strict shared component TypeScript checks.
 - `frontend/shared/vite.config.ts` — shared component Vitest browser-like test configuration.
 - `openstack_platform/dashboard/static/assets/index-HVBM2P2O.js` — generated operator React production bundle.
-- `openstack_platform/dashboard/static/assets/style-DVx6-JRR.css` — generated operator shared/operator production stylesheet.
+- `openstack_platform/dashboard/static/assets/style-D_0t2pU2.css` — generated operator shared/operator production stylesheet.
 - `frontend/scripts/theme-plugin.ts` — emits the shared external theme bootstrap and serves it in the portal Vite preview.
