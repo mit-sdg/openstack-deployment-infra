@@ -1,19 +1,37 @@
+import {
+  ErrorAlert,
+  Icon,
+  Page,
+  PageHeader,
+  Skeleton,
+  TabNav,
+  backLinkClass,
+  tabClass,
+} from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { Link } from 'wouter';
 import { api } from '../api';
 import { healthy } from '../utils/presentation';
 import { BoundaryText } from './BoundaryText';
-import { ErrorNotice } from './Feedback';
 import { Status } from './Status';
+import '../pages/app-pages.css';
 
+const tabs = [
+  ['Overview', ''],
+  ['Settings', '/configuration'],
+  ['Deploy', '/deploy'],
+  ['Deployments', '/deployments'],
+] as const;
+
+/** App header (name, status, URL) and the app's tabs. */
 export function AppFrame({
   id,
   active,
   children,
 }: {
   id: string;
-  active: string;
+  active: (typeof tabs)[number][0] | 'Configuration';
   children: ReactNode;
 }) {
   const app = useQuery({
@@ -21,48 +39,48 @@ export function AppFrame({
     queryFn: () => api.app(id),
     refetchInterval: 5000,
   });
+  const current = active === 'Configuration' ? 'Settings' : active;
   return (
-    <>
-      <Link href="/apps" className="back-link">
-        ← My applications
-      </Link>
-      {app.data && (
-        <div className="app-heading">
-          <div>
-            <span className="eyebrow">Application</span>
-            <h1>{app.data.slug}</h1>
-            {app.data.url && (
-              <a
-                className="public-url mono"
-                href={app.data.url}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <BoundaryText text={new URL(app.data.url).hostname} /> ↗
-              </a>
-            )}
-          </div>
-          <Status state={healthy(app.data)} />
-        </div>
-      )}
-      <nav className="app-nav" aria-label="Application pages">
-        {[
-          ['Overview', ''],
-          ['Configuration', '/configuration'],
-          ['Deploy', '/deploy'],
-          ['Deployments', '/deployments'],
-        ].map(([name, suffix]) => (
+    <Page>
+      <PageHeader
+        back={
+          <Link href="/apps" className={backLinkClass}>
+            <Icon name="arrow-left" />
+            Apps
+          </Link>
+        }
+        title={app.data ? app.data.slug : <Skeleton variant="title" width="quarter" />}
+        meta={
+          app.data && (
+            <Status state={app.data.lifecycleState === 'creating' ? 'creating' : healthy(app.data)} />
+          )
+        }
+      >
+        {app.data?.url && (
+          <a
+            className="ui-link app-url"
+            href={app.data.url}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <BoundaryText text={new URL(app.data.url).hostname} />
+            <Icon name="external" />
+          </a>
+        )}
+      </PageHeader>
+      <TabNav label="App pages">
+        {tabs.map(([name, suffix]) => (
           <Link
             key={name}
             href={`/apps/${id}${suffix}`}
-            className={active === name ? 'active' : ''}
-            aria-current={active === name ? 'page' : undefined}
+            className={tabClass(current === name)}
+            aria-current={current === name ? 'page' : undefined}
           >
             {name}
           </Link>
         ))}
-      </nav>
-      {app.error ? <ErrorNotice error={app.error} /> : children}
-    </>
+      </TabNav>
+      {app.error ? <ErrorAlert error={app.error} /> : children}
+    </Page>
   );
 }

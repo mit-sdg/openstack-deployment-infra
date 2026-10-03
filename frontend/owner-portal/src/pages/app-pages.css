@@ -1,0 +1,132 @@
+/*
+ * Page-only layout for the app workspace (track A). Tokens only, unlayered
+ * .app-* classes. Candidates for frontend/shared are noted inline.
+ */
+
+/* Public URL under the app name. */
+.app-url {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+  max-width: 100%;
+  font-size: var(--ui-text-sm);
+}
+
+/* Text and a badge on one line, e.g. "PostgreSQL · Ready". */
+.app-inline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+/* Padded block inside a flush Section (shared candidate: Section.Block). */
+.app-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+  margin: 0;
+  padding: var(--ui-space-4) var(--ui-space-5);
+  border-top: 1px solid var(--ui-border);
+}
+.app-block:first-child {
+  border-top: 0;
+}
+.app-block--subtle {
+  background: var(--ui-surface-subtle);
+}
+.app-block--subtle:last-child {
+  border-radius: 0 0 var(--ui-radius-lg) var(--ui-radius-lg);
+}
+.app-divider {
+  border-top: 1px solid var(--ui-border);
+}
+
+/* Settings form: titled groups, heading beside the fields on wide screens. */
+.app-settings-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 3fr);
+  gap: var(--ui-space-4) var(--ui-space-8);
+  padding: var(--ui-space-6) var(--ui-space-5);
+  border-top: 1px solid var(--ui-border);
+}
+.app-settings-group:first-child {
+  border-top: 0;
+}
+.app-settings-group > :only-child {
+  grid-column: 1 / -1;
+}
+.app-settings-group__title {
+  font-size: var(--ui-text-md);
+  font-weight: var(--ui-weight-semibold);
+  line-height: var(--ui-control-height);
+}
+
+/* Environment variable form: name, value and the button on one row. */
+.app-env-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--ui-space-3);
+}
+
+/* Storage rows: actions under the meta line. */
+.app-resource-actions {
+  margin-top: var(--ui-space-2);
+}
+
+/* Binding editor rows: output, variable name and an action on one line. */
+.app-bindings {
+  display: flex;
+  flex-direction: column;
+}
+.app-binding {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto;
+  align-items: center;
+  gap: var(--ui-space-3);
+  padding: var(--ui-space-2) 0;
+  border-top: 1px solid var(--ui-border);
+}
+.app-binding:first-child {
+  border-top: 0;
+}
+.app-binding__name {
+  overflow-wrap: anywhere;
+}
+
+/* Deploy page: form and settings summary side by side. */
+.app-deploy {
+  align-items: start;
+}
+
+/* Environment variable names in a summary. */
+.app-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-1) var(--ui-space-2);
+}
+
+@media (max-width: 640px) {
+  .app-block {
+    padding: var(--ui-space-4);
+  }
+  .app-settings-group {
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--ui-space-5) var(--ui-space-4);
+  }
+  .app-settings-group__title {
+    line-height: inherit;
+  }
+  .app-env-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .app-binding {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: var(--ui-space-2) 0;
+  }
+  .app-binding__name {
+    grid-column: 1 / -1;
+  }
+}

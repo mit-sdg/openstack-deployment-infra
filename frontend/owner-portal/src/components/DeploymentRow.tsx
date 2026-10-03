@@ -1,7 +1,9 @@
+import { Badge, ListItem } from '@openstack-platform/ui';
 import { Link } from 'wouter';
-import { short, time } from '../utils/presentation';
+import { relativeTime, short } from '../utils/presentation';
 import { Status } from './Status';
 
+/** One deployment as a list row. Put rows inside a shared <List>. */
 export function DeploymentRow({
   id,
   deployment,
@@ -20,29 +22,35 @@ export function DeploymentRow({
   href?: string;
 }) {
   return (
-    <div className="deployment-row">
-      <div>
+    <ListItem
+      title={
         <Link
-          className="mono app-link"
+          className="ui-link ui-link--plain ui-mono"
           href={href ?? `/apps/${id}/deployments/${deployment.deploymentId}`}
         >
           {short(deployment.repositoryCommit)}
         </Link>
-        {deployment.deploymentId === active && (
-          <span className="chip accepted-chip">Accepted version</span>
-        )}
-        <p className="cell-sub">
-          {time(deployment.requestedAt)} · Settings revision {deployment.configurationRevision}
-        </p>
-      </div>
-      <Status state={deployment.status} />
-      <Link
-        className="row-arrow"
-        href={href ?? `/apps/${id}/deployments/${deployment.deploymentId}`}
-        aria-label={`View commit ${short(deployment.repositoryCommit)}`}
-      >
-        →
-      </Link>
-    </div>
+      }
+      meta={
+        deployment.requestedAt && (
+          <time
+            dateTime={deployment.requestedAt}
+            title={new Date(deployment.requestedAt).toLocaleString()}
+          >
+            Started {relativeTime(deployment.requestedAt)}
+          </time>
+        )
+      }
+      trailing={
+        <>
+          {deployment.deploymentId === active && (
+            <Badge tone="neutral" dot={false}>
+              Live
+            </Badge>
+          )}
+          <Status state={deployment.status} />
+        </>
+      }
+    />
   );
 }

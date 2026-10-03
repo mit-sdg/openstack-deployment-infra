@@ -1,5 +1,20 @@
+import {
+  Alert,
+  Button,
+  ErrorAlert,
+  Field,
+  Fieldset,
+  Grid,
+  Hint,
+  InlineStatus,
+  Input,
+  LoadingRows,
+  Radio,
+  Section,
+  Textarea,
+} from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 import {
   api,
   configurationGuidance,
@@ -7,24 +22,49 @@ import {
   validateSettings,
   validateBindings,
   type Settings,
+  type StorageBinding,
 } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { EnvironmentSection } from '../components/EnvironmentSection';
 import { StorageSection } from '../components/StorageSection';
-import { ErrorNotice, Loading } from '../components/Feedback';
+import './app-pages.css';
 
 export function ConfigurationPage({ id }: { id: string }) {
   const query = useQuery({ queryKey: ['settings', id], queryFn: () => api.settings(id) });
   return (
-    <AppFrame id={id} active="Configuration">
+    <AppFrame id={id} active="Settings">
       {query.isPending ? (
-        <Loading />
+        <Section aria-label="Settings">
+          <LoadingRows rows={4} />
+        </Section>
       ) : query.error ? (
-        <ErrorNotice error={query.error} />
+        <ErrorAlert error={query.error} />
       ) : (
-        <ConfigurationForm key={id} id={id} initial={query.data!} resources />
+        <ConfigurationForm key={id} id={id} initial={query.data} resources />
       )}
     </AppFrame>
+  );
+}
+
+/** One titled group of fields inside the settings card. */
+function Group({ title, children }: { title: string; children: ReactNode }) {
+  const id = useId();
+  return (
+    <div className="app-settings-group" role="group" aria-labelledby={id}>
+      <h3 id={id} className="app-settings-group__title">
+        {title}
+      </h3>
+      <div className="ui-stack ui-gap-4">{children}</div>
+    </div>
+  );
+}
+
+/** Stable comparison of bindings, independent of order. */
+function bindingKey(bindings: StorageBinding[]) {
+  return JSON.stringify(
+    [...bindings]
+      .sort((a, b) => a.resourceId.localeCompare(b.resourceId))
+      .map((binding) => [binding.resourceId, Object.entries(binding.outputs).sort()]),
   );
 }
 
@@ -40,6 +80,7 @@ export function ConfigurationForm({
   service?: ReturnType<typeof resourceApi>;
 }) {
   const scope = service === api ? [] : ['admin'];
+  const formId = useId();
   const environment = useQuery({
     queryKey: [...scope, 'environment', id],
     queryFn: () => service.environment(id),
@@ -48,12 +89,20 @@ export function ConfigurationForm({
   const [settings, setSettings] = useState<Settings>(structuredClone(initial));
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [savedBindings, setSavedBindings] = useState(() =>
+    bindingKey(initial.configuration.storageBindings),
+  );
+  const submitted = useRef('');
   const client = useQueryClient();
   const save = useMutation({
-    mutationFn: (key: string) => service.save(id, settings, key),
+    mutationFn: (key: string) => {
+      submitted.current = bindingKey(settings.configuration.storageBindings);
+      return service.save(id, settings, key);
+    },
     onSuccess: (result) => {
       setSettings((current) => ({ ...current, revision: result.revision as number }));
       setSaved(true);
+      setSavedBindings(submitted.current);
       client.invalidateQueries({ queryKey: [...scope, 'settings', id] });
       client.invalidateQueries({ queryKey: [...scope, 'app', id] });
     },
@@ -78,17 +127,12 @@ export function ConfigurationForm({
       },
     });
   }
+  const unsavedBindings = bindingKey(settings.configuration.storageBindings) !== savedBindings;
   return (
     <>
-      <div className="section-heading">
-        <div>
-          <h2>Application configuration</h2>
-          <p>Save your settings independently from deploying your code.</p>
-        </div>
-        <span className="chip">Revision {settings.revision}</span>
-      </div>
       <form
-        className="card form-card"
+        id={formId}
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
           const validation =
@@ -101,156 +145,114 @@ export function ConfigurationForm({
           if (!validation) save.mutate(crypto.randomUUID());
         }}
       >
-        <section className="form-section">
-          <div className="form-section-heading">
-            <span className="step-number">01</span>
-            <div>
-              <h3>Source</h3>
-              <p>Start with a public GitHub repository.</p>
-            </div>
-          </div>
-          <div className="fields-grid">
-            <div className="field full">
-              <label htmlFor="repository">Repository URL</label>
-              <input
-                id="repository"
+        <Section
+          flush
+          aria-label="Build and run settings"
+          footer={
+            <>
+              {saved && <InlineStatus>Settings saved. They apply on your next deploy.</InlineStatus>}
+              <Button type="submit" variant="primary" loading={save.isPending}>
+                Save settings
+              </Button>
+            </>
+          }
+        >
+          <Group title="Source">
+            <Field label="Repository URL" id="repository" hint={configurationGuidance.root}>
+              <Input
                 type="url"
                 placeholder="https://github.com/your-name/your-app"
                 value={settings.repository}
                 onChange={(e) => update({ repository: e.target.value })}
                 required
               />
-              <p className="field-help">
-                Public, credential-free repositories only. {configurationGuidance.root}
-              </p>
-            </div>
-            <div className="field">
-              <label htmlFor="branch">Preferred branch</label>
-              <input
-                id="branch"
+            </Field>
+            <Field
+              label="Branch"
+              id="branch"
+              hint="Only a label. You choose the exact commit when you deploy."
+            >
+              <Input
                 value={settings.branch}
                 onChange={(e) => update({ branch: e.target.value })}
                 required
               />
-              <p className="field-help">
-                A label for your deployment. You choose the exact commit separately.
-              </p>
-            </div>
-          </div>
-        </section>
-        <section className="form-section">
-          <div className="form-section-heading">
-            <span className="step-number">02</span>
-            <div>
-              <h3>Build</h3>
-              <p>{configurationGuidance.scripts}</p>
-            </div>
-          </div>
-          <div className="fields-grid">
-            <fieldset className="runtime-choice full">
-              <legend>JavaScript runtime</legend>
+            </Field>
+          </Group>
+          <Group title="Build">
+            <Fieldset legend="Runtime" variant="cards">
               {(['node', 'bun'] as const).map((name) => (
-                <label
+                <Radio
                   key={name}
-                  className={`runtime-option ${settings.configuration.build.runtime === name ? 'selected' : ''}`}
-                >
-                  <input
-                    type="radio"
-                    name="runtime"
-                    value={name}
-                    checked={settings.configuration.build.runtime === name}
-                    onChange={() => build({ runtime: name })}
-                  />
-                  <span>
-                    <strong>{name === 'node' ? 'Node.js' : 'Bun'}</strong>
-                    <small>
-                      {name === 'node' ? 'Uses package-lock.json' : 'Uses bun.lock or bun.lockb'}
-                    </small>
-                  </span>
-                </label>
+                  name="runtime"
+                  value={name}
+                  label={name === 'node' ? 'Node.js' : 'Bun'}
+                  description={
+                    name === 'node' ? 'Uses package-lock.json' : 'Uses bun.lock or bun.lockb'
+                  }
+                  checked={settings.configuration.build.runtime === name}
+                  onChange={() => build({ runtime: name })}
+                />
               ))}
-            </fieldset>
-            <div className="field full">
-              <label htmlFor="packages">Package directories</label>
-              <textarea
-                id="packages"
+            </Fieldset>
+            <Field
+              label="Package directories"
+              id="packages"
+              hint="One per line. Use . for the repository root. Each needs its lockfile."
+            >
+              <Textarea
                 rows={2}
                 value={settings.configuration.build.packages.join('\n')}
                 onChange={(e) => build({ packages: e.target.value.split('\n') })}
               />
-              <p className="field-help">
-                One directory per line. Use . for the repository root. {configurationGuidance.locks}
-              </p>
+            </Field>
+            <Grid columns={2}>
+              <Field label="Build script" id="build-script" optional>
+                <Input
+                  placeholder="build"
+                  value={settings.configuration.build.buildScript ?? ''}
+                  onChange={(e) => build({ buildScript: e.target.value || null })}
+                />
+              </Field>
+              <Field label="Start script" id="start-script">
+                <Input
+                  value={settings.configuration.build.startScript}
+                  onChange={(e) => build({ startScript: e.target.value })}
+                  required
+                />
+              </Field>
+            </Grid>
+            <Hint>{configurationGuidance.scripts}</Hint>
+          </Group>
+          <Group title="Runtime">
+            <Grid columns={2}>
+              <Field label="Port" id="port">
+                <Input
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={65535}
+                  value={settings.configuration.runtime.port}
+                  onChange={(e) => runtime({ port: Number(e.target.value) })}
+                  required
+                />
+              </Field>
+              <Field label="Health check path" id="health">
+                <Input
+                  value={settings.configuration.runtime.healthPath}
+                  onChange={(e) => runtime({ healthPath: e.target.value })}
+                  required
+                />
+              </Field>
+            </Grid>
+            <Hint>{configurationGuidance.health}</Hint>
+          </Group>
+          {(error || save.error) && (
+            <div className="app-settings-group">
+              <ErrorAlert error={error ?? save.error} />
             </div>
-            <div className="field">
-              <label htmlFor="build-script">
-                Build script <span className="optional">optional</span>
-              </label>
-              <input
-                id="build-script"
-                placeholder="build"
-                value={settings.configuration.build.buildScript ?? ''}
-                onChange={(e) => build({ buildScript: e.target.value || null })}
-              />
-              <p className="field-help">Leave empty if your app needs no build step.</p>
-            </div>
-            <div className="field">
-              <label htmlFor="start-script">Start script</label>
-              <input
-                id="start-script"
-                value={settings.configuration.build.startScript}
-                onChange={(e) => build({ startScript: e.target.value })}
-                required
-              />
-              <p className="field-help">A script name from the root package.json, such as start.</p>
-            </div>
-          </div>
-        </section>
-        <section className="form-section">
-          <div className="form-section-heading">
-            <span className="step-number">03</span>
-            <div>
-              <h3>Runtime</h3>
-              <p>Tell the platform where to reach your app and check its health.</p>
-            </div>
-          </div>
-          <div className="fields-grid">
-            <div className="field">
-              <label htmlFor="port">Application port</label>
-              <input
-                id="port"
-                type="number"
-                min={1}
-                max={65535}
-                value={settings.configuration.runtime.port}
-                onChange={(e) => runtime({ port: Number(e.target.value) })}
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="health">Health path</label>
-              <input
-                id="health"
-                value={settings.configuration.runtime.healthPath}
-                onChange={(e) => runtime({ healthPath: e.target.value })}
-                required
-              />
-              <p className="field-help">{configurationGuidance.health}</p>
-            </div>
-          </div>
-          <ErrorNotice error={error ?? save.error} />
-          {saved && (
-            <p className="saved-message" role="status">
-              Settings saved. They apply to your next deployment.
-            </p>
           )}
-        </section>
-        <div className="form-footer">
-          <p className="muted">Saving does not deploy or restart your application.</p>
-          <button className="button button-primary" disabled={save.isPending}>
-            {save.isPending ? 'Saving…' : 'Save configuration'}
-          </button>
-        </div>
+        </Section>
       </form>
       {resources && (
         <>
@@ -265,6 +267,21 @@ export function ConfigurationForm({
             bindings={settings.configuration.storageBindings}
             onChange={(storageBindings) =>
               update({ configuration: { ...settings.configuration, storageBindings } })
+            }
+            notice={
+              unsavedBindings && (
+                <Alert
+                  tone="warning"
+                  action={
+                    <Button type="submit" form={formId} size="sm" loading={save.isPending}>
+                      Save changes
+                    </Button>
+                  }
+                >
+                  Save your settings to keep these variable changes. They apply on your next
+                  deploy.
+                </Alert>
+              )
             }
           />
         </>
