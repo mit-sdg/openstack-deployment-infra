@@ -2,8 +2,16 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const screenshots = path.resolve("../../.tmp/dashboard-screenshots/after");
+function withoutConditional(headers: Record<string, string>) {
+  return Object.fromEntries(
+    Object.entries(headers).filter(
+      ([name]) => name.toLowerCase() !== "if-none-match",
+    ),
+  );
+}
 async function expectStatCaptionsToFit(page: Page) {
   const captions = await page
     .locator(".stat__sub > span:last-child")
@@ -163,7 +171,10 @@ for (const width of [320, 390, 768, 1440])
           page.getByRole("heading", { name: "Disruption detected" }),
         ).toBeVisible();
         await page.route("**/api/snapshot", async (route) => {
-          const response = await route.fetch();
+          const response = await route.fetch({
+            headers: withoutConditional(route.request().headers()),
+          });
+          expect(response.status()).toBe(200);
           const data = await response.json();
           if (data.state === "ready") {
             data.summary.counts.backup.offsite = "failed";
@@ -173,8 +184,38 @@ for (const width of [320, 390, 768, 1440])
             app.url = `https://${"long-label".repeat(5)}.${"long-label".repeat(5)}.example.invalid`;
             app.recoveryNote = "<img src=x onerror=alert(1)>";
           }
-          await route.fulfill({ response, json: data });
+          const body = JSON.stringify(data);
+          await route.fulfill({
+            response,
+            status: 200,
+            body,
+            headers: {
+              ...response.headers(),
+              "content-length": String(Buffer.byteLength(body)),
+              etag: `"fixture-${createHash("sha256").update(body).digest("hex")}"`,
+            },
+          });
         });
+        // Exercise the rewrite with a real cached validator instead of relying
+        // on a background poll racing the fixture installation.
+        const upstream = await page.request.get(
+          "http://127.0.0.1:8480/api/snapshot",
+        );
+        const upstreamEtag = upstream.headers().etag;
+        expect(upstreamEtag).toBeTruthy();
+        const rewritten = await page.evaluate(async (etag) => {
+          const response = await fetch("/api/snapshot", {
+            headers: { "If-None-Match": etag },
+          });
+          return {
+            status: response.status,
+            etag: response.headers.get("ETag"),
+            data: await response.json(),
+          };
+        }, upstreamEtag);
+        expect(rewritten.status).toBe(200);
+        expect(rewritten.etag).not.toBe(upstreamEtag);
+        expect(rewritten.data.summary.counts.backup.offsite).toBe("failed");
         await page.reload();
         await expect(
           page.getByRole("button", {
@@ -320,6 +361,22 @@ test("pending collection, reconnect, ETag and retained view state", async ({
     await expect(
       page.getByRole("heading", { name: "Disruption detected" }),
     ).toBeVisible();
+    // No interception: verify the server's empty-body 304 response with its own
+    // validator. Retry only if collection changes between the two real reads.
+    await expect
+      .poll(async () => {
+        const fresh = await page.request.get(
+          "http://127.0.0.1:8485/api/snapshot",
+        );
+        const cached = await page.request.get(
+          "http://127.0.0.1:8485/api/snapshot",
+          {
+            headers: { "If-None-Match": fresh.headers().etag },
+          },
+        );
+        return { status: cached.status(), bytes: (await cached.body()).length };
+      })
+      .toEqual({ status: 304, bytes: 0 });
     const search = page.getByRole("searchbox");
     await search.fill("course-planner");
     const conditional = page.waitForRequest(

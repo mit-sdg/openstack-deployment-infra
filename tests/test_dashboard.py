@@ -965,6 +965,37 @@ class ServerTests(unittest.TestCase):
     def test_socket_is_private_and_removed_on_close(self) -> None:
         self.assertEqual(stat.S_IMODE(os.lstat(self.socket_path).st_mode), 0o600)
 
+    def test_repeated_sigterm_cannot_interrupt_cleanup_and_handler_is_restored(self) -> None:
+        transport = mock.Mock(spec=socketserver.BaseServer)
+        dashboard = mock.Mock(spec=service.DashboardService)
+        original = mock.Mock()
+        handlers: dict[int, Any] = {server.signal.SIGTERM: original}
+
+        def change_handler(signum: int, handler: Any) -> Any:
+            previous = handlers[signum]
+            handlers[signum] = handler
+            return previous
+
+        def deliver() -> None:
+            handler = handlers[server.signal.SIGTERM]
+            if callable(handler):
+                handler(server.signal.SIGTERM, None)
+
+        def cleanup() -> None:
+            self.assertEqual(handlers[server.signal.SIGTERM], server.signal.SIG_IGN)
+            deliver()
+
+        transport.serve_forever.side_effect = lambda **_kwargs: deliver()
+        dashboard.stop.side_effect = cleanup
+        transport.server_close.side_effect = cleanup
+        with mock.patch.object(server.signal, "signal", side_effect=change_handler):
+            server.serve(transport, dashboard)
+        dashboard.start.assert_called_once_with()
+        dashboard.stop.assert_called_once_with()
+        transport.server_close.assert_called_once_with()
+        original.assert_not_called()
+        self.assertIs(handlers[server.signal.SIGTERM], original)
+
     def test_static_assets_and_snapshot_carry_strict_headers(self) -> None:
         status, headers, body = self.request("GET", "/")
         self.assertEqual(status, 200)
