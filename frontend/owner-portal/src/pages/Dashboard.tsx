@@ -4,10 +4,12 @@ import {
   BoundaryText,
   DataTable,
   EmptyState,
-  ErrorAlert,
   Page,
   PageHeader,
+  PageHeaderSkeleton,
   PageSkeleton,
+  SectionSkeleton,
+  RelativeTime,
   Section,
   buttonClass,
   Icon,
@@ -16,10 +18,11 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { Link, useLocation } from 'wouter';
 import { api, type AppRecord } from '../api';
+import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useOwnerIntents } from '../hooks/useIntentPolling';
-import { healthy, relativeTime, short } from '../utils/presentation';
+import { healthy, short } from '../utils/presentation';
 
 const columns: Column<AppRecord>[] = [
   {
@@ -41,6 +44,8 @@ const columns: Column<AppRecord>[] = [
   {
     key: 'url',
     header: 'URL',
+    // Phones: the whole card opens the app, so the URL stays on its page.
+    mobile: 'hidden',
     cell: (app) =>
       app.url ? (
         <a className="ui-link ui-text-sm" href={app.url} target="_blank" rel="noopener noreferrer">
@@ -63,18 +68,11 @@ const columns: Column<AppRecord>[] = [
   {
     key: 'deployed',
     header: 'Last deployed',
-    cell: (app) =>
-      app.acceptedDeployment ? (
-        <time
-          className="ui-text-muted"
-          dateTime={app.acceptedDeployment.acceptedAt}
-          title={new Date(app.acceptedDeployment.acceptedAt).toLocaleString()}
-        >
-          {relativeTime(app.acceptedDeployment.acceptedAt)}
-        </time>
-      ) : (
-        <span className="ui-text-subtle">—</span>
-      ),
+    cell: (app) => (
+      <span className="ui-text-muted">
+        <RelativeTime value={app.acceptedDeployment?.acceptedAt} />
+      </span>
+    ),
   },
 ];
 
@@ -82,8 +80,21 @@ export function Dashboard() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 5000 });
   const intents = useOwnerIntents();
   const [, navigate] = useLocation();
-  if (apps.isPending) return <PageSkeleton />;
-  if (apps.error) return <ErrorAlert error={apps.error} />;
+  if (apps.isPending)
+    return (
+      <PageSkeleton label="Loading your apps…">
+        <PageHeaderSkeleton meta actions={1} />
+        <SectionSkeleton variant="table" columns={5} rows={2} />
+        <SectionSkeleton title variant="list" density="compact" rows={4} />
+      </PageSkeleton>
+    );
+  if (apps.error)
+    return (
+      <Page>
+        <PageHeader title="Apps" />
+        <QueryError query={apps} what="your apps" />
+      </Page>
+    );
   const { items, quota } = apps.data;
   const used = quota.apps.used + quota.apps.reserved;
   const full = used >= quota.apps.limit;
@@ -109,7 +120,7 @@ export function Dashboard() {
       />
       {full && items.length > 0 && (
         <Alert tone="info">
-          You’ve used all {quota.apps.limit} of your apps. Ask staff if you need another one.
+          You’ve reached your limit of {quota.apps.limit} apps. Ask staff if you need more.
         </Alert>
       )}
       {items.length ? (
@@ -129,7 +140,7 @@ export function Dashboard() {
           </EmptyState>
         </div>
       )}
-      <ErrorAlert error={intents.error} focus={false} />
+      {intents.error && <QueryError query={intents} what="recent activity" />}
       {!!intents.data?.items.length && (
         <Section title="Recent activity" flush>
           <OperationList label="Recent activity">

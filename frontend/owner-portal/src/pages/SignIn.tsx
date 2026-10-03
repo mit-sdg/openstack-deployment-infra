@@ -3,7 +3,6 @@ import {
   Button,
   ErrorAlert,
   Field,
-  Hint,
   Input,
   PasswordInput,
   SegmentedControl,
@@ -13,7 +12,6 @@ import { useState, type FormEvent } from 'react';
 import { useLocation } from 'wouter';
 import { clearCredentials } from '../api';
 import { authOptionsQuery } from '../authOptions';
-import { Mark } from '../components/Mark';
 
 const messages: Record<string, string> = {
   INVALID_CREDENTIALS: 'Username or password is incorrect.',
@@ -89,7 +87,7 @@ export function SignIn() {
   }
   const platformName = options.data?.platformName;
   return (
-    <AuthLayout title={platformName ? `Sign in to ${platformName}` : 'Sign in'} mark={<Mark />}>
+    <AuthLayout title={platformName ? `Sign in to ${platformName}` : 'Sign in'}>
       <SegmentedControl
         label="Sign-in method"
         hideLabel
@@ -101,14 +99,14 @@ export function SignIn() {
           { value: 'commons', label: sentenceCase(provider) },
           { value: 'local', label: 'Local account' },
         ]}
+        hint={
+          method === 'local'
+            ? 'Use the username and password you chose when you set up this account.'
+            : undefined
+        }
       />
       <ErrorAlert error={options.error ?? login.error} />
       <form className="ui-stack ui-gap-4" onSubmit={submit} aria-busy={login.isPending}>
-        <Hint>
-          {method === 'commons'
-            ? `Use your ${provider} username and password.`
-            : 'Use the username and password you chose when you set up this account.'}
-        </Hint>
         <Field label="Username" id="class-username">
           <Input
             name="username"
@@ -139,8 +137,7 @@ export function SignIn() {
           <Field
             label="Authentication code"
             id="local-totp"
-            optional
-            hint="Required for admin accounts. Use the 6-digit code from your authenticator app."
+            hint="Only for admin accounts: the 6-digit code from your authenticator app."
           >
             <Input
               inputMode="numeric"

@@ -1,8 +1,8 @@
-import { buttonClass, ToastProvider } from '@openstack-platform/ui';
+import { buttonClass, Page, ToastProvider } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Link, Route, Switch, useLocation } from 'wouter';
 import { authOptionsQuery } from './authOptions';
-import { EmptyState, ErrorNotice, PageSkeleton } from './components/Feedback';
+import { EmptyState, ErrorNotice, PageSkeleton, QueryError } from './components/Feedback';
 import { useSession } from './hooks/useSession';
 import { ConfigurationPage } from './pages/Configuration';
 import { Dashboard } from './pages/Dashboard';
@@ -50,7 +50,9 @@ export function App() {
         ) : session.isPending ? (
           <PageSkeleton />
         ) : session.error ? (
-          <ErrorNotice error={session.error} />
+          <Page>
+            <QueryError query={session} what="your account" />
+          </Page>
         ) : (
           <Switch>
             {/* Wildcards: in wouter 3 ":rest*" matches one segment only, which

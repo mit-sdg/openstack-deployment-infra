@@ -95,16 +95,22 @@ Alignment rules:
 
 ### Shape, focus and states
 
-- Radii: `--ui-radius-sm` 6px (segments, menu items), `--ui-radius-md` 8px
-  (controls, alerts, code), `--ui-radius-lg` 12px (cards, dialogs, menus),
-  `--ui-radius-full` (badges, avatars).
+- Radii: `--ui-radius-xs` 4px (16px checkboxes only), `--ui-radius-sm` 6px
+  (segments, menu items), `--ui-radius-md` 8px (controls, alerts, code),
+  `--ui-radius-lg` 12px (cards, dialogs, menus), `--ui-radius-full` (badges,
+  avatars).
 - Borders are 1px `--ui-border` on surfaces and `--ui-border-strong` on
   controls.
 - Focus: one 2px `--ui-focus` outline, 2px offset, on every control (inset
   inside menus, tabs and segmented controls).
 - States: hover uses `--ui-surface-hover` (or the `-hover` solid), pressed uses
   `--ui-surface-active` (or the `-active` solid), disabled is 50% opacity with
-  a not-allowed cursor and no hover change.
+  a not-allowed cursor and no hover change. Hover styles apply only on devices
+  that can hover (`@media (hover: hover)`), so taps never leave a fill.
+- Fixed-height controls keep their step's line height (buttons 14/20, small
+  buttons and segments 13/20, badges 12/16); the control height centers it.
+- Section headers are always `--ui-section-header-height` (56px), with or
+  without an action: their padding leaves room for exactly one control.
 - Motion: `--ui-duration-fast` 120ms for hovers, `--ui-duration` 200ms for
   overlays. Reduced motion turns animation off.
 
@@ -131,24 +137,24 @@ Import everything from `@openstack-platform/ui`. Components take children and
 plain props; routing stays in the app, so links are passed in as `<Link>`
 elements and styled with the exported class helpers.
 
-| Need                      | Use                                                                                                                                |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Page frame                | `AppShell`, `Brand`, `AccountMenu`, `navLinkClass`, `menuItemClass` (shell only)                                                   |
-| Page content              | `Page` (`width="narrow"` for single forms), `PageHeader`, `backLinkClass`                                                          |
-| Signed-out flows          | `AuthLayout` (sign in, account setup)                                                                                              |
-| Grouping                  | `Section` (titled card; `flush` for tables/lists; `footer` for form actions), `Card`                                               |
-| Layout                    | `Stack`, `Cluster`, `Grid` (`columns={2 \| 3}`, one column on phones)                                                              |
-| Actions                   | `Button` (`primary`, `secondary`, `ghost`, `danger`; `size="sm"`; `loading`), `IconButton`, `buttonClass()` for links              |
-| Forms                     | `Field` + `Input` / `Textarea` / `Select` / `PasswordInput`; `Checkbox`, `Radio`, `Switch`, `Fieldset` (`variant="cards"`), `Hint` |
-| Choice in place           | `SegmentedControl` (two to four options, not navigation)                                                                           |
-| Navigation between routes | `TabNav` + `tabClass()`                                                                                                            |
-| Status                    | `Badge` with a tone. In the portal use `components/Status.tsx`, which maps states.                                                 |
-| Collections               | `DataTable` (stacks on phones), `List` + `ListItem` (feeds), `KeyValueList`                                                        |
-| Text values               | `CodeBlock` (`variant="log"` for build output), `CopyField`, `BoundaryText` for URLs                                               |
-| Feedback                  | `Alert`, `ErrorAlert`, `InlineStatus`, `useToast()` (inside `ToastProvider`), `EmptyState`                                         |
-| Loading                   | `PageSkeleton` (whole page), `LoadingRows` (inside a section), `Skeleton`, `Spinner`                                               |
-| Overlays                  | `Dialog` (centered; a bottom sheet on phones)                                                                                      |
-| Utilities (class names)   | `ui-link`, `ui-mono`, `ui-text-muted`, `ui-text-subtle`, `ui-text-danger`, `ui-text-sm`, `ui-truncate`, `ui-break`, `ui-sr-only`   |
+| Need                      | Use                                                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Page frame                | `AppShell`, `Brand`, `AccountMenu`, `navLinkClass`, `menuItemClass` (shell only)                                                      |
+| Page content              | `Page` (`width="narrow"` for single forms), `PageHeader`, `backLinkClass`                                                             |
+| Signed-out flows          | `AuthLayout` (sign in, account setup)                                                                                                 |
+| Grouping                  | `Section` (titled card; `flush` for tables/lists; `footer` for form actions), `Card`                                                  |
+| Layout                    | `Stack`, `Cluster`, `Grid` (`columns={2 \| 3}`, one column on phones)                                                                 |
+| Actions                   | `Button` (`primary`, `secondary`, `ghost`, `danger`; `size="sm"`; `loading`), `IconButton`, `buttonClass()` for links                 |
+| Forms                     | `Field` + `Input` / `Textarea` / `Select` / `PasswordInput`; `Checkbox`, `Radio`, `Switch`, `Fieldset` (`variant="cards"`), `Hint`    |
+| Choice in place           | `SegmentedControl` (two to four options, not navigation)                                                                              |
+| Navigation between routes | `TabNav` + `tabClass()`                                                                                                               |
+| Status                    | `Badge` (needs attention) and `StatusText` (expected state). In the portal use `components/Status.tsx`, which applies the badge rule. |
+| Collections               | `DataTable` (stacks on phones), `List` + `ListItem` (feeds), `KeyValueList`                                                           |
+| Text values               | `CodeBlock` (`variant="log"` for build output), `CopyField`, `CopyId` (short ID + copy), `RelativeTime`, `BoundaryText` for URLs      |
+| Feedback                  | `Alert`, `ErrorAlert`, `InlineStatus`, `useToast()` (inside `ToastProvider`), `EmptyState`                                            |
+| Loading                   | `PageSkeleton` (whole page), `LoadingRows` (inside a section), `Skeleton`, `Spinner`                                                  |
+| Overlays                  | `Dialog` (centered; a bottom sheet on phones)                                                                                         |
+| Utilities (class names)   | `ui-link`, `ui-mono`, `ui-text-muted`, `ui-text-subtle`, `ui-text-danger`, `ui-text-sm`, `ui-truncate`, `ui-break`, `ui-sr-only`      |
 
 The portal adds a few shared pieces in `owner-portal/src/components`:
 `Status` (state to badge), `Operation` + `OperationList` (activity rows),
@@ -171,17 +177,38 @@ The portal adds a few shared pieces in `owner-portal/src/components`:
   with `error`, and request failures with `ErrorAlert` above the actions.
 - **Tables:** use `DataTable` for records people compare across rows. When a
   row opens a detail page, pass `onRowClick` and keep a link in the first
-  column. Give each
-  column a plain `header` and choose its phone layout (`title`, `trailing`,
-  `field`, `hidden`). Put tables in `<Section flush>`.
+  column. Choose each column's phone role: `title` and `trailing` (status)
+  share the first line; with only one or two extra values use `secondary`
+  (muted line, e.g. username) and `meta` (subtle, e.g. a time) instead of
+  labelled `field` lines; `hidden` drops a column (e.g. IDs) on phones.
+- **"View all":** a section that previews a longer list puts the link in
+  `Section` `actions` as a small ghost button:
+  `<Link className={buttonClass({ variant: "ghost", size: "sm" })}>View all <Icon name="chevron-right" /></Link>`.
+  Show it only when there is more; there is no footer variant.
+- **IDs and times:** show long IDs with `CopyId` (8 characters; commits 9)
+  and times with `RelativeTime`, which keeps the exact time in the tooltip
+  and a `<time dateTime>`. Use `CopyField` for values people paste whole,
+  like setup links.
 - **Lists:** use `List` for collections and `density="compact"` for feeds.
   `meta` holds facts (`app · commit · time`), not sentences. Separators are
   added automatically and dropped on phones. In feeds, badge only states that
   need attention (in progress, failed, needs attention), never success.
+- **Activity titles are events** phrased by outcome, from `activityTitle`
+  in `utils/presentation.ts`: "Deployed", "App created", "Settings saved";
+  "Deploying" while running; the noun ("Deployment") next to a Failed badge.
 - **Empty states** say what will appear and offer the next action. Show only one
   create action on a page.
-- **Loading:** skeletons, not "Loading…" text. Keep layout stable while
-  data loads.
+- **Loading:** skeletons that mirror the loaded layout, never "Loading…"
+  text, so nothing jumps. Wrap them in `PageSkeleton` (it announces the
+  label) and compose `PageHeaderSkeleton` (with `meta` and `actions` like the
+  real header) and one `SectionSkeleton` per section (`variant` table, list
+  or body, with the real row count and density). See `pages/Dashboard.tsx`.
+- **Load errors:** keep the page's shape. Render the normal `Page` and
+  `PageHeader`, then `QueryError` (portal) for the failed query, or
+  `LoadError` (shared) with your own message. It says what failed and what to
+  do ("Couldn't load your apps. Try again in a minute.") and offers Retry. It
+  is announced but not focused, so no focus ring appears on load. Section
+  queries that fail render the same component inside the section.
 - **Feedback:** confirmations that need no action are toasts or
   `InlineStatus`. Anything that needs action is an `Alert`.
 - **Phones:** controls are 44px tall automatically. Don't add fixed widths;
@@ -191,6 +218,25 @@ The portal adds a few shared pieces in `owner-portal/src/components`:
 - **Security:** no `style` attributes, injected stylesheets or HTML injection
   (`npm run check:source` enforces this). Never put secrets in URLs, storage,
   query keys, toasts or `CopyField`. Secret inputs stay write-only.
+
+### Badge rule
+
+Badges are for states that need attention. The expected state is quiet.
+
+- **Expected states** (succeeded, healthy, ready, active, live) never get a
+  badge. In tables and details they render as `StatusText` (a dot and muted
+  text). In feeds they are visually hidden but still read by screen readers
+  (`<Status quiet="hidden">`).
+- **Badges** mark everything else: in progress (queued, building,
+  deploying, creating), problems (failed, unhealthy, needs attention, not
+  created) and neutral exceptions (stopped, disabled, rolled back, unknown).
+  The text always names the state; color is never the only signal.
+- **One place per view.** A detail page shows an object's state once: next
+  to the title in `PageHeader` `meta`, not again in its details or a
+  sidebar.
+- Use the portal `Status` component for every state so labels, tones and this
+  rule stay consistent. Add new states to `components/Status.tsx`; don't map
+  them in pages.
 
 ## Copy rules
 
@@ -229,7 +275,15 @@ The portal adds a few shared pieces in `owner-portal/src/components`:
 Pages that are not rebuilt yet keep their old class names, styled by
 `owner-portal/src/styles/legacy.css` in the lower `legacy` layer. That file
 maps the old color variables to the new tokens, so old pages already follow the
-theme. When you rebuild a page:
+theme.
+
+Legacy element rules (headings, labels, inputs…) are fenced off from
+anything inside `Page`, `AuthLayout` or `Dialog`, and base rules (body type,
+links, focus) come only from `ui.css`. So a rebuilt page must render its
+content inside `Page` (or `AuthLayout` for signed-out flows) to be measured
+against the system values exactly.
+
+When you rebuild a page:
 
 1. Rewrite it with design-system components. Keep every API call, query key,
    mutation, CSRF/step-up flow, confirmation and write-only behavior.

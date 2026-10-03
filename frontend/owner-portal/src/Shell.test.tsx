@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { api, clearCredentials, type AppRecord, type Session } from './api';
+import { ApiError, api, clearCredentials, type AppRecord, type Session } from './api';
 import { pageTitle } from './shell/PortalShell';
 
 const session = (role: Session['role']): Session => ({
@@ -165,7 +165,31 @@ describe('app list', () => {
     vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
     mockApps([app, { ...app, applicationId: 'app-2', slug: 'second' }]);
     show('/apps');
-    expect(await screen.findByText(/used all 2 of your apps/)).toBeVisible();
+    expect(await screen.findByText(/reached your limit of 2 apps/)).toBeVisible();
     expect(screen.queryByRole('link', { name: 'Create app' })).toBeNull();
+  });
+  it('keeps the page header and offers Retry when apps fail to load', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
+    mockApps([app]);
+    vi.mocked(api.apps).mockRejectedValueOnce(
+      new ApiError(503, 'UNAVAILABLE', 'The service is unavailable.'),
+    );
+    show('/apps');
+    expect(await screen.findByRole('heading', { name: 'Apps', level: 1 })).toBeVisible();
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't load your apps. Try again in a minute.");
+    // Announced, not focused: no focus ring appears on load.
+    expect(alert).not.toHaveFocus();
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('table', { name: 'Apps' })).toBeVisible();
+  });
+  it('shows a skeleton shaped like the app list while loading', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
+    vi.spyOn(api, 'apps').mockReturnValue(new Promise(() => {}));
+    vi.spyOn(api, 'intents').mockReturnValue(new Promise(() => {}));
+    show('/apps');
+    expect(await screen.findByText('Loading your apps…')).toBeInTheDocument();
+    expect(document.querySelector('.ui-skeleton--button')).not.toBeNull();
+    expect(document.querySelectorAll('.ui-skeleton-table__row')).toHaveLength(2);
   });
 });
