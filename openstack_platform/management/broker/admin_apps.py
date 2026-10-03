@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from ...controller.deployment_config import branch_name, parse_configuration
 from ...controller.http import HttpError, Request, Response
 from ...controller.storage_contract import RESOURCE_OUTPUTS
-from ...validation import repository_url, slug
+from ...validation import flavor_reference, repository_url, slug
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body
 from .accounts import audit
@@ -59,7 +59,6 @@ class AdminApps:
             ("POST", root + "/{app}/deployments", b.deploy),
             ("GET", root + "/{app}/deployments", b.history),
             ("GET", root + "/{app}/deployments/{deployment}", b.deployment),
-            ("GET", root + "/{app}/deployments/{deployment}/build-log", b.build_log),
             ("PUT", root + "/{app}/owner", self.reassign),
             ("POST", root + "/{app}/state", self.state),
         ]
@@ -187,6 +186,80 @@ class AdminApps:
         ):
             raise HttpError(409, "IDENTITY_CONFIRMATION_REQUIRED", IDENTITY_WARNING)
 
+    @staticmethod
+    def sizing_plan(value: dict[str, Any], app: str, model: dict[str, Any]) -> None:
+        # Validate the public plan shape before durable admission. The controller
+        # independently verifies the complete plan against fresh cloud evidence.
+        try:
+            if (
+                set(value)
+                != {
+                    "applicationId",
+                    "deploymentId",
+                    "activation",
+                    "current",
+                    "flavor",
+                    "allocation",
+                    "reserve",
+                    "fingerprint",
+                }
+                or value["applicationId"] != app
+                or value["deploymentId"] != model.get("activeDeploymentId")
+            ):
+                raise ValueError
+            if (
+                value["activation"] != "enable-after-healthy-acceptance"
+                or value["allocation"] != "measured-worker-capacity-minus-reserve"
+            ):
+                raise ValueError
+            current, flavor = value["current"], value["flavor"]
+            if (
+                not isinstance(current, dict)
+                or set(current) != {"enabled", "flavor", "cpuMHz", "memoryMiB"}
+                or not isinstance(flavor, dict)
+                or set(flavor) != {"flavor_id", "name", "vcpus", "ram_mib", "disk_gib"}
+            ):
+                raise ValueError
+            flavor_reference(current["flavor"])
+            flavor_reference(flavor["flavor_id"])
+            flavor_reference(flavor["name"])
+            if type(current["enabled"]) is not bool or current["enabled"] != model.get(
+                "desiredRunning"
+            ):
+                raise ValueError
+            for item, keys in (
+                (current, ("cpuMHz", "memoryMiB")),
+                (flavor, ("vcpus", "ram_mib", "disk_gib")),
+            ):
+                if any(type(item[k]) is not int or not 0 <= item[k] <= 2**31 - 1 for k in keys):
+                    raise ValueError
+            if value["reserve"] != {
+                "cpuMHzMinimum": 200,
+                "memoryMiBMinimum": 512,
+                "percentMinimum": 10,
+            } or any(type(v) is not int for v in value["reserve"].values()):
+                raise ValueError
+            sizing = model.get("sizing")
+            if not isinstance(sizing, dict) or any(
+                current[a] != sizing[b]
+                for a, b in (
+                    ("flavor", "workerFlavor"),
+                    ("cpuMHz", "cpuMHz"),
+                    ("memoryMiB", "memoryMiB"),
+                )
+            ):
+                raise ValueError
+            if value["fingerprint"] != digest(
+                canonical({k: v for k, v in value.items() if k != "fingerprint"})
+            ):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            raise HttpError(
+                400,
+                "INVALID_PLAN",
+                "Supply the exact current reviewed sizing plan; no extra configuration fields are accepted.",
+            ) from None
+
     def deployment_body(self, request: Request, app: dict[str, Any]) -> dict[str, Any]:
         if (
             not isinstance(request.body, dict)
@@ -212,6 +285,8 @@ class AdminApps:
             )
         model = self.observed(app["id"])
         self.identity_consent(app["id"], body, model)
+        if "plan" in body:
+            self.sizing_plan(body["plan"], app["id"], model)
         if model.get("requiresMaintenance") is True and body.get("maintenance") is not True:
             raise HttpError(
                 409,

@@ -200,8 +200,28 @@ class AdminApplicationTests(ManagementCase):
             "configurationRevision": 2,
             "commit": "a" * 40,
             "maintenance": True,
-            "plan": {"flavor": {"name": "worker-large"}},
+            "plan": {
+                "applicationId": self.app_id,
+                "deploymentId": None,
+                "activation": "enable-after-healthy-acceptance",
+                "current": {
+                    "enabled": False,
+                    "flavor": "worker-small",
+                    "cpuMHz": 500,
+                    "memoryMiB": 512,
+                },
+                "flavor": {
+                    "flavor_id": "large",
+                    "name": "worker-large",
+                    "vcpus": 4,
+                    "ram_mib": 8192,
+                    "disk_gib": 40,
+                },
+                "allocation": "measured-worker-capacity-minus-reserve",
+                "reserve": {"cpuMHzMinimum": 200, "memoryMiBMinimum": 512, "percentMinimum": 10},
+            },
         }
+        body["plan"]["fingerprint"] = digest(canonical(body["plan"]))
         result = self.call("POST", self.prefix + "/deployments", body, "admin")
         with self.broker.database.connect() as db:
             row = db.execute(
@@ -360,6 +380,31 @@ class AdminApplicationTests(ManagementCase):
             self.assert_error(
                 "SESSION_EXPIRED", lambda: self.call("GET", self.prefix, owner="admin")
             )
+
+    def test_sizing_plan_rejects_extra_environment_fields_before_journaling(self) -> None:
+        body = {
+            "configurationRevision": 1,
+            "commit": "a" * 40,
+            "plan": {"environment": {"TOKEN": "PLAN_SECRET_SENTINEL"}},
+        }
+        self.assert_error(
+            "INVALID_PLAN", lambda: self.call("POST", self.prefix + "/deployments", body, "admin")
+        )
+        with self.broker.database.connect() as db:
+            self.assertNotIn("PLAN_SECRET_SENTINEL", "\n".join(db.iterdump()))
+
+    def test_admin_cannot_read_cross_owner_logs_or_privileged_controller_routes(self) -> None:
+        self.assert_error(
+            "NOT_FOUND",
+            lambda: self.call(
+                "GET",
+                self.prefix + "/deployments/" + str(uuid.uuid4()) + "/build-log",
+                owner="admin",
+            ),
+        )
+        self.assert_error(
+            "NOT_FOUND", lambda: self.call("GET", "/v1/admin/applications", owner="admin")
+        )
 
     def test_owner_save_loses_authority_after_reassignment_before_transaction(self) -> None:
         original = self.broker.own
