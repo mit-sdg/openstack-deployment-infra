@@ -179,9 +179,15 @@ export function StorageSection({
   service = api,
   notice,
   save,
+  identityProvider: managedIdentityProvider = false,
 }: {
   id: string;
   service?: ReturnType<typeof resourceApi>;
+  /**
+   * For admin services: the app provides portal sign-in, so every storage
+   * change needs the dialog's explicit consent. Owners read this themselves.
+   */
+  identityProvider?: boolean;
   bindings: StorageBinding[];
   onChange: (bindings: StorageBinding[]) => void;
   /**
@@ -205,14 +211,14 @@ export function StorageSection({
     queryKey: [...scope, 'environment', id],
     queryFn: () => service.environment(id),
   });
-  // Owners confirm identity-provider changes in a dialog rather than the
-  // request layer's native prompt. Admin services bring their own confirmation.
+  // Identity-provider storage changes are confirmed in this section's dialog,
+  // never a native prompt: owners read the flag here, admins pass it in.
   const app = useQuery({
     queryKey: ['app', id],
     queryFn: () => api.app(id),
     enabled: owner,
   });
-  const identityProvider = owner && app.data?.identityProvider === true;
+  const identityProvider = owner ? app.data?.identityProvider === true : managedIdentityProvider;
   const busy =
     storage.data?.intents.some((intent) => !['succeeded', 'failed'].includes(intent.state)) ||
     environment.data?.intents?.some((intent) => !['succeeded', 'failed'].includes(intent.state));

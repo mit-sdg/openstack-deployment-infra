@@ -313,6 +313,47 @@ describe('owner resources', () => {
       vi.unstubAllGlobals();
     }
   });
+  it('confirms admin storage changes for the sign-in app in the same dialog', async () => {
+    vi.spyOn(api, 'intent').mockResolvedValue(intent);
+    // The admin page passes a confirming service only for the sign-in app;
+    // the section's dialog must collect consent before any request.
+    const service = resourceApi('/admin-apps', () => true);
+    vi.spyOn(service, 'environment').mockResolvedValue({ revision: 1, updatedAt: null, items: [] });
+    vi.spyOn(service, 'storage').mockResolvedValue({ items: [], intents: [] });
+    const confirm = vi.spyOn(window, 'confirm');
+    const fetcher = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify({ data: intent }), { status: 202 })),
+      );
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      wrap(
+        <StorageSection
+          id="app"
+          service={service}
+          identityProvider
+          bindings={[]}
+          onChange={() => {}}
+        />,
+      );
+      fireEvent.click(await screen.findByRole('button', { name: 'Add MongoDB' }));
+      const submit = screen.getAllByRole('button', { name: 'Add MongoDB' }).at(-1)!;
+      expect(submit).toBeDisabled();
+      expect(fetcher).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByLabelText(/Signing in to this portal depends on this app/));
+      fireEvent.click(submit);
+      await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+      expect(fetcher.mock.calls[0][0]).toBe('/api/v1/admin-apps/app/storage');
+      expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+        type: 'mongo',
+        identityProviderConfirmed: true,
+      });
+      expect(confirm).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('allows PostgreSQL password and S3 secret-key bindings', async () => {
     mocks();
     vi.mocked(api.storage).mockResolvedValue({

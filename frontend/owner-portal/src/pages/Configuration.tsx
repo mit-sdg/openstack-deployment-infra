@@ -77,11 +77,14 @@ export function ConfigurationForm({
   initial,
   resources = false,
   service = api,
+  identityProvider = false,
 }: {
   id: string;
   initial: Settings;
   resources?: boolean;
   service?: ReturnType<typeof resourceApi>;
+  /** Admin view of the sign-in app: storage changes need explicit consent. */
+  identityProvider?: boolean;
 }) {
   const scope = service === api ? [] : ['admin'];
   const formId = useId();
@@ -304,6 +307,7 @@ export function ConfigurationForm({
           />
           <StorageSection
             service={service}
+            identityProvider={identityProvider}
             id={id}
             bindings={settings.configuration.storageBindings}
             onChange={(storageBindings) =>

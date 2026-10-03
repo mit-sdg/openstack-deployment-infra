@@ -370,11 +370,10 @@ function ManagedApplication({ id }: { id: string }) {
   const toast = useToast();
   const app = useQuery({ queryKey: ['admin', 'app', id], queryFn: () => adminAppsApi.detail(id) });
   const identity = app.data?.identityProvider === true;
+  // The storage section's dialog collects explicit consent for the sign-in
+  // app before any change, so its requests can confirm; others send none.
   const service = useMemo(
-    () =>
-      adminAppsApi.resources(
-        () => !identity || window.confirm(`${signInWarning}. Continue with this storage change?`),
-      ),
+    () => adminAppsApi.resources(identity ? () => true : undefined),
     [id, identity],
   );
   const settings = useQuery({
@@ -505,6 +504,7 @@ function ManagedApplication({ id }: { id: string }) {
         initial={settings.data}
         resources
         service={service}
+        identityProvider={identity}
       />
       <Section title="Danger zone" flush>
         <List label="Danger zone">
