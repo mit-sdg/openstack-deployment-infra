@@ -21,6 +21,10 @@ export type Column<T> = {
 /**
  * Table on wide screens, stacked rows on phones. Explicit ARIA roles keep
  * the table semantics when CSS changes the display of rows and cells.
+ *
+ * With onRowClick the whole row is clickable (hover state and a chevron).
+ * Keep a real link in the first column: it is the keyboard and screen
+ * reader target, and supports opening in a new tab.
  */
 export function DataTable<T>({
   label,
@@ -28,6 +32,7 @@ export function DataTable<T>({
   rows,
   rowKey,
   empty,
+  onRowClick,
 }: {
   /** Accessible name, e.g. "Apps". */
   label: string;
@@ -36,11 +41,16 @@ export function DataTable<T>({
   rowKey: (row: T) => string;
   /** Shown instead of the table when there are no rows. */
   empty?: ReactNode;
+  onRowClick?: (row: T) => void;
 }) {
   if (!rows.length && empty) return <>{empty}</>;
   return (
     <div className="ui-table-wrap">
-      <table className="ui-table" role="table" aria-label={label}>
+      <table
+        className={onRowClick ? "ui-table ui-table--clickable" : "ui-table"}
+        role="table"
+        aria-label={label}
+      >
         <thead role="rowgroup">
           <tr role="row">
             {columns.map((column) => (
@@ -57,11 +67,36 @@ export function DataTable<T>({
                 )}
               </th>
             ))}
+            {onRowClick && (
+              <th
+                role="columnheader"
+                aria-hidden="true"
+                className="ui-table__chevron-cell"
+              />
+            )}
           </tr>
         </thead>
         <tbody role="rowgroup">
           {rows.map((row) => (
-            <tr role="row" key={rowKey(row)}>
+            <tr
+              role="row"
+              key={rowKey(row)}
+              onClick={
+                onRowClick &&
+                ((event) => {
+                  // Links and controls inside the row keep their own behaviour,
+                  // and selecting text does not navigate.
+                  if (
+                    (event.target as Element).closest(
+                      "a, button, input, select, textarea, label",
+                    )
+                  )
+                    return;
+                  if (window.getSelection()?.toString()) return;
+                  onRowClick(row);
+                })
+              }
+            >
               {columns.map((column) => (
                 <td
                   key={column.key}
@@ -75,6 +110,16 @@ export function DataTable<T>({
                   {column.cell(row)}
                 </td>
               ))}
+              {onRowClick && (
+                <td
+                  role="cell"
+                  aria-hidden="true"
+                  data-mobile="hidden"
+                  className="ui-table__chevron-cell"
+                >
+                  <Icon name="chevron-right" className="ui-table__chevron" />
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -86,13 +131,19 @@ export function DataTable<T>({
 /** Divided list for feeds and simple collections. */
 export function List({
   label,
+  density = "default",
   children,
 }: {
   label?: string;
+  /** "compact" puts each row's title and facts on one line, for feeds. */
+  density?: "default" | "compact";
   children: ReactNode;
 }) {
   return (
-    <ul className="ui-list" aria-label={label}>
+    <ul
+      className={density === "compact" ? "ui-list ui-list--compact" : "ui-list"}
+      aria-label={label}
+    >
       {children}
     </ul>
   );
