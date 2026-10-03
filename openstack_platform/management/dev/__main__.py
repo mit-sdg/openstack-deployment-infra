@@ -10,17 +10,21 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
+import uuid
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+from ..broker.database import Database
 from ..broker.main import serve
+from ..broker.staff_admin import change_grant
 from ..common import canonical
 from ..config import Config
 from ..identity.client import IdentityConfig
 from ..identity.main import serve as serve_identity
 from ..web.server import Reply, WebServer, error_reply
-from .commons import Commons
+from .commons import USERS, Commons
 from .controller import FakeController
 
 
@@ -173,6 +177,30 @@ def run(
     fixture = FakeController(root / "controller.json")
     controller = fixture.server(config.controller_socket)
     resources.callback(controller.server_close)
+    # Explicit local fixture enrollment before any broker socket/admissions exist.
+    # Production entry points never import this harness or enroll any accounts.
+    database = Database(config)
+    subject, display_name = USERS["taylor"]
+    now = time.time()
+    with database.connect(write=True) as db:
+        row = db.execute(
+            "SELECT id FROM users WHERE issuer=? AND subject=?", (config.issuer, subject)
+        ).fetchone()
+        user_id = row["id"] if row is not None else str(uuid.uuid4())
+        if row is None:
+            db.execute(
+                "INSERT INTO users VALUES(?,?,?,'taylor',?,1,?,?)",
+                (user_id, config.issuer, subject, display_name, now, now),
+            )
+        change_grant(
+            db,
+            config,
+            action="grant",
+            user_id=user_id,
+            issuer=config.issuer,
+            subject=subject,
+            review="development-fixture",
+        )
     broker, broker_server = serve(config)
     resources.callback(broker.journal.close)
     resources.callback(broker_server.server_close)

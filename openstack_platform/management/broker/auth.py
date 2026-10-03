@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -19,6 +20,7 @@ from ..identity.client import credentials
 from .anonymous import AddressLimits, AnonymousChallenge, client_address_bucket
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
+from .staff_policy import ABSOLUTE_SECONDS, IDLE_SECONDS, current_grant
 
 
 @dataclass
@@ -121,6 +123,12 @@ class Auth:
         if request.headers.get("origin") != self.config.portal_origin:
             raise HttpError(403, "ORIGIN_REJECTED", "This action requires the portal origin.")
 
+    def read_origin(self, request: Request) -> None:
+        if "origin" in request.headers:
+            self.portal_origin(request)
+        if request.headers.get("sec-fetch-site", "same-origin") != "same-origin":
+            raise HttpError(403, "ORIGIN_REJECTED", "This read requires the portal origin.")
+
     def options(self, request: Request) -> Response:
         if request.body is not None or request.query:
             raise HttpError(400, "INVALID_REQUEST", "Sign-in options do not accept fields.")
@@ -144,7 +152,13 @@ class Auth:
         self.portal_origin(request)
         now = self.clock()
         self.address_limits.check(request, "start", now)
-        body = object_body(request.body, {"csrfToken", "username", "password"})
+        fields = {"csrfToken", "username", "password"}
+        if isinstance(request.body, dict) and "mode" in request.body:
+            fields.add("mode")
+        body = object_body(request.body, fields)
+        mode = body.get("mode", "owner")
+        if mode not in ("owner", "staff"):
+            raise HttpError(400, "INVALID_REQUEST", "Invalid sign-in mode.")
         binder = self.cookies(request).get(self.config.login_cookie, "")
         if (
             not self.anonymous.valid(binder, now)
@@ -172,6 +186,21 @@ class Auth:
                     "Your portal account is disabled. Contact course staff.",
                 )
             user_id = existing["id"] if existing else str(uuid.uuid4())
+            grant = (
+                current_grant(db, dict(existing), self.config.issuer, now)
+                if existing is not None
+                else None
+            )
+            if mode == "staff" and grant is None:
+                raise HttpError(
+                    403, "STAFF_UNAVAILABLE", "Staff sign-in is not available for this account."
+                )
+            kind = "staff_read" if mode == "staff" else "owner"
+            lifetime = (
+                min(ABSOLUTE_SECONDS, self.config.absolute_seconds)
+                if mode == "staff"
+                else self.config.absolute_seconds
+            )
             db.execute(
                 "INSERT INTO users(id,issuer,subject,username,display_name,created,last_login) VALUES(?,?,?,?,?,?,?) ON CONFLICT(issuer,subject) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,last_login=excluded.last_login",
                 (
@@ -188,8 +217,16 @@ class Auth:
             if old:
                 db.execute("DELETE FROM sessions WHERE token=?", (digest(old),))
             db.execute(
-                "INSERT INTO sessions VALUES(?,?,?,?,?)",
-                (digest(session), user_id, now, now, now + self.config.absolute_seconds),
+                "INSERT INTO sessions(token,user_id,created,last_used,expires,kind,staff_generation) VALUES(?,?,?,?,?,?,?)",
+                (
+                    digest(session),
+                    user_id,
+                    now,
+                    now,
+                    now + lifetime,
+                    kind,
+                    grant["generation"] if mode == "staff" and grant is not None else None,
+                ),
             )
             db.execute(
                 "INSERT INTO audit(user_id,action,created) VALUES(?,'sign_in',?)", (user_id, now)
@@ -197,11 +234,11 @@ class Auth:
         return Response(
             200,
             {
-                "data": {"returnPath": "/apps"},
+                "data": {"returnPath": "/staff/owners" if mode == "staff" else "/apps"},
                 "browser": {
                     "cookies": [
                         self.directive("login"),
-                        self.directive("session", session, self.config.absolute_seconds),
+                        self.directive("session", session, lifetime),
                     ]
                 },
             },
@@ -258,37 +295,62 @@ class Auth:
         finally:
             self.failures.finish(reservation, failed=failed, succeeded=succeeded)
 
+    def session_row(
+        self, db: sqlite3.Connection, sid: str, now: float, kind: str | None = None
+    ) -> dict[str, Any]:
+        row = db.execute(
+            "SELECT users.*, sessions.expires, sessions.last_used, sessions.kind, sessions.staff_generation FROM sessions JOIN users ON user_id=users.id WHERE token=?",
+            (sid,),
+        ).fetchone()
+        idle = (
+            min(IDLE_SECONDS, self.config.idle_seconds)
+            if row is not None and row["kind"] == "staff_read"
+            else self.config.idle_seconds
+        )
+        if row is None or row["expires"] <= now or row["last_used"] + idle <= now:
+            raise HttpError(401, "SESSION_EXPIRED", "Sign in to continue.")
+        if not row["enabled"]:
+            raise HttpError(403, "ACCOUNT_DISABLED", "This account is disabled.")
+        user = dict(row)
+        if row["kind"] == "staff_read":
+            grant = current_grant(db, user, self.config.issuer, now)
+            if grant is None or grant["generation"] != row["staff_generation"]:
+                raise HttpError(401, "SESSION_EXPIRED", "Sign in to continue.")
+        if kind is not None and row["kind"] != kind:
+            raise HttpError(403, "ACCESS_DENIED", "This session cannot access this view.")
+        return user
+
+    @staticmethod
+    def check_csrf(db: sqlite3.Connection, request: Request, sid: str, now: float) -> None:
+        csrf = request.headers.get("x-csrf-token", "")
+        found = db.execute(
+            "SELECT 1 FROM csrf_tokens WHERE token=? AND session=? AND expires>?",
+            (digest(csrf), sid, now),
+        ).fetchone()
+        if found is None:
+            raise HttpError(403, "CSRF_REJECTED", "Refresh this page before trying again.")
+
     def authenticate(
-        self, request: Request, *, mutation: bool = False
+        self,
+        request: Request,
+        *,
+        mutation: bool = False,
+        kind: str | None = None,
+        csrf: bool = False,
     ) -> tuple[dict[str, Any], str]:
         token = self.cookies(request).get(self.config.session_cookie)
         sid, now = digest(token or ""), self.clock()
         with self.database.connect(write=True) as db:
-            row = db.execute(
-                "SELECT users.*, sessions.expires, sessions.last_used FROM sessions JOIN users ON user_id=users.id WHERE token=?",
-                (sid,),
-            ).fetchone()
-            if (
-                row is None
-                or row["expires"] <= now
-                or row["last_used"] + self.config.idle_seconds <= now
-            ):
-                raise HttpError(401, "SESSION_EXPIRED", "Sign in to continue.")
-            if not row["enabled"]:
-                raise HttpError(403, "ACCOUNT_DISABLED", "This account is disabled.")
+            user = self.session_row(db, sid, now, kind)
             if mutation:
                 self.portal_origin(request)
-                csrf = request.headers.get("x-csrf-token", "")
-                found = db.execute(
-                    "SELECT 1 FROM csrf_tokens WHERE token=? AND session=? AND expires>?",
-                    (digest(csrf), sid, now),
-                ).fetchone()
-                if found is None:
-                    raise HttpError(403, "CSRF_REJECTED", "Refresh this page before trying again.")
+            if mutation or csrf:
+                self.check_csrf(db, request, sid, now)
             db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
-            return dict(row), sid
+            return user, sid
 
     def bootstrap(self, request: Request) -> Response:
+        self.read_origin(request)
         user, sid = self.authenticate(request)
         token, now = opaque(), self.clock()
         with self.database.connect(write=True) as db:
@@ -312,7 +374,10 @@ class Auth:
                     },
                     "csrfToken": token,
                     "expiresAt": utc(user["expires"]),
-                    "features": ["apps", "deployments", "build-logs"],
+                    "kind": user["kind"],
+                    "features": ["staff-read"]
+                    if user["kind"] == "staff_read"
+                    else ["apps", "deployments", "build-logs"],
                 }
             },
         )

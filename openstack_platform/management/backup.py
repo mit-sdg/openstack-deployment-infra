@@ -14,55 +14,11 @@ from pathlib import Path
 from .. import durable, runtime
 from ..controller.hosted_backup import _fsync_directory, _sha256, _write_file
 from ..validation import age_recipient as validate_recipient
-from .broker.database import MIGRATION_2, SCHEMA_V1
+from .broker.database import validate_database
 from .common import digest
 from .config import Config
 
 FORMAT = "openstack-platform-management-broker-backup-v1"
-
-
-def validate_database(
-    connection: sqlite3.Connection, identity: str | None = None
-) -> tuple[int, str]:
-    if (
-        connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]
-        or connection.execute("PRAGMA foreign_key_check").fetchall()
-    ):
-        raise ValueError("broker SQLite integrity or foreign keys failed")
-    rows = connection.execute("SELECT version,identity FROM metadata").fetchall()
-    if (
-        len(rows) != 1
-        or rows[0][0] not in (1, 2)
-        or (identity is not None and rows[0][1] != identity)
-    ):
-        raise ValueError("broker schema or identity mismatch")
-    migration = connection.execute(
-        "SELECT checksum FROM schema_migrations WHERE version=1"
-    ).fetchone()
-    if migration is None or migration[0] != digest(SCHEMA_V1):
-        raise ValueError("broker migration checksum mismatch")
-    if rows[0][0] == 2:
-        second = connection.execute(
-            "SELECT checksum FROM schema_migrations WHERE version=2"
-        ).fetchone()
-        if second is None or second[0] != digest(MIGRATION_2):
-            raise ValueError("broker migration checksum mismatch")
-    required = {
-        "users",
-        "sessions",
-        "csrf_tokens",
-        "apps",
-        "configurations",
-        "intents",
-        "audit",
-        "observations",
-        "quotas",
-    }
-    if not required <= {
-        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }:
-        raise ValueError("broker schema is incomplete")
-    return int(rows[0][0]), str(rows[0][1])
 
 
 def private_directory(path: Path, mode: int = 0o700) -> None:
@@ -192,6 +148,16 @@ def restore_database(source: Path, destination: Path, *, identity: str | None = 
                 if validate_database(restored)[0] == 1:
                     restored.execute("DELETE FROM flows")
                     restored.execute("DELETE FROM replays")
+                if validate_database(restored)[0] == 3:
+                    now = time.time()
+                    restored.execute(
+                        "UPDATE staff_grants SET enabled=0,generation=generation+1,updated=?",
+                        (now,),
+                    )
+                    restored.execute(
+                        "INSERT INTO staff_grant_audit(user_id,action,generation,actor_uid,review,created) SELECT user_id,'restore_disable',generation,?,'offline-restore',? FROM staff_grants",
+                        (os.geteuid(), now),
+                    )
                 restored.execute(
                     "UPDATE intents SET lease=0,next_retry=0 WHERE state NOT IN ('succeeded','failed')"
                 )

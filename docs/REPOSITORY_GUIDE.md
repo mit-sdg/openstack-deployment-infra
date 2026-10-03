@@ -317,6 +317,10 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/client.py` — fixed bounded Unix HTTP client with no TCP fallback.
 - `openstack_platform/management/broker/database.py` — private broker SQLite schema, migration evidence/locking, and short transactions.
 - `openstack_platform/management/broker/journal.py` — durable intent leases, same-key retries, operation polling, and recovery states.
+- `openstack_platform/management/broker/staff.py` — closed metadata projections, catalog paging, read budgets and transactional staff audit.
+- `openstack_platform/management/broker/staff_policy.py` — fixed staff bounds, current-grant checks and URL sanitization.
+- `openstack_platform/management/broker/staff_admin.py` — broker-identity offline enrollment, independent identity matching and joint session revocation.
+- `tests/test_management_staff.py` — staff read-only authority, disclosure, quota/paging/audit and migration/restore evidence.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
 - `openstack_platform/management/web/server.py` — bounded HTTP, static serving, closed broker forwarding, typed cookie directives, and CSP/security headers.
@@ -378,7 +382,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/identity/client.py` — bounded system-CA HTTPS Commons client and typed contract.
 - `openstack_platform/management/identity/main.py` — broker-only Unix identity process and configuration-only readiness.
 - `openstack_platform/management/dev/commons.py` — loopback HTTPS Commons bb78c5e contract double.
-- `tests/test_management_identity.py` — Commons contract, TLS/peer limits and schema-2 migration evidence.
+- `tests/test_management_identity.py` — Commons contract, TLS/peer limits and schema-1/2-to-3 migration evidence.
 - `tests/test_management_dev.py` — long-checkout socket binding, private development directories, path limits and partial-startup cleanup.
 
 - `openstack_platform/management_release.py` — commit-bound broker/web archives and authenticated asset compatibility evidence.

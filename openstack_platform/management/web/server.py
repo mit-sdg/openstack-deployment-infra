@@ -142,7 +142,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             )
             return Reply(200, file.read_bytes(), content_type, (("Cache-Control", cache),))
         if re.fullmatch(
-            r"/(?:|sign-in|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|deployments(?:/[a-f0-9-]{36})?))?)?)",
+            r"/(?:|sign-in|signin|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|deployments(?:/[a-f0-9-]{36})?))?)?|staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations))",
             path,
         ):
             index = self.assets / "index.html"
@@ -157,6 +157,13 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             if path not in {"/auth/options", "/auth/login"}:
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
+        elif re.fullmatch(
+            r"/api/v1/staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations)",
+            path,
+        ):
+            if method != "GET":
+                return error_reply(405, "METHOD_NOT_ALLOWED")
+            target = path.removeprefix("/api")
         elif re.fullmatch(
             r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/deployments(?:/[a-f0-9-]{36}(?:/build-log)?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
             path,
@@ -223,7 +230,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             if path == "/auth/login" and status == 200:
                 returned = value.get("data", {}).get("returnPath")
                 if not isinstance(returned, str) or not re.fullmatch(
-                    r"/(?:apps(?:/[a-z0-9/-]+)?|activity)", returned
+                    r"/(?:apps(?:/[a-z0-9/-]+)?|activity|staff/owners)", returned
                 ):
                     raise ValueError("invalid sign-in return path")
             if browser.get("status") == 204:

@@ -555,7 +555,7 @@ let
               import json
               commit = "a" * 40
               pair = "b" * 64
-              descriptor = json.dumps({"sourceCommit": commit, "pairIdentity": pair, "compatibility": {"brokerProtocolVersion": 2, "webProtocolVersion": 2, "authProtocolVersion": 2, "brokerSchemaVersion": 2, "controllerApiVersion": 1}}, separators=(",", ":"))
+              descriptor = json.dumps({"sourceCommit": commit, "pairIdentity": pair, "compatibility": {"brokerProtocolVersion": 3, "webProtocolVersion": 3, "authProtocolVersion": 3, "brokerSchemaVersion": 3, "controllerApiVersion": 1}}, separators=(",", ":"))
               for component in ("broker", "web"):
                   release = f"${state}/management-{component}-releases/releases/vm-test"
                   machine.succeed(f"install -d -m 2750 -o agentops -g management-{component} {release} {release}/bin {release}/config {release}/evidence")

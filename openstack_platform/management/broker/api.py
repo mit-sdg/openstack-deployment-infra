@@ -19,6 +19,7 @@ from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
 from .journal import Journal, intent_model
+from .staff import StaffReads
 
 RESERVED = {"admin", "api", "auth", "status", "www", "platform", "class"}
 DEFAULT_CONFIGURATION: dict[str, Any] = {
@@ -36,9 +37,17 @@ class Broker:
         self.auth = Auth(config, self.database)
         self.client = ProjectClient(config.controller_socket, config.controller_timeout)
         self.journal = Journal(self.database, self.client)
+        self.staff = StaffReads(self)
 
     def router(self) -> Router:
         router = Router()
+        common = {
+            ("GET", "/v1/auth/options"),
+            ("POST", "/v1/auth/login"),
+            ("GET", "/v1/session"),
+            ("POST", "/v1/logout"),
+            ("GET", "/v1/health"),
+        }
         routes = [
             ("GET", "/v1/auth/options", self.auth.options),
             ("POST", "/v1/auth/login", self.auth.login),
@@ -57,11 +66,22 @@ class Broker:
             ("GET", "/v1/intents/{intent}", self.intent),
             ("POST", "/v1/intents/{intent}/resume", self.resume),
             ("GET", "/v1/health", self.health),
+            ("GET", "/v1/staff/owners", self.staff.owners),
+            ("GET", "/v1/staff/owners/{owner}", self.staff.owner),
+            ("GET", "/v1/staff/apps", self.staff.apps),
+            ("GET", "/v1/staff/apps/{app}", self.staff.app),
+            ("GET", "/v1/staff/apps/{app}/deployments", self.staff.deployments),
+            ("GET", "/v1/staff/apps/{app}/deployments/{deployment}", self.staff.deployment),
+            ("GET", "/v1/staff/operations", self.staff.operations),
         ]
         for method, path, handler in routes:
 
             def guarded(request: Request, handler: Any = handler, route: str = path) -> Response:
                 try:
+                    if route.startswith("/v1/staff/"):
+                        return self.staff.handle(request, handler, route)
+                    if (request.method, route) not in common:
+                        self.auth.authenticate(request, kind="owner")
                     if request.method == "GET" and request.body is not None:
                         raise HttpError(
                             400, "INVALID_REQUEST", "Read requests cannot contain a body."
@@ -101,7 +121,7 @@ class Broker:
     def health(self, request: Request) -> Response:
         if request.query or request.body is not None:
             raise HttpError(400, "INVALID_REQUEST", "Invalid readiness request.")
-        return Response(200, {"data": {"ready": True, "protocolVersion": 1}})
+        return Response(200, {"data": {"ready": True, "protocolVersion": 3}})
 
     def own(
         self, request: Request, *, mutation: bool = False
@@ -174,7 +194,7 @@ class Broker:
             "truncated": more,
         }
 
-    def app_model(self, app: dict[str, Any]) -> dict[str, Any]:
+    def app_model(self, app: dict[str, Any], *, cache_seconds: int = 2) -> dict[str, Any]:
         result: dict[str, Any] = {
             "applicationId": app["id"],
             "slug": app["slug"],
@@ -195,7 +215,7 @@ class Broker:
         if cached is not None:
             result.update(strict_json(cached["body"].encode()))
             result.update(savedRevision=app["revision"], lifecycleState=app["lifecycle"])
-            if time.time() - cached["updated"] < 2:
+            if time.time() - cached["updated"] < cache_seconds:
                 return result
             result["stale"] = True
         if app["lifecycle"] == "ready":

@@ -143,7 +143,7 @@ class ManagementReleaseTests(unittest.TestCase):
     def test_assets_full_archive_hash_and_compatibility_are_bound_without_node_runtime(
         self,
     ) -> None:
-        self.assertEqual(self.document["compatibility"]["authProtocolVersion"], 2)
+        self.assertEqual(self.document["compatibility"]["authProtocolVersion"], 3)
         self.assertEqual(self.document["ui"]["build"]["nodeVersion"], "24.19.0")
         for mode in ("broker", "web"):
             files = releases.verify_archive(
@@ -932,7 +932,7 @@ class ManagementReleaseTests(unittest.TestCase):
         descriptor = broker / "evidence/management-artifacts.json"
         raw = descriptor.read_bytes()
         value = json.loads(raw)
-        value["compatibility"]["brokerSchemaVersion"] = 3
+        value["compatibility"]["brokerSchemaVersion"] = 4
         descriptor.chmod(0o640)
         descriptor.write_text(json.dumps(value))
         descriptor.chmod(0o440)

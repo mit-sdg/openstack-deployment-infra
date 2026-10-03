@@ -21,10 +21,10 @@ from pathlib import Path
 from typing import Any
 
 COMPATIBILITY = {
-    "brokerProtocolVersion": 2,
-    "webProtocolVersion": 2,
-    "authProtocolVersion": 2,
-    "brokerSchemaVersion": 2,
+    "brokerProtocolVersion": 3,
+    "webProtocolVersion": 3,
+    "authProtocolVersion": 3,
+    "brokerSchemaVersion": 3,
     "controllerApiVersion": 1,
 }
 
