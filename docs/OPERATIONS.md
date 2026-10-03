@@ -74,6 +74,12 @@ mutation routes. It runs as the owner of `/srv/openstack-platform`, uses the sam
 pinned `platform-admin` bridge as `status`, and listens only on a private Unix
 socket. You reach it through an SSH session that logs in as that operator.
 
+The React view uses the owner portal's shared visual components while keeping
+operator data, its API client and its server separate. Its built assets ship in
+the operator CLI release; Node and npm are not needed on the operator host.
+Assets are loaded into memory when the dashboard starts. After selecting a new
+operator release, restart the dashboard user unit to serve that release's UI.
+
 The socket admits any process running as the operator account, and the page
 shows global administrator reads. Do not publish it through a tunnel, reverse
 proxy, or shared port: the dashboard has no user authentication of its own.
@@ -120,6 +126,16 @@ hold the controller's shared API lock while they probe providers and helpers.
 Server state comes from the same operator-state and provider reads as
 `infra list`. Public routes are probed without credentials or redirects. The
 refresh button only wakes the next refresh, at most once every 10 seconds.
+
+Use application search, status filters and sorting to narrow the table, and open
+an application row for route evidence, deployment history, sizing, storage and
+identifiers. `Needs attention` opens the affected application or highlights its
+role; grouped application failures select the attention filter. The theme button
+cycles system, light and dark, saving this dashboard's preference independently
+of the portal. Relative ages update locally each second. The browser polls the
+cached snapshot every 10 seconds, every 2 seconds while collecting or reconnecting,
+and every 60 seconds while hidden; conditional ETags avoid reloading unchanged
+snapshots. These reads do not change the server's collection interval.
 
 Application statuses mean:
 

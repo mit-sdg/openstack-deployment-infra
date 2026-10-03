@@ -1,3 +1,4 @@
+import { ActivityRow } from '@openstack-platform/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'wouter';
 import { api, type Intent } from '../api';
@@ -21,7 +22,7 @@ export function Operation({ intent }: { intent: Intent }) {
         ? 'Create application'
         : 'Save configuration';
   return (
-    <li className="operation">
+    <ActivityRow>
       <div>
         <strong>{title}</strong>
         <div className="operation-subject">
@@ -63,6 +64,6 @@ export function Operation({ intent }: { intent: Intent }) {
           </button>
         )}
       </div>
-    </li>
+    </ActivityRow>
   );
 }

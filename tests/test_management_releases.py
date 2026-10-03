@@ -64,7 +64,7 @@ class ManagementReleaseTests(unittest.TestCase):
             "sourceCommit": cls.commit,
             "dirty": False,
             "npmLockSha256": hashlib.sha256(
-                (cls.repository / "frontend/owner-portal/package-lock.json").read_bytes()
+                (cls.repository / "frontend/package-lock.json").read_bytes()
             ).hexdigest(),
             "nodeVersion": "24.19.0",
             "assetManifestSha256": assets[".vite/manifest.json"]["sha256"],
@@ -987,7 +987,9 @@ class BuildIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="release-build-", dir=ROOT / ".tmp") as directory:
             repository, commit = clean_repository(ROOT, Path(directory) / "source")
             frontend = repository / "frontend/owner-portal"
-            subprocess.run(["npm", "ci"], cwd=frontend, check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(
+                ["npm", "ci"], cwd=frontend.parent, check=True, stdout=subprocess.DEVNULL
+            )
             subprocess.run(
                 ["npm", "run", "build"], cwd=frontend, check=True, stdout=subprocess.DEVNULL
             )

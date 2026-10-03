@@ -1,3 +1,4 @@
+import { Card } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'wouter';
 import { api } from '../api';
@@ -29,7 +30,7 @@ export function Dashboard() {
           </Link>
         )}
       </div>
-      <div className="quota-card card">
+      <Card className="quota-card">
         <div>
           <span className="overline">Application quota</span>
           <strong>
@@ -49,7 +50,7 @@ export function Dashboard() {
           aria-label="Applications used"
         />
         <span className="quota-note">Disabled apps still use a slot.</span>
-      </div>
+      </Card>
       <section className="section card">
         <div className="card-header">
           <h2>

@@ -32,6 +32,13 @@ Today, an operator can create and recover a platform with:
   state, and managed data, including retained application images; and
 - a local controller and locally tested owner portal with isolated identity checks.
 
+The operator dashboard and owner portal use shared React presentation components
+and theme tokens in the `frontend/` workspace. They remain separate apps with
+separate API clients and servers: operator evidence stays behind its private Unix
+socket. The dashboard's generated browser assets are committed with the CLI, so
+operator installation requires no Node tooling. See the
+[dashboard preview and frontend checks](docs/DEVELOPMENT.md#preview-the-operator-dashboard).
+
 The implemented local application workflow supports public, credential-free GitHub
 repositories and typed Node or Bun configuration. Users will not receive SSH,
 OpenStack, Nomad, registry, or database-administrator credentials. Private

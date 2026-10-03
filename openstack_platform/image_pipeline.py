@@ -21,7 +21,14 @@ from . import release_manifest as release
 from .config import PlatformConfig, _plain, load_platform
 from .openstack import publisher_metadata
 
-GATES = ("static", "generated-recipes", "nix-eval", "package-tests", "role-vm-tests")
+GATES = (
+    "static",
+    "generated-recipes",
+    "nix-eval",
+    "package-tests",
+    "role-vm-tests",
+    "dashboard-frontend",
+)
 IMAGE_INPUTS = (
     "flake.nix",
     "flake.lock",
@@ -29,6 +36,7 @@ IMAGE_INPUTS = (
     "nix",
     "infra",
     "openstack_platform",
+    "frontend",
     "deploy",
     "pyproject.toml",
     "uv.lock",
