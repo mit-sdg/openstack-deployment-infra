@@ -68,7 +68,8 @@ export type Session = {
   csrfToken: string;
   quota: Quota;
   expiresAt: string;
-  kind: 'owner' | 'staff_read';
+  role: 'owner' | 'staff' | 'admin';
+  stepUpExpiresAt: string | null;
 };
 export type Page<T> = { items: T[]; nextCursor: string | null; truncated: boolean };
 export type BuildLog = {
@@ -145,7 +146,8 @@ export async function request<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const epoch = credentialEpoch;
-  const staff = path.startsWith('/staff/');
+  const staff =
+    path.startsWith('/staff/') || path.startsWith('/accounts') || path.startsWith('/account-audit');
   const response = await fetch(`/api/v1${path}`, {
     credentials: 'same-origin',
     cache: 'no-store',
@@ -201,8 +203,8 @@ export const api = {
       (v) => {
         const data = fields(v, { csrfToken: 'string', expiresAt: 'string' });
         fields(data.user, { id: 'string', displayName: 'string', username: 'string' });
-        if (data.kind !== 'owner' && data.kind !== 'staff_read')
-          throw new Error('Invalid session kind');
+        if (!['owner', 'staff', 'admin'].includes(String(data.role)))
+          throw new Error('Invalid session role');
         csrf = data.csrfToken as string;
         return data as Session;
       },

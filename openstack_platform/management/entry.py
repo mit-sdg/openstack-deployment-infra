@@ -31,16 +31,16 @@ def main() -> None:
     from .config import Config
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("broker", "web", "identity", "staff-admin"))
+    parser.add_argument("mode", choices=("broker", "web", "identity", "bootstrap"))
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--requirements", type=Path, required=True)
     parser.add_argument("--smoke", action="store_true")
     args, remaining = parser.parse_known_args()
-    if remaining and args.mode != "staff-admin":
+    if remaining and args.mode != "bootstrap":
         parser.error("unexpected arguments")
-    if args.mode == "staff-admin" and args.smoke:
-        parser.error("staff recovery is not a service smoke mode")
+    if args.mode == "bootstrap" and args.smoke:
+        parser.error("bootstrap is not a service smoke mode")
     requirement = json.loads(args.requirements.read_text())
     if requirement != {
         "python": "3.14",
@@ -64,10 +64,10 @@ def main() -> None:
         config = Config.load(args.config)
         if config.development:
             raise ValueError("release cannot enable development mode")
-        if args.mode == "staff-admin":
-            from .broker.staff_admin import run as staff_admin
+        if args.mode == "bootstrap":
+            from .broker.bootstrap import run as bootstrap
 
-            staff_admin(config, remaining)
+            bootstrap(config, remaining)
             return
         if args.smoke:
             if args.mode == "broker":

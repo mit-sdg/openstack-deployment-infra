@@ -142,7 +142,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             )
             return Reply(200, file.read_bytes(), content_type, (("Cache-Control", cache),))
         if re.fullmatch(
-            r"/(?:|sign-in|signin|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|deployments(?:/[a-f0-9-]{36})?))?)?|staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations))",
+            r"/(?:|sign-in|signin|setup|activate|admin/(?:accounts|audit)|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|deployments(?:/[a-f0-9-]{36})?))?)?|staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations))",
             path,
         ):
             index = self.assets / "index.html"
@@ -154,9 +154,20 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self, method: str, path: str, query: str, headers: dict[str, str], raw: bytes
     ) -> Reply:
         if path.startswith("/auth/"):
-            if path not in {"/auth/options", "/auth/login"}:
+            if path not in {
+                "/auth/options",
+                "/auth/login",
+                "/auth/token-info",
+                "/auth/enroll",
+                "/auth/enroll/finish",
+            }:
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
+        elif re.fullmatch(
+            r"/api/v1/(?:accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
+            path,
+        ):
+            target = path.removeprefix("/api")
         elif re.fullmatch(
             r"/api/v1/staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations)",
             path,
@@ -176,7 +187,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             if raw:
                 content_type = headers.get("content-type", "")
                 if content_type != "application/json" or (
-                    path == "/auth/login" and len(raw) > 4096
+                    path.startswith("/auth/") and len(raw) > 16384
                 ):
                     return error_reply(415, "UNSUPPORTED_MEDIA_TYPE")
                 body = strict_json(raw)
@@ -227,10 +238,11 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             extra: list[tuple[str, str]] = [
                 ("Set-Cookie", self.cookie(cookie)) for cookie in browser.get("cookies", [])
             ]
-            if path == "/auth/login" and status == 200:
+            if path in {"/auth/login", "/auth/enroll/finish"} and status == 200:
                 returned = value.get("data", {}).get("returnPath")
                 if not isinstance(returned, str) or not re.fullmatch(
-                    r"/(?:apps(?:/[a-z0-9/-]+)?|activity|staff/owners)", returned
+                    r"/(?:apps(?:/[a-z0-9/-]+)?|activity|staff/owners|admin/accounts|sign-in)",
+                    returned,
                 ):
                     raise ValueError("invalid sign-in return path")
             if browser.get("status") == 204:

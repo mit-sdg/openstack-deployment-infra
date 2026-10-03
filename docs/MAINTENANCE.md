@@ -936,29 +936,31 @@ checksummed archives for rollback review. The GitHub frontend job builds/verifie
 unsigned development archives after its HTTPS smoke at the same source commit;
 it performs no publication.
 
-Schema 3 migrates schemas 1/2 forward while preserving the original migration
-checksums, users, ownership, quotas, configurations and intents. It invalidates
-all sessions, adds empty staff grants and separate session kinds/generations,
-read/membership audit and paging indexes. Coordinate broker/web/auth protocol 3
-in source manifest, archive requirements, isolated smoke, standalone installer,
-root activation and retained-pair validation. The admin image must contain the
-matching activation code before a protocol-3 pair can be selected; keep the
-[admin image preflight](#preflight-controller-paths-before-an-admin-image-upgrade)
-and replacement procedure. This changes no controller API, socket privilege or
-management-unit isolation.
+The final schema-3 account migration upgrades schemas 1/2 with their original
+checksums, preserves user/app/quota/configuration/intent state and invalidates
+sessions. It adds local credentials/TOTP, immutable role/generation snapshots,
+single-use tokens and private admin/read audit. The earlier unpublished grant
+prototype schema-3 checksum is unsupported; reset only disposable development
+state. Do not rewrite a recorded checksum or silently downgrade production data.
 
-Take a verified schema-2 backup before upgrading, quiesce admissions/backup and
-activation watchers, install a matching reviewed pair, verify schema-3 readiness
-and take a fresh backup before reopening. Users re-enter credentials. A schema-2
-binary or protocol-2 pair is not a compatible rollback after migration;
-retained-pair activation refuses it. Any schema downgrade needs separate offline
-recovery review, including ownership/intents admitted after the backup. Restoring
-schema-3 evidence deletes authentication and disables every restored staff grant
-with a new generation. Independently review and regrant membership; an older
-backup must not silently resurrect staff privilege. New grants/renewals/removals
-use the [typed recovery helper](OPERATIONS.md#enroll-or-revoke-a-portal-staff-account),
-not an image rebuild or a browser action. The portal remains locally verified,
-not deployed or live-accepted.
+Coordinate broker/web/auth protocol 3 and schema 3 in the source manifest,
+archive requirements, isolated smoke, standalone installer, root activation and
+retained-pair validation. The admin image's own activation code pins compatibility;
+a protocol-2 image refuses protocol-3 releases and requires the approved host
+replacement. The bootstrap command is an unprivileged Python entry point in the
+image/controller package and in the broker release. Its mode-0640 hash-only file
+uses the existing operator-owned broker-group setgid config directory; no new
+sandbox access, directory, password inventory or broker TCP permission is needed.
+
+Take a verified backup, quiesce release/backup admissions, install a matched pair,
+verify readiness and take a fresh backup before reopening. Old-schema binaries
+are not compatible rollbacks; retained activation refuses incompatible evidence.
+A schema-3 restore keeps roles and local credential/factor state, increments
+all generations and deletes sessions/invitations/enrollment handles. It rejects
+pre-restore enrollment files and advances factor replay counters beyond the
+restore window. Recover with a new operator enrollment URL and local admin if
+necessary; normal account/role/quota maintenance uses the admin UI. See
+[bootstrap and recovery](OPERATIONS.md#bootstrap-or-recover-a-local-admin).
 
 Admin management preparation uses scoped `systemd-tmpfiles` configurations after
 the state/backup mounts are present. It never runs path-based `install -d`, chown

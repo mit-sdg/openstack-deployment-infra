@@ -18,7 +18,6 @@ from typing import Any
 
 from ..broker.database import Database
 from ..broker.main import serve
-from ..broker.staff_admin import change_grant
 from ..common import canonical
 from ..config import Config
 from ..identity.client import IdentityConfig
@@ -110,7 +109,7 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, default=9443)
     parser.add_argument("--provider-port", type=int, default=9444)
-    parser.add_argument("--state", type=Path, default=Path(".tmp/owner-portal-credentials"))
+    parser.add_argument("--state", type=Path, default=Path(".tmp/owner-portal-accounts"))
     parser.add_argument(
         "--vite", action="store_true", help="Start Vite on the portal port (requires --http)"
     )
@@ -179,6 +178,11 @@ def run(
     resources.callback(controller.server_close)
     # Explicit local fixture enrollment before any broker socket/admissions exist.
     # Production entry points never import this harness or enroll any accounts.
+    from ..broker.bootstrap import enrollment_file
+
+    enrollment_folder = enrollment_file(config).parent
+    enrollment_folder.mkdir(parents=True, mode=0o2750, exist_ok=True)
+    enrollment_folder.chmod(0o2750)
     database = Database(config)
     subject, display_name = USERS["taylor"]
     now = time.time()
@@ -189,18 +193,12 @@ def run(
         user_id = row["id"] if row is not None else str(uuid.uuid4())
         if row is None:
             db.execute(
-                "INSERT INTO users VALUES(?,?,?,'taylor',?,1,?,?)",
+                "INSERT INTO users(id,issuer,subject,username,display_name,enabled,created,last_login) VALUES(?,?,?,'taylor',?,1,?,?)",
                 (user_id, config.issuer, subject, display_name, now, now),
             )
-        change_grant(
-            db,
-            config,
-            action="grant",
-            user_id=user_id,
-            issuer=config.issuer,
-            subject=subject,
-            review="development-fixture",
-        )
+        db.execute("UPDATE users SET role='staff',generation=generation+1 WHERE id=?", (user_id,))
+        db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+
     broker, broker_server = serve(config)
     resources.callback(broker.journal.close)
     resources.callback(broker_server.server_close)

@@ -1,265 +1,149 @@
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 const repository = path.resolve('../..');
 const mode = process.env.OWNER_PORTAL_SMOKE_MODE ?? 'https';
 if (!['https', 'http', 'vite'].includes(mode)) throw new Error('Invalid fixture mode');
-const config = path.join(repository, `.tmp/e-smoke-${mode}/config.json`);
-function fixture(action: 'grant' | 'revoke' | 'sentinel', appId = '') {
-  // Test-owned loopback DB only: never a grant HTTP route or production recovery bypass.
-  execFileSync(
+const config = path.join(repository, `.tmp/e-accounts-${mode}/config.json`);
+const password = 'private fixture phrase 927184';
+function bootstrapUrl() {
+  return execFileSync(
     'uv',
     [
       'run',
       'python',
       '-c',
       `
-import json, sys, time
 from pathlib import Path
+import sys
 from openstack_platform.management.config import Config
-from openstack_platform.management.broker.database import Database
-from openstack_platform.management.broker.staff_admin import change_grant
+from openstack_platform.management.broker.bootstrap import issue
 config = Config.load(Path(sys.argv[1]))
 assert config.development and config.state_directory.is_relative_to(Path.cwd() / '.tmp')
-with Database(config).connect(write=True) as db:
-    if sys.argv[2] == 'sentinel':
-        row = db.execute('SELECT app_id,body FROM observations WHERE app_id=?', (sys.argv[3],)).fetchone()
-        if row is not None:
-            body = json.loads(row['body'])
-            body['refs'] = {'environment': 'STAFF_SECRET_SENTINEL'}
-            db.execute('UPDATE observations SET body=?,updated=? WHERE app_id=?', (json.dumps(body), time.time(), row['app_id']))
-    else:
-        row = db.execute("SELECT id,subject FROM users WHERE username='taylor' AND issuer=?", (config.issuer,)).fetchone()
-        assert row is not None and row['subject'] == '44444444-4444-4444-8444-444444444444'
-        change_grant(db, config, action=sys.argv[2], user_id=row['id'], issuer=config.issuer,
-                     subject=row['subject'], review='playwright-fixture')
+print(issue(config))
 `,
       config,
-      action,
-      appId,
     ],
     { cwd: repository, stdio: 'pipe' },
-  );
+  )
+    .toString()
+    .trim();
 }
-// Development StrictMode can admit a cancelled GET and its remount retry.
-// Pace navigation at the approved user-token refill rate; never relax broker limits.
-async function pace(page: Page) {
-  if (mode === 'vite') await page.waitForTimeout(1000);
+function code(secret: string) {
+  return execFileSync(
+    'uv',
+    [
+      'run',
+      'python',
+      '-c',
+      `
+import sys,time
+from openstack_platform.management.broker.local_security import totp_code
+print(totp_code(sys.argv[1], int(time.time()//30)))
+`,
+      secret,
+    ],
+    { cwd: repository, stdio: 'pipe' },
+  )
+    .toString()
+    .trim();
 }
-async function signIn(page: Page, username: string, staff = false) {
-  await page.goto(staff ? '/signin?mode=staff' : '/sign-in');
-  await page.getByLabel('Username', { exact: true }).fill(username);
-  await page.getByLabel('Password', { exact: true }).fill(`local-${username}-password`);
+async function commons(page: Page, name: string) {
+  await page.goto('/sign-in');
+  await page.getByLabel('Username', { exact: true }).fill(name);
+  await page.getByLabel('Password', { exact: true }).fill(`local-${name}-password`);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page).toHaveURL(staff ? /\/staff\/owners$/ : /\/apps$/);
+  await expect(page).toHaveURL(/\/apps$/);
 }
-async function app(page: Page, slug: string) {
-  const session = (await (await page.request.get('/api/v1/session')).json()).data;
-  const headers = {
-    Origin: new URL(page.url()).origin,
-    'X-CSRF-Token': session.csrfToken,
-    'Idempotency-Key': crypto.randomUUID(),
-  };
+async function createApp(page: Page, slug: string) {
   const known = (await (await page.request.get('/api/v1/apps')).json()).data.items;
-  if (known.length) return { appId: known[0].applicationId as string, headers };
-  const created = await page.request.post('/api/v1/apps', { headers, data: { slug } });
-  expect([201, 202]).toContain(created.status());
-  return { appId: (await created.json()).data.app.applicationId as string, headers };
+  if (known.length) return known[0].applicationId as string;
+  await page.getByRole('link', { name: 'Create application', exact: true }).click();
+  await page.getByLabel('Application name').fill(slug);
+  await page.getByRole('button', { name: 'Create application', exact: true }).click();
+  await expect(page).toHaveURL(/\/configuration$/);
+  return new URL(page.url()).pathname.split('/')[2];
 }
-
 for (const [layout, viewport, colorScheme] of [
   ['desktop-light', { width: 1440, height: 1000 }, 'light'],
   ['mobile-dark', { width: 390, height: 844 }, 'dark'],
 ] as const) {
-  test(`staff and owner modes · ${layout}`, async ({ browser }) => {
-    fixture('grant');
+  test(`local admin bootstrap, invite and role boundaries · ${layout}`, async ({ browser }) => {
+    const admin = await browser.newContext({ viewport, colorScheme, ignoreHTTPSErrors: true });
+    const staff = await browser.newContext({ ignoreHTTPSErrors: true });
     const owner = await browser.newContext({ ignoreHTTPSErrors: true });
-    const student = await browser.newContext({ ignoreHTTPSErrors: true });
-    const staff = await browser.newContext({ viewport, colorScheme, ignoreHTTPSErrors: true });
+    const other = await browser.newContext({ ignoreHTTPSErrors: true });
     try {
-      const ownerPage = await owner.newPage();
-      const studentPage = await student.newPage();
+      const page = await admin.newPage();
       const staffPage = await staff.newPage();
-      staffPage.on('response', async (response) => {
-        const url = new URL(response.url());
-        if (url.pathname.startsWith('/api/v1/staff/') && response.status() >= 400) {
-          const value = await response.json().catch(() => ({}));
-          console.warn(
-            'staff-read-failure',
-            response.status(),
-            url.pathname,
-            value.error?.code ?? 'NON_JSON',
-          );
-        }
-      });
-      await signIn(ownerPage, 'taylor');
-      const own = await app(ownerPage, 'instructor-project');
-      await signIn(studentPage, 'alice');
-      const other = await app(studentPage, 'student-project');
-      expect((await ownerPage.request.get(`/api/v1/apps/${other.appId}`)).status()).toBe(404);
-      expect((await studentPage.request.get(`/api/v1/apps/${own.appId}`)).status()).toBe(404);
-      const csp: string[] = [];
-      const network: string[] = [];
-      await staff.addInitScript(() =>
-        document.addEventListener('securitypolicyviolation', () =>
-          console.error('STAFF_CSP_VIOLATION'),
-        ),
-      );
-      staffPage.on('console', (event) => {
-        if (event.text().includes('STAFF_CSP_VIOLATION')) csp.push(event.text());
-      });
-      staff.on('request', (request) => {
-        if (!['127.0.0.1', 'localhost'].includes(new URL(request.url()).hostname))
-          network.push(request.url());
-      });
-      await signIn(staffPage, 'taylor', true);
-      expect((await ownerPage.request.get('/api/v1/session')).status()).toBe(200);
-      expect((await staffPage.request.get('/api/v1/session')).status()).toBe(200);
+      const ownerPage = await owner.newPage();
+      const otherPage = await other.newPage();
+      const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 8);
+      const url = bootstrapUrl();
+      const token = new URL(url).hash.slice(1);
+      const requestUrls: string[] = [];
+      admin.on('request', (request) => requestUrls.push(request.url()));
+      await page.goto(url);
+      await expect(page).toHaveURL(/\/setup$/);
+      await page.getByLabel('Local username', { exact: true }).fill('admin' + suffix);
+      await page.getByLabel('New password', { exact: true }).fill(password);
+      await page.getByRole('button', { name: 'Continue', exact: true }).click();
+      const secret = await page.getByTestId('totp-secret').textContent();
+      expect(secret).toBeTruthy();
+      await page.getByLabel('Authentication code', { exact: true }).fill(code(secret!));
+      await page.getByRole('button', { name: 'Finish enrollment', exact: true }).click();
+      await expect(page).toHaveURL(/\/admin\/accounts$/);
+      await expect(page.getByRole('heading', { name: 'Accounts', exact: true })).toBeVisible();
+      expect(requestUrls.every((value) => !value.includes(token))).toBe(true);
+      await page.getByLabel('Local username', { exact: true }).fill('staff' + suffix);
+      await page.getByLabel('Display name', { exact: true }).fill('Local Staff');
+      await page.getByLabel('Account role', { exact: true }).selectOption('staff');
+      await page.getByRole('button', { name: 'Create invitation', exact: true }).click();
+      const invitation = await page.getByLabel('Account setup link').first().inputValue();
+      await staffPage.goto(invitation);
+      await staffPage.getByLabel('New password', { exact: true }).fill(password);
+      await staffPage.getByRole('button', { name: 'Continue', exact: true }).click();
+      await staffPage.getByRole('button', { name: 'Finish enrollment', exact: true }).click();
+      await expect(staffPage).toHaveURL(/\/apps$/);
+      const own = await createApp(staffPage, 'local-staff-' + suffix);
+      await commons(ownerPage, 'alice');
+      const foreign = await createApp(ownerPage, 'student-project');
+      expect((await staffPage.request.get(`/api/v1/apps/${foreign}`)).status()).toBe(404);
+      expect((await ownerPage.request.get(`/api/v1/apps/${own}`)).status()).toBe(404);
+      await staffPage.getByRole('link', { name: 'Staff catalog', exact: true }).click();
+      await expect(staffPage.getByRole('heading', { name: 'Owners', exact: true })).toBeVisible();
       await expect(
         staffPage.getByRole('link', { name: 'Alice Student', exact: true }),
       ).toBeVisible();
+      await staffPage.goto('/admin/accounts');
       await expect(
-        staffPage.getByRole('link', { name: 'Taylor Instructor', exact: true }),
+        staffPage.getByRole('heading', { name: 'Admin access unavailable' }),
       ).toBeVisible();
-      await expect(staffPage.getByRole('navigation', { name: 'Staff pages' })).toBeVisible();
+      await ownerPage.goto('/admin/audit');
       await expect(
-        staffPage.getByRole('link', { name: 'Create application', exact: true }),
-      ).toHaveCount(0);
-      const session = (await (await staffPage.request.get('/api/v1/session')).json()).data;
-      const headers = {
-        Origin: new URL(staffPage.url()).origin,
-        'X-CSRF-Token': session.csrfToken,
-        'Idempotency-Key': crypto.randomUUID(),
-      };
-      for (const appId of [own.appId, other.appId]) {
-        for (const [method, endpoint, data] of [
-          ['POST', '/api/v1/apps', { slug: 'forbidden-staff-project' }],
-          [
-            'PUT',
-            `/api/v1/apps/${appId}/configuration`,
-            {
-              expectedRevision: 0,
-              repository: 'https://github.com/example/student-app',
-              branch: 'main',
-              configuration: {
-                schemaVersion: 1,
-                build: {
-                  runtime: 'node',
-                  packages: ['.'],
-                  buildScript: null,
-                  startScript: 'start',
-                },
-                runtime: { port: 3000, healthPath: '/health' },
-                storageBindings: [],
-              },
-            },
-          ],
-          [
-            'POST',
-            `/api/v1/apps/${appId}/deployments`,
-            { configurationRevision: 1, commit: 'a'.repeat(40) },
-          ],
-          ['POST', `/api/v1/intents/${crypto.randomUUID()}/resume`, {}],
-        ] as const) {
-          const response = await staffPage.request.fetch(endpoint, { method, headers, data });
-          expect(response.status()).toBe(403);
-          expect((await response.json()).error.code).toBe('ACCESS_DENIED');
-        }
+        ownerPage.getByRole('heading', { name: 'Admin access unavailable' }),
+      ).toBeVisible();
+      expect((await staffPage.request.get('/api/v1/accounts')).status()).toBe(403);
+      expect((await ownerPage.request.get('/api/v1/account-audit')).status()).toBe(403);
+      await otherPage.goto(invitation);
+      await expect(otherPage.getByRole('alert')).toContainText('unavailable or expired');
+      const replay = await browser.newContext({ ignoreHTTPSErrors: true });
+      try {
+        const retry = await replay.newPage();
+        await retry.goto(url);
+        await expect(retry.getByRole('alert')).toContainText('unavailable or expired');
+      } finally {
+        await replay.close();
       }
-      expect(
-        (await staffPage.request.get(`/api/v1/apps/${own.appId}/configuration`)).status(),
-      ).toBe(403);
-      await pace(staffPage);
-      await staffPage
-        .getByRole('navigation', { name: 'Staff pages' })
-        .getByRole('link', { name: 'Applications' })
-        .click();
-      await expect(
-        staffPage.getByRole('link', { name: 'instructor-project', exact: true }),
-      ).toBeVisible();
-      await expect(
-        staffPage.getByRole('link', { name: 'student-project', exact: true }),
-      ).toBeVisible();
-      await pace(staffPage);
-      await staffPage.getByRole('link', { name: 'student-project', exact: true }).click();
-      await expect(
-        staffPage.getByRole('heading', { name: 'student-project', exact: true }),
-      ).toBeVisible();
-      await expect(
-        staffPage.getByRole('link', {
-          name: 'https://github.com/example/student-app',
-          exact: true,
-        }),
-      ).toBeVisible();
-      await expect(staffPage.getByRole('link', { name: 'Deploy', exact: true })).toHaveCount(0);
-      await pace(staffPage);
-      await staffPage.getByRole('link', { name: 'Deployments', exact: true }).click();
-      await expect(staffPage.getByRole('heading', { name: 'Deployment history' })).toBeVisible();
-      await expect(staffPage.getByRole('button', { name: /Resume|Deploy/ })).toHaveCount(0);
-      await pace(staffPage);
-      await staffPage
-        .getByRole('navigation', { name: 'Staff pages' })
-        .getByRole('link', { name: 'Operations' })
-        .click();
-      await expect(
-        staffPage.getByRole('heading', { name: 'Operations', exact: true }),
-      ).toBeVisible();
-      await expect(staffPage.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0);
-      await pace(staffPage);
-      fixture('sentinel', own.appId);
-      const response = await staffPage.request.get(`/api/v1/staff/apps/${own.appId}`, { headers });
-      expect(response.status()).toBe(200);
-      expect(await response.text()).not.toContain('STAFF_SECRET_SENTINEL');
-      await pace(staffPage);
-      await staffPage.goto(`/staff/apps/${own.appId}`);
-      await expect(
-        staffPage.getByRole('heading', { name: 'instructor-project', exact: true }),
-      ).toBeVisible();
-      expect(await staffPage.content()).not.toContain('STAFF_SECRET_SENTINEL');
-      await mkdir(path.join(repository, '.tmp/owner-portal-playwright/screenshots'), {
-        recursive: true,
-      });
-      await staffPage.screenshot({
-        path: path.join(
-          repository,
-          `.tmp/owner-portal-playwright/screenshots/staff-${mode}-${layout}.png`,
-        ),
-        fullPage: true,
-      });
-      fixture('revoke');
-      expect((await staffPage.request.get('/api/v1/session')).status()).toBe(401);
-      expect((await ownerPage.request.get('/api/v1/session')).status()).toBe(401);
-      await staffPage.getByRole('button', { name: 'Refresh', exact: true }).click();
-      await expect(staffPage).toHaveURL(/\/signin\?mode=staff$/);
-      await expect(staffPage.getByRole('navigation', { name: 'Staff pages' })).toHaveCount(0);
-      expect(csp).toHaveLength(0);
-      expect(network).toHaveLength(0);
+      await page.getByRole('link', { name: 'Audit', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Admin audit', exact: true })).toBeVisible();
+      await expect(page.getByText('account_invited', { exact: true }).first()).toBeVisible();
     } finally {
-      fixture('grant');
-      await owner.close();
-      await student.close();
+      await admin.close();
       await staff.close();
+      await owner.close();
+      await other.close();
     }
   });
 }
-test('ordinary credentials cannot mint staff authority; staff expiry returns to credential entry', async ({
-  page,
-}) => {
-  await page.goto('/signin?mode=staff');
-  await page.getByLabel('Username', { exact: true }).fill('bob');
-  await page.getByLabel('Password', { exact: true }).fill('wrong-fixture');
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('Username or password is incorrect');
-  await page.getByLabel('Password', { exact: true }).fill('local-bob-password');
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('not available for this account');
-  await page.clock.install();
-  await signIn(page, 'taylor', true);
-  await page.clock.fastForward(3600001);
-  await expect(page).toHaveURL(/\/signin\?mode=staff$/);
-  await expect(
-    page.getByRole('heading', { name: 'Staff sign-in with your class account' }),
-  ).toBeVisible();
-});

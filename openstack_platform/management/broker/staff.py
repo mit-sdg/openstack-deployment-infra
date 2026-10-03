@@ -183,7 +183,7 @@ class StaffReads:
         now = self.broker.auth.clock()
         with self.broker.database.connect(write=True) as db:
             if status == 200:
-                self.broker.auth.session_row(db, sid, now, "staff_read")
+                self.broker.auth.session_row(db, sid, now, "staff")
             state = db.execute(
                 "SELECT row_count,pruned_at FROM staff_read_state WHERE singleton=1"
             ).fetchone()
@@ -250,7 +250,7 @@ class StaffReads:
         if request.method != "GET":
             raise HttpError(405, "METHOD_NOT_ALLOWED", "Staff views permit only reads.")
         try:
-            user, sid = self.broker.auth.authenticate(request, kind="staff_read", touch=False)
+            user, sid = self.broker.auth.authenticate(request, kind="staff", touch=False)
         except HttpError as failure:
             self.limits.probe(failure.code, self.broker.auth.clock())
             raise
@@ -263,7 +263,7 @@ class StaffReads:
                 self.query(request, route)
                 with self.broker.database.connect(write=True) as db:
                     now = self.broker.auth.clock()
-                    self.broker.auth.session_row(db, sid, now, "staff_read")
+                    self.broker.auth.session_row(db, sid, now, "staff")
                     self.broker.auth.check_csrf(db, request, sid, now)
                     db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
                 result = handler(request)

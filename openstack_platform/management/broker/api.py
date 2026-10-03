@@ -15,6 +15,7 @@ from ...validation import ValidationError, commit, repository_url, slug
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body, strict_json, utc
 from ..config import Config
+from .accounts import Accounts
 from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
@@ -38,6 +39,7 @@ class Broker:
         self.client = ProjectClient(config.controller_socket, config.controller_timeout)
         self.journal = Journal(self.database, self.client)
         self.staff = StaffReads(self)
+        self.accounts = Accounts(self)
 
     def router(self) -> Router:
         router = Router()
@@ -46,6 +48,9 @@ class Broker:
             ("POST", "/v1/auth/login"),
             ("GET", "/v1/session"),
             ("POST", "/v1/logout"),
+            ("POST", "/v1/auth/token-info"),
+            ("POST", "/v1/auth/enroll"),
+            ("POST", "/v1/auth/enroll/finish"),
             ("GET", "/v1/health"),
         }
         routes = [
@@ -66,6 +71,15 @@ class Broker:
             ("GET", "/v1/intents/{intent}", self.intent),
             ("POST", "/v1/intents/{intent}/resume", self.resume),
             ("GET", "/v1/health", self.health),
+            ("POST", "/v1/auth/token-info", self.accounts.token_info),
+            ("POST", "/v1/auth/enroll", self.accounts.enroll),
+            ("POST", "/v1/auth/enroll/finish", self.accounts.finish),
+            ("GET", "/v1/accounts", self.accounts.listing),
+            ("POST", "/v1/accounts", self.accounts.create),
+            ("PATCH", "/v1/accounts/{user}", self.accounts.change),
+            ("PUT", "/v1/accounts/{user}/quotas", self.accounts.quotas),
+            ("GET", "/v1/account-audit", self.accounts.history),
+            ("POST", "/v1/reauthenticate", self.accounts.reauthenticate),
             ("GET", "/v1/staff/owners", self.staff.owners),
             ("GET", "/v1/staff/owners/{owner}", self.staff.owner),
             ("GET", "/v1/staff/apps", self.staff.apps),
@@ -80,8 +94,23 @@ class Broker:
                 try:
                     if route.startswith("/v1/staff/"):
                         return self.staff.handle(request, handler, route)
+                    if route in {
+                        "/v1/accounts",
+                        "/v1/accounts/{user}",
+                        "/v1/accounts/{user}/quotas",
+                        "/v1/account-audit",
+                        "/v1/reauthenticate",
+                    }:
+                        self.auth.authenticate(
+                            request, kind="admin", mutation=request.method != "GET", touch=False
+                        )
+                        if request.method == "GET" and request.body is not None:
+                            raise HttpError(
+                                400, "INVALID_REQUEST", "Read requests cannot contain a body."
+                            )
+                        return cast(Response, handler(request))
                     if (request.method, route) not in common:
-                        self.auth.authenticate(request, kind="owner", touch=False)
+                        self.auth.authenticate(request, touch=False)
                     if request.method == "GET" and request.body is not None:
                         raise HttpError(
                             400, "INVALID_REQUEST", "Read requests cannot contain a body."

@@ -1,33 +1,15 @@
-"""Fixed bounds and live grant checks for the public metadata view."""
+"""Fixed bounds and URL checks for the public metadata view."""
 
 from __future__ import annotations
 
-import sqlite3
-from collections.abc import Mapping
-from typing import Any, cast
 from urllib.parse import urlsplit
 
 ABSOLUTE_SECONDS = 3600
 IDLE_SECONDS = 600
-GRANT_SECONDS = 90 * 86400
-MEMBER_LIMIT = 100
+ADMIN_IDLE_SECONDS = 900
 AUDIT_SECONDS = 30 * 86400
 AUDIT_ROWS = 2_000_000
 RESPONSE_BYTES = 256 * 1024
-
-
-def current_grant(
-    db: sqlite3.Connection, user: Mapping[str, Any], issuer: str, now: float
-) -> sqlite3.Row | None:
-    if not user["enabled"] or user["issuer"] != issuer:
-        return None
-    return cast(
-        sqlite3.Row | None,
-        db.execute(
-            "SELECT generation FROM staff_grants WHERE user_id=? AND enabled=1 AND valid_until>?",
-            (user["id"], now),
-        ).fetchone(),
-    )
 
 
 def public_url(value: object) -> str | None:

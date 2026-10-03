@@ -45,7 +45,7 @@ function useRead<T>(
 ) {
   const { userId, active } = useContext(StaffContext);
   return useQuery({
-    queryKey: ['staff', 'staff_read', userId, ...key],
+    queryKey: ['staff', 'staff', userId, ...key],
     queryFn: ({ signal }) => read(signal),
     enabled: active,
     retry: false,
@@ -549,8 +549,7 @@ export function StaffPages({ userId }: { userId: string }) {
         </Route>
         <Route>
           <Empty title="Read-only staff session">
-            Use the staff navigation. To manage your own applications, sign in again through{' '}
-            <Link href="/sign-in">Owner sign-in</Link>.
+            Use the staff navigation, or return to <Link href="/apps">My applications</Link>.
           </Empty>
         </Route>
       </Switch>

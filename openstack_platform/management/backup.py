@@ -150,13 +150,20 @@ def restore_database(source: Path, destination: Path, *, identity: str | None = 
                     restored.execute("DELETE FROM replays")
                 if validate_database(restored)[0] == 3:
                     now = time.time()
+                    restored.execute("DELETE FROM account_tokens")
+                    restored.execute("DELETE FROM enrollments")
+                    restored.execute("DELETE FROM login_backoff")
                     restored.execute(
-                        "UPDATE staff_grants SET enabled=0,generation=generation+1,updated=?",
-                        (now,),
+                        "UPDATE token_policy SET valid_after=? WHERE singleton=1", (now,)
+                    )
+                    restored.execute("UPDATE users SET generation=generation+1")
+                    restored.execute(
+                        "UPDATE local_accounts SET last_counter=MAX(last_counter,?) WHERE totp_confirmed=1",
+                        (int(now // 30) + 1,),
                     )
                     restored.execute(
-                        "INSERT INTO staff_grant_audit(user_id,action,generation,actor_uid,review,created) SELECT user_id,'restore_disable',generation,?,'offline-restore',? FROM staff_grants",
-                        (os.geteuid(), now),
+                        "INSERT INTO admin_audit(action,details,created) VALUES('offline_restore','{}',?)",
+                        (now,),
                     )
                 restored.execute(
                     "UPDATE intents SET lease=0,next_retry=0 WHERE state NOT IN ('succeeded','failed')"

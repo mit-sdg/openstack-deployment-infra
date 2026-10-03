@@ -1,4 +1,4 @@
-"""Private SQLite management state; no credential values are persisted."""
+"""Private broker identities, local credential hashes/TOTP state, ownership and audit."""
 
 from __future__ import annotations
 
@@ -59,34 +59,52 @@ SCHEMA_VERSION = 3
 MIGRATION_3 = """
 DELETE FROM csrf_tokens;
 DELETE FROM sessions;
-ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'owner' CHECK(kind IN ('owner','staff_read'));
-ALTER TABLE sessions ADD COLUMN staff_generation INTEGER CHECK(
- (kind='owner' AND staff_generation IS NULL) OR
- (kind='staff_read' AND staff_generation IS NOT NULL AND staff_generation>0));
-CREATE TABLE staff_grants (
- user_id TEXT PRIMARY KEY REFERENCES users(id),
- enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
- generation INTEGER NOT NULL CHECK(generation>0),
- valid_until REAL NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
-CREATE TABLE staff_grant_audit (
- sequence INTEGER PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
- action TEXT NOT NULL CHECK(action IN ('grant','renew','revoke','restore_disable')),
- generation INTEGER NOT NULL, actor_uid INTEGER NOT NULL,
- review TEXT NOT NULL, created REAL NOT NULL);
+DROP TABLE csrf_tokens;
+DROP TABLE sessions;
+ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'owner' CHECK(role IN ('owner','staff','admin') AND (role!='admin' OR issuer='local'));
+ALTER TABLE users ADD COLUMN generation INTEGER NOT NULL DEFAULT 1 CHECK(generation>0);
+ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','pending'));
+CREATE UNIQUE INDEX local_username ON users(username COLLATE NOCASE) WHERE issuer='local';
+CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ created REAL NOT NULL, last_used REAL NOT NULL, expires REAL NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('owner','staff','admin')),
+ generation INTEGER NOT NULL CHECK(generation>0), reauthenticated_at REAL NOT NULL DEFAULT 0);
+CREATE TABLE csrf_tokens (token TEXT PRIMARY KEY, session TEXT NOT NULL REFERENCES sessions(token) ON DELETE CASCADE,
+ expires REAL NOT NULL, created REAL NOT NULL);
+CREATE TABLE local_accounts (user_id TEXT PRIMARY KEY REFERENCES users(id),
+ password_hash TEXT, totp_secret TEXT, totp_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(totp_confirmed IN (0,1)),
+ last_counter INTEGER NOT NULL DEFAULT -1);
+CREATE TABLE login_backoff (name_hash TEXT PRIMARY KEY, failures INTEGER NOT NULL,
+ blocked_until REAL NOT NULL, attempt_until REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE token_policy (singleton INTEGER PRIMARY KEY CHECK(singleton=1), valid_after REAL NOT NULL);
+INSERT INTO token_policy VALUES(1,0);
+CREATE TABLE account_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+ user_id TEXT NOT NULL REFERENCES users(id), generation INTEGER NOT NULL,
+ purpose TEXT NOT NULL CHECK(purpose IN ('invite','password-reset','totp-reset')),
+ expires REAL NOT NULL, created REAL NOT NULL);
+CREATE TABLE used_tokens (id TEXT PRIMARY KEY, purpose TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE enrollments (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ generation INTEGER NOT NULL, binder_hash TEXT NOT NULL, purpose TEXT NOT NULL,
+ secret TEXT, password_hash TEXT, expires REAL NOT NULL, failures INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE admin_audit (sequence INTEGER PRIMARY KEY, actor_id TEXT REFERENCES users(id),
+ target_id TEXT REFERENCES users(id), action TEXT NOT NULL, details TEXT NOT NULL,
+ created REAL NOT NULL);
 CREATE TABLE staff_read_audit (
  sequence INTEGER PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES users(id),
  correlation TEXT NOT NULL, route TEXT NOT NULL, owner_id TEXT, app_id TEXT,
  deployment_id TEXT, page_limit INTEGER, cursor_used INTEGER NOT NULL,
  result_count INTEGER NOT NULL, outcome TEXT NOT NULL, status INTEGER NOT NULL,
  stale INTEGER NOT NULL, created REAL NOT NULL);
-CREATE TABLE staff_read_state (
- singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+CREATE TABLE staff_read_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1),
  row_count INTEGER NOT NULL CHECK(row_count>=0), pruned_at REAL NOT NULL);
 INSERT INTO staff_read_state VALUES(1,0,0);
 CREATE INDEX staff_read_age ON staff_read_audit(created,sequence);
 CREATE INDEX staff_read_actor ON staff_read_audit(actor_id,created);
-CREATE INDEX staff_grant_age ON staff_grants(enabled,valid_until);
+CREATE INDEX admin_audit_age ON admin_audit(created DESC,sequence DESC);
+CREATE INDEX account_token_age ON account_tokens(expires);
+CREATE INDEX enrollment_age ON enrollments(expires);
 CREATE INDEX user_page ON users(created DESC,id DESC);
+CREATE INDEX user_name ON users(username,id);
 CREATE INDEX app_page ON apps(created DESC,id DESC);
 CREATE INDEX app_owner_page ON apps(user_id,created DESC,id DESC);
 CREATE INDEX intent_page ON intents(created DESC,id DESC);
@@ -231,7 +249,17 @@ def validate_database(
         "quotas",
     }
     if rows[0][0] == 3:
-        required |= {"staff_grants", "staff_grant_audit", "staff_read_audit", "staff_read_state"}
+        required |= {
+            "local_accounts",
+            "login_backoff",
+            "token_policy",
+            "account_tokens",
+            "used_tokens",
+            "enrollments",
+            "admin_audit",
+            "staff_read_audit",
+            "staff_read_state",
+        }
     if not required <= {
         row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }:

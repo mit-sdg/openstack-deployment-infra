@@ -316,8 +316,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/database.py` — private broker SQLite schema, migration evidence/locking, and short transactions.
 - `openstack_platform/management/broker/journal.py` — durable intent leases, same-key retries, operation polling, and recovery states.
 - `openstack_platform/management/broker/staff.py` — closed metadata projections, catalog paging, read budgets and transactional staff audit.
-- `openstack_platform/management/broker/staff_policy.py` — fixed staff bounds, current-grant checks and URL sanitization.
-- `openstack_platform/management/broker/staff_admin.py` — broker-identity offline enrollment, independent identity matching and joint session revocation.
+- `openstack_platform/management/broker/staff_policy.py` — fixed metadata bounds and URL sanitization.
 - `tests/test_management_staff.py` — staff read-only authority, disclosure, quota/paging/audit and migration/restore evidence.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
@@ -394,6 +393,15 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/rollback.py` — operator re-verification, smoke and normal activation request for a retained compatible pair and its own config snapshot.
 - `frontend/owner-portal/scripts/build-receipt.mjs` — Node/Git/npm-lock and actual Vite output receipt.
 - `tests/test_management_releases.py` — artifact trust, hostile archives, real-filesystem installation and explicit Node build integration.
+
+- `openstack_platform/management/broker/local_security.py` — bounded stdlib scrypt, TOTP counters and token hashes.
+- `openstack_platform/management/broker/local_auth.py` — local login, persistent backoff and credential/counter rechecks.
+- `openstack_platform/management/broker/bootstrap.py` — operator-owned hash-only enrollment file and setup URL.
+- `openstack_platform/management/broker/accounts.py` — admin account actions, step-up, invites/resets and private audit.
+- `tests/test_management_accounts.py` — local crypto, enrollment replay, roles/generations and account management tests.
+- `frontend/owner-portal/src/adminApi.ts` — typed account-management, quota, step-up and audit requests.
+- `frontend/owner-portal/src/pages/Accounts.tsx` — admin account list/actions, invitations, quotas and audit view.
+- `frontend/owner-portal/src/pages/Enrollment.tsx` — fragment-token setup/reset, local password and TOTP enrollment.
 
 ## Keeping this guide current
 

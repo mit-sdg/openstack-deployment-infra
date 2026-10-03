@@ -34,15 +34,15 @@ variables, storage lifecycle, enable/disable and runtime logs are later work.
 Private repositories, Dockerfiles, arbitrary build commands, custom domains,
 teams, scaling, shell access and credential export remain outside this slice.
 
-The same public portal has a read-only view for allowlisted course instructors
-and TAs: portal-known owners, effective quotas, app metadata and sanitized saved
-repository URLs, deployment history, and portal operation status. It contains no
-environment/configuration values, credentials, logs, or privileged operator data.
-Staff can still manage their own apps through a separately authenticated owner
-session. An owner session cannot gain staff access without a fresh password
-check. The broker DB allowlist starts empty and is maintained from the
-[recovery console](OPERATIONS.md#enroll-or-revoke-a-portal-staff-account).
-No controller capability or host sandbox is widened for this view.
+The same portal supports local accounts and DB-assigned owner/staff/admin roles.
+Staff inherit own-app rights and read the broker-known course catalog. Admins
+must be local accounts with TOTP and manage accounts/quotas through the UI.
+Commons identities can never be admin. The operator issues a 24-hour single-use
+fragment setup URL without putting any password in inventory or environment.
+See [bootstrap and recovery](OPERATIONS.md#bootstrap-or-recover-a-local-admin).
+The approved admin image replacement carries protocol-3 activation; later portal
+updates install matching broker/web releases. The operator dashboard remains
+separate and no controller administrator payload is exposed by account APIs.
 
 ## What appears in OpenStack
 

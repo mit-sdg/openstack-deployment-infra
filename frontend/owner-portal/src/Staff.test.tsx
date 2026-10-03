@@ -14,8 +14,9 @@ const owner = {
   displayName: '<script>Student</script>',
   portalEnabled: true,
 };
-const session = (kind: Session['kind']): Session => ({
-  kind,
+const session = (role: Session['role']): Session => ({
+  role,
+  stepUpExpiresAt: null,
   csrfToken: 'staff-csrf',
   expiresAt: new Date(Date.now() + 3600000).toISOString(),
   user: { id: userId, username: 'instructor', displayName: 'Instructor' },
@@ -42,7 +43,7 @@ afterEach(() => {
 
 describe('staff navigation and sign-in', () => {
   it('shows a read-only directory, escapes profile text and never mounts owner mutation hooks', async () => {
-    vi.spyOn(api, 'session').mockResolvedValue(session('staff_read'));
+    vi.spyOn(api, 'session').mockResolvedValue(session('staff'));
     const owners = vi
       .spyOn(staffApi, 'owners')
       .mockResolvedValue({ items: [owner], nextCursor: null, truncated: false });
@@ -58,16 +59,7 @@ describe('staff navigation and sign-in', () => {
     expect(create).not.toHaveBeenCalled();
     expect(resume).not.toHaveBeenCalled();
     expect(owners).toHaveBeenCalledTimes(1);
-    expect(client.getQueryData(['staff', 'staff_read', userId, 'owners', undefined])).toBeDefined();
-  });
-  it('blocks owner write-page navigation from staff without owner API calls', async () => {
-    vi.spyOn(api, 'session').mockResolvedValue(session('staff_read'));
-    const settings = vi.spyOn(api, 'settings');
-    const create = vi.spyOn(api, 'create');
-    show('/apps/new');
-    expect(await screen.findByRole('heading', { name: 'Read-only staff session' })).toBeVisible();
-    expect(settings).not.toHaveBeenCalled();
-    expect(create).not.toHaveBeenCalled();
+    expect(client.getQueryData(['staff', 'staff', userId, 'owners', undefined])).toBeDefined();
   });
   it('blocks staff direct URLs for owner sessions without querying the catalog', async () => {
     vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
@@ -77,35 +69,8 @@ describe('staff navigation and sign-in', () => {
     expect(owners).not.toHaveBeenCalled();
     expect(screen.queryByRole('navigation', { name: 'Staff pages' })).not.toBeInTheDocument();
   });
-  it('uses explicit staff mode and only shows its availability error after submitting credentials', async () => {
-    const fetch = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ data: { csrfToken: 'anonymous', providerLabel: 'class account' } }),
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        json: async () => ({ error: { code: 'STAFF_UNAVAILABLE' } }),
-      });
-    vi.stubGlobal('fetch', fetch);
-    show('/signin?mode=staff', <SignIn />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled());
-    expect(
-      screen.queryByText('Staff sign-in is not available for this account.'),
-    ).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'instructor' } });
-    fireEvent.change(screen.getByLabelText('Password', { exact: true }), {
-      target: { value: 'local-password' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('not available for this account');
-    expect(JSON.parse(fetch.mock.calls[1][1].body).mode).toBe('staff');
-    expect(screen.getByLabelText('Password', { exact: true })).toHaveValue('');
-    expect(screen.getByRole('link', { name: 'Owner sign-in' })).toHaveAttribute('href', '/sign-in');
-  });
   it('clears staff cache and returns to staff credential entry when access ends', async () => {
-    vi.spyOn(api, 'session').mockResolvedValue(session('staff_read'));
+    vi.spyOn(api, 'session').mockResolvedValue(session('staff'));
     vi.spyOn(staffApi, 'owners').mockResolvedValue({
       items: [owner],
       nextCursor: null,
@@ -122,14 +87,14 @@ describe('staff navigation and sign-in', () => {
     await screen.findByText(owner.displayName);
     act(() => window.dispatchEvent(new Event('portal-session-ended')));
     expect(
-      await screen.findByRole('heading', { name: 'Staff sign-in with your class account' }),
+      await screen.findByRole('heading', { name: 'Sign in with your class account' }),
     ).toBeVisible();
     expect(screen.queryByText(owner.displayName)).not.toBeInTheDocument();
     expect(client.getQueryCache().findAll({ queryKey: ['staff'] })).toHaveLength(0);
   });
   it('pauses polling in a hidden tab and ends an idle staff view', async () => {
     vi.useFakeTimers();
-    vi.spyOn(api, 'session').mockResolvedValue(session('staff_read'));
+    vi.spyOn(api, 'session').mockResolvedValue(session('staff'));
     const operations = vi
       .spyOn(staffApi, 'operations')
       .mockResolvedValue({ items: [], nextCursor: null, truncated: false });
@@ -154,7 +119,7 @@ describe('staff navigation and sign-in', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600000);
     });
-    expect(window.location.pathname).toBe('/signin');
+    expect(window.location.pathname).toBe('/sign-in');
     expect(screen.queryByRole('heading', { name: 'Operations' })).not.toBeInTheDocument();
   });
 });
@@ -171,7 +136,7 @@ describe('staff data API', () => {
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: async () => ({ data: session('staff_read') }),
+        json: async () => ({ data: session('staff') }),
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -215,5 +180,32 @@ describe('staff data API', () => {
       json: async () => ({ data: { items: [owner], nextCursor: null, truncated: false } }),
     });
     await expect(pending).rejects.toThrow('Sign in to continue');
+  });
+});
+
+describe('admin-only account pages', () => {
+  it('denies account and audit pages to owner and staff sessions without admin API calls', async () => {
+    const { adminApi } = await import('./adminApi');
+    const listing = vi.spyOn(adminApi, 'accounts');
+    vi.spyOn(api, 'session').mockResolvedValue(session('staff'));
+    show('/admin/accounts');
+    expect(await screen.findByRole('heading', { name: 'Admin access unavailable' })).toBeVisible();
+    expect(listing).not.toHaveBeenCalled();
+  });
+  it('offers two identity methods without a role selector or staff sign-in upgrade', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: { csrfToken: 'anon', providerLabel: 'class account' } }),
+      }),
+    );
+    show('/sign-in', <SignIn />);
+    expect(screen.getByRole('radio', { name: 'Commons' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Local portal account' })).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Staff sign-in' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: 'Local portal account' }));
+    expect(screen.getByLabelText('Authentication code (when enabled)')).toBeVisible();
+    expect(screen.queryByRole('combobox', { name: /role/i })).not.toBeInTheDocument();
   });
 });

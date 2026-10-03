@@ -235,7 +235,7 @@ The anonymous HMAC binder cookie is HttpOnly, Path=/, SameSite=Strict, Secure
 and __Host-prefixed on HTTPS. Login requires the exact portal Origin plus its
 HMAC CSRF token. Session cookies stay Secure/HttpOnly/Lax and expire after 8 h
 absolute or 30 min idle. Commons password changes or archiving do not end an
-existing portal session. Local portal revocation or logout does. Per-address
+existing Commons portal session. Local security changes, revocation or logout do. Per-address
 limits default to 600 options and 400 login attempts/minute, with IPv6 /64
 buckets. Five failed credentials exhaust a fixed 60-second budget for the exact
 username and address bucket. Pending identity checks reserve budget to prevent
@@ -254,40 +254,41 @@ the local systemd-resolved DNS stub. Review the provider ranges when updating th
 inventory. Web accepts only ingress and its overwritten `cf-connecting-ip`;
 X-Forwarded-For and X-Real-Ip never choose rate-limit buckets.
 
-### Exercise staff and owner sign-in modes
+### Exercise local accounts and roles
 
-The loopback harness explicitly enrolls the Taylor fixture before starting its
-broker socket. Production databases still start with no grants; production
-entry points never import the harness. Open `/signin?mode=staff` and enter the
-Taylor credentials for the read-only catalog. Use ordinary `/sign-in` for its
-own-app workspace. A fresh credential exchange creates each session kind; two
-browser contexts can hold both. An owner session never gains staff permission
-from a grant or a forged role header. The Bob fixture's successful password
-check in staff mode gets only the generic account-unavailability error.
+Use a fresh `.tmp/owner-portal-accounts` state directory for the final schema-3
+account model. The earlier unpublished staff-grant prototype checksum is refused;
+do not edit migration history to make an old test DB appear compatible. Run:
 
-Directory/catalog pages page through local metadata without per-row controller
-calls. Detail and operations pages poll every 15 seconds while visible, pause
-in hidden tabs and end after idle/absolute expiry. Staff GETs require session
-CSRF and reject supplied foreign Origin/Fetch Metadata. Owner mutations and
-configuration/log/intents reads reject a staff session, even for its own app.
-Tests include direct API mutation attempts, joint session revocation, secret
-sentinels in nested cache/upstream payloads, strict decoding, paging and audit
-failure. Staff fixture screenshots are saved locally under
-`.tmp/owner-portal-playwright/screenshots`; traces, video and credential captures
-remain disabled. The existing upload collector keeps its explicit owner-fixture
-whitelist; staff screenshots are for local review.
+```sh
+uv run python -m openstack_platform.management.dev --state .tmp/owner-portal-accounts
+```
 
-For manual offline enrollment/reset, stop the local harness first. Use
-`uv run python -m openstack_platform.management.broker.staff_admin --config
-.tmp/owner-portal-credentials/config.json inspect --user-id USER_UUID`, then
-`grant`, `renew` or `revoke` with `--user-id`, the verified loopback `--issuer`,
-fixture `--subject`, safe `--review`, and optional `--days 1..90`. The helper
-refuses an existing broker socket. Starting the harness regrants the Taylor
-fixture; a fresh explicit `.tmp` state directory resets all fixture data without
-altering production policy. See the
-[production recovery procedure](OPERATIONS.md#enroll-or-revoke-a-portal-staff-account)
-for stable identity verification and unit coordination. Playwright's grant
-changes use only its loopback test-owned DB, never a public grant endpoint.
+The harness explicitly gives the Taylor Commons fixture role `staff`; its own
+apps and catalog use one immutable role session. Production has no seed admin
+password or account. To exercise bootstrap while the local harness runs, use:
+
+```sh
+uv run openstack-platform-management-bootstrap --config .tmp/owner-portal-accounts/config.json
+```
+
+Open the fragment URL, create a local admin and enroll the one-time displayed
+TOTP key. The development config permits current-user file ownership; production
+requires the operator UID and broker setgid directory. All credentials remain
+public fixture data or locally entered test values; no live Commons or OpenStack
+service is contacted. Use Accounts to create a local staff invitation, redeem it
+in another browser context, then compare owner/staff/admin navigation. Commons
+remains the default sign-in method; local login has a separate method selector,
+never a role selector. Admin roles are prohibited for Commons accounts.
+
+Tests verify scrypt salts/cost upgrades, RFC TOTP vectors/window/replay, hash-only
+24-hour operator files, 72-hour invites/resets, one-time ID consumption, five-minute
+step-up, role/generation transitions, session invalidation, field projections and
+safe audit. Playwright bootstraps an admin, enrolls TOTP, invites local staff,
+checks Commons owner isolation and denies admin pages to non-admin roles. Tokens
+are removed from address bars and never enter request URLs. Traces/video remain
+disabled. Use the root npm workspace/lockfile and `frontend/shared` from PR #62;
+do not install or regenerate an owner-portal-only lockfile.
 
 ## Verify the portal
 

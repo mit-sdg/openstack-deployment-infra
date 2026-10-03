@@ -293,7 +293,7 @@ class RealProjectContractTests(ManagementCase):
             self.assertEqual(set(real_error["error"]), set(fake_error["error"]))
 
     def test_staff_reads_use_real_project_capability_without_global_enumeration(self) -> None:
-        from openstack_platform.management.broker.staff_admin import change_grant
+        from openstack_platform.management.broker.accounts import security_change
 
         app = self.create(slug="staff-contract-project")
         self.save(app)
@@ -307,15 +307,8 @@ class RealProjectContractTests(ManagementCase):
         self.broker.journal.dispatch(intent["intentId"])
         user = self.call("GET", "/v1/session", owner="alice").body["data"]["user"]["id"]
         with self.broker.database.connect(write=True) as connection:
-            change_grant(
-                connection,
-                self.config,
-                action="grant",
-                user_id=user,
-                issuer=self.config.issuer,
-                subject="11111111-1111-4111-8111-111111111111",
-                review="real-project-contract",
-            )
+            connection.execute("UPDATE users SET role='staff' WHERE id=?", (user,))
+            security_change(connection, user)
         options = self.call("GET", "/v1/auth/options").body
         signed = self.call(
             "POST",
@@ -324,7 +317,6 @@ class RealProjectContractTests(ManagementCase):
                 "csrfToken": options["data"]["csrfToken"],
                 "username": "alice",
                 "password": self.commons.passwords["alice"],
-                "mode": "staff",
             },
             headers={
                 "cookie": self.config.login_cookie + "=" + options["browser"]["cookies"][0]["value"]

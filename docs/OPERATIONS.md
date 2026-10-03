@@ -1309,130 +1309,107 @@ the Commons origin is confirmed. Production
 uses system CAs; no provider signing keys are used by this credential protocol.
 CA updates belong to the admin image, not a per-account key rotation.
 
-Defaults are two apps and one held external mutation per owner. Configuration
-changes affect owners without a `quotas` override; disabled apps still count.
-Recovery-console administrators may maintain `quotas(user_id,apps,concurrent)` and revoke
-`users.enabled`/`sessions` in the private broker DB through an offline recovery
-console as the broker identity. Stop portal/backup admissions, use a transaction
-with the immutable user ID, and record a safe audit action; never edit ownership
-by username. The portal's only cross-owner read exception is the explicitly
-allowlisted, bounded staff metadata view of this broker's catalog. Global
-controller administrator reads, quota edits, grants, revocations, ownership
-corrections and recovery actions remain outside the public portal. A local
-revocation rejects existing sessions at the next authorization check. Commons
-archiving/password changes affect new logins only; issued owner sessions retain
-the 8 h/30 min contract, staff sessions 1 h/10 min, unless locally revoked.
+Defaults are two apps and one held external mutation per owner. Local admins
+edit per-owner quotas in **Accounts**; lower limits stop new admission without
+cancelling existing operations or deleting apps. Disabled apps still count.
+Staff/admin catalog reads enumerate only broker-known resources; global
+controller administrator views remain outside this public portal.
 
-### Enroll or revoke a portal staff account
+### Bootstrap or recover a local admin
 
-Use a reviewed schema-3/protocol-3 active broker/web pair and the existing
-approved recovery console. The allowlist is private broker DB state, empty on
-initial migration; editing membership needs no inventory rebuild or host
-replacement. The recovery administrator performs service control, then runs
-the typed helper as `management-broker`. This grants no new operator sudo rights.
-The helper performs no network exchange and refuses a running broker socket,
-another process identity, a mismatched realm, unsafe DB ownership/mode, or an
-unsupported schema. Never use a mutable username as the enrollment key.
+Install and activate a matched schema-3/protocol-3 broker/web pair. The admin
+image must have the protocol-3 root activator: protocol-2 image code refuses the
+new descriptor, so the approved admin replacement is required. The bootstrap
+command is unprivileged and must run as the existing `operator` account on the
+admin host. It needs no additional directories or sandbox access. Its hash-only
+file is `paths.adminState/management-broker-releases/config/admin-enrollment.json`,
+inside the existing operator-owned, broker-group-readable setgid directory.
 
-First have the intended account sign in through owner mode so Commons establishes
-its stable `(issuer, subject)` record. Take a verified broker backup and retain
-its evidence before editing grants. From the admin recovery console, set `NS` to
-the inventory namespace and `STATE` to `paths.adminState`, then quiesce all portal
-admissions, activation watchers and broker backups. The following service control
-runs as the existing recovery-console administrator:
+Set `STATE` from inventory and resolve the active broker release. Use its
+isolated entry point so the helper matches the installed broker:
 
 ```sh
-systemctl stop "$NS-management-activate.path" \
-  "$NS-management-broker.path" "$NS-management-web.path" \
-  "$NS-management-broker-backup.timer"
-systemctl stop "$NS-management-activate.service" \
-  "$NS-management-web.service" "$NS-management-identity.service" \
-  "$NS-management-broker.service" "$NS-management-broker-backup.service"
 BROKER_RELEASE=$(readlink -f "$STATE/management-active/current/broker")
-test -n "$BROKER_RELEASE"
-test ! -e "/run/$NS-management-broker/broker.sock"
+/run/current-system/sw/bin/management-python3.14 -I -B   "$BROKER_RELEASE/runtime/openstack_platform/management/entry.py" bootstrap   --config "$BROKER_RELEASE/config/management.json"   --requirements "$BROKER_RELEASE/requirements.json"
 ```
 
-Obtain the immutable broker user UUID from the private DB/recovery records, not
-from a username lookup that could select a reused identity. Set `STAFF_USER_ID`
-to that UUID. Inspect the record with the release-local helper:
+The image package also exposes `openstack-platform-management-bootstrap --config
+PATH`. Both forms require the operator identity; root and broker identities are
+refused. They atomically replace a mode-0640 file whose group is inherited from
+the prepared mode-2750 directory. Only token ID, SHA-256 token hash, realm digest,
+creation time and 24 h expiry are stored. Issuing a new URL supersedes the prior
+unconsumed URL. Treat the printed URL as a credential; share it only with the
+intended admin. No password, plaintext token, or TOTP key belongs in inventory,
+environment variables, tickets, access logs or shell history.
 
-```sh
-sudo -u management-broker -- /run/current-system/sw/bin/management-python3.14 \
-  -I -B "$BROKER_RELEASE/runtime/openstack_platform/management/entry.py" staff-admin \
-  --config "$BROKER_RELEASE/config/management.json" \
-  --requirements "$BROKER_RELEASE/requirements.json" inspect --user-id "$STAFF_USER_ID"
-```
+Open the complete `/setup#ID.TOKEN` URL in a browser. The fragment never reaches
+HTTP requests or Referer; the page removes it from the address bar and POSTs it
+under exact Origin and anonymous-CSRF rules. Choose a local username and a
+password of at least 12 characters, at most 1024 UTF-8 bytes, excluding the
+username (case-insensitive). Enroll the displayed TOTP key in an authenticator
+and confirm a code. The key is shown only once and uses no external QR service.
+The pending admin cannot sign in until enrollment finishes. Each token ID is
+consumed when enrollment starts; replay, expiry, wrong realm and malformed files
+are refused. An abandoned or exhausted enrollment needs a new operator URL and
+new local username. Enrollment handles expire after 10 min and permit at most
+five incorrect code confirmations.
 
-Independently verify its `issuer` and canonical `subject` UUID against the course's
-trusted Commons administration records. The helper's own output alone is not
-independent verification. Confirm the person is currently an instructor or TA.
-Set `COMMONS_ORIGIN` and `COMMONS_SUBJECT` to those verified values and
-`STAFF_REVIEW` to a non-secret review reference (1–80 letters, digits, dots,
-underscores, slashes or hyphens, starting with a letter/digit). Do not put a
-password or credential in any argument or review reference.
+Recovery uses the same command to create a **new** local admin. That admin can
+disable the old account or issue password/TOTP reset links from Accounts.
+Commons identities cannot become admin; their credentials are checked externally
+and are never reset by this UI. No additional sudo or controller capability is
+needed for the operator command.
 
-```sh
-sudo -u management-broker -- /run/current-system/sw/bin/management-python3.14 \
-  -I -B "$BROKER_RELEASE/runtime/openstack_platform/management/entry.py" staff-admin \
-  --config "$BROKER_RELEASE/config/management.json" \
-  --requirements "$BROKER_RELEASE/requirements.json" grant \
-  --user-id "$STAFF_USER_ID" --issuer "$COMMONS_ORIGIN" \
-  --subject "$COMMONS_SUBJECT" --review "$STAFF_REVIEW" --days 90
-```
+### Manage accounts, roles and quotas
 
-Use `renew` with the same verified identity and review arguments to extend an
-existing grant, or `revoke` to disable it. Grants/renewals accept 1–90 days,
-default 90, and at most 100 enabled memberships. An expired membership still
-occupies an enabled slot until revoked. Disabled portal accounts cannot be
-granted/renewed. An identity mismatch or membership-limit failure rolls back the
-transaction. Successful grant, renewal and revocation each increment generation,
-delete **all** owner and staff sessions/CSRF for that user, and record a private
-grant audit. A revoked staff session never becomes an owner session.
+**Accounts** lists and searches local and Commons accounts, including role,
+active/pending/disabled status, last sign-in, app count and effective quotas.
+Create local owner/staff/admin accounts through 72 h single-use invitations;
+copy and privately share the returned fragment URL. The portal sends no email.
+Local owner/staff recipients may enable TOTP; admins must enroll it. A staff
+account can manage its own apps and read the catalog in the same session.
+There is no sign-in mode selector, impersonation or role upgrade in a session.
 
-Verify with the same release invocation using `list` instead of `grant` and omit
-the identity/change arguments. It returns at most 100 membership records and a
-`truncated` flag; inspect the target's generation/enabled state directly in the
-private DB if older disabled records exceed that list. Keep the review evidence.
-After a removal, the account may still sign in as an ordinary owner unless
-`users.enabled` is also disabled through the existing recovery procedure. For a
-full-account revocation, disable it and delete all sessions in one transaction.
+Changing role, enabling/disabling, revoking sessions, or issuing/resetting local
+credentials increments generation and deletes all of the account's sessions and
+outstanding account/enrollment links. A new login receives its current DB role.
+Admin promotions without a confirmed TOTP factor become pending and receive a
+fresh enrollment link. Common accounts may be owner or staff, never admin.
+Quota edits use 0–1000 apps and 0–16 concurrent operations; zero stops new
+admission. They do not reassign ownership or change controller resources.
 
-Take a fresh verified backup, then reopen the fixed units from the recovery
-console:
+Role/enable/disable/session-revoke and reset actions, plus creation of another
+admin, require password and a fresh TOTP code validated within five minutes.
+Use **Confirm a sensitive account action** when prompted. Codes cannot be reused
+within their accepted counter/window; wait for a fresh code if you just enrolled
+or signed in. Admin sessions are capped at 1 h absolute/15 min idle. Local login
+also has the existing five-failure username/address window and persistent
+per-account exponential delays from 1 s to 15 min. A generic credential error
+covers invalid accounts, passwords, factors and backoff; throttling/capacity
+errors have no credential detail.
 
-```sh
-systemctl start "$NS-management-broker-backup.service"
-systemctl show "$NS-management-broker-backup.service" -p Result
-systemctl start "$NS-management-identity.service" "$NS-management-broker.service" \
-  "$NS-management-web.service"
-systemctl start "$NS-management-activate.path" "$NS-management-broker.path" \
-  "$NS-management-web.path" "$NS-management-broker-backup.timer"
-systemctl is-active "$NS-management-broker.service" "$NS-management-web.service"
-```
+Password-reset links require the existing TOTP factor when enabled. TOTP-reset
+links enroll a fresh factor but do not issue a session: sign in with the password
+and a fresh code afterward. To recover both factors, the new admin can issue a
+TOTP-reset link first, then a password-reset link. Resetting credentials does not
+silently enable a disabled account. **Admin audit** records safe actor/target IDs,
+action, generation/role/quota metadata and timestamps, never links or secrets.
 
-The user must re-enter credentials using **Staff sign-in** (`/signin?mode=staff`).
-An ordinary owner login remains available to an allowlisted account and has only
-its own app permissions. A successful password check without a live grant gets
-the generic “not available for this account” staff error. Test the intended
-mode's navigation and rejected writes before declaring live acceptance. Two
-browser contexts may hold owner and staff sessions concurrently; one browser's
-new login replaces its previous cookie/session.
-
-Every staff read checks account, immutable session kind, grant expiry/generation,
-session expiry and session CSRF. Revocation committed during a dependency read
-is checked again before its result/audit commits. A response authorized before
-a later revocation may already be in flight; quiescing web is the hard incident
-cutover. A stolen staff password also permits ordinary own-app owner access;
-it does not permit writes to other owners' apps.
+Break glass is the operator bootstrap command, not the former offline staff-grant
+helper. Keep a verified broker backup before recovery or release migration.
+A restore retains roles and credential/factor state, increments generations and
+deletes all sessions, invitations and pending enrollment handles. It also fences
+off every pre-restore operator enrollment file by issuance time, and rejects the
+current TOTP window to prevent replay from a rolled-back counter. Wait for a fresh
+code after restore, and issue a new operator URL if recovery is needed.
 
 ### Review staff reads and recover audit capacity
 
 Staff reads record actor ID, correlation UUID, fixed route, validated resource/
 filter IDs, page bound/cursor presence, row count, outcome/status, stale flag and
 time in `staff_read_audit`. They never record passwords, cookies, CSRF, raw
-queries, response bodies, logs or controller operation references. Membership
-changes have separate `staff_grant_audit` evidence. Read audits are private to
+queries, response bodies, logs or controller operation references. Account
+changes have separate `admin_audit` evidence. Read audits are private to
 recovery access; the staff portal exposes no audit endpoint.
 
 Read-audit retention is 30 days. Read traffic triggers bounded pruning batches
@@ -1462,9 +1439,8 @@ export/status, including a broken selector whose release files disappeared.
 Checking both keeps recovery evidence mandatory before first activation and
 while staging changes independently of an active pair. The
 broker HMAC key is not restored; sessions and CSRF are removed. Schema-3 restores
-disable every restored staff grant and increment its generation; independently
-review and regrant staff membership before reopening staff access. This prevents
-an old backup from restoring a removed account's privilege. To replace state,
+retain roles, increment generations, delete all sessions/account/enrollment tokens
+and fence off pre-restore operator enrollment files. To replace state,
 stop identity/broker/web, their activation/path units and broker backup timer/
 service. Decrypt to broker-owned mode-0600 `management-broker/restore-input.sqlite3`
 and use `openstack-platform-management-broker-restore --yes` from the recovery

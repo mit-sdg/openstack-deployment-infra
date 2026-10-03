@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type FormEvent } from 'react';
-import { Link, useLocation, useSearch } from 'wouter';
+import { useLocation } from 'wouter';
 import { clearCredentials } from '../api';
 import { ErrorNotice } from '../components/Feedback';
 import { Mark } from '../components/Mark';
@@ -11,11 +11,12 @@ const messages: Record<string, string> = {
   IDENTITY_UNAVAILABLE: 'Class sign-in is temporarily unavailable. Please try again.',
   RATE_LIMITED: 'Too many unsuccessful attempts. Wait a minute, then try again.',
   CSRF_REJECTED: 'Reload the sign-in page and try again.',
-  STAFF_UNAVAILABLE: 'Staff sign-in is not available for this account.',
+  AUTH_UNAVAILABLE: 'Local sign-in is temporarily unavailable.',
 };
 
 export function SignIn() {
-  const staff = new URLSearchParams(useSearch()).get('mode') === 'staff';
+  const [method, setMethod] = useState<'commons' | 'local'>('commons');
+  const [totp, setTotp] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [visible, setVisible] = useState(false);
@@ -50,23 +51,29 @@ export function SignIn() {
             csrfToken: options.data?.csrfToken,
             username,
             password,
-            mode: staff ? 'staff' : 'owner',
+            method,
+            totp,
           }),
         });
         const value = await response.json();
         if (!response.ok)
           throw new Error(
-            messages[value.error?.code] ?? 'Sign-in could not complete. Please try again.',
+            (method === 'local' && value.error?.code === 'INVALID_CREDENTIALS'
+              ? 'Username, password or authentication code is incorrect.'
+              : messages[value.error?.code]) ?? 'Sign-in could not complete. Please try again.',
           );
         if (
           typeof value.data?.returnPath !== 'string' ||
-          !/^\/(?:apps(?:\/[a-z0-9/-]+)?|activity|staff\/owners)$/.test(value.data.returnPath)
+          !/^\/(?:apps(?:\/[a-z0-9/-]+)?|activity|staff\/owners|admin\/accounts)$/.test(
+            value.data.returnPath,
+          )
         )
           throw new Error('Invalid sign-in response.');
         return value.data.returnPath as string;
       } finally {
         setPassword('');
         setVisible(false);
+        setTotp('');
       }
     },
     onSuccess: (path) => {
@@ -82,28 +89,22 @@ export function SignIn() {
   return (
     <div className="sign-in-layout">
       <div className="sign-in-intro">
-        <span className="eyebrow">
-          {staff ? 'Staff view · Read only' : 'Your application workspace'}
-        </span>
+        <span className="eyebrow">Your application workspace</span>
         <h1>
-          {staff ? 'Course applications.' : 'Make something.'}
+          Make something.
           <br />
-          {staff ? 'See what’s running.' : 'Put it out there.'}
+          Put it out there.
         </h1>
-        <p>
-          {staff
-            ? 'Review owners, quotas, deployment history, and application status.'
-            : 'Create an app, connect your repository, and turn a specific commit into a running application.'}
-        </p>
+        <p>Create an app, connect your repository, and deploy a specific commit.</p>
         <div className="intro-steps">
           <span>
-            <b>01</b> {staff ? 'Review owners' : 'Connect your code'}
+            <b>01</b> Connect your code
           </span>
           <span>
-            <b>02</b> {staff ? 'Browse applications' : 'Choose your settings'}
+            <b>02</b> Choose your settings
           </span>
           <span>
-            <b>03</b> {staff ? 'Check operations' : 'Deploy with confidence'}
+            <b>03</b> Deploy with confidence
           </span>
         </div>
       </div>
@@ -112,10 +113,37 @@ export function SignIn() {
           <Mark />
         </span>
         <h2>
-          {staff ? 'Staff sign-in with your ' : 'Sign in with your '}
-          {options.data?.providerLabel ?? 'class account'}
+          Sign in with your{' '}
+          {method === 'local'
+            ? 'local portal account'
+            : (options.data?.providerLabel ?? 'class account')}
         </h2>
-        <p>Use the same username and password as your class account.</p>
+        <p>
+          {method === 'commons'
+            ? 'Use the same username and password as your class account.'
+            : 'Use the local portal credentials you enrolled.'}
+        </p>
+        <fieldset className="field">
+          <legend>Sign-in method</legend>
+          <label>
+            <input
+              type="radio"
+              name="method"
+              checked={method === 'commons'}
+              onChange={() => setMethod('commons')}
+            />{' '}
+            Commons
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="method"
+              checked={method === 'local'}
+              onChange={() => setMethod('local')}
+            />{' '}
+            Local portal account
+          </label>
+        </fieldset>
         <ErrorNotice error={options.error ?? login.error} />
         <form onSubmit={submit} aria-busy={login.isPending}>
           <div className="field">
@@ -139,7 +167,7 @@ export function SignIn() {
                 name="password"
                 type={visible ? 'text' : 'password'}
                 autoComplete="current-password"
-                maxLength={128}
+                maxLength={method === 'local' ? 1024 : 128}
                 required
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
@@ -161,6 +189,19 @@ export function SignIn() {
               </button>
             </div>
           </div>
+          {method === 'local' && (
+            <div className="field">
+              <label htmlFor="local-totp">Authentication code (when enabled)</label>
+              <input
+                id="local-totp"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                value={totp}
+                onChange={(event) => setTotp(event.target.value)}
+              />
+            </div>
+          )}
           <button
             className="button button-primary sign-in-button"
             disabled={!options.data || login.isPending}
@@ -169,17 +210,10 @@ export function SignIn() {
           </button>
         </form>
         <small>
-          Your password is checked server-side with your{' '}
-          {options.data?.providerLabel ?? 'class account'} and is never saved by the portal. Portal
-          {staff
-            ? 'staff sessions last up to 1 hour, or 10 minutes without activity.'
-            : 'sessions last up to 8 hours, or 30 minutes without activity.'}
+          {method === 'commons'
+            ? 'Commons passwords are checked server-side and never saved by the portal.'
+            : 'Local passwords are stored as salted password hashes. Admin accounts require an authentication code.'}
         </small>
-        <p>
-          <Link href={staff ? '/sign-in' : '/signin?mode=staff'} className="text-link">
-            {staff ? 'Owner sign-in' : 'Staff sign-in'}
-          </Link>
-        </p>
       </section>
     </div>
   );

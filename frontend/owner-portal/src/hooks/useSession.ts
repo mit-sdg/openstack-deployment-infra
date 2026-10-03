@@ -6,7 +6,7 @@ import { api, clearCredentials } from '../api';
 export function useSession() {
   const [location, navigate] = useLocation();
   const client = useQueryClient();
-  const signIn = location === '/sign-in' || location === '/signin';
+  const signIn = ['/sign-in', '/signin', '/setup', '/activate'].includes(location);
   const session = useQuery({
     queryKey: ['session'],
     queryFn: ({ signal }) => api.session(signal),
@@ -25,12 +25,12 @@ export function useSession() {
     function ended() {
       clearCredentials();
       void client.cancelQueries();
-      navigate(session.data?.kind === 'staff_read' ? '/signin?mode=staff' : '/sign-in');
+      navigate('/sign-in');
       client.clear();
     }
     window.addEventListener('portal-session-ended', ended);
     return () => window.removeEventListener('portal-session-ended', ended);
-  }, [client, navigate, session.data?.kind]);
+  }, [client, navigate, session.data?.role]);
   useEffect(() => {
     if (signIn || !session.data) return;
     const expires = Date.parse(session.data.expiresAt);

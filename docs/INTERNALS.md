@@ -577,7 +577,7 @@ identified by Commons origin and stable UUID rather than mutable username.
 
 The owner API exposes only their own apps/config/deployments/build logs/intents,
 returning 404 for another owner's IDs. Defaults are two apps and one external
-mutation per owner, with recovery-console overrides. Broker transactions reserve ownership
+mutation per owner, with local-admin quota overrides. Broker transactions reserve ownership
 and quota and persist the intent plus a separate controller idempotency key before
 calling project.sock. Unknown outcomes repeat that exact key/request; known 202
 operations are polled. Only terminal confirmed/not_required cleanup settles an
@@ -590,31 +590,68 @@ build logs. React assets are external static files under strict CSP; admin runs
 Python only. Environment values, managed storage, enable/disable and runtime logs
 remain later work. Deletion and global administrator reads remain operator-only.
 
-### Read-only portal staff view
+### Local identities, roles and admin enrollment
 
-`POST /auth/login` (broker `/v1/auth/login`) accepts an optional `mode` of
-`owner` (default) or `staff`, alongside username/password and anonymous CSRF.
-Only after Commons accepts the password does staff mode check a live grant for
-that immutable `(issuer, subject)` broker user. Missing/disabled/expired grants
-get `STAFF_UNAVAILABLE`, a generic account-availability error. A successful staff
-login returns `/staff/owners` and creates an immutable `staff_read` session.
-Owner mode remains available to all enabled accounts, including allowlisted
-staff; its scope and writes are restricted to the caller's own apps as before.
-There is no impersonation, session upgrade or role toggle. A fresh credential
-exchange is required to enter either mode. Separate browser contexts can hold
-both kinds; granting, renewing or revoking membership deletes all of that user's
-sessions and CSRF in one transaction.
+Commons credential checking remains the fixed HTTPS identity integration, with
+stable `(issuer, subject)` identity and no persisted Commons passwords. Local
+accounts have issuer `local`, immutable UUID subject, and a unique canonical
+lowercase username. They store only salted password hashes and private TOTP
+state in broker SQLite. Local and Commons names occupy separate namespaces.
+`POST /auth/login` accepts `method=commons` (default) or `local`, password and
+optional TOTP; client role claims are ignored. The broker assigns the current
+DB role to an immutable session snapshot. Roles are `owner`, `staff`, `admin`;
+SQL and broker checks allow admin only when issuer is local. Every session joins
+current enabled/status/role/generation; security changes increment generation and
+delete all sessions. Staff/admin inherit own-app owner rights, while staff
+catalog endpoints remain metadata-only.
 
-Staff sessions have 1 h absolute and 10 min request-idle limits, capped by a
-shorter configured owner limit. They recheck user enabled state, grant
-enabled/expiry/realm/generation and session expiry on every request. Staff reads
-require session-bound CSRF even on GET; a supplied Origin must match exactly,
-and supplied Fetch Metadata must be `same-origin`. Bootstrap issues CSRF without
-a previous token, rejecting supplied cross-site Origin/Fetch Metadata. There is
-no CORS. All owner routes reject staff session kinds, including configuration,
-build logs, intents and every mutation. Logout may delete authentication state;
-read bookkeeping may update session activity, sanitized cache, rate counters
-and private audit, but never admit/resume an intent or mutate an application.
+Local hashing uses `hashlib.scrypt`, `N=32768,r=8,p=3,dklen=64`, random 16-byte
+salts, constant-time hash comparison and automatic upgrade after valid login.
+Only bounded supported costs are accepted from stored hashes. Two nonqueued
+hashing slots limit aggregate algorithm memory to roughly 64 MiB; OpenSSL is
+capped at 48 MiB per call. The current broker unit has no explicit MemoryMax.
+The cost corresponds to the 32 MiB option in the
+[OWASP scrypt guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt).
+Passwords must have 12+ characters, at most 1024 UTF-8 bytes and exclude the
+username case-insensitively. Neither passwords nor factors are logged.
+
+TOTP follows [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238): SHA-1, six digits,
+30-second steps and a ±1-step window. A private 160-bit secret is exposed only on
+first enrollment response, as text/otpauth URI; no external QR endpoint is used.
+Accepted counters strictly increase. Admin sessions require a confirmed local
+factor; local owner/staff factors are optional. Admin expiry is 1 h/15 min idle,
+staff 1 h/10 min, capped by shorter owner policy. Sensitive account actions need
+password plus fresh TOTP within five minutes. Existing username/address failure
+reservations also cover local login; bounded persistent name-hash backoff protects
+against attempts spread across addresses. Password work occurs outside DB locks;
+credentials, generation and TOTP counter are rechecked in the commit transaction.
+
+The operator creates a hash-only enrollment file under the existing broker-group
+setgid release/config directory, atomically at 0640. Broker reads it through its
+existing read-only sandbox path; no new network permission is needed. IDs are
+consumed in the same transaction that starts enrollment. Invitations/resets are
+72 h hashed single-use DB tokens tied to user generation. Enrollment is bound to
+the anonymous browser binder, lasts ten minutes, and limits code confirmation to
+five failures. Restore clears every session/token/handle, preserves roles, fences
+pre-restore files and advances factor counters beyond the restore window.
+The final schema-3 account migration preserves immutable migrations 1/2; old,
+unpublished staff-grant prototype schema-3 checksums are intentionally refused.
+Use fresh development state rather than silently rewriting a migration record.
+
+Admin-only broker/browser endpoints are `/api/v1/accounts` (GET list/search,
+POST local invitation), `/api/v1/accounts/{user}` (PATCH role/state/revoke/reset),
+`/api/v1/accounts/{user}/quotas` (PUT limits), `/api/v1/account-audit` (GET safe
+admin actions), and `/api/v1/reauthenticate` (POST password/TOTP step-up). They do
+not proxy controller administrator routes. Anonymous `/auth/token-info`,
+`/auth/enroll` and `/auth/enroll/finish` require exact Origin and binder CSRF.
+Setup links carry secrets only in fragments and transient POST bodies.
+Admin GETs also require session CSRF and same-origin metadata. Paging defaults
+25/max 50; account search caps at 64 characters, escaped LIKE parameters.
+Account mutations recheck admin authority in their DB transaction and audit
+atomically. Quota changes do not modify ownership or provider resources.
+See [bootstrap and recovery](OPERATIONS.md#bootstrap-or-recover-a-local-admin).
+
+### Read-only course catalog
 
 Only the following browser GET routes exist, mapping to broker paths after
 removing `/api`:
@@ -663,8 +700,7 @@ navigation and mutation components do not mount in staff mode. Directory pages
 refresh manually; detail/operation polling runs every 15 seconds while visible,
 pauses in hidden tabs, and stops after repeated failures. Idle/absolute expiry,
 logout and access loss cancel queries and clear private in-memory data/CSRF;
-query caches are never persisted. `/signin?mode=staff` is credential entry, not
-an authenticated role switch.
+query caches are never persisted. All navigation uses the immutable session role.
 
 All staff collections default to 25 records and cap at 50, with scoped UUID
 cursors and indexed local keyset paging. Unknown/duplicate/empty query fields,
@@ -675,25 +711,23 @@ share /64 buckets. Limiter state is bounded (100 users/4096 addresses) and
 process-local; restart resets it. 429/503 responses carry a 30-second retry
 delay. These bound cost/response volume, not eventual disclosure: a compromised
 staff credential can enumerate the entire approved course metadata catalog and
-also mint an ordinary owner session for its own apps. It cannot widen owner
+also manage its own apps. It cannot widen owner
 write scope. Commons password/archival changes still affect new logins only.
 
 Successful staff reads recheck authorization and commit a private read audit
 before sending data. Audit/dependency failure returns 503 without metadata;
 revocation during an upstream call suppresses a result at the final check.
 Already authorized/in-flight responses cannot be retracted. Recovery-console
-quiescing supplies the incident cutover. Grant management and audit maintenance
-remain [offline operations](OPERATIONS.md#enroll-or-revoke-a-portal-staff-account).
+quiescing supplies the incident cutover. Account management belongs to local admins; audit-cap maintenance and bootstrap
+belong to [portal operations](OPERATIONS.md#owner-portal-operations).
 
 Schema 3 preserves immutable migration-1/2 checksums and invalidates all sessions,
-adding grants, session kinds/generation, indexed staff paging and private read/
-membership audits. Enrollment defaults to empty, lasts at most 90 days and caps
-at 100 enabled members. Unknown schemas/checksums/realms fail closed. Online SQLite snapshots are
+adding local credentials, immutable role/generation snapshots, single-use tokens,
+indexed paging and private admin/read audits. No initial admin password exists. Unknown schemas/checksums/realms fail closed. Online SQLite snapshots are
 age-encrypted as the fourth backup class. Four-class off-site bundles coexist with
 legacy three-class evidence, and restore invalidates sessions/anonymous challenges
-and disables all restored staff grants with incremented generations. Regranting
-requires independent identity review; old backup policy never silently restores
-staff access. Read audits retain 30 days with bounded daily pruning on read
+and deletes all account/enrollment tokens while preserving roles and incrementing
+generations. Pre-restore enrollment files are fenced off by issuance time. Read audits retain 30 days with bounded daily pruning on read
 traffic and a 2-million-row cap; cap/commit failure denies staff reads, while
 owner APIs have no audit-cap authorization dependency. Shared DB/disk failure
 can affect both kinds of access.
