@@ -37,6 +37,7 @@ class FakeController:
         self.failed_next = False
         self.recovery_next = False
         self.delay = 0.6
+        self.pause_storage_creation = False
         self.error_next: tuple[int, str] | None = None
         self.state_file = state_file
         if state_file is not None and state_file.is_file():
@@ -340,7 +341,11 @@ class FakeController:
         operation = self.operations.get(identifier)
         if operation is None:
             raise HttpError(404, "OPERATION_NOT_FOUND", "Operation does not exist.")
-        if operation["status"] == "running" and time.time() >= operation["ready"]:
+        if (
+            operation["status"] == "running"
+            and time.time() >= operation["ready"]
+            and not (operation["kind"] == "storage.create" and self.pause_storage_creation)
+        ):
             if operation["kind"] != "app.deploy":
                 operation.update(
                     status="succeeded",

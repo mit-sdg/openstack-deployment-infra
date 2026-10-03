@@ -7,12 +7,14 @@ import os
 import stat
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
 from openstack_platform.controller.http import ControllerServer, Router
 from openstack_platform.management.config import Config
-from openstack_platform.management.dev.__main__ import main
+from openstack_platform.management.dev.__main__ import HarnessWeb, main
+from openstack_platform.management.dev.controller import FakeController
 from openstack_platform.management.identity.client import IdentityConfig
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +60,42 @@ class ManagementDevelopmentTests(unittest.TestCase):
             )
         )
         return IdentityConfig.load(path)
+
+    def test_storage_creation_gate_preserves_provisioning_until_browser_finishes_it(self) -> None:
+        config = self.load()
+        fixture = FakeController()
+        fixture.delay = 0
+        web = HarnessWeb(("127.0.0.1", 0), config, self.root, fixture=fixture)
+        self.addCleanup(web.server_close)
+        pause = "/__test__/pause-storage-creation"
+        finish = "/__test__/finish-storage-creation"
+        self.assertEqual(
+            web.handle("POST", pause, {"origin": "https://foreign.example"}, b"{}").status, 403
+        )
+        self.assertFalse(fixture.pause_storage_creation)
+        self.assertEqual(
+            web.handle("POST", pause, {"origin": config.portal_origin}, b"{}").status, 200
+        )
+        router = fixture.router()
+        app, operation = str(uuid.uuid4()), str(uuid.uuid4())
+        router.dispatch(
+            "POST", "/v1/applications", {"idempotency-key": app}, {"slug": "gated-storage"}
+        )
+        router.dispatch(
+            "POST",
+            f"/v1/applications/{app}/storage",
+            {"idempotency-key": operation},
+            {"type": "postgres"},
+        )
+        observed = router.dispatch("GET", f"/v1/operations/{operation}", {}, None)
+        self.assertEqual(observed.body["status"], "running")
+        self.assertEqual(fixture.resources[operation]["lifecycleState"], "creating")
+        self.assertEqual(
+            web.handle("POST", finish, {"origin": config.portal_origin}, b"{}").status, 200
+        )
+        observed = router.dispatch("GET", f"/v1/operations/{operation}", {}, None)
+        self.assertEqual(observed.body["status"], "succeeded")
+        self.assertEqual(fixture.resources[operation]["lifecycleState"], "active")
 
     def test_all_sockets_bind_in_private_directory_from_long_checkout(self) -> None:
         checkout = Path("/tmp") / ("deep-checkout-" + "x" * 100)

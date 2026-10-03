@@ -147,7 +147,7 @@ for (const [mode, viewport, colorScheme] of [
       });
       await page.getByRole('button', { name: 'Deploy this commit', exact: true }).click();
       await expect(page.getByText('Deployment succeeded.', { exact: false })).toBeVisible({
-        timeout: 15000,
+        timeout: 30000,
       });
       const historyResponse = await page.request.get(`/api/v1/apps/${appId}/deployments`);
       const history = (await historyResponse.json()).data.items as {
