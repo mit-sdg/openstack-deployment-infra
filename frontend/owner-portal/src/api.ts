@@ -158,6 +158,18 @@ export function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<
     truncated: data.truncated,
   };
 }
+// Keep metadata panels inside the broker's two-active-reads account bound.
+let adminReads = 0;
+const adminReadWaiters: (() => void)[] = [];
+async function adminReadSlot() {
+  if (adminReads >= 2) await new Promise<void>((resolve) => adminReadWaiters.push(resolve));
+  else adminReads++;
+  return () => {
+    const next = adminReadWaiters.shift();
+    if (next) next();
+    else adminReads--;
+  };
+}
 export async function request<T>(
   path: string,
   decode: (v: unknown) => T,
@@ -167,24 +179,35 @@ export async function request<T>(
 ): Promise<T> {
   const epoch = credentialEpoch;
   const staff =
-    path.startsWith('/staff/') || path.startsWith('/accounts') || path.startsWith('/account-audit');
-  const response = await fetch(`/api/v1${path}`, {
-    credentials: 'same-origin',
-    cache: 'no-store',
-    signal,
-    ...(staff ? { headers: { 'X-CSRF-Token': csrf } } : {}),
-    ...(options
-      ? {
-          method: options.method,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CSRF-Token': csrf,
-            ...(options.key ? { 'Idempotency-Key': options.key } : {}),
-          },
-          body: JSON.stringify(options.body),
-        }
-      : {}),
-  });
+    path.startsWith('/admin-apps') ||
+    path.startsWith('/staff/') ||
+    path.startsWith('/accounts') ||
+    path.startsWith('/account-audit');
+  const release = !options && path.startsWith('/admin-apps') ? await adminReadSlot() : () => {};
+  let response: Response;
+  try {
+    if (epoch !== credentialEpoch)
+      throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
+    response = await fetch(`/api/v1${path}`, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal,
+      ...(staff ? { headers: { 'X-CSRF-Token': csrf } } : {}),
+      ...(options
+        ? {
+            method: options.method,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': csrf,
+              ...(options.key ? { 'Idempotency-Key': options.key } : {}),
+            },
+            body: JSON.stringify(options.body),
+          }
+        : {}),
+    });
+  } finally {
+    release();
+  }
   if (response.status === 204) return undefined as T;
   const payload = record(await response.json());
   if (epoch !== credentialEpoch) throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
@@ -217,6 +240,7 @@ export async function request<T>(
   return decode(payload.data);
 }
 export const api = {
+  ...resourceApi(),
   session: (signal?: AbortSignal) =>
     request(
       '/session',
@@ -242,41 +266,6 @@ export const api = {
       (v) => ({ app: appData(record(v).app), intent: intentData(record(v).intent) }),
       { method: 'POST', body: { slug }, key },
     ),
-  settings: (id: string) =>
-    request(
-      `/apps/${id}/configuration`,
-      (v) => fields(v, { revision: 'number', repository: 'string', branch: 'string' }) as Settings,
-    ),
-  save: (id: string, settings: Settings, key: string) =>
-    request(`/apps/${id}/configuration`, (v) => fields(v, { revision: 'number' }), {
-      method: 'PUT',
-      body: {
-        expectedRevision: settings.revision,
-        repository: settings.repository,
-        branch: settings.branch,
-        configuration: settings.configuration,
-      },
-      key,
-    }),
-  environment: (id: string) => request(`/apps/${id}/environment`, (v) => record(v) as Environment),
-  setEnvironment: (id: string, name: string, value: string, key: string) =>
-    request(`/apps/${id}/environment/${name}`, intentData, { method: 'PUT', body: { value }, key }),
-  deleteEnvironment: (id: string, name: string, key: string) =>
-    request(`/apps/${id}/environment/${name}`, intentData, { method: 'DELETE', body: {}, key }),
-  storage: (id: string) =>
-    request(
-      `/apps/${id}/storage`,
-      (v) =>
-        record(v) as { items: StorageResource[]; intents: (Intent & { type: string | null })[] },
-    ),
-  createStorage: (id: string, type: StorageResource['type'], key: string) =>
-    request(`/apps/${id}/storage`, intentData, { method: 'POST', body: { type }, key }),
-  storageAction: (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
-    request(`/apps/${id}/storage/${resource}/${action}`, intentData, {
-      method: 'POST',
-      body: {},
-      key,
-    }),
   deploy: (id: string, revision: number, commit: string, key: string) =>
     request(`/apps/${id}/deployments`, intentData, {
       method: 'POST',
@@ -362,4 +351,64 @@ export function validateBindings(bindings: StorageBinding[], names: string[]): s
     }
   }
   return null;
+}
+
+// Both workspaces use the same resource requests and write-only controls.
+export function resourceApi(prefix = '/apps', confirmStorage?: () => boolean) {
+  function consentFields() {
+    if (!confirmStorage) return {};
+    if (!confirmStorage()) throw new Error('Action canceled.');
+    return { identityProviderConfirmed: true };
+  }
+  return {
+    settings: (id: string) =>
+      request(
+        `${prefix}/${id}/configuration`,
+        (v) =>
+          fields(v, { revision: 'number', repository: 'string', branch: 'string' }) as Settings,
+      ),
+    save: (id: string, settings: Settings, key: string) =>
+      request(`${prefix}/${id}/configuration`, (v) => fields(v, { revision: 'number' }), {
+        method: 'PUT',
+        body: {
+          expectedRevision: settings.revision,
+          repository: settings.repository,
+          branch: settings.branch,
+          configuration: settings.configuration,
+        },
+        key,
+      }),
+    environment: (id: string) =>
+      request(`${prefix}/${id}/environment`, (v) => record(v) as Environment),
+    setEnvironment: (id: string, name: string, value: string, key: string) =>
+      request(`${prefix}/${id}/environment/${name}`, intentData, {
+        method: 'PUT',
+        body: { value },
+        key,
+      }),
+    deleteEnvironment: (id: string, name: string, key: string) =>
+      request(`${prefix}/${id}/environment/${name}`, intentData, {
+        method: 'DELETE',
+        body: {},
+        key,
+      }),
+    storage: (id: string) =>
+      request(
+        `${prefix}/${id}/storage`,
+        (v) =>
+          record(v) as { items: StorageResource[]; intents: (Intent & { type: string | null })[] },
+      ),
+    createStorage: (id: string, type: StorageResource['type'], key: string) =>
+      request(`${prefix}/${id}/storage`, intentData, {
+        method: 'POST',
+        body: { type, ...consentFields() },
+        key,
+      }),
+    storageAction: (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
+      request(`${prefix}/${id}/storage/${resource}/${action}`, intentData, {
+        method: 'POST',
+        body: consentFields(),
+        key,
+      }),
+  };
 }

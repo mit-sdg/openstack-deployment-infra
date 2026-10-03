@@ -10,6 +10,7 @@ import { NewApp } from './pages/NewApp';
 import { Overview } from './pages/Overview';
 import { SignIn } from './pages/SignIn';
 import { StaffPages } from './pages/Staff';
+import { AdminAppsPages } from './pages/AdminApps';
 import { AccountsPage, AdminAuditPage } from './pages/Accounts';
 import { Enrollment } from './pages/Enrollment';
 import { PortalShell } from './shell/PortalShell';
@@ -36,6 +37,24 @@ export function App() {
         <ErrorNotice error={session.error} />
       ) : (
         <Switch>
+          <Route path="/admin/apps/:rest*">
+            {session.data?.role === 'admin' ? (
+              <AdminAppsPages />
+            ) : (
+              <Empty title="Admin access unavailable">
+                This account cannot manage other owners' applications.
+              </Empty>
+            )}
+          </Route>
+          <Route path="/admin/apps">
+            {session.data?.role === 'admin' ? (
+              <AdminAppsPages />
+            ) : (
+              <Empty title="Admin access unavailable">
+                This account cannot manage applications.
+              </Empty>
+            )}
+          </Route>
           <Route path="/admin/accounts">
             {session.data?.role === 'admin' ? (
               <AccountsPage />

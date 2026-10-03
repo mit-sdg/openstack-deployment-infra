@@ -67,6 +67,7 @@ export function PortalShell({
             {elevated && <Link href="/staff/owners">Staff catalog</Link>}
             {role === 'admin' && (
               <>
+                <Link href="/admin/apps">Manage applications</Link>
                 <Link href="/admin/accounts">Accounts</Link>
                 <Link href="/admin/audit">Audit</Link>
               </>

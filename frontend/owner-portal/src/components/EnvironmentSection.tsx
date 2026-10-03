@@ -1,15 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { api, validateEnvName, type StorageBinding } from '../api';
+import { api, resourceApi, validateEnvName, type StorageBinding } from '../api';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 import { time } from '../utils/presentation';
 import { ErrorNotice, Loading } from './Feedback';
 import { Operation } from './Operation';
 
-export function EnvironmentSection({ id, bindings }: { id: string; bindings: StorageBinding[] }) {
+export function EnvironmentSection({
+  id,
+  bindings,
+  service = api,
+}: {
+  id: string;
+  bindings: StorageBinding[];
+  service?: ReturnType<typeof resourceApi>;
+}) {
+  const scope = service === api ? [] : ['admin'];
   const environment = useQuery({
-    queryKey: ['environment', id],
-    queryFn: () => api.environment(id),
+    queryKey: [...scope, 'environment', id],
+    queryFn: () => service.environment(id),
     refetchInterval: 5000,
   });
   const [name, setName] = useState('');
@@ -24,8 +33,8 @@ export function EnvironmentSection({ id, bindings }: { id: string; bindings: Sto
   useEffect(() => {
     if (intent.data?.state === 'succeeded' || intent.data?.state === 'failed') {
       attempt.current = null;
-      client.invalidateQueries({ queryKey: ['environment', id] });
-      client.invalidateQueries({ queryKey: ['app', id] });
+      client.invalidateQueries({ queryKey: [...scope, 'environment', id] });
+      client.invalidateQueries({ queryKey: [...scope, 'app', id] });
     }
   }, [intent.data?.state, client, id]);
   const edit = useMutation({
@@ -41,13 +50,13 @@ export function EnvironmentSection({ id, bindings }: { id: string; bindings: Sto
       const value = valueField.current?.value ?? '';
       if (valueField.current) valueField.current.value = '';
       return action === 'set'
-        ? api.setEnvironment(id, target, value, key)
-        : api.deleteEnvironment(id, target, key);
+        ? service.setEnvironment(id, target, value, key)
+        : service.deleteEnvironment(id, target, key);
     },
     onSuccess: (result) => {
       setIntentId(result.intentId);
       client.invalidateQueries({ queryKey: ['intents'] });
-      client.invalidateQueries({ queryKey: ['environment', id] });
+      client.invalidateQueries({ queryKey: [...scope, 'environment', id] });
     },
   });
   return (

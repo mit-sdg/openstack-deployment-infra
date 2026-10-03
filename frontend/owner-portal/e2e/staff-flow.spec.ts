@@ -83,6 +83,11 @@ for (const [layout, viewport, colorScheme] of [
       const url = bootstrapUrl();
       const token = new URL(url).hash.slice(1);
       const requestUrls: string[] = [];
+      const managedReads: string[] = [];
+      page.on('response', (response) => {
+        if (new URL(response.url()).pathname.startsWith('/api/v1/admin-apps'))
+          managedReads.push(`${response.status()} ${new URL(response.url()).pathname}`);
+      });
       admin.on('request', (request) => requestUrls.push(request.url()));
       await page.goto(url);
       await expect(page).toHaveURL(/\/setup$/);
@@ -139,6 +144,63 @@ for (const [layout, viewport, colorScheme] of [
       await page.getByRole('link', { name: 'Audit', exact: true }).click();
       await expect(page.getByRole('heading', { name: 'Admin audit', exact: true })).toBeVisible();
       await expect(page.getByText('account_invited', { exact: true }).first()).toBeVisible();
+      await page.getByRole('link', { name: 'Manage applications', exact: true }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Manage applications', exact: true }),
+      ).toBeVisible();
+      const operatorId =
+        layout === 'desktop-light'
+          ? '00000000-0000-4000-8000-000000000081'
+          : '00000000-0000-4000-8000-000000000083';
+      const liveSession = (await (await page.request.get('/api/v1/session')).json()).data;
+      const known = await page.request.get(`/api/v1/admin-apps/${operatorId}`, {
+        headers: { 'X-CSRF-Token': liveSession.csrfToken },
+      });
+      if (known.status() === 200) {
+        await page.goto(`/admin/apps/${operatorId}`);
+      } else {
+        expect(known.status()).toBe(404);
+        await page.getByLabel('Controller application UUID').fill(operatorId);
+        await page.getByRole('button', { name: 'Adopt application', exact: true }).click();
+      }
+      await expect(page).toHaveURL(new RegExp(`/admin/apps/${operatorId}$`));
+      try {
+        await expect(
+          page.getByText('Portal sign-in depends on this app', { exact: true }),
+        ).toBeVisible({ timeout: 15000 });
+      } catch (error) {
+        console.log(managedReads.join('\n'));
+        console.log(await page.locator('main').innerText());
+        throw error;
+      }
+      await expect(page.getByLabel('Repository URL')).toHaveValue(
+        'https://github.com/example/class-app',
+      );
+      const imported = await page.request.get(`/api/v1/admin-apps/${operatorId}/configuration`, {
+        headers: { 'X-CSRF-Token': liveSession.csrfToken },
+      });
+      const initialRevision = (await imported.json()).data.revision;
+      await page.getByLabel('Health path').fill('/ready');
+      await page.getByRole('button', { name: 'Save configuration', exact: true }).click();
+      await expect(page.getByLabel('Health path')).toHaveValue('/ready');
+      await expect(
+        page.getByText(`Revision ${initialRevision + 1}`, { exact: true }),
+      ).toBeVisible();
+      await page.getByRole('button', { name: 'Deploy application', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Deploy application', exact: true });
+      await expect(dialog).toContainText('A retained primary IPv4 requires maintenance.');
+      await expect(dialog).toContainText('Brief cutover downtime');
+      await expect(
+        dialog.getByRole('button', { name: 'Confirm deployment', exact: true }),
+      ).toBeDisabled();
+      await expect(dialog).toContainText('current accepted sizing is preserved');
+      await expect(dialog).toContainText('Portal sign-in depends on this app');
+      await staffPage.goto('/admin/apps');
+      await expect(
+        staffPage.getByRole('heading', { name: 'Admin access unavailable' }),
+      ).toBeVisible();
+      expect((await staffPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
+      expect((await ownerPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
     } finally {
       await admin.close();
       await staff.close();
