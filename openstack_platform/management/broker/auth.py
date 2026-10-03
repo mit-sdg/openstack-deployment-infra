@@ -169,6 +169,7 @@ class Auth:
             {
                 "data": {
                     "providerLabel": self.config.class_label,
+                    "platformName": self.config.platform_name,
                     "csrfToken": self.anonymous.csrf(binder),
                 },
                 "browser": {"cookies": [self.directive("login", binder, 600)]},
@@ -486,6 +487,7 @@ class Auth:
                     "stepUpExpiresAt": utc(user["reauthenticated_at"] + 300)
                     if user["kind"] == "admin"
                     else None,
+                    "platformName": self.config.platform_name,
                     "features": ["apps", "deployments", "build-logs"]
                     + (["staff-read"] if user["kind"] != "owner" else [])
                     + (["accounts"] if user["kind"] == "admin" else []),

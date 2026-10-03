@@ -201,6 +201,23 @@ class CeremonyTests(ManagementCase):
                 "NOT_FOUND", lambda route=route: self.call("POST", "/v1/auth/" + route, {})
             )
 
+    def test_options_and_session_expose_configured_display_labels(self) -> None:
+        options = self.call("GET", "/v1/auth/options").body["data"]
+        self.assertEqual(options["providerLabel"], "class account")
+        self.assertEqual(options["platformName"], "App platform")
+        self.login()
+        session = self.call("GET", "/v1/session", owner="alice").body["data"]
+        self.assertEqual(session["platformName"], "App platform")
+        self.config = dataclasses.replace(
+            self.config, platform_name="Example Platform", class_label="Example account"
+        )
+        self.broker.auth.config = self.config
+        options = self.call("GET", "/v1/auth/options").body["data"]
+        self.assertEqual(
+            (options["providerLabel"], options["platformName"]),
+            ("Example account", "Example Platform"),
+        )
+
     def test_generic_invalid_disabled_and_unavailable_errors(self) -> None:
         self.assert_error("INVALID_CREDENTIALS", lambda: self.attempt("missing", "incorrect"))
         self.assert_error("INVALID_CREDENTIALS", lambda: self.attempt("alice", "incorrect"))
