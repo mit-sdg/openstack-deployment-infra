@@ -1,3 +1,19 @@
+export type StorageBinding = { resourceId: string; outputs: Record<string, string> };
+export type StorageResource = {
+  resourceId: string;
+  type: 'postgres' | 'mongo' | 's3';
+  label: string;
+  status: string;
+  createdAt: string;
+  verifiedAt: string | null;
+  defaultBindings: Record<string, string>;
+};
+export type Environment = {
+  revision: number;
+  intents?: Intent[];
+  updatedAt: string | null;
+  items: { name: string; updatedAt: string | null }[];
+};
 export type Configuration = {
   schemaVersion: 1;
   build: {
@@ -7,7 +23,7 @@ export type Configuration = {
     startScript: string;
   };
   runtime: { port: number; healthPath: string };
-  storageBindings: [];
+  storageBindings: StorageBinding[];
 };
 export type Settings = {
   revision: number;
@@ -21,6 +37,7 @@ export type AppRecord = {
   slug: string;
   url: string | null;
   savedRevision: number;
+  configurationChanged?: boolean;
   lifecycleState: string;
   desiredRunning: boolean;
   activeDeploymentId: string | null;
@@ -44,6 +61,9 @@ export type Intent = {
   operationId: string | null;
   operation: { status: string; phase: string; cleanupState: string } | null;
   safeError: string | null;
+  names?: string[];
+  requiresResubmit?: boolean;
+  retryKey?: string | null;
 };
 export type Deployment = {
   deploymentId: string;
@@ -208,6 +228,25 @@ export const api = {
       },
       key,
     }),
+  environment: (id: string) => request(`/apps/${id}/environment`, (v) => record(v) as Environment),
+  setEnvironment: (id: string, name: string, value: string, key: string) =>
+    request(`/apps/${id}/environment/${name}`, intentData, { method: 'PUT', body: { value }, key }),
+  deleteEnvironment: (id: string, name: string, key: string) =>
+    request(`/apps/${id}/environment/${name}`, intentData, { method: 'DELETE', body: {}, key }),
+  storage: (id: string) =>
+    request(
+      `/apps/${id}/storage`,
+      (v) =>
+        record(v) as { items: StorageResource[]; intents: (Intent & { type: string | null })[] },
+    ),
+  createStorage: (id: string, type: StorageResource['type'], key: string) =>
+    request(`/apps/${id}/storage`, intentData, { method: 'POST', body: { type }, key }),
+  storageAction: (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
+    request(`/apps/${id}/storage/${resource}/${action}`, intentData, {
+      method: 'POST',
+      body: {},
+      key,
+    }),
   deploy: (id: string, revision: number, commit: string, key: string) =>
     request(`/apps/${id}/deployments`, intentData, {
       method: 'POST',
@@ -266,5 +305,31 @@ export function validateSettings(settings: Settings): string | null {
     healthPath.length > 256
   )
     return 'Enter an absolute health path without a query or fragment.';
+  return null;
+}
+
+export function validateEnvName(name: string): string | null {
+  if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name))
+    return 'Use A–Z, 0–9 and underscores, starting with A–Z (at most 128 characters).';
+  if (
+    ['NODE_ENV', 'PLATFORM_ENV', 'PLATFORM_PROJECT_ID', 'PLATFORM_PROJECT_SLUG', 'PORT'].includes(
+      name,
+    ) ||
+    name.startsWith('STORAGE__')
+  )
+    return 'This name is reserved by the platform.';
+  return null;
+}
+export function validateBindings(bindings: StorageBinding[], names: string[]): string | null {
+  const targets = new Set<string>();
+  for (const binding of bindings) {
+    for (const name of Object.values(binding.outputs)) {
+      const invalid = validateEnvName(name);
+      if (invalid) return invalid;
+      if (targets.has(name)) return `${name} is used by more than one output.`;
+      if (names.includes(name)) return `${name} already exists as an environment variable.`;
+      targets.add(name);
+    }
+  }
   return null;
 }

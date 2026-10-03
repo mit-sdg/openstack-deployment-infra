@@ -92,7 +92,9 @@ for (const [mode, viewport, colorScheme] of [
         applicationId: string;
       }[];
       // Re-runs reuse the Alice fixture app but do not reuse any authentication state.
-      let appId = known[0]?.applicationId;
+      let appId =
+        known.find((app) => app.slug === 'student-project')?.applicationId ??
+        known[0]?.applicationId;
       if (!appId) {
         await page.getByRole('link', { name: 'Create application', exact: true }).click();
         await page.getByLabel('Application name').fill('student-project');
@@ -107,7 +109,9 @@ for (const [mode, viewport, colorScheme] of [
       await page.getByLabel('Application port').fill('3000');
       await page.getByLabel('Health path').fill('/health');
       await page.getByRole('button', { name: 'Save configuration' }).click();
-      await expect(page.getByRole('status')).toContainText('Settings saved.');
+      await expect(page.getByRole('status').filter({ hasText: 'Settings saved.' })).toContainText(
+        'Settings saved.',
+      );
       await expect
         .poll(
           async () =>
@@ -143,7 +147,7 @@ for (const [mode, viewport, colorScheme] of [
       });
       await page.getByRole('button', { name: 'Deploy this commit', exact: true }).click();
       await expect(page.getByText('Deployment succeeded.', { exact: false })).toBeVisible({
-        timeout: 15000,
+        timeout: 30000,
       });
       const historyResponse = await page.request.get(`/api/v1/apps/${appId}/deployments`);
       const history = (await historyResponse.json()).data.items as {
@@ -164,7 +168,12 @@ for (const [mode, viewport, colorScheme] of [
         fullPage: true,
       });
       await page.goto('/apps');
-      await expect(page.getByText('Healthy', { exact: true })).toBeVisible();
+      await expect(
+        page
+          .locator('tr')
+          .filter({ has: page.locator(`a.app-link[href="/apps/${appId}"]`) })
+          .getByText('Healthy', { exact: true }),
+      ).toBeVisible();
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         window.scrollTo(0, 0);

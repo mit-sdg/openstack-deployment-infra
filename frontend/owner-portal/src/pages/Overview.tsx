@@ -41,6 +41,12 @@ export function Overview({ id }: { id: string }) {
                     ? 'This is the version the platform has accepted. Newer attempts appear separately in your history.'
                     : 'Save your repository and runtime settings, then choose the exact commit to deploy.'}
                 </p>
+                {app.data.configurationChanged && (
+                  <p className="notice">
+                    Configuration changed since last deploy. Deploy again to apply saved bindings or
+                    rotated credentials.
+                  </p>
+                )}
                 <div className="overview-meta">
                   <div>
                     <span>Commit</span>

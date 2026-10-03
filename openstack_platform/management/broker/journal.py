@@ -55,7 +55,7 @@ class Journal:
         now = time.time()
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT intents.id FROM intents JOIN users ON users.id=intents.user_id WHERE intents.state IN ('prepared','unknown','accepted') AND next_retry<=? AND lease<=? AND users.enabled=1 ORDER BY intents.created LIMIT 4",
+                "SELECT intents.id FROM intents JOIN users ON users.id=intents.user_id WHERE intents.state IN ('prepared','unknown','accepted') AND (intents.kind NOT IN ('env_set','env_delete') OR intents.state='accepted') AND next_retry<=? AND lease<=? AND users.enabled=1 ORDER BY intents.created LIMIT 4",
                 (now, now),
             ).fetchall()
         for row in rows:
@@ -64,14 +64,27 @@ class Journal:
             except Exception as error:
                 report_exception(error, row["id"])
 
-    def dispatch(self, identifier: str) -> None:
+    def dispatch(self, identifier: str, *, secret_body: object = None) -> None:
         now = time.time()
         with self.database.connect(write=True) as db:
             row = db.execute("SELECT * FROM intents WHERE id=?", (identifier,)).fetchone()
             if (
                 row is None
-                or row["state"] not in {"prepared", "unknown", "accepted"}
+                or (
+                    row["state"] not in {"prepared", "unknown", "accepted"}
+                    and not (
+                        row["kind"] in {"env_set", "env_delete"}
+                        and row["state"] == "blocked"
+                        and secret_body is not None
+                    )
+                )
                 or row["lease"] > now
+            ):
+                return
+            if (
+                row["kind"] in {"env_set", "env_delete"}
+                and row["state"] != "accepted"
+                and secret_body is None
             ):
                 return
             db.execute(
@@ -109,7 +122,9 @@ class Journal:
                     else result["status"]
                 )
                 if state == "failed":
-                    error = "The controller rejected this operation. Review the build output."
+                    error = (
+                        "The controller rejected this operation. Review its status before retrying."
+                    )
                 if state in {"succeeded", "failed"} and result.get("cleanupState") not in {
                     "confirmed",
                     "not_required",
@@ -121,7 +136,9 @@ class Journal:
                 status, result = self.client.request(
                     intent["method"],
                     intent["path"],
-                    strict_json(intent["body"].encode()),
+                    secret_body
+                    if intent["kind"] in {"env_set", "env_delete"}
+                    else strict_json(intent["body"].encode()),
                     intent["controller_key"],
                 )
                 if status == 201 and intent["kind"] == "create_app":
@@ -188,4 +205,11 @@ def intent_model(row: Any) -> dict[str, Any]:
         "createdAt": utc(row["created"]),
         "updatedAt": utc(row["updated"]),
         "commit": body.get("commit") if row["kind"] == "deploy" else None,
+        "names": body.get("names", []) if row["kind"] in {"env_set", "env_delete"} else [],
+        "retryKey": row["client_key"]
+        if row["kind"] in {"env_set", "env_delete"}
+        and row["state"] in {"prepared", "unknown", "blocked"}
+        else None,
+        "requiresResubmit": row["kind"] in {"env_set", "env_delete"}
+        and row["state"] in {"prepared", "unknown", "blocked"},
     }

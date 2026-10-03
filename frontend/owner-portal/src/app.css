@@ -1069,3 +1069,32 @@ html:has(dialog[open]) {
 .sign-in-card form .field {
   margin-bottom: 1rem;
 }
+
+.button-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+.button-group input {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+.resource-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+.resource-table th,
+.resource-table td {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.table-scroll {
+  overflow-x: auto;
+}
+fieldset {
+  min-width: 0;
+}

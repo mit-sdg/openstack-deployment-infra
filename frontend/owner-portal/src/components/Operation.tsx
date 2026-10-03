@@ -20,7 +20,15 @@ export function Operation({ intent }: { intent: Intent }) {
       ? 'Deploy application'
       : intent.kind === 'create_app'
         ? 'Create application'
-        : 'Save configuration';
+        : ((
+            {
+              storage_create: 'Create storage',
+              storage_verify: 'Verify storage',
+              storage_rotate: 'Rotate storage credentials',
+              env_set: 'Set environment variable',
+              env_delete: 'Delete environment variable',
+            } as Record<string, string>
+          )[intent.kind] ?? 'Save configuration');
   return (
     <ActivityRow>
       <div>
@@ -38,11 +46,13 @@ export function Operation({ intent }: { intent: Intent }) {
           {intent.operation?.phase
             ? humanPhase(intent.operation.phase)
             : intent.state === 'unknown'
-              ? 'Recovering the original request'
+              ? intent.requiresResubmit
+                ? 'Resubmit the original environment edit to recover'
+                : 'Recovering the original request'
               : 'Recorded in your workspace'}
         </p>
         {intent.safeError && <p className="operation-error">{intent.safeError}</p>}
-        {intent.operationId && (
+        {intent.operationId && intent.kind === 'deploy' && (
           <Link
             href={`/apps/${intent.appId}/deployments/${intent.operationId}`}
             className="text-link"
@@ -54,7 +64,7 @@ export function Operation({ intent }: { intent: Intent }) {
       </div>
       <div className="operation-actions">
         <Status state={intent.state} />
-        {intent.state === 'blocked' && (
+        {intent.state === 'blocked' && !intent.requiresResubmit && (
           <button
             className="button button-small"
             onClick={() => resume.mutate()}
