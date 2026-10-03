@@ -49,6 +49,7 @@ export {
   LoadingRows,
   PageSkeleton,
   Skeleton,
+  StatusText,
   ToastProvider,
   useToast,
   type Tone,
@@ -62,6 +63,7 @@ export {
   ListItem,
   type Column,
 } from "./components/Data";
+export { CopyId, RelativeTime, relativeTime } from "./components/Text";
 export {
   Dialog,
   SegmentedControl,

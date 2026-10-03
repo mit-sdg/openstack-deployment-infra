@@ -703,6 +703,8 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--ui-space-2);
+    /* Stay at the right edge even when the header wraps. */
+    margin-left: auto;
   }
   .ui-section__body {
     display: flex;
@@ -1321,11 +1323,64 @@
     font-weight: var(--ui-weight-medium);
     white-space: nowrap;
   }
+  .ui-status-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ui-text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading-sm);
+    white-space: nowrap;
+  }
   .ui-badge__dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--tone);
+  }
+
+  /* Copyable ID */
+  .ui-copy-id {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    color: var(--ui-text-muted);
+  }
+  .ui-copy-id__button {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: var(--ui-space-6);
+    height: var(--ui-space-6);
+    padding: 0;
+    border: 0;
+    border-radius: var(--ui-radius-sm);
+    background: transparent;
+    color: var(--ui-text-subtle);
+    transition:
+      background-color var(--ui-duration-fast) var(--ui-ease),
+      color var(--ui-duration-fast) var(--ui-ease);
+  }
+  .ui-copy-id__button .ui-icon {
+    width: 14px;
+    height: 14px;
+  }
+  .ui-copy-id__button:hover {
+    background: var(--ui-surface-hover);
+    color: var(--ui-text);
+  }
+  .ui-copy-id__button:active {
+    background: var(--ui-surface-active);
+  }
+  /* Touch: grow the hit area to 44px without changing the layout. */
+  @media (pointer: coarse), (max-width: 640px) {
+    .ui-copy-id__button::after {
+      content: "";
+      position: absolute;
+      inset: calc((var(--ui-space-6) - 44px) / 2);
+    }
   }
 
   /* Alerts and inline feedback */
@@ -1617,6 +1672,19 @@
       grid-column: 2;
       grid-row: 1;
       justify-self: end;
+    }
+    .ui-table tbody td[data-mobile="secondary"],
+    .ui-table tbody td[data-mobile="meta"] {
+      grid-column: 1 / -1;
+      margin-top: calc(-1 * var(--ui-space-1));
+      color: var(--ui-text-muted);
+      font-size: var(--ui-text-sm);
+      line-height: var(--ui-leading-sm);
+    }
+    .ui-table tbody td[data-mobile="meta"] {
+      color: var(--ui-text-subtle);
+      font-size: var(--ui-text-xs);
+      line-height: var(--ui-leading-xs);
     }
     .ui-table tbody td[data-mobile="field"] {
       grid-column: 1 / -1;

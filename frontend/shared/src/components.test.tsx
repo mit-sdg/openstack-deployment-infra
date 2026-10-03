@@ -9,12 +9,15 @@ import {
   Checkbox,
   CodeBlock,
   CopyField,
+  CopyId,
   DataTable,
   Dialog,
   ErrorAlert,
   Field,
   Input,
   PasswordInput,
+  RelativeTime,
+  StatusText,
   SegmentedControl,
   Select,
   ThemeToggle,
@@ -281,5 +284,80 @@ describe("overlays and shell", () => {
     expect(localStorage.getItem("this-app")).toBeNull();
     expect(document.documentElement.dataset.theme).toBeUndefined();
     expect(localStorage.getItem("another-app")).toBe("dark");
+  });
+});
+
+describe("compact values", () => {
+  it("copies the whole ID while showing its start", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const id = "22222222-2222-4222-8222-222222222222";
+    render(<CopyId value={id} label="owner ID" />);
+    expect(screen.getByText("22222222")).toHaveAttribute("title", id);
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Copy owner ID" })),
+    );
+    expect(writeText).toHaveBeenCalledWith(id);
+    expect(screen.getByRole("status")).toHaveTextContent("Copied to clipboard");
+  });
+  it("shows relative time with the exact time available", () => {
+    const value = new Date(Date.now() - 21 * 60000).toISOString();
+    const { container } = render(
+      <>
+        <RelativeTime value={value} />
+        <RelativeTime value={null} empty="Never" />
+      </>,
+    );
+    const time = container.querySelector("time")!;
+    expect(time).toHaveTextContent("21 minutes ago");
+    expect(time).toHaveAttribute("dateTime", value);
+    expect(time).toHaveAttribute("title", new Date(value).toLocaleString());
+    expect(screen.getByText("Never")).toHaveClass("ui-text-subtle");
+  });
+  it("renders quiet status as text with a decorative dot", () => {
+    const { container } = render(<StatusText>Healthy</StatusText>);
+    expect(container.querySelector(".ui-badge")).toBeNull();
+    expect(screen.getByText("Healthy")).toBeVisible();
+    expect(container.querySelector("[aria-hidden='true']")).not.toBeNull();
+  });
+  it("marks secondary and meta columns for the compact phone layout", () => {
+    render(
+      <DataTable
+        label="Owners"
+        rows={[{ id: "1", name: "Alice", username: "alice" }]}
+        rowKey={(row) => row.id}
+        columns={[
+          {
+            key: "name",
+            header: "Name",
+            mobile: "title",
+            cell: (row) => row.name,
+          },
+          {
+            key: "username",
+            header: "Username",
+            mobile: "secondary",
+            cell: (row) => row.username,
+          },
+          {
+            key: "seen",
+            header: "Last seen",
+            mobile: "meta",
+            cell: () => "today",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("alice").closest("td")).toHaveAttribute(
+      "data-mobile",
+      "secondary",
+    );
+    expect(screen.getByText("today").closest("td")).toHaveAttribute(
+      "data-mobile",
+      "meta",
+    );
   });
 });

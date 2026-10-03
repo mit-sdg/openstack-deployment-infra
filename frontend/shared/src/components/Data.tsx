@@ -12,10 +12,13 @@ export type Column<T> = {
   align?: "start" | "end";
   /**
    * Phone layout, where each row becomes a stacked card:
-   * "title" leads the card, "trailing" sits opposite it (e.g. a status),
-   * "field" (default) is a label/value line, "hidden" is omitted.
+   * - "title" leads the card; "trailing" sits opposite it (e.g. a status).
+   * - "secondary" is a muted line under the title, without a label
+   *   (e.g. a username). "meta" is a smaller, subtle line (e.g. a time).
+   * - "field" (default) is a labelled line; "hidden" is omitted.
+   * Prefer secondary/meta when a row has only one or two extra values.
    */
-  mobile?: "title" | "trailing" | "field" | "hidden";
+  mobile?: "title" | "trailing" | "secondary" | "meta" | "field" | "hidden";
 };
 
 /**

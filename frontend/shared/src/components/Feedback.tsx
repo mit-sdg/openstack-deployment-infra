@@ -29,6 +29,25 @@ export function Badge({
   );
 }
 
+/**
+ * Quiet status for the expected state (healthy, active, live): a small dot
+ * and text, without a pill. Use Badge only for states that need attention.
+ */
+export function StatusText({
+  tone = "success",
+  children,
+}: {
+  tone?: Tone;
+  children: ReactNode;
+}) {
+  return (
+    <span className={`ui-status-text ui-tone-${tone}`} data-tone={tone}>
+      <span className="ui-badge__dot" aria-hidden="true" />
+      {children}
+    </span>
+  );
+}
+
 const alertIcons: Record<Tone, IconName> = {
   neutral: "info",
   info: "info",
