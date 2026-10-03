@@ -75,6 +75,21 @@ let
         peer_policy=PeerPolicy(frozenset({(${toString constants.accounts.managementWeb.uid}, ${toString constants.accounts.managementWeb.gid})})), socket_gid=${toString constants.accounts.managementWeb.gid})
     server.serve_forever()
   '';
+  managementWebProbe = pkgs.writeText "management-web-probe.py" ''
+    import sys
+    sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
+    from openstack_platform.controller.http import ControllerServer, Response, Router
+    router = Router()
+    router.add("GET", "/v1/health", lambda request: Response(200, {"status": "ok"}))
+    server = ControllerServer("${state}/management-web/web-health.sock", router)
+    server.serve_forever()
+  '';
+  delayedController = pkgs.writeShellScript "vm-delayed-controller" ''
+    # Type=simple is active before its controller sockets exist. Hold this gap
+    # open so the broker's real sandbox must wait on API readiness, not After.
+    ${pkgs.coreutils}/bin/sleep 3
+    exec ${packages.controllerPackage}/bin/openstack-platform-controller "$@"
+  '';
   managementFakeCommons = pkgs.writeText "vm-fake-commons.py" ''
     import json, socket, ssl, sys
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -284,6 +299,38 @@ let
                 # outage assertion can observe it without racing automatic retries.
                 Restart = lib.mkForce "no";
               };
+              "${namespace}-controller".serviceConfig.ExecStart = lib.mkForce (
+                lib.concatStringsSep " " [
+                  delayedController
+                  "--platform-config /etc/${namespace}/platform.json"
+                  "--state-directory ${state}/controller/state"
+                  "--policy ${state}/controller/policy.json"
+                  "--socket /run/${namespace}-controller/project.sock"
+                  "--socket-group controller-api"
+                  "--project-peer ${toString constants.accounts.managementBroker.uid}:${toString constants.accounts.managementBroker.gid}"
+                  "--privileged-socket /run/${namespace}-controller/privileged.sock"
+                  "--privileged-socket-group platform-admin"
+                  "--privileged-peer ${toString constants.accounts.operator.uid}:${toString constants.accounts.operator.gid}"
+                  "--max-connections-per-peer 8"
+                ]
+              );
+              "vm-restore-active-portal" = {
+                # The admin VM uses disposable tmpfs state. Restore a saved
+                # active pair before path units evaluate it on the second boot.
+                wantedBy = [ "multi-user.target" ];
+                after = [ "${systemdEscapePath state}.mount" ];
+                before = [ "${namespace}-management-broker.path" "${namespace}-management-web.path" ];
+                unitConfig = {
+                  DefaultDependencies = false;
+                  RequiresMountsFor = [ state ];
+                  ConditionPathExists = "/var/lib/portal-boot-fixture";
+                };
+                serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+                script = ''
+                  cp -a /var/lib/portal-boot-fixture/. ${state}/
+                  rm -f ${state}/management-broker/identity-sandbox-ok
+                '';
+              };
               "vm-fake-commons" = {
                 wantedBy = [ "multi-user.target" ];
                 serviceConfig.ExecStart = "${packages.platformPython}/bin/python ${managementFakeCommons}";
@@ -429,7 +476,7 @@ let
         };
 
       testScript = ''
-        machine.start()
+        machine.start(allow_reboot=True)
         machine.wait_for_unit("multi-user.target")
         machine.wait_for_unit("cloud-final.service")
         machine.succeed("getent passwd agentops >/dev/null")
@@ -567,7 +614,7 @@ let
               machine.succeed("printf '#!/bin/sh\\nexec /run/current-system/sw/bin/management-python3.14 ${managementIdentityBootstrap} --config ${state}/management-active/current/broker/config/identity.json\\n' > ${state}/management-broker-releases/releases/vm-test/bin/management-identity")
               machine.succeed("chown agentops:management-broker ${state}/management-broker-releases/releases/vm-test/bin/*; chmod 0550 ${state}/management-broker-releases/releases/vm-test/bin/*")
               machine.succeed("printf '%s\\n' '{\"commonsOrigin\":\"https://class.example.com:9444\",\"socket\":\"/run/${namespace}-management-identity/identity.sock\",\"development\":false}' > ${state}/management-broker-releases/releases/vm-test/config/identity.json; chown agentops:management-broker ${state}/management-broker-releases/releases/vm-test/config/identity.json; chmod 0440 ${state}/management-broker-releases/releases/vm-test/config/identity.json")
-              machine.succeed("printf '#!/bin/sh\\nexec sleep infinity\\n' > ${state}/management-web-releases/releases/vm-test/bin/management-web; chown agentops:management-web ${state}/management-web-releases/releases/vm-test/bin/management-web; chmod 0550 ${state}/management-web-releases/releases/vm-test/bin/management-web")
+              machine.succeed("printf '#!/bin/sh\\nexec /run/current-system/sw/bin/management-python3.14 ${managementWebProbe}\\n' > ${state}/management-web-releases/releases/vm-test/bin/management-web; chown agentops:management-web ${state}/management-web-releases/releases/vm-test/bin/management-web; chmod 0550 ${state}/management-web-releases/releases/vm-test/bin/management-web")
               machine.succeed("install -m 0600 -o agentops -g management-broker /dev/null ${state}/management-broker-releases/.install.lock")
               machine.wait_for_unit("vm-fake-commons.service")
               # Restarting the required prepare unit can stop its path units.
@@ -606,6 +653,38 @@ let
               machine.fail("runuser -u management-web -- cat ${state}/management-active/current/broker/config/platform.json")
               machine.succeed("! grep -F PLATFORM_ENVIRONMENT= /etc/profile")
               selected_pair = machine.succeed("readlink ${state}/management-active/current").strip()
+              web_health = "runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket ${state}/management-web/web-health.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'"
+              # Persist this already-active pair across the VM's disposable
+              # state mount, then boot without any reset-failed/reactivation.
+              machine.succeed("mkdir -p /var/lib/portal-boot-fixture; cp -a ${state}/management-active ${state}/management-broker-releases ${state}/management-web-releases ${state}/management-broker ${state}/management-web /var/lib/portal-boot-fixture/; rm -f /var/lib/portal-boot-fixture/management-broker-releases/activate-request")
+              machine.reboot()
+              machine.wait_for_unit("multi-user.target")
+              machine.wait_for_unit("${namespace}-controller-readiness.service")
+              for component in ("identity", "broker", "web"):
+                  machine.wait_for_unit(f"${namespace}-management-{component}.service")
+              for component in ("broker", "web"):
+                  machine.wait_for_unit(f"${namespace}-management-{component}.path")
+              machine.wait_until_succeeds(broker_health)
+              machine.wait_until_succeeds(web_health)
+              machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
+              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
+              # Force a controller restart, including socket directory removal,
+              # and verify the dependency restart chain heals both portal units.
+              before_broker = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
+              before_web = machine.succeed("systemctl show ${namespace}-management-web.service -p MainPID --value").strip()
+              machine.succeed("systemctl restart ${namespace}-controller.service")
+              machine.wait_for_unit("${namespace}-controller-readiness.service")
+              machine.wait_until_succeeds(broker_health)
+              machine.wait_until_succeeds(web_health)
+              for component in ("identity", "broker", "web"):
+                  machine.succeed(f"systemctl is-active --quiet ${namespace}-management-{component}.service")
+              for component in ("broker", "web"):
+                  machine.succeed(f"systemctl is-active --quiet ${namespace}-management-{component}.path")
+                  machine.succeed(f"! systemctl is-failed --quiet ${namespace}-management-{component}.path")
+              assert machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip() != before_broker
+              assert machine.succeed("systemctl show ${namespace}-management-web.service -p MainPID --value").strip() != before_web
+              machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
+
               # A staged broker upgrade remains inactive through service and
               # boot-path restarts. The VM state mount is disposable tmpfs.
               next_descriptor = descriptor.replace(pair, "c" * 64)
