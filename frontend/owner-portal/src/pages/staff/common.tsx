@@ -431,11 +431,6 @@ export function duration(deployment: StaffDeployment) {
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
-// Staff activity kinds that the shared titles name under another key.
-const titleKinds: Record<string, string> = {
-  app_enable: 'lifecycle',
-  app_disable: 'lifecycle',
-};
 const stages: Record<string, string> = {
   queued: 'Waiting to build',
   building: 'Building',
@@ -464,7 +459,7 @@ export function ActivityItem({
   const problem = ['failed', 'blocked'].includes(item.state);
   return (
     <ListItem
-      title={activityTitle(titleKinds[item.kind] ?? item.kind, item.state)}
+      title={activityTitle(item.kind, item.state)}
       meta={
         <>
           {showApp && <AppLink id={item.applicationId} name={item.applicationSlug} />}

@@ -37,7 +37,7 @@ import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useIntentPolling } from '../hooks/useIntentPolling';
-import { healthy } from '../utils/presentation';
+import { ownerAppState } from '../utils/presentation';
 import { OwnerPicker, friendly, shown, useStepUp } from './admin/common';
 
 const signInWarning = 'This app provides sign-in for the portal';
@@ -430,7 +430,7 @@ function ManagedApplication({ id }: { id: string }) {
     );
   }
   const data = app.data;
-  const state = data.lifecycleState === 'creating' ? 'creating' : healthy(data);
+  const state = ownerAppState(data);
   const resources = storage.data?.items ?? [];
   return (
     <Page>

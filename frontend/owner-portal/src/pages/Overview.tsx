@@ -19,7 +19,7 @@ import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useOwnerIntents } from '../hooks/useIntentPolling';
-import { healthy, short } from '../utils/presentation';
+import { ownerAppState, short } from '../utils/presentation';
 
 function Running({ app }: { app: AppRecord }) {
   const deployed = app.acceptedDeployment!;
@@ -39,7 +39,8 @@ function Running({ app }: { app: AppRecord }) {
   ];
   // The header already shows the app's state. Break it down only when it
   // isn't healthy, so the person can see which part needs attention.
-  if (app.desiredRunning && !app.stale && healthy(app) !== 'healthy') {
+  const state = ownerAppState(app);
+  if (!app.stale && (state === 'unhealthy' || state === 'unknown')) {
     const health = app.health;
     items.push(
       {

@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { Link } from 'wouter';
 import { api, type AppRecord } from '../api';
-import { healthy } from '../utils/presentation';
+import { ownerAppState } from '../utils/presentation';
 import { BoundaryText } from './BoundaryText';
 import { QueryError } from './Feedback';
 import { Status } from './Status';
@@ -16,14 +16,9 @@ const tabs = [
   ['Deployments', '/deployments'],
 ] as const;
 
-/**
- * The app's one state, shown next to its name. An app that was never
- * deployed reads "Not deployed" rather than "Stopped".
- */
+/** The app's one state, shown next to its name (see ownerAppState). */
 export function AppStatus({ app }: { app: AppRecord }) {
-  if (app.lifecycleState === 'creating') return <Status state="creating" />;
-  if (!app.acceptedDeployment) return <Status state="not_deployed" label="Not deployed" />;
-  return <Status state={healthy(app)} />;
+  return <Status state={ownerAppState(app)} />;
 }
 
 /** App header (name, status, URL) and the app's tabs. */
