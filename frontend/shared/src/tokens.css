@@ -1,0 +1,132 @@
+/*
+ * Design tokens. Every value the UI uses comes from here; components never
+ * hardcode colors, sizes or durations. Colors use light-dark(), so the
+ * active theme is just the root color-scheme: the OS preference by default,
+ * or the explicit data-theme the theme toggle sets on <html>.
+ */
+:root {
+  color-scheme: light dark;
+
+  /* Neutral surfaces and text. */
+  --ui-bg: light-dark(#fafafa, #0b0b0c);
+  --ui-surface: light-dark(#ffffff, #131315);
+  --ui-surface-subtle: light-dark(#f4f4f5, #18181b);
+  --ui-surface-hover: light-dark(#f4f4f5, #1f1f23);
+  --ui-surface-active: light-dark(#e9e9ec, #27272a);
+  --ui-surface-raised: light-dark(#ffffff, #18181b);
+  --ui-border: light-dark(#e4e4e7, #26262a);
+  --ui-border-strong: light-dark(#d4d4d8, #3a3a40);
+  --ui-text: light-dark(#18181b, #f4f4f5);
+  --ui-text-muted: light-dark(#52525b, #a1a1aa);
+  --ui-text-subtle: light-dark(#6b6b74, #8d8d96);
+  --ui-overlay: light-dark(rgb(24 24 27 / 40%), rgb(0 0 0 / 60%));
+
+  /* One accent. */
+  --ui-accent: light-dark(#4f46e5, #6366f1);
+  --ui-accent-hover: light-dark(#4338ca, #7175f4);
+  --ui-accent-solid: light-dark(#4f46e5, #5250e0);
+  --ui-accent-solid-hover: light-dark(#4338ca, #5f5ce9);
+  --ui-accent-text: light-dark(#4338ca, #a5b4fc);
+  --ui-accent-subtle: light-dark(#eef0ff, rgb(99 102 241 / 14%));
+  --ui-on-accent: #ffffff;
+  --ui-focus: light-dark(#6366f1, #818cf8);
+
+  /* Status colors: text, quiet background and dot/icon. */
+  --ui-success-text: light-dark(#15803d, #4ade80);
+  --ui-success-subtle: light-dark(#ecfdf3, rgb(34 197 94 / 12%));
+  --ui-success: light-dark(#16a34a, #22c55e);
+  --ui-warning-text: light-dark(#a15c07, #fbbf24);
+  --ui-warning-subtle: light-dark(#fffbeb, rgb(245 158 11 / 12%));
+  --ui-warning: light-dark(#d97706, #f59e0b);
+  --ui-danger-text: light-dark(#b91c1c, #f87171);
+  --ui-danger-subtle: light-dark(#fef2f2, rgb(239 68 68 / 12%));
+  --ui-danger: light-dark(#dc2626, #ef4444);
+  --ui-danger-solid: light-dark(#dc2626, #c42b2b);
+  --ui-danger-solid-hover: light-dark(#b91c1c, #d23434);
+  --ui-info-text: var(--ui-accent-text);
+  --ui-info-subtle: var(--ui-accent-subtle);
+  --ui-info: var(--ui-accent);
+  --ui-neutral-text: var(--ui-text-muted);
+  --ui-neutral-subtle: var(--ui-surface-subtle);
+  --ui-neutral: light-dark(#a1a1aa, #71717a);
+
+  /* Typography. System fonts: nothing is downloaded. */
+  --ui-font:
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --ui-font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+  --ui-text-xs: 12px;
+  --ui-text-sm: 13px;
+  --ui-text-md: 14px;
+  --ui-text-lg: 16px;
+  --ui-text-xl: 20px;
+  --ui-text-2xl: 24px;
+  --ui-leading-tight: 1.25;
+  --ui-leading: 1.5;
+  --ui-weight-regular: 400;
+  --ui-weight-medium: 500;
+  --ui-weight-semibold: 600;
+  --ui-tracking-tight: -0.011em;
+  --ui-tracking-title: -0.02em;
+
+  /* Spacing: a 4px grid. */
+  --ui-space-1: 4px;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-space-5: 20px;
+  --ui-space-6: 24px;
+  --ui-space-8: 32px;
+  --ui-space-10: 40px;
+  --ui-space-12: 48px;
+  --ui-space-16: 64px;
+
+  /* Shape and depth. */
+  --ui-radius-sm: 6px;
+  --ui-radius-md: 8px;
+  --ui-radius-lg: 12px;
+  --ui-radius-full: 999px;
+  --ui-shadow-xs: 0 1px 2px light-dark(rgb(24 24 27 / 5%), rgb(0 0 0 / 30%));
+  --ui-shadow-sm:
+    0 1px 2px light-dark(rgb(24 24 27 / 4%), rgb(0 0 0 / 30%)),
+    0 1px 3px light-dark(rgb(24 24 27 / 6%), rgb(0 0 0 / 30%));
+  --ui-shadow-md:
+    0 4px 12px light-dark(rgb(24 24 27 / 8%), rgb(0 0 0 / 45%)),
+    0 1px 3px light-dark(rgb(24 24 27 / 6%), rgb(0 0 0 / 30%));
+  --ui-shadow-lg:
+    0 16px 48px light-dark(rgb(24 24 27 / 16%), rgb(0 0 0 / 60%)),
+    0 2px 6px light-dark(rgb(24 24 27 / 6%), rgb(0 0 0 / 30%));
+
+  /* Motion. Reduced-motion users get none (see ui.css). */
+  --ui-duration-fast: 120ms;
+  --ui-duration: 200ms;
+  --ui-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Layout. */
+  --ui-control-height: 36px;
+  --ui-control-height-sm: 30px;
+  --ui-header-height: 56px;
+  --ui-page-width: 1200px;
+  --ui-narrow-width: 680px;
+  --ui-gutter: var(--ui-space-8);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+/* Phones and touch screens: every control is at least 44px tall. */
+@media (max-width: 640px), (pointer: coarse) {
+  :root {
+    --ui-control-height: 44px;
+    --ui-control-height-sm: 44px;
+  }
+}
+@media (max-width: 640px) {
+  :root {
+    --ui-gutter: var(--ui-space-4);
+  }
+}

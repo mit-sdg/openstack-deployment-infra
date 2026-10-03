@@ -1,4 +1,4 @@
-import type { Tone } from "@openstack-platform/ui";
+import type { LegacyTone as Tone } from "@openstack-platform/ui";
 export function Icon({
   name,
   className = "icon",

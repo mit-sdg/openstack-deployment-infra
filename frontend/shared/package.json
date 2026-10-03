@@ -6,7 +6,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./tokens.css": "./src/tokens.css",
-    "./primitives.css": "./src/primitives.css",
+    "./ui.css": "./src/ui.css",
+    "./legacy/tokens.css": "./src/legacy/tokens.css",
+    "./legacy/primitives.css": "./src/legacy/primitives.css",
     "./theme.js": "./src/theme.js"
   },
   "peerDependencies": {
