@@ -21,6 +21,7 @@ from . import known_device
 from .anonymous import AddressLimits, AnonymousChallenge, client_address_bucket
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
+from .local_auth_limits import DeviceFailureLimits, KnownAccountLimits
 from .staff_policy import ABSOLUTE_SECONDS, ADMIN_IDLE_SECONDS, IDLE_SECONDS
 
 
@@ -99,6 +100,10 @@ class Auth:
         self.local_limits = AddressLimits(options_per_minute=6, starts_per_minute=12)
         self.step_up_limits = AddressLimits(options_per_minute=12, starts_per_minute=12)
         self.step_up_failures = FailureLimits()
+        self.known_limits = AddressLimits(options_per_minute=600, starts_per_minute=12)
+        self.known_failures = FailureLimits()
+        self.known_accounts = KnownAccountLimits()
+        self.device_failures = DeviceFailureLimits()
         self.recognized_options_limits = AddressLimits(options_per_minute=600, starts_per_minute=12)
         self.identity = ProjectClient(
             config.identity_socket, timeout=10, capacity=MANAGEMENT_REQUESTS
@@ -230,7 +235,12 @@ class Auth:
                     [
                         self.directive(
                             "device",
-                            known_device.issue(self.anonymous.key, user, now),
+                            known_device.issue(
+                                self.anonymous.key,
+                                user,
+                                now,
+                                previous=known_device.read(request, self.config.device_cookie),
+                            ),
                             known_device.LIFETIME,
                         )
                     ]
@@ -497,7 +507,11 @@ class Auth:
             {
                 "browser": {
                     "status": 204,
-                    "cookies": [self.directive("login"), self.directive("session")],
+                    "cookies": [
+                        self.directive("login"),
+                        self.directive("session"),
+                        self.directive("device"),
+                    ],
                 }
             },
         )

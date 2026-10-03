@@ -1478,10 +1478,17 @@ also has the existing five-failure username/address window and per-source
 admission at 12 attempts/minute per lane. Wrong passwords have a shared
 20-failure rolling-hour budget across all sources; once it is exhausted, use a
 recognized browser. Successful local sign-in retains a signed HttpOnly, Secure,
-SameSite=Strict known-device cookie for 90 days. It exempts the password budget
-and uses reserved hash capacity; it does not replace the password or factor.
+SameSite=Strict known-device cookie for 90 days. New cookies carry a random device
+ID with at most 20 failed credential attempts in a rolling hour. While that
+process-local allowance is available, it exempts the account password budget;
+it never replaces the password or factor or bypasses account-wide TOTP limits.
+Refreshing the cookie preserves its ID and does not reset failures. Known-device
+login allows one in-flight request and 12 attempts/minute per account across all
+addresses. Admin step-up has its own hash slot and address/failure budget.
 A role change, reset, disable or other generation bump invalidates recognition.
-Logout preserves it. If it is absent/expired after a guessing flood, wait for the
+Explicit logout clears it. Older cookies remain recognized until expiry but
+have no device ID, so they do not exempt the account password budget; successful
+local login upgrades them. If the cookie is absent/expired after a flood, wait for the
 hourly window or use the supported reset/recovery workflow; anonymous guessing
 cannot invalidate an existing device cookie.
 
@@ -1490,7 +1497,11 @@ backoff doubles to one hour, with at most 10 failures in a rolling hour, shared
 by login and step-up regardless of source or device recognition. Success clears
 the exponential delay without reopening hourly windows. Step-up has reserved
 hash capacity but still needs the same password budget/device exemption and
-TOTP checks. A generic credential error
+TOTP checks. In-memory account/device admission limits reset on broker restart;
+the durable account-wide guessing limits remain. Saturated device tracking falls
+back to the account password budget rather than granting an unbounded exemption.
+Deploy this follow-up as matched portal releases: it changes neither schema nor
+compatibility and needs no admin replacement. A generic credential error
 covers invalid accounts, passwords, factors and backoff; throttling/capacity
 errors have no credential detail.
 

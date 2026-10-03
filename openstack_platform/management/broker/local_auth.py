@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import ExitStack
 from time import monotonic, sleep
 from typing import TYPE_CHECKING, Any
 
 from ...controller.http import HttpError
 from . import known_device
+from .local_auth_limits import DeviceReservation
 from .local_security import (
     DUMMY_HASH,
     HashCapacityError,
@@ -97,22 +99,33 @@ def authenticate(
     with auth.database.connect() as db:
         user = account(db, username)
         recognized = known_device.valid(auth.anonymous.key, device, user, now)
-        denied = blocked(db, user, recognized, now)
-    trusted = recognized or step_up
-    limits = auth.step_up_limits if trusted else auth.local_limits
-    failures = auth.step_up_failures if trusted else auth.failures
-    # Separate recognized/session budgets keep an anonymous flood at the same
-    # address from consuming the returning user's admission or hashing capacity.
+    identifier = known_device.device_id(device) if recognized else None
+    limits = (
+        auth.step_up_limits if step_up else auth.known_limits if recognized else auth.local_limits
+    )
+    failures = (
+        auth.step_up_failures if step_up else auth.known_failures if recognized else auth.failures
+    )
     limits.check_bucket(address, "start", now)
     window = failures.reserve("local:" + username, address, now)
     succeeded = failed = False
+    device_window = DeviceReservation()
+    stack = ExitStack()
     try:
-        with hashing_slot(step_up=trusted):
+        if recognized and not step_up and user is not None:
+            stack.enter_context(auth.known_accounts.reserve((user["id"], user["generation"]), now))
+        if identifier is not None and user is not None:
+            device_window = auth.device_failures.reserve(
+                (user["id"], user["generation"], identifier), now
+            )
+        with auth.database.connect() as db:
+            denied = device_window.denied or blocked(db, user, device_window.exempt, now)
+        with hashing_slot(step_up=step_up, known=recognized):
             # Exhausted budgets, unavailable accounts and unknown names all do
             # the standard dummy verification and return the same generic error.
             encoded = DUMMY_HASH if denied else user["password_hash"] if user else DUMMY_HASH
             hashed = True
-            valid, upgrade = verify_password(password, encoded, step_up=trusted)
+            valid, upgrade = verify_password(password, encoded, step_up=step_up, known=recognized)
             with auth.database.connect(write=True) as db:
                 now = auth.clock()
                 latest = account(db, username)
@@ -123,7 +136,7 @@ def authenticate(
                     and user is not None
                     and latest["generation"] == user["generation"]
                     and latest["password_hash"] == encoded
-                    and not blocked(db, latest, recognized_now, now)
+                    and not blocked(db, latest, recognized_now and device_window.exempt, now)
                 )
                 if eligible and latest is not None:
                     if not valid:
@@ -167,7 +180,7 @@ def authenticate(
             # Rehash outside writer locks, then recheck the exact credential and
             # generation. It shares the already acquired lane, with no nested queue.
             if upgrade:
-                replacement = hash_password(password, step_up=trusted)
+                replacement = hash_password(password, step_up=step_up, known=recognized)
                 with auth.database.connect(write=True) as db:
                     current = account(db, username)
                     if (
@@ -188,10 +201,15 @@ def authenticate(
             503, "AUTH_UNAVAILABLE", "Sign-in is temporarily unavailable.", retryable=True
         ) from None
     finally:
-        failures.finish(window, failed=failed, succeeded=succeeded)
-        if hashed and not succeeded:
-            # Equalize credential failures, including legacy hashes, exhausted
-            # budgets and unknown names. Never sleep while holding a hash slot.
-            remaining = FAILURE_FLOOR_SECONDS - (monotonic() - started)
-            if remaining > 0:
-                sleep(remaining)
+        try:
+            failures.finish(window, failed=failed, succeeded=succeeded)
+            auth.device_failures.finish(
+                device_window, failed=hashed and not succeeded, now=auth.clock()
+            )
+            if hashed and not succeeded:
+                # Never hold the physical hash slot during latency equalization.
+                remaining = FAILURE_FLOOR_SECONDS - (monotonic() - started)
+                if remaining > 0:
+                    sleep(remaining)
+        finally:
+            stack.close()

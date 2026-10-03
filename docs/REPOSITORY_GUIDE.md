@@ -419,6 +419,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 
 - `openstack_platform/management/broker/known_device.py` — private-key HMAC recognition cookies bound to local user IDs, generation and expiry.
 
+- `openstack_platform/management/broker/local_auth_limits.py` — bounded process-local account admission, device failure windows and pending reservations.
+
 ## Keeping this guide current
 
 When adding, deleting, or renaming a tracked file, update this guide in the same
