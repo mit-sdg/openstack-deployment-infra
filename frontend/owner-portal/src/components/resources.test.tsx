@@ -241,27 +241,35 @@ describe('owner resources', () => {
       vi.unstubAllGlobals();
     }
   });
-  it('explains blocked outputs without offering editable credential bindings', async () => {
+  it('allows PostgreSQL password and S3 secret-key bindings', async () => {
     mocks();
     vi.mocked(api.storage).mockResolvedValue({
       items: [
+        { ...resource, defaultBindings: { url: 'DATABASE_URL', password: 'PGPASSWORD' } },
         {
           ...resource,
-          unavailableBindings: {
-            password: "PGPASSWORD can't be bound yet; DATABASE_URL already includes the password",
-          },
+          resourceId: 'bucket',
+          type: 's3',
+          label: 'S3',
+          defaultBindings: { secret_access_key: 'AWS_SECRET_ACCESS_KEY' },
         },
       ],
       intents: [],
     });
-    wrap(<StorageSection id="app" bindings={[]} onChange={() => {}} />);
-    expect(
-      await screen.findByText(
-        "PGPASSWORD can't be bound yet; DATABASE_URL already includes the password",
-      ),
-    ).toBeVisible();
-    expect(screen.queryByLabelText('password → environment name')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Bind password/ })).not.toBeInTheDocument();
+    function Editor() {
+      const [bindings, setBindings] = useState<StorageBinding[]>([]);
+      return <StorageSection id="app" bindings={bindings} onChange={setBindings} />;
+    }
+    wrap(<Editor />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Bind password to PGPASSWORD' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Bind secret_access_key to AWS_SECRET_ACCESS_KEY' }),
+    );
+    expect(screen.getByLabelText('password → environment name')).toHaveValue('PGPASSWORD');
+    expect(screen.getByLabelText('secret_access_key → environment name')).toHaveValue(
+      'AWS_SECRET_ACCESS_KEY',
+    );
+    expect(screen.queryByText(/needs a platform update/)).not.toBeInTheDocument();
   });
   it('shows only injected names on deploy review', async () => {
     Object.defineProperty(HTMLDialogElement.prototype, 'close', {

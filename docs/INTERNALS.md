@@ -586,6 +586,18 @@ Outstanding checks reserve budget so concurrency cannot bypass it. Other
 addresses remain unaffected and rejections never extend the window. Users are individual invited class accounts,
 identified by Commons origin and stable UUID rather than mutable username.
 
+Operator deletion is reconciled without deleting broker history. The real
+project read returns `404 APPLICATION_NOT_FOUND` after the privileged deletion
+operation succeeds at `tombstoned`. Only that definitive missing-app evidence
+retires a known `ready` broker record to `lifecycle='deleted'` (the existing text
+column permits it); outages and unconfirmed `creating` apps do not qualify.
+Owner/staff/admin app listings exclude deleted records, quota no longer counts
+them, and a single `app_deleted_by_administrator` audit event is written. Further
+mutations return `410 APPLICATION_DELETED`. Configuration, intent and audit rows
+remain intact. Existence checks use environment metadata, avoiding live health
+provider calls, with bounded lazy checks and a round-robin scan in the existing
+journal loop.
+
 The owner API exposes only their own apps/config/deployments/build logs/intents,
 environment names and storage resources,
 returning 404 for another owner's IDs. Defaults are two apps and one external
@@ -626,17 +638,13 @@ they cannot starve background recovery of other operations. Environment writes
 are limited to 30 new intents per owner per minute and 65,536 UTF-8 bytes per
 value; controller admission also enforces the installed deployment's limits.
 
-The current controller's generic fingerprint secret-key filter mistakes
-PostgreSQL `password` and S3 `secret_access_key` output names for credential
-fields. The broker derives unavailable outputs by applying the controller's
-`_SECRET_KEY` to `RESOURCE_OUTPUTS`, omits them from defaults and rejects saves
-that bind them. PostgreSQL's URL includes its password; S3 secret key injection
-needs a platform update. The binding editor explains the limitation and allows
-removing an unavailable binding from an older saved configuration. The broker
-imports `SECRET_KEY_PATTERN` from the shared storage contract; a parity
-test checks it against the controller's unchanged `_SECRET_KEY.pattern`. Broker
-archives do not include controller database code or `runtime.py` for this filter.
-The mitigation remains release-only, with no schema or compatibility changes.
+Portal defaults expose every output in `OUTPUT_ENVIRONMENT_KEYS`, including
+PostgreSQL `password` and S3 `secret_access_key`. Strict controller fingerprint
+normalization validates those identifiers as public binding metadata. Targets
+remain owner-chosen, and credential values stay in Nomad Variables. PostgreSQL's
+URL already includes its password. The public `SECRET_KEY_PATTERN` contract and
+its parity test against the controller's unchanged regex remain available;
+the broker no longer applies a blocked-output filter.
 
 Controller admission error codes are retained in existing intent JSON and
 validated as 1–64 uppercase ASCII letters/digits/underscores, beginning with a

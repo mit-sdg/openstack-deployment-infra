@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import re
 import sqlite3
 import time
 import uuid
@@ -17,7 +16,6 @@ from ...controller.storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
     RESERVED_ENVIRONMENT_PREFIX,
     RESOURCE_OUTPUTS,
-    SECRET_KEY_PATTERN,
 )
 from ...validation import ValidationError, bounded_text, env_key
 from ...validation import uuid as checked_uuid
@@ -27,26 +25,6 @@ from .journal import intent_model
 
 if TYPE_CHECKING:
     from .api import Broker
-
-
-_BINDING_SECRET_KEY = re.compile(SECRET_KEY_PATTERN, re.IGNORECASE)
-BLOCKED_OUTPUTS = {
-    resource_type: frozenset(output for output in outputs if _BINDING_SECRET_KEY.search(output))
-    for resource_type, outputs in RESOURCE_OUTPUTS.items()
-}
-BLOCKED_MESSAGES = {
-    "postgres": "PGPASSWORD can't be bound yet; DATABASE_URL already includes the password",
-    "s3": "S3 secret key binding needs a platform update; ask an administrator",
-}
-
-
-def blocked_bindings(resource_type: str) -> dict[str, str]:
-    return {
-        output: BLOCKED_MESSAGES.get(
-            resource_type, "This binding needs a platform update; ask an administrator"
-        )
-        for output in sorted(BLOCKED_OUTPUTS[resource_type])
-    }
 
 
 def owner_key(value: object) -> str:
@@ -214,12 +192,7 @@ def storage_resources(self: Broker, app_id: str) -> list[dict[str, Any]]:
                     }.get(item["lifecycleState"], item["lifecycleState"]),
                     "createdAt": utc(item.get("createdAt")),
                     "verifiedAt": utc(item.get("lastVerifiedAt")),
-                    "defaultBindings": {
-                        output: target
-                        for output, target in OUTPUT_ENVIRONMENT_KEYS[item["type"]].items()
-                        if output not in BLOCKED_OUTPUTS[item["type"]]
-                    },
-                    "unavailableBindings": blocked_bindings(item["type"]),
+                    "defaultBindings": dict(OUTPUT_ENVIRONMENT_KEYS[item["type"]]),
                 }
             )
         cursor = page.get("nextCursor")
@@ -327,12 +300,6 @@ def validate_bindings(
             if output not in RESOURCE_OUTPUTS[resource["type"]]:
                 raise HttpError(
                     400, "INVALID_BINDING", f"Unknown output for {resource['type']} storage."
-                )
-            if output in BLOCKED_OUTPUTS[resource["type"]]:
-                raise HttpError(
-                    400,
-                    "BINDING_PLATFORM_UPDATE_REQUIRED",
-                    blocked_bindings(resource["type"])[output],
                 )
             if target in names:
                 raise HttpError(

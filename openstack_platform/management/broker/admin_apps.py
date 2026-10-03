@@ -286,10 +286,10 @@ class AdminApps:
         limit, cursor = b.staff.page_limit(request), request.query.get("cursor", (None,))[0]
         with b.database.connect() as db:
             parameters: list[object] = []
-            where = "lifecycle!='rejected'"
+            where = "lifecycle NOT IN ('rejected','deleted')"
             if cursor:
                 point = db.execute(
-                    "SELECT created,id FROM apps WHERE id=? AND lifecycle!='rejected'",
+                    "SELECT created,id FROM apps WHERE id=?",
                     (checked_uuid(cursor),),
                 ).fetchone()
                 if point is None:
@@ -303,7 +303,8 @@ class AdminApps:
                     (*parameters, limit + 1),
                 )
             ]
-        # Local list has no per-app controller fanout. Detail refreshes one app.
+        # Existence checks use bounded SQLite-only project reads, not live health.
+        b.journal.reconcile_page(rows)
         return Response(
             200,
             {
@@ -317,6 +318,7 @@ class AdminApps:
                             "lifecycleState": row["lifecycle"],
                         }
                         for row in rows[:limit]
+                        if row["lifecycle"] != "deleted"
                     ],
                     "nextCursor": rows[limit - 1]["id"] if len(rows) > limit else None,
                     "truncated": len(rows) > limit,

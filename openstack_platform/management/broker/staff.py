@@ -345,6 +345,10 @@ class StaffReads:
             ).fetchone()
         if row is None:
             raise HttpError(404, "NOT_FOUND", "Application not found.")
+        if row["lifecycle"] == "deleted" or self.broker.journal.observe_deleted(row["id"]):
+            raise HttpError(
+                410, "APPLICATION_DELETED", "This application was deleted by an administrator."
+            )
         return dict(row)
 
     @staticmethod
@@ -374,7 +378,7 @@ class StaffReads:
             ),
         }
         source, columns, model = sources[table]
-        conditions = ["1=1"]
+        conditions = ["a.lifecycle NOT IN ('rejected','deleted')"] if table == "apps" else ["1=1"]
         parameters: list[object] = []
         owner = request.query.get("ownerId", (None,))[0]
         app = request.query.get("applicationId", (None,))[0]
@@ -393,7 +397,7 @@ class StaffReads:
             cursor = request.query.get("cursor", (None,))[0]
             if cursor is not None:
                 point = db.execute(
-                    f"SELECT a.created,a.id FROM {source} WHERE {' AND '.join(conditions)} AND a.id=?",
+                    f"SELECT a.created,a.id FROM {source} WHERE {' AND '.join(condition for condition in conditions if not condition.startswith('a.lifecycle')) or '1=1'} AND a.id=?",
                     (*parameters, cursor),
                 ).fetchone()
                 if point is None:
@@ -404,8 +408,11 @@ class StaffReads:
                 f"SELECT {columns} FROM {source} WHERE {' AND '.join(conditions)} ORDER BY a.created DESC,a.id DESC LIMIT ?",
                 (*parameters, limit + 1),
             ).fetchall()
+        projected = [dict(row) for row in rows]
+        if table == "apps":
+            self.broker.journal.reconcile_page(projected)
         return {
-            "items": [model(dict(row)) for row in rows[:limit]],
+            "items": [model(row) for row in projected[:limit] if row.get("lifecycle") != "deleted"],
             "nextCursor": rows[limit - 1]["id"] if len(rows) > limit else None,
             "truncated": len(rows) > limit,
         }

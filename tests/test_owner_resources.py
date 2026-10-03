@@ -146,7 +146,6 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
                 "createdAt",
                 "verifiedAt",
                 "defaultBindings",
-                "unavailableBindings",
             },
         )
         self.assert_error(
@@ -191,12 +190,10 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
         )
 
     def test_default_bindings_for_every_type_are_admitted_by_real_project_router(self):
-        from openstack_platform.controller.database import _SECRET_KEY
         from openstack_platform.controller.storage_contract import (
             OUTPUT_ENVIRONMENT_KEYS,
             RESOURCE_OUTPUTS,
         )
-        from openstack_platform.management.broker.resources import BLOCKED_OUTPUTS
 
         for resource_type in ("postgres", "mongo", "s3"):
             with self.subTest(resource_type=resource_type):
@@ -205,19 +202,12 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
                     "data"
                 ]["items"]
                 resource = next(item for item in resources if item["type"] == resource_type)
-                blocked = {
-                    name for name in RESOURCE_OUTPUTS[resource_type] if _SECRET_KEY.search(name)
-                }
-                self.assertEqual(BLOCKED_OUTPUTS[resource_type], blocked)
                 self.assertEqual(
-                    resource["defaultBindings"],
-                    {
-                        k: v
-                        for k, v in OUTPUT_ENVIRONMENT_KEYS[resource_type].items()
-                        if k not in blocked
-                    },
+                    resource["defaultBindings"], dict(OUTPUT_ENVIRONMENT_KEYS[resource_type])
                 )
-                self.assertEqual(set(resource["unavailableBindings"]), blocked)
+                self.assertEqual(
+                    set(resource["defaultBindings"]), set(RESOURCE_OUTPUTS[resource_type])
+                )
                 with self.broker.database.connect() as connection:
                     revision = connection.execute(
                         "SELECT revision FROM apps WHERE id=?", (self.app_id,)
@@ -258,26 +248,6 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
                 self.assertEqual(admissions, [(202, None)])
                 self.assertEqual(result["state"], "accepted")
                 self.finish(result)
-                for output in blocked:
-                    invalid = copy.deepcopy(configuration)
-                    invalid["storageBindings"][0]["outputs"] = {output: "CUSTOM_SECRET_NAME"}
-                    with self.assertRaises(HttpError) as caught:
-                        self.call(
-                            "PUT",
-                            f"/v1/apps/{self.app_id}/configuration",
-                            {
-                                "expectedRevision": revision + 1,
-                                "repository": "https://github.com/example/app",
-                                "branch": "main",
-                                "configuration": invalid,
-                            },
-                            "alice",
-                        )
-                    self.assertEqual(caught.exception.code, "BINDING_PLATFORM_UPDATE_REQUIRED")
-                    self.assertEqual(
-                        caught.exception.summary, resource["unavailableBindings"][output]
-                    )
-                    self.assertNotIn("CUSTOM_SECRET_NAME", caught.exception.summary)
 
     def test_binding_validation_outputs_names_collisions_foreign_and_injectivity(self):
         resource = self.storage_create()
@@ -560,7 +530,7 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
             replay = self.call("PUT", path, {"value": "low-entropy"}, "alice", key).body["data"]
             self.assertEqual(replay["intentId"], intent["intentId"])
             self.assertEqual(replay["state"], "succeeded")
-            request.assert_not_called()
+            request.assert_called_once_with("GET", f"/v1/applications/{self.app_id}/environment")
         self.assert_error(
             "IDEMPOTENCY_CONFLICT",
             lambda: self.call("PUT", path, {"value": "changed"}, "alice", key),

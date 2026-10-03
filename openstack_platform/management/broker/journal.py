@@ -72,6 +72,8 @@ class Journal:
         self.stop_event = threading.Event()
         self.wake = threading.Event()
         self.thread: threading.Thread | None = None
+        self.next_app_scan = 0.0
+        self.app_scan_cursor: tuple[float, str] | None = None
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self.run, name="management-recovery", daemon=True)
@@ -104,6 +106,78 @@ class Journal:
                 self.dispatch(row["id"])
             except Exception as error:
                 report_exception(error, row["id"])
+
+        if time.monotonic() >= self.next_app_scan:
+            self.next_app_scan = time.monotonic() + 5
+            self.reconcile_apps()
+
+    def observe_deleted(self, app_id: str, *, missing: bool = False) -> bool:
+        """Only definitive project-not-found evidence retires a known ready app."""
+        with self.database.connect() as db:
+            app = db.execute("SELECT user_id,lifecycle FROM apps WHERE id=?", (app_id,)).fetchone()
+        if app is None or app["lifecycle"] != "ready":
+            return app is not None and app["lifecycle"] == "deleted"
+        if not missing:
+            try:
+                status, result = self.client.request(
+                    "GET", f"/v1/applications/{app_id}/environment"
+                )
+            except ControllerUnavailable:
+                return False
+            error = result.get("error")
+            missing = (
+                status == 404
+                and isinstance(error, dict)
+                and error.get("code") == "APPLICATION_NOT_FOUND"
+            )
+        if not missing:
+            return False
+        now = time.time()
+        with self.database.connect(write=True) as db:
+            changed = db.execute(
+                "UPDATE apps SET lifecycle='deleted' WHERE id=? AND lifecycle='ready'", (app_id,)
+            ).rowcount
+            if changed:
+                db.execute("UPDATE observations SET updated=0 WHERE app_id=?", (app_id,))
+                db.execute(
+                    "UPDATE intents SET state='failed',safe_error='This application was deleted by an administrator.',updated=?,lease=0 WHERE app_id=? AND state IN ('prepared','unknown','blocked')",
+                    (now, app_id),
+                )
+                db.execute(
+                    "INSERT INTO audit(user_id,app_id,action,created) VALUES(?,?,'app_deleted_by_administrator',?)",
+                    (app["user_id"], app_id, now),
+                )
+        return True
+
+    def reconcile_apps(self) -> None:
+        with self.database.connect() as db:
+            clause, values = (
+                ("", ())
+                if self.app_scan_cursor is None
+                else (
+                    " AND (created>? OR (created=? AND id>?))",
+                    (self.app_scan_cursor[0], self.app_scan_cursor[0], self.app_scan_cursor[1]),
+                )
+            )
+            rows = db.execute(
+                "SELECT id,created FROM apps WHERE lifecycle='ready'"
+                + clause
+                + " ORDER BY created,id LIMIT 4",
+                values,
+            ).fetchall()
+        for row in rows:
+            self.observe_deleted(row["id"])
+        self.app_scan_cursor = (rows[-1]["created"], rows[-1]["id"]) if len(rows) == 4 else None
+
+    def reconcile_page(self, rows: list[dict[str, Any]]) -> None:
+        # Cheap metadata reads, not health/provider observations; bound work per
+        # list read and let the round-robin background scan settle other pages.
+        started = time.monotonic()
+        for row in rows[:4]:
+            if time.monotonic() - started >= 2:
+                break
+            if row.get("lifecycle") == "ready" and self.observe_deleted(row["id"]):
+                row["lifecycle"] = "deleted"
 
     def dispatch(self, identifier: str, *, secret_body: object = None) -> None:
         now = time.time()
