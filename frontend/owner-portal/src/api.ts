@@ -1,3 +1,12 @@
+export const configurationGuidance = {
+  root: 'The repository root must contain package.json.',
+  locks:
+    'Each package directory must contain its runtime lockfile: package-lock.json for Node.js, bun.lock or bun.lockb for Bun.',
+  scripts: 'Build and start scripts come from the root package.json.',
+  health:
+    'Use a health endpoint such as /health that returns HTTP 2xx with a body of at most 4 KB.',
+  postgres: 'PostgreSQL’s DATABASE_URL already includes the password.',
+};
 export type StorageBinding = { resourceId: string; outputs: Record<string, string> };
 export type StorageResource = {
   resourceId: string;
@@ -319,13 +328,13 @@ export function validateSettings(settings: Settings): string | null {
     new Set(settings.configuration.build.packages).size !==
       settings.configuration.build.packages.length
   )
-    return 'Package directories must be unique paths inside your repository.';
+    return `Package directories must be unique paths inside your repository. ${configurationGuidance.locks}`;
   if (
     !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/.test(settings.configuration.build.startScript) ||
     (settings.configuration.build.buildScript !== null &&
       !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/.test(settings.configuration.build.buildScript))
   )
-    return 'Enter package script names, rather than commands.';
+    return `Enter script names, rather than commands. ${configurationGuidance.scripts}`;
   const { port, healthPath } = settings.configuration.runtime;
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     return 'Port must be between 1 and 65535.';
@@ -336,7 +345,7 @@ export function validateSettings(settings: Settings): string | null {
     healthPath.split('/').includes('..') ||
     healthPath.length > 256
   )
-    return 'Enter an absolute health path without a query or fragment.';
+    return `Enter an absolute health path without a query or fragment. ${configurationGuidance.health}`;
   return null;
 }
 

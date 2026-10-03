@@ -117,13 +117,7 @@ def write_tar(path: Path, files: dict[str, bytes]) -> None:
 def runtime_files(source: dict[str, bytes], mode: str) -> dict[str, bytes]:
     names = {f"openstack_platform/{name}" for name in BASE}
     if mode == "broker":
-        names.update(
-            {
-                "openstack_platform/durable.py",
-                "openstack_platform/runtime.py",
-                "openstack_platform/controller/database.py",
-            }
-        )
+        names.add("openstack_platform/durable.py")
     names |= {f"openstack_platform/controller/{name}" for name in CONTROLLER}
     names |= {
         f"openstack_platform/management/{name}"

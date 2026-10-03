@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { api, request, record, type Session, type Settings } from './api';
+import { api, request, record, configurationGuidance, type Session, type Settings } from './api';
 import { adminAppsApi } from './adminAppsApi';
 import { AdminAppsPages } from './pages/AdminApps';
 import { EnvironmentSection } from './components/EnvironmentSection';
@@ -110,6 +110,11 @@ describe('admin application management', () => {
     vi.spyOn(adminAppsApi, 'resources').mockReturnValue(service);
     show(<AdminAppsPages />, `/admin/apps/${id}`);
     fireEvent.click(await screen.findByRole('button', { name: 'Deploy application' }));
+    expect(screen.getByText(configurationGuidance.scripts)).toBeVisible();
+    expect(screen.getByText(configurationGuidance.root, { exact: false })).toBeVisible();
+    expect(screen.getByText(configurationGuidance.health)).toBeVisible();
+    expect(screen.getByText(configurationGuidance.postgres, { exact: false })).toBeVisible();
+
     expect(screen.getByRole('dialog')).toHaveTextContent(
       'A retained primary IPv4 requires maintenance.',
     );

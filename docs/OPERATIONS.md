@@ -1331,6 +1331,16 @@ and S3 TLS use the platform CA through the default `PGSSLROOTCERT` and
 `AWS_CA_BUNDLE` bindings. Renaming these targets requires configuring the client
 to use the renamed CA path variable.
 
+The repository root must contain `package.json`, and each selected package
+directory must contain its runtime lockfile. Build and start scripts come from
+the root `package.json`. Use a small health endpoint such as `/health` that returns
+HTTP 2xx with a body of at most 4096 bytes; a full HTML page at `/` can fail health
+verification. PostgreSQL's `DATABASE_URL` already includes the password.
+Known build and health failures show release-owned guidance in intent/operation
+views. Staff and admins also see a bounded internal code; owners do not. Unknown
+failures retain a generic message, and controller free text is not used as
+guidance.
+
 ### Manage applications as a local admin
 
 Sign in with a local admin account and open **Manage applications**. The list

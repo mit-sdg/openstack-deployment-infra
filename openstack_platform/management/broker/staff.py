@@ -19,7 +19,7 @@ from ...validation import uuid as checked_uuid
 from ..common import canonical, strict_json, utc
 from .anonymous import client_address_bucket
 from .client import ControllerUnavailable
-from .journal import controller_error_code
+from .journal import controller_error_code, deploy_failure_guidance
 from .staff_policy import AUDIT_ROWS, AUDIT_SECONDS, RESPONSE_BYTES, public_url
 
 if TYPE_CHECKING:
@@ -594,6 +594,12 @@ class StaffReads:
             "updatedAt": utc(row["updated"]),
             "statusObservedAt": utc(operation.get("updatedAt")),
             "controllerErrorCode": controller_error_code(operation.get("controllerErrorCode")),
+            "guidance": deploy_failure_guidance(
+                row["kind"],
+                row["state"],
+                controller_error_code(operation.get("controllerErrorCode")),
+                phase,
+            ),
             "attention": "recovery_required"
             if state == "blocked"
             else "failed"

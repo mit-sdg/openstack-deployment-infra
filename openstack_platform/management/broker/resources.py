@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import sqlite3
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from ...controller.database import _SECRET_KEY
 from ...controller.deployment_config import parse_configuration
 from ...controller.http import HttpError, Request, Response
 from ...controller.storage_contract import (
@@ -17,6 +17,7 @@ from ...controller.storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
     RESERVED_ENVIRONMENT_PREFIX,
     RESOURCE_OUTPUTS,
+    SECRET_KEY_PATTERN,
 )
 from ...validation import ValidationError, bounded_text, env_key
 from ...validation import uuid as checked_uuid
@@ -28,8 +29,9 @@ if TYPE_CHECKING:
     from .api import Broker
 
 
+_BINDING_SECRET_KEY = re.compile(SECRET_KEY_PATTERN, re.IGNORECASE)
 BLOCKED_OUTPUTS = {
-    resource_type: frozenset(output for output in outputs if _SECRET_KEY.search(output))
+    resource_type: frozenset(output for output in outputs if _BINDING_SECRET_KEY.search(output))
     for resource_type, outputs in RESOURCE_OUTPUTS.items()
 }
 BLOCKED_MESSAGES = {

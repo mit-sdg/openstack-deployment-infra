@@ -372,6 +372,60 @@ class CeremonyTests(ManagementCase):
 
 
 class OwnerIntentTests(ManagementCase):
+    def test_deploy_guidance_uses_only_release_text_and_hides_codes_from_owners(self) -> None:
+        from openstack_platform.management.broker.journal import (
+            BUILD_GUIDANCE,
+            HEALTH_GUIDANCE,
+            deploy_failure_guidance,
+            intent_model,
+        )
+
+        user = self.login()
+        app = self.create()
+        for code, phase, expected in (
+            ("BUILD_REJECTED", None, BUILD_GUIDANCE),
+            ("BUILD_FAILED", None, BUILD_GUIDANCE),
+            ("HEALTH_TIMEOUT", None, HEALTH_GUIDANCE),
+            ("CANDIDATE_UNHEALTHY", None, HEALTH_GUIDANCE),
+            ("DEADLINE_EXCEEDED", "worker_ready", HEALTH_GUIDANCE),
+            ("DEADLINE_EXCEEDED", "building", None),
+            (None, "build_rejected", BUILD_GUIDANCE),
+            ("INVALID_REQUEST", None, None),
+        ):
+            with self.subTest(code=code, phase=phase):
+                with self.broker.database.connect(write=True) as db:
+                    identifier = self.broker.record(
+                        db,
+                        user,
+                        app,
+                        "deploy",
+                        str(uuid.uuid4()),
+                        "fp",
+                        "POST",
+                        f"/v1/applications/{app}/deployments",
+                        {"commit": "a" * 40},
+                        str(uuid.uuid4()),
+                    )
+                    db.execute(
+                        "UPDATE intents SET state='failed',operation=?,safe_error='Generic failure.' WHERE id=?",
+                        (canonical({"controllerErrorCode": code, "phase": phase}), identifier),
+                    )
+                    row = dict(
+                        db.execute("SELECT * FROM intents WHERE id=?", (identifier,)).fetchone()
+                    )
+                owner = self.call("GET", f"/v1/intents/{identifier}", owner="alice").body["data"]
+                self.assertEqual(owner["safeError"], expected or "Generic failure.")
+                self.assertNotIn("controllerErrorCode", owner)
+                admin = intent_model(row, diagnostic=True)
+                self.assertEqual(admin["safeError"], expected or "Generic failure.")
+                self.assertEqual(admin["controllerErrorCode"], code)
+                staff = self.broker.staff.operation_model(row)
+                self.assertEqual(staff["guidance"], expected)
+                self.assertEqual(staff["controllerErrorCode"], code)
+        self.assertIsNone(deploy_failure_guidance("env_set", "failed", "BUILD_REJECTED", None))
+        self.assertIsNone(deploy_failure_guidance("deploy", "succeeded", "HEALTH_TIMEOUT", None))
+        self.assertIsNone(deploy_failure_guidance("deploy", "failed", {}, {}))
+
     def test_controller_rejection_codes_are_durable_bounded_and_role_scoped(self) -> None:
         from openstack_platform.management.broker.accounts import security_change
         from openstack_platform.management.common import strict_json

@@ -633,16 +633,25 @@ fields. The broker derives unavailable outputs by applying the controller's
 that bind them. PostgreSQL's URL includes its password; S3 secret key injection
 needs a platform update. The binding editor explains the limitation and allows
 removing an unavailable binding from an older saved configuration. The broker
-archive includes the unchanged controller database module and its standard-library
-runtime dependencies solely to import that filter; this is a release-only
-mitigation with no schema, compatibility, controller or Nix changes.
+imports `SECRET_KEY_PATTERN` from the shared storage contract; a parity
+test checks it against the controller's unchanged `_SECRET_KEY.pattern`. Broker
+archives do not include controller database code or `runtime.py` for this filter.
+The mitigation remains release-only, with no schema or compatibility changes.
 
 Controller admission error codes are retained in existing intent JSON and
 validated as 1–64 uppercase ASCII letters/digits/underscores, beginning with a
 letter. No controller summary is retained or displayed. Admin/staff intent and
 operation projections expose `controllerErrorCode`; owner projections strip it
-and keep the generic error. Already failed intents cannot recover a code that
+and show release-owned guidance or a generic error. Already failed intents cannot recover a code that
 was discarded by an earlier broker version.
+Known failed-deploy codes map to fixed release-owned guidance for root
+`package.json`, per-package runtime lockfiles and root build/start scripts, or a
+small HTTP-2xx health endpoint with a body of at most 4096 bytes. The
+`build_rejected` phase also identifies build guidance. Deadline codes get health
+guidance only when their recorded phase identifies health verification; unknown
+failures keep the generic message. Owner projections omit internal codes while
+showing the same guidance; staff/admin views retain the bounded code separately.
+Controller free text is never used to select or populate guidance.
 
 Saving bindings checks application ownership, outputs for the storage type,
 valid/unreserved/injective targets and collisions with owner environment names
