@@ -180,6 +180,68 @@ class AdminApplicationTests(ManagementCase):
             "OWNER_CONFLICT", lambda: self.call("PUT", f"/v1/admin-apps/{app}/owner", body, "admin")
         )
 
+    def test_list_names_owners_and_reports_cached_url_and_last_deploy(self) -> None:
+        operator = self.adopted(identity=False)
+        with self.broker.database.connect() as db:
+            names = {
+                row["id"]: (row["username"], row["display_name"])
+                for row in db.execute("SELECT id,username,display_name FROM users")
+            }
+
+        def listing() -> dict[str, dict[str, Any]]:
+            items = self.call("GET", "/v1/admin-apps", owner="admin").body["data"]["items"]
+            return {item["applicationId"]: item for item in items}
+
+        before = listing()
+        self.assertEqual(set(before), {self.app_id, operator})
+        for item in before.values():
+            self.assertEqual(
+                (item["ownerUsername"], item["ownerDisplayName"]), names[item["ownerId"]]
+            )
+        # Additive: every earlier field is still present.
+        self.assertEqual(
+            set(before[operator]) - {"ownerUsername", "ownerDisplayName", "url", "lastDeployedAt"},
+            {"applicationId", "slug", "ownerId", "savedRevision", "lifecycleState"},
+        )
+        # The list never reads the controller; values come from the last observation.
+        self.assertIsNone(before[operator]["lastDeployedAt"])
+        detail = self.call("GET", f"/v1/admin-apps/{operator}", owner="admin").body["data"]
+        self.assertEqual(
+            (detail["ownerUsername"], detail["ownerDisplayName"]), names[detail["ownerId"]]
+        )
+        after = listing()[operator]
+        self.assertEqual(after["url"], detail["url"])
+        self.assertTrue(after["url"].startswith("https://"))
+        self.assertEqual(after["lastDeployedAt"], detail["acceptedDeployment"]["acceptedAt"])
+        self.assertIsNone(after.get("observation"))
+        # A malformed cached observation yields nulls rather than a failed list.
+        with self.broker.database.connect(write=True) as db:
+            db.execute(
+                "UPDATE observations SET body=? WHERE app_id=?",
+                ('{"url":"http://x.test","acceptedDeployment":[1]}', operator),
+            )
+        broken = listing()[operator]
+        self.assertEqual((broken["url"], broken["lastDeployedAt"]), (None, None))
+        # Paging still works across the joins.
+        page = self.call("GET", "/v1/admin-apps?limit=1", owner="admin").body["data"]
+        rest = self.call(
+            "GET", "/v1/admin-apps?limit=1&cursor=" + page["nextCursor"], owner="admin"
+        ).body["data"]
+        self.assertEqual(
+            {item["applicationId"] for item in page["items"] + rest["items"]},
+            {self.app_id, operator},
+        )
+        # The web layer forwards the new fields unchanged.
+        assets = self.root / "assets"
+        assets.mkdir()
+        (assets / "index.html").write_text('<div id="root"></div>')
+        web = WebServer(("127.0.0.1", 0), self.config, assets)
+        self.addCleanup(web.server_close)
+        body = {"data": {"items": [after], "nextCursor": None, "truncated": False}}
+        with patch.object(web.broker, "request", return_value=(200, copy.deepcopy(body))):
+            reply = web.forward("GET", "/api/v1/admin-apps", "", {}, b"")
+        self.assertEqual(strict_json(reply.body), body)
+
     def test_target_owner_quota_not_admin_quota(self) -> None:
         with self.broker.database.connect(write=True) as db:
             db.execute("INSERT INTO quotas VALUES(?,1,1)", (self.owner,))

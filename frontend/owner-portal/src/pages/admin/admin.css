@@ -1,0 +1,68 @@
+/* Admin and account pages. Tokens only; see frontend/DESIGN.md. */
+
+/* A heading for a group of controls inside a dialog. */
+.admin-group-title {
+  font-size: var(--ui-text-md);
+  font-weight: var(--ui-weight-semibold);
+}
+
+/* Authenticator key: grouped characters that copy as one value. */
+.admin-secret {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-1) var(--ui-space-3);
+  padding: var(--ui-space-3) var(--ui-input-padding-x);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-subtle);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-lg);
+}
+
+/* A field and its button on one line, aligned to the control. */
+.admin-inline-form {
+  align-items: flex-end;
+}
+
+/* A row title that opens a dialog: looks like the row's link. */
+.admin-row-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-text);
+  font-weight: var(--ui-weight-medium);
+  text-align: start;
+}
+.admin-row-button:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.admin-row-button:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+  border-radius: var(--ui-radius-sm);
+}
+
+/*
+ * QR code for authenticator setup. Scanners need dark modules on a light
+ * plate in every theme, so these two colors are fixed on purpose: the plate
+ * uses the white on-accent token and the modules are black.
+ */
+.admin-qr {
+  display: block;
+  width: 100%;
+  max-width: calc(var(--ui-space-16) * 3);
+  height: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+}
+.admin-qr__plate {
+  fill: var(--ui-on-accent);
+}
+.admin-qr__modules {
+  fill: #000;
+}
+.admin-qr-frame {
+  display: flex;
+  justify-content: center;
+}

@@ -680,8 +680,13 @@ class Accounts:
         from ..common import strict_json
 
         with self.broker.database.connect() as db:
+            # Names come from the same read so the log needs no account lookups.
             rows = db.execute(
-                "SELECT * FROM admin_audit WHERE sequence<? ORDER BY sequence DESC LIMIT ?",
+                "SELECT l.*,a.username AS actor_username,a.display_name AS actor_display_name,"
+                "t.username AS target_username,t.display_name AS target_display_name"
+                " FROM admin_audit l LEFT JOIN users a ON a.id=l.actor_id"
+                " LEFT JOIN users t ON t.id=l.target_id"
+                " WHERE l.sequence<? ORDER BY l.sequence DESC LIMIT ?",
                 (int(cursor), limit + 1),
             ).fetchall()
         return Response(
@@ -696,6 +701,10 @@ class Accounts:
                             "action": row["action"],
                             "details": strict_json(row["details"].encode()),
                             "createdAt": utc(row["created"]),
+                            "actorUsername": row["actor_username"],
+                            "actorDisplayName": row["actor_display_name"],
+                            "targetUsername": row["target_username"],
+                            "targetDisplayName": row["target_display_name"],
                         }
                         for row in rows[:limit]
                     ],
