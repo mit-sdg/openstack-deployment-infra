@@ -170,6 +170,29 @@ describe("data display", () => {
     );
     expect(screen.getByRole("columnheader", { name: "Name" })).toBeVisible();
   });
+  it("makes rows clickable without hijacking links inside them", () => {
+    const open = vi.fn();
+    render(
+      <DataTable
+        label="Apps"
+        rows={[{ id: "1", name: "demo" }]}
+        rowKey={(row) => row.id}
+        onRowClick={(row) => open(row.id)}
+        columns={[
+          {
+            key: "name",
+            header: "Name",
+            cell: (row) => <a href="#demo">{row.name}</a>,
+          },
+          { key: "note", header: "Note", cell: () => "Plain text" },
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "demo" }));
+    expect(open).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Plain text"));
+    expect(open).toHaveBeenCalledWith("1");
+  });
   it("shows the empty state instead of an empty table", () => {
     render(
       <DataTable

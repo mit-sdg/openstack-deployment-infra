@@ -73,7 +73,13 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
               Resume
             </Button>
           )}
-          <Status state={intent.state} />
+          {/* Success is the norm: it gets no badge, but screen readers still
+              hear each row's outcome. */}
+          {intent.state === 'succeeded' ? (
+            <span className="ui-sr-only">Succeeded</span>
+          ) : (
+            <Status state={intent.state} />
+          )}
         </>
       }
     >
@@ -94,5 +100,9 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
 }
 
 export function OperationList({ label, children }: { label: string; children: ReactNode }) {
-  return <List label={label}>{children}</List>;
+  return (
+    <List label={label} density="compact">
+      {children}
+    </List>
+  );
 }

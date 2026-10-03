@@ -13,6 +13,7 @@ import { useState, type FormEvent } from 'react';
 import { useLocation } from 'wouter';
 import { clearCredentials } from '../api';
 import { authOptionsQuery } from '../authOptions';
+import { Mark } from '../components/Mark';
 
 const messages: Record<string, string> = {
   INVALID_CREDENTIALS: 'Username or password is incorrect.',
@@ -86,8 +87,9 @@ export function SignIn() {
     event.preventDefault();
     login.mutate();
   }
+  const platformName = options.data?.platformName;
   return (
-    <AuthLayout title="Sign in">
+    <AuthLayout title={platformName ? `Sign in to ${platformName}` : 'Sign in'} mark={<Mark />}>
       <SegmentedControl
         label="Sign-in method"
         hideLabel

@@ -1,0 +1,112 @@
+/* Gallery-only layout helpers. Not part of the design system. */
+.gallery-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-3);
+}
+.gallery-label {
+  min-width: 120px;
+  color: var(--ui-text-subtle);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-xs);
+}
+.gallery-swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--ui-space-3);
+}
+.gallery-swatch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-xs);
+  color: var(--ui-text-muted);
+}
+.gallery-swatch > span:first-child {
+  height: 40px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+}
+.gallery-align {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ui-space-2);
+}
+.gallery-align > * {
+  flex: 0 0 auto;
+  width: 180px;
+}
+.gallery-spacer {
+  height: 1px;
+  background: var(--ui-border);
+}
+.gallery-type > * + * {
+  margin-top: var(--ui-space-2);
+}
+.gallery-t-2xl {
+  font-size: var(--ui-text-2xl);
+  line-height: var(--ui-leading-2xl);
+  letter-spacing: var(--ui-tracking-2xl);
+  font-weight: var(--ui-weight-semibold);
+}
+.gallery-t-xl {
+  font-size: var(--ui-text-xl);
+  line-height: var(--ui-leading-xl);
+  letter-spacing: var(--ui-tracking-xl);
+  font-weight: var(--ui-weight-semibold);
+}
+.gallery-t-lg {
+  font-size: var(--ui-text-lg);
+  line-height: var(--ui-leading-lg);
+  letter-spacing: var(--ui-tracking-lg);
+  font-weight: var(--ui-weight-semibold);
+}
+.gallery-t-md {
+  font-size: var(--ui-text-md);
+  line-height: var(--ui-leading-md);
+}
+.gallery-t-medium {
+  font-weight: var(--ui-weight-medium);
+}
+.sw-bg {
+  background: var(--ui-bg);
+}
+.sw-surface {
+  background: var(--ui-surface);
+}
+.sw-surface-subtle {
+  background: var(--ui-surface-subtle);
+}
+.sw-surface-active {
+  background: var(--ui-surface-active);
+}
+.sw-border {
+  background: var(--ui-border-strong);
+}
+.sw-text {
+  background: var(--ui-text);
+}
+.sw-text-muted {
+  background: var(--ui-text-muted);
+}
+.sw-text-subtle {
+  background: var(--ui-text-subtle);
+}
+.sw-accent {
+  background: var(--ui-accent-solid);
+}
+.sw-accent-subtle {
+  background: var(--ui-accent-subtle);
+}
+.sw-success {
+  background: var(--ui-success);
+}
+.sw-warning {
+  background: var(--ui-warning);
+}
+.sw-danger {
+  background: var(--ui-danger);
+}
