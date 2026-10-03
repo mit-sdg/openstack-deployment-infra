@@ -155,6 +155,92 @@ describe('owner resources', () => {
     expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument();
     expect(screen.getByText(/Ask an administrator/)).toBeVisible();
   });
+  it('requires Commons confirmation before owner deployment', async () => {
+    Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+      configurable: true,
+      value: vi.fn(function (this: HTMLDialogElement) {
+        this.setAttribute('open', '');
+      }),
+    });
+    mocks();
+    vi.spyOn(api, 'app').mockResolvedValue({
+      applicationId: 'app',
+      slug: 'commons',
+      identityProvider: true,
+      url: null,
+      savedRevision: 7,
+      lifecycleState: 'ready',
+      desiredRunning: true,
+      activeDeploymentId: null,
+      acceptedDeployment: null,
+      health: null,
+      stale: false,
+      observedAt: null,
+    });
+    vi.spyOn(api, 'settings').mockResolvedValue({
+      revision: 7,
+      repository: 'https://github.com/example/app',
+      branch: 'main',
+      configurationSha256: null,
+      configuration: {
+        schemaVersion: 1,
+        build: { runtime: 'node', packages: ['.'], buildScript: null, startScript: 'start' },
+        runtime: { port: 3000, healthPath: '/health' },
+        storageBindings: [],
+      },
+    });
+    const deployment = vi.spyOn(api, 'deploy').mockResolvedValue(intent);
+    wrap(<DeployPage id="app" />);
+    fireEvent.change(await screen.findByLabelText('Full commit SHA'), {
+      target: { value: 'a'.repeat(40) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Review deployment →' }));
+    const submit = screen.getByRole('button', { name: 'Deploy this commit' });
+    expect(submit).toBeDisabled();
+    expect(deployment).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByLabelText('Portal sign-in depends on this app — confirm deployment'),
+    );
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(deployment).toHaveBeenCalledWith('app', 7, 'a'.repeat(40), expect.any(String), true),
+    );
+  });
+  it('requires owner Commons confirmation for storage creation, verification and rotation', async () => {
+    vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: true } as never);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const fetcher = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify({ data: intent }), { status: 202 })),
+      );
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      await expect(api.createStorage('app', 'postgres', 'key')).rejects.toThrow('Action canceled.');
+      expect(fetcher).not.toHaveBeenCalled();
+      confirm.mockReturnValue(true);
+      await api.createStorage('app', 'postgres', 'key');
+      expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+        type: 'postgres',
+        identityProviderConfirmed: true,
+      });
+      for (const action of ['verify', 'rotate'] as const) {
+        await api.storageAction('app', 'resource', action, 'key');
+        expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({
+          identityProviderConfirmed: true,
+        });
+      }
+      expect(confirm).toHaveBeenCalledWith(
+        expect.stringContaining('Portal sign-in depends on this app'),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('shows only injected names on deploy review', async () => {
     Object.defineProperty(HTMLDialogElement.prototype, 'close', {
       configurable: true,

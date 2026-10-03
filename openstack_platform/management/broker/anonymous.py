@@ -107,7 +107,11 @@ class AddressLimits:
         self.limits = {"options": options_per_minute, "start": starts_per_minute}
 
     def check(self, request: Request, action: str, now: float) -> None:
-        key = action, client_address_bucket(request)
+        self.check_bucket(client_address_bucket(request), action, now)
+
+    def check_bucket(self, address: str, action: str, now: float) -> None:
+        """Admit a bucket already validated/grouped at the trusted web boundary."""
+        key = action, address
         with self.lock:
             stale = [
                 key for key, values in self.visits.items() if not values or values[-1] <= now - 60

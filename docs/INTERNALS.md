@@ -638,8 +638,8 @@ session CSRF token; writes require the exact portal Origin and CSRF. The role,
 generation and enabled state are rechecked in the mutation transaction and after
 controller reads. Request-local context variables prevent concurrent threads
 from sharing elevated authority. The normal `/v1/apps` namespace still enforces
-ownership for every role. Reassignment is an optimistic owner transition and
-requires step-up; all app mutations share a busy scope across actors.
+ownership for every role. Adoption always requires step-up. Reassignment is an
+optimistic owner transition and requires step-up; all app mutations share a busy scope across actors.
 
 `GET /v1/admin-apps` pages the broker DB, default 25 and maximum 50, without
 controller fanout. Detail reads use project GET by known UUID. Administrative
@@ -674,8 +674,11 @@ reservation records stay privileged. Admin deploy accepts maintenance/plan,
 while owner/staff deploy bodies reject those fields. Plan fields, types, known
 current sizing and fingerprint are checked before the broker journals a request;
 the controller validates against fresh cloud evidence at admission. Omitting a plan preserves
-accepted sizing. Class-app consent matches public URL host with Commons origin
-and is enforced server-side for deploy, state and storage changes.
+accepted sizing. Class-app consent matches public URL host with Commons origin and is enforced
+server-side for adoption, reassignment, deploy, state and storage changes. Deploy
+and storage consent also apply through ordinary owner routes regardless of role;
+owners still have no stop route. Creating any local account or issuing any invite
+requires step-up, including owner/staff accounts.
 
 ### Local identities, roles and admin enrollment
 
@@ -695,7 +698,9 @@ catalog endpoints remain metadata-only.
 Local hashing uses `hashlib.scrypt`, `N=32768,r=8,p=3,dklen=64`, random 16-byte
 salts, constant-time hash comparison and automatic upgrade after valid login.
 Only bounded supported costs are accepted from stored hashes. Two nonqueued
-hashing slots limit aggregate algorithm memory to roughly 64 MiB; OpenSSL is
+hashing slots limit aggregate algorithm memory to roughly 64 MiB. One slot serves
+anonymous login/enrollment; the other is reserved for step-up from a live admin
+session. Anonymous work cannot occupy the reserved slot; OpenSSL is
 capped at 48 MiB per call. The current broker unit has no explicit MemoryMax.
 The cost corresponds to the 32 MiB option in the
 [OWASP scrypt guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt).
@@ -709,8 +714,13 @@ Accepted counters strictly increase. Admin sessions require a confirmed local
 factor; local owner/staff factors are optional. Admin expiry is 1 h/15 min idle,
 staff 1 h/10 min, capped by shorter owner policy. Sensitive account actions need
 password plus fresh TOTP within five minutes. Existing username/address failure
-reservations also cover local login; bounded persistent name-hash backoff protects
-against attempts spread across addresses. Password work occurs outside DB locks;
+reservations also cover local login. Validated-address admission permits 12 local
+login attempts and six new backoff names per minute before hashing or allocation.
+Persistent name backoff is capped at five seconds and applies to the source of the
+failure; another address is not locked out. Saturation evicts the oldest idle,
+non-blocked row, or authenticates without a new row if every row is protected.
+Capacity shedding allocates no DB row. Live-admin step-up has independent address
+and failure budgets and bypasses anonymous name backoff. Password work occurs outside DB locks;
 credentials, generation and TOTP counter are rechecked in the commit transaction.
 
 The operator creates a hash-only enrollment file under the existing broker-group
@@ -719,7 +729,15 @@ existing read-only sandbox path; no new network permission is needed. IDs are
 consumed in the same transaction that starts enrollment. Invitations/resets are
 72 h hashed single-use DB tokens tied to user generation. Enrollment is bound to
 the anonymous browser binder, lasts ten minutes, and limits code confirmation to
-five failures. Restore clears every session/token/handle, preserves roles, fences
+five failures. Password-reset links with an existing factor count wrong start-phase
+codes per link, reject after five failures, and verify the code before scrypt.
+Finishing enrollment supplies step-up only if a fresh code was verified in that
+finish request. Issuing a password reset clears the old hash; issuing a factor
+reset clears the old secret. Reset targets become pending until enrollment
+completes, including optional-MFA accounts, so they cannot fall back to password
+only. Migration 3 sets the bootstrap fence to its application time; restoring an
+older v1/v2 DB and upgrading cannot replay a still-present enrollment file.
+Restore clears every session/token/handle, preserves roles, fences
 pre-restore files and advances factor counters beyond the restore window.
 The final schema-3 account migration preserves immutable migrations 1/2; old,
 unpublished staff-grant prototype schema-3 checksums are intentionally refused.

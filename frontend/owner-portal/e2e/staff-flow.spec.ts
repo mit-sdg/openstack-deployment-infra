@@ -161,6 +161,9 @@ for (const [layout, viewport, colorScheme] of [
       } else {
         expect(known.status()).toBe(404);
         await page.getByLabel('Controller application UUID').fill(operatorId);
+        await page
+          .getByLabel('Portal sign-in depends on this app — confirm adoption if this is Commons')
+          .check();
         await page.getByRole('button', { name: 'Adopt application', exact: true }).click();
       }
       await expect(page).toHaveURL(new RegExp(`/admin/apps/${operatorId}$`));

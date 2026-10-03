@@ -12,6 +12,7 @@ from ...controller.http import HttpError, Request, Response
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body, opaque, text, utc
 from . import bootstrap, local_security
+from .anonymous import client_address_bucket
 from .local_auth import authenticate as local_authenticate
 
 if TYPE_CHECKING:
@@ -77,7 +78,7 @@ class Accounts:
         token, identifier = opaque(), str(uuid.uuid4())
         generation = db.execute("SELECT generation FROM users WHERE id=?", (user,)).fetchone()[0]
         db.execute(
-            "INSERT INTO account_tokens VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO account_tokens(id,token_hash,user_id,generation,purpose,expires,created) VALUES(?,?,?,?,?,?,?)",
             (
                 identifier,
                 local_security.token_hash(token),
@@ -102,7 +103,8 @@ class Accounts:
         if row is not None:
             user = self.target(db, row["user_id"])
             if (
-                row["expires"] <= now
+                row["failures"] >= 5
+                or row["expires"] <= now
                 or row["generation"] != user["generation"]
                 or not hmac.compare_digest(row["token_hash"], local_security.token_hash(token))
                 or user["issuer"] != "local"
@@ -169,7 +171,8 @@ class Accounts:
             raise HttpError(400, "INVALID_REQUEST", "Invalid enrollment fields.")
         body = request.body
         try:
-            with self.broker.database.connect() as db:
+            reset_counter = None
+            with self.broker.database.connect(write=True) as db:
                 token = self.resolve_token(db, body["token"])
                 user = token["user"]
                 name = (
@@ -187,34 +190,43 @@ class Accounts:
                     else None
                 )
                 prior_factor = dict(secret_row) if secret_row is not None else None
-            purpose = token["purpose"]
-            if purpose != "totp-reset":
-                supplied = local_security.password(body["password"], name)
-                encoded = local_security.hash_password(supplied)
-            else:
-                encoded = None
-            selected = body.get("totpEnabled", False)
-            if type(selected) is not bool:
-                raise ValueError("invalid TOTP selection")
-            enroll_factor = (
-                purpose in {"bootstrap", "totp-reset"}
-                or purpose == "invite"
-                and (role == "admin" or selected)
-            )
-            secret = local_security.totp_secret() if enroll_factor else None
-            if purpose == "password-reset" and prior_factor and prior_factor["totp_confirmed"]:
-                if (
-                    local_security.verify_totp(
+                purpose = token["purpose"]
+                supplied = (
+                    local_security.password(body["password"], name)
+                    if purpose != "totp-reset"
+                    else None
+                )
+                if purpose == "password-reset" and prior_factor and prior_factor["totp_confirmed"]:
+                    reset_counter = local_security.verify_totp(
                         prior_factor["totp_secret"],
                         body.get("totp"),
                         self.broker.auth.clock(),
                         prior_factor["last_counter"],
                     )
-                    is None
-                ):
-                    raise HttpError(
-                        401, "INVALID_CREDENTIALS", "A fresh authentication code is required."
+                    if reset_counter is None:
+                        # Return inside the transaction so the failure survives.
+                        db.execute(
+                            "UPDATE account_tokens SET failures=MIN(failures+1,5) WHERE id=?",
+                            (token["id"],),
+                        )
+                        return self.code_failure()
+                    db.execute(
+                        "UPDATE local_accounts SET last_counter=? WHERE user_id=?",
+                        (reset_counter, user["id"]),
                     )
+            selected = body.get("totpEnabled", False)
+            if type(selected) is not bool:
+                raise ValueError("invalid TOTP selection")
+            enroll_factor = (
+                purpose in {"bootstrap", "totp-reset"}
+                or purpose in {"invite", "password-reset"}
+                and (role == "admin" or selected)
+                and not (
+                    purpose == "password-reset" and prior_factor and prior_factor["totp_confirmed"]
+                )
+            )
+            secret = local_security.totp_secret() if enroll_factor else None
+            encoded = local_security.hash_password(supplied) if supplied is not None else None
             handle = opaque()
             with self.broker.database.connect(write=True) as db:
                 token = self.resolve_token(db, body["token"])
@@ -233,20 +245,11 @@ class Accounts:
                         "SELECT totp_secret,last_counter FROM local_accounts WHERE user_id=?",
                         (user["id"],),
                     ).fetchone()
-                    counter = local_security.verify_totp(
-                        latest["totp_secret"],
-                        body.get("totp"),
-                        self.broker.auth.clock(),
-                        latest["last_counter"],
-                    )
-                    if counter is None:
-                        raise HttpError(
-                            401, "INVALID_CREDENTIALS", "A fresh authentication code is required."
-                        )
-                    db.execute(
-                        "UPDATE local_accounts SET last_counter=? WHERE user_id=?",
-                        (counter, user["id"]),
-                    )
+                    if (
+                        latest["totp_secret"] != prior_factor["totp_secret"]
+                        or latest["last_counter"] != reset_counter
+                    ):
+                        raise HttpError(403, "TOKEN_INVALID", "This enrollment is unavailable.")
                 db.execute(
                     "INSERT INTO used_tokens VALUES(?,?,?)",
                     (token["id"], purpose, self.broker.auth.clock()),
@@ -298,6 +301,20 @@ class Accounts:
             },
         )
 
+    @staticmethod
+    def code_failure() -> Response:
+        return Response(
+            401,
+            {
+                "error": {
+                    "code": "INVALID_CREDENTIALS",
+                    "summary": "A fresh authentication code is required.",
+                    "retryable": False,
+                    "correlationId": str(uuid.uuid4()),
+                }
+            },
+        )
+
     def finish(self, request: Request) -> Response:
         binder = self.broker.auth.anonymous_post(request)
         body = object_body(request.body, {"csrfToken", "enrollmentToken", "totp"})
@@ -337,6 +354,30 @@ class Accounts:
                             }
                         },
                     )
+            elif body["totp"]:
+                factor = db.execute(
+                    "SELECT totp_secret,totp_confirmed,last_counter FROM local_accounts WHERE user_id=?",
+                    (user["id"],),
+                ).fetchone()
+                counter = (
+                    local_security.verify_totp(
+                        factor["totp_secret"],
+                        body["totp"],
+                        self.broker.auth.clock(),
+                        factor["last_counter"],
+                    )
+                    if factor and factor["totp_confirmed"]
+                    else None
+                )
+                if counter is None:
+                    db.execute(
+                        "UPDATE enrollments SET failures=failures+1 WHERE token_hash=?", (hashed,)
+                    )
+                    return self.code_failure()
+                db.execute(
+                    "UPDATE local_accounts SET last_counter=? WHERE user_id=?",
+                    (counter, user["id"]),
+                )
             if (
                 user["role"] == "admin"
                 and row["purpose"] not in ("password-reset",)
@@ -357,7 +398,7 @@ class Accounts:
                     "UPDATE local_accounts SET totp_secret=?,totp_confirmed=1,last_counter=? WHERE user_id=?",
                     (row["secret"], counter, user["id"]),
                 )
-            if row["purpose"] in ("bootstrap", "invite", "totp-reset"):
+            if row["purpose"] in ("bootstrap", "invite", "totp-reset", "password-reset"):
                 db.execute("UPDATE users SET status='active' WHERE id=?", (user["id"],))
             security_change(db, user["id"])
             db.execute(
@@ -379,8 +420,8 @@ class Accounts:
                 db,
                 latest,
                 request,
-                reauthenticated=latest["role"] == "admin",
-                proof_at=row["expires"] - 600,
+                reauthenticated=latest["role"] == "admin" and counter is not None,
+                proof_at=self.broker.auth.clock() if counter is not None else None,
             )
         return Response(200, response)
 
@@ -396,7 +437,8 @@ class Accounts:
             user["username"],
             body["password"],
             body["totp"],
-            request.headers.get("x-portal-client-address", ""),
+            client_address_bucket(request),
+            step_up=True,
         )
         with self.broker.database.connect(write=True) as db:
             current = self.broker.auth.session_row(db, sid, self.broker.auth.clock(), "admin")
@@ -410,7 +452,7 @@ class Accounts:
         return Response(200, {"data": {"stepUpExpiresAt": utc(self.broker.auth.clock() + 300)}})
 
     def create(self, request: Request) -> Response:
-        actor, sid = self.admin(request)
+        actor, sid = self.admin(request, step_up=True)
         body = object_body(request.body, {"username", "displayName", "role"})
         try:
             name = local_security.username(body["username"])
@@ -420,12 +462,10 @@ class Accounts:
         role = body["role"]
         if role not in ("owner", "staff", "admin"):
             raise HttpError(400, "INVALID_ROLE", "Invalid role.")
-        if role == "admin":
-            self.admin(request, step_up=True)
         identifier = str(uuid.uuid4())
         try:
             with self.broker.database.connect(write=True) as db:
-                self.checked_actor(db, sid, step_up=role == "admin")
+                self.checked_actor(db, sid, step_up=True)
                 db.execute(
                     "INSERT INTO users(id,issuer,subject,username,display_name,created,last_login,role,status) VALUES(?,'local',?,?,?,?,0,?,'pending')",
                     (identifier, str(uuid.uuid4()), name, display, self.broker.auth.clock(), role),
@@ -493,6 +533,18 @@ class Accounts:
             if action == "invite" and user["status"] != "pending":
                 raise HttpError(400, "INVALID_FIELD", "Only a pending account can be invited.")
             security_change(db, user["id"])
+            if action == "password-reset":
+                db.execute(
+                    "UPDATE local_accounts SET password_hash=NULL WHERE user_id=?", (user["id"],)
+                )
+            elif action == "totp-reset":
+                db.execute(
+                    "UPDATE local_accounts SET totp_secret=NULL,totp_confirmed=0,last_counter=-1 WHERE user_id=?",
+                    (user["id"],),
+                )
+            if action in ("password-reset", "totp-reset"):
+                # Optional-MFA accounts must not fall back to password-only login.
+                db.execute("UPDATE users SET status='pending' WHERE id=?", (user["id"],))
             latest = self.target(db, user["id"])
             factor = db.execute(
                 "SELECT totp_confirmed,password_hash FROM local_accounts WHERE user_id=?",

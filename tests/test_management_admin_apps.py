@@ -65,7 +65,12 @@ class AdminApplicationTests(ManagementCase):
             ]
         if bindings:
             snapshot["configurationSha256"] = digest(canonical(snapshot["configuration"]))
-        self.call("POST", "/v1/admin-apps/adopt", {"applicationId": identifier}, "admin")
+        self.call(
+            "POST",
+            "/v1/admin-apps/adopt",
+            {"applicationId": identifier, "identityProviderConfirmed": identity},
+            "admin",
+        )
         return identifier
 
     def test_owner_and_staff_denied_every_admin_action_before_lookup(self) -> None:
@@ -119,7 +124,7 @@ class AdminApplicationTests(ManagementCase):
             self.call(
                 "POST",
                 "/v1/admin-apps/adopt",
-                {"applicationId": imported},
+                {"applicationId": imported, "identityProviderConfirmed": True},
                 "admin",
                 row["client_key"],
             ).status,
@@ -127,7 +132,12 @@ class AdminApplicationTests(ManagementCase):
         )
         self.assert_error(
             "ALREADY_OWNED",
-            lambda: self.call("POST", "/v1/admin-apps/adopt", {"applicationId": imported}, "admin"),
+            lambda: self.call(
+                "POST",
+                "/v1/admin-apps/adopt",
+                {"applicationId": imported, "identityProviderConfirmed": True},
+                "admin",
+            ),
         )
         self.assert_error(
             "IDEMPOTENCY_CONFLICT",
@@ -230,7 +240,7 @@ class AdminApplicationTests(ManagementCase):
         self.assertIs(strict_json(row["body"].encode())["_portalAdmin"], True)
         self.assertIn('"maintenance":true', row["body"])
         self.assertIn('"plan":', row["body"])
-        for field in ("maintenance", "plan", "role", "identityProviderConfirmed"):
+        for field in ("maintenance", "plan", "role"):
             self.assert_error(
                 "INVALID_REQUEST",
                 lambda field=field: self.call(
@@ -449,6 +459,91 @@ class AdminApplicationTests(ManagementCase):
             ),
         )
 
+    def test_adoption_requires_step_up_even_when_owner_is_admin(self) -> None:
+        self.now += 301
+        for owner in (None, self.admin_user, self.owner):
+            body = {"applicationId": str(uuid.uuid4()), **({"ownerId": owner} if owner else {})}
+            with self.subTest(owner=owner):
+                self.assert_error(
+                    "STEP_UP_REQUIRED",
+                    lambda body=body: self.call("POST", "/v1/admin-apps/adopt", body, "admin"),
+                )
+
+    def test_identity_confirmation_required_for_adoption_and_reassignment(self) -> None:
+        identifier = str(uuid.uuid4())
+        self.fixture.seed_operator_app(identifier, self.config.commons_origin)
+        body = {"applicationId": identifier, "ownerId": self.owner}
+        self.assert_error(
+            "IDENTITY_CONFIRMATION_REQUIRED",
+            lambda: self.call("POST", "/v1/admin-apps/adopt", body, "admin"),
+        )
+        body["identityProviderConfirmed"] = True
+        self.call("POST", "/v1/admin-apps/adopt", body, "admin")
+        transfer = {"expectedOwnerId": self.owner, "ownerId": self.admin_user}
+        path = f"/v1/admin-apps/{identifier}/owner"
+        self.assert_error(
+            "IDENTITY_CONFIRMATION_REQUIRED", lambda: self.call("PUT", path, transfer, "admin")
+        )
+        transfer["identityProviderConfirmed"] = True
+        self.assertEqual(self.call("PUT", path, transfer, "admin").status, 200)
+
+    def test_identity_confirmation_follows_app_onto_owner_and_staff_routes(self) -> None:
+        staff = self.login("taylor")
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE users SET role='staff' WHERE id=?", (staff,))
+            security_change(db, staff)
+        self.login("taylor")
+        for account, owner in (("alice", self.owner), ("taylor", staff)):
+            identifier = str(uuid.uuid4())
+            self.fixture.seed_operator_app(identifier, self.config.commons_origin)
+            self.fixture.apps[identifier]["slug"] += "-" + account
+            self.call(
+                "POST",
+                "/v1/admin-apps/adopt",
+                {"applicationId": identifier, "ownerId": owner, "identityProviderConfirmed": True},
+                "admin",
+            )
+            prefix = f"/v1/apps/{identifier}"
+            self.assertTrue(
+                self.call("GET", prefix, owner=account).body["data"]["identityProvider"]
+            )
+            for suffix, fields in (
+                ("deployments", {"configurationRevision": 7, "commit": "a" * 40}),
+                ("storage", {"type": "postgres"}),
+            ):
+                with self.subTest(account=account, suffix=suffix):
+                    self.assert_error(
+                        "IDENTITY_CONFIRMATION_REQUIRED",
+                        lambda fields=fields, suffix=suffix, prefix=prefix, account=account: (
+                            self.call("POST", prefix + "/" + suffix, fields, account)
+                        ),
+                    )
+            self.assert_error(
+                "NOT_FOUND",
+                lambda prefix=prefix, account=account: self.call(
+                    "POST", prefix + "/state", {"desiredRunning": False}, account
+                ),
+            )  # Owners have no stop capability.
+            storage = self.call(
+                "POST",
+                prefix + "/storage",
+                {"type": "postgres", "identityProviderConfirmed": True},
+                account,
+            ).body["data"]
+            self.broker.journal.dispatch(storage["intentId"])
+            resource = self.call("GET", prefix + "/storage", owner=account).body["data"]["items"][
+                0
+            ]["resourceId"]
+            for action in ("verify", "rotate"):
+                self.assert_error(
+                    "IDENTITY_CONFIRMATION_REQUIRED",
+                    lambda prefix=prefix, account=account, action=action, resource=resource: (
+                        self.call("POST", prefix + f"/storage/{resource}/{action}", {}, account)
+                    ),
+                )
+            with self.broker.database.connect() as db:
+                self.assertNotIn("identityProviderConfirmed", "\n".join(db.iterdump()))
+
     def test_admin_web_closed_routes_origin_and_csrf(self) -> None:
         assets = self.root / "assets"
         assets.mkdir()
@@ -470,6 +565,10 @@ class AdminApplicationTests(ManagementCase):
             ).status,
             404,
         )
+        with patch.object(web.broker, "request") as upstream:
+            path = f"/api/v1/admin-apps/{self.app_id}/deployments/{uuid.uuid4()}/build-log"
+            self.assertEqual(web.forward("GET", path, "", {}, b"").status, 404)
+            upstream.assert_not_called()
         self.assert_error(
             "CSRF_REJECTED",
             lambda: self.call(

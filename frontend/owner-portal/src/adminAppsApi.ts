@@ -43,10 +43,15 @@ export const adminAppsApi = {
       body: { slug, ownerId },
       key,
     }),
-  adopt: (applicationId: string, ownerId: string | undefined, key: string) =>
+  adopt: (
+    applicationId: string,
+    ownerId: string | undefined,
+    key: string,
+    identityProviderConfirmed = false,
+  ) =>
     request('/admin-apps/adopt', (v) => fields(v, { applicationId: 'string' }), {
       method: 'POST',
-      body: { applicationId, ...(ownerId ? { ownerId } : {}) },
+      body: { applicationId, ...(ownerId ? { ownerId } : {}), identityProviderConfirmed },
       key,
     }),
   resources: (confirm?: () => boolean) => resourceApi('/admin-apps', confirm),
@@ -70,10 +75,15 @@ export const adminAppsApi = {
       },
       key,
     }),
-  reassign: (id: string, expectedOwnerId: string, ownerId: string) =>
+  reassign: (
+    id: string,
+    expectedOwnerId: string,
+    ownerId: string,
+    identityProviderConfirmed = false,
+  ) =>
     request(`/admin-apps/${id}/owner`, record, {
       method: 'PUT',
-      body: { ownerId, expectedOwnerId },
+      body: { ownerId, expectedOwnerId, identityProviderConfirmed },
     }),
   state: (id: string, desiredRunning: boolean, identityProviderConfirmed: boolean, key: string) =>
     request(`/admin-apps/${id}/state`, intent, {

@@ -164,7 +164,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
         elif re.fullmatch(
-            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/deployments(?:/[a-f0-9-]{36}(?:/build-log)?)?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
+            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/deployments(?:/[a-f0-9-]{36})?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
             path,
         ):
             target = path.removeprefix("/api")

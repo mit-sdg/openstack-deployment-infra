@@ -199,6 +199,19 @@ class Broker:
                 raise HttpError(404, "NOT_FOUND", "Application not found.")
             return user, dict(row)
 
+    def identity_mutation_body(
+        self, request: Request, app: dict[str, Any], fields: set[str]
+    ) -> dict[str, Any]:
+        body = {} if request.body is None and not fields else request.body
+        if (
+            not isinstance(body, dict)
+            or not fields <= set(body)
+            or set(body) - fields - {"identityProviderConfirmed"}
+        ):
+            raise HttpError(400, "INVALID_REQUEST", "Unexpected mutation fields.")
+        self.admin_apps.identity_consent(app["id"], body)
+        return {key: value for key, value in body.items() if key != "identityProviderConfirmed"}
+
     def quota(self, user_id: str) -> dict[str, Any]:
         with self.database.connect() as db:
             policy = db.execute("SELECT * FROM quotas WHERE user_id=?", (user_id,)).fetchone()
@@ -390,6 +403,7 @@ class Broker:
     def app(self, request: Request) -> Response:
         _user, app = self.own(request)
         model = self.app_model(app)
+        model["identityProvider"] = self.admin_apps.identity(model)
         model["configurationChanged"] = False
         if model["activeDeploymentId"]:
             try:
@@ -633,7 +647,7 @@ class Broker:
         body = (
             self.admin_apps.deployment_body(request, app)
             if request.path.startswith("/v1/admin-apps/")
-            else object_body(request.body, {"configurationRevision", "commit"})
+            else self.identity_mutation_body(request, app, {"configurationRevision", "commit"})
         )
         sha = commit(body["commit"])
         revision = body["configurationRevision"]

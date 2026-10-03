@@ -95,6 +95,9 @@ class Auth:
             config.anonymous_options_per_minute, config.anonymous_starts_per_minute
         )
         self.failures = FailureLimits()
+        self.local_limits = AddressLimits(options_per_minute=6, starts_per_minute=12)
+        self.step_up_limits = AddressLimits(options_per_minute=12, starts_per_minute=12)
+        self.step_up_failures = FailureLimits()
         self.identity = ProjectClient(
             config.identity_socket, timeout=10, capacity=MANAGEMENT_REQUESTS
         )

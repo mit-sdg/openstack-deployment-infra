@@ -49,12 +49,14 @@ function ManagedCatalog() {
   const [slug, setSlug] = useState('');
   const [owner, setOwner] = useState('');
   const [identifier, setIdentifier] = useState('');
+  const [adoptionConfirmed, setAdoptionConfirmed] = useState(false);
   const create = useMutation({
     mutationFn: () => adminAppsApi.create(slug, owner, crypto.randomUUID()),
     onSuccess: (app) => navigate(`/admin/apps/${app.applicationId}`),
   });
   const adopt = useMutation({
-    mutationFn: () => adminAppsApi.adopt(identifier, owner || undefined, crypto.randomUUID()),
+    mutationFn: () =>
+      adminAppsApi.adopt(identifier, owner || undefined, crypto.randomUUID(), adoptionConfirmed),
     onSuccess: (app) => navigate(`/admin/apps/${app.applicationId}`),
   });
   return (
@@ -112,11 +114,20 @@ function ManagedCatalog() {
           Imports the current accepted repository, ref and configuration, including storage
           bindings. Adoption does not redeploy the app.
         </p>
+        <label>
+          <input
+            type="checkbox"
+            checked={adoptionConfirmed}
+            onChange={(e) => setAdoptionConfirmed(e.target.checked)}
+          />
+          Portal sign-in depends on this app — confirm adoption if this is Commons
+        </label>
         <button className="button" disabled={adopt.isPending}>
           Adopt application
         </button>
         <ErrorNotice error={adopt.error} />
       </form>
+      <StepUp />
       <ErrorNotice error={catalog.error} />
       {catalog.isPending ? (
         <Loading />
@@ -179,8 +190,8 @@ function StepUp() {
     >
       <h2>Confirm sensitive actions</h2>
       <p>
-        Reassignment and storage deletion require your password and a fresh authentication code
-        within five minutes.
+        Adoption, reassignment and storage deletion require your password and a fresh authentication
+        code within five minutes.
       </p>
       <div className="field">
         <label htmlFor="step-password">Admin password</label>
@@ -263,7 +274,13 @@ function ManagedApplication({ id }: { id: string }) {
     },
   });
   const reassign = useMutation({
-    mutationFn: () => adminAppsApi.reassign(id, app.data!.ownerId, owner),
+    mutationFn: () =>
+      adminAppsApi.reassign(
+        id,
+        app.data!.ownerId,
+        owner,
+        identity && window.confirm('Portal sign-in depends on this app. Confirm reassignment?'),
+      ),
     onSuccess: refresh,
   });
   const state = useMutation({

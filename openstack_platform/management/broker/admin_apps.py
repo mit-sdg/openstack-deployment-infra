@@ -8,7 +8,6 @@ import uuid
 from collections.abc import Callable
 from contextlib import ExitStack
 from contextvars import ContextVar
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
@@ -17,7 +16,7 @@ from ...controller.http import HttpError, Request, Response
 from ...controller.storage_contract import RESOURCE_OUTPUTS
 from ...validation import flavor_reference, repository_url, slug
 from ...validation import uuid as checked_uuid
-from ..common import canonical, digest, object_body
+from ..common import canonical, digest
 from .accounts import audit
 from .client import ControllerUnavailable
 from .resources import operation_quota
@@ -68,6 +67,7 @@ class AdminApps:
             request.method == "DELETE"
             and "/storage/" in request.path
             or request.path.endswith("/owner")
+            or request.path == "/v1/admin-apps/adopt"
         )
         user, sid = self.broker.accounts.admin(request, step_up=sensitive)
         allowed = (
@@ -95,20 +95,6 @@ class AdminApps:
                         self.broker.auth.clock(),
                     )
                 )
-            # Reuse resource handlers without adding consent fields to their
-            # canonical requests or (especially) storing environment values.
-            if (
-                request.method != "GET"
-                and "/storage" in request.path
-                and request.method != "DELETE"
-            ):
-                _actor, app = self.broker.own(request, mutation=True)
-                if not isinstance(request.body, dict):
-                    raise HttpError(400, "INVALID_REQUEST", "Supply a request object.")
-                body = dict(request.body)
-                self.identity_consent(app["id"], body)
-                body.pop("identityProviderConfirmed", None)
-                request = replace(request, body=body)
             response = handler(request)
             # Suppress a result if authority was revoked during a controller read.
             with self.broker.database.connect() as db:
@@ -357,7 +343,7 @@ class AdminApps:
         if (
             not isinstance(request.body, dict)
             or "applicationId" not in request.body
-            or set(request.body) - {"applicationId", "ownerId"}
+            or set(request.body) - {"applicationId", "ownerId", "identityProviderConfirmed"}
         ):
             raise HttpError(
                 400, "INVALID_REQUEST", "Supply an application ID and optional owner ID."
@@ -377,6 +363,7 @@ class AdminApps:
                     409, "ALREADY_OWNED", "This application already has a broker owner."
                 )
         model = self.observed(identifier)
+        self.identity_consent(identifier, request.body, model)
         active = model.get("activeDeploymentId")
         if active is None:
             raise HttpError(
@@ -473,7 +460,7 @@ class AdminApps:
     def reassign(self, request: Request) -> Response:
         b = self.broker
         actor, app = b.own(request, mutation=True)
-        body = object_body(request.body, {"ownerId", "expectedOwnerId"})
+        body = b.identity_mutation_body(request, app, {"ownerId", "expectedOwnerId"})
         owner, expected = checked_uuid(body["ownerId"]), checked_uuid(body["expectedOwnerId"])
         with b.database.connect(write=True) as db:
             self.check(db)

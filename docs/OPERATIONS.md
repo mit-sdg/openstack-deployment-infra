@@ -1331,8 +1331,9 @@ set/replace/delete its environment names, provision/verify/rotate storage,
 deploy exact commits, change its running state and reassign its owner. Creation
 uses the target owner's app quota. Adoption and reassignment preserve existing
 apps even when the recipient exceeds that quota; future creation remains
-quota-limited. Reassignment requires a fresh five-minute password/TOTP step-up,
-the expected current owner and no unfinished app operation. Ordinary My
+quota-limited. Adoption always requires a fresh five-minute password/TOTP
+step-up. Reassignment requires that proof, the expected current owner and no
+unfinished app operation. Ordinary My
 applications routes remain scoped to the signed-in owner even for admins.
 Environment values remain write-only for admins. No value is stored in broker
 SQLite, returned in reads, placed in an audit record or cached by the React
@@ -1348,8 +1349,9 @@ creation remains an operator capability: obtain a current plan through the
 operator and paste its JSON. An app with a retained primary IPv4 requires
 maintenance; expect brief cutover downtime after the candidate finishes building.
 The broker identifies the Commons app by matching its public URL host with
-`ownerPortal.commonsOrigin`. Deploy, stop/start and storage changes display
-**Portal sign-in depends on this app** and require separate confirmation. Local
+`ownerPortal.commonsOrigin`. Adoption, reassignment, deploy, stop/start and storage changes display
+**Portal sign-in depends on this app** and require separate confirmation. This follows the app onto owner deployment
+and storage routes after reassignment; owner routes do not offer stop/start. Local
 admin sign-in remains available while Commons is stopped; never rely on a
 Commons session for recovery. This confirmation does not prohibit management
 of the class app.
@@ -1467,19 +1469,31 @@ Quota edits use 0–1000 apps and 0–16 concurrent operations; zero stops new
 admission. They do not reassign ownership or change controller resources.
 
 Role/enable/disable/session-revoke and reset actions, plus creation of another
-admin, require password and a fresh TOTP code validated within five minutes.
+local account (owner, staff or admin), and issuing any invitation require password
+and a fresh TOTP code validated within five minutes.
 Use **Confirm a sensitive account action** when prompted. Codes cannot be reused
 within their accepted counter/window; wait for a fresh code if you just enrolled
 or signed in. Admin sessions are capped at 1 h absolute/15 min idle. Local login
 also has the existing five-failure username/address window and persistent
-per-account exponential delays from 1 s to 15 min. A generic credential error
+source-scoped exponential delays from 1 s to at most 5 s. A different address
+is not blocked by another source's failed guesses. Per validated address, local
+login admits 12 attempts and six new backoff names per minute. Step-up has its
+own rate/failure budget and reserved hashing slot, so anonymous sign-in floods
+cannot occupy its capacity. A generic credential error
 covers invalid accounts, passwords, factors and backoff; throttling/capacity
 errors have no credential detail.
 
-Password-reset links require the existing TOTP factor when enabled. TOTP-reset
+Issuing a password reset immediately clears the old password hash. Issuing a
+TOTP reset clears the old secret and makes the account pending, even when MFA
+was optional; old credentials and password-only fallback cannot sign in.
+Password-reset links require the existing TOTP factor when enabled and are void
+after five wrong codes. Codes are checked before password hashing. Enrollment
+finish does not supply step-up unless a fresh code was verified in that finish
+request; use the step-up form afterward when needed. TOTP-reset
 links enroll a fresh factor but do not issue a session: sign in with the password
 and a fresh code afterward. To recover both factors, the new admin can issue a
-TOTP-reset link first, then a password-reset link. Resetting credentials does not
+TOTP-reset link first, complete its enrollment, then issue a password-reset link.
+Issuing a second reset voids any outstanding earlier reset link. Resetting credentials does not
 silently enable a disabled account. **Admin audit** records safe actor/target IDs,
 action, generation/role/quota metadata and timestamps, never links or secrets.
 
@@ -1489,7 +1503,9 @@ A restore retains roles and credential/factor state, increments generations and
 deletes all sessions, invitations and pending enrollment handles. It also fences
 off every pre-restore operator enrollment file by issuance time, and rejects the
 current TOTP window to prevent replay from a rolled-back counter. Wait for a fresh
-code after restore, and issue a new operator URL if recovery is needed.
+code after restore, and issue a new operator URL if recovery is needed. Upgrading
+a restored v1/v2 backup to schema 3 also fences old enrollment files at migration
+time; issue enrollment URLs after the broker has completed migration.
 
 ### Review staff reads and recover audit capacity
 

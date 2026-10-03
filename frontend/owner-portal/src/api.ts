@@ -38,6 +38,7 @@ export type AppRecord = {
   url: string | null;
   savedRevision: number;
   configurationChanged?: boolean;
+  identityProvider?: boolean;
   lifecycleState: string;
   desiredRunning: boolean;
   activeDeploymentId: string | null;
@@ -266,10 +267,20 @@ export const api = {
       (v) => ({ app: appData(record(v).app), intent: intentData(record(v).intent) }),
       { method: 'POST', body: { slug }, key },
     ),
-  deploy: (id: string, revision: number, commit: string, key: string) =>
+  deploy: (
+    id: string,
+    revision: number,
+    commit: string,
+    key: string,
+    identityProviderConfirmed = false,
+  ) =>
     request(`/apps/${id}/deployments`, intentData, {
       method: 'POST',
-      body: { configurationRevision: revision, commit },
+      body: {
+        configurationRevision: revision,
+        commit,
+        ...(identityProviderConfirmed ? { identityProviderConfirmed: true } : {}),
+      },
       key,
     }),
   history: (id: string, cursor?: string) =>
@@ -355,8 +366,13 @@ export function validateBindings(bindings: StorageBinding[], names: string[]): s
 
 // Both workspaces use the same resource requests and write-only controls.
 export function resourceApi(prefix = '/apps', confirmStorage?: () => boolean) {
-  function consentFields() {
-    if (!confirmStorage) return {};
+  async function consentFields(id: string) {
+    if (!confirmStorage) {
+      if (prefix !== '/apps' || !(await api.app(id)).identityProvider) return {};
+      if (!window.confirm('Portal sign-in depends on this app. Confirm this storage change?'))
+        throw new Error('Action canceled.');
+      return { identityProviderConfirmed: true };
+    }
     if (!confirmStorage()) throw new Error('Action canceled.');
     return { identityProviderConfirmed: true };
   }
@@ -398,16 +414,16 @@ export function resourceApi(prefix = '/apps', confirmStorage?: () => boolean) {
         (v) =>
           record(v) as { items: StorageResource[]; intents: (Intent & { type: string | null })[] },
       ),
-    createStorage: (id: string, type: StorageResource['type'], key: string) =>
+    createStorage: async (id: string, type: StorageResource['type'], key: string) =>
       request(`${prefix}/${id}/storage`, intentData, {
         method: 'POST',
-        body: { type, ...consentFields() },
+        body: { type, ...(await consentFields(id)) },
         key,
       }),
-    storageAction: (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
+    storageAction: async (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
       request(`${prefix}/${id}/storage/${resource}/${action}`, intentData, {
         method: 'POST',
-        body: consentFields(),
+        body: await consentFields(id),
         key,
       }),
   };

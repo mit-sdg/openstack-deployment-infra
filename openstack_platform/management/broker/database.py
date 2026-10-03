@@ -76,13 +76,13 @@ CREATE TABLE local_accounts (user_id TEXT PRIMARY KEY REFERENCES users(id),
  password_hash TEXT, totp_secret TEXT, totp_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(totp_confirmed IN (0,1)),
  last_counter INTEGER NOT NULL DEFAULT -1);
 CREATE TABLE login_backoff (name_hash TEXT PRIMARY KEY, failures INTEGER NOT NULL,
- blocked_until REAL NOT NULL, attempt_until REAL NOT NULL, updated REAL NOT NULL);
+ blocked_until REAL NOT NULL, attempt_until REAL NOT NULL, updated REAL NOT NULL, blocked_address TEXT NOT NULL DEFAULT '');
 CREATE TABLE token_policy (singleton INTEGER PRIMARY KEY CHECK(singleton=1), valid_after REAL NOT NULL);
 INSERT INTO token_policy VALUES(1,0);
 CREATE TABLE account_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
  user_id TEXT NOT NULL REFERENCES users(id), generation INTEGER NOT NULL,
  purpose TEXT NOT NULL CHECK(purpose IN ('invite','password-reset','totp-reset')),
- expires REAL NOT NULL, created REAL NOT NULL);
+ expires REAL NOT NULL, created REAL NOT NULL, failures INTEGER NOT NULL DEFAULT 0 CHECK(failures BETWEEN 0 AND 5));
 CREATE TABLE used_tokens (id TEXT PRIMARY KEY, purpose TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE enrollments (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
  generation INTEGER NOT NULL, binder_hash TEXT NOT NULL, purpose TEXT NOT NULL,
