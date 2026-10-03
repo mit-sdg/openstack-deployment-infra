@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { api, clearCredentials, type Session } from './api';
+import { StaffPages } from './pages/Staff';
 import { staffApi } from './staffApi';
 
 const userId = '11111111-1111-4111-8111-111111111111';
@@ -54,6 +55,7 @@ describe('staff navigation and sign-in', () => {
     expect(screen.getByRole('navigation', { name: 'Staff pages' })).toBeVisible();
     expect(screen.queryByRole('link', { name: 'Create application' })).not.toBeInTheDocument();
     expect(document.querySelector('script')).toBeNull();
+    expect(screen.queryByText(/read only/i)).not.toBeInTheDocument();
     expect(apps).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
     expect(resume).not.toHaveBeenCalled();
@@ -119,7 +121,7 @@ describe('staff navigation and sign-in', () => {
       await vi.advanceTimersByTimeAsync(600000);
     });
     expect(window.location.pathname).toBe('/sign-in');
-    expect(screen.queryByRole('heading', { name: 'Operations' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Activity' })).not.toBeInTheDocument();
   });
 });
 
@@ -150,6 +152,154 @@ describe('staff controller diagnostics', () => {
     show('/staff/operations');
     expect(await screen.findByText('INVALID_REQUEST')).toBeVisible();
     expect(screen.getByText('Check that the repository root contains package.json.')).toBeVisible();
+  });
+});
+
+const appId = '33333333-3333-4333-8333-333333333333';
+const deploymentId = '44444444-4444-4444-8444-444444444444';
+const commit = 'abcdef0123456789abcdef0123456789abcdef01';
+const catalogApp = {
+  applicationId: appId,
+  ownerId,
+  slug: 'weather-dashboard',
+  lifecycleState: 'ready',
+  savedRevision: 2,
+  createdAt: new Date().toISOString(),
+  repository: 'https://github.com/example/weather-dashboard',
+};
+const empty = { items: [], nextCursor: null, truncated: false };
+function staffPage(path: string) {
+  return show(path, <StaffPages userId={userId} />);
+}
+
+describe('staff detail pages', () => {
+  it('shows an app read-only, with names instead of IDs and chained reads', async () => {
+    let active = 0;
+    let peak = 0;
+    const track =
+      <T,>(value: T) =>
+      async () => {
+        peak = Math.max(peak, ++active);
+        await new Promise((done) => setTimeout(done, 5));
+        active--;
+        return value;
+      };
+    const app = vi.spyOn(staffApi, 'app').mockImplementation(
+      track({
+        ...catalogApp,
+        url: 'https://weather-dashboard.apps.example.com',
+        desiredRunning: true,
+        activeDeploymentId: deploymentId,
+        acceptedDeployment: { deploymentId, sourceCommit: commit, acceptedAt: null },
+        health: { process: 'healthy', route: 'unhealthy' },
+        observedAt: new Date().toISOString(),
+        stale: false,
+      }),
+    );
+    const deployments = vi.spyOn(staffApi, 'deployments').mockImplementation(
+      track({
+        items: [
+          {
+            deploymentId,
+            applicationId: appId,
+            status: 'succeeded',
+            repositoryCommit: commit,
+            configurationRevision: 2,
+            cleanupState: 'confirmed',
+            requestedAt: null,
+            updatedAt: null,
+            acceptedAt: null,
+            lastHealthyAt: null,
+          },
+        ],
+        nextCursor: null,
+        truncated: false,
+      }),
+    );
+    vi.spyOn(staffApi, 'operations').mockImplementation(track(empty));
+    vi.spyOn(staffApi, 'owner').mockImplementation(
+      track({
+        ...owner,
+        displayName: 'Alice Student',
+        quota: {
+          apps: { limit: 2, used: 1, reserved: 0 },
+          concurrentOperations: { limit: 1, used: 0, reserved: 0 },
+        },
+      }),
+    );
+    staffPage(`/staff/apps/${appId}`);
+    expect(await screen.findByRole('heading', { name: 'weather-dashboard' })).toBeVisible();
+    expect(await screen.findByRole('link', { name: 'Alice Student' })).toHaveAttribute(
+      'href',
+      `/staff/owners/${ownerId}`,
+    );
+    expect(app).toHaveBeenCalledTimes(1);
+    expect(deployments).toHaveBeenCalledTimes(1);
+    // Two active reads per account at most; never two controller reads at once.
+    expect(peak).toBe(1);
+    expect(screen.getByText('Live')).toBeVisible();
+    expect(screen.getAllByText('Unhealthy')).toHaveLength(2);
+    expect(screen.queryByText(appId)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy app ID' })).toBeVisible();
+    // Read-only: refresh and copy are the only buttons.
+    expect(
+      screen
+        .getAllByRole('button')
+        .map((button) => button.textContent || button.getAttribute('aria-label')),
+    ).toEqual(['Refresh', 'Copy app ID']);
+  });
+  it('shows activity in plain words without resume actions', async () => {
+    vi.spyOn(staffApi, 'operations').mockResolvedValue({
+      items: [
+        {
+          intentId: userId,
+          applicationId: appId,
+          ownerId,
+          kind: 'save_configuration',
+          state: 'blocked',
+          stage: 'recovery',
+          cleanupState: 'pending',
+          createdAt: new Date().toISOString(),
+          updatedAt: null,
+          statusObservedAt: null,
+          attention: 'awaiting_controller',
+          controllerErrorCode: null,
+          guidance: null,
+        },
+      ],
+      nextCursor: null,
+      truncated: false,
+    });
+    vi.spyOn(staffApi, 'owners').mockResolvedValue({
+      items: [{ ...owner, displayName: 'Alice Student' }],
+      nextCursor: null,
+      truncated: false,
+    });
+    const apps = vi
+      .spyOn(staffApi, 'apps')
+      .mockResolvedValue({ items: [catalogApp], nextCursor: null, truncated: false });
+    staffPage('/staff/operations');
+    expect(await screen.findByRole('heading', { name: 'Activity' })).toBeVisible();
+    expect(await screen.findByText('Save settings')).toBeVisible();
+    expect(await screen.findByRole('link', { name: 'weather-dashboard' })).toBeVisible();
+    expect(await screen.findByRole('link', { name: 'Alice Student' })).toBeVisible();
+    expect(apps).toHaveBeenCalledWith(undefined, undefined, expect.anything(), 50);
+    expect(screen.getByText('Waiting for the platform')).toBeVisible();
+    expect(screen.getByText('Needs attention')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/controller|intent|operation/i)).not.toBeInTheDocument();
+  });
+  it('pages through owners with the server cursor', async () => {
+    const next = '55555555-5555-4555-8555-555555555555';
+    const owners = vi
+      .spyOn(staffApi, 'owners')
+      .mockResolvedValueOnce({ items: [owner], nextCursor: next, truncated: true })
+      .mockResolvedValueOnce({ items: [], nextCursor: null, truncated: false });
+    staffPage('/staff/owners');
+    fireEvent.click(await screen.findByRole('button', { name: 'Next page' }));
+    expect(await screen.findByRole('heading', { name: 'No owners yet' })).toBeVisible();
+    expect(owners).toHaveBeenLastCalledWith(next, expect.anything());
+    expect(screen.getByRole('button', { name: 'First page' })).toBeVisible();
   });
 });
 
