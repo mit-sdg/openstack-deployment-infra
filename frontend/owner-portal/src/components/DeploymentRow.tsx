@@ -1,6 +1,6 @@
-import { Badge, ListItem } from '@openstack-platform/ui';
+import { ListItem, RelativeTime } from '@openstack-platform/ui';
 import { Link } from 'wouter';
-import { relativeTime, short } from '../utils/presentation';
+import { short } from '../utils/presentation';
 import { Status } from './Status';
 
 /** One deployment as a list row. Put rows inside a shared <List>. */
@@ -33,23 +33,14 @@ export function DeploymentRow({
       }
       meta={
         deployment.requestedAt && (
-          <time
-            dateTime={deployment.requestedAt}
-            title={new Date(deployment.requestedAt).toLocaleString()}
-          >
-            Started {relativeTime(deployment.requestedAt)}
-          </time>
+          <span>
+            Started <RelativeTime value={deployment.requestedAt} />
+          </span>
         )
       }
       trailing={
-        <>
-          {deployment.deploymentId === active && (
-            <Badge tone="neutral" dot={false}>
-              Live
-            </Badge>
-          )}
-          <Status state={deployment.status} />
-        </>
+        // The live deployment reads "Live"; it succeeded by definition.
+        <Status state={deployment.deploymentId === active ? 'live' : deployment.status} />
       }
     />
   );

@@ -11,13 +11,14 @@ import {
   List,
   ListItem,
   LoadingRows,
+  RelativeTime,
   Section,
 } from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { api, resourceApi, validateEnvName, type StorageBinding } from '../api';
 import { useIntentPolling } from '../hooks/useIntentPolling';
-import { relativeTime } from '../utils/presentation';
+import { QueryError } from './Feedback';
 import { Operation, OperationList } from './Operation';
 import '../pages/app-pages.css';
 
@@ -84,7 +85,7 @@ export function EnvironmentSection({
         <LoadingRows rows={2} />
       ) : environment.error ? (
         <div className="app-block">
-          <ErrorAlert error={environment.error} focus={false} />
+          <QueryError query={environment} what="your environment variables" />
         </div>
       ) : items.length ? (
         <List label="Environment variables">
@@ -94,9 +95,9 @@ export function EnvironmentSection({
               title={<code>{item.name}</code>}
               meta={
                 item.updatedAt && (
-                  <time dateTime={item.updatedAt} title={new Date(item.updatedAt).toLocaleString()}>
-                    Updated {relativeTime(item.updatedAt)}
-                  </time>
+                  <span>
+                    Updated <RelativeTime value={item.updatedAt} />
+                  </span>
                 )
               }
               trailing={

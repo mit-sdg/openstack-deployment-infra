@@ -8,9 +8,10 @@ import {
   Hint,
   InlineStatus,
   Input,
-  LoadingRows,
+  PageSkeleton,
   Radio,
   Section,
+  SectionSkeleton,
   Textarea,
 } from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -26,6 +27,7 @@ import {
 } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { EnvironmentSection } from '../components/EnvironmentSection';
+import { QueryError } from '../components/Feedback';
 import { StorageSection } from '../components/StorageSection';
 import './app-pages.css';
 
@@ -34,11 +36,13 @@ export function ConfigurationPage({ id }: { id: string }) {
   return (
     <AppFrame id={id} active="Settings">
       {query.isPending ? (
-        <Section aria-label="Settings">
-          <LoadingRows rows={4} />
-        </Section>
+        <PageSkeleton label="Loading settings…">
+          <SectionSkeleton rows={8} />
+          <SectionSkeleton title variant="list" rows={2} />
+          <SectionSkeleton title variant="list" rows={3} />
+        </PageSkeleton>
       ) : query.error ? (
-        <ErrorAlert error={query.error} />
+        <QueryError query={query} what="your settings" />
       ) : (
         <ConfigurationForm key={id} id={id} initial={query.data} resources />
       )}
@@ -92,19 +96,54 @@ export function ConfigurationForm({
   const [savedBindings, setSavedBindings] = useState(() =>
     bindingKey(initial.configuration.storageBindings),
   );
-  const submitted = useRef('');
+  // The last saved settings, so variable names can be saved on their own
+  // without also saving unrelated edits still in the form.
+  const [savedSettings, setSavedSettings] = useState<Settings>(() => structuredClone(initial));
+  const submitted = useRef<Settings>(initial);
   const client = useQueryClient();
+  function refresh() {
+    client.invalidateQueries({ queryKey: [...scope, 'settings', id] });
+    client.invalidateQueries({ queryKey: [...scope, 'app', id] });
+  }
   const save = useMutation({
     mutationFn: (key: string) => {
-      submitted.current = bindingKey(settings.configuration.storageBindings);
+      submitted.current = structuredClone(settings);
       return service.save(id, settings, key);
     },
     onSuccess: (result) => {
-      setSettings((current) => ({ ...current, revision: result.revision as number }));
+      const revision = result.revision as number;
+      setSettings((current) => ({ ...current, revision }));
+      setSavedSettings({ ...submitted.current, revision });
       setSaved(true);
-      setSavedBindings(submitted.current);
-      client.invalidateQueries({ queryKey: [...scope, 'settings', id] });
-      client.invalidateQueries({ queryKey: [...scope, 'app', id] });
+      setSavedBindings(bindingKey(submitted.current.configuration.storageBindings));
+      refresh();
+    },
+  });
+  const saveBindings = useMutation({
+    mutationFn: ({ bindings, key }: { bindings: StorageBinding[]; key: string }) =>
+      service.save(
+        id,
+        {
+          ...savedSettings,
+          revision: settings.revision,
+          configuration: { ...savedSettings.configuration, storageBindings: bindings },
+        },
+        key,
+      ),
+    onSuccess: (result, { bindings }) => {
+      const revision = result.revision as number;
+      setSettings((current) => ({
+        ...current,
+        revision,
+        configuration: { ...current.configuration, storageBindings: bindings },
+      }));
+      setSavedSettings((current) => ({
+        ...current,
+        revision,
+        configuration: { ...current.configuration, storageBindings: bindings },
+      }));
+      setSavedBindings(bindingKey(bindings));
+      refresh();
     },
   });
   function update(change: Partial<Settings>) {
@@ -269,6 +308,13 @@ export function ConfigurationForm({
             bindings={settings.configuration.storageBindings}
             onChange={(storageBindings) =>
               update({ configuration: { ...settings.configuration, storageBindings } })
+            }
+            // Before the first save there are no settings to add names to, so
+            // names stay in the draft and are saved with the form.
+            save={
+              settings.revision
+                ? (bindings) => saveBindings.mutateAsync({ bindings, key: crypto.randomUUID() })
+                : undefined
             }
             notice={
               unsavedBindings && (

@@ -74,6 +74,44 @@ describe('owner configuration', () => {
     expect(save.mock.calls[0][1].configuration.runtime.port).toBe(8080);
     expect(await screen.findByRole('status')).toHaveTextContent('Settings saved');
   });
+  it('saves default database variables in one click without saving other draft edits', async () => {
+    vi.spyOn(api, 'environment').mockResolvedValue({ revision: 0, updatedAt: null, items: [] });
+    vi.spyOn(api, 'storage').mockResolvedValue({
+      items: [
+        {
+          resourceId: 'db',
+          type: 'postgres',
+          label: 'PostgreSQL',
+          status: 'ready',
+          createdAt: '2026-10-01T00:00:00Z',
+          verifiedAt: null,
+          defaultBindings: { url: 'DATABASE_URL' },
+        },
+      ],
+      intents: [],
+    });
+    vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: false } as never);
+    const save = vi.spyOn(api, 'save').mockResolvedValue({ revision: 2 });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ConfigurationForm id="app" initial={settings} resources />
+      </QueryClientProvider>,
+    );
+    fireEvent.change(screen.getByLabelText('Branch'), { target: { value: 'draft-branch' } });
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Use default PostgreSQL variables' }),
+    );
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const sent = save.mock.calls[0][1];
+    expect(sent.branch).toBe('main');
+    expect(sent.revision).toBe(1);
+    expect(sent.configuration.storageBindings).toEqual([
+      { resourceId: 'db', outputs: { url: 'DATABASE_URL' } },
+    ]);
+    expect(await screen.findByText('1 variable')).toBeVisible();
+    // The draft keeps its unsaved edit.
+    expect(screen.getByLabelText('Branch')).toHaveValue('draft-branch');
+  });
   it('explains revision conflicts and preserves the draft', async () => {
     vi.spyOn(api, 'save').mockRejectedValue(
       new ApiError(409, 'REVISION_CONFLICT', 'Settings changed in another tab.'),

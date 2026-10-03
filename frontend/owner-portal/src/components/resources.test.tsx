@@ -145,17 +145,24 @@ describe('owner resources', () => {
       return <StorageSection id="app" bindings={bindings} onChange={setBindings} />;
     }
     wrap(<Editor />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit PostgreSQL variables' }));
+    // Without variables, the row says the app can't connect and offers both paths.
+    expect(await screen.findByText(/can’t connect to PostgreSQL yet/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Use default PostgreSQL variables' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Choose PostgreSQL variable names' }));
     expect(screen.queryByRole('button', { name: 'Add PostgreSQL' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add MongoDB' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Reset to defaults' }));
+    // The editor starts from the defaults.
+    expect(screen.getByLabelText('host → environment name')).toHaveValue('PGHOST');
     fireEvent.change(screen.getByLabelText('url → environment name'), {
       target: { value: 'APP_DATABASE' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Remove host' }));
     expect(current).toEqual([]);
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
-    expect(current).toEqual([{ resourceId: 'resource', outputs: { url: 'APP_DATABASE' } }]);
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+    await waitFor(() =>
+      expect(current).toEqual([{ resourceId: 'resource', outputs: { url: 'APP_DATABASE' } }]),
+    );
+    expect(screen.getByRole('button', { name: 'Edit PostgreSQL variables' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Rotate PostgreSQL credentials' }));
     expect(screen.getByRole('dialog')).toHaveTextContent('next deploy');
     expect(rotate).not.toHaveBeenCalled();
@@ -299,19 +306,22 @@ describe('owner resources', () => {
       return <StorageSection id="app" bindings={bindings} onChange={setBindings} />;
     }
     wrap(<Editor />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit PostgreSQL variables' }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Choose PostgreSQL variable names' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove password' }));
     fireEvent.click(screen.getByRole('button', { name: 'Add password as PGPASSWORD' }));
     expect(screen.getByLabelText('password → environment name')).toHaveValue('PGPASSWORD');
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Edit S3 storage variables' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
     fireEvent.click(
-      screen.getByRole('button', { name: 'Add secret_access_key as AWS_SECRET_ACCESS_KEY' }),
+      await screen.findByRole('button', { name: 'Choose S3 storage variable names' }),
     );
     expect(screen.getByLabelText('secret_access_key → environment name')).toHaveValue(
       'AWS_SECRET_ACCESS_KEY',
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
-    expect(screen.getAllByText('1 variable')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+    expect(await screen.findByText('2 variables')).toBeVisible();
+    expect(await screen.findByText('1 variable')).toBeVisible();
     expect(screen.queryByText(/needs a platform update/)).not.toBeInTheDocument();
   });
   it('shows only injected names on deploy review', async () => {

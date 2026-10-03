@@ -1,11 +1,13 @@
 import {
   Alert,
   EmptyState,
-  ErrorAlert,
+  Icon,
   KeyValueList,
   List,
-  LoadingRows,
+  PageSkeleton,
+  RelativeTime,
   Section,
+  SectionSkeleton,
   buttonClass,
 } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
@@ -13,56 +15,49 @@ import { Link } from 'wouter';
 import { api, type AppRecord } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { DeploymentRow } from '../components/DeploymentRow';
+import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useOwnerIntents } from '../hooks/useIntentPolling';
-import { relativeTime, short } from '../utils/presentation';
-
-function When({ value }: { value: string | null | undefined }) {
-  return value ? (
-    <time dateTime={value} title={new Date(value).toLocaleString()}>
-      {relativeTime(value)}
-    </time>
-  ) : (
-    <span className="ui-text-subtle">—</span>
-  );
-}
+import { healthy, short } from '../utils/presentation';
 
 function Running({ app }: { app: AppRecord }) {
-  const health = app.health;
-  const process =
-    health?.allocationHealthy === true ? 'healthy' : !app.desiredRunning ? 'stopped' : 'unknown';
-  const route = health?.routeHealthy === true ? 'healthy' : 'unknown';
   const deployed = app.acceptedDeployment!;
-  return (
-    <KeyValueList
-      columns={2}
-      items={[
-        {
-          label: 'Commit',
-          value: (
-            <Link
-              href={`/apps/${app.applicationId}/deployments/${deployed.deploymentId}`}
-              className="ui-link ui-mono"
-            >
-              {short(deployed.sourceCommit)}
-            </Link>
-          ),
-        },
-        { label: 'Deployed', value: <When value={deployed.acceptedAt} /> },
-        { label: 'App', value: <Status state={app.stale ? 'unknown' : process} /> },
-        {
-          label: 'Public URL',
-          value: (
-            <Status
-              state={app.stale ? 'unknown' : route}
-              label={!app.stale && route === 'unknown' ? 'Not checked yet' : undefined}
-            />
-          ),
-        },
-      ]}
-    />
-  );
+  const items = [
+    {
+      label: 'Commit',
+      value: (
+        <Link
+          href={`/apps/${app.applicationId}/deployments/${deployed.deploymentId}`}
+          className="ui-link ui-mono"
+        >
+          {short(deployed.sourceCommit)}
+        </Link>
+      ),
+    },
+    { label: 'Deployed', value: <RelativeTime value={deployed.acceptedAt} /> },
+  ];
+  // The header already shows the app's state. Break it down only when it
+  // isn't healthy, so the person can see which part needs attention.
+  if (app.desiredRunning && !app.stale && healthy(app) !== 'healthy') {
+    const health = app.health;
+    items.push(
+      {
+        label: 'App',
+        value: <Status state={health?.allocationHealthy === true ? 'healthy' : 'unknown'} />,
+      },
+      {
+        label: 'Public URL',
+        value: (
+          <Status
+            state={health?.routeHealthy === true ? 'healthy' : 'unknown'}
+            label={health?.routeHealthy === true ? undefined : 'Not checked yet'}
+          />
+        ),
+      },
+    );
+  }
+  return <KeyValueList columns={2} items={items} />;
 }
 
 export function Overview({ id }: { id: string }) {
@@ -87,9 +82,11 @@ export function Overview({ id }: { id: string }) {
   return (
     <AppFrame id={id} active="Overview">
       {app.isPending ? (
-        <Section title="Current deployment">
-          <LoadingRows />
-        </Section>
+        <PageSkeleton label="Loading your app…">
+          <SectionSkeleton title rows={1} />
+          <SectionSkeleton title variant="list" rows={1} />
+          <SectionSkeleton title variant="list" density="compact" rows={4} />
+        </PageSkeleton>
       ) : (
         app.data && (
           <>
@@ -137,18 +134,21 @@ export function Overview({ id }: { id: string }) {
                 </EmptyState>
               </div>
             )}
-            <ErrorAlert error={history.error} focus={false} />
+            {history.error && <QueryError query={history} what="deployments" />}
             {latest && (
               <Section
                 title="Latest deployment"
                 flush
                 actions={
-                  <Link
-                    href={`/apps/${id}/deployments`}
-                    className={buttonClass({ variant: 'ghost', size: 'sm' })}
-                  >
-                    View all
-                  </Link>
+                  (history.data!.items.length > 1 || history.data!.nextCursor) && (
+                    <Link
+                      href={`/apps/${id}/deployments`}
+                      className={buttonClass({ variant: 'ghost', size: 'sm' })}
+                    >
+                      View all
+                      <Icon name="chevron-right" />
+                    </Link>
+                  )
                 }
               >
                 <List label="Latest deployment">
@@ -156,7 +156,7 @@ export function Overview({ id }: { id: string }) {
                 </List>
               </Section>
             )}
-            <ErrorAlert error={intents.error} focus={false} />
+            {intents.error && <QueryError query={intents} what="activity" />}
             {!!activity.length && (
               <Section title="Activity" flush>
                 <OperationList label="Activity">

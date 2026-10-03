@@ -1,12 +1,14 @@
 import {
   Button,
   CodeBlock,
-  ErrorAlert,
+  CopyId,
   Hint,
   Icon,
   KeyValueList,
-  LoadingRows,
+  PageSkeleton,
+  RelativeTime,
   Section,
+  SectionSkeleton,
   backLinkClass,
 } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
@@ -15,18 +17,9 @@ import { Link } from 'wouter';
 import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { BoundaryText } from '../components/BoundaryText';
+import { QueryError } from '../components/Feedback';
 import { Status } from '../components/Status';
-import { relativeTime, short } from '../utils/presentation';
-
-function When({ value }: { value: string | null }) {
-  return value ? (
-    <time dateTime={value} title={new Date(value).toLocaleString()}>
-      {relativeTime(value)}
-    </time>
-  ) : (
-    <span className="ui-text-subtle">—</span>
-  );
-}
+import { short } from '../utils/presentation';
 
 function Details({ deployment }: { deployment: Deployment }) {
   return (
@@ -35,14 +28,14 @@ function Details({ deployment }: { deployment: Deployment }) {
       items={[
         {
           label: 'Commit',
-          value: <span className="ui-mono ui-break">{deployment.repositoryCommit}</span>,
+          value: <CopyId value={deployment.repositoryCommit} label="commit SHA" length={9} />,
         },
         {
           label: 'Repository',
           value: <BoundaryText text={deployment.sourceRepository} />,
         },
-        { label: 'Started', value: <When value={deployment.requestedAt} /> },
-        { label: 'Went live', value: <When value={deployment.acceptedAt} /> },
+        { label: 'Started', value: <RelativeTime value={deployment.requestedAt} /> },
+        { label: 'Went live', value: <RelativeTime value={deployment.acceptedAt} /> },
         {
           label: 'Runtime',
           value: deployment.configuration.build.runtime === 'node' ? 'Node.js' : 'Bun',
@@ -85,11 +78,12 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
         </Link>
       </div>
       {attempt.isPending ? (
-        <Section title="Deployment">
-          <LoadingRows />
-        </Section>
+        <PageSkeleton label="Loading deployment…">
+          <SectionSkeleton title rows={3} />
+          <SectionSkeleton title rows={4} />
+        </PageSkeleton>
       ) : attempt.error ? (
-        <ErrorAlert error={attempt.error} />
+        <QueryError query={attempt} what="this deployment" />
       ) : (
         <>
           <Section
@@ -117,7 +111,7 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
               </>
             }
           >
-            <ErrorAlert error={log.error} focus={false} />
+            {log.error && <QueryError query={log} what="the build output" />}
             <CodeBlock label="Build log" variant="log">
               {log.data?.text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') ||
                 'Build output will appear here.'}

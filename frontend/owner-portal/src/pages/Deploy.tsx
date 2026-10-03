@@ -10,8 +10,9 @@ import {
   Hint,
   Input,
   KeyValueList,
-  LoadingRows,
+  PageSkeleton,
   Section,
+  SectionSkeleton,
   buttonClass,
 } from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -20,6 +21,7 @@ import { Link } from 'wouter';
 import { api, type Settings } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { BoundaryText } from '../components/BoundaryText';
+import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 
@@ -97,11 +99,14 @@ export function DeployPage({ id }: { id: string }) {
   return (
     <AppFrame id={id} active="Deploy">
       {settings.isPending ? (
-        <Section title="Deploy a commit">
-          <LoadingRows />
-        </Section>
+        <PageSkeleton label="Loading deploy…">
+          <Grid columns={2} gap={6} className="app-deploy">
+            <SectionSkeleton title rows={2} />
+            <SectionSkeleton title rows={6} />
+          </Grid>
+        </PageSkeleton>
       ) : settings.error ? (
-        <ErrorAlert error={settings.error} />
+        <QueryError query={settings} what="your settings" />
       ) : settings.data.revision === 0 ? (
         <div className="ui-card">
           <EmptyState
@@ -182,7 +187,9 @@ export function DeployPage({ id }: { id: string }) {
                 </Link>
               }
             >
-              <ErrorAlert error={environment.error} focus={false} />
+              {environment.error && (
+                <QueryError query={environment} what="your environment variables" />
+              )}
               <KeyValueList items={summary(settings.data, injectedNames)} />
             </Section>
           </Grid>

@@ -1,19 +1,11 @@
-import {
-  ErrorAlert,
-  Icon,
-  Page,
-  PageHeader,
-  Skeleton,
-  TabNav,
-  backLinkClass,
-  tabClass,
-} from '@openstack-platform/ui';
+import { Icon, Page, PageHeader, TabNav, backLinkClass, tabClass } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { Link } from 'wouter';
-import { api } from '../api';
+import { api, type AppRecord } from '../api';
 import { healthy } from '../utils/presentation';
 import { BoundaryText } from './BoundaryText';
+import { QueryError } from './Feedback';
 import { Status } from './Status';
 import '../pages/app-pages.css';
 
@@ -23,6 +15,16 @@ const tabs = [
   ['Deploy', '/deploy'],
   ['Deployments', '/deployments'],
 ] as const;
+
+/**
+ * The app's one state, shown next to its name. An app that was never
+ * deployed reads "Not deployed" rather than "Stopped".
+ */
+export function AppStatus({ app }: { app: AppRecord }) {
+  if (app.lifecycleState === 'creating') return <Status state="creating" />;
+  if (!app.acceptedDeployment) return <Status state="not_deployed" label="Not deployed" />;
+  return <Status state={healthy(app)} />;
+}
 
 /** App header (name, status, URL) and the app's tabs. */
 export function AppFrame({
@@ -49,20 +51,28 @@ export function AppFrame({
             Apps
           </Link>
         }
-        title={app.data ? app.data.slug : <Skeleton variant="title" width="quarter" />}
+        title={
+          app.data ? (
+            app.data.slug
+          ) : app.error ? (
+            'App'
+          ) : (
+            <span className="ui-skeleton ui-skeleton--heading" aria-hidden="true" />
+          )
+        }
         meta={
-          app.data && (
-            <Status
-              state={app.data.lifecycleState === 'creating' ? 'creating' : healthy(app.data)}
-              label={
-                app.data.lifecycleState !== 'creating' && !app.data.acceptedDeployment
-                  ? 'Not deployed'
-                  : undefined
-              }
-            />
+          app.data ? (
+            <AppStatus app={app.data} />
+          ) : (
+            app.isPending && <span className="ui-skeleton ui-skeleton--badge" aria-hidden="true" />
           )
         }
       >
+        {app.isPending && (
+          <span className="ui-skeleton-line" aria-hidden="true">
+            <span className="ui-skeleton ui-skeleton--text ui-skeleton--quarter" />
+          </span>
+        )}
         {app.data?.url && (
           <a
             className="ui-link app-url"
@@ -75,19 +85,25 @@ export function AppFrame({
           </a>
         )}
       </PageHeader>
-      <TabNav label="App pages">
-        {tabs.map(([name, suffix]) => (
-          <Link
-            key={name}
-            href={`/apps/${id}${suffix}`}
-            className={tabClass(current === name)}
-            aria-current={current === name ? 'page' : undefined}
-          >
-            {name}
-          </Link>
-        ))}
-      </TabNav>
-      {app.error ? <ErrorAlert error={app.error} /> : children}
+      {app.error ? (
+        <QueryError query={app} what="this app" />
+      ) : (
+        <>
+          <TabNav label="App pages">
+            {tabs.map(([name, suffix]) => (
+              <Link
+                key={name}
+                href={`/apps/${id}${suffix}`}
+                className={tabClass(current === name)}
+                aria-current={current === name ? 'page' : undefined}
+              >
+                {name}
+              </Link>
+            ))}
+          </TabNav>
+          {children}
+        </>
+      )}
     </Page>
   );
 }

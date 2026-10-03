@@ -65,6 +65,9 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     variables.getByRole('listitem').filter({ has: page.getByText('API_TOKEN', { exact: true }) }),
   ).toBeVisible({ timeout: operationTimeout });
 
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await expect(page.getByText('Settings saved.', { exact: false })).toBeVisible();
+
   // A disabled button can mean a pending env observation, not existing storage.
   // Read existence once, then wait for the UI's actual action/readiness states.
   const storageResponse = await page.request.get(`/api/v1/apps/${id}/storage`);
@@ -116,33 +119,33 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     timeout: operationTimeout,
   });
   await expect(add).toHaveCount(0);
-  // Fresh creation seeds defaults; a retained fixture may have saved a subset.
-  const saved = (await (await page.request.get(`/api/v1/apps/${id}/configuration`)).json()).data
-    .configuration.storageBindings;
-  const initialOutputs = existingPostgres
-    ? (saved.find((item: { resourceId: string }) => item.resourceId === existingPostgres.resourceId)
-        ?.outputs ?? {})
-    : { url: 'DATABASE_URL', host: 'PGHOST' };
-  await page.getByRole('button', { name: 'Edit PostgreSQL variables' }).click();
-  if (existingPostgres && !Object.keys(initialOutputs).length) {
-    await page.getByRole('button', { name: 'Reset to defaults' }).click();
-  } else if (existingPostgres && !('url' in initialOutputs)) {
-    await bindings.getByRole('button', { name: 'Add url as DATABASE_URL' }).click();
+  // Adding a database opens its variables prefilled with defaults; otherwise
+  // open the editor from the row. Reset so reruns start from the same state.
+  const editor = page.getByRole('dialog');
+  if (!(await editor.isVisible())) {
+    const edit = page.getByRole('button', { name: 'Edit PostgreSQL variables' });
+    if (await edit.count()) await edit.click();
+    else await page.getByRole('button', { name: 'Choose PostgreSQL variable names' }).click();
   }
+  await editor.getByRole('button', { name: 'Reset to defaults' }).click();
   await bindings.getByLabel('url → environment name').fill('APP_DATABASE');
-  if (!existingPostgres || !Object.keys(initialOutputs).length || 'host' in initialOutputs) {
-    await bindings.getByRole('button', { name: 'Remove host' }).click();
-  }
+  await bindings.getByRole('button', { name: 'Remove host' }).click();
   await expect(bindings.getByRole('button', { name: 'Add host as PGHOST' })).toBeVisible();
-  await page.getByRole('dialog').getByRole('button', { name: 'Apply' }).click();
-  await expect(page.getByRole('dialog')).toHaveCount(0);
+  // Saving the names saves settings straight away.
+  await editor.getByRole('button', { name: 'Save variables' }).click();
+  await expect(editor).toHaveCount(0);
+  await expect
+    .poll(
+      async () =>
+        JSON.stringify(
+          (await (await page.request.get(`/api/v1/apps/${id}/configuration`)).json()).data
+            .configuration.storageBindings,
+        ),
+      { timeout: operationTimeout },
+    )
+    .toContain('"url":"APP_DATABASE"');
   await expect(storageSection.getByRole('button', { name: /delete/i })).toHaveCount(0);
   await expect(page.getByText(/Only an admin can delete/)).toBeVisible();
-  await expect(
-    page.getByText('Save your settings to keep these variable changes.', { exact: false }),
-  ).toBeVisible();
-  await page.getByRole('button', { name: 'Save settings' }).click();
-  await expect(page.getByText('Settings saved.', { exact: false })).toBeVisible();
   await page.goto(`/apps/${id}/deploy`);
   await expect(page.getByText('APP_DATABASE', { exact: true })).toBeVisible();
   await expect(page.getByText('API_TOKEN', { exact: true })).toBeVisible();

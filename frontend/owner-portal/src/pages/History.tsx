@@ -1,12 +1,12 @@
 import {
-  Badge,
   Button,
   Cluster,
   DataTable,
   EmptyState,
-  ErrorAlert,
-  LoadingRows,
+  PageSkeleton,
+  RelativeTime,
   Section,
+  SectionSkeleton,
   buttonClass,
   type Column,
 } from '@openstack-platform/ui';
@@ -15,8 +15,9 @@ import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
 import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
+import { QueryError } from '../components/Feedback';
 import { Status } from '../components/Status';
-import { relativeTime, short } from '../utils/presentation';
+import { short } from '../utils/presentation';
 
 function columns(id: string, active: string | null | undefined): Column<Deployment>[] {
   return [
@@ -25,55 +26,42 @@ function columns(id: string, active: string | null | undefined): Column<Deployme
       header: 'Commit',
       mobile: 'title',
       cell: (deployment) => (
-        <span className="app-inline">
-          <Link
-            href={`/apps/${id}/deployments/${deployment.deploymentId}`}
-            className="ui-link ui-link--plain ui-mono"
-          >
-            {short(deployment.repositoryCommit)}
-          </Link>
-          {deployment.deploymentId === active && (
-            <Badge tone="neutral" dot={false}>
-              Live
-            </Badge>
-          )}
-        </span>
+        <Link
+          href={`/apps/${id}/deployments/${deployment.deploymentId}`}
+          className="ui-link ui-link--plain ui-mono"
+        >
+          {short(deployment.repositoryCommit)}
+        </Link>
       ),
     },
     {
       key: 'status',
       header: 'Status',
       mobile: 'trailing',
-      cell: (deployment) => <Status state={deployment.status} />,
+      // The live deployment reads "Live"; it succeeded by definition.
+      cell: (deployment) => (
+        <Status state={deployment.deploymentId === active ? 'live' : deployment.status} />
+      ),
     },
     {
       key: 'started',
       header: 'Started',
+      mobile: 'meta',
       cell: (deployment) => (
-        <time
-          className="ui-text-muted"
-          dateTime={deployment.requestedAt}
-          title={new Date(deployment.requestedAt).toLocaleString()}
-        >
-          {relativeTime(deployment.requestedAt)}
-        </time>
+        <span className="ui-text-muted">
+          <RelativeTime value={deployment.requestedAt} />
+        </span>
       ),
     },
     {
       key: 'live',
       header: 'Went live',
-      cell: (deployment) =>
-        deployment.acceptedAt ? (
-          <time
-            className="ui-text-muted"
-            dateTime={deployment.acceptedAt}
-            title={new Date(deployment.acceptedAt).toLocaleString()}
-          >
-            {relativeTime(deployment.acceptedAt)}
-          </time>
-        ) : (
-          <span className="ui-text-subtle">—</span>
-        ),
+      mobile: 'hidden',
+      cell: (deployment) => (
+        <span className="ui-text-muted">
+          <RelativeTime value={deployment.acceptedAt} />
+        </span>
+      ),
     },
   ];
 }
@@ -90,11 +78,11 @@ export function HistoryPage({ id }: { id: string }) {
   return (
     <AppFrame id={id} active="Deployments">
       {history.isPending ? (
-        <Section flush aria-label="Deployments">
-          <LoadingRows />
-        </Section>
+        <PageSkeleton label="Loading deployments…">
+          <SectionSkeleton variant="table" columns={4} rows={3} />
+        </PageSkeleton>
       ) : history.error ? (
-        <ErrorAlert error={history.error} />
+        <QueryError query={history} what="deployments" />
       ) : history.data.items.length ? (
         <>
           <Section flush aria-label="Deployments">

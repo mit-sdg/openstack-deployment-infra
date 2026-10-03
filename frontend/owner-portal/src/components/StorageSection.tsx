@@ -6,10 +6,12 @@ import {
   ErrorAlert,
   Hint,
   IconButton,
+  InlineStatus,
   Input,
   List,
   ListItem,
   LoadingRows,
+  RelativeTime,
   Section,
 } from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -22,7 +24,7 @@ import {
   type StorageBinding,
   type StorageResource,
 } from '../api';
-import { relativeTime } from '../utils/presentation';
+import { QueryError } from './Feedback';
 import { Operation, OperationList } from './Operation';
 import { Status } from './Status';
 import '../pages/app-pages.css';
@@ -54,11 +56,16 @@ function BindingsDialog({
   resource: StorageResource;
   outputs: Record<string, string>;
   validate: (outputs: Record<string, string>) => string | null;
-  onApply: (outputs: Record<string, string>) => void;
+  /** Applies the names; may save them right away (a rejected promise keeps the dialog open). */
+  onApply: (outputs: Record<string, string>) => void | Promise<unknown>;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState<Record<string, string>>(() => ({ ...outputs }));
-  const [error, setError] = useState<string | null>(null);
+  // A resource without variables starts from the defaults: most apps want them.
+  const [draft, setDraft] = useState<Record<string, string>>(() => ({
+    ...(Object.keys(outputs).length ? outputs : resource.defaultBindings),
+  }));
+  const [error, setError] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
   const certificates = Object.values(resource.defaultBindings).filter((name) =>
     /SSLROOTCERT|CA_BUNDLE/.test(name),
   );
@@ -90,13 +97,22 @@ function BindingsDialog({
           <Button onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
-            onClick={() => {
+            loading={saving}
+            onClick={async () => {
               const invalid = validate(draft);
               setError(invalid);
-              if (!invalid) onApply(draft);
+              if (invalid) return;
+              setSaving(true);
+              try {
+                await onApply(draft);
+              } catch (failure) {
+                setError(failure);
+              } finally {
+                setSaving(false);
+              }
             }}
           >
-            Apply
+            Save variables
           </Button>
         </>
       }
@@ -162,11 +178,17 @@ export function StorageSection({
   onChange,
   service = api,
   notice,
+  save,
 }: {
   id: string;
   service?: ReturnType<typeof resourceApi>;
   bindings: StorageBinding[];
   onChange: (bindings: StorageBinding[]) => void;
+  /**
+   * Saves new bindings straight away. Without it, binding changes only
+   * update the draft through onChange and the parent saves them.
+   */
+  save?: (bindings: StorageBinding[]) => Promise<unknown>;
   /** Optional message shown at the top of the section, e.g. unsaved changes. */
   notice?: ReactNode;
 }) {
@@ -195,19 +217,19 @@ export function StorageSection({
     storage.data?.intents.some((intent) => !['succeeded', 'failed'].includes(intent.state)) ||
     environment.data?.intents?.some((intent) => !['succeeded', 'failed'].includes(intent.state));
   const [createdType, setCreatedType] = useState<StorageResource['type'] | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  // Right after adding a resource, open its variables prefilled with defaults.
   useEffect(() => {
     const created = storage.data?.items.find((resource) => resource.type === createdType);
     if (created) {
-      onChange([
-        ...bindings.filter((item) => item.resourceId !== created.resourceId),
-        { resourceId: created.resourceId, outputs: { ...created.defaultBindings } },
-      ]);
+      setEditing(created.resourceId);
       setCreatedType(null);
     }
-  }, [storage.data, createdType, bindings, onChange]);
+  }, [storage.data, createdType]);
   const [confirming, setConfirming] = useState<Request | null>(null);
   const [identityConfirmed, setIdentityConfirmed] = useState(false);
-  const [editing, setEditing] = useState<string | null>(null);
+  const [applying, setApplying] = useState<string | null>(null);
+  const [applyError, setApplyError] = useState<unknown>(null);
   const [started, setStarted] = useState<string[]>([]);
   const pending = useRef<{ subject: string; key: string } | null>(null);
   const action = useMutation({
@@ -236,11 +258,32 @@ export function StorageSection({
   }
   const names = environment.data?.items.map((item) => item.name) ?? [];
   const invalid = validateBindings(bindings, names);
-  function replace(resource: string, outputs: Record<string, string>) {
-    onChange([
+  function withOutputs(resource: string, outputs: Record<string, string>) {
+    return [
       ...bindings.filter((item) => item.resourceId !== resource),
       ...(Object.keys(outputs).length ? [{ resourceId: resource, outputs }] : []),
-    ]);
+    ];
+  }
+  function apply(resource: string, outputs: Record<string, string>) {
+    const next = withOutputs(resource, outputs);
+    if (save) return save(next);
+    onChange(next);
+  }
+  async function applyDefaults(resource: StorageResource) {
+    setApplyError(null);
+    // Names that clash with existing variables need a choice: open the editor.
+    if (validateBindings(withOutputs(resource.resourceId, resource.defaultBindings), names)) {
+      setEditing(resource.resourceId);
+      return;
+    }
+    setApplying(resource.resourceId);
+    try {
+      await apply(resource.resourceId, { ...resource.defaultBindings });
+    } catch (failure) {
+      setApplyError(failure);
+    } finally {
+      setApplying(null);
+    }
   }
   const editingResource = storage.data?.items.find((item) => item.resourceId === editing);
   const confirmingResource = storage.data?.items.find(
@@ -254,13 +297,17 @@ export function StorageSection({
   return (
     <Section title="Databases and storage" flush>
       {notice && <div className="app-block">{notice}</div>}
-      {(storage.error || action.error) && (
+      {(!!action.error || !!applyError) && (
         <div className="app-block">
-          <ErrorAlert error={storage.error ?? action.error} />
+          <ErrorAlert error={action.error ?? applyError} />
         </div>
       )}
       {storage.isPending ? (
         <LoadingRows rows={3} />
+      ) : storage.error ? (
+        <div className="app-block">
+          <QueryError query={storage} what="your databases and storage" />
+        </div>
       ) : (
         <List label="Databases and storage">
           {types.map((type) => {
@@ -316,37 +363,53 @@ export function StorageSection({
                 }
                 meta={
                   <>
-                    <span>
-                      {count
-                        ? `${count} ${count === 1 ? 'variable' : 'variables'}`
-                        : 'No variables'}
-                    </span>
+                    {!!count && <span>{`${count} ${count === 1 ? 'variable' : 'variables'}`}</span>}
                     {resource.verifiedAt ? (
-                      <time
-                        dateTime={resource.verifiedAt}
-                        title={new Date(resource.verifiedAt).toLocaleString()}
-                      >
-                        Verified {relativeTime(resource.verifiedAt)}
-                      </time>
+                      <span>
+                        Verified <RelativeTime value={resource.verifiedAt} />
+                      </span>
                     ) : (
-                      <time
-                        dateTime={resource.createdAt}
-                        title={new Date(resource.createdAt).toLocaleString()}
-                      >
-                        Added {relativeTime(resource.createdAt)}
-                      </time>
+                      <span>
+                        Added <RelativeTime value={resource.createdAt} />
+                      </span>
                     )}
                   </>
                 }
               >
+                {!count && (
+                  <InlineStatus tone="warning">
+                    Your app can’t connect to {labels[type]} yet. Give it the connection variables.
+                  </InlineStatus>
+                )}
                 <Cluster className="app-resource-actions">
-                  <Button
-                    size="sm"
-                    aria-label={`Edit ${labels[type]} variables`}
-                    onClick={() => setEditing(resource.resourceId)}
-                  >
-                    Edit variables
-                  </Button>
+                  {count ? (
+                    <Button
+                      size="sm"
+                      aria-label={`Edit ${labels[type]} variables`}
+                      onClick={() => setEditing(resource.resourceId)}
+                    >
+                      Edit variables
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        size="sm"
+                        loading={applying === resource.resourceId}
+                        aria-label={`Use default ${labels[type]} variables`}
+                        onClick={() => applyDefaults(resource)}
+                      >
+                        Use default variables
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Choose ${labels[type]} variable names`}
+                        onClick={() => setEditing(resource.resourceId)}
+                      >
+                        Choose names
+                      </Button>
+                    </>
+                  )}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -405,8 +468,8 @@ export function StorageSection({
               names,
             )
           }
-          onApply={(outputs) => {
-            replace(editingResource.resourceId, outputs);
+          onApply={async (outputs) => {
+            await apply(editingResource.resourceId, outputs);
             setEditing(null);
           }}
           onClose={() => setEditing(null)}
