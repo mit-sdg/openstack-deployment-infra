@@ -27,6 +27,28 @@ def job(name: str) -> str:
 
 
 class PublicationTriggerTests(unittest.TestCase):
+    def test_dashboard_freshness_checks_untracked_output_and_gates_publication(self) -> None:
+        frontend = job("dashboard-frontend")
+        for required in (
+            'node-version: "24.19.0"',
+            "npm@11.17.0",
+            "npm --prefix frontend ci",
+            "npm --prefix frontend run format:check --workspaces",
+            "npm --prefix frontend run typecheck",
+            "npm --prefix frontend test",
+            "git diff --exit-code -- openstack_platform/dashboard/static",
+            "npm --prefix frontend run check:freshness",
+            "npm --prefix frontend/operator-dashboard run smoke",
+        ):
+            self.assertIn(required, frontend)
+        gate = (ROOT / "frontend/scripts/check-freshness.mjs").read_text()
+        self.assertIn("--untracked-files=all", gate)
+        self.assertIn("dashboard-frontend", GATES)
+        self.assertIn("frontend", IMAGE_INPUTS)
+        self.assertIn(
+            "needs: [development-evidence, dashboard-frontend]", job("development-publish")
+        )
+
     def test_every_github_action_is_pinned_to_an_immutable_sha(self) -> None:
         uses = re.findall(r"uses:\s+([^\s#]+)", WORKFLOW.read_text())
         self.assertTrue(uses)

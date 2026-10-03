@@ -16,15 +16,21 @@ function walk(directory) {
         : [];
   });
 }
-function check(file, app, options) {
+export function inspectSource(
+  file,
+  app,
+  options = {},
+  contents = readFileSync(file, "utf8"),
+) {
+  const diagnostics = [];
   const source = ts.createSourceFile(
     file,
-    readFileSync(file, "utf8"),
+    contents,
     ts.ScriptTarget.Latest,
     true,
   );
   const fail = (reason) =>
-    failures.push(`${path.relative(root, file)}: ${reason}`);
+    diagnostics.push(`${path.relative(root, file)}: ${reason}`);
   const isTest =
     /\.test\.[jt]sx?$/.test(file) || file.endsWith("test-setup.ts");
   function visit(node) {
@@ -109,18 +115,27 @@ function check(file, app, options) {
     ts.forEachChild(node, visit);
   }
   visit(source);
+  return diagnostics;
 }
-for (const app of apps) {
-  const configPath = ts.findConfigFile(path.join(root, app), ts.sys.fileExists);
-  if (!configPath) continue;
-  const config = ts.readConfigFile(configPath, ts.sys.readFile);
-  const parsed = ts.parseJsonConfigFileContent(
-    config.config,
-    ts.sys,
-    path.dirname(configPath),
-  );
-  for (const file of walk(path.join(root, app, "src")))
-    check(file, app, parsed.options);
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  for (const app of apps) {
+    const configPath = ts.findConfigFile(
+      path.join(root, app),
+      ts.sys.fileExists,
+    );
+    if (!configPath) continue;
+    const config = ts.readConfigFile(configPath, ts.sys.readFile);
+    const parsed = ts.parseJsonConfigFileContent(
+      config.config,
+      ts.sys,
+      path.dirname(configPath),
+    );
+    for (const file of walk(path.join(root, app, "src")))
+      failures.push(...inspectSource(file, app, parsed.options));
+  }
+  if (failures.length) throw new Error(failures.join("\n"));
+  console.log("First-party CSP and app import boundaries passed");
 }
-if (failures.length) throw new Error(failures.join("\n"));
-console.log("First-party CSP and app import boundaries passed");

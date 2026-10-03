@@ -21,6 +21,7 @@ import stat
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from types import FrameType
@@ -35,13 +36,17 @@ from .service import Collector, DashboardService, pending_snapshot
 
 STATIC = Path(__file__).with_name("static")
 MAXIMUM_CONNECTIONS = 32
-_ASSETS = {
-    "/": ("index.html", "text/html; charset=utf-8"),
-    "/assets/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
-    "/assets/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
-    "/assets/theme.js": ("theme.js", "text/javascript; charset=utf-8"),
-    "/assets/favicon.svg": ("favicon.svg", "image/svg+xml"),
+_ENTRY_FILES = {"index.html", "theme.js", "favicon.svg"}
+_MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
 }
+MAXIMUM_ASSET_BYTES = 8 * 1024 * 1024
+MAXIMUM_STATIC_BYTES = 16 * 1024 * 1024
+MAXIMUM_ASSETS = 64
+_ASSET_NAME = re.compile(r"[A-Za-z0-9_-]+\.(?:js|css|svg)")
 _LOOPBACK_HOST = re.compile(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?")
 _RELEASE = re.compile(r"[0-9a-f]{40}")
 SECURITY_HEADERS = (
@@ -70,12 +75,82 @@ def _etag(body: bytes) -> str:
     return '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
 
 
+class _EntryReferences(HTMLParser):
+    """Reject inline execution and require same-origin entry reference closure."""
+
+    def __init__(self, routes: set[str]) -> None:
+        super().__init__(convert_charrefs=True)
+        self.routes = routes
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        names = [name for name, _value in attrs]
+        if len(names) != len(set(names)):
+            raise ValueError("dashboard entry has duplicate attributes")
+        attributes = dict(attrs)
+        if (
+            tag in {"style", "base"}
+            or "style" in attributes
+            or "srcset" in attributes
+            or any(name.startswith("on") for name in attributes)
+            or (tag == "script" and not attributes.get("src"))
+        ):
+            raise ValueError("dashboard entry contains inline code or styles")
+        for name in ("src", "href", "poster", "data", "action", "formaction", "xlink:href"):
+            if name in attributes and attributes[name] not in self.routes:
+                raise ValueError("dashboard entry references an unadmitted asset")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+
+def _asset_bytes(path: Path) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= MAXIMUM_ASSET_BYTES:
+            raise ValueError("dashboard asset must be a bounded direct regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            body = stream.read(MAXIMUM_ASSET_BYTES + 1)
+        if len(body) != metadata.st_size:
+            raise ValueError("dashboard asset size changed while reading")
+        return body
+    finally:
+        os.close(descriptor)
+
+
 def load_assets(directory: Path = STATIC) -> dict[str, Asset]:
-    """Read the fixed static allowlist once; nothing else is served from disk."""
+    """Load a closed, bounded committed distribution into memory at startup."""
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise ValueError("dashboard static root must be a direct directory")
+    files: dict[str, Path] = {}
+    for path in directory.iterdir():
+        if path.name == "assets":
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                raise ValueError("dashboard assets must be a direct directory")
+            for asset in path.iterdir():
+                if not _ASSET_NAME.fullmatch(asset.name):
+                    raise ValueError("dashboard asset name or suffix is not admitted")
+                files["/assets/" + asset.name] = asset
+                if len(files) > MAXIMUM_ASSETS:
+                    raise ValueError("dashboard asset inventory exceeds its file limit")
+        elif path.name in _ENTRY_FILES:
+            files["/" + path.name] = path
+        else:
+            raise ValueError("dashboard static inventory contains an unadmitted file")
+    if not {"/" + name for name in _ENTRY_FILES}.issubset(files):
+        raise ValueError("dashboard static inventory lacks an entry file")
     assets: dict[str, Asset] = {}
-    for route, (name, content_type) in _ASSETS.items():
-        body = (directory / name).read_bytes()
-        assets[route] = Asset(body, content_type, _etag(body))
+    total = 0
+    for route, path in sorted(files.items()):
+        body = _asset_bytes(path)
+        total += len(body)
+        if total > MAXIMUM_STATIC_BYTES or len(files) > MAXIMUM_ASSETS:
+            raise ValueError("dashboard static inventory exceeds its size limits")
+        assets[route] = Asset(body, _MIME_TYPES[path.suffix], _etag(body))
+    assets["/"] = assets["/index.html"]
+    parser = _EntryReferences(set(assets))
+    parser.feed(assets["/"].body.decode("utf-8"))
+    parser.close()
     return assets
 
 

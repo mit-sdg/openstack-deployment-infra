@@ -46,6 +46,12 @@ confidence threshold.
 
 ## Preview the operator dashboard
 
+The frontend npm workspace contains `shared` (`@openstack-platform/ui`),
+`owner-portal` and `operator-dashboard`, with one `frontend/package-lock.json`.
+Use Node 24.19.0 and npm 11.17.0. Shared contains presentation and theme tokens;
+the source check rejects app-to-app imports, owner/operator imports into shared,
+network/router dependencies in shared, and first-party inline code/styles.
+
 Serve the dashboard with synthetic evidence, then open `http://localhost:8470`:
 
 ```sh
@@ -58,8 +64,50 @@ Its fixtures pass through the production parsers and status rules. Scenarios
 are `mixed` (the default), `healthy`, `outage`, `unreachable` (admin reads fail
 after the first refresh), and `empty`. `--port`, `--interval`, and `--delay`
 (seconds added to each refresh, for the loading state) adjust it. The preview
-re-reads `openstack_platform/dashboard/static/` on every request; restart it
-after Python changes.
+uses the committed React production bundle under
+`openstack_platform/dashboard/static/` and needs no Node to run. It reloads each
+complete distribution and keeps the previous one while a rebuild is incomplete;
+restart it after Python changes. Production loads its asset allowlist once.
+
+To change the UI, install the locked workspace and rebuild the committed output:
+
+```sh
+npm --prefix frontend ci
+npm --prefix frontend run format:check
+npm --prefix frontend run format:check --workspaces
+npm --prefix frontend run check:source
+npm --prefix frontend run typecheck
+npm --prefix frontend test
+npm --prefix frontend run build
+npm --prefix frontend run smoke
+```
+
+The owner build emits its ignored `dist/` and commit-bound receipt; the dashboard
+build replaces its committed `static/` directory. Commit every generated addition
+and deletion with the frontend changes, and update their tracked-file guide
+entries. Its only files are HTML, JS, CSS and SVG; no source maps or Vite manifest
+are committed. The generated output contains no commit, build time or checkout
+path. `npm --prefix frontend/operator-dashboard run dev` runs a production build
+watcher; keep the Python preview running alongside it. Vite's HMR server injects
+development code/styles and is not the dashboard's strict-CSP preview.
+
+The required `dashboard-frontend` CI job pins Node/npm, checks all workspaces,
+rebuilds both apps, runs `git diff --exit-code -- openstack_platform/dashboard/static`
+and checks the full Git status including untracked output. After committing the
+generated files, verify locally with:
+
+```sh
+npm --prefix frontend/operator-dashboard run build
+npm --prefix frontend run check:freshness
+```
+
+Playwright uses the Python preview with all five scenarios and delayed collection.
+It checks polling/ETags, refresh, reconnect, drawers and preserved view state,
+320/390/768/1440 px in light/dark, reduced motion, forced colors and print. It
+collects CSP violations and unexpected requests under the production policy.
+Synthetic screenshots are written to `.tmp/dashboard-screenshots/after/`, with
+one `<width>-<light|dark>.png` for each viewport/theme pair. No live systems are
+needed for these checks.
 
 ## Run shell and document checks
 
@@ -121,7 +169,7 @@ is stored, audited or logged. The harness replaces Commons and the controller
 with loopback doubles; it does not call any live platform or class application.
 
 Use Python 3.14, Node 24.19.0 and npm 11.17.0. The source-only UI package and
-owner portal are npm workspaces rooted in `frontend/`, with one lockfile.
+owner portal and operator dashboard are npm workspaces rooted in `frontend/`, with one lockfile.
 Shared UI components contain presentation only; owner routing and API calls
 remain in the portal. Run the import/CSP source check after frontend edits:
 

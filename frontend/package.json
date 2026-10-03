@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "shared",
-    "owner-portal"
+    "owner-portal",
+    "operator-dashboard"
   ],
   "engines": {
     "node": "24.19.0",
@@ -16,9 +17,10 @@
     "format:check": "prettier --check package.json scripts",
     "check:source": "node scripts/check-source.mjs",
     "typecheck": "npm run typecheck --workspaces",
-    "test": "npm run test --workspaces",
-    "build": "npm run build --workspace owner-portal",
-    "smoke": "npm run smoke --workspace owner-portal"
+    "test": "node --test scripts/source-policy.test.mjs && npm run test --workspaces",
+    "build": "npm run build --workspace owner-portal --workspace operator-dashboard",
+    "smoke": "npm run smoke --workspace owner-portal --workspace operator-dashboard",
+    "check:freshness": "node scripts/check-freshness.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3",

@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import socketserver
 import ssl
@@ -17,6 +18,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from email.message import Message
@@ -966,7 +968,7 @@ class ServerTests(unittest.TestCase):
     def test_static_assets_and_snapshot_carry_strict_headers(self) -> None:
         status, headers, body = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn(b"/assets/dashboard.js", body)
+        self.assertRegex(body, rb'/assets/[^" ]+\.js')
         self.assertIn("default-src 'none'", headers["content-security-policy"])
         self.assertIn("frame-ancestors 'none'", headers["content-security-policy"])
         self.assertEqual(headers["x-content-type-options"], "nosniff")
@@ -979,13 +981,16 @@ class ServerTests(unittest.TestCase):
             "GET", "/api/snapshot", {"If-None-Match": headers["etag"]}
         )
         self.assertEqual((status, body), (304, b""))
-        status, headers, body = self.request("HEAD", "/assets/dashboard.css")
+        css_route = next(route for route in server.load_assets() if route.endswith(".css"))
+        status, headers, body = self.request("HEAD", css_route)
         self.assertEqual((status, body), (200, b""))
         self.assertTrue(headers["content-type"].startswith("text/css"))
 
     def test_unknown_paths_methods_hosts_and_bodies_are_rejected(self) -> None:
         self.assertEqual(self.request("GET", "/../../etc/passwd")[0], 404)
         self.assertEqual(self.request("GET", "/static/dashboard.js")[0], 404)
+        self.assertEqual(self.request("GET", "/.vite/manifest.json")[0], 404)
+        self.assertEqual(self.request("GET", "/apps/some-app")[0], 404)
         self.assertEqual(self.request("PUT", "/api/snapshot")[0], 405)
         self.assertEqual(self.request("GET", "/", {"Host": "attacker.example"})[0], 421)
         self.assertEqual(self.request("GET", "/", {"Host": "localhost.attacker.example"})[0], 421)
@@ -1079,6 +1084,29 @@ class OperatorCommandTests(unittest.TestCase):
 
 
 class StaticAssetTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("uv"), "uv wheel builder is unavailable")
+    def test_source_built_wheel_contains_the_complete_committed_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subprocess.run(
+                ["uv", "build", "--wheel", "--out-dir", temporary],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+            )
+            wheel = next(Path(temporary).glob("*.whl"))
+            expected = {
+                path.relative_to(ROOT).as_posix(): path.read_bytes()
+                for path in STATIC.rglob("*")
+                if path.is_file()
+            }
+            with zipfile.ZipFile(wheel) as archive:
+                actual = {
+                    name: archive.read(name)
+                    for name in archive.namelist()
+                    if name.startswith("openstack_platform/dashboard/static/")
+                }
+            self.assertEqual(actual, expected)
+
     def test_markup_has_no_inline_script_style_or_handlers(self) -> None:
         html = (STATIC / "index.html").read_text()
         self.assertNotRegex(html, r"<script(?![^>]*\bsrc=)[^>]*>")
@@ -1089,25 +1117,96 @@ class StaticAssetTests(unittest.TestCase):
             with self.subTest(reference=reference):
                 self.assertIn(reference, server.load_assets())
 
-    def test_renderer_never_builds_markup_from_strings(self) -> None:
-        script = (STATIC / "dashboard.js").read_text()
-        for forbidden in (
-            "innerHTML",
-            "outerHTML",
-            "insertAdjacentHTML",
-            "document.write",
-            "eval(",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, script)
-
-    def test_every_static_asset_is_served_and_covered_by_release_identity(self) -> None:
-        names = {path.name for path in STATIC.iterdir() if path.is_file()}
-        served = {name for name, _type in server._ASSETS.values()}
-        self.assertEqual(names, served)
+    def test_every_committed_asset_is_served_and_covered_by_release_identity(self) -> None:
+        names = {
+            "/" + path.relative_to(STATIC).as_posix()
+            for path in STATIC.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(names | {"/"}, set(server.load_assets()))
         for name in names:
             with self.subTest(name=name):
                 self.assertIn(Path(name).suffix, release_manifest.OPERATOR_WHEEL_SUFFIXES)
+        self.assertNotIn("/.vite/manifest.json", names)
+
+    def inventory(self, root: Path) -> Path:
+        directory = root / "static"
+        directory.mkdir()
+        (directory / "assets").mkdir()
+        (directory / "assets/entry-123.js").write_text("console.log('fixture');")
+        (directory / "assets/entry-123.css").write_text("body {color: black;}")
+        (directory / "theme.js").write_text("/* external preference bootstrap */")
+        (directory / "favicon.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        (directory / "index.html").write_text(
+            '<!doctype html><script src="/theme.js"></script>'
+            '<script type="module" src="/assets/entry-123.js"></script>'
+            '<link rel="stylesheet" href="/assets/entry-123.css">'
+        )
+        return directory
+
+    def test_loader_rejects_missing_extra_indirect_and_unbounded_files(self) -> None:
+        for damage in ("missing", "extra", "symlink", "directory", "file-limit", "size"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory = self.inventory(root)
+                if damage == "missing":
+                    (directory / "theme.js").unlink()
+                elif damage == "extra":
+                    (directory / "receipt.json").write_text("{}")
+                elif damage == "symlink":
+                    (directory / "theme.js").unlink()
+                    (directory / "theme.js").symlink_to(directory / "assets/entry-123.js")
+                elif damage == "directory":
+                    (directory / "assets/fake.js").mkdir()
+                elif damage == "file-limit":
+                    for index in range(server.MAXIMUM_ASSETS):
+                        (directory / f"assets/extra-{index}.js").write_text("// extra")
+                else:
+                    with (directory / "assets/entry-123.js").open("wb") as stream:
+                        stream.truncate(server.MAXIMUM_ASSET_BYTES + 1)
+                with self.assertRaises((ValueError, OSError)):
+                    server.load_assets(directory)
+
+    def test_loader_rejects_escaping_and_inline_entry_references(self) -> None:
+        bad_entries = (
+            '<script src="https://untrusted.example.invalid/code.js"></script>',
+            '<script src="/assets/missing.js"></script>',
+            '<script src="/assets/../theme.js"></script>',
+            '<script src="/assets/entry-123.js?alternate"></script>',
+            '<script src="#entry"></script>',
+            "<img src>",
+            '<img srcset="https://untrusted.example.invalid/image.svg 1x">',
+            "<script>window.alert(1)</script>",
+            "<style>body {display:none}</style>",
+            '<div style="color:red">Inline</div>',
+            '<img src="/favicon.svg" onload="window.alert(1)">',
+            '<script src="/theme.js" src="/assets/entry-123.js"></script>',
+            '<base href="/">',
+        )
+        for entry in bad_entries:
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as temporary:
+                directory = self.inventory(Path(temporary))
+                (directory / "index.html").write_text(entry)
+                with self.assertRaises(ValueError):
+                    server.load_assets(directory)
+
+    def test_loaded_bytes_do_not_follow_later_disk_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = self.inventory(Path(temporary))
+            assets = server.load_assets(directory)
+            before = assets["/theme.js"]
+            (directory / "theme.js").write_text("// changed after startup")
+            self.assertEqual(assets["/theme.js"], before)
+            self.assertNotEqual(server.load_assets(directory)["/theme.js"].etag, before.etag)
+            self.assertIs(assets["/"], assets["/index.html"])
+
+    def test_preview_keeps_the_last_complete_distribution_during_rebuild(self) -> None:
+        with mock.patch.object(
+            preview, "load_assets", side_effect=[{"/": "old"}, ValueError(), {"/": "new"}]
+        ):
+            assets = preview._ReloadingAssets()
+            self.assertEqual(assets.get("/"), "old")
+            self.assertEqual(assets.get("/"), "new")
 
     def test_manifest_and_installer_hash_the_same_wheel_inputs(self) -> None:
         self.assertEqual(

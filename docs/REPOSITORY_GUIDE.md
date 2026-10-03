@@ -215,10 +215,8 @@ cross-cutting boundaries.
 - `openstack_platform/dashboard/server.py` — private Unix-socket HTTP server, static asset allowlist, security headers, and `dashboard` command composition.
 - `openstack_platform/dashboard/service.py` — single-flight refresh loop, last-good source retention, route-check history, and snapshot serialization.
 - `openstack_platform/dashboard/sources.py` — fixed admin reader, strict parsers for privileged and operator reads, and public route probes.
-- `openstack_platform/dashboard/static/dashboard.css` — dashboard layout, light and dark themes, and responsive desktop and mobile styles.
-- `openstack_platform/dashboard/static/dashboard.js` — browser renderer that polls the cached snapshot and builds the view with DOM APIs.
 - `openstack_platform/dashboard/static/favicon.svg` — dashboard browser icon.
-- `openstack_platform/dashboard/static/index.html` — dashboard document shell and icon sprite.
+- `openstack_platform/dashboard/static/index.html` — generated React entry with external same-origin scripts and stylesheet.
 - `openstack_platform/dashboard/static/theme.js` — applies a saved light or dark preference before first paint.
 
 ## Tests
@@ -397,10 +395,36 @@ change. `tests/test_documentation.py` checks that every path returned by
 not-yet-added guide entry during local editing, but CI verifies it once the file
 is tracked.
 
-## Shared frontend presentation
+## Shared presentation and operator React frontend
 
+- `.gitattributes` — marks committed dashboard browser output as generated.
+- `frontend/operator-dashboard/e2e/dashboard.spec.ts` — four-width/theme CSP, interaction, reconnect and preference acceptance.
+- `frontend/operator-dashboard/index.html` — source entry with external theme bootstrap and no inline code/styles.
+- `frontend/operator-dashboard/package.json` — separate operator React app and production build/browser scripts.
+- `frontend/operator-dashboard/playwright.config.ts` — loopback Python preview lifecycle for all synthetic scenarios.
+- `frontend/operator-dashboard/public/favicon.svg` — source dashboard browser icon.
+- `frontend/operator-dashboard/src/App.tsx` — operator shell, view state, refresh and connection feedback.
+- `frontend/operator-dashboard/src/Applications.tsx` — application filters, sorting, search and responsive evidence table.
+- `frontend/operator-dashboard/src/Drawer.tsx` — read-only modal details, storage evidence and identifier copy actions.
+- `frontend/operator-dashboard/src/Icons.tsx` — operator-specific SVG symbols and status shapes.
+- `frontend/operator-dashboard/src/Sections.tsx` — overview, attention, roles, operations, checks and source evidence.
+- `frontend/operator-dashboard/src/api.ts` — same-origin snapshot and guarded bodyless refresh requests.
+- `frontend/operator-dashboard/src/app.css` — operator screen layouts and print rules using shared tokens/primitives.
+- `frontend/operator-dashboard/src/main.tsx` — independent React operator root with no portal imports.
+- `frontend/operator-dashboard/src/polling.test.ts` — exact cadence, refresh, reconnect, abort and coalescing checks.
+- `frontend/operator-dashboard/src/polling.ts` — single-flight polling, ETag/304, visibility and refresh state.
+- `frontend/operator-dashboard/src/presentation.test.tsx` — hostile-text rendering, filters, focus and time-format parity.
+- `frontend/operator-dashboard/src/presentation.tsx` — operator formatting, safe external links and route history.
+- `frontend/operator-dashboard/src/snapshot.ts` — TypeScript view types for unchanged Python snapshot schema version 1.
+- `frontend/operator-dashboard/src/test-fixtures.ts` — domain-generic frontend snapshot fixtures.
+- `frontend/operator-dashboard/src/test-setup.ts` — operator UI test DOM/mock cleanup.
+- `frontend/operator-dashboard/src/useSnapshot.ts` — React subscription and one-second local clock lifecycle.
+- `frontend/operator-dashboard/tsconfig.json` — strict operator UI and browser-test TypeScript checks.
+- `frontend/operator-dashboard/vite.config.ts` — reproducible committed build without source maps or a Vite manifest.
 - `frontend/package.json` — pinned Node/npm root workspace and all-frontend checks.
+- `frontend/scripts/check-freshness.mjs` — compares dashboard output with Git, including staged and untracked files.
 - `frontend/scripts/check-source.mjs` — TypeScript AST checks for first-party CSP and app import boundaries.
+- `frontend/scripts/source-policy.test.mjs` — rejection tests for unsafe source and cross-app dependencies.
 - `frontend/shared/package.json` — source-only shared presentation exports and React peer dependency.
 - `frontend/shared/src/BoundaryText.tsx` — text-only line-break opportunities for URLs and paths.
 - `frontend/shared/src/Feedback.tsx` — parameterized empty/loading/error presentation and focus policy.
@@ -415,4 +439,6 @@ is tracked.
 - `frontend/shared/src/tokens.css` — common light/dark surface, typography and status tokens.
 - `frontend/shared/tsconfig.json` — strict shared component TypeScript checks.
 - `frontend/shared/vite.config.ts` — shared component Vitest browser-like test configuration.
+- `openstack_platform/dashboard/static/assets/index-HVBM2P2O.js` — generated operator React production bundle.
+- `openstack_platform/dashboard/static/assets/style-DVx6-JRR.css` — generated operator shared/operator production stylesheet.
 - `frontend/scripts/theme-plugin.ts` — emits the shared external theme bootstrap and serves it in the portal Vite preview.

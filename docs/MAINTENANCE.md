@@ -35,9 +35,25 @@ python3 -m openstack_platform.release_manifest verify \
 
 The component manifest binds the full source commit, implementation contract,
 `uv.lock`, deterministic wheel inputs (packaged Python, text, and dashboard
-browser assets), helper action manifest, controller API
-and schema versions, and the explicit not-shipped UI placeholder. Its SPDX 2.3
-SBOM describes the Python component set.
+browser assets), helper action manifest, controller API and schema versions, and
+the owner UI source/compatibility identity. Its SPDX 2.3 SBOM describes locked
+Python/npm dependencies and source identities for local frontend workspace packages.
+
+The operator dashboard is a separate React app using the source-only shared UI
+package. Its generated HTML/JS/CSS/SVG output is committed under
+`openstack_platform/dashboard/static/`; Git is the durable store. These files are
+already included in the operator source-input hash and source-built wheel. No
+new installer flags, artifact formats or setup inputs are needed, and no Node
+toolchain is installed on the operator host. Signed and explicitly unsigned
+production releases keep the existing evidence verification policy unchanged.
+
+Before signing or publishing a release containing frontend changes, require the
+`dashboard-frontend` freshness gate: exact Node 24.19.0/npm 11.17.0, locked root
+workspace install, all workspace checks, production rebuild, full committed-file
+comparison including untracked output, and browser checks under the unchanged
+dashboard CSP. The job also blocks image publication. A source hash authenticates
+the committed bundle bytes; the required rebuild gate establishes their freshness
+against the frontend/shared sources. Review both source and generated output.
 
 After building all five roles, prepare an `artifact-inputs.json` object keyed by
 `admin`, `ingress`, `storage`, `worker`, and `builder`. Each entry contains the

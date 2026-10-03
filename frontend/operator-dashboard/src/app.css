@@ -1,110 +1,26 @@
-/* Read-only operator dashboard.
- *
- * Status colors are a fixed palette (good, warning, critical, info, neutral)
- * and always appear with an icon or label; text stays in ink tokens. The dark
- * theme is a selected set of steps, applied either from the OS preference or
- * from an explicit data-theme stamp that wins in both directions. */
+@import "@openstack-platform/ui/tokens.css";
+@import "@openstack-platform/ui/primitives.css";
 
 :root {
-  color-scheme: light;
-  --bg: #f5f5f3;
-  --surface: #ffffff;
-  --surface-2: #f7f7f5;
-  --surface-3: #eeeeeb;
-  --border: rgba(11, 11, 11, 0.09);
-  --border-strong: rgba(11, 11, 11, 0.16);
-  --ink: #0b0b0b;
-  --ink-2: #52514e;
-  --ink-3: #6b6a65;
-  --accent: #2a78d6;
-  --accent-ink: #1c5cab;
-  --accent-soft: rgba(42, 120, 214, 0.1);
-  --good: #0ca30c;
-  --warning: #fab219;
-  --critical: #d03b3b;
-  --info: #2a78d6;
-  --neutral: #898781;
-  --good-soft: rgba(12, 163, 12, 0.1);
-  --warning-soft: rgba(250, 178, 25, 0.18);
-  --critical-soft: rgba(208, 59, 59, 0.1);
-  --info-soft: rgba(42, 120, 214, 0.1);
-  --neutral-soft: rgba(137, 135, 129, 0.13);
   --bar-empty: #e6e6e2;
-  --shadow-1: 0 1px 2px rgba(11, 11, 11, 0.04), 0 1px 1px rgba(11, 11, 11, 0.02);
-  --shadow-2: 0 2px 6px rgba(11, 11, 11, 0.05), 0 12px 32px -8px rgba(11, 11, 11, 0.12);
+  --shadow-1: var(--shadow);
+  --shadow-2:
+    0 2px 6px rgba(11, 11, 11, 0.05), 0 12px 32px -8px rgba(11, 11, 11, 0.12);
   --shadow-drawer: -16px 0 48px -12px rgba(11, 11, 11, 0.22);
   --backdrop: rgba(23, 23, 21, 0.32);
-  --topbar: rgba(245, 245, 243, 0.84);
-  --skeleton: #ececea;
-  --skeleton-shine: #f7f7f5;
-  --radius: 12px;
+  --topbar: var(--bg);
+  --skeleton: var(--surface-3);
+  --skeleton-shine: var(--surface-2);
   --radius-sm: 8px;
-  --gutter: 28px;
-  --page-width: 1320px;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
-
 @media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) {
-    color-scheme: dark;
-    --bg: #0e0e0d;
-    --surface: #161615;
-    --surface-2: #1d1d1c;
-    --surface-3: #262624;
-    --border: rgba(255, 255, 255, 0.08);
-    --border-strong: rgba(255, 255, 255, 0.15);
-    --ink: #f4f4f2;
-    --ink-2: #c3c2b7;
-    --ink-3: #9a9991;
-    --accent: #3987e5;
-    --accent-ink: #6da7ec;
-    --accent-soft: rgba(57, 135, 229, 0.16);
-    --good-soft: rgba(12, 163, 12, 0.18);
-    --warning-soft: rgba(250, 178, 25, 0.16);
-    --critical-soft: rgba(208, 59, 59, 0.2);
-    --info-soft: rgba(57, 135, 229, 0.18);
-    --neutral-soft: rgba(137, 135, 129, 0.18);
+  :root:not([data-theme="light"]) {
     --bar-empty: #2c2c2a;
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-    --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4), 0 16px 40px -8px rgba(0, 0, 0, 0.6);
-    --shadow-drawer: -16px 0 48px -12px rgba(0, 0, 0, 0.7);
-    --backdrop: rgba(0, 0, 0, 0.58);
-    --topbar: rgba(14, 14, 13, 0.82);
-    --skeleton: #1d1d1c;
-    --skeleton-shine: #282826;
   }
 }
-
 :root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #0e0e0d;
-  --surface: #161615;
-  --surface-2: #1d1d1c;
-  --surface-3: #262624;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.15);
-  --ink: #f4f4f2;
-  --ink-2: #c3c2b7;
-  --ink-3: #9a9991;
-  --accent: #3987e5;
-  --accent-ink: #6da7ec;
-  --accent-soft: rgba(57, 135, 229, 0.16);
-  --good-soft: rgba(12, 163, 12, 0.18);
-  --warning-soft: rgba(250, 178, 25, 0.16);
-  --critical-soft: rgba(208, 59, 59, 0.2);
-  --info-soft: rgba(57, 135, 229, 0.18);
-  --neutral-soft: rgba(137, 135, 129, 0.18);
   --bar-empty: #2c2c2a;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4), 0 16px 40px -8px rgba(0, 0, 0, 0.6);
-  --shadow-drawer: -16px 0 48px -12px rgba(0, 0, 0, 0.7);
-  --backdrop: rgba(0, 0, 0, 0.58);
-  --topbar: rgba(14, 14, 13, 0.82);
-  --skeleton: #1d1d1c;
-  --skeleton-shine: #282826;
 }
-
 /* Base */
 
 *,
@@ -398,7 +314,7 @@ a:hover {
   backdrop-filter: saturate(1.8) blur(14px);
 }
 
-.topbar__inner {
+.topbar-inner {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -426,7 +342,9 @@ a:hover {
   border-radius: 9px;
   background: var(--accent);
   color: #ffffff;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12), var(--shadow-1);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    var(--shadow-1);
 }
 
 .brand__mark .icon {
@@ -460,7 +378,7 @@ a:hover {
   white-space: nowrap;
 }
 
-.topbar__actions {
+.topbar-actions {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -505,7 +423,10 @@ a:hover {
   background: var(--surface);
   color: var(--ink-2);
   cursor: pointer;
-  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+  transition:
+    background-color 0.15s,
+    color 0.15s,
+    border-color 0.15s;
 }
 
 .icon-button:hover {
@@ -590,7 +511,7 @@ a:hover {
   outline: none;
 }
 
-.page[data-disconnected="true"] {
+[data-disconnected="true"] {
   opacity: 0.62;
 }
 
@@ -924,7 +845,9 @@ a:hover {
 .role-card:target,
 .role-card[data-highlight="true"] {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-1);
+  box-shadow:
+    0 0 0 3px var(--accent-soft),
+    var(--shadow-1);
 }
 
 .role-card__head {
@@ -1136,7 +1059,9 @@ a:hover {
 .segmented button[aria-pressed="true"] {
   background: var(--surface);
   color: var(--ink);
-  box-shadow: var(--shadow-1), 0 0 0 1px var(--border);
+  box-shadow:
+    var(--shadow-1),
+    0 0 0 1px var(--border);
 }
 
 .segmented__count {
@@ -1586,7 +1511,8 @@ a:hover {
   max-width: var(--page-width);
   margin: 0 auto;
   padding: 18px max(var(--gutter), env(safe-area-inset-right))
-    max(18px, env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
+    max(18px, env(safe-area-inset-bottom))
+    max(var(--gutter), env(safe-area-inset-left));
   color: var(--ink-3);
   font-size: 12.5px;
 }
@@ -1679,8 +1605,6 @@ a:hover {
   margin-top: 8px;
   font-size: 13px;
 }
-
-
 
 .drawer__body {
   flex: 1;
@@ -2274,4 +2198,31 @@ a:hover {
     box-shadow: none;
     break-inside: avoid;
   }
+}
+
+.theme-button .theme-icon {
+  width: 17px;
+  height: 17px;
+}
+@media print {
+  :root,
+  :root[data-theme="dark"] {
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --ink-3: #6b6a65;
+    --bg: white;
+    --surface: white;
+    --surface-2: #f7f7f5;
+    --surface-3: #eeeeeb;
+    --border: rgba(11, 11, 11, 0.16);
+  }
+}
+
+.brand__mark svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
 }
