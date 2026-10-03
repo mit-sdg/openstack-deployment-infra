@@ -12,14 +12,18 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Literal
 
 SCRYPT_N = 32768
 SCRYPT_R = 8
 SCRYPT_P = 3
 SCRYPT_MEMORY = 48 * 1024**2
 HASH_SLOTS = threading.BoundedSemaphore(1)
+KNOWN_DEVICE_HASH_SLOTS = threading.BoundedSemaphore(1)
 STEP_UP_HASH_SLOTS = threading.BoundedSemaphore(1)
-HASH_LEASE: ContextVar[bool | None] = ContextVar("password_hash_lease", default=None)
+HASH_LEASE: ContextVar[Literal["anonymous", "known", "step_up"] | None] = ContextVar(
+    "password_hash_lease", default=None
+)
 
 
 class HashCapacityError(RuntimeError):
@@ -45,14 +49,17 @@ def password(value: object, account: str) -> str:
 
 
 @contextmanager
-def hashing_slot(*, step_up: bool = False) -> Iterator[None]:
-    if HASH_LEASE.get() == step_up:
+def hashing_slot(*, step_up: bool = False, known: bool = False) -> Iterator[None]:
+    lane: Literal["anonymous", "known", "step_up"] = (
+        "step_up" if step_up else "known" if known else "anonymous"
+    )
+    if HASH_LEASE.get() == lane:
         yield
         return
-    pool = STEP_UP_HASH_SLOTS if step_up else HASH_SLOTS
+    pool = STEP_UP_HASH_SLOTS if step_up else KNOWN_DEVICE_HASH_SLOTS if known else HASH_SLOTS
     if not pool.acquire(blocking=False):
         raise HashCapacityError("local authentication capacity unavailable")
-    lease = HASH_LEASE.set(step_up)
+    lease = HASH_LEASE.set(lane)
     try:
         yield
     finally:
@@ -61,19 +68,21 @@ def hashing_slot(*, step_up: bool = False) -> Iterator[None]:
 
 
 def hash_password(
-    value: str, *, n: int = SCRYPT_N, p: int = SCRYPT_P, step_up: bool = False
+    value: str, *, n: int = SCRYPT_N, p: int = SCRYPT_P, step_up: bool = False, known: bool = False
 ) -> str:
     if n not in {8192, 16384, 32768} or not 1 <= p <= 10:
         raise ValueError("unsupported password cost")
     salt = secrets.token_bytes(16)
-    with hashing_slot(step_up=step_up):
+    with hashing_slot(step_up=step_up, known=known):
         key = hashlib.scrypt(
             value.encode("utf-8"), salt=salt, n=n, r=SCRYPT_R, p=p, maxmem=SCRYPT_MEMORY, dklen=64
         )
     return f"scrypt${n}${SCRYPT_R}${p}${salt.hex()}${key.hex()}"
 
 
-def verify_password(value: str, encoded: str, *, step_up: bool = False) -> tuple[bool, bool]:
+def verify_password(
+    value: str, encoded: str, *, step_up: bool = False, known: bool = False
+) -> tuple[bool, bool]:
     """Return validity and upgrade requirement; reject unbounded/corrupt costs."""
     if len(value.encode("utf-8")) > 1024:
         return False, False
@@ -92,7 +101,7 @@ def verify_password(value: str, encoded: str, *, step_up: bool = False) -> tuple
         salt, stored = bytes.fromhex(salt_hex), bytes.fromhex(key_hex)
     except (ValueError, TypeError):
         return False, False
-    with hashing_slot(step_up=step_up):
+    with hashing_slot(step_up=step_up, known=known):
         key = hashlib.scrypt(
             value.encode("utf-8"), salt=salt, n=n, r=r, p=p, maxmem=SCRYPT_MEMORY, dklen=64
         )

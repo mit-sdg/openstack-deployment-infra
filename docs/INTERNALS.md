@@ -697,21 +697,22 @@ catalog endpoints remain metadata-only.
 
 Local hashing uses `hashlib.scrypt`, `N=32768,r=8,p=3,dklen=64`, random 16-byte
 salts, constant-time hash comparison and automatic upgrade after valid login.
-Only bounded supported costs are accepted from stored hashes. Two nonqueued
-hashing slots limit aggregate algorithm memory to roughly 64 MiB. One slot serves
-anonymous local login/enrollment, the other known-device local login and step-up
-from a live admin session. Anonymous work cannot borrow the reserved slot.
-Validated-address budgets admit at most 12 attempts/minute per lane and keep
-anonymous traffic separate from recognized/session traffic, including options
-requests. No hash slot or account-failure row is reserved when capacity is shed.
-OpenSSL is capped at 48 MiB per call; the current unit has no explicit MemoryMax.
-A local five-hash benchmark averaged 0.377 s/hash, about 159 verifications/minute
-per lane (318 total), before provider and transport overhead. Hardware and load
-change that throughput. Failed credential checks have a one-second minimum
-response duration after hash-slot release; busy slots return 503 quickly. A
-single address can consume at most 12 admitted attempts/minute, so anonymous
-fairness is per source; widespread anonymous saturation can still shed new
-browsers/enrollment, while recognized login and live-admin capacity stay reserved.
+Only bounded supported costs are accepted from stored hashes. Three nonqueued
+hash slots separately serve anonymous local login/enrollment, known-device login,
+and step-up from a live admin session. Neither anonymous nor known-device work
+can occupy the step-up slot. Aggregate algorithm memory is roughly 96 MiB;
+OpenSSL is capped at 48 MiB per call, and the unit has no explicit MemoryMax.
+Validated-address budgets admit at most 12 attempts/minute per lane. Known-device
+login also has a process-local account/generation budget of 12 attempts/minute
+across all addresses and at most one in-flight request per account. Account
+admission state expires after its 60-second window. These limits have independent
+address/failure buckets from step-up, including recognized-browser options.
+A previous local five-hash benchmark averaged 0.377 s/hash, about 159 verifications
+per minute per lane before transport/provider overhead. Hardware and load change
+throughput. Failed credential checks have a one-second minimum response duration
+after hash-slot release; busy slots return 503 quickly. The known-account
+in-flight reservation lasts through that response delay. Widespread anonymous
+saturation may shed new browsers/enrollment, while admin step-up stays isolated.
 The cost corresponds to the 32 MiB option in the
 [OWASP scrypt guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt).
 Passwords must have 12+ characters, at most 1024 UTF-8 bytes and exclude the
@@ -729,7 +730,8 @@ locks; credentials, generation and budgets are rechecked in the commit transacti
 Wrong passwords consume a rolling per-account budget of 20 failures/hour across
 all addresses. After exhaustion, an unrecognized device performs the standard
 dummy hash and receives the same generic error as a wrong password or unknown
-account. Only a known-device cookie exempts this password budget; a live session
+account. Only a current known-device cookie with an available device failure
+reservation exempts this password budget; a live session
 reserves capacity but does not exempt step-up from it. No unknown-name rows are
 allocated and there is no global backoff-table limit to lock out real accounts.
 Only a correct password can cause a TOTP failure: each failure starts an
@@ -741,12 +743,30 @@ hourly guessing budget. Trusted generation changes and restore clear the records
 
 Successful local sign-in/enrollment issues `__Host-portal-device` over HTTPS,
 HttpOnly, Secure, SameSite=Strict, Path=/, no Domain, expiring in 90 days. The
-cookie carries user UUID, generation and expiry, signed using a domain-separated
+version-2 cookie carries user UUID, generation, expiry and a random 128-bit device
+ID, signed using a domain-separated
 HMAC key derived from the private broker key (`owner-portal/known-device/v1`).
 It recognizes a browser and grants no account/session/role access by itself.
 Malformed, forged, expired, other-account and old-generation cookies are treated
-as unrecognized; logout retains recognition, while every generation bump
-invalidates it. Only loopback development HTTP uses a non-Secure development
+as unrecognized. Explicit logout clears the browser's device cookie; every
+generation bump invalidates it. Version-1 cookies keep valid recognition and
+known-login capacity, but have no device ID and fall under the durable account
+password budget. A successful legacy login issues a version-2 cookie. Refresh
+preserves an existing device ID instead of reopening its failure allowance.
+
+Device IDs have a process-local rolling budget of 20 failed hashed credential
+attempts/hour, shared between known-device login and step-up, across all addresses.
+This includes password and factor failures and dummy-hash denials, but not requests
+shed before hashing. Pending reservations count against the budget. Success does
+not clear failures. Exhausted device budgets use the dummy path and generic error;
+they never bypass account TOTP limits. Each account and device registry is bounded
+at 4096 entries; live device failure windows are not evicted to reopen an exemption.
+If device tracking is full, untracked devices lose the exemption and use the
+account password budget. Device state expires when its one-hour failures lapse.
+These admission/device registries reset on broker restart; the durable account
+password and TOTP budgets remain. All new state is in memory: schema, compatibility,
+controller privileges and Nix units are unchanged, so a matched portal release
+needs no admin image change. Only loopback development HTTP uses a non-Secure development
 cookie name. The browser neither reads the cookie nor stores it in JavaScript.
 
 The operator creates a hash-only enrollment file under the existing broker-group
