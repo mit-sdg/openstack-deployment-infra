@@ -1,206 +1,24 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="color-scheme" content="light dark">
-    <meta name="referrer" content="no-referrer">
-    <meta name="robots" content="noindex, nofollow">
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow" />
     <title>Platform status</title>
-    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-    <script src="/assets/theme.js"></script>
-    <link rel="stylesheet" href="/assets/dashboard.css">
-    <script type="module" src="/assets/dashboard.js"></script>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script
+      src="/theme.js"
+      data-theme-storage="platform-dashboard-theme"
+    ></script>
+    <script type="module" crossorigin src="/assets/index-HVBM2P2O.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/style-D_0t2pU2.css">
   </head>
   <body>
-    <svg class="sprite" aria-hidden="true" focusable="false">
-      <symbol id="i-logo" viewBox="0 0 24 24"><path d="M12 2.8 21 7.6 12 12.4 3 7.6Z"/><path d="m3 12 9 4.8 9-4.8"/><path d="m3 16.4 9 4.8 9-4.8"/></symbol>
-      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></symbol>
-      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M20.5 3.5V8H16"/></symbol>
-      <symbol id="i-theme-system" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.5" rx="2"/><path d="M8.5 20h7M12 16.5V20"/></symbol>
-      <symbol id="i-theme-light" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/></symbol>
-      <symbol id="i-theme-dark" viewBox="0 0 24 24"><path d="M20 14.6A8.5 8.5 0 1 1 9.4 4a6.6 6.6 0 0 0 10.6 10.6Z"/></symbol>
-      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
-      <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></symbol>
-      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9.5 6 6 6-6 6"/></symbol>
-      <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
-      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5.5 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v.5"/></symbol>
-      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
-      <symbol id="i-admin" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5"/><path d="M9.5 9.5h5v5h-5z"/><path d="M9.5 2.5v2.5M14.5 2.5v2.5M9.5 19v2.5M14.5 19v2.5M2.5 9.5H5M2.5 14.5H5M19 9.5h2.5M19 14.5h2.5"/></symbol>
-      <symbol id="i-ingress" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 3.7 5.6 3.7 9s-1.2 6.4-3.7 9c-2.5-2.6-3.7-5.6-3.7-9S9.5 5.6 12 3Z"/></symbol>
-      <symbol id="i-storage" viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.75"/><path d="M4.5 5.5v13c0 1.5 3.4 2.75 7.5 2.75s7.5-1.25 7.5-2.75v-13"/><path d="M4.5 12c0 1.5 3.4 2.75 7.5 2.75s7.5-1.25 7.5-2.75"/></symbol>
-      <symbol id="i-worker" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="7" rx="1.75"/><rect x="3.5" y="13" width="17" height="7" rx="1.75"/><path d="M7.5 7.5h.01M7.5 16.5h.01M11 7.5h2M11 16.5h2"/></symbol>
-      <symbol id="i-builder" viewBox="0 0 24 24"><path d="m12 2.75 8 4.5v9.5l-8 4.5-8-4.5v-9.5Z"/><path d="m4 7.25 8 4.5 8-4.5"/><path d="M12 11.75v9.5"/></symbol>
-      <symbol id="i-roles" viewBox="0 0 24 24"><path d="M12 2.8 21 7.6 12 12.4 3 7.6Z"/><path d="m3 12 9 4.8 9-4.8"/><path d="m3 16.4 9 4.8 9-4.8"/></symbol>
-      <symbol id="i-apps" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></symbol>
-      <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.5-7 5 14 2.5-7h4"/></symbol>
-      <symbol id="i-backup" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4.5" rx="1.25"/><path d="M5 8.5v10A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-10"/><path d="M10 12.5h4"/></symbol>
-      <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5.5c0 4.4 2.9 7.9 7 9.5 4.1-1.6 7-5.1 7-9.5V6Z"/><path d="m9 12 2.2 2.2L15.5 10"/></symbol>
-      <symbol id="i-commit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.25"/><path d="M3 12h5.75M15.25 12H21"/></symbol>
-      <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="8" r="2"/><path d="M6.5 7.5v9"/><path d="M17.5 10c0 3.6-3.3 4.4-11 6.5"/></symbol>
-      <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M3 13.5h5l1.5 2.5h5l1.5-2.5h5"/><path d="M5.6 5h12.8L21 13.5V18a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18v-4.5Z"/></symbol>
-      <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v4.5M15 3v4.5"/><path d="M6.5 7.5h11V11a5.5 5.5 0 0 1-11 0Z"/><path d="M12 16.5V21"/></symbol>
-      <symbol id="s-good" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m7.6 12.4 3 3 5.8-6.3" fill="none"/></symbol>
-      <symbol id="s-warning" viewBox="0 0 24 24"><path d="M10.2 3.4a2.1 2.1 0 0 1 3.6 0l8.4 14.5a2.1 2.1 0 0 1-1.8 3.1H3.6a2.1 2.1 0 0 1-1.8-3.1Z" fill="currentColor" stroke="none"/><path d="M12 9v4.4M12 17.2h.01" fill="none"/></symbol>
-      <symbol id="s-critical" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m8.7 8.7 6.6 6.6M15.3 8.7l-6.6 6.6" fill="none"/></symbol>
-      <symbol id="s-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="M7.8 12h.01M12 12h.01M16.2 12h.01" fill="none"/></symbol>
-      <symbol id="s-neutral" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M8.6 12h6.8" fill="none"/></symbol>
-    </svg>
-
-    <a class="skip-link" href="#main">Skip to content</a>
-
-    <header class="topbar">
-      <div class="topbar__inner">
-        <div class="brand">
-          <span class="brand__mark" aria-hidden="true"><svg class="icon"><use href="#i-logo"></use></svg></span>
-          <div class="brand__text">
-            <span class="brand__name" id="platform-name">Platform status</span>
-            <span class="brand__meta" id="platform-meta">Operator dashboard</span>
-          </div>
-        </div>
-        <div class="topbar__actions">
-          <span class="readonly" title="This view cannot change the platform">
-            <svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg><span>Read-only</span>
-          </span>
-          <span class="freshness" id="freshness"></span>
-          <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh now" title="Refresh now">
-            <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
-          </button>
-          <button class="icon-button" id="theme-button" type="button" aria-label="Color theme: match system" title="Color theme: match system">
-            <svg class="icon" aria-hidden="true"><use href="#i-theme-system"></use></svg>
-          </button>
-        </div>
-      </div>
-    </header>
-
-    <div class="banner" id="connection-banner" role="status" hidden></div>
-
-    <main id="main" class="page" tabindex="-1">
-      <section class="overview card" id="overview" aria-labelledby="headline">
-        <div class="overview__status">
-          <span class="overview__icon" id="overview-icon" aria-hidden="true"></span>
-          <div class="overview__text">
-            <h1 class="overview__headline" id="headline" aria-live="polite">Collecting platform status…</h1>
-            <p class="overview__detail" id="overview-detail">The first refresh waits for the admin host, OpenStack, and public routes to answer.</p>
-          </div>
-          <p class="overview__checked" id="overview-checked"></p>
-        </div>
-        <dl class="stats" id="stats">
-          <div class="stat skeleton-block"></div>
-          <div class="stat skeleton-block"></div>
-          <div class="stat skeleton-block"></div>
-          <div class="stat skeleton-block"></div>
-        </dl>
-      </section>
-
-      <section class="section" id="issues-section" aria-labelledby="issues-title" hidden>
-        <div class="card issues">
-          <div class="card__header">
-            <h2 class="card__title" id="issues-title">Needs attention</h2>
-            <span class="count" id="issues-count"></span>
-          </div>
-          <ul class="issue-list" id="issue-list"></ul>
-        </div>
-      </section>
-
-      <section class="section" id="roles-section" aria-labelledby="roles-title">
-        <div class="section__header">
-          <h2 class="section__title" id="roles-title">Infrastructure roles</h2>
-          <p class="section__note" id="roles-note">Five machine roles from the platform contract</p>
-        </div>
-        <div class="roles" id="roles">
-          <div class="role-card card skeleton-block" data-lifetime="persistent"></div>
-          <div class="role-card card skeleton-block" data-lifetime="persistent"></div>
-          <div class="role-card card skeleton-block" data-lifetime="persistent"></div>
-          <div class="role-card card skeleton-block" data-lifetime="replaceable"></div>
-          <div class="role-card card skeleton-block" data-lifetime="single-use" data-role="builder"></div>
-        </div>
-      </section>
-
-      <section class="section" id="applications-section" aria-labelledby="applications-title">
-        <div class="section__header">
-          <h2 class="section__title" id="applications-title">Applications <span class="count" id="applications-count"></span></h2>
-          <p class="section__note">Public routes checked against each accepted deployment</p>
-        </div>
-        <div class="card apps">
-          <div class="toolbar">
-            <label class="search">
-              <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
-              <span class="visually-hidden">Search applications</span>
-              <input id="app-search" type="search" placeholder="Search applications" title="Search by name, URL, commit, deployment, or application ID" autocomplete="off" spellcheck="false">
-            </label>
-            <div class="segmented" id="app-filters" role="group" aria-label="Filter applications"></div>
-            <label class="select">
-              <span class="visually-hidden">Sort applications</span>
-              <select id="app-sort">
-                <option value="status">Sort: Status</option>
-                <option value="name">Sort: Name</option>
-                <option value="deployed">Sort: Recently deployed</option>
-                <option value="latency">Sort: Response time</option>
-              </select>
-            </label>
-          </div>
-          <div class="apps__body" id="apps-body">
-            <div class="skeleton-rows">
-              <div class="skeleton-block"></div>
-              <div class="skeleton-block"></div>
-              <div class="skeleton-block"></div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <div class="split">
-        <section class="section" id="operations-section" aria-labelledby="operations-title">
-          <div class="card">
-            <div class="card__header">
-              <h2 class="card__title" id="operations-title">Operations</h2>
-              <span class="card__note" id="operations-note"></span>
-            </div>
-            <div id="operations">
-              <div class="skeleton-rows">
-                <div class="skeleton-block"></div>
-                <div class="skeleton-block"></div>
-                <div class="skeleton-block"></div>
-              </div>
-            </div>
-          </div>
-        </section>
-        <section class="section" id="checks-section" aria-labelledby="checks-title">
-          <div class="card">
-            <div class="card__header">
-              <h2 class="card__title" id="checks-title">Platform checks</h2>
-              <span class="card__note" id="checks-note"></span>
-            </div>
-            <ul class="check-list" id="checks">
-              <li class="skeleton-block skeleton-item"></li>
-              <li class="skeleton-block skeleton-item"></li>
-              <li class="skeleton-block skeleton-item"></li>
-            </ul>
-          </div>
-        </section>
-      </div>
-    </main>
-
-    <footer class="footer">
-      <div class="footer__inner" id="footer"></div>
-    </footer>
-
-    <dialog class="drawer" id="app-drawer" aria-labelledby="drawer-title">
-      <div class="drawer__panel">
-        <header class="drawer__header">
-          <div class="drawer__heading">
-            <h2 class="drawer__title" id="drawer-title"></h2>
-            <div class="drawer__subtitle" id="drawer-subtitle"></div>
-          </div>
-          <button class="icon-button" id="drawer-close" type="button" aria-label="Close details">
-            <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
-          </button>
-        </header>
-        <div class="drawer__body" id="drawer-body"></div>
-      </div>
-    </dialog>
-
-    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <div id="root"></div>
   </body>
 </html>

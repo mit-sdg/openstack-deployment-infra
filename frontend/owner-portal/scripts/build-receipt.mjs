@@ -25,7 +25,7 @@ const receipt = {
     execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], {
       cwd: root,
     }).toString().length !== 0,
-  npmLockSha256: hash(readFileSync('package-lock.json')),
+  npmLockSha256: hash(readFileSync('../package-lock.json')),
   nodeVersion: process.versions.node,
   assetManifestSha256: assets['.vite/manifest.json'].sha256,
   assets,

@@ -414,10 +414,18 @@ class Fixture:
 
 
 class _ReloadingAssets(dict[str, Any]):
-    """Re-read the static files on every request while iterating on the page."""
+    """Keep the last complete distribution while a local rebuild is in progress."""
+
+    def __init__(self) -> None:
+        self._current = load_assets()
+        super().__init__(self._current)
 
     def get(self, key: str, default: Any = None) -> Any:
-        return load_assets().get(key, default)
+        try:
+            self._current = load_assets()
+        except (OSError, ValueError):
+            pass
+        return self._current.get(key, default)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

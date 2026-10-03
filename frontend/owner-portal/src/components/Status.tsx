@@ -1,3 +1,4 @@
+import { StatusBadge } from '@openstack-platform/ui';
 export function Status({ state }: { state: string }) {
   const label: Record<string, string> = {
     succeeded: 'Succeeded',
@@ -19,10 +20,5 @@ export function Status({ state }: { state: string }) {
       : ['accepted', 'running', 'prepared', 'creating'].includes(state)
         ? 'info'
         : 'neutral';
-  return (
-    <span className={`status tone-${tone}`}>
-      <span className="status-dot" aria-hidden="true" />
-      {label[state] ?? state}
-    </span>
-  );
+  return <StatusBadge label={label[state] ?? state} tone={tone} />;
 }

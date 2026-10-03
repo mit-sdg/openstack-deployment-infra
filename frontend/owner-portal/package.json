@@ -12,13 +12,14 @@
     "test": "vitest run",
     "build": "vite build && node scripts/build-receipt.mjs",
     "smoke": "playwright test",
-    "format:check": "prettier --check src e2e scripts public/theme.js *.ts *.json index.html"
+    "format:check": "prettier --check src e2e scripts *.ts *.json index.html"
   },
   "dependencies": {
     "@tanstack/react-query": "5.104.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "wouter": "3.13.0"
+    "wouter": "3.13.0",
+    "@openstack-platform/ui": "0.1.0"
   },
   "devDependencies": {
     "@playwright/test": "1.57.0",
