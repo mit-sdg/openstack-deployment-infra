@@ -11,7 +11,7 @@ from urllib.parse import quote
 from ...controller.http import HttpError, Request, Response
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body, opaque, text, utc
-from . import bootstrap, local_security
+from . import bootstrap, known_device, local_security
 from .anonymous import client_address_bucket
 from .local_auth import authenticate as local_authenticate
 
@@ -38,6 +38,10 @@ def security_change(db: sqlite3.Connection, user: str) -> None:
     db.execute("DELETE FROM sessions WHERE user_id=?", (user,))
     db.execute("DELETE FROM account_tokens WHERE user_id=?", (user,))
     db.execute("DELETE FROM enrollments WHERE user_id=?", (user,))
+    db.execute("DELETE FROM authentication_failures WHERE user_id=?", (user,))
+    db.execute(
+        "UPDATE local_accounts SET totp_streak=0,totp_blocked_until=0 WHERE user_id=?", (user,)
+    )
 
 
 class Accounts:
@@ -226,6 +230,10 @@ class Accounts:
                 )
             )
             secret = local_security.totp_secret() if enroll_factor else None
+            if supplied is not None:
+                self.broker.auth.local_limits.check_bucket(
+                    client_address_bucket(request), "start", self.broker.auth.clock()
+                )
             encoded = local_security.hash_password(supplied) if supplied is not None else None
             handle = opaque()
             with self.broker.database.connect(write=True) as db:
@@ -401,10 +409,6 @@ class Accounts:
             if row["purpose"] in ("bootstrap", "invite", "totp-reset", "password-reset"):
                 db.execute("UPDATE users SET status='active' WHERE id=?", (user["id"],))
             security_change(db, user["id"])
-            db.execute(
-                "DELETE FROM login_backoff WHERE name_hash=?",
-                (digest("local:" + user["username"]),),
-            )
             audit(
                 db,
                 None,
@@ -439,6 +443,7 @@ class Accounts:
             body["totp"],
             client_address_bucket(request),
             step_up=True,
+            device=known_device.read(request, self.broker.config.device_cookie),
         )
         with self.broker.database.connect(write=True) as db:
             current = self.broker.auth.session_row(db, sid, self.broker.auth.clock(), "admin")

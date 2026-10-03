@@ -17,6 +17,7 @@ from ...controller.http import HttpError, Request, Response
 from ..common import MANAGEMENT_REQUESTS, digest, object_body, opaque, utc
 from ..config import Config
 from ..identity.client import credentials
+from . import known_device
 from .anonymous import AddressLimits, AnonymousChallenge, client_address_bucket
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
@@ -98,6 +99,7 @@ class Auth:
         self.local_limits = AddressLimits(options_per_minute=6, starts_per_minute=12)
         self.step_up_limits = AddressLimits(options_per_minute=12, starts_per_minute=12)
         self.step_up_failures = FailureLimits()
+        self.recognized_options_limits = AddressLimits(options_per_minute=600, starts_per_minute=12)
         self.identity = ProjectClient(
             config.identity_socket, timeout=10, capacity=MANAGEMENT_REQUESTS
         )
@@ -132,11 +134,28 @@ class Auth:
         if request.headers.get("sec-fetch-site", "same-origin") != "same-origin":
             raise HttpError(403, "ORIGIN_REJECTED", "This read requires the portal origin.")
 
+    def recognized_browser(self, request: Request) -> bool:
+        token = known_device.read(request, self.config.device_cookie)
+        if token is None:
+            return False
+        with self.database.connect() as db:
+            row = db.execute("SELECT * FROM users WHERE id=?", (token.split(".")[1],)).fetchone()
+            user = dict(row) if row else None
+            return bool(
+                user
+                and user["enabled"]
+                and user["status"] == "active"
+                and known_device.valid(self.anonymous.key, token, user, self.clock())
+            )
+
     def options(self, request: Request) -> Response:
         if request.body is not None or request.query:
             raise HttpError(400, "INVALID_REQUEST", "Sign-in options do not accept fields.")
         now = self.clock()
-        self.address_limits.check(request, "options", now)
+        if self.recognized_browser(request):
+            self.recognized_options_limits.check(request, "options", now)
+        else:
+            self.address_limits.check(request, "options", now)
         binder = self.cookies(request).get(self.config.login_cookie, "")
         if not self.anonymous.valid(binder, now):
             binder = self.anonymous.issue(now)
@@ -207,13 +226,23 @@ class Auth:
             "data": {"returnPath": "/admin/accounts" if user["role"] == "admin" else "/apps"},
             "browser": {
                 "cookies": [self.directive("login"), self.directive("session", session, lifetime)]
+                + (
+                    [
+                        self.directive(
+                            "device",
+                            known_device.issue(self.anonymous.key, user, now),
+                            known_device.LIFETIME,
+                        )
+                    ]
+                    if user["issuer"] == "local"
+                    else []
+                )
             },
         }
 
     def login(self, request: Request) -> Response:
         self.anonymous_post(request)
         now = self.clock()
-        self.address_limits.check(request, "start", now)
         body = request.body
         required = {"csrfToken", "username", "password"}
         if (
@@ -242,11 +271,17 @@ class Auth:
                     "Username, password or authentication code is incorrect.",
                 ) from None
             verified = local_authenticate(
-                self, name, supplied, body.get("totp"), client_address_bucket(request)
+                self,
+                name,
+                supplied,
+                body.get("totp"),
+                client_address_bucket(request),
+                device=known_device.read(request, self.config.device_cookie),
             )
             issuer, subject = "local", verified["subject"]
             profile = {"username": name, "displayName": verified["display_name"]}
         else:
+            self.address_limits.check(request, "start", now)
             try:
                 checked = credentials({"username": body["username"], "password": body["password"]})
             except ValueError:

@@ -415,7 +415,9 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/AdminApps.tsx` — managed catalog, adoption, shared configuration/resources, deploy review and sensitive actions.
 - `frontend/owner-portal/src/AdminApps.test.tsx` — role navigation, maintenance confirmations and admin write-only cache tests.
 
-- `tests/test_management_login_admission.py` — saturation, validated-address admission, short source-scoped backoff and reserved live-admin hashing regressions.
+- `tests/test_management_login_admission.py` — distributed password/TOTP budgets, generation-bound device cookies, generic failures and reserved hashing regressions.
+
+- `openstack_platform/management/broker/known_device.py` — private-key HMAC recognition cookies bound to local user IDs, generation and expiry.
 
 ## Keeping this guide current
 

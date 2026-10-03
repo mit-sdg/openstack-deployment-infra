@@ -256,7 +256,11 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def cookie(self, directive: Any) -> str:
         if not isinstance(directive, dict) or set(directive) != {"name", "value", "maxAge"}:
             raise ValueError("invalid cookie directive")
-        names = {"login": self.config.login_cookie, "session": self.config.session_cookie}
+        names = {
+            "login": self.config.login_cookie,
+            "session": self.config.session_cookie,
+            "device": self.config.device_cookie,
+        }
         value, age = directive["value"], directive["maxAge"]
         if (
             directive["name"] not in names
@@ -271,11 +275,11 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 )
             )
             or type(age) is not int
-            or not 0 <= age <= 86400
+            or not 0 <= age <= (90 * 86400 if directive["name"] == "device" else 86400)
         ):
             raise ValueError("invalid cookie directive")
         secure = "; Secure" if self.config.portal_origin.startswith("https:") else ""
-        same_site = "Strict" if directive["name"] == "login" else "Lax"
+        same_site = "Strict" if directive["name"] in {"login", "device"} else "Lax"
         return f"{names[directive['name']]}={value}; Path=/; Max-Age={age}{secure}; HttpOnly; SameSite={same_site}"
 
     def csp(self) -> str:

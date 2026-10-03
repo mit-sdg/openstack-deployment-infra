@@ -334,13 +334,9 @@ class AccountsTests(ManagementCase):
                 code=local_security.totp_code(self.admin_secret, int(self.now // 30)),
             ),
         )
-        self.assert_error(
-            "INVALID_CREDENTIALS",
-            lambda: self.local_login(
-                "rootadmin", code=local_security.totp_code(self.admin_secret, int(self.now // 30))
-            ),
-        )
-        self.now += 10
+        # A wrong password cannot impose an anonymous name lockout on the
+        # correct password; TOTP replay protection and its own backoff still apply.
+        self.now += 1
         weak = local_security.hash_password("private secure phrase 48219", n=16384, p=1)
         with self.broker.database.connect(write=True) as db:
             db.execute("UPDATE local_accounts SET password_hash=?", (weak,))

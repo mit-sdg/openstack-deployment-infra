@@ -1,11 +1,13 @@
-"""Local credential admission, source-scoped backoff and reserved live-admin capacity."""
+"""Account-wide guessing budgets, recognized browsers and bounded hash admission."""
 
 from __future__ import annotations
 
+import sqlite3
+from time import monotonic, sleep
 from typing import TYPE_CHECKING, Any
 
 from ...controller.http import HttpError
-from ..common import digest
+from . import known_device
 from .local_security import (
     DUMMY_HASH,
     HashCapacityError,
@@ -18,8 +20,12 @@ from .local_security import (
 if TYPE_CHECKING:
     from .auth import Auth
 
-BACKOFF_ROWS = 4096
-MAX_BACKOFF_SECONDS = 5
+PASSWORD_FAILURES = 20
+TOTP_FAILURES = 10
+WINDOW_SECONDS = 3600
+TOTP_BACKOFF_SECONDS = 30
+MAX_TOTP_BACKOFF_SECONDS = 3600
+FAILURE_FLOOR_SECONDS = 1.0
 
 
 def invalid() -> HttpError:
@@ -28,141 +34,164 @@ def invalid() -> HttpError:
     )
 
 
+def account(db: sqlite3.Connection, username: str) -> dict[str, Any] | None:
+    row = db.execute(
+        "SELECT users.*,local_accounts.password_hash,local_accounts.totp_secret,local_accounts.totp_confirmed,local_accounts.last_counter,local_accounts.totp_streak,local_accounts.totp_blocked_until FROM users JOIN local_accounts ON user_id=users.id WHERE issuer='local' AND username=?",
+        (username,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def count(db: sqlite3.Connection, user: str, kind: str, now: float) -> int:
+    return int(
+        db.execute(
+            "SELECT COUNT(*) FROM authentication_failures WHERE user_id=? AND kind=? AND created>?",
+            (user, kind, now - WINDOW_SECONDS),
+        ).fetchone()[0]
+    )
+
+
+def blocked(
+    db: sqlite3.Connection, user: dict[str, Any] | None, recognized: bool, now: float
+) -> bool:
+    return (
+        user is None
+        or not user["enabled"]
+        or user["status"] != "active"
+        or not user["password_hash"]
+        or user["totp_blocked_until"] > now
+        or count(db, user["id"], "totp", now) >= TOTP_FAILURES
+        or not recognized
+        and count(db, user["id"], "password", now) >= PASSWORD_FAILURES
+    )
+
+
+def failure(db: sqlite3.Connection, user: str, kind: str, now: float) -> None:
+    # At most 20 password + 10 TOTP events per live account/hour. Unknown names
+    # allocate no rows, and there is no global table cap that can lock out users.
+    db.execute(
+        "DELETE FROM authentication_failures WHERE user_id=? AND created<=?",
+        (user, now - WINDOW_SECONDS),
+    )
+    maximum = PASSWORD_FAILURES if kind == "password" else TOTP_FAILURES
+    if count(db, user, kind, now) < maximum:
+        db.execute(
+            "INSERT INTO authentication_failures(user_id,kind,created) VALUES(?,?,?)",
+            (user, kind, now),
+        )
+
+
 def authenticate(
-    auth: Auth, username: str, password: str, code: object, address: str, *, step_up: bool = False
+    auth: Auth,
+    username: str,
+    password: str,
+    code: object,
+    address: str,
+    *,
+    step_up: bool = False,
+    device: object = None,
 ) -> dict[str, Any]:
+    started = monotonic()
+    hashed = False
     now = auth.clock()
-    limits = auth.step_up_limits if step_up else auth.local_limits
-    failures = auth.step_up_failures if step_up else auth.failures
-    # No DB allocation and no scrypt slot before validated-address admission.
+    with auth.database.connect() as db:
+        user = account(db, username)
+        recognized = known_device.valid(auth.anonymous.key, device, user, now)
+        denied = blocked(db, user, recognized, now)
+    trusted = recognized or step_up
+    limits = auth.step_up_limits if trusted else auth.local_limits
+    failures = auth.step_up_failures if trusted else auth.failures
+    # Separate recognized/session budgets keep an anonymous flood at the same
+    # address from consuming the returning user's admission or hashing capacity.
     limits.check_bucket(address, "start", now)
-    name = digest("local:" + username)
-    if not step_up:
-        with auth.database.connect() as db:
-            exists = db.execute("SELECT 1 FROM login_backoff WHERE name_hash=?", (name,)).fetchone()
-        if not exists:
-            limits.check_bucket(address, "options", now)  # New-name allocation budget.
     window = failures.reserve("local:" + username, address, now)
-    reserved = succeeded = failed = False
+    succeeded = failed = False
     try:
-        # Keep one independent slot for proof from a live local-admin session.
-        with hashing_slot(step_up=step_up):
+        with hashing_slot(step_up=trusted):
+            # Exhausted budgets, unavailable accounts and unknown names all do
+            # the standard dummy verification and return the same generic error.
+            encoded = DUMMY_HASH if denied else user["password_hash"] if user else DUMMY_HASH
+            hashed = True
+            valid, upgrade = verify_password(password, encoded, step_up=trusted)
             with auth.database.connect(write=True) as db:
-                tracked = False
-                if not step_up:
-                    db.execute(
-                        "DELETE FROM login_backoff WHERE name_hash IN (SELECT name_hash FROM login_backoff WHERE updated<? AND attempt_until<=? LIMIT 100)",
-                        (now - 3600, now),
-                    )
-                    backoff = db.execute(
-                        "SELECT * FROM login_backoff WHERE name_hash=?", (name,)
-                    ).fetchone()
-                    if backoff is not None and (
-                        backoff["attempt_until"] > now
-                        or backoff["blocked_until"] > now
-                        and backoff["blocked_address"] == address
-                    ):
-                        raise invalid()
-                    if (
-                        backoff is None
-                        and db.execute("SELECT COUNT(*) FROM login_backoff").fetchone()[0]
-                        >= BACKOFF_ROWS
-                    ):
-                        db.execute(
-                            "DELETE FROM login_backoff WHERE name_hash IN (SELECT name_hash FROM login_backoff WHERE blocked_until<=? AND attempt_until<=? ORDER BY updated,name_hash LIMIT 1)",
-                            (now, now),
-                        )
-                    if (
-                        backoff is not None
-                        or db.execute("SELECT COUNT(*) FROM login_backoff").fetchone()[0]
-                        < BACKOFF_ROWS
-                    ):
-                        db.execute(
-                            "INSERT INTO login_backoff(name_hash,failures,blocked_until,attempt_until,updated,blocked_address) VALUES(?,0,0,?,?,?) ON CONFLICT(name_hash) DO UPDATE SET attempt_until=excluded.attempt_until,updated=excluded.updated",
-                            (name, now + 30, now, address),
-                        )
-                        reserved = tracked = True
-                    # All rows protected: authenticate without allocating. Existing
-                    # blocked windows stay protected; capacity never locks out a new name.
-                row = db.execute(
-                    "SELECT users.*,local_accounts.password_hash,local_accounts.totp_secret,local_accounts.totp_confirmed,local_accounts.last_counter FROM users JOIN local_accounts ON user_id=users.id WHERE issuer='local' AND username=?",
-                    (username,),
-                ).fetchone()
-                user = dict(row) if row is not None else None
-            encoded = (
-                user["password_hash"] if user is not None and user["password_hash"] else DUMMY_HASH
-            )
-            valid, upgrade = verify_password(password, encoded, step_up=step_up)
-            replacement = hash_password(password, step_up=step_up) if valid and upgrade else None
-            with auth.database.connect(write=True) as db:
-                latest = db.execute(
-                    "SELECT users.*,local_accounts.password_hash,local_accounts.totp_secret,local_accounts.totp_confirmed,local_accounts.last_counter FROM users JOIN local_accounts ON user_id=users.id WHERE issuer='local' AND username=?",
-                    (username,),
-                ).fetchone()
+                now = auth.clock()
+                latest = account(db, username)
+                recognized_now = known_device.valid(auth.anonymous.key, device, latest, now)
                 eligible = (
-                    valid
-                    and user is not None
+                    not denied
                     and latest is not None
+                    and user is not None
                     and latest["generation"] == user["generation"]
                     and latest["password_hash"] == encoded
-                    and latest["enabled"]
-                    and latest["status"] == "active"
+                    and not blocked(db, latest, recognized_now, now)
                 )
-                counter = None
                 if eligible and latest is not None:
-                    if latest["totp_confirmed"] and latest["totp_secret"]:
+                    if not valid:
+                        failure(db, latest["id"], "password", now)
+                        eligible = False
+                    elif latest["totp_confirmed"] and latest["totp_secret"]:
                         counter = verify_totp(
-                            latest["totp_secret"], code, auth.clock(), latest["last_counter"]
+                            latest["totp_secret"], code, now, latest["last_counter"]
                         )
-                        eligible = counter is not None
+                        if counter is None:
+                            failure(db, latest["id"], "totp", now)
+                            streak = min(latest["totp_streak"] + 1, 32)
+                            delay = min(
+                                MAX_TOTP_BACKOFF_SECONDS,
+                                TOTP_BACKOFF_SECONDS * 2 ** min(streak - 1, 7),
+                            )
+                            db.execute(
+                                "UPDATE local_accounts SET totp_streak=?,totp_blocked_until=? WHERE user_id=?",
+                                (streak, now + delay, latest["id"]),
+                            )
+                            eligible = False
+                        else:
+                            db.execute(
+                                "UPDATE local_accounts SET last_counter=?,totp_streak=0,totp_blocked_until=0 WHERE user_id=?",
+                                (counter, latest["id"]),
+                            )
                     elif latest["role"] == "admin":
                         eligible = False
                 succeeded = bool(eligible)
                 failed = not succeeded
                 if succeeded and latest is not None:
-                    if counter is not None:
-                        db.execute(
-                            "UPDATE local_accounts SET last_counter=? WHERE user_id=?",
-                            (counter, latest["id"]),
-                        )
-                    if replacement is not None:
-                        db.execute(
-                            "UPDATE local_accounts SET password_hash=? WHERE user_id=?",
-                            (replacement, latest["id"]),
-                        )
-                    if tracked:
-                        db.execute(
-                            "UPDATE login_backoff SET failures=0,blocked_until=0,attempt_until=0,updated=?,blocked_address='' WHERE name_hash=?",
-                            (auth.clock(), name),
-                        )
-                    result = dict(latest)
-                elif tracked:
-                    count = (
-                        db.execute(
-                            "SELECT failures FROM login_backoff WHERE name_hash=?", (name,)
-                        ).fetchone()[0]
-                        + 1
-                    )
+                    # Preserve rolling failure windows on success; resetting only
+                    # the exponential streak cannot reopen an hourly guessing budget.
                     db.execute(
-                        "UPDATE login_backoff SET failures=?,blocked_until=?,attempt_until=0,updated=?,blocked_address=? WHERE name_hash=?",
-                        (
-                            min(count, 32),
-                            auth.clock() + min(MAX_BACKOFF_SECONDS, 2 ** min(count - 1, 3)),
-                            auth.clock(),
-                            address,
-                            name,
-                        ),
+                        "UPDATE local_accounts SET totp_streak=0,totp_blocked_until=0 WHERE user_id=?",
+                        (latest["id"],),
                     )
-            reserved = False
+                    result = dict(latest)
             if not succeeded:
                 raise invalid()
+            # Rehash outside writer locks, then recheck the exact credential and
+            # generation. It shares the already acquired lane, with no nested queue.
+            if upgrade:
+                replacement = hash_password(password, step_up=trusted)
+                with auth.database.connect(write=True) as db:
+                    current = account(db, username)
+                    if (
+                        current is None
+                        or current["generation"] != result["generation"]
+                        or current["password_hash"] != encoded
+                        or not current["enabled"]
+                        or current["status"] != "active"
+                    ):
+                        raise invalid()
+                    db.execute(
+                        "UPDATE local_accounts SET password_hash=? WHERE user_id=?",
+                        (replacement, result["id"]),
+                    )
             return result
     except HashCapacityError:
         raise HttpError(
             503, "AUTH_UNAVAILABLE", "Sign-in is temporarily unavailable.", retryable=True
         ) from None
     finally:
-        if reserved:
-            with auth.database.connect(write=True) as db:
-                db.execute("UPDATE login_backoff SET attempt_until=0 WHERE name_hash=?", (name,))
         failures.finish(window, failed=failed, succeeded=succeeded)
+        if hashed and not succeeded:
+            # Equalize credential failures, including legacy hashes, exhausted
+            # budgets and unknown names. Never sleep while holding a hash slot.
+            remaining = FAILURE_FLOOR_SECONDS - (monotonic() - started)
+            if remaining > 0:
+                sleep(remaining)

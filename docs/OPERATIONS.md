@@ -1474,12 +1474,23 @@ and a fresh TOTP code validated within five minutes.
 Use **Confirm a sensitive account action** when prompted. Codes cannot be reused
 within their accepted counter/window; wait for a fresh code if you just enrolled
 or signed in. Admin sessions are capped at 1 h absolute/15 min idle. Local login
-also has the existing five-failure username/address window and persistent
-source-scoped exponential delays from 1 s to at most 5 s. A different address
-is not blocked by another source's failed guesses. Per validated address, local
-login admits 12 attempts and six new backoff names per minute. Step-up has its
-own rate/failure budget and reserved hashing slot, so anonymous sign-in floods
-cannot occupy its capacity. A generic credential error
+also has the existing five-failure username/address window and per-source
+admission at 12 attempts/minute per lane. Wrong passwords have a shared
+20-failure rolling-hour budget across all sources; once it is exhausted, use a
+recognized browser. Successful local sign-in retains a signed HttpOnly, Secure,
+SameSite=Strict known-device cookie for 90 days. It exempts the password budget
+and uses reserved hash capacity; it does not replace the password or factor.
+A role change, reset, disable or other generation bump invalidates recognition.
+Logout preserves it. If it is absent/expired after a guessing flood, wait for the
+hourly window or use the supported reset/recovery workflow; anonymous guessing
+cannot invalidate an existing device cookie.
+
+Only failures after the correct password affect TOTP: an account-wide 30-second
+backoff doubles to one hour, with at most 10 failures in a rolling hour, shared
+by login and step-up regardless of source or device recognition. Success clears
+the exponential delay without reopening hourly windows. Step-up has reserved
+hash capacity but still needs the same password budget/device exemption and
+TOTP checks. A generic credential error
 covers invalid accounts, passwords, factors and backoff; throttling/capacity
 errors have no credential detail.
 

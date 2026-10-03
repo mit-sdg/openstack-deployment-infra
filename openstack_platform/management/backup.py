@@ -152,7 +152,8 @@ def restore_database(source: Path, destination: Path, *, identity: str | None = 
                     now = time.time()
                     restored.execute("DELETE FROM account_tokens")
                     restored.execute("DELETE FROM enrollments")
-                    restored.execute("DELETE FROM login_backoff")
+                    restored.execute("DELETE FROM authentication_failures")
+                    restored.execute("UPDATE local_accounts SET totp_streak=0,totp_blocked_until=0")
                     restored.execute(
                         "UPDATE token_policy SET valid_after=? WHERE singleton=1", (now,)
                     )

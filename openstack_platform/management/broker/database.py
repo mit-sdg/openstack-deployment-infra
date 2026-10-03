@@ -74,9 +74,13 @@ CREATE TABLE csrf_tokens (token TEXT PRIMARY KEY, session TEXT NOT NULL REFERENC
  expires REAL NOT NULL, created REAL NOT NULL);
 CREATE TABLE local_accounts (user_id TEXT PRIMARY KEY REFERENCES users(id),
  password_hash TEXT, totp_secret TEXT, totp_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(totp_confirmed IN (0,1)),
- last_counter INTEGER NOT NULL DEFAULT -1);
-CREATE TABLE login_backoff (name_hash TEXT PRIMARY KEY, failures INTEGER NOT NULL,
- blocked_until REAL NOT NULL, attempt_until REAL NOT NULL, updated REAL NOT NULL, blocked_address TEXT NOT NULL DEFAULT '');
+ last_counter INTEGER NOT NULL DEFAULT -1,
+ totp_streak INTEGER NOT NULL DEFAULT 0 CHECK(totp_streak>=0),
+ totp_blocked_until REAL NOT NULL DEFAULT 0);
+CREATE TABLE authentication_failures (sequence INTEGER PRIMARY KEY,
+ user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('password','totp')),
+ created REAL NOT NULL);
+CREATE INDEX authentication_failure_window ON authentication_failures(user_id,kind,created);
 CREATE TABLE token_policy (singleton INTEGER PRIMARY KEY CHECK(singleton=1), valid_after REAL NOT NULL);
 INSERT INTO token_policy VALUES(1,0);
 CREATE TABLE account_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
@@ -255,7 +259,7 @@ def validate_database(
     if rows[0][0] == 3:
         required |= {
             "local_accounts",
-            "login_backoff",
+            "authentication_failures",
             "token_policy",
             "account_tokens",
             "used_tokens",

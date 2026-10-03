@@ -699,9 +699,19 @@ Local hashing uses `hashlib.scrypt`, `N=32768,r=8,p=3,dklen=64`, random 16-byte
 salts, constant-time hash comparison and automatic upgrade after valid login.
 Only bounded supported costs are accepted from stored hashes. Two nonqueued
 hashing slots limit aggregate algorithm memory to roughly 64 MiB. One slot serves
-anonymous login/enrollment; the other is reserved for step-up from a live admin
-session. Anonymous work cannot occupy the reserved slot; OpenSSL is
-capped at 48 MiB per call. The current broker unit has no explicit MemoryMax.
+anonymous local login/enrollment, the other known-device local login and step-up
+from a live admin session. Anonymous work cannot borrow the reserved slot.
+Validated-address budgets admit at most 12 attempts/minute per lane and keep
+anonymous traffic separate from recognized/session traffic, including options
+requests. No hash slot or account-failure row is reserved when capacity is shed.
+OpenSSL is capped at 48 MiB per call; the current unit has no explicit MemoryMax.
+A local five-hash benchmark averaged 0.377 s/hash, about 159 verifications/minute
+per lane (318 total), before provider and transport overhead. Hardware and load
+change that throughput. Failed credential checks have a one-second minimum
+response duration after hash-slot release; busy slots return 503 quickly. A
+single address can consume at most 12 admitted attempts/minute, so anonymous
+fairness is per source; widespread anonymous saturation can still shed new
+browsers/enrollment, while recognized login and live-admin capacity stay reserved.
 The cost corresponds to the 32 MiB option in the
 [OWASP scrypt guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt).
 Passwords must have 12+ characters, at most 1024 UTF-8 bytes and exclude the
@@ -713,15 +723,31 @@ first enrollment response, as text/otpauth URI; no external QR endpoint is used.
 Accepted counters strictly increase. Admin sessions require a confirmed local
 factor; local owner/staff factors are optional. Admin expiry is 1 h/15 min idle,
 staff 1 h/10 min, capped by shorter owner policy. Sensitive account actions need
-password plus fresh TOTP within five minutes. Existing username/address failure
-reservations also cover local login. Validated-address admission permits 12 local
-login attempts and six new backoff names per minute before hashing or allocation.
-Persistent name backoff is capped at five seconds and applies to the source of the
-failure; another address is not locked out. Saturation evicts the oldest idle,
-non-blocked row, or authenticates without a new row if every row is protected.
-Capacity shedding allocates no DB row. Live-admin step-up has independent address
-and failure budgets and bypasses anonymous name backoff. Password work occurs outside DB locks;
-credentials, generation and TOTP counter are rechecked in the commit transaction.
+password plus fresh TOTP within five minutes. Password work occurs outside DB
+locks; credentials, generation and budgets are rechecked in the commit transaction.
+
+Wrong passwords consume a rolling per-account budget of 20 failures/hour across
+all addresses. After exhaustion, an unrecognized device performs the standard
+dummy hash and receives the same generic error as a wrong password or unknown
+account. Only a known-device cookie exempts this password budget; a live session
+reserves capacity but does not exempt step-up from it. No unknown-name rows are
+allocated and there is no global backoff-table limit to lock out real accounts.
+Only a correct password can cause a TOTP failure: each failure starts an
+account-wide 30-second exponential backoff (doubling to at most one hour), with
+at most 10 failures in any rolling hour. Login and step-up share these records;
+known-device cookies never bypass TOTP restrictions. Success resets the
+exponential streak, preserving rolling windows so a success cannot reopen the
+hourly guessing budget. Trusted generation changes and restore clear the records.
+
+Successful local sign-in/enrollment issues `__Host-portal-device` over HTTPS,
+HttpOnly, Secure, SameSite=Strict, Path=/, no Domain, expiring in 90 days. The
+cookie carries user UUID, generation and expiry, signed using a domain-separated
+HMAC key derived from the private broker key (`owner-portal/known-device/v1`).
+It recognizes a browser and grants no account/session/role access by itself.
+Malformed, forged, expired, other-account and old-generation cookies are treated
+as unrecognized; logout retains recognition, while every generation bump
+invalidates it. Only loopback development HTTP uses a non-Secure development
+cookie name. The browser neither reads the cookie nor stores it in JavaScript.
 
 The operator creates a hash-only enrollment file under the existing broker-group
 setgid release/config directory, atomically at 0640. Broker reads it through its
