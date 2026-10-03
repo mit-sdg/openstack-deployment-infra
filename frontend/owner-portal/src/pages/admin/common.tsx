@@ -38,6 +38,7 @@ const messages: Record<string, string> = {
   OWNER_CONFLICT: 'The owner changed while you were working. Reload the page and try again.',
   APP_BUSY: 'This app has changes in progress. Wait for them to finish, then try again.',
   ACCOUNT_UNAVAILABLE: 'This username is taken. Choose another one.',
+  RATE_LIMITED: 'Too many requests right now. Wait a minute, then reload the page.',
 };
 
 /** Maps known error codes to plain copy; other errors keep the server's message. */

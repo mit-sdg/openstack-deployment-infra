@@ -95,25 +95,29 @@ for (const [layout, viewport, colorScheme] of [
       admin.on('request', (request) => requestUrls.push(request.url()));
       await page.goto(url);
       await expect(page).toHaveURL(/\/setup$/);
-      await page.getByLabel('Local username', { exact: true }).fill('admin' + suffix);
+      await page.getByLabel('Username', { exact: true }).fill('admin' + suffix);
       await page.getByLabel('New password', { exact: true }).fill(password);
       await page.getByRole('button', { name: 'Continue', exact: true }).click();
       const secret = await page.getByTestId('totp-secret').textContent();
       expect(secret).toBeTruthy();
       await page.getByLabel('Authentication code', { exact: true }).fill(code(secret!));
-      await page.getByRole('button', { name: 'Finish enrollment', exact: true }).click();
+      await page.getByRole('button', { name: 'Finish setup', exact: true }).click();
       await expect(page).toHaveURL(/\/admin\/accounts$/);
       await expect(page.getByRole('heading', { name: 'Accounts', exact: true })).toBeVisible();
       expect(requestUrls.every((value) => !value.includes(token))).toBe(true);
-      await page.getByLabel('Local username', { exact: true }).fill('staff' + suffix);
-      await page.getByLabel('Display name', { exact: true }).fill('Local Staff');
-      await page.getByLabel('Account role', { exact: true }).selectOption('staff');
-      await page.getByRole('button', { name: 'Create invitation', exact: true }).click();
-      const invitation = await page.getByLabel('Account setup link').first().inputValue();
+      await page.getByRole('button', { name: 'Create account', exact: true }).click();
+      const create = page.getByRole('dialog', { name: 'Create account', exact: true });
+      await create.getByLabel('Username', { exact: true }).fill('staff' + suffix);
+      await create.getByLabel('Display name').fill('Local Staff');
+      await create.getByLabel('Role', { exact: true }).selectOption('staff');
+      await create.getByRole('button', { name: 'Create account', exact: true }).click();
+      const created = page.getByRole('dialog', { name: 'Account created', exact: true });
+      const invitation = await created.getByLabel('Setup link', { exact: true }).inputValue();
+      await created.getByRole('button', { name: 'Done', exact: true }).click();
       await staffPage.goto(invitation);
       await staffPage.getByLabel('New password', { exact: true }).fill(password);
       await staffPage.getByRole('button', { name: 'Continue', exact: true }).click();
-      await staffPage.getByRole('button', { name: 'Finish enrollment', exact: true }).click();
+      await staffPage.getByRole('button', { name: 'Finish setup', exact: true }).click();
       await expect(staffPage).toHaveURL(/\/apps$/);
       const own = await createApp(staffPage, 'local-staff-' + suffix);
       await commons(ownerPage, 'alice');
@@ -146,12 +150,10 @@ for (const [layout, viewport, colorScheme] of [
         await replay.close();
       }
       await page.getByRole('link', { name: 'Audit log', exact: true }).click();
-      await expect(page.getByRole('heading', { name: 'Admin audit', exact: true })).toBeVisible();
-      await expect(page.getByText('account_invited', { exact: true }).first()).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Audit log', exact: true })).toBeVisible();
+      await expect(page.getByText('Account created', { exact: true }).first()).toBeVisible();
       await page.getByRole('link', { name: 'All apps', exact: true }).click();
-      await expect(
-        page.getByRole('heading', { name: 'Manage applications', exact: true }),
-      ).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'All apps', exact: true })).toBeVisible();
       const operatorId =
         layout === 'desktop-light'
           ? '00000000-0000-4000-8000-000000000081'
@@ -164,16 +166,23 @@ for (const [layout, viewport, colorScheme] of [
         await page.goto(`/admin/apps/${operatorId}`);
       } else {
         expect(known.status()).toBe(404);
-        await page.getByLabel('Controller application UUID').fill(operatorId);
-        await page
-          .getByLabel('Portal sign-in depends on this app — confirm adoption if this is Commons')
-          .check();
-        await page.getByRole('button', { name: 'Adopt application', exact: true }).click();
+        await page.getByRole('button', { name: 'Adopt app', exact: true }).click();
+        const adopt = page.getByRole('dialog', { name: 'Adopt app', exact: true });
+        await adopt.getByLabel('App ID', { exact: true }).fill(operatorId);
+        const submit = adopt.getByRole('button', { name: 'Adopt app', exact: true });
+        await submit.click();
+        // The sign-in app is only adopted after explicit consent.
+        const consent = adopt.getByLabel('Adopt the sign-in app', { exact: false });
+        await expect(consent).toBeVisible();
+        await expect(submit).toBeDisabled();
+        await expect(page).toHaveURL(/\/admin\/apps$/);
+        await consent.check();
+        await submit.click();
       }
       await expect(page).toHaveURL(new RegExp(`/admin/apps/${operatorId}$`));
       try {
         await expect(
-          page.getByText('Portal sign-in depends on this app', { exact: true }),
+          page.getByText('This app provides sign-in for the portal', { exact: true }).first(),
         ).toBeVisible({ timeout: 15000 });
       } catch (error) {
         console.log(managedReads.join('\n'));
@@ -193,15 +202,16 @@ for (const [layout, viewport, colorScheme] of [
       await expect(
         page.getByText(`Revision ${initialRevision + 1}`, { exact: true }),
       ).toBeVisible();
-      await page.getByRole('button', { name: 'Deploy application', exact: true }).click();
-      const dialog = page.getByRole('dialog', { name: 'Deploy application', exact: true });
-      await expect(dialog).toContainText('A retained primary IPv4 requires maintenance.');
-      await expect(dialog).toContainText('Brief cutover downtime');
-      await expect(
-        dialog.getByRole('button', { name: 'Confirm deployment', exact: true }),
-      ).toBeDisabled();
-      await expect(dialog).toContainText('current accepted sizing is preserved');
-      await expect(dialog).toContainText('Portal sign-in depends on this app');
+      await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: /^Deploy / });
+      await expect(dialog).toContainText('this app keeps a fixed IP address');
+      await expect(dialog).toContainText('goes offline briefly');
+      const deploy = dialog.getByRole('button', { name: 'Deploy', exact: true });
+      await expect(deploy).toBeDisabled();
+      await dialog.getByLabel('Allow a brief outage', { exact: false }).check();
+      await expect(deploy).toBeDisabled();
+      await expect(dialog).toContainText('Leave empty to keep the current size');
+      await expect(dialog).toContainText('This app provides sign-in for the portal');
       await staffPage.goto('/admin/apps');
       await expect(
         staffPage.getByRole('heading', { name: "You don't have access to this page" }),

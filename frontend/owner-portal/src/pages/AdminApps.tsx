@@ -77,25 +77,38 @@ function ManagedCatalog() {
       header: 'Name',
       mobile: 'title',
       cell: (app) => (
-        <Link href={`/admin/apps/${app.applicationId}`} className="ui-link ui-link--plain">
-          {app.slug}
-        </Link>
+        <>
+          <Link href={`/admin/apps/${app.applicationId}`} className="ui-link ui-link--plain">
+            {app.slug}
+          </Link>
+          <span className="admin-phone-only ui-text-muted ui-text-sm">
+            <AccountName id={app.ownerId} names={names} label="owner ID" />
+          </span>
+        </>
       ),
     },
     {
       key: 'status',
       header: 'Status',
       mobile: 'trailing',
-      cell: (app) => <Status state={app.lifecycleState} />,
+      // Ready is the norm: only states that need attention get a badge.
+      cell: (app) =>
+        app.lifecycleState === 'ready' ? (
+          <span className="ui-sr-only">Ready</span>
+        ) : (
+          <Status state={app.lifecycleState} />
+        ),
     },
     {
       key: 'owner',
       header: 'Owner',
+      mobile: 'hidden',
       cell: (app) => <AccountName id={app.ownerId} names={names} label="owner ID" />,
     },
     {
       key: 'id',
       header: 'App ID',
+      mobile: 'hidden',
       cell: (app) => <CopyId value={app.applicationId} label="app ID" />,
     },
   ];
@@ -113,7 +126,7 @@ function ManagedCatalog() {
           </>
         }
       />
-      <ErrorAlert error={catalog.error} />
+      <ErrorAlert error={friendly(catalog.error)} focus={false} />
       {catalog.data &&
         (catalog.data.items.length || cursor ? (
           <Section
@@ -138,7 +151,12 @@ function ManagedCatalog() {
           >
             <DataTable
               label="All apps"
-              columns={columns}
+              columns={columns.filter(
+                // Ready is the norm: show the column only when a row needs attention.
+                (column) =>
+                  column.key !== 'status' ||
+                  catalog.data!.items.some((app) => app.lifecycleState !== 'ready'),
+              )}
               rows={catalog.data.items}
               rowKey={(app) => app.applicationId}
               onRowClick={(app) => navigate(`/admin/apps/${app.applicationId}`)}
@@ -265,14 +283,13 @@ function AdoptDialog({
         <Field
           label="App ID"
           id="adopt-id"
-          hint="For an app that already runs on the platform. Its repository and settings are imported, and it isn’t redeployed."
+          hint="An app already running on the platform. Its settings are imported; it isn’t redeployed."
         >
           <Input
             required
             autoCapitalize="none"
             spellCheck={false}
             className="ui-mono"
-            placeholder="00000000-0000-0000-0000-000000000000"
             value={identifier}
             onChange={(event) => {
               setIdentifier(event.target.value);
@@ -384,19 +401,20 @@ function ManagedApplication({ id }: { id: string }) {
             </EmptyState>
           </div>
         ) : (
-          <ErrorAlert error={app.error ?? settings.error} />
+          <ErrorAlert error={friendly(app.error ?? settings.error)} focus={false} />
         )}
       </Page>
     );
   }
   const data = app.data;
+  const state = data.lifecycleState === 'creating' ? 'creating' : healthy(data);
   const resources = storage.data?.items ?? [];
   return (
     <Page>
       <PageHeader
         title={data.slug}
         back={back}
-        meta={<Status state={data.lifecycleState === 'creating' ? 'creating' : healthy(data)} />}
+        meta={state !== 'healthy' && <Status state={state} />}
         actions={
           <>
             <Button onClick={() => setAction('state')}>
@@ -847,9 +865,8 @@ function StorageDialog({
       <form id="admin-storage" className="ui-stack ui-gap-4" onSubmit={submit}>
         <ErrorAlert error={shown(remove.error)} />
         <Alert tone="danger" title="This can’t be undone">
-          All data is deleted. Nightly backups exist, but restoring one needs help from the platform
-          team and can lose recent changes. Remove it from the app’s settings and save before you
-          delete it.
+          All of its data is deleted. Restoring a nightly backup needs the platform team and can
+          lose recent changes. First remove it from the app’s settings and save.
         </Alert>
         <Field label="Database or storage" id="delete-resource">
           <Select

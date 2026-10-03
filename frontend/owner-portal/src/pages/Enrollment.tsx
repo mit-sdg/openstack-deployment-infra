@@ -171,7 +171,9 @@ export function Enrollment() {
   if (options.error || info.error)
     return (
       <AuthLayout title="Set up your account" footer={footer} mark={<Mark />}>
-        <ErrorAlert error={options.error ?? info.error} />
+        <Alert tone="danger" title={(options.error ?? info.error)!.message}>
+          {info.error ? 'Ask an admin for a new link.' : 'Reload the page to try again.'}
+        </Alert>
       </AuthLayout>
     );
   const purpose: string = info.data?.purpose ?? 'invite';
@@ -189,7 +191,7 @@ export function Enrollment() {
           {stage.totpSecret ? (
             <>
               <Hint>
-                Add this key to an authenticator app, then enter the 6-digit code it shows. The key
+                Add this key to an authenticator app, then enter the 6‑digit code it shows. The key
                 is shown only once.
               </Hint>
               <Secret value={stage.totpSecret} />
@@ -279,7 +281,7 @@ export function Enrollment() {
           <Field
             label="Current authentication code"
             id="existing-code"
-            hint="The 6-digit code from your authenticator app."
+            hint="The 6‑digit code from your authenticator app."
           >
             <Input
               inputMode="numeric"
@@ -295,7 +297,7 @@ export function Enrollment() {
         {purpose === 'invite' && !admin && (
           <Checkbox
             label="Use an authenticator app"
-            description="Ask for a 6-digit code each time you sign in."
+            description="Ask for a 6‑digit code each time you sign in."
             checked={enabled}
             onChange={(event) => setEnabled(event.target.checked)}
             disabled={begin.isPending}

@@ -54,11 +54,13 @@ function accountState(account: Account): { label: string; tone: Tone } {
   return { label: 'Active', tone: 'success' };
 }
 
-function RoleBadge({ role }: { role: Account['role'] }) {
-  return (
-    <Badge tone={role === 'owner' ? 'neutral' : 'info'} dot={false}>
-      {roleNames[role]}
-    </Badge>
+/** Active is the norm: only states that need attention get a badge. */
+function AccountState({ account }: { account: Account }) {
+  const state = accountState(account);
+  return account.enabled && account.status === 'active' ? (
+    <span className="ui-sr-only">{state.label}</span>
+  ) : (
+    <Badge tone={state.tone}>{state.label}</Badge>
   );
 }
 
@@ -83,8 +85,17 @@ export function AccountsPage() {
       mobile: 'title',
       cell: (account) => (
         <span className="ui-stack ui-gap-1">
-          <span>{account.displayName}</span>
-          <span className="ui-text-muted ui-text-sm">{account.username}</span>
+          <button type="button" className="admin-row-button" onClick={() => setManaging(account)}>
+            {account.displayName}
+          </button>
+          <span className="ui-text-muted ui-text-sm">
+            {account.username}
+            <span className="admin-phone-only-inline">
+              {' · '}
+              {roleNames[account.role]} ·{' '}
+              {account.lastSignIn ? <When value={account.lastSignIn} /> : 'never signed in'}
+            </span>
+          </span>
         </span>
       ),
     },
@@ -92,15 +103,18 @@ export function AccountsPage() {
       key: 'status',
       header: 'Status',
       mobile: 'trailing',
-      cell: (account) => {
-        const state = accountState(account);
-        return <Badge tone={state.tone}>{state.label}</Badge>;
-      },
+      cell: (account) => <AccountState account={account} />,
     },
-    { key: 'role', header: 'Role', cell: (account) => <RoleBadge role={account.role} /> },
+    {
+      key: 'role',
+      header: 'Role',
+      mobile: 'hidden',
+      cell: (account) => roleNames[account.role],
+    },
     {
       key: 'method',
       header: 'Sign-in',
+      mobile: 'hidden',
       cell: (account) => (
         <span className="ui-text-muted">{account.method === 'local' ? 'Local' : provider}</span>
       ),
@@ -108,8 +122,9 @@ export function AccountsPage() {
     {
       key: 'apps',
       header: 'Apps',
+      mobile: 'hidden',
       cell: (account) => (
-        <span className="ui-text-muted">
+        <span className="ui-text-muted ui-tabular">
           {account.appCount} of {account.appLimit}
         </span>
       ),
@@ -117,23 +132,8 @@ export function AccountsPage() {
     {
       key: 'last',
       header: 'Last sign-in',
+      mobile: 'hidden',
       cell: (account) => <When value={account.lastSignIn} />,
-    },
-    {
-      key: 'actions',
-      header: 'Actions',
-      hideHeader: true,
-      align: 'end',
-      cell: (account) => (
-        <Button
-          size="sm"
-          variant="ghost"
-          aria-label={`Manage ${account.username}`}
-          onClick={() => setManaging(account)}
-        >
-          Manage
-        </Button>
-      ),
     },
   ];
   if (accounts.isPending && !accounts.data) return <PageSkeleton />;
@@ -164,7 +164,7 @@ export function AccountsPage() {
           }}
         />
       </Grid>
-      <ErrorAlert error={accounts.error} />
+      <ErrorAlert error={friendly(accounts.error)} focus={false} />
       {accounts.data &&
         (items.length ? (
           <Section
@@ -190,7 +190,12 @@ export function AccountsPage() {
           >
             <DataTable
               label="Accounts"
-              columns={columns}
+              columns={columns.filter(
+                // Active is the norm: show the column only when a row needs attention.
+                (column) =>
+                  column.key !== 'status' ||
+                  items.some((account) => !account.enabled || account.status !== 'active'),
+              )}
               rows={items}
               rowKey={(account) => account.userId}
               onRowClick={setManaging}
@@ -413,12 +418,24 @@ function ManageDialog({
         columns={2}
         items={[
           { label: 'Username', value: account.username },
-          { label: 'Status', value: <Badge tone={state.tone}>{state.label}</Badge> },
-          { label: 'Sign-in', value: local ? 'Local account' : provider },
           {
-            label: 'Authenticator app',
-            value: local ? (account.totpEnabled ? 'On' : 'Off') : '—',
+            label: 'Status',
+            value:
+              state.tone === 'success' ? (
+                state.label
+              ) : (
+                <Badge tone={state.tone}>{state.label}</Badge>
+              ),
           },
+          {
+            label: 'Sign-in',
+            value: local
+              ? account.totpEnabled
+                ? 'Local, with authenticator app'
+                : 'Local'
+              : provider,
+          },
+          { label: 'Apps', value: `${account.appCount} of ${account.appLimit}` },
           { label: 'Last sign-in', value: <When value={account.lastSignIn} /> },
           { label: 'Account ID', value: <CopyId value={account.userId} label="account ID" /> },
         ]}
@@ -430,29 +447,27 @@ function ManageDialog({
         </Alert>
       )}
       <Stack gap={6}>
-        <Group title="Role">
-          <form
-            className="ui-cluster ui-gap-2 admin-inline-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              action('role', role);
-            }}
-          >
-            <Field label={`Role for ${account.username}`} id={`role-${account.userId}`}>
-              <Select
-                value={role}
-                onChange={(event) => setRole(event.target.value as Account['role'])}
-              >
-                <option value="owner">Owner</option>
-                <option value="staff">Staff</option>
-                {local && <option value="admin">Admin</option>}
-              </Select>
-            </Field>
-            <Button type="submit" disabled={role === account.role} loading={busy === 'role'}>
-              Change role
-            </Button>
-          </form>
-        </Group>
+        <form
+          className="ui-cluster ui-gap-2 admin-inline-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            action('role', role);
+          }}
+        >
+          <Field label="Role" id={`role-${account.userId}`}>
+            <Select
+              value={role}
+              onChange={(event) => setRole(event.target.value as Account['role'])}
+            >
+              <option value="owner">Owner</option>
+              <option value="staff">Staff</option>
+              {local && <option value="admin">Admin</option>}
+            </Select>
+          </Field>
+          <Button type="submit" disabled={role === account.role} loading={busy === 'role'}>
+            Change role
+          </Button>
+        </form>
         <Group title="Limits">
           <form
             className="ui-stack ui-gap-4"
@@ -541,8 +556,11 @@ const auditLabels: Record<string, string> = {
   quotas: 'Limits changed',
   app_adopted: 'App adopted',
   app_owner_changed: 'Owner changed',
+  app_adopt_app: 'App import started',
+  app_create_app: 'App created',
   app_deploy: 'App deployed',
   app_state: 'App started or stopped',
+  app_storage: 'Storage added',
   app_storage_delete: 'Storage deleted',
   app_storage_create: 'Storage added',
   app_storage_rotate: 'Storage credentials rotated',
@@ -550,6 +568,13 @@ const auditLabels: Record<string, string> = {
   app_env_set: 'Environment variable set',
   app_env_delete: 'Environment variable deleted',
   app_configuration: 'Settings saved',
+};
+
+const purposes: Record<string, string> = {
+  bootstrap: 'First admin',
+  invite: 'Invitation',
+  'password-reset': 'Password reset',
+  'totp-reset': 'Authenticator reset',
 };
 
 function auditLabel(row: AdminAudit) {
@@ -572,7 +597,7 @@ function auditDetails(row: AdminAudit) {
       `${roleNames[previousRole as Account['role']] ?? previousRole} → ${roleNames[role as Account['role']] ?? role}`,
     );
   else if (typeof role === 'string') parts.push(roleNames[role as Account['role']] ?? role);
-  if (typeof purpose === 'string') parts.push(auditLabels[purpose] ?? purpose);
+  if (typeof purpose === 'string') parts.push(purposes[purpose] ?? purpose);
   if (typeof apps === 'number') parts.push(`${apps} apps`);
   if (typeof concurrentOperations === 'number') parts.push(`${concurrentOperations} at a time`);
   return parts.join(' · ');
@@ -586,47 +611,64 @@ export function AdminAuditPage() {
     queryFn: () => adminApi.audit(cursor),
     retry: false,
   });
+  const by = (row: AdminAudit) => <AccountName id={row.actorId} names={names} />;
   const columns: Column<AdminAudit>[] = [
-    { key: 'action', header: 'Action', mobile: 'title', cell: (row) => auditLabel(row) },
     {
-      key: 'when',
-      header: 'When',
-      mobile: 'trailing',
-      cell: (row) => <When value={row.createdAt} />,
+      key: 'action',
+      header: 'Action',
+      mobile: 'title',
+      cell: (row) => {
+        const details = auditDetails(row);
+        return (
+          <>
+            {auditLabel(row)}
+            <span className="admin-phone-only ui-text-muted ui-text-sm">
+              <AccountName id={row.targetId} names={names} />
+              {details && ` · ${details}`}
+            </span>
+          </>
+        );
+      },
     },
     {
       key: 'target',
       header: 'Account',
+      mobile: 'hidden',
       cell: (row) => <AccountName id={row.targetId} names={names} />,
     },
-    {
-      key: 'actor',
-      header: 'By',
-      cell: (row) =>
-        row.actorId && row.actorId === row.targetId ? (
-          <span className="ui-text-muted">Themselves</span>
-        ) : (
-          <AccountName id={row.actorId} names={names} />
-        ),
-    },
+    { key: 'actor', header: 'By', mobile: 'hidden', cell: by },
     {
       key: 'details',
       header: 'Details',
+      mobile: 'hidden',
       cell: (row) => {
         const text = auditDetails(row);
-        return text ? (
+        const app = row.details.applicationId;
+        return typeof app === 'string' ? (
+          <span className="ui-cluster ui-gap-2">
+            <span className="ui-text-muted">App</span>
+            <CopyId value={app} label="app ID" />
+          </span>
+        ) : text ? (
           <span className="ui-text-muted">{text}</span>
         ) : (
           <span className="ui-text-subtle">—</span>
         );
       },
     },
+    {
+      key: 'when',
+      header: 'When',
+      mobile: 'trailing',
+      align: 'end',
+      cell: (row) => <When value={row.createdAt} />,
+    },
   ];
   if (audit.isPending) return <PageSkeleton />;
   return (
     <Page>
       <PageHeader title="Audit log" />
-      <ErrorAlert error={audit.error} />
+      <ErrorAlert error={friendly(audit.error)} focus={false} />
       {audit.data &&
         (audit.data.items.length ? (
           <Section

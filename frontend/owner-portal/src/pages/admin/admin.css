@@ -62,3 +62,41 @@
 .admin-inline-form {
   align-items: flex-end;
 }
+
+/*
+ * Phone rows: a table's primary line plus muted secondary text, instead of a
+ * labeled line per column. Pair with mobile: 'hidden' on those columns.
+ */
+.admin-phone-only,
+.admin-phone-only-inline {
+  display: none;
+}
+@media (max-width: 640px) {
+  .admin-phone-only {
+    display: block;
+    margin-top: var(--ui-space-1);
+    font-weight: var(--ui-weight-regular);
+  }
+  .admin-phone-only-inline {
+    display: inline;
+  }
+}
+
+/* A row title that opens a dialog: looks like the row's link. */
+.admin-row-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-text);
+  font-weight: var(--ui-weight-medium);
+  text-align: start;
+}
+.admin-row-button:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.admin-row-button:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+  border-radius: var(--ui-radius-sm);
+}
