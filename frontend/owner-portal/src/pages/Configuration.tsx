@@ -1,6 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { api, resourceApi, validateSettings, validateBindings, type Settings } from '../api';
+import {
+  api,
+  configurationGuidance,
+  resourceApi,
+  validateSettings,
+  validateBindings,
+  type Settings,
+} from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { EnvironmentSection } from '../components/EnvironmentSection';
 import { StorageSection } from '../components/StorageSection';
@@ -113,7 +120,9 @@ export function ConfigurationForm({
                 onChange={(e) => update({ repository: e.target.value })}
                 required
               />
-              <p className="field-help">Public, credential-free repositories only.</p>
+              <p className="field-help">
+                Public, credential-free repositories only. {configurationGuidance.root}
+              </p>
             </div>
             <div className="field">
               <label htmlFor="branch">Preferred branch</label>
@@ -134,7 +143,7 @@ export function ConfigurationForm({
             <span className="step-number">02</span>
             <div>
               <h3>Build</h3>
-              <p>Use the package scripts and lockfiles already in your repository.</p>
+              <p>{configurationGuidance.scripts}</p>
             </div>
           </div>
           <div className="fields-grid">
@@ -169,7 +178,9 @@ export function ConfigurationForm({
                 value={settings.configuration.build.packages.join('\n')}
                 onChange={(e) => build({ packages: e.target.value.split('\n') })}
               />
-              <p className="field-help">One directory per line. Use . for the repository root.</p>
+              <p className="field-help">
+                One directory per line. Use . for the repository root. {configurationGuidance.locks}
+              </p>
             </div>
             <div className="field">
               <label htmlFor="build-script">
@@ -191,7 +202,7 @@ export function ConfigurationForm({
                 onChange={(e) => build({ startScript: e.target.value })}
                 required
               />
-              <p className="field-help">A package.json script name, such as start.</p>
+              <p className="field-help">A script name from the root package.json, such as start.</p>
             </div>
           </div>
         </section>
@@ -224,6 +235,7 @@ export function ConfigurationForm({
                 onChange={(e) => runtime({ healthPath: e.target.value })}
                 required
               />
+              <p className="field-help">{configurationGuidance.health}</p>
             </div>
           </div>
           <ErrorNotice error={error ?? save.error} />

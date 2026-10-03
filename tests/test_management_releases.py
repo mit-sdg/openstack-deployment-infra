@@ -156,6 +156,8 @@ class ManagementReleaseTests(unittest.TestCase):
                     if path.startswith("runtime/")
                 )
             )
+            self.assertNotIn("runtime/openstack_platform/controller/database.py", files)
+            self.assertNotIn("runtime/openstack_platform/runtime.py", files)
             self.assertFalse(any("assertions.py" in path for path in files))
             self.assertTrue(
                 "runtime/openstack_platform/management/identity/main.py" in files

@@ -230,6 +230,11 @@ class ControllerDatabaseTests(unittest.TestCase):
         assert stored is not None
         self.assertEqual(stored.deadline_at, "2026-01-01T09:15:00Z")
 
+    def test_shared_secret_pattern_matches_unchanged_controller_filter(self) -> None:
+        from openstack_platform.controller.storage_contract import SECRET_KEY_PATTERN
+
+        self.assertEqual(db._SECRET_KEY.pattern, SECRET_KEY_PATTERN)
+
     def test_operation_refs_and_errors_exclude_obvious_secrets(self) -> None:
         self.migrate()
         with self.assertRaisesRegex(ValidationError, "secret material"):

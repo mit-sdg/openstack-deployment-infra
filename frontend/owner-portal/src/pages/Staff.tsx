@@ -503,6 +503,7 @@ function StaffOperationList({ search }: { search: string }) {
                           Status observed {time(operation.statusObservedAt)} · Cleanup{' '}
                           {operation.cleanupState.replaceAll('_', ' ')}
                         </p>
+                        {operation.guidance && <p>{operation.guidance}</p>}
                         {operation.controllerErrorCode && (
                           <p>
                             Controller code: <code>{operation.controllerErrorCode}</code>

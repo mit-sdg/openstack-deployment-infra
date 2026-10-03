@@ -142,6 +142,7 @@ describe('staff controller diagnostics', () => {
           statusObservedAt: null,
           attention: 'failed',
           controllerErrorCode: 'INVALID_REQUEST',
+          guidance: 'Check that the repository root contains package.json.',
         },
       ],
       nextCursor: null,
@@ -149,6 +150,7 @@ describe('staff controller diagnostics', () => {
     });
     show('/staff/operations');
     expect(await screen.findByText('INVALID_REQUEST')).toBeVisible();
+    expect(screen.getByText('Check that the repository root contains package.json.')).toBeVisible();
   });
 });
 

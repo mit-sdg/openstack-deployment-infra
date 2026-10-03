@@ -21,6 +21,39 @@ def controller_error_code(value: object) -> str | None:
     )
 
 
+BUILD_GUIDANCE = "Check that the repository root contains package.json, each package directory contains its runtime lockfile, and build/start scripts are defined in the root package.json."
+HEALTH_GUIDANCE = "Check that the health path returns HTTP 2xx with a body of at most 4 KB; use a small endpoint such as /health rather than a full HTML page."
+
+
+def deploy_failure_guidance(kind: str, state: str, code: object, phase: object) -> str | None:
+    """Map known deploy evidence to release-owned text; never parse free text."""
+    if kind != "deploy" or state not in {"failed", "blocked"}:
+        return None
+    code = controller_error_code(code)
+    phase = phase if isinstance(phase, str) else None
+    if (
+        code in {"BUILD_REJECTED", "BUILD_FAILED", "SOURCE_REJECTED", "INVALID_BUILD_CONFIGURATION"}
+        or phase == "build_rejected"
+    ):
+        return BUILD_GUIDANCE
+    if code in {
+        "CANDIDATE_UNHEALTHY",
+        "PUBLIC_HEALTH_FAILED",
+        "PUBLIC_HEALTH_TIMEOUT",
+        "HEALTH_CHECK_FAILED",
+        "HEALTH_CHECK_TIMEOUT",
+        "HEALTH_TIMEOUT",
+    }:
+        return HEALTH_GUIDANCE
+    if code in {"DEADLINE_EXCEEDED", "DEADLINE_EXPIRED"} and phase in {
+        "worker_ready",
+        "job_submitted",
+        "verifying",
+    }:
+        return HEALTH_GUIDANCE
+    return None
+
+
 def report_exception(error: Exception, intent_id: str = "recovery-scan") -> None:
     # A dedicated message-only handler never formats exception values/tracebacks,
     # which could contain submitted bodies or credential material.
@@ -239,7 +272,13 @@ def intent_model(row: Any, *, diagnostic: bool = False) -> dict[str, Any]:
         "operationId": row["operation_id"],
         "operation": operation or None,
         "statusUrl": f"/api/v1/intents/{row['id']}",
-        "safeError": row["safe_error"],
+        "safeError": deploy_failure_guidance(
+            row["kind"],
+            row["state"],
+            code,
+            operation.get("phase") if isinstance(operation, dict) else None,
+        )
+        or row["safe_error"],
         "createdAt": utc(row["created"]),
         "updatedAt": utc(row["updated"]),
         "commit": body.get("commit") if row["kind"] == "deploy" else None,

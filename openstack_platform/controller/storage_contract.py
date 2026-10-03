@@ -7,6 +7,10 @@ from types import MappingProxyType
 
 from ..validation import ValidationError, resource_name, slug, uuid
 
+# Public contract for callers that must preserve the controller's existing
+# secret-key rejection behavior without importing controller database code.
+SECRET_KEY_PATTERN = r"(?:^|_)(?:password|passwd|secret|token|credential|private_key|user_data|cloud_init|env_value|source_contents?)(?:$|_)"
+
 RESOURCE_TYPES = ("postgres", "mongo", "s3")
 DEFAULT_RESOURCE_NAME = "default"
 # Public output names are stable binding-contract names, not runtime env names.

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { api, ApiError, validateSettings, type Settings } from './api';
+import { api, ApiError, configurationGuidance, validateSettings, type Settings } from './api';
 import { Status } from './components/Status';
 import { ConfigurationForm } from './pages/Configuration';
 
@@ -62,6 +62,10 @@ describe('owner configuration', () => {
         <ConfigurationForm id="app" initial={settings} />
       </QueryClientProvider>,
     );
+    expect(screen.getByText(configurationGuidance.scripts)).toBeVisible();
+    expect(screen.getByText(configurationGuidance.root, { exact: false })).toBeVisible();
+    expect(screen.getByText(configurationGuidance.locks, { exact: false })).toBeVisible();
+    expect(screen.getByText(configurationGuidance.health)).toBeVisible();
     fireEvent.click(screen.getByLabelText(/Bun/));
     fireEvent.change(screen.getByLabelText('Application port'), { target: { value: '8080' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
