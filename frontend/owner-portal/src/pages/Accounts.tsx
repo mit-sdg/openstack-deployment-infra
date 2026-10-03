@@ -621,7 +621,7 @@ export function AdminAuditPage() {
         const details = auditDetails(row);
         return (
           <>
-            {auditLabel(row)}
+            <span>{auditLabel(row)}</span>
             <span className="admin-phone-only ui-text-muted ui-text-sm">
               <AccountName id={row.targetId} names={names} />
               {details && ` · ${details}`}
