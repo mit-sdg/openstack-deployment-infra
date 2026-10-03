@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 import uuid
 from typing import Any
@@ -113,6 +114,117 @@ class RealProjectContractTests(ManagementCase):
         self.broker.client.path = self.real_socket
         self.broker.client.timeout = 5
         self.login()
+
+    def test_real_project_admits_all_storage_outputs_and_replays_existing_operations(self) -> None:
+        from openstack_platform.controller import database as db
+        from openstack_platform.controller import storage
+        from openstack_platform.controller.storage_contract import OUTPUT_ENVIRONMENT_KEYS
+
+        original = self.real.fixture.api.helper_caller
+
+        def helper(config, action, values, **kwargs):
+            if action.startswith("storage.") and action.endswith(".create"):
+                kind = action.split(".")[1]
+                app = db.get_application(self.real.connection, values["applicationId"])
+                name = storage._provider_name(config, app, kind, "default")
+                return {
+                    "providerId": name,
+                    "providerName": name,
+                    "verified": True,
+                    "evidenceAccepted": True,
+                    "modifyIndex": 1,
+                }
+            return original(config, action, values, **kwargs)
+
+        self.real.fixture.api.helper_caller = helper
+        for kind, outputs in OUTPUT_ENVIRONMENT_KEYS.items():
+            with self.subTest(kind=kind):
+                app = str(uuid.uuid4())
+                status, _created, _ = self.wire(
+                    self.real_socket,
+                    "POST",
+                    "/v1/applications",
+                    {"slug": "all-outputs-" + kind},
+                    app,
+                )
+                self.assertEqual(status, 201)
+                key = str(uuid.uuid4())
+                status, _storage, _ = self.wire(
+                    self.real_socket, "POST", f"/v1/applications/{app}/storage", {"type": kind}, key
+                )
+                self.assertEqual(status, 202)
+                self.real.fixture.api.wait_for_operations()
+                status, resources, _ = self.wire(
+                    self.real_socket, "GET", f"/v1/applications/{app}/storage"
+                )
+                self.assertEqual(status, 200)
+                resource = resources["items"][0]
+                self.assertEqual(resource["lifecycleState"], "active")
+                body = {
+                    "repository": "https://github.com/example/app",
+                    "requestedRef": "main",
+                    "commit": "a" * 40,
+                    "configurationRevision": 1,
+                    "configuration": {
+                        "schemaVersion": 1,
+                        "build": {
+                            "runtime": "node",
+                            "packages": ["."],
+                            "buildScript": None,
+                            "startScript": "start",
+                        },
+                        "runtime": {"port": 3000, "healthPath": "/health"},
+                        "storageBindings": [
+                            {"resourceId": resource["resourceId"], "outputs": dict(outputs)}
+                        ],
+                    },
+                }
+                deployment = str(uuid.uuid4())
+                status, admitted, _ = self.wire(
+                    self.real_socket,
+                    "POST",
+                    f"/v1/applications/{app}/deployments",
+                    body,
+                    deployment,
+                )
+                self.assertEqual(status, 202, admitted)
+                self.real.fixture.api.wait_for_operations()
+                operation = db.get_operation(self.real.connection, deployment)
+                self.assertEqual(operation.phase, "build_rejected")
+                self.assertIsNotNone(db.get_deployment_attempt(self.real.connection, deployment))
+                status, replayed, _ = self.wire(
+                    self.real_socket,
+                    "POST",
+                    f"/v1/applications/{app}/deployments",
+                    body,
+                    deployment,
+                )
+                self.assertEqual(status, 202)
+                self.assertEqual(replayed["operationId"], deployment)
+                changed = {**body, "commit": "b" * 40}
+                status, conflict, _ = self.wire(
+                    self.real_socket,
+                    "POST",
+                    f"/v1/applications/{app}/deployments",
+                    changed,
+                    deployment,
+                )
+                self.assertEqual(status, 409)
+                self.assertEqual(conflict["error"]["code"], "IDEMPOTENCY_CONFLICT")
+                changed_binding = copy.deepcopy(body)
+                first_output = next(iter(outputs))
+                changed_binding["configuration"]["storageBindings"][0]["outputs"][first_output] = (
+                    "RENAMED_OUTPUT"
+                )
+                status, conflict, _ = self.wire(
+                    self.real_socket,
+                    "POST",
+                    f"/v1/applications/{app}/deployments",
+                    changed_binding,
+                    deployment,
+                )
+                self.assertEqual(status, 409)
+                self.assertEqual(conflict["error"]["code"], "IDEMPOTENCY_CONFLICT")
 
     @staticmethod
     def wire(

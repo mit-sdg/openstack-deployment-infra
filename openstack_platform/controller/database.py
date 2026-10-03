@@ -997,10 +997,42 @@ def _cleanup_state(value: str) -> str:
     return value
 
 
+def _fingerprint_validation_view(value: Any) -> Any:
+    """Validate public binding identifiers without relaxing operation refs.
+
+    Only the validation copy changes: the hash still covers the original JSON
+    bytes so requests admitted by earlier controllers remain replayable.
+    """
+    if isinstance(value, list):
+        return [_fingerprint_validation_view(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result: dict[Any, Any] = {}
+    for key, item in value.items():
+        if key == "configuration" and isinstance(item, dict) and "storageBindings" in item:
+            from .deployment_config import parse_configuration
+            from .storage_contract import RESOURCE_OUTPUTS
+
+            configuration = parse_configuration(item)
+            supported = {output for outputs in RESOURCE_OUTPUTS.values() for output in outputs}
+            public = json.loads(configuration.canonical_json())
+            for binding in public["storageBindings"]:
+                pairs = []
+                for output, target in sorted(binding["outputs"].items()):
+                    if output not in supported:
+                        raise ValidationError("storage output is not supported")
+                    pairs.append([output, env_key(target)])
+                binding["outputs"] = pairs
+            result[key] = public
+        else:
+            result[key] = _fingerprint_validation_view(item)
+    return result
+
+
 def request_fingerprint(request: Mapping[str, Any]) -> str:
     """Hash a bounded canonical request without persisting its contents."""
     plain = dict(request)
-    _walk_refs(plain)
+    _walk_refs(_fingerprint_validation_view(plain))
     try:
         encoded = json.dumps(
             plain,
