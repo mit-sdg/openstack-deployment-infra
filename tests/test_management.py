@@ -372,6 +372,70 @@ class CeremonyTests(ManagementCase):
 
 
 class OwnerIntentTests(ManagementCase):
+    def test_controller_rejection_codes_are_durable_bounded_and_role_scoped(self) -> None:
+        from openstack_platform.management.broker.accounts import security_change
+        from openstack_platform.management.common import strict_json
+
+        self.login()
+        app = self.create()
+        self.save(app)
+        for code, expected in (
+            ("INVALID_REQUEST", "INVALID_REQUEST"),
+            ("NOT_FOUND", "NOT_FOUND"),
+            ("free text PRIVATE_VALUE", None),
+            ("A" * 65, None),
+            (123, None),
+        ):
+            with self.subTest(code=code):
+                original = self.broker.client.request
+
+                def reject(method, path, *args, code=code, original=original, **kwargs):
+                    if method == "POST" and path.endswith("/deployments"):
+                        return 400, {
+                            "error": {"code": code, "summary": "PRIVATE_CONTROLLER_SUMMARY"}
+                        }
+                    return original(method, path, *args, **kwargs)
+
+                with patch.object(self.broker.client, "request", side_effect=reject):
+                    intent = self.call(
+                        "POST",
+                        f"/v1/apps/{app}/deployments",
+                        {"commit": "a" * 40, "configurationRevision": 1},
+                        "alice",
+                    ).body["data"]
+                self.assertEqual(intent["state"], "failed")
+                self.assertNotIn("controllerErrorCode", intent)
+                self.assertNotIn("PRIVATE_CONTROLLER_SUMMARY", canonical(intent))
+                self.assertNotIn("INVALID_REQUEST", canonical(intent))
+                with self.broker.database.connect() as db:
+                    row = db.execute(
+                        "SELECT operation FROM intents WHERE id=?", (intent["intentId"],)
+                    ).fetchone()
+                    stored = strict_json(row[0].encode()) if row[0] else {}
+                self.assertEqual(stored.get("controllerErrorCode"), expected)
+                user = self.call("GET", "/v1/session", owner="alice").body["data"]["user"]["id"]
+                with self.broker.database.connect(write=True) as db:
+                    db.execute("UPDATE users SET role='staff' WHERE id=?", (user,))
+                    security_change(db, user)
+                self.login()
+                detail = self.call("GET", f"/v1/intents/{intent['intentId']}", owner="alice").body[
+                    "data"
+                ]
+                self.assertEqual(detail["controllerErrorCode"], expected)
+                operations = self.call("GET", "/v1/staff/operations", owner="alice").body["data"][
+                    "items"
+                ]
+                self.assertEqual(
+                    next(item for item in operations if item["intentId"] == intent["intentId"])[
+                        "controllerErrorCode"
+                    ],
+                    expected,
+                )
+                with self.broker.database.connect(write=True) as db:
+                    db.execute("UPDATE users SET role='owner' WHERE id=?", (user,))
+                    security_change(db, user)
+                self.login()
+
     def test_sidecar_disappearance_does_not_turn_committed_requests_into_failures(self) -> None:
         self.login("bob")
         original = os.chmod

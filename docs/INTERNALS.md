@@ -615,6 +615,24 @@ they cannot starve background recovery of other operations. Environment writes
 are limited to 30 new intents per owner per minute and 65,536 UTF-8 bytes per
 value; controller admission also enforces the installed deployment's limits.
 
+The current controller's generic fingerprint secret-key filter mistakes
+PostgreSQL `password` and S3 `secret_access_key` output names for credential
+fields. The broker derives unavailable outputs by applying the controller's
+`_SECRET_KEY` to `RESOURCE_OUTPUTS`, omits them from defaults and rejects saves
+that bind them. PostgreSQL's URL includes its password; S3 secret key injection
+needs a platform update. The binding editor explains the limitation and allows
+removing an unavailable binding from an older saved configuration. The broker
+archive includes the unchanged controller database module and its standard-library
+runtime dependencies solely to import that filter; this is a release-only
+mitigation with no schema, compatibility, controller or Nix changes.
+
+Controller admission error codes are retained in existing intent JSON and
+validated as 1–64 uppercase ASCII letters/digits/underscores, beginning with a
+letter. No controller summary is retained or displayed. Admin/staff intent and
+operation projections expose `controllerErrorCode`; owner projections strip it
+and keep the generic error. Already failed intents cannot recover a code that
+was discarded by an earlier broker version.
+
 Saving bindings checks application ownership, outputs for the storage type,
 valid/unreserved/injective targets and collisions with owner environment names
 or pending edits. The broker serializes binding saves and environment admission

@@ -503,6 +503,11 @@ function StaffOperationList({ search }: { search: string }) {
                           Status observed {time(operation.statusObservedAt)} · Cleanup{' '}
                           {operation.cleanupState.replaceAll('_', ' ')}
                         </p>
+                        {operation.controllerErrorCode && (
+                          <p>
+                            Controller code: <code>{operation.controllerErrorCode}</code>
+                          </p>
+                        )}
                         {operation.attention !== 'none' && (
                           <p>{operation.attention.replaceAll('_', ' ')}</p>
                         )}

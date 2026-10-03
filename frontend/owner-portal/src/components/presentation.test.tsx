@@ -22,6 +22,7 @@ describe('reviewed owner presentation', () => {
             operationId: null,
             operation: { status: 'succeeded', phase: 'finished', cleanupState: 'confirmed' },
             safeError: null,
+            controllerErrorCode: 'INVALID_REQUEST',
           }}
         />
       </QueryClientProvider>,
@@ -30,6 +31,7 @@ describe('reviewed owner presentation', () => {
     expect(screen.getByText('aaaaaaaaa')).toBeVisible();
     expect(screen.getByText('just now')).toBeVisible();
     expect(screen.getByText('Completed')).toBeVisible();
+    expect(screen.getByText('INVALID_REQUEST')).toBeVisible();
     expect(screen.queryByText('finished')).toBeNull();
   });
   it('places explicit wrap opportunities at URL separators', () => {

@@ -9,6 +9,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from ...controller.database import _SECRET_KEY
 from ...controller.deployment_config import parse_configuration
 from ...controller.http import HttpError, Request, Response
 from ...controller.storage_contract import (
@@ -25,6 +26,25 @@ from .journal import intent_model
 
 if TYPE_CHECKING:
     from .api import Broker
+
+
+BLOCKED_OUTPUTS = {
+    resource_type: frozenset(output for output in outputs if _SECRET_KEY.search(output))
+    for resource_type, outputs in RESOURCE_OUTPUTS.items()
+}
+BLOCKED_MESSAGES = {
+    "postgres": "PGPASSWORD can't be bound yet; DATABASE_URL already includes the password",
+    "s3": "S3 secret key binding needs a platform update; ask an administrator",
+}
+
+
+def blocked_bindings(resource_type: str) -> dict[str, str]:
+    return {
+        output: BLOCKED_MESSAGES.get(
+            resource_type, "This binding needs a platform update; ask an administrator"
+        )
+        for output in sorted(BLOCKED_OUTPUTS[resource_type])
+    }
 
 
 def owner_key(value: object) -> str:
@@ -61,11 +81,11 @@ def environment_metadata(self: Broker, app_id: str) -> dict[str, Any]:
 
 
 def environment(self: Broker, request: Request) -> Response:
-    _user, app = self.own(request)
+    user, app = self.own(request)
     data = environment_metadata(self, app["id"])
     with self.database.connect() as db:
         data["intents"] = [
-            intent_model(row)
+            intent_model(row, diagnostic=user["role"] in {"staff", "admin"})
             for row in db.execute(
                 "SELECT * FROM intents WHERE app_id=? AND kind IN ('env_set','env_delete') AND state NOT IN ('succeeded','failed') ORDER BY created",
                 (app["id"],),
@@ -192,7 +212,12 @@ def storage_resources(self: Broker, app_id: str) -> list[dict[str, Any]]:
                     }.get(item["lifecycleState"], item["lifecycleState"]),
                     "createdAt": utc(item.get("createdAt")),
                     "verifiedAt": utc(item.get("lastVerifiedAt")),
-                    "defaultBindings": dict(OUTPUT_ENVIRONMENT_KEYS[item["type"]]),
+                    "defaultBindings": {
+                        output: target
+                        for output, target in OUTPUT_ENVIRONMENT_KEYS[item["type"]].items()
+                        if output not in BLOCKED_OUTPUTS[item["type"]]
+                    },
+                    "unavailableBindings": blocked_bindings(item["type"]),
                 }
             )
         cursor = page.get("nextCursor")
@@ -206,7 +231,10 @@ def storage(self: Broker, request: Request) -> Response:
     items = storage_resources(self, app["id"])
     with self.database.connect() as db:
         progress = [
-            {**intent_model(row), "type": strict_json(row["body"].encode()).get("type")}
+            {
+                **intent_model(row, diagnostic=user["role"] in {"staff", "admin"}),
+                "type": strict_json(row["body"].encode()).get("type"),
+            }
             for row in db.execute(
                 "SELECT * FROM intents WHERE user_id=? AND app_id=? AND kind LIKE 'storage_%' ORDER BY created DESC LIMIT 20",
                 (user["id"], app["id"]),
@@ -297,6 +325,12 @@ def validate_bindings(
             if output not in RESOURCE_OUTPUTS[resource["type"]]:
                 raise HttpError(
                     400, "INVALID_BINDING", f"Unknown output for {resource['type']} storage."
+                )
+            if output in BLOCKED_OUTPUTS[resource["type"]]:
+                raise HttpError(
+                    400,
+                    "BINDING_PLATFORM_UPDATE_REQUIRED",
+                    blocked_bindings(resource["type"])[output],
                 )
             if target in names:
                 raise HttpError(

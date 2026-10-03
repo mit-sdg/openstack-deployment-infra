@@ -7,6 +7,7 @@ export type StorageResource = {
   createdAt: string;
   verifiedAt: string | null;
   defaultBindings: Record<string, string>;
+  unavailableBindings?: Record<string, string>;
 };
 export type Environment = {
   revision: number;
@@ -62,6 +63,7 @@ export type Intent = {
   operationId: string | null;
   operation: { status: string; phase: string; cleanupState: string } | null;
   safeError: string | null;
+  controllerErrorCode?: string | null;
   names?: string[];
   requiresResubmit?: boolean;
   retryKey?: string | null;

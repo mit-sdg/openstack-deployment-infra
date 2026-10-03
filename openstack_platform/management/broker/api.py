@@ -554,7 +554,12 @@ class Broker:
             )
         return Response(
             201 if intent["state"] == "succeeded" else 202,
-            {"data": {"app": self.app_model(app), "intent": intent_model(intent)}},
+            {
+                "data": {
+                    "app": self.app_model(app),
+                    "intent": intent_model(intent, diagnostic=user["role"] in {"staff", "admin"}),
+                }
+            },
         )
 
     def configuration(self, request: Request) -> Response:
@@ -707,7 +712,10 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
-            model = intent_model(row)
+            actor = db.execute("SELECT role FROM users WHERE id=?", (user,)).fetchone()
+            model = intent_model(
+                row, diagnostic=actor is not None and actor[0] in {"staff", "admin"}
+            )
             app = db.execute(
                 "SELECT slug FROM apps WHERE id=? AND user_id=?", (row["app_id"], user)
             ).fetchone()
@@ -723,7 +731,11 @@ class Broker:
                 for row in db.execute("SELECT id,slug FROM apps WHERE user_id=?", (user["id"],))
             }
         page["items"] = [
-            {**intent_model(row), "appSlug": slugs.get(row["app_id"])} for row in page["items"]
+            {
+                **intent_model(row, diagnostic=user["role"] in {"staff", "admin"}),
+                "appSlug": slugs.get(row["app_id"]),
+            }
+            for row in page["items"]
         ]
         return Response(200, {"data": page})
 

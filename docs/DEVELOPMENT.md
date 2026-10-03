@@ -202,6 +202,11 @@ The configuration page also supports write-only environment edits and
 PostgreSQL/MongoDB/S3 creation, status, bindings, verification and credential
 rotation. The development controller persists only environment names and
 resource metadata; it simulates these operations without retaining values.
+The broker temporarily excludes storage outputs matched by the controller's
+secret-key filter. Real project-router tests also prove default bindings for
+PostgreSQL, MongoDB and S3 are admitted and that blocked outputs cannot be saved.
+The release archive includes the existing controller database module/runtime
+for importing that regex; archive smoke checks verify those dependencies.
 The real project-router tests in `tests/test_owner_resources.py` cover ownership,
 limits, binding validation, no-values projections, same-key recovery and the
 unchanged image activation compatibility dictionaries. The resource Vitest and

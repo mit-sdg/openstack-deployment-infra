@@ -51,7 +51,9 @@ repositories, arbitrary build commands, and Dockerfiles are outside the current
 contract. Owners can set write-only environment variables and provision one
 PostgreSQL database, MongoDB database, and S3 bucket per app. They choose which
 storage outputs bind to which environment names; credentials never appear in
-portal responses. Storage deletion requires an administrator. See
+portal responses. Storage deletion requires an administrator. PostgreSQL connections currently
+use the URL binding, which includes the password; individual PostgreSQL password
+and S3 secret key bindings need a platform update. See
 [owner portal operations](docs/OPERATIONS.md#owner-portal-operations).
 
 ## Documentation

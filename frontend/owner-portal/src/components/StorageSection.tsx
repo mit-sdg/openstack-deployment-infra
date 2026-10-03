@@ -94,8 +94,10 @@ export function StorageSection({
         <h2>Databases and storage</h2>
         <p>One of each type per application. Databases are backed up nightly by the platform.</p>
         <p className="field-help">
-          PostgreSQL and S3 use TLS with the platform CA, delivered through PGSSLROOTCERT and
-          AWS_CA_BUNDLE by default. Keep those outputs bound when using TLS verification.
+          Use DATABASE_URL for PostgreSQL connections; it includes the password. Individual password
+          and S3 secret key bindings need a platform update. PostgreSQL and S3 use TLS with the
+          platform CA, delivered through PGSSLROOTCERT and AWS_CA_BUNDLE by default. Keep those
+          outputs bound when using TLS verification.
         </p>
         <p>Binding changes apply on your next deploy. Save configuration after editing bindings.</p>
         <div className="button-group">
@@ -167,6 +169,20 @@ export function StorageSection({
                         onClick={() => output(resource.resourceId, name, defaultTarget)}
                       >
                         Bind {name} to {defaultTarget}
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {Object.entries(resource.unavailableBindings ?? {}).map(([name, message]) => (
+                  <div className="field" key={name}>
+                    <p className="field-help">{message}</p>
+                    {name in current && (
+                      <button
+                        type="button"
+                        className="button button-small"
+                        onClick={() => output(resource.resourceId, name, null)}
+                      >
+                        Remove unavailable {name} binding
                       </button>
                     )}
                   </div>

@@ -124,6 +124,34 @@ describe('staff navigation and sign-in', () => {
   });
 });
 
+describe('staff controller diagnostics', () => {
+  it('shows a controller code in the operations view', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue(session('staff'));
+    vi.spyOn(staffApi, 'operations').mockResolvedValue({
+      items: [
+        {
+          intentId: userId,
+          applicationId: ownerId,
+          ownerId,
+          kind: 'deploy',
+          state: 'failed',
+          stage: 'settled',
+          cleanupState: 'unknown',
+          createdAt: new Date().toISOString(),
+          updatedAt: null,
+          statusObservedAt: null,
+          attention: 'failed',
+          controllerErrorCode: 'INVALID_REQUEST',
+        },
+      ],
+      nextCursor: null,
+      truncated: false,
+    });
+    show('/staff/operations');
+    expect(await screen.findByText('INVALID_REQUEST')).toBeVisible();
+  });
+});
+
 describe('staff data API', () => {
   it('attaches session CSRF to GET and refreshes it once', async () => {
     const fetch = vi

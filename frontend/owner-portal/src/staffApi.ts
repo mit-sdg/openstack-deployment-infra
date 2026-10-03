@@ -52,6 +52,7 @@ export type StaffOperation = {
   updatedAt: string | null;
   statusObservedAt: string | null;
   attention: string;
+  controllerErrorCode: string | null;
 };
 
 type Check = (v: unknown) => boolean;
@@ -165,6 +166,7 @@ const operation = (v: unknown) =>
     updatedAt: stamp,
     statusObservedAt: stamp,
     attention: state('none', 'awaiting_controller', 'failed', 'recovery_required'),
+    controllerErrorCode: nullable((v) => typeof v === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(v)),
   });
 function quota(v: unknown): boolean {
   shape(
