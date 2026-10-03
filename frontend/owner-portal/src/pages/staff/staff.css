@@ -33,3 +33,18 @@
     height: var(--ui-space-8);
   }
 }
+
+/* Two-line table rows on phones: a short summary under the row title
+   replaces one or two label/value lines (candidate for DataTable). */
+.staff-row-detail {
+  display: none;
+}
+@media (max-width: 640px) {
+  .staff-row-detail {
+    display: block;
+    flex-basis: 100%;
+    color: var(--ui-text-muted);
+    font-size: var(--ui-text-sm);
+    font-weight: var(--ui-weight-regular);
+  }
+}

@@ -1,5 +1,6 @@
 import {
   Badge,
+  Cluster,
   DataTable,
   EmptyState,
   KeyValueList,
@@ -21,15 +22,28 @@ import {
   Back,
   CopyId,
   Loaded,
-  nameMap,
+  PhoneDetail,
   pager,
   Preview,
   Refresh,
   useRead,
 } from './common';
 
-function Access({ enabled }: { enabled: boolean }) {
-  return enabled ? <Badge tone="success">Active</Badge> : <Badge>Disabled</Badge>;
+const roles = { staff: 'Staff', admin: 'Admin' } as const;
+
+/** Badges only for what stands out: a staff or admin role, or a disabled account. */
+function AccountBadges({ owner }: { owner: StaffOwner }) {
+  if (owner.role === 'owner' && owner.portalEnabled) return null;
+  return (
+    <Cluster gap={2}>
+      {owner.role !== 'owner' && (
+        <Badge tone="info" dot={false}>
+          {roles[owner.role]}
+        </Badge>
+      )}
+      {!owner.portalEnabled && <Badge tone="warning">Disabled</Badge>}
+    </Cluster>
+  );
 }
 
 const ownerColumns: Column<StaffOwner>[] = [
@@ -38,21 +52,25 @@ const ownerColumns: Column<StaffOwner>[] = [
     header: 'Name',
     mobile: 'title',
     cell: (owner) => (
-      <Link href={`/staff/owners/${owner.ownerId}`} className="ui-link ui-link--plain">
-        {owner.displayName}
-      </Link>
+      <>
+        <Link href={`/staff/owners/${owner.ownerId}`} className="ui-link ui-link--plain">
+          {owner.displayName}
+        </Link>
+        <PhoneDetail>{owner.username}</PhoneDetail>
+      </>
     ),
-  },
-  {
-    key: 'status',
-    header: 'Status',
-    mobile: 'trailing',
-    cell: (owner) => <Access enabled={owner.portalEnabled} />,
   },
   {
     key: 'username',
     header: 'Username',
+    mobile: 'hidden',
     cell: (owner) => <span className="ui-text-muted">{owner.username}</span>,
+  },
+  {
+    key: 'account',
+    header: 'Account',
+    mobile: 'trailing',
+    cell: (owner) => <AccountBadges owner={owner} />,
   },
 ];
 
@@ -98,12 +116,12 @@ export function useAppPage(ownerId?: string, enabled = true) {
 
 export function AppsSection({
   page: { query, cursor, setCursor },
-  owners,
+  showOwner = false,
   title,
   filtered,
 }: {
   page: ReturnType<typeof useAppPage>;
-  owners?: Map<string, string>;
+  showOwner?: boolean;
   title?: string;
   filtered?: boolean;
 }) {
@@ -119,7 +137,7 @@ export function AppsSection({
         {(page) => (
           <DataTable
             label="Apps"
-            columns={appColumns(owners)}
+            columns={appColumns(showOwner)}
             rows={page.items}
             rowKey={(app) => app.applicationId}
             onRowClick={(app) => navigate(`/staff/apps/${app.applicationId}`)}
@@ -145,11 +163,6 @@ export function StaffOwnerPage({ id }: { id: string }) {
     (signal) => staffApi.operations(id, undefined, undefined, signal),
     { poll: true, enabled: !catalog.query.isPending },
   );
-  const apps = nameMap(
-    catalog.query.data?.items ?? [],
-    (app) => app.applicationId,
-    (app) => app.slug,
-  );
   if (owner.isPending) return <PageSkeleton />;
   const back = <Back href="/staff/owners">Owners</Back>;
   if (owner.error)
@@ -167,7 +180,7 @@ export function StaffOwnerPage({ id }: { id: string }) {
       <PageHeader
         title={data.displayName}
         back={back}
-        meta={<Access enabled={data.portalEnabled} />}
+        meta={<AccountBadges owner={data} />}
         actions={<Refresh queries={[owner, catalog.query, activity]} />}
       />
       <Section title="Details">
@@ -192,7 +205,7 @@ export function StaffOwnerPage({ id }: { id: string }) {
             page.items.length ? (
               <OperationList label="Recent activity">
                 {page.items.slice(0, 5).map((item) => (
-                  <ActivityItem key={item.intentId} item={item} apps={apps} />
+                  <ActivityItem key={item.intentId} item={item} showOwner={false} />
                 ))}
               </OperationList>
             ) : (

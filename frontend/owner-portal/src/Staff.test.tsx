@@ -13,7 +13,9 @@ const owner = {
   username: 'student',
   displayName: '<script>Student</script>',
   portalEnabled: true,
+  role: 'owner' as const,
 };
+const ownerName = { ownerUsername: 'student', ownerDisplayName: 'Alice Student' };
 const session = (role: Session['role']): Session => ({
   role,
   stepUpExpiresAt: null,
@@ -133,7 +135,9 @@ describe('staff controller diagnostics', () => {
         {
           intentId: userId,
           applicationId: ownerId,
+          applicationSlug: 'weather-dashboard',
           ownerId,
+          ...ownerName,
           kind: 'deploy',
           state: 'failed',
           stage: 'settled',
@@ -167,6 +171,7 @@ const catalogApp = {
   createdAt: new Date().toISOString(),
   repository: 'https://github.com/example/weather-dashboard',
 };
+const appRow = { ...catalogApp, ...ownerName };
 const empty = { items: [], nextCursor: null, truncated: false };
 function staffPage(path: string) {
   return show(path, <StaffPages userId={userId} />);
@@ -238,7 +243,9 @@ describe('staff detail pages', () => {
     // Two active reads per account at most; never two controller reads at once.
     expect(peak).toBe(1);
     expect(screen.getByText('Live')).toBeVisible();
+    // Health badges only where it needs a look: the title and the failing check.
     expect(screen.getAllByText('Unhealthy')).toHaveLength(2);
+    expect(screen.getByText('Healthy').closest('.ui-badge')).toBeNull();
     expect(screen.queryByText(appId)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy app ID' })).toBeVisible();
     // Read-only: refresh and copy are the only buttons.
@@ -254,7 +261,9 @@ describe('staff detail pages', () => {
         {
           intentId: userId,
           applicationId: appId,
+          applicationSlug: 'weather-dashboard',
           ownerId,
+          ...ownerName,
           kind: 'save_configuration',
           state: 'blocked',
           stage: 'recovery',
@@ -270,24 +279,63 @@ describe('staff detail pages', () => {
       nextCursor: null,
       truncated: false,
     });
-    vi.spyOn(staffApi, 'owners').mockResolvedValue({
-      items: [{ ...owner, displayName: 'Alice Student' }],
-      nextCursor: null,
-      truncated: false,
-    });
-    const apps = vi
-      .spyOn(staffApi, 'apps')
-      .mockResolvedValue({ items: [catalogApp], nextCursor: null, truncated: false });
+    const owners = vi.spyOn(staffApi, 'owners');
+    const apps = vi.spyOn(staffApi, 'apps');
     staffPage('/staff/operations');
     expect(await screen.findByRole('heading', { name: 'Activity' })).toBeVisible();
     expect(await screen.findByText('Save settings')).toBeVisible();
     expect(await screen.findByRole('link', { name: 'weather-dashboard' })).toBeVisible();
     expect(await screen.findByRole('link', { name: 'Alice Student' })).toBeVisible();
-    expect(apps).toHaveBeenCalledWith(undefined, undefined, expect.anything(), 50);
+    // Names come with the rows: no directory reads.
+    expect(owners).not.toHaveBeenCalled();
+    expect(apps).not.toHaveBeenCalled();
     expect(screen.getByText('Waiting for the platform')).toBeVisible();
     expect(screen.getByText('Needs attention')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
     expect(screen.queryByText(/controller|intent|operation/i)).not.toBeInTheDocument();
+  });
+  it('badges only staff roles and disabled accounts in the owner list', async () => {
+    vi.spyOn(staffApi, 'owners').mockResolvedValue({
+      items: [
+        owner,
+        {
+          ...owner,
+          ownerId: appId,
+          displayName: 'Taylor',
+          username: 'taylor',
+          role: 'staff',
+        },
+        {
+          ...owner,
+          ownerId: deploymentId,
+          displayName: 'Carol',
+          username: 'carol',
+          portalEnabled: false,
+        },
+      ],
+      nextCursor: null,
+      truncated: false,
+    });
+    staffPage('/staff/owners');
+    expect(await screen.findByText('Taylor')).toBeVisible();
+    expect(screen.getByText('Staff')).toBeVisible();
+    expect(screen.getByText('Disabled')).toBeVisible();
+    expect(screen.queryByText('Active')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh' })).toHaveClass('ui-button--ghost');
+  });
+  it('lists every app with its owner name from the row', async () => {
+    vi.spyOn(staffApi, 'apps').mockResolvedValue({
+      items: [appRow],
+      nextCursor: null,
+      truncated: false,
+    });
+    const owners = vi.spyOn(staffApi, 'owners');
+    staffPage('/staff/apps');
+    expect(await screen.findByRole('link', { name: 'Alice Student' })).toHaveAttribute(
+      'href',
+      `/staff/owners/${ownerId}`,
+    );
+    expect(owners).not.toHaveBeenCalled();
   });
   it('pages through owners with the server cursor', async () => {
     const next = '55555555-5555-4555-8555-555555555555';
@@ -340,6 +388,19 @@ describe('staff data API', () => {
       }),
     );
     await expect(staffApi.owners()).rejects.toThrow('Invalid staff metadata');
+  });
+  it('rejects unknown roles and app rows without owner names', async () => {
+    const reply = (data: unknown) =>
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ data }) }),
+      );
+    reply({ items: [{ ...owner, role: 'root' }], nextCursor: null, truncated: false });
+    await expect(staffApi.owners()).rejects.toThrow('Invalid staff metadata');
+    reply({ items: [catalogApp], nextCursor: null, truncated: false });
+    await expect(staffApi.apps()).rejects.toThrow('Invalid staff metadata');
+    reply({ items: [appRow], nextCursor: null, truncated: false });
+    await expect(staffApi.apps()).resolves.toMatchObject({ items: [appRow] });
   });
   it('drops a late response after credentials and private caches were cleared', async () => {
     let resolve!: (v: unknown) => void;

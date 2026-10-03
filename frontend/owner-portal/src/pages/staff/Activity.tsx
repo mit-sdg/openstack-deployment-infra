@@ -1,18 +1,18 @@
-import { Field, Grid, Page, PageHeader, Section, Select } from '@openstack-platform/ui';
+import { Page, PageHeader, Section } from '@openstack-platform/ui';
 import { useState } from 'react';
-import { useLocation, useSearch } from 'wouter';
+import { useSearch } from 'wouter';
 import { OperationList } from '../../components/Operation';
 import { staffApi } from '../../staffApi';
-import { OwnerFilter } from './Apps';
+import { useOwnerName } from './Apps';
 import {
   ActivityEmpty,
   ActivityItem,
+  AppLink,
+  FilterChip,
   Loaded,
-  nameMap,
+  OwnerLink,
   pager,
   Refresh,
-  useAppNames,
-  useOwnerNames,
   useRead,
 } from './common';
 
@@ -21,64 +21,39 @@ export function StaffOperations() {
   return <ActivityPage key={search} search={search} />;
 }
 
+// Filters come from links on owner and app pages (?ownerId=, ?applicationId=).
 function ActivityPage({ search }: { search: string }) {
   const params = new URLSearchParams(search);
   const ownerId = params.get('ownerId') ?? undefined;
   const applicationId = params.get('applicationId') ?? undefined;
-  const [, navigate] = useLocation();
   const [cursor, setCursor] = useState<string>();
   const activity = useRead(
     ['operations', ownerId, applicationId, cursor],
     (signal) => staffApi.operations(ownerId, applicationId, cursor, signal),
     { poll: true },
   );
-  const loaded = !activity.isPending;
-  const ownerQuery = useOwnerNames(loaded);
-  const appQuery = useAppNames(loaded && !ownerQuery.isPending);
-  const owners = ownerQuery.data?.items ?? [];
-  const apps = appQuery.data?.items ?? [];
-  const appNames = nameMap(
-    apps,
-    (app) => app.applicationId,
-    (app) => app.slug,
-  );
-  const ownerNames = nameMap(
-    owners,
-    (owner) => owner.ownerId,
-    (owner) => owner.displayName,
-  );
-  const choices = apps.filter((app) => !ownerId || app.ownerId === ownerId);
-  function filter(owner?: string, app?: string) {
-    const next = new URLSearchParams();
-    if (owner) next.set('ownerId', owner);
-    if (app) next.set('applicationId', app);
-    navigate(next.size ? `/staff/operations?${next}` : '/staff/operations');
-  }
+  const rows = activity.data?.items;
+  const ownerName = useOwnerName(ownerId, rows);
+  const appName = rows?.[0]?.applicationSlug;
   return (
     <Page>
       <PageHeader title="Activity" actions={<Refresh queries={[activity]} />} />
-      <Grid columns={3}>
-        <OwnerFilter value={ownerId} owners={owners} onChange={(owner) => filter(owner)} />
-        <Field label="App" id="staff-app-filter">
-          <Select
-            value={applicationId ?? ''}
-            onChange={(event) => filter(ownerId, event.target.value || undefined)}
-          >
-            <option value="">All apps</option>
-            {applicationId && !choices.some((app) => app.applicationId === applicationId) && (
-              <option value={applicationId}>
-                {apps.find((app) => app.applicationId === applicationId)?.slug ??
-                  `App ${applicationId.slice(0, 8)}`}
-              </option>
-            )}
-            {choices.map((app) => (
-              <option key={app.applicationId} value={app.applicationId}>
-                {app.slug}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </Grid>
+      {ownerId && (
+        <FilterChip
+          label="Owner"
+          value={<OwnerLink id={ownerId} name={ownerName ?? `Owner ${ownerId.slice(0, 8)}`} />}
+          clear="/staff/operations"
+        />
+      )}
+      {applicationId && (
+        <FilterChip
+          label="App"
+          value={
+            <AppLink id={applicationId} name={appName ?? `App ${applicationId.slice(0, 8)}`} />
+          }
+          clear="/staff/operations"
+        />
+      )}
       <Section flush aria-label="Activity" footer={pager(activity.data, cursor, setCursor)}>
         <Loaded query={activity}>
           {(page) =>
@@ -88,8 +63,8 @@ function ActivityPage({ search }: { search: string }) {
                   <ActivityItem
                     key={item.intentId}
                     item={item}
-                    apps={applicationId ? undefined : appNames}
-                    owners={ownerId || applicationId ? undefined : ownerNames}
+                    showApp={!applicationId}
+                    showOwner={!ownerId && !applicationId}
                   />
                 ))}
               </OperationList>

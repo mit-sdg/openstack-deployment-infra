@@ -9,6 +9,7 @@ import {
   LoadingRows,
   Section,
   backLinkClass,
+  buttonClass,
   type Column,
 } from '@openstack-platform/ui';
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
@@ -19,7 +20,7 @@ import { Status } from '../../components/Status';
 import {
   staffApi,
   type StaffApp,
-  type StaffCatalogApp,
+  type StaffAppRow,
   type StaffDeployment,
   type StaffOperation,
 } from '../../staffApi';
@@ -83,22 +84,7 @@ export function useRead<T>(
 // observation at a time, so pages chain related reads with `enabled`: each
 // starts once the one before it has settled.
 
-// Names for IDs. The first page of owners and apps covers a class; anything
-// else falls back to a compact ID.
 const lookup = { staleTime: 60000 };
-export function useOwnerNames(enabled = true) {
-  return useRead(['directory', 'owners'], (signal) => staffApi.owners(undefined, signal, 50), {
-    ...lookup,
-    enabled,
-  });
-}
-export function useAppNames(enabled = true) {
-  return useRead(
-    ['directory', 'apps'],
-    (signal) => staffApi.apps(undefined, undefined, signal, 50),
-    { ...lookup, enabled },
-  );
-}
 export function useOwner(id: string | undefined, enabled = true) {
   return useRead(['owner', id], (signal) => staffApi.owner(id!, signal), {
     ...lookup,
@@ -127,6 +113,8 @@ export function Refresh({ queries }: { queries: UseQueryResult<unknown>[] }) {
   }, [until]);
   return (
     <Button
+      variant="ghost"
+      size="sm"
       onClick={async () => {
         for (const query of queries) await query.refetch();
       }}
@@ -236,25 +224,49 @@ export function CopyId({
   );
 }
 
-export function OwnerLink({ id, name }: { id: string; name?: string }) {
-  return name ? (
+export function OwnerLink({ id, name }: { id: string; name: string }) {
+  return (
     <Link href={`/staff/owners/${id}`} className="ui-link">
       {name}
     </Link>
-  ) : (
-    <CopyId value={id} label="owner ID" />
   );
 }
 
-export function AppLink({ id, name }: { id: string; name?: string }) {
-  return name ? (
+export function AppLink({ id, name }: { id: string; name: string }) {
+  return (
     <Link href={`/staff/apps/${id}`} className="ui-link">
       {name}
     </Link>
-  ) : (
-    <Link href={`/staff/apps/${id}`} className="ui-link">
-      App <code>{id.slice(0, 8)}</code>
-    </Link>
+  );
+}
+
+/**
+ * Secondary text under a table row's title, shown only on phones, where the
+ * columns it summarises are hidden (candidate for DataTable in shared).
+ */
+export function PhoneDetail({ children }: { children: ReactNode }) {
+  return <span className="staff-row-detail">{children}</span>;
+}
+
+/** Shows only a filter that is set, with a way to clear it. */
+export function FilterChip({
+  label,
+  value,
+  clear,
+}: {
+  label: string;
+  value: ReactNode;
+  clear: string;
+}) {
+  return (
+    <Cluster gap={2} className="ui-text-sm">
+      <span className="ui-text-muted">{label}</span>
+      {value}
+      <Link href={clear} className={buttonClass({ variant: 'ghost', size: 'sm' })}>
+        <Icon name="x" />
+        Clear filter
+      </Link>
+    </Cluster>
   );
 }
 
@@ -277,6 +289,13 @@ export function AppHealth({ app }: { app: StaffApp }) {
   return <Status state="unknown" />;
 }
 
+/** One health check as a detail value: plain text, a badge only when it needs a look. */
+export function HealthValue({ state }: { state: string }) {
+  if (state === 'healthy') return <>Healthy</>;
+  if (state === 'stopped') return <>Stopped</>;
+  return <Status state={state} label={state === 'unknown' ? 'Unknown' : undefined} />;
+}
+
 const deploymentStates: Record<string, [string, string]> = {
   queued: ['prepared', 'Queued'],
   building: ['accepted', 'Building'],
@@ -290,16 +309,26 @@ export function DeploymentStatus({ status }: { status: string }) {
   return <Status state={state} label={label} />;
 }
 
-export function appColumns(owners?: Map<string, string>): Column<StaffCatalogApp>[] {
+/** App table columns; without the owner column, phones show two-line rows. */
+export function appColumns(showOwner: boolean): Column<StaffAppRow>[] {
+  const detail = showOwner ? 'field' : 'hidden';
   return [
     {
       key: 'name',
       header: 'Name',
       mobile: 'title',
       cell: (app) => (
-        <Link href={`/staff/apps/${app.applicationId}`} className="ui-link ui-link--plain">
-          {app.slug}
-        </Link>
+        <>
+          <Link href={`/staff/apps/${app.applicationId}`} className="ui-link ui-link--plain">
+            {app.slug}
+          </Link>
+          {!showOwner && (
+            <PhoneDetail>
+              {repositoryName(app.repository) ?? 'No repository'}
+              {app.createdAt && ` · ${relativeTime(app.createdAt)}`}
+            </PhoneDetail>
+          )}
+        </>
       ),
     },
     {
@@ -308,37 +337,42 @@ export function appColumns(owners?: Map<string, string>): Column<StaffCatalogApp
       mobile: 'trailing',
       cell: (app) => <Lifecycle state={app.lifecycleState} />,
     },
-    ...(owners
+    ...(showOwner
       ? [
           {
             key: 'owner',
             header: 'Owner',
-            cell: (app: StaffCatalogApp) => (
-              <OwnerLink id={app.ownerId} name={owners.get(app.ownerId)} />
-            ),
+            cell: (app: StaffAppRow) => <OwnerLink id={app.ownerId} name={app.ownerDisplayName} />,
           },
         ]
       : []),
     {
       key: 'repository',
       header: 'Repository',
+      mobile: detail,
       cell: (app) => <Repository url={app.repository} />,
     },
     {
       key: 'created',
       header: 'Created',
+      mobile: detail,
       cell: (app) => <When value={app.createdAt} />,
     },
   ];
 }
 
-export function Repository({ url }: { url: string | null }) {
-  if (!url) return <span className="ui-text-subtle">Not set</span>;
+function repositoryName(url: string | null) {
+  if (!url) return null;
   const { hostname, pathname } = new URL(url);
   const path = pathname.replace(/^\/|\.git$|\/$/g, '');
+  return hostname === 'github.com' && path ? path : hostname + (path ? `/${path}` : '');
+}
+
+export function Repository({ url }: { url: string | null }) {
+  if (!url) return <span className="ui-text-subtle">Not set</span>;
   return (
     <a className="ui-link ui-break" href={url} target="_blank" rel="noopener noreferrer">
-      {hostname === 'github.com' && path ? path : hostname + (path ? `/${path}` : '')}
+      {repositoryName(url)}
     </a>
   );
 }
@@ -360,6 +394,9 @@ export function deploymentColumns(app: string, live?: string | null): Column<Sta
             </code>
           </Link>
           {deployment.deploymentId === live && <Status state="running" label="Live" />}
+          {deployment.requestedAt && (
+            <PhoneDetail>Started {relativeTime(deployment.requestedAt)}</PhoneDetail>
+          )}
         </Cluster>
       ),
     },
@@ -372,11 +409,13 @@ export function deploymentColumns(app: string, live?: string | null): Column<Sta
     {
       key: 'requested',
       header: 'Started',
+      mobile: 'hidden',
       cell: (deployment) => <When value={deployment.requestedAt} />,
     },
     {
       key: 'accepted',
       header: 'Went live',
+      mobile: 'hidden',
       cell: (deployment) => <When value={deployment.acceptedAt} />,
     },
   ];
@@ -425,12 +464,12 @@ const finished = ['succeeded', 'failed', 'blocked'];
 /** One activity row. Read-only: no resume or retry actions. */
 export function ActivityItem({
   item,
-  apps,
-  owners,
+  showApp = true,
+  showOwner = true,
 }: {
   item: StaffOperation;
-  apps?: Map<string, string>;
-  owners?: Map<string, string>;
+  showApp?: boolean;
+  showOwner?: boolean;
 }) {
   const progress =
     item.attention === 'awaiting_controller'
@@ -444,8 +483,8 @@ export function ActivityItem({
       title={kinds[item.kind] ?? 'Other change'}
       meta={
         <>
-          {apps && <AppLink id={item.applicationId} name={apps.get(item.applicationId)} />}
-          {owners && <OwnerLink id={item.ownerId} name={owners.get(item.ownerId)} />}
+          {showApp && <AppLink id={item.applicationId} name={item.applicationSlug} />}
+          {showOwner && <OwnerLink id={item.ownerId} name={item.ownerDisplayName} />}
           {progress && <span>{progress}</span>}
           <When value={item.createdAt} />
         </>
@@ -474,15 +513,11 @@ export function ActivityItem({
   );
 }
 
-export function nameMap<T>(items: T[], id: (item: T) => string, name: (item: T) => string) {
-  return new Map(items.map((item) => [id(item), name(item)]));
-}
-
 export function ActivityEmpty({ filtered }: { filtered?: boolean }) {
   return (
     <EmptyState title="No activity yet">
       {filtered
-        ? 'Nothing matches these filters yet.'
+        ? 'Nothing matches this filter yet.'
         : 'New apps, saved settings and deploys will appear here.'}
     </EmptyState>
   );

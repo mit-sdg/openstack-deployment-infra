@@ -5,7 +5,10 @@ export type StaffOwner = {
   username: string;
   displayName: string;
   portalEnabled: boolean;
+  role: 'owner' | 'staff' | 'admin';
 };
+/** Owner names that list rows carry, so lists need no per-owner reads. */
+type OwnerName = { ownerUsername: string; ownerDisplayName: string };
 export type StaffCatalogApp = {
   applicationId: string;
   ownerId: string;
@@ -15,6 +18,7 @@ export type StaffCatalogApp = {
   createdAt: string | null;
   repository: string | null;
 };
+export type StaffAppRow = StaffCatalogApp & OwnerName;
 export type StaffApp = StaffCatalogApp & {
   url: string | null;
   desiredRunning: boolean;
@@ -40,9 +44,10 @@ export type StaffDeployment = {
   acceptedAt: string | null;
   lastHealthyAt: string | null;
 };
-export type StaffOperation = {
+export type StaffOperation = OwnerName & {
   intentId: string;
   applicationId: string;
+  applicationSlug: string;
   ownerId: string;
   kind: string;
   state: string;
@@ -102,7 +107,9 @@ const ownerChecks = {
   username: text(32),
   displayName: text(256),
   portalEnabled: bool,
+  role: state('owner', 'staff', 'admin'),
 };
+const ownerName = { ownerUsername: text(32), ownerDisplayName: text(256) };
 const owner = (v: unknown) => shape<StaffOwner>(v, ownerChecks);
 const catalogChecks = {
   applicationId: id,
@@ -113,7 +120,7 @@ const catalogChecks = {
   createdAt: stamp,
   repository: url,
 };
-const catalog = (v: unknown) => shape<StaffCatalogApp>(v, catalogChecks);
+const catalog = (v: unknown) => shape<StaffAppRow>(v, { ...catalogChecks, ...ownerName });
 const health = state('healthy', 'unhealthy', 'stopped', 'unknown');
 const app = (v: unknown) =>
   shape<StaffApp>(v, {
@@ -158,7 +165,9 @@ const operation = (v: unknown) =>
   shape<StaffOperation>(v, {
     intentId: id,
     applicationId: id,
+    applicationSlug: text(40),
     ownerId: id,
+    ...ownerName,
     kind: state('create_app', 'save_configuration', 'deploy', 'unknown'),
     state: state('prepared', 'unknown', 'accepted', 'succeeded', 'failed', 'blocked'),
     stage: state('queued', 'building', 'deploying', 'verifying', 'settled', 'recovery', 'unknown'),
@@ -196,44 +205,49 @@ function query(values: Record<string, string | undefined>) {
   for (const [key, value] of Object.entries(values)) if (value) params.set(key, value);
   return params.size ? `?${params}` : '';
 }
-// Reads run straight away so request() captures the credential epoch at call
-// time. Pages chain related reads (see pages/staff/common.tsx) to stay within
-// the broker's two active reads per account and one controller observation.
-const read = <T>(path: string, decode: (v: unknown) => T, signal?: AbortSignal) =>
-  request(path, decode, undefined, false, signal);
-const pageSize = (limit?: number) => (limit ? String(limit) : undefined);
 export const staffApi = {
-  owners: (cursor?: string, signal?: AbortSignal, limit?: number) =>
-    read(
-      '/staff/owners' + query({ limit: pageSize(limit), cursor }),
-      (v) => page(v, owner),
-      signal,
-    ),
+  owners: (cursor?: string, signal?: AbortSignal) =>
+    request('/staff/owners' + query({ cursor }), (v) => page(v, owner), undefined, false, signal),
   owner: (ownerId: string, signal?: AbortSignal) =>
-    read(
+    request(
       `/staff/owners/${ownerId}`,
       (v) => shape<StaffOwner & { quota: Quota }>(v, { ...ownerChecks, quota }),
+      undefined,
+      false,
       signal,
     ),
-  apps: (ownerId?: string, cursor?: string, signal?: AbortSignal, limit?: number) =>
-    read(
-      '/staff/apps' + query({ ownerId, limit: pageSize(limit), cursor }),
+  apps: (ownerId?: string, cursor?: string, signal?: AbortSignal) =>
+    request(
+      '/staff/apps' + query({ ownerId, cursor }),
       (v) => page(v, catalog),
+      undefined,
+      false,
       signal,
     ),
-  app: (appId: string, signal?: AbortSignal) => read(`/staff/apps/${appId}`, app, signal),
+  app: (appId: string, signal?: AbortSignal) =>
+    request(`/staff/apps/${appId}`, app, undefined, false, signal),
   deployments: (appId: string, cursor?: string, signal?: AbortSignal) =>
-    read(
+    request(
       `/staff/apps/${appId}/deployments` + query({ cursor }),
       (v) => page(v, deployment),
+      undefined,
+      false,
       signal,
     ),
   deployment: (appId: string, deploymentId: string, signal?: AbortSignal) =>
-    read(`/staff/apps/${appId}/deployments/${deploymentId}`, deployment, signal),
+    request(
+      `/staff/apps/${appId}/deployments/${deploymentId}`,
+      deployment,
+      undefined,
+      false,
+      signal,
+    ),
   operations: (ownerId?: string, applicationId?: string, cursor?: string, signal?: AbortSignal) =>
-    read(
+    request(
       '/staff/operations' + query({ ownerId, applicationId, cursor }),
       (v) => page(v, operation),
+      undefined,
+      false,
       signal,
     ),
 };

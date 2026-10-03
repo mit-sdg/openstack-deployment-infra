@@ -3,19 +3,15 @@ import {
   BoundaryText,
   Cluster,
   ErrorAlert,
-  Field,
-  Grid,
   KeyValueList,
   Page,
   PageHeader,
   PageSkeleton,
   Section,
-  Select,
 } from '@openstack-platform/ui';
-import { Link, useLocation, useSearch } from 'wouter';
+import { Link, useSearch } from 'wouter';
 import { OperationList } from '../../components/Operation';
 import { staffApi } from '../../staffApi';
-import { Status } from '../../components/Status';
 import { short } from '../../utils/presentation';
 import {
   ActivityEmpty,
@@ -25,70 +21,42 @@ import {
   CopyId,
   DeploymentTable,
   Loaded,
-  nameMap,
+  FilterChip,
+  HealthValue,
   OwnerLink,
   Preview,
   Refresh,
   Repository,
   When,
   useOwner,
-  useOwnerNames,
   useRead,
 } from './common';
 import { AppsSection, useAppPage } from './Owners';
 
-/** Owner filter for lists. Owners outside the first page keep a compact label. */
-export function OwnerFilter({
-  value,
-  owners,
-  onChange,
-}: {
-  value?: string;
-  owners: { ownerId: string; displayName: string }[];
-  onChange: (owner?: string) => void;
-}) {
-  return (
-    <Field label="Owner" id="staff-owner-filter">
-      <Select value={value ?? ''} onChange={(event) => onChange(event.target.value || undefined)}>
-        <option value="">All owners</option>
-        {value && !owners.some((owner) => owner.ownerId === value) && (
-          <option value={value}>Owner {value.slice(0, 8)}</option>
-        )}
-        {owners.map((owner) => (
-          <option key={owner.ownerId} value={owner.ownerId}>
-            {owner.displayName}
-          </option>
-        ))}
-      </Select>
-    </Field>
-  );
+/** An owner's name for a filter: from the listed rows, else one owner read. */
+export function useOwnerName(
+  id: string | undefined,
+  rows: { ownerDisplayName: string }[] | undefined,
+) {
+  const lookup = useOwner(id, !!rows && !rows.length);
+  return rows?.[0]?.ownerDisplayName ?? lookup.data?.displayName;
 }
 
 export function StaffApps() {
   const ownerId = new URLSearchParams(useSearch()).get('ownerId') ?? undefined;
-  const [, navigate] = useLocation();
   const page = useAppPage(ownerId);
-  const owners = useOwnerNames(!page.query.isPending).data?.items ?? [];
+  const name = useOwnerName(ownerId, page.query.data?.items);
   return (
     <Page>
       <PageHeader title="All apps" actions={<Refresh queries={[page.query]} />} />
-      <Grid columns={3}>
-        <OwnerFilter
-          value={ownerId}
-          owners={owners}
-          onChange={(owner) => navigate(owner ? `/staff/apps?ownerId=${owner}` : '/staff/apps')}
+      {ownerId && (
+        <FilterChip
+          label="Owner"
+          value={<OwnerLink id={ownerId} name={name ?? `Owner ${ownerId.slice(0, 8)}`} />}
+          clear="/staff/apps"
         />
-      </Grid>
-      <AppsSection
-        key={ownerId ?? 'all'}
-        page={page}
-        filtered={!!ownerId}
-        owners={nameMap(
-          owners,
-          (owner) => owner.ownerId,
-          (owner) => owner.displayName,
-        )}
-      />
+      )}
+      <AppsSection key={ownerId ?? 'all'} page={page} filtered={!!ownerId} showOwner />
     </Page>
   );
 }
@@ -105,7 +73,7 @@ export function StaffAppPage({ id }: { id: string }) {
     (signal) => staffApi.operations(undefined, id, undefined, signal),
     { poll: true, enabled: app.isSuccess && !deployments.isPending },
   );
-  const owner = useOwner(app.data?.ownerId, !activity.isPending);
+  const ownerName = useOwnerName(app.data?.ownerId, activity.data?.items);
   const back = <Back href="/staff/apps">All apps</Back>;
   if (app.isPending) return <PageSkeleton />;
   if (app.error)
@@ -146,7 +114,11 @@ export function StaffAppPage({ id }: { id: string }) {
           items={[
             {
               label: 'Owner',
-              value: <OwnerLink id={data.ownerId} name={owner.data?.displayName} />,
+              value: ownerName ? (
+                <OwnerLink id={data.ownerId} name={ownerName} />
+              ) : (
+                <CopyId value={data.ownerId} label="owner ID" />
+              ),
             },
             { label: 'Created', value: <When value={data.createdAt} /> },
             { label: 'Repository', value: <Repository url={data.repository} /> },
@@ -173,8 +145,8 @@ export function StaffAppPage({ id }: { id: string }) {
               label: 'Health checked',
               value: <When value={data.observedAt} empty="Not checked yet" />,
             },
-            { label: 'App health', value: <Status state={data.health.process} /> },
-            { label: 'URL health', value: <Status state={data.health.route} /> },
+            { label: 'App health', value: <HealthValue state={data.health.process} /> },
+            { label: 'URL health', value: <HealthValue state={data.health.route} /> },
           ]}
         />
       </Section>
@@ -203,7 +175,7 @@ export function StaffAppPage({ id }: { id: string }) {
             page.items.length ? (
               <OperationList label="Recent activity">
                 {page.items.slice(0, 5).map((item) => (
-                  <ActivityItem key={item.intentId} item={item} />
+                  <ActivityItem key={item.intentId} item={item} showApp={false} showOwner={false} />
                 ))}
               </OperationList>
             ) : (

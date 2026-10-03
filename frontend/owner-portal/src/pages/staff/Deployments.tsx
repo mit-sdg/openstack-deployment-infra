@@ -83,7 +83,10 @@ export function StaffDeploymentPage({ id, deployment }: { id: string; deployment
         <KeyValueList
           columns={2}
           items={[
-            { label: 'App', value: <AppLink id={id} name={app.data?.slug} /> },
+            {
+              label: 'App',
+              value: <AppLink id={id} name={app.data?.slug ?? `App ${id.slice(0, 8)}`} />,
+            },
             {
               label: 'Commit',
               value: data.repositoryCommit ? (
