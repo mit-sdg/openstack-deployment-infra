@@ -13,6 +13,7 @@ import {
   DataTable,
   Dialog,
   ErrorAlert,
+  KeyValueList,
   LoadError,
   Field,
   Input,
@@ -386,5 +387,26 @@ describe("round 3 pieces", () => {
     expect(alert).not.toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledOnce();
+  });
+});
+
+describe("key-value lists", () => {
+  it("stacks only long values on phones", () => {
+    const { container } = render(
+      <KeyValueList
+        items={[
+          { label: "Branch", value: "main" },
+          {
+            label: "Repository",
+            value: "https://github.com/example/a-very-long-repository-name",
+          },
+          { label: "Link", value: <a href="#x">x</a>, stacked: true },
+        ]}
+      />,
+    );
+    const items = [...container.querySelectorAll(".ui-kv__item")];
+    expect(
+      items.map((item) => item.classList.contains("ui-kv__item--stacked")),
+    ).toEqual([false, true, true]);
   });
 });

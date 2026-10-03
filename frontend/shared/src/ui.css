@@ -1663,7 +1663,7 @@
   .ui-skeleton-table__row {
     padding-top: var(--ui-cell-padding-y);
     padding-bottom: var(--ui-cell-padding-y);
-    min-height: calc(var(--ui-badge-height) + 2 * var(--ui-cell-padding-y));
+    min-height: var(--ui-table-row-height);
     border-top: 1px solid var(--ui-border);
   }
   .ui-skeleton-table__head + .ui-skeleton-table__row {
@@ -1735,7 +1735,9 @@
     text-align: left;
     white-space: nowrap;
   }
+  /* Fixed row height, with or without a badge in the row. */
   .ui-table td {
+    height: var(--ui-table-row-height);
     padding: var(--ui-cell-padding-y) var(--ui-cell-padding-x);
     border-top: 1px solid var(--ui-border);
     vertical-align: middle;
@@ -1815,6 +1817,7 @@
     .ui-table tbody td,
     .ui-table tbody td:first-child,
     .ui-table tbody td:last-child {
+      height: auto;
       display: block;
       min-width: 0;
       padding: 0;
@@ -2037,13 +2040,23 @@
       border-top: 1px solid var(--ui-border);
       padding-top: var(--ui-space-3);
     }
+    /* Phones: label left, value right, like stacked table cards. */
     .ui-kv__item {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 0;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: baseline;
+      gap: var(--ui-space-4);
     }
     .ui-kv dt {
+      color: var(--ui-text-subtle);
       font-size: var(--ui-text-sm);
       line-height: var(--ui-leading-sm);
+    }
+    .ui-kv__item:not(.ui-kv__item--stacked) dd {
+      text-align: end;
+    }
+    .ui-kv__item--stacked {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
     }
   }
 

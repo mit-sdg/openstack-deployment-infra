@@ -119,6 +119,8 @@
   --ui-section-header-height: 56px;
   --ui-cell-padding-y: 12px;
   --ui-cell-padding-x: 16px;
+  /* Every table row, with or without a badge (border included). */
+  --ui-table-row-height: 48px;
   --ui-row-padding-y: 12px;
   --ui-row-padding-y-compact: 10px;
 

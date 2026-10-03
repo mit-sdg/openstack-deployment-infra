@@ -180,22 +180,46 @@ export function ListItem({
   );
 }
 
-/** Label/value pairs. Two columns on wide screens, stacked on phones. */
+/** Text values longer than this stack under their label on phones. */
+const inlineLimit = 28;
+
+/**
+ * Label/value pairs. Wide screens: a label column and a value column.
+ * Phones: label left and value right on one line, like stacked table
+ * cards; long text values (or items with `stacked`) put the value under the
+ * label instead.
+ */
 export function KeyValueList({
   items,
   columns = 1,
 }: {
-  items: { label: ReactNode; value: ReactNode; key?: string }[];
+  items: {
+    label: ReactNode;
+    value: ReactNode;
+    key?: string;
+    /** Force the stacked phone layout, e.g. for long links or paragraphs. */
+    stacked?: boolean;
+  }[];
   columns?: 1 | 2;
 }) {
   return (
     <dl className={`ui-kv ui-kv--${columns}`}>
-      {items.map((item, index) => (
-        <div className="ui-kv__item" key={item.key ?? index}>
-          <dt>{item.label}</dt>
-          <dd>{item.value}</dd>
-        </div>
-      ))}
+      {items.map((item, index) => {
+        const stacked =
+          item.stacked ??
+          (typeof item.value === "string" && item.value.length > inlineLimit);
+        return (
+          <div
+            className={
+              stacked ? "ui-kv__item ui-kv__item--stacked" : "ui-kv__item"
+            }
+            key={item.key ?? index}
+          >
+            <dt>{item.label}</dt>
+            <dd>{item.value}</dd>
+          </div>
+        );
+      })}
     </dl>
   );
 }
