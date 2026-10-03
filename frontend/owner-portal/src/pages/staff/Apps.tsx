@@ -6,7 +6,6 @@ import {
   Field,
   Grid,
   KeyValueList,
-  List,
   Page,
   PageHeader,
   PageSkeleton,
@@ -14,6 +13,7 @@ import {
   Select,
 } from '@openstack-platform/ui';
 import { Link, useLocation, useSearch } from 'wouter';
+import { OperationList } from '../../components/Operation';
 import { staffApi } from '../../staffApi';
 import { Status } from '../../components/Status';
 import { short } from '../../utils/presentation';
@@ -201,11 +201,11 @@ export function StaffAppPage({ id }: { id: string }) {
         <Loaded query={activity}>
           {(page) =>
             page.items.length ? (
-              <List label="Recent activity">
+              <OperationList label="Recent activity">
                 {page.items.slice(0, 5).map((item) => (
                   <ActivityItem key={item.intentId} item={item} />
                 ))}
-              </List>
+              </OperationList>
             ) : (
               <ActivityEmpty />
             )

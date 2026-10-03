@@ -87,7 +87,7 @@ export function StaffDeploymentPage({ id, deployment }: { id: string; deployment
             {
               label: 'Commit',
               value: data.repositoryCommit ? (
-                <CopyId value={data.repositoryCommit} label="commit" />
+                <CopyId value={data.repositoryCommit} label="commit" length={9} />
               ) : (
                 <span className="ui-text-subtle">Unknown</span>
               ),

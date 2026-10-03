@@ -1,6 +1,7 @@
-import { Field, Grid, List, Page, PageHeader, Section, Select } from '@openstack-platform/ui';
+import { Field, Grid, Page, PageHeader, Section, Select } from '@openstack-platform/ui';
 import { useState } from 'react';
 import { useLocation, useSearch } from 'wouter';
+import { OperationList } from '../../components/Operation';
 import { staffApi } from '../../staffApi';
 import { OwnerFilter } from './Apps';
 import {
@@ -82,7 +83,7 @@ function ActivityPage({ search }: { search: string }) {
         <Loaded query={activity}>
           {(page) =>
             page.items.length ? (
-              <List label="Activity">
+              <OperationList label="Activity">
                 {page.items.map((item) => (
                   <ActivityItem
                     key={item.intentId}
@@ -91,7 +92,7 @@ function ActivityPage({ search }: { search: string }) {
                     owners={ownerId || applicationId ? undefined : ownerNames}
                   />
                 ))}
-              </List>
+              </OperationList>
             ) : (
               <ActivityEmpty filtered={!!(ownerId || applicationId)} />
             )

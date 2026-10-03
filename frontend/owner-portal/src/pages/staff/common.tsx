@@ -13,7 +13,7 @@ import {
 } from '@openstack-platform/ui';
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { Link } from 'wouter';
+import { Link, useLocation } from 'wouter';
 import { ApiError, type Page } from '../../api';
 import { Status } from '../../components/Status';
 import {
@@ -198,11 +198,20 @@ export function When({ value, empty = '—' }: { value: string | null | undefine
 }
 
 /** First block of an ID with a button that copies the whole ID. */
-export function CopyId({ value, label }: { value: string; label: string }) {
+export function CopyId({
+  value,
+  label,
+  length = 8,
+}: {
+  value: string;
+  label: string;
+  /** Characters shown; commits use 9 to match the rest of the portal. */
+  length?: number;
+}) {
   const [copied, setCopied] = useState(false);
   return (
     <span className="staff-id">
-      <code title={value}>{value.slice(0, 8)}</code>
+      <code title={value}>{value.slice(0, length)}</code>
       <button
         type="button"
         className="staff-id__copy"
@@ -382,12 +391,16 @@ export function DeploymentTable({
   live?: string | null;
   rows: StaffDeployment[];
 }) {
+  const [, navigate] = useLocation();
   return (
     <DataTable
       label="Deployments"
       columns={deploymentColumns(app, live)}
       rows={rows}
       rowKey={(deployment) => deployment.deploymentId}
+      onRowClick={(deployment) =>
+        navigate(`/staff/apps/${app}/deployments/${deployment.deploymentId}`)
+      }
       empty={
         <EmptyState title="No deployments yet">Deploys of this app will appear here.</EmptyState>
       }
@@ -437,7 +450,14 @@ export function ActivityItem({
           <When value={item.createdAt} />
         </>
       }
-      trailing={<Status state={item.state} />}
+      trailing={
+        // Success is the norm in feeds: no badge, but screen readers hear it.
+        item.state === 'succeeded' ? (
+          <span className="ui-sr-only">Succeeded</span>
+        ) : (
+          <Status state={item.state} />
+        )
+      }
     >
       {(item.guidance || item.controllerErrorCode) && (
         <p className={`ui-text-sm ${problem ? 'ui-text-danger' : 'ui-text-muted'}`}>

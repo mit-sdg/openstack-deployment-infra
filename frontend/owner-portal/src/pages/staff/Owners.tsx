@@ -3,7 +3,6 @@ import {
   DataTable,
   EmptyState,
   KeyValueList,
-  List,
   Page,
   PageHeader,
   PageSkeleton,
@@ -12,7 +11,8 @@ import {
   type Column,
 } from '@openstack-platform/ui';
 import { useState } from 'react';
-import { Link } from 'wouter';
+import { Link, useLocation } from 'wouter';
+import { OperationList } from '../../components/Operation';
 import { staffApi, type StaffOwner } from '../../staffApi';
 import {
   ActivityEmpty,
@@ -59,6 +59,7 @@ const ownerColumns: Column<StaffOwner>[] = [
 export function StaffOwners() {
   const [cursor, setCursor] = useState<string>();
   const owners = useRead(['owners', cursor], (signal) => staffApi.owners(cursor, signal));
+  const [, navigate] = useLocation();
   return (
     <Page>
       <PageHeader title="Owners" actions={<Refresh queries={[owners]} />} />
@@ -70,6 +71,7 @@ export function StaffOwners() {
               columns={ownerColumns}
               rows={page.items}
               rowKey={(owner) => owner.ownerId}
+              onRowClick={(owner) => navigate(`/staff/owners/${owner.ownerId}`)}
               empty={
                 <EmptyState title="No owners yet">
                   People appear here after they first sign in.
@@ -105,6 +107,7 @@ export function AppsSection({
   title?: string;
   filtered?: boolean;
 }) {
+  const [, navigate] = useLocation();
   return (
     <Section
       title={title}
@@ -119,6 +122,7 @@ export function AppsSection({
             columns={appColumns(owners)}
             rows={page.items}
             rowKey={(app) => app.applicationId}
+            onRowClick={(app) => navigate(`/staff/apps/${app.applicationId}`)}
             empty={
               <EmptyState title="No apps yet">
                 {filtered
@@ -186,11 +190,11 @@ export function StaffOwnerPage({ id }: { id: string }) {
         <Loaded query={activity}>
           {(page) =>
             page.items.length ? (
-              <List label="Recent activity">
+              <OperationList label="Recent activity">
                 {page.items.slice(0, 5).map((item) => (
                   <ActivityItem key={item.intentId} item={item} apps={apps} />
                 ))}
-              </List>
+              </OperationList>
             ) : (
               <ActivityEmpty />
             )
