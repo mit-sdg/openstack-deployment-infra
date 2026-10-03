@@ -18,7 +18,8 @@ from ...controller.http import (
     Response,
     Router,
 )
-from ...validation import ValidationError, slug, uuid
+from ...controller.storage_contract import RESOURCE_OUTPUTS
+from ...validation import ValidationError, env_key, slug, uuid
 from ..common import canonical, digest, strict_json, utc
 
 
@@ -28,6 +29,8 @@ class FakeController:
         self.deployments: dict[str, dict[str, Any]] = {}
         self.operations: dict[str, dict[str, Any]] = {}
         self.keys: dict[str, tuple[str, Response]] = {}
+        self.environments: dict[str, dict[str, Any]] = {}
+        self.resources: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str, str | None]] = []
         self.lock = threading.RLock()
         self.drop_next = False
@@ -40,6 +43,8 @@ class FakeController:
             if state_file.is_symlink() or state_file.stat().st_size > 1048576:
                 raise ValueError("invalid fake controller state")
             saved = strict_json(state_file.read_bytes())
+            self.environments = saved.get("environments", {})
+            self.resources = saved.get("resources", {})
             self.apps, self.deployments, self.operations = (
                 saved["apps"],
                 saved["deployments"],
@@ -91,6 +96,8 @@ class FakeController:
             return
         value = {
             "apps": self.apps,
+            "environments": self.environments,
+            "resources": self.resources,
             "deployments": self.deployments,
             "operations": self.operations,
             "keys": {
@@ -126,6 +133,13 @@ class FakeController:
             ("GET", "/v1/deployments/{deployment}", self.deployment),
             ("GET", "/v1/deployments/{deployment}/build-log", self.log),
             ("GET", "/v1/operations/{operation}", self.operation),
+            ("GET", "/v1/applications/{app}/environment", self.environment),
+            ("PUT", "/v1/applications/{app}/environment/{key}", self.environment_write),
+            ("DELETE", "/v1/applications/{app}/environment/{key}", self.environment_write),
+            ("GET", "/v1/applications/{app}/storage", self.storage),
+            ("POST", "/v1/applications/{app}/storage", self.storage_create),
+            ("POST", "/v1/storage/{resource}/verify", self.storage_action),
+            ("POST", "/v1/storage/{resource}/rotate", self.storage_action),
         ]
         for method, path, handler in routes:
 
@@ -147,8 +161,11 @@ class FakeController:
                             else None,
                         )
                     try:
-                        for identifier in request.path_parameters.values():
-                            uuid(identifier)
+                        for field, identifier in request.path_parameters.items():
+                            if field == "key":
+                                env_key(identifier)
+                            else:
+                                uuid(identifier)
                         return handler(request)  # type: ignore[no-any-return]
                     except ValidationError:
                         raise HttpError(
@@ -324,6 +341,18 @@ class FakeController:
         if operation is None:
             raise HttpError(404, "OPERATION_NOT_FOUND", "Operation does not exist.")
         if operation["status"] == "running" and time.time() >= operation["ready"]:
+            if operation["kind"] != "app.deploy":
+                operation.update(
+                    status="succeeded",
+                    phase="accepted",
+                    cleanupState="not_required",
+                    updatedAt=utc(time.time()),
+                )
+                for resource in self.resources.values():
+                    if operation["scope"] == f"app-{resource['applicationId']}":
+                        resource.update(lifecycleState="active", lastVerifiedAt=utc(time.time()))
+                self.persist()
+                return Response(200, {k: v for k, v in operation.items() if k != "ready"})
             attempt = self.deployments[identifier]
             if operation["fixtureRecovery"]:
                 operation.update(
@@ -461,3 +490,116 @@ class FakeController:
             "nextCursor": selected[-1]["deploymentId"] if more and selected else None,
             "truncated": more,
         }
+
+    def resource_operation(self, request: Request, app_id: str, kind: str) -> Response:
+        identifier = request.idempotency_key()
+        self.operations[identifier] = {
+            "operationId": identifier,
+            "scope": f"app-{app_id}",
+            "kind": kind,
+            "status": "running",
+            "phase": "provisioning",
+            "cleanupState": "not_required",
+            "updatedAt": utc(time.time()),
+            "ready": time.time() + self.delay,
+        }
+        return self.remember(
+            request,
+            Response(
+                202,
+                {
+                    "operationId": identifier,
+                    "statusUrl": f"/v1/operations/{identifier}",
+                    "result": {"kind": "operation", "id": identifier},
+                },
+            ),
+        )
+
+    def environment(self, request: Request) -> Response:
+        app = request.path_parameters["app"]
+        if app not in self.apps:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        return Response(
+            200,
+            {
+                "applicationId": app,
+                **self.environments.get(
+                    app, {"revision": 0, "updatedAt": utc(time.time()), "keys": []}
+                ),
+            },
+        )
+
+    def environment_write(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay:
+            return replay
+        app = request.path_parameters["app"]
+        self.environment(request)
+        name = env_key(request.path_parameters["key"])
+        environment = self.environments.setdefault(app, {"revision": 0, "keys": []})
+        names = {item["name"] for item in environment["keys"]}
+        if request.method == "PUT":
+            self.body(request, {"value"})
+            names.add(name)
+        else:
+            names.discard(name)
+        environment.update(
+            keys=[{"name": n, "owner": "staff"} for n in sorted(names)],
+            revision=environment["revision"] + 1,
+            updatedAt=utc(time.time()),
+        )
+        return self.resource_operation(
+            request, app, "app.env.set" if request.method == "PUT" else "app.env.unset"
+        )
+
+    def storage(self, request: Request) -> Response:
+        app = request.path_parameters["app"]
+        if app not in self.apps:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        return Response(
+            200,
+            {
+                "items": [r for r in self.resources.values() if r["applicationId"] == app],
+                "nextCursor": None,
+                "truncated": False,
+            },
+        )
+
+    def storage_create(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay:
+            return replay
+        self.storage(request)
+        app = request.path_parameters["app"]
+        body = self.body(request, {"type"})
+        if body["type"] not in RESOURCE_OUTPUTS:
+            raise HttpError(400, "INVALID_REQUEST", "Invalid storage type.")
+        if any(
+            r["type"] == body["type"] and r["applicationId"] == app for r in self.resources.values()
+        ):
+            raise HttpError(409, "INVALID_REQUEST", "Storage exists.")
+        identifier = request.idempotency_key()
+        self.resources[identifier] = {
+            "resourceId": identifier,
+            "applicationId": app,
+            "type": body["type"],
+            "name": "default",
+            "displayLabel": None,
+            "lifecycleState": "creating",
+            "createdAt": utc(time.time()),
+            "updatedAt": utc(time.time()),
+            "lastVerifiedAt": None,
+            "quotas": {},
+        }
+        return self.resource_operation(request, app, "storage.create")
+
+    def storage_action(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay:
+            return replay
+        resource = self.resources.get(request.path_parameters["resource"])
+        if resource is None:
+            raise HttpError(404, "STORAGE_NOT_FOUND", "Storage does not exist.")
+        return self.resource_operation(
+            request, resource["applicationId"], "storage." + request.path.rsplit("/", 1)[1]
+        )

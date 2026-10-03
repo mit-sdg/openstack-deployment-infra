@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { api, validateSettings, type Settings } from '../api';
+import { api, validateSettings, validateBindings, type Settings } from '../api';
 import { AppFrame } from '../components/AppFrame';
+import { EnvironmentSection } from '../components/EnvironmentSection';
+import { StorageSection } from '../components/StorageSection';
 import { ErrorNotice, Loading } from '../components/Feedback';
 
 export function ConfigurationPage({ id }: { id: string }) {
@@ -13,13 +15,26 @@ export function ConfigurationPage({ id }: { id: string }) {
       ) : query.error ? (
         <ErrorNotice error={query.error} />
       ) : (
-        <ConfigurationForm key={id} id={id} initial={query.data!} />
+        <ConfigurationForm key={id} id={id} initial={query.data!} resources />
       )}
     </AppFrame>
   );
 }
 
-export function ConfigurationForm({ id, initial }: { id: string; initial: Settings }) {
+export function ConfigurationForm({
+  id,
+  initial,
+  resources = false,
+}: {
+  id: string;
+  initial: Settings;
+  resources?: boolean;
+}) {
+  const environment = useQuery({
+    queryKey: ['environment', id],
+    queryFn: () => api.environment(id),
+    enabled: resources,
+  });
   const [settings, setSettings] = useState<Settings>(structuredClone(initial));
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -66,7 +81,12 @@ export function ConfigurationForm({ id, initial }: { id: string; initial: Settin
         className="card form-card"
         onSubmit={(event) => {
           event.preventDefault();
-          const validation = validateSettings(settings);
+          const validation =
+            validateSettings(settings) ??
+            validateBindings(
+              settings.configuration.storageBindings,
+              environment.data?.items.map((item) => item.name) ?? [],
+            );
           setError(validation);
           if (!validation) save.mutate(crypto.randomUUID());
         }}
@@ -217,6 +237,18 @@ export function ConfigurationForm({ id, initial }: { id: string; initial: Settin
           </button>
         </div>
       </form>
+      {resources && (
+        <>
+          <EnvironmentSection id={id} bindings={settings.configuration.storageBindings} />
+          <StorageSection
+            id={id}
+            bindings={settings.configuration.storageBindings}
+            onChange={(storageBindings) =>
+              update({ configuration: { ...settings.configuration, storageBindings } })
+            }
+          />
+        </>
+      )}
     </>
   );
 }
