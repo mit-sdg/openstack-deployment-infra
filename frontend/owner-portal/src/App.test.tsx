@@ -64,11 +64,11 @@ describe('owner configuration', () => {
     );
     expect(screen.getByText(configurationGuidance.scripts)).toBeVisible();
     expect(screen.getByText(configurationGuidance.root, { exact: false })).toBeVisible();
-    expect(screen.getByText(configurationGuidance.locks, { exact: false })).toBeVisible();
+    expect(screen.getByText(/Each needs its lockfile/)).toBeVisible();
     expect(screen.getByText(configurationGuidance.health)).toBeVisible();
     fireEvent.click(screen.getByLabelText(/Bun/));
-    fireEvent.change(screen.getByLabelText('Application port'), { target: { value: '8080' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
+    fireEvent.change(screen.getByLabelText('Port'), { target: { value: '8080' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save.mock.calls[0][1].configuration.build.runtime).toBe('bun');
     expect(save.mock.calls[0][1].configuration.runtime.port).toBe(8080);
@@ -83,12 +83,12 @@ describe('owner configuration', () => {
         <ConfigurationForm id="app" initial={settings} />
       </QueryClientProvider>,
     );
-    fireEvent.change(screen.getByLabelText('Preferred branch'), {
+    fireEvent.change(screen.getByLabelText('Branch'), {
       target: { value: 'feature/student' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Settings changed in another tab');
-    expect(screen.getByLabelText('Preferred branch')).toHaveValue('feature/student');
+    expect(screen.getByLabelText('Branch')).toHaveValue('feature/student');
   });
   it('reports statuses using text in addition to color', () => {
     render(

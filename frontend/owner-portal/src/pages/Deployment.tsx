@@ -50,7 +50,9 @@ function Details({ deployment }: { deployment: Deployment }) {
         {
           label: 'Image',
           value: deployment.imageDigest ? (
-            <span className="ui-mono ui-break">{deployment.imageDigest}</span>
+            <span className="ui-mono ui-truncate" title={deployment.imageDigest}>
+              {deployment.imageDigest}
+            </span>
           ) : (
             <span className="ui-text-subtle">Not built yet</span>
           ),

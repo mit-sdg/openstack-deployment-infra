@@ -72,6 +72,12 @@
   gap: var(--ui-space-3);
 }
 
+/* Monospace text inputs (SHAs, variable names). Shared candidate: Input mono. */
+.app-mono-input {
+  font-family: var(--ui-font-mono);
+  font-variant-ligatures: none;
+}
+
 /* Storage rows: actions under the meta line. */
 .app-resource-actions {
   margin-top: var(--ui-space-2);

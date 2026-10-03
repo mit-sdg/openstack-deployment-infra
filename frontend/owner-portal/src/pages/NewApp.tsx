@@ -31,7 +31,7 @@ export function NewApp() {
     event.preventDefault();
     setError(null);
     if (!/^[a-z][a-z0-9-]{1,38}[a-z0-9]$/.test(slug) || slug.includes('--')) {
-      setError('Use 3 to 40 lowercase letters, numbers and single hyphens, starting with a letter.');
+      setError('Start with a letter and use only lowercase letters, numbers and single hyphens.');
       return;
     }
     create.mutate({ key: crypto.randomUUID() });
@@ -65,7 +65,7 @@ export function NewApp() {
             label="App name"
             id="slug"
             error={error}
-            hint="Lowercase letters, numbers and hyphens. It becomes part of your app’s URL and can’t be changed later."
+            hint="3 to 40 lowercase letters, numbers and hyphens. It becomes part of your app’s URL and can’t be changed."
           >
             <Input
               autoComplete="off"

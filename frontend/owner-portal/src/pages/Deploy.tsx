@@ -156,7 +156,7 @@ export function DeployPage({ id }: { id: string }) {
                   hint="Copy the full SHA from GitHub. The deployment always uses this exact commit, even if the branch moves on."
                 >
                   <Input
-                    className="ui-mono"
+                    className="app-mono-input"
                     value={sha}
                     onChange={(event) => {
                       setSha(event.target.value.trim());
@@ -191,6 +191,7 @@ export function DeployPage({ id }: { id: string }) {
       <Dialog
         open={review}
         onClose={() => setReview(false)}
+        size="lg"
         title="Deploy this commit?"
         footer={
           <>

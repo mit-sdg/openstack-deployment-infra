@@ -1,6 +1,7 @@
 import {
   Alert,
   Button,
+  Cluster,
   Dialog,
   ErrorAlert,
   Field,
@@ -99,7 +100,7 @@ export function EnvironmentSection({
                 )
               }
               trailing={
-                <>
+                <Cluster gap={1}>
                   <Button
                     size="sm"
                     variant="ghost"
@@ -121,7 +122,7 @@ export function EnvironmentSection({
                   >
                     Delete
                   </Button>
-                </>
+                </Cluster>
               }
             />
           ))}
@@ -183,7 +184,7 @@ export function EnvironmentSection({
         <div className="app-env-form">
           <Field label="Variable name" id="env-name">
             <Input
-              className="ui-mono"
+              className="app-mono-input"
               value={name}
               autoComplete="off"
               autoCapitalize="characters"

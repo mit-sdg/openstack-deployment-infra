@@ -102,8 +102,8 @@ function BindingsDialog({
       }
     >
       <Hint>
-        Choose the environment variable name your app reads for each value. Remove the ones your
-        app doesn’t use.
+        Choose the environment variable name your app reads for each value. Remove the ones your app
+        doesn’t use.
       </Hint>
       <div role="group" aria-label={`${labels[resource.type]} bindings`} className="app-bindings">
         {Object.entries(resource.defaultBindings).map(([name, defaultTarget]) => (
@@ -114,7 +114,7 @@ function BindingsDialog({
                 <Input
                   id={`${resource.resourceId}-${name}`}
                   aria-label={`${name} → environment name`}
-                  className="ui-mono"
+                  className="app-mono-input"
                   value={draft[name]}
                   autoComplete="off"
                   autoCapitalize="characters"
@@ -145,7 +145,6 @@ function BindingsDialog({
           </div>
         ))}
       </div>
-      {resource.type === 'postgres' && <Hint>{configurationGuidance.postgres}</Hint>}
       {!!certificates.length && (
         <Hint>
           Keep {certificates.join(' and ')} so your app can verify the TLS certificate when it
@@ -268,15 +267,11 @@ export function StorageSection({
             const resource = storage.data?.items.find((item) => item.type === type);
             if (!resource)
               return (
-                <ListItem
-                  key={type}
-                  title={labels[type]}
-                  meta={<span>Not added</span>}
-                  trailing={
+                <ListItem key={type} title={labels[type]} meta={<span>Not added</span>}>
+                  <Cluster className="app-resource-actions">
                     <Button
                       size="sm"
                       icon="plus"
-                      aria-label={`Add ${labels[type]}`}
                       disabled={
                         storage.isPending ||
                         !!storage.error ||
@@ -291,10 +286,10 @@ export function StorageSection({
                       }
                       onClick={() => request({ type })}
                     >
-                      Add
+                      Add {labels[type]}
                     </Button>
-                  }
-                />
+                  </Cluster>
+                </ListItem>
               );
             const outputs =
               bindings.find((item) => item.resourceId === resource.resourceId)?.outputs ?? {};
@@ -322,7 +317,9 @@ export function StorageSection({
                 meta={
                   <>
                     <span>
-                      {count ? `${count} ${count === 1 ? 'variable' : 'variables'}` : 'No variables'}
+                      {count
+                        ? `${count} ${count === 1 ? 'variable' : 'variables'}`
+                        : 'No variables'}
                     </span>
                     {resource.verifiedAt ? (
                       <time
@@ -389,7 +386,8 @@ export function StorageSection({
         </div>
       )}
       <p className="app-block app-block--subtle ui-hint">
-        Databases are backed up every night. Only an admin can delete a database or storage.
+        Databases are backed up every night. {configurationGuidance.postgres} Only an admin can
+        delete a database or storage.
       </p>
       {editingResource && (
         <BindingsDialog

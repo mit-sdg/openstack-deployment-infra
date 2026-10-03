@@ -14,8 +14,8 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
   let id = existing?.applicationId;
   if (!id) {
     await page.goto('/apps/new');
-    await page.getByLabel('Application name').fill('resource-project');
-    await page.getByRole('button', { name: 'Create application', exact: true }).click();
+    await page.getByLabel('App name').fill('resource-project');
+    await page.getByRole('button', { name: 'Create app', exact: true }).click();
     await expect(page).toHaveURL(/\/configuration$/);
     id = new URL(page.url()).pathname.split('/')[2];
   } else await page.goto(`/apps/${id}/configuration`);
@@ -40,8 +40,12 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
   const storageSection = page
     .locator('section')
     .filter({ has: page.getByRole('heading', { name: 'Databases and storage', exact: true }) });
+  // Recent changes sit in their own list, apart from the variables and resources.
   const operationRow = (section: Locator, createdAt: string) =>
-    section.getByRole('listitem').filter({ has: page.locator(`time[datetime="${createdAt}"]`) });
+    section
+      .getByRole('list', { name: /changes$/ })
+      .getByRole('listitem')
+      .filter({ has: page.locator(`time[datetime="${createdAt}"]`) });
   await page.getByLabel('Variable name').fill('API_TOKEN');
   await page.getByLabel('New value').fill(sentinel);
   const written = page.waitForResponse(
@@ -55,11 +59,10 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
   await expect(page.getByLabel('New value')).toHaveValue('');
   await expect(
     operationRow(environmentSection, writeIntent.createdAt).getByText('Succeeded', { exact: true }),
-  ).toBeVisible({ timeout: operationTimeout });
+  ).toBeAttached({ timeout: operationTimeout });
+  const variables = environmentSection.getByRole('list', { name: 'Environment variables' });
   await expect(
-    environmentSection
-      .getByRole('row')
-      .filter({ has: page.getByText('API_TOKEN', { exact: true }) }),
+    variables.getByRole('listitem').filter({ has: page.getByText('API_TOKEN', { exact: true }) }),
   ).toBeVisible({ timeout: operationTimeout });
 
   // A disabled button can mean a pending env observation, not existing storage.
@@ -71,7 +74,11 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
   );
   const add = page.getByRole('button', { name: 'Add PostgreSQL', exact: true });
   const bindings = page.getByRole('group', { name: 'PostgreSQL bindings' });
-  const postgresStatus = bindings.locator('..').locator('h3 .chip');
+  const postgresStatus = storageSection
+    .getByRole('listitem')
+    .filter({ hasText: 'PostgreSQL' })
+    .locator('.ui-badge')
+    .first();
   if (!existingPostgres) {
     await expect(add).toBeEnabled({ timeout: operationTimeout });
     // Hold controller completion until the real provisioning chip is visible;
@@ -91,8 +98,8 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
       );
       await add.click();
       createIntent = (await (await created).json()).data;
-      await expect(postgresStatus).toHaveText('provisioning', { timeout: operationTimeout });
-      await expect(add).toBeDisabled();
+      await expect(postgresStatus).toHaveText('Setting up', { timeout: operationTimeout });
+      await expect(add).toHaveCount(0);
     } finally {
       const released = await page.request.post('/__test__/finish-storage-creation', {
         headers: { Origin: new URL(page.url()).origin },
@@ -102,13 +109,13 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     }
     await expect(
       operationRow(storageSection, createIntent.createdAt).getByText('Succeeded', { exact: true }),
-    ).toBeVisible({ timeout: operationTimeout });
+    ).toBeAttached({ timeout: operationTimeout });
   }
-  await expect(postgresStatus).toHaveText('ready', { timeout: operationTimeout });
+  await expect(postgresStatus).toHaveText('Ready', { timeout: operationTimeout });
   await expect(page.getByRole('button', { name: 'Verify PostgreSQL' })).toBeEnabled({
     timeout: operationTimeout,
   });
-  await expect(add).toBeDisabled();
+  await expect(add).toHaveCount(0);
   // Fresh creation seeds defaults; a retained fixture may have saved a subset.
   const saved = (await (await page.request.get(`/api/v1/apps/${id}/configuration`)).json()).data
     .configuration.storageBindings;
@@ -116,36 +123,41 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     ? (saved.find((item: { resourceId: string }) => item.resourceId === existingPostgres.resourceId)
         ?.outputs ?? {})
     : { url: 'DATABASE_URL', host: 'PGHOST' };
+  await page.getByRole('button', { name: 'Edit PostgreSQL variables' }).click();
   if (existingPostgres && !Object.keys(initialOutputs).length) {
-    await page.getByRole('button', { name: 'Use default bindings' }).click();
+    await page.getByRole('button', { name: 'Reset to defaults' }).click();
   } else if (existingPostgres && !('url' in initialOutputs)) {
-    await bindings.getByRole('button', { name: 'Bind url to DATABASE_URL' }).click();
+    await bindings.getByRole('button', { name: 'Add url as DATABASE_URL' }).click();
   }
   await bindings.getByLabel('url → environment name').fill('APP_DATABASE');
   if (!existingPostgres || !Object.keys(initialOutputs).length || 'host' in initialOutputs) {
-    await bindings.getByRole('button', { name: 'Remove host binding' }).click();
+    await bindings.getByRole('button', { name: 'Remove host' }).click();
   }
-  await expect(bindings.getByRole('button', { name: 'Bind host to PGHOST' })).toBeVisible();
+  await expect(bindings.getByRole('button', { name: 'Add host as PGHOST' })).toBeVisible();
+  await page.getByRole('dialog').getByRole('button', { name: 'Apply' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(storageSection.getByRole('button', { name: /delete/i })).toHaveCount(0);
-  await expect(page.getByText(/Ask an administrator to delete/)).toBeVisible();
-  await page.getByRole('button', { name: 'Save configuration' }).click();
+  await expect(page.getByText(/Only an admin can delete/)).toBeVisible();
+  await expect(
+    page.getByText('Save your settings to keep these variable changes.', { exact: false }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Save settings' }).click();
   await expect(page.getByText('Settings saved.', { exact: false })).toBeVisible();
   await page.goto(`/apps/${id}/deploy`);
   await expect(page.getByText('APP_DATABASE', { exact: true })).toBeVisible();
   await expect(page.getByText('API_TOKEN', { exact: true })).toBeVisible();
   await expect(page.getByText('PGHOST', { exact: true })).toHaveCount(0);
-  await page.getByLabel('Full commit SHA').fill('d'.repeat(40));
-  await page.getByRole('button', { name: 'Review deployment →' }).click();
+  await page.getByLabel('Commit SHA').fill('d'.repeat(40));
+  await page.getByRole('button', { name: 'Review deployment' }).click();
   await expect(page.getByRole('dialog')).toContainText('APP_DATABASE');
-  await page.getByRole('button', { name: 'Deploy this commit', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Deploy', exact: true }).click();
   await expect(page.getByText('Deployment succeeded.', { exact: false })).toBeVisible({
     timeout: operationTimeout,
   });
   await page.goto(`/apps/${id}/configuration`);
-  let warning = '';
-  page.once('dialog', async (dialog) => {
-    warning = dialog.message();
-    await dialog.accept();
+  // Native prompts are gone: any window.confirm would fail this test.
+  page.on('dialog', (dialog) => {
+    throw new Error(`Unexpected native dialog: ${dialog.message()}`);
   });
   const rotated = page.waitForResponse(
     (response) =>
@@ -157,26 +169,26 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     timeout: operationTimeout,
   });
   await page.getByRole('button', { name: 'Rotate PostgreSQL credentials' }).click();
+  await expect(page.getByRole('dialog')).toContainText('next deploy');
+  await page.getByRole('dialog').getByRole('button', { name: 'Rotate credentials' }).click();
   const rotation = (await (await rotated).json()).data;
   await expect(
     operationRow(storageSection, rotation.createdAt).getByText('Succeeded', { exact: true }),
-  ).toBeVisible({ timeout: operationTimeout });
+  ).toBeAttached({ timeout: operationTimeout });
   await expect(page.getByRole('button', { name: 'Rotate PostgreSQL credentials' })).toBeEnabled({
     timeout: operationTimeout,
   });
-  expect(warning).toContain('Redeploy');
   await expect(operationRow(storageSection, rotation.createdAt)).toContainText(
     'Rotate storage credentials',
   );
   await page.goto(`/apps/${id}`);
   await expect(
-    page.getByText('Configuration changed since last deploy.', { exact: false }),
+    page.getByText('Settings changed since the last deploy.', { exact: false }),
   ).toBeVisible({ timeout: operationTimeout });
   await page.goto(`/apps/${id}/configuration`);
   await expect(page.getByRole('button', { name: 'Delete API_TOKEN' })).toBeEnabled({
     timeout: operationTimeout,
   });
-  page.once('dialog', (dialog) => dialog.accept());
   const deleted = page.waitForResponse(
     (response) =>
       response.request().method() === 'DELETE' &&
@@ -184,15 +196,17 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
       response.ok(),
   );
   await page.getByRole('button', { name: 'Delete API_TOKEN' }).click();
+  await expect(page.getByRole('dialog')).toContainText('Delete API_TOKEN?');
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete variable' }).click();
   const deleteIntent = (await (await deleted).json()).data;
   await expect(
     operationRow(environmentSection, deleteIntent.createdAt).getByText('Succeeded', {
       exact: true,
     }),
-  ).toBeVisible({ timeout: operationTimeout });
+  ).toBeAttached({ timeout: operationTimeout });
   await expect(
     environmentSection
-      .getByRole('row')
+      .getByRole('listitem')
       .filter({ has: page.getByText('API_TOKEN', { exact: true }) }),
   ).toHaveCount(0, { timeout: operationTimeout });
   await Promise.all(pending);

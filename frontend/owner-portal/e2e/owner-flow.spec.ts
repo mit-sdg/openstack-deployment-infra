@@ -97,18 +97,18 @@ for (const [mode, viewport, colorScheme] of [
         known[0]?.applicationId;
       if (!appId) {
         await page.getByRole('link', { name: 'Create app', exact: true }).click();
-        await page.getByLabel('Application name').fill('student-project');
-        await page.getByRole('button', { name: 'Create application', exact: true }).click();
+        await page.getByLabel('App name').fill('student-project');
+        await page.getByRole('button', { name: 'Create app', exact: true }).click();
         await expect(page).toHaveURL(/\/apps\/[a-f0-9-]+\/configuration$/);
         appId = new URL(page.url()).pathname.split('/')[2];
       } else await page.goto(`/apps/${appId}/configuration`);
       await page.getByLabel('Repository URL').fill('https://github.com/example/student-app');
-      await page.getByLabel('Preferred branch').fill('main');
+      await page.getByLabel('Branch', { exact: true }).fill('main');
       await page.getByLabel('Bun', { exact: false }).check();
       await page.getByLabel('Start script').fill('start');
-      await page.getByLabel('Application port').fill('3000');
-      await page.getByLabel('Health path').fill('/health');
-      await page.getByRole('button', { name: 'Save configuration' }).click();
+      await page.getByLabel('Port', { exact: true }).fill('3000');
+      await page.getByLabel('Health check path').fill('/health');
+      await page.getByRole('button', { name: 'Save settings' }).click();
       await expect(page.getByRole('status').filter({ hasText: 'Settings saved.' })).toContainText(
         'Settings saved.',
       );
@@ -129,7 +129,7 @@ for (const [mode, viewport, colorScheme] of [
       });
       await page.getByRole('link', { name: 'Deploy', exact: true }).click();
       const sha = crypto.randomUUID().replaceAll('-', '') + 'a'.repeat(8);
-      await page.getByLabel('Full commit SHA').fill(sha);
+      await page.getByLabel('Commit SHA').fill(sha);
       await page.getByRole('button', { name: 'Review deployment' }).click();
       await expect(page.getByRole('dialog')).toBeVisible();
       await expect(page.getByRole('dialog')).toContainText(sha);
@@ -145,7 +145,7 @@ for (const [mode, viewport, colorScheme] of [
           body: '{}',
         });
       });
-      await page.getByRole('button', { name: 'Deploy this commit', exact: true }).click();
+      await page.getByRole('dialog').getByRole('button', { name: 'Deploy', exact: true }).click();
       await expect(page.getByText('Deployment succeeded.', { exact: false })).toBeVisible({
         timeout: 30000,
       });

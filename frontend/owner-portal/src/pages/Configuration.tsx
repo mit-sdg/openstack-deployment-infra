@@ -150,7 +150,9 @@ export function ConfigurationForm({
           aria-label="Build and run settings"
           footer={
             <>
-              {saved && <InlineStatus>Settings saved. They apply on your next deploy.</InlineStatus>}
+              {saved && (
+                <InlineStatus>Settings saved. They apply on your next deploy.</InlineStatus>
+              )}
               <Button type="submit" variant="primary" loading={save.isPending}>
                 Save settings
               </Button>
@@ -278,8 +280,7 @@ export function ConfigurationForm({
                     </Button>
                   }
                 >
-                  Save your settings to keep these variable changes. They apply on your next
-                  deploy.
+                  Save your settings to keep these variable changes. They apply on your next deploy.
                 </Alert>
               )
             }

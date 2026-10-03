@@ -52,7 +52,14 @@ export function AppFrame({
         title={app.data ? app.data.slug : <Skeleton variant="title" width="quarter" />}
         meta={
           app.data && (
-            <Status state={app.data.lifecycleState === 'creating' ? 'creating' : healthy(app.data)} />
+            <Status
+              state={app.data.lifecycleState === 'creating' ? 'creating' : healthy(app.data)}
+              label={
+                app.data.lifecycleState !== 'creating' && !app.data.acceptedDeployment
+                  ? 'Not deployed'
+                  : undefined
+              }
+            />
           )
         }
       >
