@@ -855,13 +855,13 @@ removing `/api`:
 
 | Route | Query fields | Visible data and source |
 | --- | --- | --- |
-| `/api/v1/staff/owners` | `limit`, `cursor` | Broker user ID, username, display name, local enabled flag; only accounts known to the portal. |
+| `/api/v1/staff/owners` | `limit`, `cursor` | Broker user ID, username, display name, local enabled flag and role; only accounts known to the portal. |
 | `/api/v1/staff/owners/{owner}` | None | The same identity plus effective app/concurrent-deployment quota limits, used and reserved counts from broker quotas/apps/intents and inventory defaults. |
-| `/api/v1/staff/apps` | `limit`, `cursor`, optional `ownerId` | Broker app/owner IDs, slug, lifecycle, saved revision, creation time, sanitized repository URL from the current saved configuration. Rejected create attempts remain visible; they do not consume app quota. |
+| `/api/v1/staff/apps` | `limit`, `cursor`, optional `ownerId` | Broker app/owner IDs, owner username and display name, slug, lifecycle, saved revision, creation time, sanitized repository URL from the current saved configuration. Rejected create attempts remain visible; they do not consume app quota. |
 | `/api/v1/staff/apps/{app}` | None | Catalog fields plus public URL, desired-running flag, accepted deployment ID/commit/time, coarse process/route health, observation time and stale flag, from one project API app read or its last validated cache. |
 | `/api/v1/staff/apps/{app}/deployments` | `limit`, `cursor` | Per-app project API deployment IDs, app IDs, status, commit, settings revision, cleanup state and requested/updated/accepted/last-healthy times. |
 | `/api/v1/staff/apps/{app}/deployments/{deployment}` | None | The same snapshot fields after checking both requested deployment ID and broker-known parent app association. |
-| `/api/v1/staff/operations` | `limit`, `cursor`, optional `ownerId`/`applicationId` | Broker intent/app/owner IDs, kind/state, coarse stage, cleanup status, creation/update/status-observation time and fixed attention enum. Only broker create/save/deploy intents appear; no controller poll is triggered by this read. |
+| `/api/v1/staff/operations` | `limit`, `cursor`, optional `ownerId`/`applicationId` | Broker intent/app/owner IDs, app slug, owner username and display name, kind/state, coarse stage, cleanup status, creation/update/status-observation time and fixed attention enum. Only broker create/save/deploy intents appear; no controller poll is triggered by this read. |
 
 Repository/public URLs must be HTTPS, at most 512 characters, with no userinfo,
 query, fragment or control characters; invalid values become null. Missing

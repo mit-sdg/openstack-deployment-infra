@@ -84,6 +84,54 @@ class StaffTests(ManagementCase):
         with self.broker.database.connect() as db:
             self.assertEqual(db.execute("SELECT row_count FROM staff_read_state").fetchone()[0], 3)
 
+    def test_lists_name_owners_and_owner_records_carry_role(self) -> None:
+        first = self.create()
+        second = self.create("bob", "bob-project")
+        self.staff()
+        with self.broker.database.connect(write=True) as db:
+            names = {
+                row["id"]: (row["username"], row["display_name"])
+                for row in db.execute("SELECT id,username,display_name FROM users")
+            }
+        apps = self.call("GET", "/v1/staff/apps", owner="alice").body["data"]["items"]
+        operations = self.call("GET", "/v1/staff/operations", owner="alice").body["data"]["items"]
+        self.assertEqual({app["applicationId"] for app in apps}, {first, second})
+        slugs = {app["applicationId"]: app["slug"] for app in apps}
+        self.assertEqual(
+            {(item["applicationId"], item["applicationSlug"]) for item in operations},
+            set(slugs.items()),
+        )
+        for item in apps + operations:
+            self.assertEqual(
+                (item["ownerUsername"], item["ownerDisplayName"]), names[item["ownerId"]]
+            )
+        # Additive: every earlier field is still present.
+        self.assertEqual(
+            set(apps[0]) - {"ownerUsername", "ownerDisplayName"},
+            {
+                "applicationId",
+                "ownerId",
+                "slug",
+                "lifecycleState",
+                "savedRevision",
+                "createdAt",
+                "repository",
+            },
+        )
+        # Filters and cursors still work across the owner join.
+        scoped = self.call("GET", f"/v1/staff/operations?ownerId={self.bob}", owner="alice")
+        self.assertEqual({item["ownerId"] for item in scoped.body["data"]["items"]}, {self.bob})
+        page = self.call("GET", "/v1/staff/apps?limit=1", owner="alice").body["data"]
+        rest = self.call(
+            "GET", "/v1/staff/apps?limit=1&cursor=" + page["nextCursor"], owner="alice"
+        ).body["data"]
+        self.assertEqual(len(page["items"] + rest["items"]), 2)
+        owners = self.call("GET", "/v1/staff/owners", owner="alice").body["data"]["items"]
+        roles = {owner["ownerId"]: owner["role"] for owner in owners}
+        self.assertEqual((roles[self.alice], roles[self.bob]), ("staff", "owner"))
+        detail = self.call("GET", f"/v1/staff/owners/{self.bob}", owner="alice").body["data"]
+        self.assertEqual(detail["role"], "owner")
+
     def test_csrf_origin_fetch_metadata_and_closed_queries(self) -> None:
         self.staff()
         for headers, code in (
