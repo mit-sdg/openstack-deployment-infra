@@ -179,7 +179,7 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     timeout: operationTimeout,
   });
   await expect(operationRow(storageSection, rotation.createdAt)).toContainText(
-    'Rotate storage credentials',
+    'Credentials rotated',
   );
   await page.goto(`/apps/${id}`);
   await expect(

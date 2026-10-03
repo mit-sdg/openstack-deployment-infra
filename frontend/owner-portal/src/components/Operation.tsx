@@ -1,21 +1,12 @@
-import { Button, List, ListItem } from '@openstack-platform/ui';
+import { Button, List, ListItem, RelativeTime } from '@openstack-platform/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { Link } from 'wouter';
 import { api, type Intent } from '../api';
-import { humanPhase, relativeTime, short } from '../utils/presentation';
+import { activityTitle, humanPhase, short } from '../utils/presentation';
 import { ErrorNotice } from './Feedback';
 import { Status } from './Status';
 
-const titles: Record<string, string> = {
-  deploy: 'Deploy',
-  create_app: 'Create app',
-  storage_create: 'Add storage',
-  storage_verify: 'Check storage',
-  storage_rotate: 'Rotate storage credentials',
-  env_set: 'Set environment variable',
-  env_delete: 'Delete environment variable',
-};
 const finished = ['succeeded', 'failed', 'blocked'];
 
 /** One activity row. Put rows inside <OperationList>. */
@@ -28,7 +19,7 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
       client.invalidateQueries({ queryKey: ['intent', intent.intentId] });
     },
   });
-  const title = titles[intent.kind] ?? 'Save settings';
+  const title = activityTitle(intent.kind, intent.state);
   const progress =
     intent.state === 'unknown'
       ? intent.requiresResubmit
@@ -61,9 +52,7 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
           {intent.names?.[0] && <code>{intent.names[0]}</code>}
           {intent.commit && <code>{short(intent.commit)}</code>}
           {progress && <span>{progress}</span>}
-          <time dateTime={intent.createdAt} title={new Date(intent.createdAt).toLocaleString()}>
-            {relativeTime(intent.createdAt)}
-          </time>
+          <RelativeTime value={intent.createdAt} />
         </>
       }
       trailing={
@@ -73,13 +62,8 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
               Resume
             </Button>
           )}
-          {/* Success is the norm: it gets no badge, but screen readers still
-              hear each row's outcome. */}
-          {intent.state === 'succeeded' ? (
-            <span className="ui-sr-only">Succeeded</span>
-          ) : (
-            <Status state={intent.state} />
-          )}
+          {/* Feeds show only states that need attention. */}
+          <Status state={intent.state} quiet="hidden" />
         </>
       }
     >

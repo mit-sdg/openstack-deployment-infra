@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { Icon, type IconName } from "../Icon";
+import { Button } from "./Button";
 
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger";
 
@@ -24,6 +25,25 @@ export function Badge({
   return (
     <span className={`ui-badge ui-tone-${tone}`} data-tone={tone}>
       {dot && <span className="ui-badge__dot" aria-hidden="true" />}
+      {children}
+    </span>
+  );
+}
+
+/**
+ * Quiet status for the expected state (healthy, active, live): a small dot
+ * and text, without a pill. Use Badge only for states that need attention.
+ */
+export function StatusText({
+  tone = "success",
+  children,
+}: {
+  tone?: Tone;
+  children: ReactNode;
+}) {
+  return (
+    <span className={`ui-status-text ui-tone-${tone}`} data-tone={tone}>
+      <span className="ui-badge__dot" aria-hidden="true" />
       {children}
     </span>
   );
@@ -183,21 +203,174 @@ export function LoadingRows({
   );
 }
 
-/** Whole-page placeholder: a title bar and a card of rows. */
-export function PageSkeleton({ label = "Loading…" }: { label?: string }) {
+/**
+ * Placeholder for a PageHeader: title, optional meta badge and action
+ * buttons, at the real heights. Compose it with SectionSkeleton inside a
+ * Page so the loading layout matches the loaded one.
+ */
+export function PageHeaderSkeleton({
+  meta = false,
+  actions = 0,
+}: {
+  meta?: boolean;
+  actions?: number;
+}) {
   return (
-    <div className="ui-page-skeleton" role="status" aria-busy="true">
-      <span className="ui-sr-only">{label}</span>
-      <Skeleton variant="title" width="quarter" />
-      <div
-        className="ui-card ui-card--padded ui-stack ui-gap-4"
-        aria-hidden="true"
-      >
-        <Skeleton width="three-quarters" />
-        <Skeleton width="half" />
-        <Skeleton width="three-quarters" />
+    <div className="ui-page-header" aria-hidden="true">
+      <div className="ui-page-header__row">
+        <div className="ui-page-header__title">
+          <span className="ui-skeleton ui-skeleton--heading" />
+          {meta && <span className="ui-skeleton ui-skeleton--badge" />}
+        </div>
+        {actions > 0 && (
+          <div className="ui-page-header__actions">
+            {Array.from({ length: actions }, (_, index) => (
+              <span className="ui-skeleton ui-skeleton--button" key={index} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+const widths = ["three-quarters", "half", "quarter"] as const;
+
+/**
+ * Placeholder for a Section at its real geometry:
+ * - variant "table": a 40px header row and rows with cell padding (rows
+ *   stack on phones like DataTable);
+ * - variant "list": list rows (density "compact" for feeds);
+ * - variant "body": padded content lines, for forms and details.
+ */
+export function SectionSkeleton({
+  title = false,
+  variant = "body",
+  rows = 3,
+  columns = 4,
+  density = "default",
+}: {
+  title?: boolean;
+  variant?: "table" | "list" | "body";
+  rows?: number;
+  columns?: number;
+  density?: "default" | "compact";
+}) {
+  const cells = Array.from({ length: columns });
+  return (
+    <div className="ui-card ui-section" aria-hidden="true">
+      {title && (
+        <div className="ui-section__header">
+          <span className="ui-skeleton ui-skeleton--section-title" />
+        </div>
+      )}
+      {variant === "table" ? (
+        <div className="ui-skeleton-table">
+          <div className="ui-skeleton-table__head">
+            {cells.map((_, index) => (
+              <span className="ui-skeleton ui-skeleton--label" key={index} />
+            ))}
+          </div>
+          {Array.from({ length: rows }, (_, row) => (
+            <div className="ui-skeleton-table__row" key={row}>
+              {cells.map((_, index) => (
+                <span className="ui-skeleton-line" key={index}>
+                  <span
+                    className={`ui-skeleton ui-skeleton--text ui-skeleton--${widths[(row + index) % 3]}`}
+                  />
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : variant === "list" ? (
+        <div className={`ui-skeleton-list ui-skeleton-list--${density}`}>
+          {Array.from({ length: rows }, (_, row) => (
+            <div className="ui-skeleton-list__row" key={row}>
+              <span className="ui-skeleton-line">
+                <span
+                  className={`ui-skeleton ui-skeleton--text ui-skeleton--${widths[row % 2]}`}
+                />
+              </span>
+              {density === "default" && (
+                <span className="ui-skeleton-line">
+                  <span className="ui-skeleton ui-skeleton--text ui-skeleton--quarter" />
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="ui-section__body">
+          {Array.from({ length: rows }, (_, row) => (
+            <span className="ui-skeleton-line" key={row}>
+              <span
+                className={`ui-skeleton ui-skeleton--text ui-skeleton--${widths[row % 3]}`}
+              />
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Announced loading state for a whole page. Pass the page's own skeleton
+ * layout as children; by default, a header and one table section.
+ */
+export function PageSkeleton({
+  label = "Loading…",
+  children,
+}: {
+  label?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="ui-page" role="status" aria-busy="true">
+      <span className="ui-sr-only">{label}</span>
+      {children ?? (
+        <>
+          <PageHeaderSkeleton actions={1} />
+          <SectionSkeleton variant="table" />
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A page or section that failed to load: says so, says what to do and
+ * offers Retry. It is not focused, so no ring appears on load; the alert
+ * role still announces it.
+ */
+export function LoadError({
+  children,
+  onRetry,
+  retrying = false,
+}: {
+  children: ReactNode;
+  onRetry?: () => void;
+  retrying?: boolean;
+}) {
+  return (
+    <Alert
+      tone="danger"
+      action={
+        onRetry && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={onRetry}
+            loading={retrying}
+          >
+            Retry
+          </Button>
+        )
+      }
+    >
+      {children}
+    </Alert>
   );
 }
 

@@ -31,7 +31,8 @@ export default defineConfig({
   },
   webServer: {
     gracefulShutdown: { signal: 'SIGTERM', timeout: 10000 },
-    command: `uv run python -m openstack_platform.management.dev --state ${state} --port ${port} --provider-port ${port + 1}${mode === 'https' ? '' : ' --http'}${mode === 'vite' ? ' --vite' : ''}`,
+    // Every run starts from empty state, so reruns never accumulate accounts.
+    command: `rm -rf -- ${state} && uv run python -m openstack_platform.management.dev --state ${state} --port ${port} --provider-port ${port + 1}${mode === 'https' ? '' : ' --http'}${mode === 'vite' ? ' --vite' : ''}`,
     cwd: repository,
     url: `${origin}/sign-in`,
     ignoreHTTPSErrors: true,

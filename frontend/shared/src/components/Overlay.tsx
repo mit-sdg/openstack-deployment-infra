@@ -106,6 +106,7 @@ export function SegmentedControl<T extends string>({
   value,
   onChange,
   block = false,
+  hint,
 }: {
   label: string;
   hideLabel?: boolean;
@@ -114,10 +115,14 @@ export function SegmentedControl<T extends string>({
   value: T;
   onChange: (value: T) => void;
   block?: boolean;
+  /** Help text under the control, in the Field hint style. */
+  hint?: ReactNode;
 }) {
+  const hintId = useId();
   return (
     <fieldset
       className={block ? "ui-segmented ui-segmented--block" : "ui-segmented"}
+      aria-describedby={hint ? hintId : undefined}
     >
       <legend className={hideLabel ? "ui-sr-only" : "ui-field__label"}>
         {label}
@@ -136,6 +141,11 @@ export function SegmentedControl<T extends string>({
           </label>
         ))}
       </div>
+      {hint && (
+        <p id={hintId} className="ui-hint ui-segmented__hint">
+          {hint}
+        </p>
+      )}
     </fieldset>
   );
 }

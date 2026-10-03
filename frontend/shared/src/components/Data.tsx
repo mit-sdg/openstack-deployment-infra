@@ -12,10 +12,13 @@ export type Column<T> = {
   align?: "start" | "end";
   /**
    * Phone layout, where each row becomes a stacked card:
-   * "title" leads the card, "trailing" sits opposite it (e.g. a status),
-   * "field" (default) is a label/value line, "hidden" is omitted.
+   * - "title" leads the card; "trailing" sits opposite it (e.g. a status).
+   * - "secondary" is a muted line under the title, without a label
+   *   (e.g. a username). "meta" is a smaller, subtle line (e.g. a time).
+   * - "field" (default) is a labelled line; "hidden" is omitted.
+   * Prefer secondary/meta when a row has only one or two extra values.
    */
-  mobile?: "title" | "trailing" | "field" | "hidden";
+  mobile?: "title" | "trailing" | "secondary" | "meta" | "field" | "hidden";
 };
 
 /**
@@ -23,8 +26,9 @@ export type Column<T> = {
  * the table semantics when CSS changes the display of rows and cells.
  *
  * With onRowClick the whole row is clickable (hover state and a chevron).
- * Keep a real link in the first column: it is the keyboard and screen
- * reader target, and supports opening in a new tab.
+ * Keep a real link in the "title" column: it is the keyboard and screen
+ * reader target and supports opening in a new tab. On phones that link
+ * stretches over the whole stacked card, so the card is one tap target.
  */
 export function DataTable<T>({
   label,
@@ -114,7 +118,7 @@ export function DataTable<T>({
                 <td
                   role="cell"
                   aria-hidden="true"
-                  data-mobile="hidden"
+                  data-mobile="chevron"
                   className="ui-table__chevron-cell"
                 >
                   <Icon name="chevron-right" className="ui-table__chevron" />
