@@ -38,7 +38,11 @@ The implemented local application workflow supports public, credential-free GitH
 repositories and typed Node or Bun configuration. Users will not receive SSH,
 OpenStack, Nomad, registry, or database-administrator credentials. Private
 repositories, arbitrary build commands, and Dockerfiles are outside the current
-contract.
+contract. Owners can set write-only environment variables and provision one
+PostgreSQL database, MongoDB database, and S3 bucket per app. They choose which
+storage outputs bind to which environment names; credentials never appear in
+portal responses. Storage deletion requires an administrator. See
+[owner portal operations](docs/OPERATIONS.md#owner-portal-operations).
 
 ## Documentation
 

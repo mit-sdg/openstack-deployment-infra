@@ -1294,6 +1294,58 @@ for a reviewed installation; they do not establish live acceptance. Keep broker
 and controller backups before changing releases or authentication realm. Operator
 controls remain outside the student UI.
 
+Owners can list, add/replace and delete their own app's environment variables.
+Values are write-only: portal reads, errors and audit records contain no values.
+Edits restart a running application and take effect after health checks pass;
+they do not change the saved configuration revision. The table's timestamp is
+for the whole environment revision, because the controller has no per-key
+updated timestamp. New environment writes are limited to 30 per owner per
+minute. A value can contain at most 65,536 UTF-8 bytes; the controller also
+applies the installed policy limits.
+
+Owners can provision one PostgreSQL database, MongoDB database and S3 bucket per
+application, watch progress, verify access and rotate credentials. Each output
+can bind to an owner-chosen environment name or be left unbound. Targets must be
+unique, unreserved and distinct from owner environment names. Save the bindings
+and deploy to apply them. Rotation also requires a redeploy to pick up new
+credentials. The platform's managed-data backup timer runs nightly; PostgreSQL
+and S3 TLS use the platform CA through the default `PGSSLROOTCERT` and
+`AWS_CA_BUNDLE` bindings. Renaming these targets requires configuring the client
+to use the renamed CA path variable.
+
+Storage deletion is admin-only. Until an administrator UI exists, an operator
+with approved privileged-socket access handles owner requests. Check the app ID
+and resource UUID against the request, list its storage to obtain the exact
+resource `name`, and take/verify a managed-data backup first. Remove bindings
+from the app's configuration and deploy that configuration so the active
+deployment no longer references the resource. Then use the existing controller
+privileged socket (see [application curl setup](APPLICATION_DEPLOYMENTS.md#preconditions-and-access)):
+
+```sh
+APP_ID=OWNER_APPLICATION_UUID
+RESOURCE_ID=REVIEWED_STORAGE_UUID
+RESOURCE_NAME=EXACT_RESOURCE_NAME
+NAMESPACE=your-installed-namespace
+ADMIN_SOCKET="/run/${NAMESPACE}-controller/privileged.sock"
+jq -n --arg confirmation "$RESOURCE_NAME" '{confirmation: $confirmation}' > storage-delete.json
+curl --unix-socket "$ADMIN_SOCKET" -sS --fail-with-body \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuidgen | tr '[:upper:]' '[:lower:]')" \
+  -X DELETE --data-binary @storage-delete.json "http://localhost/v1/storage/$RESOURCE_ID"
+```
+
+Poll the returned `statusUrl` on the privileged socket to terminal success and
+verify the resource is absent from `GET /v1/applications/{APP_ID}/storage`.
+Nonempty S3 buckets require an explicit administrator-reviewed `purge: true`;
+without it the controller refuses removal. The project socket and portal have
+no storage DELETE route. No credential values belong in deletion tickets.
+
+Install this feature as matching broker/web releases with protocol 2 and schema
+2; the activation compatibility versions are unchanged. No admin image rebuild
+or controller upgrade is needed. Unknown storage outcomes replay the journal's
+original controller key. Unknown environment outcomes require the owner to
+resubmit the same edit with its original key and value; the portal does not
+retain a value for automatic replay.
+
 The validated `ownerPortal` inventory section carries `enabled`, `commonsOrigin`,
 optional identity egress CIDRs/class label and quota/rate/session limits. The
 production renderer is `openstack-platform-management-config --platform-config

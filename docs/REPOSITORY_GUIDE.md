@@ -266,6 +266,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_full_loss_recovery_drill.py` — full and verify-only recovery drill command/evidence/failure-boundary tests.
 - `tests/test_hardening_properties.py` — generated property cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
 - `tests/test_helper_registry_artifact.py` — scoped read-only artifact graph verification, missing content, digest tampering, and secret-safe results.
+- `tests/test_owner_resources.py` — real project-router resource contracts, transport allowlist, recovery, no-values and release compatibility evidence.
 - `tests/test_retained_rollback.py` — authoritative reads, no-build rollback, storage drift, current secrets, acceptance recovery, and optional FIP handover ordering.
 - `tests/test_helper_application_actions.py` — Nomad helper deployment, ownership, health, promotion, environment, logs, and removal tests.
 - `tests/test_host_user_data.py` — protected-input validation and cloud-init rendering tests for each role.
@@ -338,17 +339,21 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/test-setup.ts` — Vitest DOM assertions and component cleanup.
 - `frontend/owner-portal/src/App.test.tsx` — configuration behavior, errors, status semantics, API decoding, and CSRF retry tests.
 - `frontend/owner-portal/e2e/owner-flow.spec.ts` — two-owner HTTPS product smoke, lost-response recovery, strict CSP, and sanitized visual evidence.
+- `frontend/owner-portal/e2e/resources.spec.ts` — owner environment, renamed PostgreSQL bindings, deployment and rotation browser flow.
 
 - `frontend/owner-portal/.prettierrc.json` — pinned frontend formatter policy with print width 100.
 - `frontend/owner-portal/src/components/AppFrame.tsx` — shared owner AppFrame component and presentation behavior.
 - `frontend/owner-portal/src/components/BoundaryText.tsx` — shared owner BoundaryText component and presentation behavior.
 - `frontend/owner-portal/src/components/DeploymentRow.tsx` — shared owner DeploymentRow component and presentation behavior.
+- `frontend/owner-portal/src/components/EnvironmentSection.tsx` — write-only owner environment editor and operation progress.
 - `frontend/owner-portal/src/components/Feedback.tsx` — shared owner Feedback component and presentation behavior.
 - `frontend/owner-portal/src/components/Mark.tsx` — shared owner Mark component and presentation behavior.
 - `frontend/owner-portal/src/components/Operation.tsx` — shared owner Operation component and presentation behavior.
 - `frontend/owner-portal/src/components/Status.tsx` — shared owner Status component and presentation behavior.
+- `frontend/owner-portal/src/components/StorageSection.tsx` — owner storage provisioning, bindings, verification and rotation controls.
 - `frontend/owner-portal/src/components/ThemeButton.tsx` — shared owner ThemeButton component and presentation behavior.
 - `frontend/owner-portal/src/components/presentation.test.tsx` — shared owner presentation.test component and presentation behavior.
+- `frontend/owner-portal/src/components/resources.test.tsx` — owner resource validation and write-only React UI tests.
 - `frontend/owner-portal/src/hooks/useIntentPolling.ts` — owner useIntentPolling lifecycle and data-fetching hook.
 - `frontend/owner-portal/src/hooks/useSession.ts` — owner useSession lifecycle and data-fetching hook.
 - `frontend/owner-portal/src/pages/Configuration.tsx` — owner configuration page module.
@@ -362,6 +367,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/shell/PortalShell.tsx` — responsive portal shell, navigation, theme, and session controls.
 - `frontend/owner-portal/src/utils/presentation.ts` — owner date, commit, health, and operation phase presentation helpers.
 - `openstack_platform/management/broker/anonymous.py` — private HMAC key, stateless expiring anonymous challenges, and bounded per-client-address limits.
+- `openstack_platform/management/broker/resources.py` — owner environment and storage routes, validation, and secret-free projections.
 - `tests/test_management_contract.py` — real project-socket broker contract and fake/real wire-shape, errors, cleanup, and read evidence.
 - `openstack_platform/management/backup.py` — online SQLite backup, encrypted evidence, verification and offline session-invalidating restore.
 - `tests/test_management_backup.py` — fourth-class backup, off-site compatibility, restore guards and full-loss drill tests.
