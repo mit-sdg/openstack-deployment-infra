@@ -318,6 +318,32 @@ class AccountsTests(ManagementCase):
             {"role", "enabled", "quotas", "revoke-sessions"} <= {row["action"] for row in actions}
         )
         self.assertNotIn(self.admin_secret, canonical(actions))
+        # Additive names for actor and target, read in the same query.
+        with self.broker.database.connect() as db:
+            names = {
+                row["id"]: (row["username"], row["display_name"])
+                for row in db.execute("SELECT id,username,display_name FROM users")
+            }
+        for row in actions:
+            self.assertEqual(
+                set(row),
+                {
+                    "id",
+                    "actorId",
+                    "targetId",
+                    "action",
+                    "details",
+                    "createdAt",
+                    "actorUsername",
+                    "actorDisplayName",
+                    "targetUsername",
+                    "targetDisplayName",
+                },
+            )
+            for side in ("actor", "target"):
+                identifier = row[side + "Id"]
+                expected = names[identifier] if identifier else (None, None)
+                self.assertEqual((row[side + "Username"], row[side + "DisplayName"]), expected)
 
     def test_admin_local_login_mfa_replay_backoff_and_rehash(self) -> None:
         self.admin()

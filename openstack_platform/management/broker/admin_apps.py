@@ -359,8 +359,14 @@ class AdminApps:
         response = self.broker.app(request)
         model = dict(cast(dict[str, Any], response.body)["data"])
         current = self.observed(app["id"])
+        with self.broker.database.connect() as db:
+            owner = db.execute(
+                "SELECT username,display_name FROM users WHERE id=?", (app["user_id"],)
+            ).fetchone()
         model.update(
             ownerId=app["user_id"],
+            ownerUsername=profile(owner["username"], 32),
+            ownerDisplayName=profile(owner["display_name"], 256),
             identityProvider=self.identity(current),
             requiresMaintenance=current.get("requiresMaintenance") is True,
             sizing=current.get("sizing"),

@@ -206,6 +206,9 @@ class AdminApplicationTests(ManagementCase):
         # The list never reads the controller; values come from the last observation.
         self.assertIsNone(before[operator]["lastDeployedAt"])
         detail = self.call("GET", f"/v1/admin-apps/{operator}", owner="admin").body["data"]
+        self.assertEqual(
+            (detail["ownerUsername"], detail["ownerDisplayName"]), names[detail["ownerId"]]
+        )
         after = listing()[operator]
         self.assertEqual(after["url"], detail["url"])
         self.assertTrue(after["url"].startswith("https://"))
