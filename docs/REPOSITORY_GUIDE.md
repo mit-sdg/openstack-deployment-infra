@@ -338,6 +338,10 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/public/theme.js` — external pre-paint light/dark preference script.
 - `frontend/owner-portal/public/favicon.svg` — code-native portal mark.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory TanStack Query setup.
+- `frontend/owner-portal/src/staffApi.ts` — strict staff metadata types/decoders and CSRF-bearing, cancellable GET reads.
+- `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff directory, quota, application, history and operation pages with bounded polling.
+- `frontend/owner-portal/src/Staff.test.tsx` — mode navigation, credential entry, decoder, CSRF, cache clearing and inactivity tests.
+- `frontend/owner-portal/e2e/staff-flow.spec.ts` — loopback staff/owner coexistence, denied writes, joint revocation, expiry and CSP/browser evidence.
 - `frontend/owner-portal/src/api.ts` — typed API/response validation, same-key CSRF retry, and typed settings validation.
 - `frontend/owner-portal/src/App.tsx` — accessible owner routes, configuration, exact-commit review, status/history, and build logs.
 - `frontend/owner-portal/src/app.css` — external dashboard-language tokens, light/dark themes, cards, responsive tables/forms, and drawer styling.

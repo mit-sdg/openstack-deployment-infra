@@ -68,6 +68,7 @@ export type Session = {
   csrfToken: string;
   quota: Quota;
   expiresAt: string;
+  kind: 'owner' | 'staff_read';
 };
 export type Page<T> = { items: T[]; nextCursor: string | null; truncated: boolean };
 export type BuildLog = {
@@ -82,20 +83,23 @@ export class ApiError extends Error {
     public status: number,
     public code: string,
     message: string,
+    public retryAfterSeconds = 30,
   ) {
     super(message);
   }
 }
 let csrf = '';
+let credentialEpoch = 0;
 export function clearCredentials() {
   csrf = '';
+  credentialEpoch++;
 }
-function record(value: unknown): Record<string, unknown> {
+export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid service response');
   return value as Record<string, unknown>;
 }
-function fields(value: unknown, checks: Record<string, 'string' | 'number' | 'boolean'>) {
+export function fields(value: unknown, checks: Record<string, 'string' | 'number' | 'boolean'>) {
   const data = record(value);
   for (const [key, type] of Object.entries(checks))
     if (typeof data[key] !== type) throw new Error('Invalid service response');
@@ -119,7 +123,7 @@ const deploymentData = (v: unknown) =>
     status: 'string',
     configurationRevision: 'number',
   }) as Deployment;
-function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<T> {
+export function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<T> {
   const data = record(value);
   if (
     !Array.isArray(data.items) ||
@@ -133,15 +137,20 @@ function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<T> {
     truncated: data.truncated,
   };
 }
-async function request<T>(
+export async function request<T>(
   path: string,
   decode: (v: unknown) => T,
   options?: { method: string; body: unknown; key?: string },
   refreshed = false,
+  signal?: AbortSignal,
 ): Promise<T> {
+  const epoch = credentialEpoch;
+  const staff = path.startsWith('/staff/');
   const response = await fetch(`/api/v1${path}`, {
     credentials: 'same-origin',
     cache: 'no-store',
+    signal,
+    ...(staff ? { headers: { 'X-CSRF-Token': csrf } } : {}),
     ...(options
       ? {
           method: options.method,
@@ -156,13 +165,19 @@ async function request<T>(
   });
   if (response.status === 204) return undefined as T;
   const payload = record(await response.json());
+  if (epoch !== credentialEpoch) throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
   if (!response.ok) {
     const error = record(payload.error);
-    if (options && !refreshed && response.status === 403 && error.code === 'CSRF_REJECTED') {
+    if (
+      (options || staff) &&
+      !refreshed &&
+      response.status === 403 &&
+      error.code === 'CSRF_REJECTED'
+    ) {
       await api.session();
-      return request(path, decode, options, true);
+      return request(path, decode, options, true, signal);
     }
-    if (response.status === 401) {
+    if (response.status === 401 || error.code === 'ACCOUNT_DISABLED') {
       clearCredentials();
       window.dispatchEvent(new Event('portal-session-ended'));
     }
@@ -170,18 +185,31 @@ async function request<T>(
       response.status,
       typeof error.code === 'string' ? error.code : 'UNAVAILABLE',
       typeof error.summary === 'string' ? error.summary : 'The service is unavailable.',
+      typeof error.retryAfterSeconds === 'number' &&
+        error.retryAfterSeconds > 0 &&
+        error.retryAfterSeconds <= 300
+        ? error.retryAfterSeconds
+        : 30,
     );
   }
   return decode(payload.data);
 }
 export const api = {
-  session: () =>
-    request('/session', (v) => {
-      const data = fields(v, { csrfToken: 'string', expiresAt: 'string' });
-      fields(data.user, { id: 'string', displayName: 'string', username: 'string' });
-      csrf = data.csrfToken as string;
-      return data as Session;
-    }),
+  session: (signal?: AbortSignal) =>
+    request(
+      '/session',
+      (v) => {
+        const data = fields(v, { csrfToken: 'string', expiresAt: 'string' });
+        fields(data.user, { id: 'string', displayName: 'string', username: 'string' });
+        if (data.kind !== 'owner' && data.kind !== 'staff_read')
+          throw new Error('Invalid session kind');
+        csrf = data.csrfToken as string;
+        return data as Session;
+      },
+      undefined,
+      false,
+      signal,
+    ),
   logout: () => request('/logout', () => undefined, { method: 'POST', body: {} }),
   apps: () =>
     request('/apps', (v) => ({ ...pageData(v, appData), quota: record(v).quota as Quota })),

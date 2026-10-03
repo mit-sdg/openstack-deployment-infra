@@ -9,6 +9,7 @@ import { HistoryPage } from './pages/History';
 import { NewApp } from './pages/NewApp';
 import { Overview } from './pages/Overview';
 import { SignIn } from './pages/SignIn';
+import { StaffPages } from './pages/Staff';
 import { PortalShell } from './shell/PortalShell';
 export function App() {
   const { signIn, session, logout } = useSession();
@@ -16,6 +17,8 @@ export function App() {
     <PortalShell
       signIn={signIn}
       user={session.data?.user}
+      staff={session.data?.kind === 'staff_read'}
+      expiresAt={session.data?.expiresAt}
       logout={() => logout.mutate()}
       loggingOut={logout.isPending}
     >
@@ -25,8 +28,16 @@ export function App() {
         <Loading />
       ) : session.error ? (
         <ErrorNotice error={session.error} />
+      ) : session.data?.kind === 'staff_read' ? (
+        <StaffPages userId={session.data.user.id} />
       ) : (
         <Switch>
+          <Route path="/staff/:rest*">
+            <Empty title="Staff access unavailable">
+              Re-enter your credentials through <Link href="/signin?mode=staff">Staff sign-in</Link>{' '}
+              to access the read-only view.
+            </Empty>
+          </Route>
           <Route path="/apps/new">
             <NewApp />
           </Route>
