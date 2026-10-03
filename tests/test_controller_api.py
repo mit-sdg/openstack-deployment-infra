@@ -126,6 +126,97 @@ class ControllerAPITests(unittest.TestCase):
                 router.dispatch(method, path, {}, None)
             self.assertEqual(raised.exception.code, "NOT_FOUND")
 
+    def test_project_capability_delta_is_only_storage_delete(self) -> None:
+        project, privileged, all_routes = (
+            self.api.router("project"),
+            self.api.router("privileged"),
+            self.api.router("all"),
+        )
+        project_set = {(r.method, r.pattern.pattern) for r in project._routes}
+        privileged_set = {(r.method, r.pattern.pattern) for r in privileged._routes}
+        complete_set = {(r.method, r.pattern.pattern) for r in all_routes._routes}
+        self.assertFalse(project_set & privileged_set)
+        self.assertEqual(project_set | privileged_set, complete_set)
+        for route in all_routes._routes:
+            expected = (
+                "/v1/admin/" in route.pattern.pattern
+                or route.method == "POST"
+                and route.pattern.pattern.endswith("/delete$")
+            )
+            self.assertEqual((route.method, route.pattern.pattern) in privileged_set, expected)
+        identifier = "00000000-0000-4000-8000-000000000081"
+        with self.assertRaises(HttpError) as error:
+            project.dispatch(
+                "DELETE",
+                f"/v1/storage/{identifier}",
+                self.headers(identifier),
+                {"confirmation": "default"},
+            )
+        self.assertEqual(error.exception.code, "STORAGE_NOT_FOUND")
+        with self.assertRaises(HttpError) as error:
+            privileged.dispatch(
+                "DELETE",
+                f"/v1/storage/{identifier}",
+                self.headers(identifier),
+                {"confirmation": "default"},
+            )
+        self.assertEqual(error.exception.code, "NOT_FOUND")
+
+    def test_project_deployment_validates_and_forwards_plan_and_maintenance(self) -> None:
+        application = self.create_application().body["applicationId"]
+        body = {
+            "repository": "https://github.com/example/app",
+            "commit": "a" * 40,
+            "requestedRef": "main",
+            "configurationRevision": 1,
+            "configuration": {
+                "schemaVersion": 1,
+                "build": {
+                    "runtime": "node",
+                    "packages": ["."],
+                    "buildScript": None,
+                    "startScript": "start",
+                },
+                "runtime": {"port": 3000, "healthPath": "/health"},
+                "storageBindings": [],
+            },
+        }
+        project = self.api.router("project")
+
+        def capture(request, work, **kwargs):
+            work(self.connection, "00000000-0000-4000-8000-000000000083")
+            return Response(202, {})
+
+        with (
+            mock.patch.object(self.api, "_external", side_effect=capture),
+            mock.patch("openstack_platform.controller.api.DeploymentService") as service,
+        ):
+            for extras in (
+                {},
+                {"maintenance": True},
+                {"maintenance": True, "plan": {"flavor": {"name": "worker-large"}}},
+            ):
+                project.dispatch(
+                    "POST", f"/v1/applications/{application}/deployments", {}, {**body, **extras}
+                )
+                accepted = service.return_value.deploy.call_args.args[0]
+                self.assertEqual(accepted.maintenance, extras.get("maintenance", False))
+                self.assertEqual(accepted.sizing_plan, extras.get("plan"))
+                self.assertFalse(accepted.reuse_worker)
+            for extras in (
+                {"maintenance": "true"},
+                {"plan": None},
+                {"plan": []},
+                {"reuseWorker": True},
+            ):
+                with self.assertRaises(HttpError):
+                    project.dispatch(
+                        "POST",
+                        f"/v1/applications/{application}/deployments",
+                        {},
+                        {**body, **extras},
+                    )
+
     def test_admitted_retry_does_not_expose_previous_attempt_as_new_failure(self) -> None:
         application_id = self.create_application().body["applicationId"]
         identifier = "00000000-0000-4000-8000-000000000090"

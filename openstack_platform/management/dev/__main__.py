@@ -188,6 +188,8 @@ def run(
     )
     resources.callback(identity.server_close)
     fixture = FakeController(root / "controller.json")
+    fixture.seed_operator_app("00000000-0000-4000-8000-000000000081", config.commons_origin)
+    fixture.seed_operator_app("00000000-0000-4000-8000-000000000083", config.commons_origin)
     controller = fixture.server(config.controller_socket)
     resources.callback(controller.server_close)
     # Explicit local fixture enrollment before any broker socket/admissions exist.

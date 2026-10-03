@@ -238,7 +238,7 @@ class ControllerRecoveryTests(TestCase):
         with self.assertRaises(HttpError):
             self.deploy(key=self.other_key, commit="b" * 40)
 
-    def test_privileged_destructive_polling_and_replay_use_admin_route(self):
+    def test_destructive_polling_and_replay_use_the_correct_socket_capability(self):
         self.reject = False
         created = self.fixture.dispatch(
             "POST",
@@ -258,13 +258,15 @@ class ControllerRecoveryTests(TestCase):
             ),
         )
         for method, path, confirmation, key in routes:
+            capability = "project" if method == "DELETE" else "privileged"
+            prefix = "/v1" if capability == "project" else "/v1/admin"
             for _ in range(2):
-                response = self.fixture.api.router("privileged").dispatch(
+                response = self.fixture.api.router(capability).dispatch(
                     method, path, self.fixture.headers(key), {"confirmation": confirmation}
                 )
                 self.wait(response)
-                self.assertEqual(response.body["statusUrl"], f"/v1/admin/operations/{key}")
-                polled = self.fixture.api.router("privileged").dispatch(
+                self.assertEqual(response.body["statusUrl"], f"{prefix}/operations/{key}")
+                polled = self.fixture.api.router(capability).dispatch(
                     "GET", response.body["statusUrl"], {}, None
                 )
                 self.assertEqual(polled.body["status"], "succeeded")

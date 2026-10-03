@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any, cast
 from urllib.parse import urlencode, urlsplit
 
@@ -17,6 +18,7 @@ from ..common import canonical, digest, object_body, strict_json, utc
 from ..config import Config
 from . import resources
 from .accounts import Accounts
+from .admin_apps import AdminApps
 from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
@@ -49,6 +51,10 @@ class Broker:
         self.journal = Journal(self.database, self.client)
         self.staff = StaffReads(self)
         self.accounts = Accounts(self)
+        self.admin_apps = AdminApps(self)
+        self.request_actor: ContextVar[tuple[str, str | None] | None] = ContextVar(
+            "app_request_actor", default=None
+        )
 
     def router(self) -> Router:
         router = Router()
@@ -104,10 +110,14 @@ class Broker:
             ("GET", "/v1/staff/apps/{app}/deployments/{deployment}", self.staff.deployment),
             ("GET", "/v1/staff/operations", self.staff.operations),
         ]
+        routes.extend(self.admin_apps.routes())
         for method, path, handler in routes:
 
             def guarded(request: Request, handler: Any = handler, route: str = path) -> Response:
+                actor_token = self.request_actor.set(None)
                 try:
+                    if route.startswith("/v1/admin-apps"):
+                        return self.admin_apps.handle(request, handler)
                     if route.startswith("/v1/staff/"):
                         return self.staff.handle(request, handler, route)
                     if route in {
@@ -159,6 +169,8 @@ class Broker:
                 except Exception as error:
                     print(f"broker exception={type(error).__name__} route={route}", file=sys.stderr)
                     raise
+                finally:
+                    self.request_actor.reset(actor_token)
 
             router.add(method, path, guarded)
         return router
@@ -171,12 +183,17 @@ class Broker:
     def own(
         self, request: Request, *, mutation: bool = False
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        user, _sid = self.auth.authenticate(request, mutation=mutation)
+        admin = request.path.startswith("/v1/admin-apps/")
+        user, _sid = self.auth.authenticate(
+            request, kind="admin" if admin else None, mutation=mutation
+        )
         identifier = checked_uuid(request.path_parameters["app"])
+        self.request_actor.set((_sid, identifier))
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT * FROM apps WHERE id=? AND user_id=? AND lifecycle!='rejected'",
-                (identifier, user["id"]),
+                "SELECT * FROM apps WHERE id=? AND lifecycle!='rejected'"
+                + ("" if admin else " AND user_id=?"),
+                (identifier,) if admin else (identifier, user["id"]),
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Application not found.")
@@ -190,7 +207,7 @@ class Broker:
                 (user_id,),
             ).fetchall()
             held = db.execute(
-                "SELECT COUNT(*) FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','env_set','env_delete') AND state NOT IN ('succeeded','failed')",
+                "SELECT COUNT(*) FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable') AND state NOT IN ('succeeded','failed')",
                 (user_id,),
             ).fetchone()[0]
         return {
@@ -407,8 +424,8 @@ class Broker:
             )
         return row
 
-    @staticmethod
     def record(
+        self,
         db: sqlite3.Connection,
         user: str,
         app: str,
@@ -420,7 +437,23 @@ class Broker:
         body: object,
         controller_key: str,
     ) -> str:
+        self.admin_apps.check(db)
+        context = self.request_actor.get()
+        if context is not None:
+            actor = self.auth.session_row(db, context[0], self.auth.clock())
+            if (
+                self.admin_apps.context.get() is None
+                and context[1] is not None
+                and db.execute(
+                    "SELECT 1 FROM apps WHERE id=? AND user_id=?", (context[1], actor["id"])
+                ).fetchone()
+                is None
+            ):
+                raise HttpError(404, "NOT_FOUND", "Application not found.")
         identifier, now = str(uuid.uuid4()), time.time()
+        stored_body = dict(cast(dict[str, Any], body))
+        if self.admin_apps.context.get() is not None:
+            stored_body["_portalAdmin"] = True
         db.execute(
             "INSERT INTO intents(id,user_id,app_id,kind,client_key,controller_key,fingerprint,method,path,body,state,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,'prepared',?,?)",
             (
@@ -433,7 +466,7 @@ class Broker:
                 fingerprint,
                 method,
                 path,
-                canonical(body),
+                canonical(stored_body),
                 now,
                 now,
             ),
@@ -442,11 +475,15 @@ class Broker:
             "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
             (user, app, identifier, kind, now),
         )
+        self.admin_apps.record_audit(db, user, app, kind, identifier, now)
         return identifier
 
     def create(self, request: Request) -> Response:
         user, _sid = self.auth.authenticate(request, mutation=True)
-        body = object_body(request.body, {"slug"})
+        self.request_actor.set((_sid, None))
+        admin = request.path == "/v1/admin-apps"
+        body = object_body(request.body, {"slug", "ownerId"} if admin else {"slug"})
+        owner = checked_uuid(body["ownerId"]) if admin else user["id"]
         name = slug(body["slug"])
         if name in RESERVED:
             raise HttpError(409, "SLUG_UNAVAILABLE", "Choose another application name.")
@@ -455,16 +492,16 @@ class Broker:
             digest(canonical({"path": request.path, "body": body})),
         )
         with self.database.connect(write=True) as db:
+            if admin:
+                self.admin_apps.check_owner(db, owner)
             existing = self.existing(db, user["id"], key, fingerprint)
             if existing is not None:
                 identifier, app_id = existing["id"], existing["app_id"]
             else:
-                policy = db.execute(
-                    "SELECT apps FROM quotas WHERE user_id=?", (user["id"],)
-                ).fetchone()
+                policy = db.execute("SELECT apps FROM quotas WHERE user_id=?", (owner,)).fetchone()
                 count = db.execute(
                     "SELECT COUNT(*) FROM apps WHERE user_id=? AND lifecycle!='rejected'",
-                    (user["id"],),
+                    (owner,),
                 ).fetchone()[0]
                 if count >= (self.config.app_limit if policy is None else policy[0]):
                     raise HttpError(409, "QUOTA_EXCEEDED", "Your application quota is full.")
@@ -485,8 +522,13 @@ class Broker:
                 )
                 db.execute(
                     "INSERT INTO apps(id,user_id,slug,lifecycle,created,create_intent) VALUES(?,?,?,'creating',?,?)",
-                    (app_id, user["id"], name, time.time(), identifier),
+                    (app_id, owner, name, time.time(), identifier),
                 )
+                if admin:
+                    db.execute(
+                        "UPDATE admin_audit SET target_id=? WHERE json_extract(details,'$.intentId')=?",
+                        (owner, identifier),
+                    )
         self.journal.dispatch(identifier)
         with self.database.connect() as db:
             intent = db.execute("SELECT * FROM intents WHERE id=?", (identifier,)).fetchone()
@@ -588,7 +630,11 @@ class Broker:
 
     def deploy(self, request: Request) -> Response:
         user, app = self.own(request, mutation=True)
-        body = object_body(request.body, {"configurationRevision", "commit"})
+        body = (
+            self.admin_apps.deployment_body(request, app)
+            if request.path.startswith("/v1/admin-apps/")
+            else object_body(request.body, {"configurationRevision", "commit"})
+        )
         sha = commit(body["commit"])
         revision = body["configurationRevision"]
         if type(revision) is not int or revision < 1:
@@ -605,21 +651,7 @@ class Broker:
                     raise HttpError(
                         409, "REVISION_CONFLICT", "Reload the saved settings before deploying."
                     )
-                held = db.execute(
-                    "SELECT * FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','env_set','env_delete') AND state NOT IN ('succeeded','failed')",
-                    (user["id"],),
-                ).fetchall()
-                policy = db.execute(
-                    "SELECT concurrent FROM quotas WHERE user_id=?", (user["id"],)
-                ).fetchone()
-                if any(row["app_id"] == app["id"] for row in held):
-                    raise HttpError(
-                        409, "APP_BUSY", "Resolve the existing deployment before starting another."
-                    )
-                if len(held) >= (self.config.concurrency_limit if policy is None else policy[0]):
-                    raise HttpError(
-                        409, "QUOTA_EXCEEDED", "Wait for your current operation to finish."
-                    )
+                resources.operation_quota(self, db, user["id"], app["id"])
                 cfg = db.execute(
                     "SELECT * FROM configurations WHERE app_id=? AND revision=?",
                     (app["id"], revision),
@@ -632,6 +664,10 @@ class Broker:
                     "configurationRevision": revision,
                     "configuration": strict_json(cfg["configuration"].encode()),
                 }
+                if request.path.startswith("/v1/admin-apps/"):
+                    controller_body.update(
+                        {k: body[k] for k in ("maintenance", "plan") if k in body}
+                    )
                 identifier = self.record(
                     db,
                     user["id"],
@@ -691,6 +727,17 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
+            if strict_json(row["body"].encode()).get("_portalAdmin") is True:
+                self.accounts.admin(request, step_up=row["kind"] == "storage_delete")
+                self.accounts.checked_actor(db, _sid, step_up=row["kind"] == "storage_delete")
+            elif (
+                row["kind"] != "create_app"
+                and db.execute(
+                    "SELECT 1 FROM apps WHERE id=? AND user_id=?", (row["app_id"], user["id"])
+                ).fetchone()
+                is None
+            ):
+                raise HttpError(404, "NOT_FOUND", "Application not found.")
             if row["kind"] in {"env_set", "env_delete"}:
                 raise HttpError(
                     409,

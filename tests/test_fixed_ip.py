@@ -392,6 +392,10 @@ class RetainedFixedIPTests(unittest.TestCase):
             self.root / "platform.sqlite3", create=False, check_same_thread=False
         )
         api = ControllerAPI(connection, self.config, self.root, helper_caller=self.helper)
+        project_socket = str(self.root / "project-acceptance.sock")
+        project_server = ControllerServer(project_socket, api.router("project"))
+        project_thread = threading.Thread(target=project_server.serve_forever, daemon=True)
+        project_thread.start()
         server = ControllerServer(socket, api.router("privileged"))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -403,7 +407,7 @@ class RetainedFixedIPTests(unittest.TestCase):
                 "--silent",
                 "--show-error",
                 "--unix-socket",
-                socket,
+                socket if path.startswith("/v1/admin/") else project_socket,
             ]
             if body is not None:
                 command += [
@@ -439,6 +443,9 @@ class RetainedFixedIPTests(unittest.TestCase):
             with mock.patch.object(self.fixture, "post", side_effect=post):
                 self._exercise_maintenance_cycles()
         finally:
+            project_server.shutdown()
+            project_server.server_close()
+            project_thread.join(timeout=5)
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
@@ -456,11 +463,12 @@ class RetainedFixedIPTests(unittest.TestCase):
                     f"/v1/admin/applications/{self.app_id}/deployments",
                     {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": value},
                 )
-        with self.assertRaises(HttpError):
-            self.fixture.post(
-                f"/v1/applications/{self.app_id}/deployments",
-                {**self.fixture.body, "maintenance": True},
-            )
+        for value in (None, 1, "true"):
+            with self.subTest(value=value), self.assertRaises(HttpError):
+                self.fixture.post(
+                    f"/v1/applications/{self.app_id}/deployments",
+                    {**self.fixture.body, "maintenance": value},
+                )
         self.assertEqual(self.fixture.calls, [])
 
     def test_maintenance_flavor_drift_after_build_does_not_stop_predecessor(self):
@@ -513,6 +521,12 @@ class RetainedFixedIPTests(unittest.TestCase):
         self.assert_success(self.fixture.deploy(self.fixture.plan()))
         self.assert_success(self.reserve())
         pid = self.port()["id"]
+        accepted = db.get_application(self.connection, self.app_id)
+        expected_sizing = (
+            accepted.worker_flavor,
+            accepted.scheduler_cpu_mhz,
+            accepted.scheduler_memory_mib,
+        )
         for _ in range(2):
             previous = db.get_active_deployment(self.connection, self.app_id).deployment_id
             events = []
@@ -539,13 +553,18 @@ class RetainedFixedIPTests(unittest.TestCase):
             self.observe_action = observe
             self.assert_success(
                 self.fixture.post(
-                    f"/v1/admin/applications/{self.app_id}/deployments",
-                    {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
+                    f"/v1/applications/{self.app_id}/deployments",
+                    {**self.fixture.body, "maintenance": True},
                 )
             )
             self.assertLess(events.index("app.build"), events.index("app.remove"))
             self.assertLess(events.index("app.worker.delete"), events.index("app.worker.create"))
             self.assertEqual(db.get_application(self.connection, self.app_id).worker_port_id, pid)
+            accepted = db.get_application(self.connection, self.app_id)
+            self.assertEqual(
+                (accepted.worker_flavor, accepted.scheduler_cpu_mhz, accepted.scheduler_memory_mib),
+                expected_sizing,
+            )
             self.assertEqual(len(self.state()["servers"]), 1)
 
     def test_ordinary_maintenance_health_failure_can_enable_previous_accepted_code(self):

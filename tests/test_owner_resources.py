@@ -16,7 +16,7 @@ from unittest import mock
 from openstack_platform import management_release
 from openstack_platform.controller import database as controller_db
 from openstack_platform.controller.http import HttpError
-from openstack_platform.management import activation
+from openstack_platform.management import activation, rollback
 from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker.api import DEFAULT_CONFIGURATION, Broker
 from openstack_platform.management.broker.client import ControllerUnavailable
@@ -126,10 +126,10 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
             self.real_socket,
             "DELETE",
             f"/v1/storage/{resource['resourceId']}",
-            {"confirmation": "default"},
+            {},
             str(uuid.uuid4()),
         )
-        self.assertEqual(status, 405)
+        self.assertEqual(status, 400)
 
     def test_one_per_type_replay_and_rotation_verification_projections(self):
         key = str(uuid.uuid4())
@@ -655,25 +655,25 @@ class ResourceWebTransportTests(management.ManagementCase):
             self.assertEqual(request.call_count, count)
 
 
-class ReleaseOnlyCompatibilityTests(contracts.ManagementCase):
-    def test_image_activation_and_release_compatibility_match_main_baseline(self):
-        # Main's immutable image activation contract: release-only additions must
-        # not bump these values or require a broker database migration.
+class AccountReleaseCompatibilityTests(contracts.ManagementCase):
+    def test_image_activation_release_and_rollback_compatibility_match_schema_three(self):
+        # Accounts require the approved replacement image with schema/protocol 3.
         expected = {
-            "brokerProtocolVersion": 2,
-            "webProtocolVersion": 2,
-            "authProtocolVersion": 2,
-            "brokerSchemaVersion": 2,
+            "brokerProtocolVersion": 3,
+            "webProtocolVersion": 3,
+            "authProtocolVersion": 3,
+            "brokerSchemaVersion": 3,
             "controllerApiVersion": 1,
         }
         self.assertEqual(activation.COMPATIBILITY, expected)
         self.assertEqual(management_release.COMPATIBILITY, expected)
+        self.assertEqual(rollback.COMPATIBILITY, expected)
         with self.broker.database.connect() as db:
-            self.assertEqual(db.execute("SELECT version FROM metadata").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT version FROM metadata").fetchone()[0], 3)
             self.assertEqual(
                 [
                     row[0]
                     for row in db.execute("SELECT version FROM schema_migrations ORDER BY version")
                 ],
-                [1, 2],
+                [1, 2, 3],
             )
