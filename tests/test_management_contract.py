@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import copy
 import threading
+import time
 import uuid
 from typing import Any
+from unittest.mock import patch
 
-from openstack_platform.controller.http import ControllerServer
+from openstack_platform.controller.http import ControllerServer, HttpError
 from openstack_platform.management.broker.client import UnixConnection
 from openstack_platform.management.common import canonical, strict_json
 from tests import test_controller_recovery as recovery_fixtures
@@ -495,3 +497,130 @@ class RealProjectContractTests(ManagementCase):
         self.assert_error(
             "NOT_FOUND", lambda: self.call("GET", f"/v1/staff/apps/{unowned}", owner="alice")
         )
+
+
+class DeletedApplicationContractTests(RealProjectContractTests):
+    def delete_remote(self, app: str, name: str) -> None:
+        response = self.real.fixture.api.router("privileged").dispatch(
+            "POST",
+            f"/v1/applications/{app}/delete",
+            {"idempotency-key": str(uuid.uuid4())},
+            {"confirmation": name},
+        )
+        self.assertEqual(response.status, 202)
+        self.real.fixture.api.wait_for_operations()
+        from openstack_platform.controller import database as db
+
+        operation = db.get_operation(self.real.connection, response.body["operationId"])
+        self.assertEqual((operation.status, operation.phase), ("succeeded", "tombstoned"))
+        status, missing, _ = self.wire(self.real_socket, "GET", f"/v1/applications/{app}")
+        self.assertEqual(status, 404)
+        self.assertEqual(missing["error"]["code"], "APPLICATION_NOT_FOUND")
+
+    def test_operator_deletion_is_retired_by_owner_read_and_preserves_history(self) -> None:
+        app = self.create(slug="retire-on-read")
+        self.save(app)
+        self.assertEqual(
+            self.call("GET", "/v1/session", owner="alice").body["data"]["quota"]["apps"]["used"], 1
+        )
+        self.delete_remote(app, "retire-on-read")
+        listing = self.call("GET", "/v1/apps", owner="alice").body["data"]
+        self.assertEqual(listing["items"], [])
+        self.assertEqual(listing["quota"]["apps"]["used"], 0)
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT lifecycle FROM apps WHERE id=?", (app,)).fetchone()[0], "deleted"
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM configurations WHERE app_id=?", (app,)).fetchone()[
+                    0
+                ],
+                1,
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM audit WHERE app_id=? AND action='app_deleted_by_administrator'",
+                    (app,),
+                ).fetchone()[0],
+                1,
+            )
+        for method, suffix, body in (
+            ("PUT", "/environment/TOKEN", {"value": "not-stored"}),
+            ("POST", "/storage", {"type": "postgres"}),
+            ("POST", "/deployments", {"configurationRevision": 1, "commit": "a" * 40}),
+        ):
+            with self.subTest(suffix=suffix), self.assertRaises(HttpError) as caught:
+                self.call(method, f"/v1/apps/{app}{suffix}", body, "alice")
+            self.assertEqual(caught.exception.code, "APPLICATION_DELETED")
+            self.assertIn("deleted by an administrator", caught.exception.summary)
+        self.assertEqual(self.call("GET", "/v1/apps", owner="alice").body["data"]["items"], [])
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM audit WHERE action='app_deleted_by_administrator'"
+                ).fetchone()[0],
+                1,
+            )
+        self.create(slug="quota-slot-reused")
+
+    def test_background_deletion_scan_and_staff_admin_lists(self) -> None:
+        from openstack_platform.management.broker import bootstrap
+        from openstack_platform.management.broker.accounts import security_change
+        from tests import test_management_accounts as accounts
+
+        self.now = time.time()
+        folder = bootstrap.enrollment_file(self.config).parent
+        folder.mkdir(parents=True, mode=0o2750)
+        folder.chmod(0o2750)
+        # Reuse real enrollment/MFA helpers without changing role enforcement.
+        self.anonymous = accounts.AccountsTests.anonymous.__get__(self)
+        self.begin = accounts.AccountsTests.begin.__get__(self)
+        self.finish = accounts.AccountsTests.finish.__get__(self)
+        accounts.AccountsTests.admin(self)
+        app = self.create(slug="retire-in-background")
+        self.delete_remote(app, "retire-in-background")
+        self.broker.journal.reconcile()
+        self.assertEqual(
+            self.call("GET", "/v1/admin-apps", owner="admin").body["data"]["items"], []
+        )
+        with self.broker.database.connect(write=True) as db:
+            user = db.execute("SELECT user_id FROM apps WHERE id=?", (app,)).fetchone()[0]
+            db.execute("UPDATE users SET role='staff' WHERE id=?", (user,))
+            security_change(db, user)
+        self.login()
+        self.assertEqual(
+            self.call("GET", "/v1/staff/apps", owner="alice").body["data"]["items"], []
+        )
+        for observer in ("staff", "admin"):
+            pending = self.create(slug="lazy-delete-" + observer)
+            self.delete_remote(pending, "lazy-delete-" + observer)
+            route = "/v1/staff/apps" if observer == "staff" else "/v1/admin-apps"
+            actor = "alice" if observer == "staff" else "admin"
+            self.assertEqual(self.call("GET", route, owner=actor).body["data"]["items"], [])
+            with self.broker.database.connect() as db:
+                self.assertEqual(
+                    db.execute("SELECT lifecycle FROM apps WHERE id=?", (pending,)).fetchone()[0],
+                    "deleted",
+                )
+        with self.assertRaises(HttpError) as caught:
+            self.call(
+                "POST",
+                f"/v1/admin-apps/{app}/deployments",
+                {"commit": "a" * 40, "configurationRevision": 1},
+                "admin",
+            )
+        self.assertEqual(caught.exception.code, "APPLICATION_DELETED")
+
+    def test_dependency_errors_and_creating_apps_are_not_deleted(self) -> None:
+        app = self.create(slug="still-present")
+        for response in (
+            (503, {"error": {"code": "DEPENDENCY_UNAVAILABLE"}}),
+            (404, {"error": {"code": "NOT_FOUND"}}),
+        ):
+            with patch.object(self.broker.client, "request", return_value=response):
+                self.assertFalse(self.broker.journal.observe_deleted(app))
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE apps SET lifecycle='creating' WHERE id=?", (app,))
+        with patch.object(self.broker.client, "request") as request:
+            self.assertFalse(self.broker.journal.observe_deleted(app))
+            request.assert_not_called()

@@ -586,6 +586,18 @@ Outstanding checks reserve budget so concurrency cannot bypass it. Other
 addresses remain unaffected and rejections never extend the window. Users are individual invited class accounts,
 identified by Commons origin and stable UUID rather than mutable username.
 
+Operator deletion is reconciled without deleting broker history. The real
+project read returns `404 APPLICATION_NOT_FOUND` after the privileged deletion
+operation succeeds at `tombstoned`. Only that definitive missing-app evidence
+retires a known `ready` broker record to `lifecycle='deleted'` (the existing text
+column permits it); outages and unconfirmed `creating` apps do not qualify.
+Owner/staff/admin app listings exclude deleted records, quota no longer counts
+them, and a single `app_deleted_by_administrator` audit event is written. Further
+mutations return `410 APPLICATION_DELETED`. Configuration, intent and audit rows
+remain intact. Existence checks use environment metadata, avoiding live health
+provider calls, with bounded lazy checks and a round-robin scan in the existing
+journal loop.
+
 The owner API exposes only their own apps/config/deployments/build logs/intents,
 environment names and storage resources,
 returning 404 for another owner's IDs. Defaults are two apps and one external

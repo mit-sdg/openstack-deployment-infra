@@ -197,7 +197,14 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Application not found.")
-            return user, dict(row)
+            app = dict(row)
+        if app["lifecycle"] == "deleted" or (
+            (mutation or not request.query) and self.journal.observe_deleted(app["id"])
+        ):
+            raise HttpError(
+                410, "APPLICATION_DELETED", "This application was deleted by an administrator."
+            )
+        return user, app
 
     def identity_mutation_body(
         self, request: Request, app: dict[str, Any], fields: set[str]
@@ -216,7 +223,7 @@ class Broker:
         with self.database.connect() as db:
             policy = db.execute("SELECT * FROM quotas WHERE user_id=?", (user_id,)).fetchone()
             apps = db.execute(
-                "SELECT lifecycle,COUNT(*) n FROM apps WHERE user_id=? AND lifecycle!='rejected' GROUP BY lifecycle",
+                "SELECT lifecycle,COUNT(*) n FROM apps WHERE user_id=? AND lifecycle NOT IN ('rejected','deleted') GROUP BY lifecycle",
                 (user_id,),
             ).fetchall()
             held = db.execute(
@@ -296,6 +303,15 @@ class Broker:
         if app["lifecycle"] == "ready":
             try:
                 status, observed = self.client.request("GET", f"/v1/applications/{app['id']}")
+                detail = observed.get("error")
+                if (
+                    status == 404
+                    and isinstance(detail, dict)
+                    and detail.get("code") == "APPLICATION_NOT_FOUND"
+                ):
+                    self.journal.observe_deleted(app["id"], missing=True)
+                    result["lifecycleState"] = "deleted"
+                    return result
                 if status != 200 or observed.get("applicationId") != app["id"]:
                     raise ControllerUnavailable("invalid app observation")
                 url = observed.get("url")
@@ -358,7 +374,11 @@ class Broker:
     def apps(self, request: Request) -> Response:
         user, _sid = self.auth.authenticate(request)
         page = self.owned_page(request, user["id"], "apps")
-        page["items"] = [self.app_model(item) for item in page["items"]]
+        self.journal.reconcile_page(page["items"])
+        page["items"] = [
+            self.app_model(item) for item in page["items"] if item["lifecycle"] != "deleted"
+        ]
+        page["items"] = [item for item in page["items"] if item["lifecycleState"] != "deleted"]
         return Response(200, {"data": {**page, "quota": self.quota(user["id"])}})
 
     def owned_page(self, request: Request, owner: str, table: str) -> dict[str, Any]:
@@ -374,14 +394,16 @@ class Broker:
             raise HttpError(400, "INVALID_REQUEST", "Invalid page limit.") from None
         if not 1 <= limit <= 100:
             raise HttpError(400, "INVALID_REQUEST", "Page limit must be 1–100.")
-        condition = "user_id=?" + (" AND lifecycle!='rejected'" if table == "apps" else "")
+        condition = "user_id=?" + (
+            " AND lifecycle NOT IN ('rejected','deleted')" if table == "apps" else ""
+        )
         parameters: list[object] = [owner]
         with self.database.connect() as db:
             cursor = request.query.get("cursor", (None,))[0]
             if cursor is not None:
                 point = db.execute(
-                    f"SELECT created,id FROM {table} WHERE {condition} AND id=?",
-                    (*parameters, checked_uuid(cursor)),
+                    f"SELECT created,id FROM {table} WHERE user_id=? AND id=?",
+                    (owner, checked_uuid(cursor)),
                 ).fetchone()
                 if point is None:
                     raise HttpError(400, "INVALID_REQUEST", "Unknown page cursor.")
@@ -514,7 +536,7 @@ class Broker:
             else:
                 policy = db.execute("SELECT apps FROM quotas WHERE user_id=?", (owner,)).fetchone()
                 count = db.execute(
-                    "SELECT COUNT(*) FROM apps WHERE user_id=? AND lifecycle!='rejected'",
+                    "SELECT COUNT(*) FROM apps WHERE user_id=? AND lifecycle NOT IN ('rejected','deleted')",
                     (owner,),
                 ).fetchone()[0]
                 if count >= (self.config.app_limit if policy is None else policy[0]):
@@ -753,6 +775,13 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
+            app_state = db.execute(
+                "SELECT lifecycle FROM apps WHERE id=?", (row["app_id"],)
+            ).fetchone()
+            if app_state is not None and app_state[0] == "deleted":
+                raise HttpError(
+                    410, "APPLICATION_DELETED", "This application was deleted by an administrator."
+                )
             if strict_json(row["body"].encode()).get("_portalAdmin") is True:
                 self.accounts.admin(request, step_up=row["kind"] == "storage_delete")
                 self.accounts.checked_actor(db, _sid, step_up=row["kind"] == "storage_delete")

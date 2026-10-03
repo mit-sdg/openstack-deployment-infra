@@ -530,7 +530,7 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
             replay = self.call("PUT", path, {"value": "low-entropy"}, "alice", key).body["data"]
             self.assertEqual(replay["intentId"], intent["intentId"])
             self.assertEqual(replay["state"], "succeeded")
-            request.assert_not_called()
+            request.assert_called_once_with("GET", f"/v1/applications/{self.app_id}/environment")
         self.assert_error(
             "IDEMPOTENCY_CONFLICT",
             lambda: self.call("PUT", path, {"value": "changed"}, "alice", key),
