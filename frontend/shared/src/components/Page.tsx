@@ -161,16 +161,27 @@ export function Grid({
  */
 export function AuthLayout({
   title,
+  mark,
   footer,
   children,
 }: {
   title: ReactNode;
+  /** Brand mark shown above the title. */
+  mark?: ReactNode;
   footer?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <div className="ui-auth">
       <div className="ui-auth__header">
+        {mark && (
+          <span
+            className="ui-brand__mark ui-brand__mark--lg"
+            aria-hidden="true"
+          >
+            {mark}
+          </span>
+        )}
         <h1>{title}</h1>
       </div>
       <div className="ui-card ui-card--padded ui-stack ui-gap-4">

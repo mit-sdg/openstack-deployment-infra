@@ -16,6 +16,8 @@
   --ui-surface-raised: light-dark(#ffffff, #18181b);
   --ui-border: light-dark(#e4e4e7, #26262a);
   --ui-border-strong: light-dark(#d4d4d8, #3a3a40);
+  --ui-border-hover: light-dark(#a1a1aa, #52525b);
+  --ui-row-hover: light-dark(#fafafa, #17171a);
   --ui-text: light-dark(#18181b, #f4f4f5);
   --ui-text-muted: light-dark(#52525b, #a1a1aa);
   --ui-text-subtle: light-dark(#6b6b74, #8d8d96);
@@ -26,6 +28,7 @@
   --ui-accent-hover: light-dark(#4338ca, #7175f4);
   --ui-accent-solid: light-dark(#4f46e5, #5250e0);
   --ui-accent-solid-hover: light-dark(#4338ca, #5f5ce9);
+  --ui-accent-solid-active: light-dark(#3730a3, #4a47d0);
   --ui-accent-text: light-dark(#4338ca, #a5b4fc);
   --ui-accent-subtle: light-dark(#eef0ff, rgb(99 102 241 / 14%));
   --ui-on-accent: #ffffff;
@@ -43,6 +46,7 @@
   --ui-danger: light-dark(#dc2626, #ef4444);
   --ui-danger-solid: light-dark(#dc2626, #c42b2b);
   --ui-danger-solid-hover: light-dark(#b91c1c, #d23434);
+  --ui-danger-solid-active: light-dark(#991b1b, #b12525);
   --ui-info-text: var(--ui-accent-text);
   --ui-info-subtle: var(--ui-accent-subtle);
   --ui-info: var(--ui-accent);
@@ -50,28 +54,39 @@
   --ui-neutral-subtle: var(--ui-surface-subtle);
   --ui-neutral: light-dark(#a1a1aa, #71717a);
 
-  /* Typography. System fonts: nothing is downloaded. */
+  /* Typography: Inter for UI text, JetBrains Mono for code (fonts.css). */
   --ui-font:
-    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+    "Inter Variable", "Inter Fallback", system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
   --ui-font-mono:
-    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas,
     monospace;
+  /* Each step: size / line height / letter spacing, tuned for Inter. */
   --ui-text-xs: 12px;
+  --ui-leading-xs: 16px;
+  --ui-tracking-xs: 0em;
   --ui-text-sm: 13px;
+  --ui-leading-sm: 20px;
+  --ui-tracking-sm: -0.003em;
   --ui-text-md: 14px;
+  --ui-leading-md: 20px;
+  --ui-tracking-md: -0.006em;
   --ui-text-lg: 16px;
+  --ui-leading-lg: 24px;
+  --ui-tracking-lg: -0.011em;
   --ui-text-xl: 20px;
+  --ui-leading-xl: 28px;
+  --ui-tracking-xl: -0.017em;
   --ui-text-2xl: 24px;
-  --ui-leading-tight: 1.25;
-  --ui-leading: 1.5;
+  --ui-leading-2xl: 32px;
+  --ui-tracking-2xl: -0.019em;
+  /* Monospace runs slightly large next to Inter. */
+  --ui-mono-scale: 0.93em;
   --ui-weight-regular: 400;
   --ui-weight-medium: 500;
   --ui-weight-semibold: 600;
-  --ui-tracking-tight: -0.011em;
-  --ui-tracking-title: -0.02em;
 
-  /* Spacing: a 4px grid. */
+  /* Spacing scale: a 4px grid. Layout tokens below are built from it. */
   --ui-space-1: 4px;
   --ui-space-2: 8px;
   --ui-space-3: 12px;
@@ -82,6 +97,41 @@
   --ui-space-10: 40px;
   --ui-space-12: 48px;
   --ui-space-16: 64px;
+
+  /* Page layout. Header, tabs and content share one left edge. */
+  --ui-gutter: 32px;
+  --ui-content-width: 1120px;
+  --ui-narrow-width: 640px;
+  --ui-header-height: 56px;
+  --ui-tabbar-height: 44px;
+  --ui-page-padding-top: 32px;
+  --ui-page-padding-bottom: 64px;
+  /* Page header to content, and section to section. */
+  --ui-page-gap: 24px;
+
+  /* Cards and sections. Card content, table cells and list rows all start
+     at --ui-card-padding, so they line up with the section title. */
+  --ui-card-padding: 20px;
+  --ui-card-gap: 16px;
+  --ui-section-header-height: 56px;
+  --ui-cell-padding-y: 12px;
+  --ui-cell-padding-x: 16px;
+  --ui-row-padding-y: 12px;
+  --ui-row-padding-y-compact: 10px;
+
+  /* Forms. */
+  --ui-field-label-gap: 6px;
+  --ui-field-gap: 16px;
+  --ui-group-gap: 24px;
+
+  /* Controls: buttons, inputs, selects and segmented controls share heights. */
+  --ui-control-height: 36px;
+  --ui-control-height-sm: 32px;
+  --ui-control-padding-x: 14px;
+  --ui-control-padding-x-sm: 10px;
+  --ui-input-padding-x: 12px;
+  --ui-badge-height: 22px;
+  --ui-icon-size: 16px;
 
   /* Shape and depth. */
   --ui-radius-sm: 6px;
@@ -98,19 +148,14 @@
   --ui-shadow-lg:
     0 16px 48px light-dark(rgb(24 24 27 / 16%), rgb(0 0 0 / 60%)),
     0 2px 6px light-dark(rgb(24 24 27 / 6%), rgb(0 0 0 / 30%));
+  /* One focus ring for every control. */
+  --ui-focus-ring-width: 2px;
+  --ui-focus-ring-offset: 2px;
 
   /* Motion. Reduced-motion users get none (see ui.css). */
   --ui-duration-fast: 120ms;
   --ui-duration: 200ms;
   --ui-ease: cubic-bezier(0.2, 0, 0, 1);
-
-  /* Layout. */
-  --ui-control-height: 36px;
-  --ui-control-height-sm: 30px;
-  --ui-header-height: 56px;
-  --ui-page-width: 1200px;
-  --ui-narrow-width: 680px;
-  --ui-gutter: var(--ui-space-8);
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -118,15 +163,28 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 }
-/* Phones and touch screens: every control is at least 44px tall. */
-@media (max-width: 640px), (pointer: coarse) {
+/* Touch screens: every control is at least 44px tall. */
+@media (pointer: coarse) {
   :root {
     --ui-control-height: 44px;
     --ui-control-height-sm: 44px;
   }
 }
+/* Tablets. */
+@media (max-width: 1023px) {
+  :root {
+    --ui-gutter: 24px;
+  }
+}
+/* Phones. */
 @media (max-width: 640px) {
   :root {
-    --ui-gutter: var(--ui-space-4);
+    --ui-gutter: 16px;
+    --ui-page-padding-top: 24px;
+    --ui-page-padding-bottom: 48px;
+    --ui-page-gap: 20px;
+    --ui-card-padding: 16px;
+    --ui-control-height: 44px;
+    --ui-control-height-sm: 44px;
   }
 }
