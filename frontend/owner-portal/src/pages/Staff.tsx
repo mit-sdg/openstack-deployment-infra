@@ -260,7 +260,7 @@ export function StaffOwnerPage({ id }: { id: string }) {
       <Heading title="Owner" />
       <Result query={owner}>
         {(data) => (
-          <section className="card section">
+          <section className="card overview-card section">
             <h2>{data.displayName}</h2>
             <p>
               {data.username} · Portal account {data.portalEnabled ? 'enabled' : 'disabled'}
@@ -296,7 +296,7 @@ export function StaffAppPage({ id }: { id: string }) {
       <Result query={app}>
         {(data) => (
           <>
-            <section className="card section">
+            <section className="card overview-card section">
               <h2>{data.slug}</h2>
               <p>
                 <Link href={`/staff/owners/${data.ownerId}`}>View owner →</Link>
@@ -342,13 +342,19 @@ export function StaffAppPage({ id }: { id: string }) {
                 <div>
                   <dt>Application process</dt>
                   <dd>
-                    <Status state={data.health.process} />
+                    <Status
+                      state={data.health.process}
+                      label={data.health.process === 'unknown' ? 'Unknown' : undefined}
+                    />
                   </dd>
                 </div>
                 <div>
                   <dt>Public route</dt>
                   <dd>
-                    <Status state={data.health.route} />
+                    <Status
+                      state={data.health.route}
+                      label={data.health.route === 'unknown' ? 'Unknown' : undefined}
+                    />
                   </dd>
                 </div>
               </dl>
@@ -417,7 +423,7 @@ export function StaffDeploymentPage({ id, deployment }: { id: string; deployment
       </Heading>
       <Result query={result}>
         {(data) => (
-          <section className="card section">
+          <section className="card overview-card section">
             <Status state={data.status} />
             <dl className="overview-meta">
               <div>

@@ -1,4 +1,4 @@
-export function Status({ state }: { state: string }) {
+export function Status({ state, label: customLabel }: { state: string; label?: string }) {
   const label: Record<string, string> = {
     succeeded: 'Succeeded',
     failed: 'Failed',
@@ -10,11 +10,12 @@ export function Status({ state }: { state: string }) {
     creating: 'Creating',
     running: 'Running',
     healthy: 'Healthy',
+    unhealthy: 'Unhealthy',
     stopped: 'Not running',
   };
   const tone = ['succeeded', 'healthy'].includes(state)
     ? 'good'
-    : ['failed', 'blocked'].includes(state)
+    : ['failed', 'blocked', 'unhealthy'].includes(state)
       ? 'critical'
       : ['accepted', 'running', 'prepared', 'creating'].includes(state)
         ? 'info'
@@ -22,7 +23,7 @@ export function Status({ state }: { state: string }) {
   return (
     <span className={`status tone-${tone}`}>
       <span className="status-dot" aria-hidden="true" />
-      {label[state] ?? state}
+      {customLabel ?? label[state] ?? state}
     </span>
   );
 }

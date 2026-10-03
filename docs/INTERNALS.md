@@ -577,7 +577,7 @@ identified by Commons origin and stable UUID rather than mutable username.
 
 The owner API exposes only their own apps/config/deployments/build logs/intents,
 returning 404 for another owner's IDs. Defaults are two apps and one external
-mutation per owner, with staff overrides. Broker transactions reserve ownership
+mutation per owner, with recovery-console overrides. Broker transactions reserve ownership
 and quota and persist the intent plus a separate controller idempotency key before
 calling project.sock. Unknown outcomes repeat that exact key/request; known 202
 operations are polled. Only terminal confirmed/not_required cleanup settles an

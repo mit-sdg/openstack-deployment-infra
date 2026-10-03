@@ -43,6 +43,11 @@ with Database(config).connect(write=True) as db:
     { cwd: repository, stdio: 'pipe' },
   );
 }
+// Development StrictMode can admit a cancelled GET and its remount retry.
+// Pace navigation at the approved user-token refill rate; never relax broker limits.
+async function pace(page: Page) {
+  if (mode === 'vite') await page.waitForTimeout(1000);
+}
 async function signIn(page: Page, username: string, staff = false) {
   await page.goto(staff ? '/signin?mode=staff' : '/sign-in');
   await page.getByLabel('Username', { exact: true }).fill(username);
@@ -77,6 +82,18 @@ for (const [layout, viewport, colorScheme] of [
       const ownerPage = await owner.newPage();
       const studentPage = await student.newPage();
       const staffPage = await staff.newPage();
+      staffPage.on('response', async (response) => {
+        const url = new URL(response.url());
+        if (url.pathname.startsWith('/api/v1/staff/') && response.status() >= 400) {
+          const value = await response.json().catch(() => ({}));
+          console.warn(
+            'staff-read-failure',
+            response.status(),
+            url.pathname,
+            value.error?.code ?? 'NON_JSON',
+          );
+        }
+      });
       await signIn(ownerPage, 'taylor');
       const own = await app(ownerPage, 'instructor-project');
       await signIn(studentPage, 'alice');
@@ -154,6 +171,7 @@ for (const [layout, viewport, colorScheme] of [
       expect(
         (await staffPage.request.get(`/api/v1/apps/${own.appId}/configuration`)).status(),
       ).toBe(403);
+      await pace(staffPage);
       await staffPage
         .getByRole('navigation', { name: 'Staff pages' })
         .getByRole('link', { name: 'Applications' })
@@ -164,6 +182,7 @@ for (const [layout, viewport, colorScheme] of [
       await expect(
         staffPage.getByRole('link', { name: 'student-project', exact: true }),
       ).toBeVisible();
+      await pace(staffPage);
       await staffPage.getByRole('link', { name: 'student-project', exact: true }).click();
       await expect(
         staffPage.getByRole('heading', { name: 'student-project', exact: true }),
@@ -175,9 +194,11 @@ for (const [layout, viewport, colorScheme] of [
         }),
       ).toBeVisible();
       await expect(staffPage.getByRole('link', { name: 'Deploy', exact: true })).toHaveCount(0);
+      await pace(staffPage);
       await staffPage.getByRole('link', { name: 'Deployments', exact: true }).click();
       await expect(staffPage.getByRole('heading', { name: 'Deployment history' })).toBeVisible();
       await expect(staffPage.getByRole('button', { name: /Resume|Deploy/ })).toHaveCount(0);
+      await pace(staffPage);
       await staffPage
         .getByRole('navigation', { name: 'Staff pages' })
         .getByRole('link', { name: 'Operations' })
@@ -186,10 +207,12 @@ for (const [layout, viewport, colorScheme] of [
         staffPage.getByRole('heading', { name: 'Operations', exact: true }),
       ).toBeVisible();
       await expect(staffPage.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0);
+      await pace(staffPage);
       fixture('sentinel', own.appId);
       const response = await staffPage.request.get(`/api/v1/staff/apps/${own.appId}`, { headers });
       expect(response.status()).toBe(200);
       expect(await response.text()).not.toContain('STAFF_SECRET_SENTINEL');
+      await pace(staffPage);
       await staffPage.goto(`/staff/apps/${own.appId}`);
       await expect(
         staffPage.getByRole('heading', { name: 'instructor-project', exact: true }),
