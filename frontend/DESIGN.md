@@ -95,16 +95,22 @@ Alignment rules:
 
 ### Shape, focus and states
 
-- Radii: `--ui-radius-sm` 6px (segments, menu items), `--ui-radius-md` 8px
-  (controls, alerts, code), `--ui-radius-lg` 12px (cards, dialogs, menus),
-  `--ui-radius-full` (badges, avatars).
+- Radii: `--ui-radius-xs` 4px (16px checkboxes only), `--ui-radius-sm` 6px
+  (segments, menu items), `--ui-radius-md` 8px (controls, alerts, code),
+  `--ui-radius-lg` 12px (cards, dialogs, menus), `--ui-radius-full` (badges,
+  avatars).
 - Borders are 1px `--ui-border` on surfaces and `--ui-border-strong` on
   controls.
 - Focus: one 2px `--ui-focus` outline, 2px offset, on every control (inset
   inside menus, tabs and segmented controls).
 - States: hover uses `--ui-surface-hover` (or the `-hover` solid), pressed uses
   `--ui-surface-active` (or the `-active` solid), disabled is 50% opacity with
-  a not-allowed cursor and no hover change.
+  a not-allowed cursor and no hover change. Hover styles apply only on devices
+  that can hover (`@media (hover: hover)`), so taps never leave a fill.
+- Fixed-height controls keep their step's line height (buttons 14/20, small
+  buttons and segments 13/20, badges 12/16); the control height centers it.
+- Section headers are always `--ui-section-header-height` (56px), with or
+  without an action: their padding leaves room for exactly one control.
 - Motion: `--ui-duration-fast` 120ms for hovers, `--ui-duration` 200ms for
   overlays. Reduced motion turns animation off.
 
@@ -187,10 +193,22 @@ The portal adds a few shared pieces in `owner-portal/src/components`:
   `meta` holds facts (`app · commit · time`), not sentences. Separators are
   added automatically and dropped on phones. In feeds, badge only states that
   need attention (in progress, failed, needs attention), never success.
+- **Activity titles are events** phrased by outcome, from `activityTitle`
+  in `utils/presentation.ts`: "Deployed", "App created", "Settings saved";
+  "Deploying" while running; the noun ("Deployment") next to a Failed badge.
 - **Empty states** say what will appear and offer the next action. Show only one
   create action on a page.
-- **Loading:** skeletons, not "Loading…" text. Keep layout stable while
-  data loads.
+- **Loading:** skeletons that mirror the loaded layout, never "Loading…"
+  text, so nothing jumps. Wrap them in `PageSkeleton` (it announces the
+  label) and compose `PageHeaderSkeleton` (with `meta` and `actions` like the
+  real header) and one `SectionSkeleton` per section (`variant` table, list
+  or body, with the real row count and density). See `pages/Dashboard.tsx`.
+- **Load errors:** keep the page's shape. Render the normal `Page` and
+  `PageHeader`, then `QueryError` (portal) for the failed query, or
+  `LoadError` (shared) with your own message. It says what failed and what to
+  do ("Couldn't load your apps. Try again in a minute.") and offers Retry. It
+  is announced but not focused, so no focus ring appears on load. Section
+  queries that fail render the same component inside the section.
 - **Feedback:** confirmations that need no action are toasts or
   `InlineStatus`. Anything that needs action is an `Alert`.
 - **Phones:** controls are 44px tall automatically. Don't add fixed widths;
@@ -257,7 +275,15 @@ Badges are for states that need attention. The expected state is quiet.
 Pages that are not rebuilt yet keep their old class names, styled by
 `owner-portal/src/styles/legacy.css` in the lower `legacy` layer. That file
 maps the old color variables to the new tokens, so old pages already follow the
-theme. When you rebuild a page:
+theme.
+
+Legacy element rules (headings, labels, inputs…) are fenced off from
+anything inside `Page`, `AuthLayout` or `Dialog`, and base rules (body type,
+links, focus) come only from `ui.css`. So a rebuilt page must render its
+content inside `Page` (or `AuthLayout` for signed-out flows) to be measured
+against the system values exactly.
+
+When you rebuild a page:
 
 1. Rewrite it with design-system components. Keep every API call, query key,
    mutation, CSRF/step-up flow, confirmation and write-only behavior.

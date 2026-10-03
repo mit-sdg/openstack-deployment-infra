@@ -3,19 +3,10 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { Link } from 'wouter';
 import { api, type Intent } from '../api';
-import { humanPhase, short } from '../utils/presentation';
+import { activityTitle, humanPhase, short } from '../utils/presentation';
 import { ErrorNotice } from './Feedback';
 import { Status } from './Status';
 
-const titles: Record<string, string> = {
-  deploy: 'Deploy',
-  create_app: 'Create app',
-  storage_create: 'Add storage',
-  storage_verify: 'Check storage',
-  storage_rotate: 'Rotate storage credentials',
-  env_set: 'Set environment variable',
-  env_delete: 'Delete environment variable',
-};
 const finished = ['succeeded', 'failed', 'blocked'];
 
 /** One activity row. Put rows inside <OperationList>. */
@@ -28,7 +19,7 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
       client.invalidateQueries({ queryKey: ['intent', intent.intentId] });
     },
   });
-  const title = titles[intent.kind] ?? 'Save settings';
+  const title = activityTitle(intent.kind, intent.state);
   const progress =
     intent.state === 'unknown'
       ? intent.requiresResubmit

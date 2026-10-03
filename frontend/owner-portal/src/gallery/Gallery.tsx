@@ -21,9 +21,12 @@ import {
   Field,
   Fieldset,
   Grid,
-  Hint,
   IconButton,
   InlineStatus,
+  LoadError,
+  PageHeaderSkeleton,
+  PageSkeleton,
+  SectionSkeleton,
   Input,
   KeyValueList,
   List,
@@ -161,7 +164,16 @@ const columns: Column<Row>[] = [
     cell: (row) => <Status state={row.state} />,
   },
   { key: 'url', header: 'URL', cell: (row) => <span className="ui-text-muted">{row.url}</span> },
-  { key: 'commit', header: 'Deployed commit', cell: (row) => <code>{row.commit}</code> },
+  {
+    key: 'commit',
+    header: 'Deployed commit',
+    cell: (row) =>
+      row.commit === 'Not deployed' ? (
+        <span className="ui-text-subtle">Not deployed</span>
+      ) : (
+        <code>{row.commit}</code>
+      ),
+  },
   {
     key: 'when',
     header: 'Last deployed',
@@ -447,8 +459,8 @@ export function Gallery() {
                   { value: 'a', label: 'Class account' },
                   { value: 'b', label: 'Local account' },
                 ]}
+                hint="Help text sits 6px under its control, in the one hint style."
               />
-              <Hint>Help text in the one consistent style.</Hint>
             </Stack>
           </Section>
 
@@ -464,7 +476,7 @@ export function Gallery() {
           <Section title="Compact list" flush actions={<Button size="sm">View all</Button>}>
             <List label="Activity" density="compact">
               <ListItem
-                title="Deploy"
+                title="Deployed"
                 meta={
                   <>
                     <a href="#data" className="ui-link">
@@ -476,7 +488,7 @@ export function Gallery() {
                 }
               />
               <ListItem
-                title="Set environment variable"
+                title="Setting variable"
                 meta={
                   <>
                     <a href="#data" className="ui-link">
@@ -490,7 +502,7 @@ export function Gallery() {
                 trailing={<Status state="accepted" />}
               />
               <ListItem
-                title="Deploy"
+                title="Deployment"
                 meta={
                   <>
                     <a href="#data" className="ui-link">
@@ -607,7 +619,11 @@ export function Gallery() {
               >
                 {tone === 'danger'
                   ? 'The health check did not pass. Check the build log, then deploy again.'
-                  : `An ${tone} message says what happened and what to do.`}
+                  : {
+                      info: 'An info message says what happened and what to do.',
+                      success: 'A success message confirms what changed.',
+                      warning: 'A warning says what might go wrong and how to avoid it.',
+                    }[tone as 'info' | 'success' | 'warning']}
               </Alert>
             ))}
             <Example label="Overlays">
@@ -624,6 +640,16 @@ export function Gallery() {
             <div className="ui-card">
               <LoadingRows />
             </div>
+            <LoadError onRetry={() => {}}>
+              Couldn’t load your apps. Try again in a minute.
+            </LoadError>
+          </Section>
+          <Section title="Page skeleton">
+            <PageSkeleton label="Loading example">
+              <PageHeaderSkeleton meta actions={1} />
+              <SectionSkeleton variant="table" columns={5} rows={2} />
+              <SectionSkeleton title variant="list" density="compact" rows={3} />
+            </PageSkeleton>
           </Section>
           <div className="ui-card">
             <EmptyState

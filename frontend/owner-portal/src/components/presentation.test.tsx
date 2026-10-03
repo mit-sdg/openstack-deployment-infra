@@ -5,7 +5,7 @@ import { BoundaryText } from './BoundaryText';
 import { Operation } from './Operation';
 import { ThemeButton } from './ThemeButton';
 import { Status } from './Status';
-import { humanPhase, relativeTime } from '../utils/presentation';
+import { activityTitle, humanPhase, relativeTime } from '../utils/presentation';
 
 describe('reviewed owner presentation', () => {
   it('renders activity with app, commit, relative time and humanized progress', () => {
@@ -72,5 +72,13 @@ describe('reviewed owner presentation', () => {
     expect(screen.getByText('Healthy')).toHaveClass('ui-status-text');
     expect(screen.getByText('Live')).toHaveClass('ui-status-text');
     expect(screen.getByText('Succeeded')).toHaveClass('ui-sr-only');
+  });
+  it('titles activity as events phrased by outcome', () => {
+    expect(activityTitle('deploy', 'succeeded')).toBe('Deployed');
+    expect(activityTitle('deploy', 'accepted')).toBe('Deploying');
+    expect(activityTitle('deploy', 'failed')).toBe('Deployment');
+    expect(activityTitle('create_app', 'succeeded')).toBe('App created');
+    expect(activityTitle('env_set', 'succeeded')).toBe('Variable set');
+    expect(activityTitle('something_new', 'succeeded')).toBe('Settings saved');
   });
 });
