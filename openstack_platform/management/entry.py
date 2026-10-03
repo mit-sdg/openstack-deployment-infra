@@ -39,6 +39,8 @@ def main() -> None:
     args, remaining = parser.parse_known_args()
     if remaining and args.mode != "staff-admin":
         parser.error("unexpected arguments")
+    if args.mode == "staff-admin" and args.smoke:
+        parser.error("staff recovery is not a service smoke mode")
     requirement = json.loads(args.requirements.read_text())
     if requirement != {
         "python": "3.14",

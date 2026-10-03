@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterator
@@ -38,6 +39,21 @@ class ReadLimits:
         self.addresses: dict[str, Bucket] = {}
         self.active = 0
         self.denied: dict[str, float] = {}
+        self.probes: dict[str, int] = {}
+        self.probe_reported_at = 0.0
+
+    def probe(self, code: str, now: float) -> None:
+        reason = (
+            code
+            if code in {"ACCESS_DENIED", "SESSION_EXPIRED", "ACCOUNT_DISABLED", "UNAUTHENTICATED"}
+            else "REJECTED"
+        )
+        with self.lock:
+            self.probes[reason] = min(1_000_000, self.probes.get(reason, 0) + 1)
+            if now - self.probe_reported_at >= 60:
+                print("staff probe_denials=" + canonical(self.probes), file=sys.stderr)
+                self.probes.clear()
+                self.probe_reported_at = now
 
     @contextmanager
     def reserve(self, user: str, address: str, now: float) -> Iterator[None]:
@@ -233,16 +249,23 @@ class StaffReads:
     ) -> Response:
         if request.method != "GET":
             raise HttpError(405, "METHOD_NOT_ALLOWED", "Staff views permit only reads.")
-        user, sid = self.broker.auth.authenticate(request, kind="staff_read")
+        try:
+            user, sid = self.broker.auth.authenticate(request, kind="staff_read", touch=False)
+        except HttpError as failure:
+            self.limits.probe(failure.code, self.broker.auth.clock())
+            raise
         correlation = str(uuid.uuid4())
         try:
             with self.limits.reserve(
                 user["id"], client_address_bucket(request), self.broker.auth.clock()
             ):
                 self.broker.auth.read_origin(request)
-                with self.broker.database.connect() as db:
-                    self.broker.auth.check_csrf(db, request, sid, self.broker.auth.clock())
                 self.query(request, route)
+                with self.broker.database.connect(write=True) as db:
+                    now = self.broker.auth.clock()
+                    self.broker.auth.session_row(db, sid, now, "staff_read")
+                    self.broker.auth.check_csrf(db, request, sid, now)
+                    db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
                 result = handler(request)
                 if len(canonical({"data": result}).encode()) > RESPONSE_BYTES:
                     raise ControllerUnavailable("staff response size")

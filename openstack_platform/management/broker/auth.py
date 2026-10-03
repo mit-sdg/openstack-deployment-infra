@@ -179,7 +179,7 @@ class Auth:
                 "SELECT * FROM users WHERE issuer=? AND subject=?",
                 (self.config.commons_origin, user["subject"]),
             ).fetchone()
-            if existing is not None and not existing["enabled"]:
+            if mode == "owner" and existing is not None and not existing["enabled"]:
                 raise HttpError(
                     403,
                     "ACCOUNT_DISABLED",
@@ -337,16 +337,18 @@ class Auth:
         mutation: bool = False,
         kind: str | None = None,
         csrf: bool = False,
+        touch: bool = True,
     ) -> tuple[dict[str, Any], str]:
         token = self.cookies(request).get(self.config.session_cookie)
         sid, now = digest(token or ""), self.clock()
-        with self.database.connect(write=True) as db:
+        with self.database.connect(write=touch) as db:
             user = self.session_row(db, sid, now, kind)
             if mutation:
                 self.portal_origin(request)
             if mutation or csrf:
                 self.check_csrf(db, request, sid, now)
-            db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
+            if touch:
+                db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
             return user, sid
 
     def bootstrap(self, request: Request) -> Response:

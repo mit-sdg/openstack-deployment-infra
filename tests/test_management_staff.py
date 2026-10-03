@@ -732,3 +732,28 @@ class StaffTests(ManagementCase):
                 with limits.reserve("another-user", "shared", 200):
                     pass
         self.assertEqual(limits.active, 0)
+
+    def test_throttled_reads_do_not_refresh_session_activity_or_flood_denial_audit(self) -> None:
+        now = time.time()
+        self.broker.auth.clock = lambda: now
+        self.staff()
+        for _ in range(10):
+            self.assertEqual(self.call("GET", "/v1/staff/owners", owner="alice").status, 200)
+        self.broker.auth.clock = lambda: now + 0.1
+        for _ in range(5):
+            self.assertEqual(self.call("GET", "/v1/staff/owners", owner="alice").status, 429)
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT last_used FROM sessions WHERE kind='staff_read'").fetchone()[0],
+                now,
+            )
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM staff_read_audit").fetchone()[0], 11)
+
+    def test_disabled_account_in_staff_mode_gets_generic_availability_after_password(self) -> None:
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE users SET enabled=0 WHERE id=?", (self.bob,))
+        self.assert_error(
+            "INVALID_CREDENTIALS", lambda: self.mode_login(name="bob", password="wrong")
+        )
+        self.assert_error("STAFF_UNAVAILABLE", lambda: self.mode_login(name="bob"))
+        self.assert_error("ACCOUNT_DISABLED", lambda: self.mode_login("owner", name="bob"))

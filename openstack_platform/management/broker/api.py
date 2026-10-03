@@ -81,7 +81,7 @@ class Broker:
                     if route.startswith("/v1/staff/"):
                         return self.staff.handle(request, handler, route)
                     if (request.method, route) not in common:
-                        self.auth.authenticate(request, kind="owner")
+                        self.auth.authenticate(request, kind="owner", touch=False)
                     if request.method == "GET" and request.body is not None:
                         raise HttpError(
                             400, "INVALID_REQUEST", "Read requests cannot contain a body."
