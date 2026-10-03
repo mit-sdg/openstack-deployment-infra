@@ -398,7 +398,7 @@ class StaffReads:
                 "a.id,a.user_id,a.app_id,a.kind,a.state,a.operation,a.created,a.updated,"
                 "u.username AS owner_username,u.display_name AS owner_display_name,"
                 "p.slug AS app_slug",
-                self.with_owner(self.operation_model),
+                self.with_owner(self.activity_model),
             ),
         }
         source, columns, model = sources[table]
@@ -585,6 +585,11 @@ class StaffReads:
     def operations(self, request: Request) -> dict[str, Any]:
         return self.local_page(request, "intents")
 
+    @classmethod
+    def activity_model(cls, row: dict[str, Any]) -> dict[str, Any]:
+        """An operation as a staff activity row, named by its app's slug."""
+        return {**cls.operation_model(row), "applicationSlug": slug(row["app_slug"])}
+
     @staticmethod
     def operation_model(row: dict[str, Any]) -> dict[str, Any]:
         operation = strict_json(row["operation"].encode()) if row["operation"] is not None else {}
@@ -614,7 +619,6 @@ class StaffReads:
         return {
             "intentId": identifier(row["id"]),
             "applicationId": identifier(row["app_id"]),
-            "applicationSlug": slug(row["app_slug"]),
             "ownerId": identifier(row["user_id"]),
             "kind": enum(row["kind"], {"create_app", "save_configuration", "deploy"}),
             "state": state,
