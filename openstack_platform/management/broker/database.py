@@ -1,10 +1,11 @@
-"""Private SQLite management state; no credential values are persisted."""
+"""Private broker identities, local credential hashes/TOTP state, ownership and audit."""
 
 from __future__ import annotations
 
 import fcntl
 import os
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -54,7 +55,68 @@ ALTER TABLE sessions DROP COLUMN kid;
 UPDATE metadata SET version=2;
 """
 SCHEMA = SCHEMA_V1
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+MIGRATION_3 = """
+DELETE FROM csrf_tokens;
+DELETE FROM sessions;
+DROP TABLE csrf_tokens;
+DROP TABLE sessions;
+ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'owner' CHECK(role IN ('owner','staff','admin') AND (role!='admin' OR issuer='local'));
+ALTER TABLE users ADD COLUMN generation INTEGER NOT NULL DEFAULT 1 CHECK(generation>0);
+ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','pending'));
+CREATE UNIQUE INDEX local_username ON users(username COLLATE NOCASE) WHERE issuer='local';
+CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ created REAL NOT NULL, last_used REAL NOT NULL, expires REAL NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('owner','staff','admin')),
+ generation INTEGER NOT NULL CHECK(generation>0), reauthenticated_at REAL NOT NULL DEFAULT 0);
+CREATE TABLE csrf_tokens (token TEXT PRIMARY KEY, session TEXT NOT NULL REFERENCES sessions(token) ON DELETE CASCADE,
+ expires REAL NOT NULL, created REAL NOT NULL);
+CREATE TABLE local_accounts (user_id TEXT PRIMARY KEY REFERENCES users(id),
+ password_hash TEXT, totp_secret TEXT, totp_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(totp_confirmed IN (0,1)),
+ last_counter INTEGER NOT NULL DEFAULT -1,
+ totp_streak INTEGER NOT NULL DEFAULT 0 CHECK(totp_streak>=0),
+ totp_blocked_until REAL NOT NULL DEFAULT 0);
+CREATE TABLE authentication_failures (sequence INTEGER PRIMARY KEY,
+ user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('password','totp')),
+ created REAL NOT NULL);
+CREATE INDEX authentication_failure_window ON authentication_failures(user_id,kind,created);
+CREATE TABLE token_policy (singleton INTEGER PRIMARY KEY CHECK(singleton=1), valid_after REAL NOT NULL);
+INSERT INTO token_policy VALUES(1,0);
+CREATE TABLE account_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+ user_id TEXT NOT NULL REFERENCES users(id), generation INTEGER NOT NULL,
+ purpose TEXT NOT NULL CHECK(purpose IN ('invite','password-reset','totp-reset')),
+ expires REAL NOT NULL, created REAL NOT NULL, failures INTEGER NOT NULL DEFAULT 0 CHECK(failures BETWEEN 0 AND 5));
+CREATE TABLE used_tokens (id TEXT PRIMARY KEY, purpose TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE enrollments (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ generation INTEGER NOT NULL, binder_hash TEXT NOT NULL, purpose TEXT NOT NULL,
+ secret TEXT, password_hash TEXT, expires REAL NOT NULL, failures INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE admin_audit (sequence INTEGER PRIMARY KEY, actor_id TEXT REFERENCES users(id),
+ target_id TEXT REFERENCES users(id), action TEXT NOT NULL, details TEXT NOT NULL,
+ created REAL NOT NULL);
+CREATE TABLE staff_read_audit (
+ sequence INTEGER PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES users(id),
+ correlation TEXT NOT NULL, route TEXT NOT NULL, owner_id TEXT, app_id TEXT,
+ deployment_id TEXT, page_limit INTEGER, cursor_used INTEGER NOT NULL,
+ result_count INTEGER NOT NULL, outcome TEXT NOT NULL, status INTEGER NOT NULL,
+ stale INTEGER NOT NULL, created REAL NOT NULL);
+CREATE TABLE staff_read_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ row_count INTEGER NOT NULL CHECK(row_count>=0), pruned_at REAL NOT NULL);
+INSERT INTO staff_read_state VALUES(1,0,0);
+CREATE INDEX staff_read_age ON staff_read_audit(created,sequence);
+CREATE INDEX staff_read_actor ON staff_read_audit(actor_id,created);
+CREATE INDEX admin_audit_age ON admin_audit(created DESC,sequence DESC);
+CREATE INDEX account_token_age ON account_tokens(expires);
+CREATE INDEX enrollment_age ON enrollments(expires);
+CREATE INDEX user_page ON users(created DESC,id DESC);
+CREATE INDEX user_name ON users(username,id);
+CREATE INDEX app_page ON apps(created DESC,id DESC);
+CREATE INDEX app_owner_page ON apps(user_id,created DESC,id DESC);
+CREATE INDEX intent_page ON intents(created DESC,id DESC);
+CREATE INDEX intent_owner_page ON intents(user_id,created DESC,id DESC);
+CREATE INDEX intent_app_page ON intents(app_id,created DESC,id DESC);
+UPDATE metadata SET version=3;
+"""
 
 
 class Database:
@@ -84,7 +146,7 @@ class Database:
                 db.executescript("BEGIN IMMEDIATE;" + SCHEMA_V1)
                 db.execute("INSERT INTO metadata VALUES(1,?)", (identity,))
             row = db.execute("SELECT * FROM metadata").fetchone()
-            if row is None or row["version"] not in (1, 2) or row["identity"] != identity:
+            if row is None or row["version"] not in (1, 2, 3) or row["identity"] != identity:
                 raise ValueError("unsupported management schema or deployment identity")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS observations (app_id TEXT PRIMARY KEY REFERENCES apps(id), body TEXT NOT NULL, updated REAL NOT NULL)"
@@ -108,6 +170,17 @@ class Database:
                 db.execute("INSERT INTO schema_migrations VALUES(2,?)", (digest(MIGRATION_2),))
             second = db.execute("SELECT checksum FROM schema_migrations WHERE version=2").fetchone()
             if second is None or second[0] != digest(MIGRATION_2):
+                raise ValueError("management migration checksum mismatch")
+            if row["version"] < 3:
+                for statement in MIGRATION_3.split(";"):
+                    if statement.strip():
+                        db.execute(statement)
+                db.execute(
+                    "UPDATE token_policy SET valid_after=? WHERE singleton=1", (time.time(),)
+                )
+                db.execute("INSERT INTO schema_migrations VALUES(3,?)", (digest(MIGRATION_3),))
+            third = db.execute("SELECT checksum FROM schema_migrations WHERE version=3").fetchone()
+            if third is None or third[0] != digest(MIGRATION_3):
                 raise ValueError("management migration checksum mismatch")
 
     @contextmanager
@@ -139,3 +212,64 @@ class Database:
                     # Another connection may close between stat and chmod;
                     # disappearance is normal, including after a committed write.
                     continue
+
+
+def validate_database(
+    connection: sqlite3.Connection, identity: str | None = None
+) -> tuple[int, str]:
+    if [row[0] for row in connection.execute("PRAGMA integrity_check")] != [
+        "ok"
+    ] or connection.execute("PRAGMA foreign_key_check").fetchall():
+        raise ValueError("broker SQLite integrity or foreign keys failed")
+    rows = connection.execute("SELECT version,identity FROM metadata").fetchall()
+    if (
+        len(rows) != 1
+        or rows[0][0] not in (1, 2, 3)
+        or (identity is not None and rows[0][1] != identity)
+    ):
+        raise ValueError("broker schema or identity mismatch")
+    migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=1"
+    ).fetchone()
+    if migration is None or migration[0] != digest(SCHEMA_V1):
+        raise ValueError("broker migration checksum mismatch")
+    if rows[0][0] >= 2:
+        second = connection.execute(
+            "SELECT checksum FROM schema_migrations WHERE version=2"
+        ).fetchone()
+        if second is None or second[0] != digest(MIGRATION_2):
+            raise ValueError("broker migration checksum mismatch")
+    if rows[0][0] == 3:
+        third = connection.execute(
+            "SELECT checksum FROM schema_migrations WHERE version=3"
+        ).fetchone()
+        if third is None or third[0] != digest(MIGRATION_3):
+            raise ValueError("broker migration checksum mismatch")
+    required = {
+        "users",
+        "sessions",
+        "csrf_tokens",
+        "apps",
+        "configurations",
+        "intents",
+        "audit",
+        "observations",
+        "quotas",
+    }
+    if rows[0][0] == 3:
+        required |= {
+            "local_accounts",
+            "authentication_failures",
+            "token_policy",
+            "account_tokens",
+            "used_tokens",
+            "enrollments",
+            "admin_audit",
+            "staff_read_audit",
+            "staff_read_state",
+        }
+    if not required <= {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }:
+        raise ValueError("broker schema is incomplete")
+    return int(rows[0][0]), str(rows[0][1])

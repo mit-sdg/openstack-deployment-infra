@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { api, validateSettings, validateBindings, type Settings } from '../api';
+import { api, resourceApi, validateSettings, validateBindings, type Settings } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { EnvironmentSection } from '../components/EnvironmentSection';
 import { StorageSection } from '../components/StorageSection';
@@ -25,14 +25,17 @@ export function ConfigurationForm({
   id,
   initial,
   resources = false,
+  service = api,
 }: {
   id: string;
   initial: Settings;
   resources?: boolean;
+  service?: ReturnType<typeof resourceApi>;
 }) {
+  const scope = service === api ? [] : ['admin'];
   const environment = useQuery({
-    queryKey: ['environment', id],
-    queryFn: () => api.environment(id),
+    queryKey: [...scope, 'environment', id],
+    queryFn: () => service.environment(id),
     enabled: resources,
   });
   const [settings, setSettings] = useState<Settings>(structuredClone(initial));
@@ -40,12 +43,12 @@ export function ConfigurationForm({
   const [saved, setSaved] = useState(false);
   const client = useQueryClient();
   const save = useMutation({
-    mutationFn: (key: string) => api.save(id, settings, key),
+    mutationFn: (key: string) => service.save(id, settings, key),
     onSuccess: (result) => {
       setSettings((current) => ({ ...current, revision: result.revision as number }));
       setSaved(true);
-      client.invalidateQueries({ queryKey: ['settings', id] });
-      client.invalidateQueries({ queryKey: ['app', id] });
+      client.invalidateQueries({ queryKey: [...scope, 'settings', id] });
+      client.invalidateQueries({ queryKey: [...scope, 'app', id] });
     },
   });
   function update(change: Partial<Settings>) {
@@ -239,8 +242,13 @@ export function ConfigurationForm({
       </form>
       {resources && (
         <>
-          <EnvironmentSection id={id} bindings={settings.configuration.storageBindings} />
+          <EnvironmentSection
+            service={service}
+            id={id}
+            bindings={settings.configuration.storageBindings}
+          />
           <StorageSection
+            service={service}
             id={id}
             bindings={settings.configuration.storageBindings}
             onChange={(storageBindings) =>

@@ -6,8 +6,9 @@ import os
 import socket
 import threading
 import time
+import uuid as uuid_module
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ...controller.deployment_config import parse_configuration
 from ...controller.http import (
@@ -61,6 +62,7 @@ class FakeController:
             # Upgrade only old local fixture checkpoints to the audited wire
             # projection. No controller or broker product records are adopted.
             for app in self.apps.values():
+                app.setdefault("requiresMaintenance", False)
                 app.setdefault(
                     "sizing", {"workerFlavor": "worker-small", "cpuMHz": 500, "memoryMiB": 512}
                 )
@@ -141,6 +143,10 @@ class FakeController:
             ("POST", "/v1/applications/{app}/storage", self.storage_create),
             ("POST", "/v1/storage/{resource}/verify", self.storage_action),
             ("POST", "/v1/storage/{resource}/rotate", self.storage_action),
+            ("GET", "/v1/storage/{resource}", self.storage_resource),
+            ("DELETE", "/v1/storage/{resource}", self.storage_delete),
+            ("POST", "/v1/applications/{app}/enable", self.running_state),
+            ("POST", "/v1/applications/{app}/disable", self.running_state),
         ]
         for method, path, handler in routes:
 
@@ -229,6 +235,7 @@ class FakeController:
             "slug": body["slug"],
             "url": f"https://{body['slug']}.apps.example.com",
             "desiredRunning": False,
+            "requiresMaintenance": False,
             "activeDeploymentId": None,
             "deployment": None,
             "sizing": {"workerFlavor": "worker-small", "cpuMHz": 500, "memoryMiB": 512},
@@ -266,10 +273,14 @@ class FakeController:
             if operation["status"] == "recovery_required":
                 operation.update(status="running", phase="building", ready=time.time() + self.delay)
             return replay
-        body = self.body(
-            request,
-            {"repository", "commit", "requestedRef", "configurationRevision", "configuration"},
-        )
+        fields = {"repository", "commit", "requestedRef", "configurationRevision", "configuration"}
+        if (
+            not isinstance(request.body, dict)
+            or not fields <= set(request.body)
+            or set(request.body) - fields - {"maintenance", "plan"}
+        ):
+            raise HttpError(400, "INVALID_BODY", "Invalid deployment fields.")
+        body = request.body
         app_id = request.path_parameters["app"]
         if app_id not in self.apps:
             raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
@@ -608,3 +619,89 @@ class FakeController:
         return self.resource_operation(
             request, resource["applicationId"], "storage." + request.path.rsplit("/", 1)[1]
         )
+
+    def storage_resource(self, request: Request) -> Response:
+        resource = self.resources.get(request.path_parameters["resource"])
+        if resource is None:
+            raise HttpError(404, "STORAGE_NOT_FOUND", "Storage does not exist.")
+        return Response(200, dict(resource))
+
+    def storage_delete(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay:
+            return replay
+        resource = dict(cast(dict[str, Any], self.storage_resource(request).body))
+        body = self.body(request, {"confirmation", "purge"})
+        if body["confirmation"] != resource["name"]:
+            raise HttpError(400, "INVALID_BODY", "Confirmation mismatch.")
+        self.resources.pop(request.path_parameters["resource"])
+        return self.resource_operation(request, resource["applicationId"], "storage.remove")
+
+    def running_state(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay:
+            return replay
+        app = request.path_parameters["app"]
+        if app not in self.apps:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        self.apps[app]["desiredRunning"] = request.path.endswith("/enable")
+        return self.resource_operation(request, app, "app.state")
+
+    def seed_operator_app(self, identifier: str, public_url: str) -> None:
+        """Explicit development fixture: accepted, larger and retained-address app."""
+        if identifier in self.apps:
+            return
+        deployment = str(
+            uuid_module.uuid5(uuid_module.NAMESPACE_URL, "fixture-accepted:" + identifier)
+        )
+        configuration = {
+            "schemaVersion": 1,
+            "build": {
+                "runtime": "node",
+                "packages": ["."],
+                "buildScript": None,
+                "startScript": "start",
+            },
+            "runtime": {"port": 3000, "healthPath": "/health"},
+            "storageBindings": [],
+        }
+        self.apps[identifier] = {
+            "applicationId": identifier,
+            "slug": "operator-class-fixture-mobile"
+            if identifier.endswith("0083")
+            else "operator-class-fixture",
+            "url": public_url,
+            "activeDeploymentId": deployment,
+            "desiredRunning": True,
+            "requiresMaintenance": True,
+            "sizing": {"workerFlavor": "worker-large", "cpuMHz": 4000, "memoryMiB": 8192},
+            "deployment": {
+                "deploymentId": deployment,
+                "sourceCommit": "a" * 40,
+                "acceptedAt": utc(time.time()),
+            },
+            "live": {
+                "schedulerAvailable": True,
+                "routeAvailable": True,
+                "schedulerState": "running",
+                "allocationHealthy": True,
+                "routeHealthy": True,
+            },
+        }
+        self.deployments[deployment] = {
+            "deploymentId": deployment,
+            "applicationId": identifier,
+            "status": "succeeded",
+            "snapshotKind": "strict",
+            "repositoryCommit": "a" * 40,
+            "sourceRepository": "https://github.com/example/class-app",
+            "requestedRef": "main",
+            "configurationRevision": 7,
+            "configuration": configuration,
+            "configurationSha256": digest(canonical(configuration)),
+            "requestedAt": utc(time.time()),
+            "acceptedAt": utc(time.time()),
+            "updatedAt": utc(time.time()),
+            "cleanupState": "confirmed",
+        }
+        self.persist()

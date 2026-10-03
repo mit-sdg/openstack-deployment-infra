@@ -22,6 +22,8 @@ export function DeployPage({ id }: { id: string }) {
       ) ?? []),
     ]),
   ].sort();
+  const identity = useQuery({ queryKey: ['app', id], queryFn: () => api.app(id) });
+  const [identityConfirmed, setIdentityConfirmed] = useState(false);
   const [sha, setSha] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [intentId, setIntentId] = useState<string | null>(null);
@@ -31,7 +33,8 @@ export function DeployPage({ id }: { id: string }) {
   const client = useQueryClient();
   const intent = useIntentPolling(intentId);
   const deploy = useMutation({
-    mutationFn: (key: string) => api.deploy(id, settings.data!.revision, sha, key),
+    mutationFn: (key: string) =>
+      api.deploy(id, settings.data!.revision, sha, key, identityConfirmed),
     onSuccess: (result) => {
       setIntentId(result.intentId);
       setReview(false);
@@ -189,6 +192,16 @@ export function DeployPage({ id }: { id: string }) {
             The branch is a label. This review does not prove the commit is its current head.
             Ordinary deployments may briefly run two versions of your app.
           </div>
+          {identity.data?.identityProvider && (
+            <label>
+              <input
+                type="checkbox"
+                checked={identityConfirmed}
+                onChange={(e) => setIdentityConfirmed(e.target.checked)}
+              />
+              Portal sign-in depends on this app — confirm deployment
+            </label>
+          )}
           <ErrorNotice error={deploy.error} />
         </div>
         <div className="dialog-footer">
@@ -197,7 +210,9 @@ export function DeployPage({ id }: { id: string }) {
           </button>
           <button
             className="button button-primary"
-            disabled={deploy.isPending}
+            disabled={
+              deploy.isPending || (identity.data?.identityProvider === true && !identityConfirmed)
+            }
             onClick={() => {
               const key = pendingKey ?? crypto.randomUUID();
               setPendingKey(key);

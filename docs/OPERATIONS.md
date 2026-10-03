@@ -1313,38 +1313,76 @@ and S3 TLS use the platform CA through the default `PGSSLROOTCERT` and
 `AWS_CA_BUNDLE` bindings. Renaming these targets requires configuring the client
 to use the renamed CA path variable.
 
-Storage deletion is admin-only. Until an administrator UI exists, an operator
-with approved privileged-socket access handles owner requests. Check the app ID
-and resource UUID against the request, list its storage to obtain the exact
-resource `name`, and take/verify a managed-data backup first. Remove bindings
-from the app's configuration and deploy that configuration so the active
-deployment no longer references the resource. Then use the existing controller
-privileged socket from the approved recovery console on admin (see [application curl setup](APPLICATION_DEPLOYMENTS.md#preconditions-and-access)):
+### Manage applications as a local admin
 
-```sh
-APP_ID=OWNER_APPLICATION_UUID
-RESOURCE_ID=REVIEWED_STORAGE_UUID
-RESOURCE_NAME=EXACT_RESOURCE_NAME
-NAMESPACE=your-installed-namespace
-ADMIN_SOCKET="/run/${NAMESPACE}-controller/privileged.sock"
-jq -n --arg confirmation "$RESOURCE_NAME" '{confirmation: $confirmation}' > storage-delete.json
-curl --unix-socket "$ADMIN_SOCKET" -sS --fail-with-body \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuidgen | tr '[:upper:]' '[:lower:]')" \
-  -X DELETE --data-binary @storage-delete.json "http://localhost/v1/storage/$RESOURCE_ID"
-```
+Sign in with a local admin account and open **Manage applications**. The list
+contains every broker-known application; the controller project socket cannot
+list operator-created applications. To adopt one, obtain its UUID independently,
+leave the owner account ID empty to use your own account (or select an active
+account UUID from Accounts), and choose **Adopt application**. Adoption verifies
+the controller app and imports its current accepted repository, ref, revision
+and validated configuration, including storage bindings. It does not restart,
+resize or recreate the app. Apps without a complete accepted snapshot must first
+be deployed through the operator. Already owned apps are refused; repeating the
+same request key returns the original import.
 
-Poll the returned `statusUrl` on the privileged socket to terminal success and
-verify the resource is absent from `GET /v1/applications/{APP_ID}/storage`.
-Nonempty S3 buckets require an explicit administrator-reviewed `purge: true`;
-without it the controller refuses removal. The project socket and portal have
-no storage DELETE route. No credential values belong in deletion tickets.
+An admin can create an app for an active owner, edit any app's configuration,
+set/replace/delete its environment names, provision/verify/rotate storage,
+deploy exact commits, change its running state and reassign its owner. Creation
+uses the target owner's app quota. Adoption and reassignment preserve existing
+apps even when the recipient exceeds that quota; future creation remains
+quota-limited. Adoption always requires a fresh five-minute password/TOTP
+step-up. Reassignment requires that proof, the expected current owner and no
+unfinished app operation. Ordinary My
+applications routes remain scoped to the signed-in owner even for admins.
+Environment values remain write-only for admins. No value is stored in broker
+SQLite, returned in reads, placed in an audit record or cached by the React
+mutation. Unknown environment writes require resubmitting the original value
+and request key; their durable fingerprints retain the keyed HMAC from the
+owner resource implementation. Other unknown operations reuse their original
+controller key.
 
-Install this feature as matching broker/web releases with protocol 2 and schema
-2; the activation compatibility versions are unchanged. No admin image rebuild
-or controller upgrade is needed. Unknown storage outcomes replay the journal's
-original controller key. Unknown environment outcomes require the owner to
-resubmit the same edit with its original key and value; the portal does not
-retain a value for automatic replay.
+The deploy dialog accepts maintenance consent and an optional reviewed sizing
+plan. Without a plan the controller preserves the app's accepted worker flavor,
+CPU and memory, including an adopted class app's larger allocation. Plan
+creation remains an operator capability: obtain a current plan through the
+operator and paste its JSON. An app with a retained primary IPv4 requires
+maintenance; expect brief cutover downtime after the candidate finishes building.
+The broker identifies the Commons app by matching its public URL host with
+`ownerPortal.commonsOrigin`. Adoption, reassignment, deploy, stop/start and storage changes display
+**Portal sign-in depends on this app** and require separate confirmation. This follows the app onto owner deployment
+and storage routes after reassignment; owner routes do not offer stop/start. Local
+admin sign-in remains available while Commons is stopped; never rely on a
+Commons session for recovery. This confirmation does not prohibit management
+of the class app.
+
+Storage deletion is available only in the admin workspace. Remove the resource's
+bindings from saved configuration and deploy that configuration before deletion.
+Review the app ID and resource type, verify a current managed-data backup, then
+reauthenticate with password and a fresh TOTP code. Type the exact application
+slug followed by a space and `postgres`, `mongo` or `s3`, for example
+`student-app postgres`, in **Delete storage**. This permanently destroys the
+resource and data, including a nonempty S3 bucket. The UI warns that nightly
+platform backups exist; operator-assisted recovery can lose newer data. Poll the
+intent to terminal success and verify the resource disappears. The broker also
+refuses deletion while saved bindings reference the resource, serializes app
+operations across owner/admin actors, and records a safe admin audit entry.
+Owners and staff have no storage-delete or cross-owner write route.
+
+The project controller socket now permits `DELETE /v1/storage/{id}` with its
+existing machine-name confirmation and optional S3 `purge` consent. The broker
+maps typed confirmation to that contract and supplies `purge:true`. Direct
+recovery-console clients must use the project socket for storage deletion.
+Cascade application deletion and every `/v1/admin/*` endpoint remain restricted
+to the privileged socket; the broker receives neither of those capabilities.
+No credential values belong in deletion tickets.
+
+Install matched broker/web releases using protocol 3 and schema 3 together with
+the approved replacement admin image. The image carries protocol-3 activation,
+the unprivileged bootstrap entry point and the controller route changes above.
+There are no Nix isolation changes or new directories. The unreleased schema-3
+prototypes are not migration inputs: only published schema 1/2 databases migrate
+to the final schema 3, and checksum mismatches fail closed.
 
 The validated `ownerPortal` inventory section carries `enabled`, `commonsOrigin`,
 optional identity egress CIDRs/class label and quota/rate/session limits. The
@@ -1361,16 +1399,152 @@ the Commons origin is confirmed. Production
 uses system CAs; no provider signing keys are used by this credential protocol.
 CA updates belong to the admin image, not a per-account key rotation.
 
-Defaults are two apps and one held external mutation per owner. Configuration
-changes affect owners without a `quotas` override; disabled apps still count.
-Staff may maintain `quotas(user_id,apps,concurrent)` and revoke
-`users.enabled`/`sessions` in the private broker DB through an offline recovery
-console as the broker identity. Stop portal/backup admissions, use a transaction
-with the immutable user ID, and record a safe audit action; never edit ownership
-by username or provide a global read/revocation endpoint in the portal. A local
-revocation rejects existing sessions immediately. Commons archiving/password
-changes affect new logins only; already issued sessions retain the 8 h/30 min
-expiry contract unless locally revoked.
+Defaults are two apps and one held external mutation per owner. Local admins
+edit per-owner quotas in **Accounts**; lower limits stop new admission without
+cancelling existing operations or deleting apps. Disabled apps still count.
+Staff/admin catalog reads enumerate only broker-known resources; global
+controller administrator views remain outside this public portal.
+
+### Bootstrap or recover a local admin
+
+Install and activate a matched schema-3/protocol-3 broker/web pair. The admin
+image must have the protocol-3 root activator: protocol-2 image code refuses the
+new descriptor, so the approved admin replacement is required. The bootstrap
+command is unprivileged and must run as the existing `operator` account on the
+admin host. It needs no additional directories or sandbox access. Its hash-only
+file is `paths.adminState/management-broker-releases/config/admin-enrollment.json`,
+inside the existing operator-owned, broker-group-readable setgid directory.
+
+Set `STATE` from inventory and resolve the active broker release. Use its
+isolated entry point so the helper matches the installed broker:
+
+```sh
+BROKER_RELEASE=$(readlink -f "$STATE/management-active/current/broker")
+/run/current-system/sw/bin/management-python3.14 -I -B   "$BROKER_RELEASE/runtime/openstack_platform/management/entry.py" bootstrap   --config "$BROKER_RELEASE/config/management.json"   --requirements "$BROKER_RELEASE/requirements.json"
+```
+
+The image package also exposes `openstack-platform-management-bootstrap --config
+PATH`. Both forms require the operator identity; root and broker identities are
+refused. They atomically replace a mode-0640 file whose group is inherited from
+the prepared mode-2750 directory. Only token ID, SHA-256 token hash, realm digest,
+creation time and 24 h expiry are stored. Issuing a new URL supersedes the prior
+unconsumed URL. Treat the printed URL as a credential; share it only with the
+intended admin. No password, plaintext token, or TOTP key belongs in inventory,
+environment variables, tickets, access logs or shell history.
+
+Open the complete `/setup#ID.TOKEN` URL in a browser. The fragment never reaches
+HTTP requests or Referer; the page removes it from the address bar and POSTs it
+under exact Origin and anonymous-CSRF rules. Choose a local username and a
+password of at least 12 characters, at most 1024 UTF-8 bytes, excluding the
+username (case-insensitive). Enroll the displayed TOTP key in an authenticator
+and confirm a code. The key is shown only once and uses no external QR service.
+The pending admin cannot sign in until enrollment finishes. Each token ID is
+consumed when enrollment starts; replay, expiry, wrong realm and malformed files
+are refused. An abandoned or exhausted enrollment needs a new operator URL and
+new local username. Enrollment handles expire after 10 min and permit at most
+five incorrect code confirmations.
+
+Recovery uses the same command to create a **new** local admin. That admin can
+disable the old account or issue password/TOTP reset links from Accounts.
+Commons identities cannot become admin; their credentials are checked externally
+and are never reset by this UI. No additional sudo or controller capability is
+needed for the operator command.
+
+### Manage accounts, roles and quotas
+
+**Accounts** lists and searches local and Commons accounts, including role,
+active/pending/disabled status, last sign-in, app count and effective quotas.
+Create local owner/staff/admin accounts through 72 h single-use invitations;
+copy and privately share the returned fragment URL. The portal sends no email.
+Local owner/staff recipients may enable TOTP; admins must enroll it. A staff
+account can manage its own apps and read the catalog in the same session.
+There is no sign-in mode selector, impersonation or role upgrade in a session.
+
+Changing role, enabling/disabling, revoking sessions, or issuing/resetting local
+credentials increments generation and deletes all of the account's sessions and
+outstanding account/enrollment links. A new login receives its current DB role.
+Admin promotions without a confirmed TOTP factor become pending and receive a
+fresh enrollment link. Common accounts may be owner or staff, never admin.
+Quota edits use 0–1000 apps and 0–16 concurrent operations; zero stops new
+admission. They do not reassign ownership or change controller resources.
+
+Role/enable/disable/session-revoke and reset actions, plus creation of another
+local account (owner, staff or admin), and issuing any invitation require password
+and a fresh TOTP code validated within five minutes.
+Use **Confirm a sensitive account action** when prompted. Codes cannot be reused
+within their accepted counter/window; wait for a fresh code if you just enrolled
+or signed in. Admin sessions are capped at 1 h absolute/15 min idle. Local login
+also has the existing five-failure username/address window and per-source
+admission at 12 attempts/minute per lane. Wrong passwords have a shared
+20-failure rolling-hour budget across all sources; once it is exhausted, use a
+recognized browser. Successful local sign-in retains a signed HttpOnly, Secure,
+SameSite=Strict known-device cookie for 90 days. It exempts the password budget
+and uses reserved hash capacity; it does not replace the password or factor.
+A role change, reset, disable or other generation bump invalidates recognition.
+Logout preserves it. If it is absent/expired after a guessing flood, wait for the
+hourly window or use the supported reset/recovery workflow; anonymous guessing
+cannot invalidate an existing device cookie.
+
+Only failures after the correct password affect TOTP: an account-wide 30-second
+backoff doubles to one hour, with at most 10 failures in a rolling hour, shared
+by login and step-up regardless of source or device recognition. Success clears
+the exponential delay without reopening hourly windows. Step-up has reserved
+hash capacity but still needs the same password budget/device exemption and
+TOTP checks. A generic credential error
+covers invalid accounts, passwords, factors and backoff; throttling/capacity
+errors have no credential detail.
+
+Issuing a password reset immediately clears the old password hash. Issuing a
+TOTP reset clears the old secret and makes the account pending, even when MFA
+was optional; old credentials and password-only fallback cannot sign in.
+Password-reset links require the existing TOTP factor when enabled and are void
+after five wrong codes. Codes are checked before password hashing. Enrollment
+finish does not supply step-up unless a fresh code was verified in that finish
+request; use the step-up form afterward when needed. TOTP-reset
+links enroll a fresh factor but do not issue a session: sign in with the password
+and a fresh code afterward. To recover both factors, the new admin can issue a
+TOTP-reset link first, complete its enrollment, then issue a password-reset link.
+Issuing a second reset voids any outstanding earlier reset link. Resetting credentials does not
+silently enable a disabled account. **Admin audit** records safe actor/target IDs,
+action, generation/role/quota metadata and timestamps, never links or secrets.
+
+Break glass is the operator bootstrap command, not the former offline staff-grant
+helper. Keep a verified broker backup before recovery or release migration.
+A restore retains roles and credential/factor state, increments generations and
+deletes all sessions, invitations and pending enrollment handles. It also fences
+off every pre-restore operator enrollment file by issuance time, and rejects the
+current TOTP window to prevent replay from a rolled-back counter. Wait for a fresh
+code after restore, and issue a new operator URL if recovery is needed. Upgrading
+a restored v1/v2 backup to schema 3 also fences old enrollment files at migration
+time; issue enrollment URLs after the broker has completed migration.
+
+### Review staff reads and recover audit capacity
+
+Staff reads record actor ID, correlation UUID, fixed route, validated resource/
+filter IDs, page bound/cursor presence, row count, outcome/status, stale flag and
+time in `staff_read_audit`. They never record passwords, cookies, CSRF, raw
+queries, response bodies, logs or controller operation references. Account
+changes have separate `admin_audit` evidence. Read audits are private to
+recovery access; the staff portal exposes no audit endpoint.
+
+Read-audit retention is 30 days. Read traffic triggers bounded pruning batches
+of at most 1000 expired rows after the daily interval; if a batch is full, later
+reads continue pruning. Inactive databases can retain expired rows until the
+next maintenance/read. At 2 million retained read-audit rows, or when a read audit
+cannot commit, staff reads return 503 without metadata. The audit row cap does
+not deny owner APIs; a shared DB/disk failure can affect both modes. Repeated
+throttled denials are aggregated, not written on
+every retry. Encrypted backups retain their own history independently.
+
+If the cap is reached, stop admissions/backups using the procedure above. Export
+the private audit rows to the approved private recovery evidence destination.
+Prune reviewed/expired rows in one broker-identity SQLite transaction and
+recompute `staff_read_state.row_count` with `SELECT COUNT(*) FROM
+staff_read_audit`; do not reset the counter without removing/exporting the rows.
+Set `pruned_at` to the maintenance timestamp, verify integrity/counts and take a
+new backup before reopening. Never delete recent evidence merely to admit more
+automated staff requests. Staff throttling returns 429, dependency/audit failure
+503, with a bounded 30-second retry delay; wait for that delay before retrying.
 
 The fourth backup class is `management-broker`: consistent SQLite online backup,
 age encryption with the hosted-controller escrow recipient, committed checksum/
@@ -1379,7 +1553,9 @@ readable. An active or staged broker selection requires this class for healthy
 export/status, including a broken selector whose release files disappeared.
 Checking both keeps recovery evidence mandatory before first activation and
 while staging changes independently of an active pair. The
-broker HMAC key is not restored; sessions and CSRF are removed. To replace state,
+broker HMAC key is not restored; sessions and CSRF are removed. Schema-3 restores
+retain roles, increment generations, delete all sessions/account/enrollment tokens
+and fence off pre-restore operator enrollment files. To replace state,
 stop identity/broker/web, their activation/path units and broker backup timer/
 service. Decrypt to broker-owned mode-0600 `management-broker/restore-input.sqlite3`
 and use `openstack-platform-management-broker-restore --yes` from the recovery
@@ -1413,7 +1589,7 @@ original controller key or polls the recorded operation.
 
 Stop admissions and back up the broker/controller databases first. Review the
 actual database migration evidence and the retained pair's authentication realm.
-The command supports schema 2 and protocol 2 with controller API 1; it refuses
+The command supports schema 3 and protocol 3 with controller API 1; it refuses
 schema-incompatible retained or active descriptors. It cannot inspect the
 broker's private database as the operator. An incompatible database needs an
 explicit forward repair or verified offline restore, which invalidates sessions

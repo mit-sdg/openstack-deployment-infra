@@ -87,11 +87,31 @@ class Journal:
                 and secret_body is None
             ):
                 return
+            if (
+                strict_json(row["body"].encode()).get("_portalAdmin") is True
+                and row["state"] != "accepted"
+            ):
+                actor = db.execute(
+                    "SELECT role,enabled,status FROM users WHERE id=?", (row["user_id"],)
+                ).fetchone()
+                if (
+                    actor is None
+                    or actor["role"] != "admin"
+                    or not actor["enabled"]
+                    or actor["status"] != "active"
+                ):
+                    db.execute(
+                        "UPDATE intents SET state='blocked',safe_error='Admin review required.' WHERE id=?",
+                        (identifier,),
+                    )
+                    return
             db.execute(
                 "UPDATE intents SET lease=?, attempts=attempts+1 WHERE id=?",
                 (now + self.client.timeout + 5, identifier),
             )
             intent = dict(row)
+        controller_body = strict_json(intent["body"].encode())
+        controller_body.pop("_portalAdmin", None)
         operation_id = intent["operation_id"]
         state = "accepted" if intent["state"] == "accepted" and operation_id else "unknown"
         operation = (
@@ -136,9 +156,7 @@ class Journal:
                 status, result = self.client.request(
                     intent["method"],
                     intent["path"],
-                    secret_body
-                    if intent["kind"] in {"env_set", "env_delete"}
-                    else strict_json(intent["body"].encode()),
+                    secret_body if intent["kind"] in {"env_set", "env_delete"} else controller_body,
                     intent["controller_key"],
                 )
                 if status == 201 and intent["kind"] == "create_app":

@@ -219,13 +219,12 @@ def mutate_storage(self: Broker, request: Request) -> Response:
     user, app = self.own(request, mutation=True)
     creating = "resource" not in request.path_parameters
     if creating:
-        body = object_body(request.body, {"type"})
+        body = self.identity_mutation_body(request, app, {"type"})
         if not isinstance(body["type"], str) or body["type"] not in RESOURCE_OUTPUTS:
             raise HttpError(400, "INVALID_FIELD", "Choose postgres, mongo or s3.")
         path, kind = f"/v1/applications/{app['id']}/storage", "storage_create"
     else:
-        if request.body not in (None, {}):
-            raise HttpError(400, "INVALID_REQUEST", "Storage actions take no fields.")
+        self.identity_mutation_body(request, app, set())
         resource = checked_uuid(request.path_parameters["resource"])
         action = request.path.rsplit("/", 1)[1]
         body, path, kind = {}, f"/v1/storage/{resource}/{action}", f"storage_{action}"
@@ -283,9 +282,16 @@ def validate_bindings(
         (app_id,),
     ):
         names.update(strict_json(row[0].encode())["names"])
+    deleting = {
+        row[0].rsplit("/", 1)[1]
+        for row in db.execute(
+            "SELECT path FROM intents WHERE app_id=? AND kind='storage_delete' AND state NOT IN ('succeeded','failed')",
+            (app_id,),
+        )
+    }
     for binding in parsed.storage_bindings:
         resource = resources.get(binding.resource_id)
-        if resource is None:
+        if resource is None or binding.resource_id in deleting:
             raise HttpError(400, "INVALID_BINDING", "Storage must belong to this application.")
         for output, target in binding.outputs:
             if output not in RESOURCE_OUTPUTS[resource["type"]]:
@@ -302,10 +308,13 @@ def validate_bindings(
 
 def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: str) -> None:
     held = db.execute(
-        "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','env_set','env_delete') AND state NOT IN ('succeeded','failed')",
+        "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable') AND state NOT IN ('succeeded','failed')",
         (user_id,),
     ).fetchall()
-    if any(row[0] == app_id for row in held):
+    if db.execute(
+        "SELECT 1 FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable') AND state NOT IN ('succeeded','failed')",
+        (app_id,),
+    ).fetchone():
         raise HttpError(
             409, "APP_BUSY", "Wait for or recover this application's current operation first."
         )

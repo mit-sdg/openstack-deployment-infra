@@ -291,3 +291,95 @@ class RealProjectContractTests(ManagementCase):
             self.assertEqual(real_error["error"]["code"], fake_error["error"]["code"])
             self.assertEqual(real_error["error"]["retryable"], fake_error["error"]["retryable"])
             self.assertEqual(set(real_error["error"]), set(fake_error["error"]))
+
+    def test_staff_reads_use_real_project_capability_without_global_enumeration(self) -> None:
+        from openstack_platform.management.broker.accounts import security_change
+
+        app = self.create(slug="staff-contract-project")
+        self.save(app)
+        intent = self.call(
+            "POST",
+            f"/v1/apps/{app}/deployments",
+            {"commit": "b" * 40, "configurationRevision": 1},
+            "alice",
+        ).body["data"]
+        self.real.fixture.api.wait_for_operations()
+        self.broker.journal.dispatch(intent["intentId"])
+        user = self.call("GET", "/v1/session", owner="alice").body["data"]["user"]["id"]
+        with self.broker.database.connect(write=True) as connection:
+            connection.execute("UPDATE users SET role='staff' WHERE id=?", (user,))
+            security_change(connection, user)
+        options = self.call("GET", "/v1/auth/options").body
+        signed = self.call(
+            "POST",
+            "/v1/auth/login",
+            {
+                "csrfToken": options["data"]["csrfToken"],
+                "username": "alice",
+                "password": self.commons.passwords["alice"],
+            },
+            headers={
+                "cookie": self.config.login_cookie + "=" + options["browser"]["cookies"][0]["value"]
+            },
+        ).body
+        self.tokens["alice"] = signed["browser"]["cookies"][1]["value"]
+        self.csrf["alice"] = self.call("GET", "/v1/session", owner="alice").body["data"][
+            "csrfToken"
+        ]
+        # Exercise a substantial per-app history without changing project privilege.
+        connection = self.real.fixture.connection
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(deployment_attempts)")]
+        template = list(
+            connection.execute(
+                "SELECT * FROM deployment_attempts WHERE deployment_id=?", (intent["operationId"],)
+            ).fetchone()
+        )
+        rows = []
+        for _ in range(1999):
+            values = template.copy()
+            key = str(uuid.uuid4())
+            values[columns.index("deployment_id")] = key
+            values[columns.index("idempotency_request_id")] = key
+            connection.execute(
+                "INSERT INTO idempotency_requests VALUES(?,?,'deployment',?,?,?)",
+                (
+                    key,
+                    "a" * 64,
+                    key,
+                    values[columns.index("requested_at")],
+                    values[columns.index("updated_at")],
+                ),
+            )
+            rows.append(values)
+        connection.executemany(
+            f"INSERT INTO deployment_attempts({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+            rows,
+        )
+        connection.commit()
+        for path in (
+            f"/v1/staff/apps/{app}",
+            f"/v1/staff/apps/{app}/deployments",
+            f"/v1/staff/apps/{app}/deployments/{intent['operationId']}",
+        ):
+            response = self.call("GET", path, owner="alice")
+            self.assertEqual(response.status, 200)
+            self.assertNotIn('"configuration"', canonical(response.body))
+            self.assertNotIn('"operationId"', canonical(response.body))
+            if path.endswith("/deployments"):
+                self.assertEqual(len(response.body["data"]["items"]), 25)
+                self.assertTrue(response.body["data"]["truncated"])
+        for path in (
+            "/v1/admin/applications",
+            "/v1/admin/deployments",
+            "/v1/admin/operations",
+            "/v1/applications",
+        ):
+            status, _body, _headers = self.wire(self.real_socket, "GET", path)
+            self.assertEqual(status, 405 if path == "/v1/applications" else 404)
+        unowned = str(uuid.uuid4())
+        self.wire(
+            self.real_socket, "POST", "/v1/applications", {"slug": "operator-only-project"}, unowned
+        )
+        self.assert_error(
+            "NOT_FOUND", lambda: self.call("GET", f"/v1/staff/apps/{unowned}", owner="alice")
+        )

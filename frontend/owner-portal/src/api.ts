@@ -38,6 +38,7 @@ export type AppRecord = {
   url: string | null;
   savedRevision: number;
   configurationChanged?: boolean;
+  identityProvider?: boolean;
   lifecycleState: string;
   desiredRunning: boolean;
   activeDeploymentId: string | null;
@@ -88,6 +89,8 @@ export type Session = {
   csrfToken: string;
   quota: Quota;
   expiresAt: string;
+  role: 'owner' | 'staff' | 'admin';
+  stepUpExpiresAt: string | null;
 };
 export type Page<T> = { items: T[]; nextCursor: string | null; truncated: boolean };
 export type BuildLog = {
@@ -102,20 +105,23 @@ export class ApiError extends Error {
     public status: number,
     public code: string,
     message: string,
+    public retryAfterSeconds = 30,
   ) {
     super(message);
   }
 }
 let csrf = '';
+let credentialEpoch = 0;
 export function clearCredentials() {
   csrf = '';
+  credentialEpoch++;
 }
-function record(value: unknown): Record<string, unknown> {
+export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid service response');
   return value as Record<string, unknown>;
 }
-function fields(value: unknown, checks: Record<string, 'string' | 'number' | 'boolean'>) {
+export function fields(value: unknown, checks: Record<string, 'string' | 'number' | 'boolean'>) {
   const data = record(value);
   for (const [key, type] of Object.entries(checks))
     if (typeof data[key] !== type) throw new Error('Invalid service response');
@@ -139,7 +145,7 @@ const deploymentData = (v: unknown) =>
     status: 'string',
     configurationRevision: 'number',
   }) as Deployment;
-function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<T> {
+export function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<T> {
   const data = record(value);
   if (
     !Array.isArray(data.items) ||
@@ -153,36 +159,71 @@ function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<T> {
     truncated: data.truncated,
   };
 }
-async function request<T>(
+// Keep metadata panels inside the broker's two-active-reads account bound.
+let adminReads = 0;
+const adminReadWaiters: (() => void)[] = [];
+async function adminReadSlot() {
+  if (adminReads >= 2) await new Promise<void>((resolve) => adminReadWaiters.push(resolve));
+  else adminReads++;
+  return () => {
+    const next = adminReadWaiters.shift();
+    if (next) next();
+    else adminReads--;
+  };
+}
+export async function request<T>(
   path: string,
   decode: (v: unknown) => T,
   options?: { method: string; body: unknown; key?: string },
   refreshed = false,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const response = await fetch(`/api/v1${path}`, {
-    credentials: 'same-origin',
-    cache: 'no-store',
-    ...(options
-      ? {
-          method: options.method,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CSRF-Token': csrf,
-            ...(options.key ? { 'Idempotency-Key': options.key } : {}),
-          },
-          body: JSON.stringify(options.body),
-        }
-      : {}),
-  });
+  const epoch = credentialEpoch;
+  const staff =
+    path.startsWith('/admin-apps') ||
+    path.startsWith('/staff/') ||
+    path.startsWith('/accounts') ||
+    path.startsWith('/account-audit');
+  const release = !options && path.startsWith('/admin-apps') ? await adminReadSlot() : () => {};
+  let response: Response;
+  try {
+    if (epoch !== credentialEpoch)
+      throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
+    response = await fetch(`/api/v1${path}`, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal,
+      ...(staff ? { headers: { 'X-CSRF-Token': csrf } } : {}),
+      ...(options
+        ? {
+            method: options.method,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': csrf,
+              ...(options.key ? { 'Idempotency-Key': options.key } : {}),
+            },
+            body: JSON.stringify(options.body),
+          }
+        : {}),
+    });
+  } finally {
+    release();
+  }
   if (response.status === 204) return undefined as T;
   const payload = record(await response.json());
+  if (epoch !== credentialEpoch) throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
   if (!response.ok) {
     const error = record(payload.error);
-    if (options && !refreshed && response.status === 403 && error.code === 'CSRF_REJECTED') {
+    if (
+      (options || staff) &&
+      !refreshed &&
+      response.status === 403 &&
+      error.code === 'CSRF_REJECTED'
+    ) {
       await api.session();
-      return request(path, decode, options, true);
+      return request(path, decode, options, true, signal);
     }
-    if (response.status === 401) {
+    if (response.status === 401 || error.code === 'ACCOUNT_DISABLED') {
       clearCredentials();
       window.dispatchEvent(new Event('portal-session-ended'));
     }
@@ -190,18 +231,32 @@ async function request<T>(
       response.status,
       typeof error.code === 'string' ? error.code : 'UNAVAILABLE',
       typeof error.summary === 'string' ? error.summary : 'The service is unavailable.',
+      typeof error.retryAfterSeconds === 'number' &&
+        error.retryAfterSeconds > 0 &&
+        error.retryAfterSeconds <= 300
+        ? error.retryAfterSeconds
+        : 30,
     );
   }
   return decode(payload.data);
 }
 export const api = {
-  session: () =>
-    request('/session', (v) => {
-      const data = fields(v, { csrfToken: 'string', expiresAt: 'string' });
-      fields(data.user, { id: 'string', displayName: 'string', username: 'string' });
-      csrf = data.csrfToken as string;
-      return data as Session;
-    }),
+  ...resourceApi(),
+  session: (signal?: AbortSignal) =>
+    request(
+      '/session',
+      (v) => {
+        const data = fields(v, { csrfToken: 'string', expiresAt: 'string' });
+        fields(data.user, { id: 'string', displayName: 'string', username: 'string' });
+        if (!['owner', 'staff', 'admin'].includes(String(data.role)))
+          throw new Error('Invalid session role');
+        csrf = data.csrfToken as string;
+        return data as Session;
+      },
+      undefined,
+      false,
+      signal,
+    ),
   logout: () => request('/logout', () => undefined, { method: 'POST', body: {} }),
   apps: () =>
     request('/apps', (v) => ({ ...pageData(v, appData), quota: record(v).quota as Quota })),
@@ -212,45 +267,20 @@ export const api = {
       (v) => ({ app: appData(record(v).app), intent: intentData(record(v).intent) }),
       { method: 'POST', body: { slug }, key },
     ),
-  settings: (id: string) =>
-    request(
-      `/apps/${id}/configuration`,
-      (v) => fields(v, { revision: 'number', repository: 'string', branch: 'string' }) as Settings,
-    ),
-  save: (id: string, settings: Settings, key: string) =>
-    request(`/apps/${id}/configuration`, (v) => fields(v, { revision: 'number' }), {
-      method: 'PUT',
-      body: {
-        expectedRevision: settings.revision,
-        repository: settings.repository,
-        branch: settings.branch,
-        configuration: settings.configuration,
-      },
-      key,
-    }),
-  environment: (id: string) => request(`/apps/${id}/environment`, (v) => record(v) as Environment),
-  setEnvironment: (id: string, name: string, value: string, key: string) =>
-    request(`/apps/${id}/environment/${name}`, intentData, { method: 'PUT', body: { value }, key }),
-  deleteEnvironment: (id: string, name: string, key: string) =>
-    request(`/apps/${id}/environment/${name}`, intentData, { method: 'DELETE', body: {}, key }),
-  storage: (id: string) =>
-    request(
-      `/apps/${id}/storage`,
-      (v) =>
-        record(v) as { items: StorageResource[]; intents: (Intent & { type: string | null })[] },
-    ),
-  createStorage: (id: string, type: StorageResource['type'], key: string) =>
-    request(`/apps/${id}/storage`, intentData, { method: 'POST', body: { type }, key }),
-  storageAction: (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
-    request(`/apps/${id}/storage/${resource}/${action}`, intentData, {
-      method: 'POST',
-      body: {},
-      key,
-    }),
-  deploy: (id: string, revision: number, commit: string, key: string) =>
+  deploy: (
+    id: string,
+    revision: number,
+    commit: string,
+    key: string,
+    identityProviderConfirmed = false,
+  ) =>
     request(`/apps/${id}/deployments`, intentData, {
       method: 'POST',
-      body: { configurationRevision: revision, commit },
+      body: {
+        configurationRevision: revision,
+        commit,
+        ...(identityProviderConfirmed ? { identityProviderConfirmed: true } : {}),
+      },
       key,
     }),
   history: (id: string, cursor?: string) =>
@@ -332,4 +362,69 @@ export function validateBindings(bindings: StorageBinding[], names: string[]): s
     }
   }
   return null;
+}
+
+// Both workspaces use the same resource requests and write-only controls.
+export function resourceApi(prefix = '/apps', confirmStorage?: () => boolean) {
+  async function consentFields(id: string) {
+    if (!confirmStorage) {
+      if (prefix !== '/apps' || !(await api.app(id)).identityProvider) return {};
+      if (!window.confirm('Portal sign-in depends on this app. Confirm this storage change?'))
+        throw new Error('Action canceled.');
+      return { identityProviderConfirmed: true };
+    }
+    if (!confirmStorage()) throw new Error('Action canceled.');
+    return { identityProviderConfirmed: true };
+  }
+  return {
+    settings: (id: string) =>
+      request(
+        `${prefix}/${id}/configuration`,
+        (v) =>
+          fields(v, { revision: 'number', repository: 'string', branch: 'string' }) as Settings,
+      ),
+    save: (id: string, settings: Settings, key: string) =>
+      request(`${prefix}/${id}/configuration`, (v) => fields(v, { revision: 'number' }), {
+        method: 'PUT',
+        body: {
+          expectedRevision: settings.revision,
+          repository: settings.repository,
+          branch: settings.branch,
+          configuration: settings.configuration,
+        },
+        key,
+      }),
+    environment: (id: string) =>
+      request(`${prefix}/${id}/environment`, (v) => record(v) as Environment),
+    setEnvironment: (id: string, name: string, value: string, key: string) =>
+      request(`${prefix}/${id}/environment/${name}`, intentData, {
+        method: 'PUT',
+        body: { value },
+        key,
+      }),
+    deleteEnvironment: (id: string, name: string, key: string) =>
+      request(`${prefix}/${id}/environment/${name}`, intentData, {
+        method: 'DELETE',
+        body: {},
+        key,
+      }),
+    storage: (id: string) =>
+      request(
+        `${prefix}/${id}/storage`,
+        (v) =>
+          record(v) as { items: StorageResource[]; intents: (Intent & { type: string | null })[] },
+      ),
+    createStorage: async (id: string, type: StorageResource['type'], key: string) =>
+      request(`${prefix}/${id}/storage`, intentData, {
+        method: 'POST',
+        body: { type, ...(await consentFields(id)) },
+        key,
+      }),
+    storageAction: async (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
+      request(`${prefix}/${id}/storage/${resource}/${action}`, intentData, {
+        method: 'POST',
+        body: await consentFields(id),
+        key,
+      }),
+  };
 }

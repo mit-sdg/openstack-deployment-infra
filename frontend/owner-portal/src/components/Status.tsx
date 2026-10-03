@@ -1,5 +1,5 @@
 import { StatusBadge } from '@openstack-platform/ui';
-export function Status({ state }: { state: string }) {
+export function Status({ state, label: customLabel }: { state: string; label?: string }) {
   const label: Record<string, string> = {
     succeeded: 'Succeeded',
     failed: 'Failed',
@@ -11,14 +11,15 @@ export function Status({ state }: { state: string }) {
     creating: 'Creating',
     running: 'Running',
     healthy: 'Healthy',
+    unhealthy: 'Unhealthy',
     stopped: 'Not running',
   };
   const tone = ['succeeded', 'healthy'].includes(state)
     ? 'good'
-    : ['failed', 'blocked'].includes(state)
+    : ['failed', 'blocked', 'unhealthy'].includes(state)
       ? 'critical'
       : ['accepted', 'running', 'prepared', 'creating'].includes(state)
         ? 'info'
         : 'neutral';
-  return <StatusBadge label={label[state] ?? state} tone={tone} />;
+  return <StatusBadge label={customLabel ?? label[state] ?? state} tone={tone} />;
 }

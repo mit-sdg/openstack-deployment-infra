@@ -142,7 +142,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             )
             return Reply(200, file.read_bytes(), content_type, (("Cache-Control", cache),))
         if re.fullmatch(
-            r"/(?:|sign-in|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|deployments(?:/[a-f0-9-]{36})?))?)?)",
+            r"/(?:|sign-in|signin|setup|activate|admin/(?:accounts|audit|apps(?:/[a-f0-9-]{36})?)|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|deployments(?:/[a-f0-9-]{36})?))?)?|staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations))",
             path,
         ):
             index = self.assets / "index.html"
@@ -154,9 +154,27 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self, method: str, path: str, query: str, headers: dict[str, str], raw: bytes
     ) -> Reply:
         if path.startswith("/auth/"):
-            if path not in {"/auth/options", "/auth/login"}:
+            if path not in {
+                "/auth/options",
+                "/auth/login",
+                "/auth/token-info",
+                "/auth/enroll",
+                "/auth/enroll/finish",
+            }:
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
+        elif re.fullmatch(
+            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/deployments(?:/[a-f0-9-]{36})?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
+            path,
+        ):
+            target = path.removeprefix("/api")
+        elif re.fullmatch(
+            r"/api/v1/staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations)",
+            path,
+        ):
+            if method != "GET":
+                return error_reply(405, "METHOD_NOT_ALLOWED")
+            target = path.removeprefix("/api")
         elif re.fullmatch(
             r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}/(?:verify|rotate))?|/deployments(?:/[a-f0-9-]{36}(?:/build-log)?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
             path,
@@ -169,7 +187,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             if raw:
                 content_type = headers.get("content-type", "")
                 if content_type != "application/json" or (
-                    path == "/auth/login" and len(raw) > 4096
+                    path.startswith("/auth/") and len(raw) > 16384
                 ):
                     return error_reply(415, "UNSUPPORTED_MEDIA_TYPE")
                 body = strict_json(raw)
@@ -220,10 +238,11 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             extra: list[tuple[str, str]] = [
                 ("Set-Cookie", self.cookie(cookie)) for cookie in browser.get("cookies", [])
             ]
-            if path == "/auth/login" and status == 200:
+            if path in {"/auth/login", "/auth/enroll/finish"} and status == 200:
                 returned = value.get("data", {}).get("returnPath")
                 if not isinstance(returned, str) or not re.fullmatch(
-                    r"/(?:apps(?:/[a-z0-9/-]+)?|activity)", returned
+                    r"/(?:apps(?:/[a-z0-9/-]+)?|activity|staff/owners|admin/accounts|sign-in)",
+                    returned,
                 ):
                     raise ValueError("invalid sign-in return path")
             if browser.get("status") == 204:
@@ -237,7 +256,11 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def cookie(self, directive: Any) -> str:
         if not isinstance(directive, dict) or set(directive) != {"name", "value", "maxAge"}:
             raise ValueError("invalid cookie directive")
-        names = {"login": self.config.login_cookie, "session": self.config.session_cookie}
+        names = {
+            "login": self.config.login_cookie,
+            "session": self.config.session_cookie,
+            "device": self.config.device_cookie,
+        }
         value, age = directive["value"], directive["maxAge"]
         if (
             directive["name"] not in names
@@ -252,11 +275,11 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 )
             )
             or type(age) is not int
-            or not 0 <= age <= 86400
+            or not 0 <= age <= (90 * 86400 if directive["name"] == "device" else 86400)
         ):
             raise ValueError("invalid cookie directive")
         secure = "; Secure" if self.config.portal_origin.startswith("https:") else ""
-        same_site = "Strict" if directive["name"] == "login" else "Lax"
+        same_site = "Strict" if directive["name"] in {"login", "device"} else "Lax"
         return f"{names[directive['name']]}={value}; Path=/; Max-Age={age}{secure}; HttpOnly; SameSite={same_site}"
 
     def csp(self) -> str:

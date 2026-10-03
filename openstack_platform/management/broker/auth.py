@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -16,9 +17,11 @@ from ...controller.http import HttpError, Request, Response
 from ..common import MANAGEMENT_REQUESTS, digest, object_body, opaque, utc
 from ..config import Config
 from ..identity.client import credentials
+from . import known_device
 from .anonymous import AddressLimits, AnonymousChallenge, client_address_bucket
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
+from .staff_policy import ABSOLUTE_SECONDS, ADMIN_IDLE_SECONDS, IDLE_SECONDS
 
 
 @dataclass
@@ -93,6 +96,10 @@ class Auth:
             config.anonymous_options_per_minute, config.anonymous_starts_per_minute
         )
         self.failures = FailureLimits()
+        self.local_limits = AddressLimits(options_per_minute=6, starts_per_minute=12)
+        self.step_up_limits = AddressLimits(options_per_minute=12, starts_per_minute=12)
+        self.step_up_failures = FailureLimits()
+        self.recognized_options_limits = AddressLimits(options_per_minute=600, starts_per_minute=12)
         self.identity = ProjectClient(
             config.identity_socket, timeout=10, capacity=MANAGEMENT_REQUESTS
         )
@@ -121,11 +128,34 @@ class Auth:
         if request.headers.get("origin") != self.config.portal_origin:
             raise HttpError(403, "ORIGIN_REJECTED", "This action requires the portal origin.")
 
+    def read_origin(self, request: Request) -> None:
+        if "origin" in request.headers:
+            self.portal_origin(request)
+        if request.headers.get("sec-fetch-site", "same-origin") != "same-origin":
+            raise HttpError(403, "ORIGIN_REJECTED", "This read requires the portal origin.")
+
+    def recognized_browser(self, request: Request) -> bool:
+        token = known_device.read(request, self.config.device_cookie)
+        if token is None:
+            return False
+        with self.database.connect() as db:
+            row = db.execute("SELECT * FROM users WHERE id=?", (token.split(".")[1],)).fetchone()
+            user = dict(row) if row else None
+            return bool(
+                user
+                and user["enabled"]
+                and user["status"] == "active"
+                and known_device.valid(self.anonymous.key, token, user, self.clock())
+            )
+
     def options(self, request: Request) -> Response:
         if request.body is not None or request.query:
             raise HttpError(400, "INVALID_REQUEST", "Sign-in options do not accept fields.")
         now = self.clock()
-        self.address_limits.check(request, "options", now)
+        if self.recognized_browser(request):
+            self.recognized_options_limits.check(request, "options", now)
+        else:
+            self.address_limits.check(request, "options", now)
         binder = self.cookies(request).get(self.config.login_cookie, "")
         if not self.anonymous.valid(binder, now):
             binder = self.anonymous.issue(now)
@@ -140,72 +170,165 @@ class Auth:
             },
         )
 
-    def login(self, request: Request) -> Response:
+    def anonymous_post(self, request: Request) -> str:
         self.portal_origin(request)
-        now = self.clock()
-        self.address_limits.check(request, "start", now)
-        body = object_body(request.body, {"csrfToken", "username", "password"})
         binder = self.cookies(request).get(self.config.login_cookie, "")
+        body = request.body
         if (
-            not self.anonymous.valid(binder, now)
-            or not isinstance(body["csrfToken"], str)
+            not isinstance(body, dict)
+            or not self.anonymous.valid(binder, self.clock())
+            or not isinstance(body.get("csrfToken"), str)
             or not hmac.compare_digest(self.anonymous.csrf(binder), body["csrfToken"])
         ):
-            raise HttpError(403, "CSRF_REJECTED", "Reload the sign-in page and try again.")
-        try:
-            checked = credentials({"username": body["username"], "password": body["password"]})
-        except ValueError:
-            raise HttpError(
-                400, "INVALID_REQUEST", "Username or password exceeds the allowed bounds."
-            ) from None
-        user = self.check_identity(checked, client_address_bucket(request), now)
-        session, now = opaque(), self.clock()
+            raise HttpError(403, "CSRF_REJECTED", "Reload this page and try again.")
+        return binder
+
+    def mint(
+        self,
+        db: sqlite3.Connection,
+        user: dict[str, Any],
+        request: Request,
+        *,
+        reauthenticated: bool = False,
+        proof_at: float | None = None,
+    ) -> dict[str, object]:
+        now, session = self.clock(), opaque()
+        lifetime = (
+            self.config.absolute_seconds
+            if user["role"] == "owner"
+            else min(ABSOLUTE_SECONDS, self.config.absolute_seconds)
+        )
+        old = self.cookies(request).get(self.config.session_cookie)
+        if old:
+            db.execute("DELETE FROM sessions WHERE token=?", (digest(old),))
+        db.execute(
+            "INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?)",
+            (
+                digest(session),
+                user["id"],
+                now,
+                now,
+                now + lifetime,
+                user["role"],
+                user["generation"],
+                min(now, proof_at)
+                if reauthenticated and proof_at is not None
+                else now
+                if reauthenticated
+                else 0,
+            ),
+        )
+        db.execute("UPDATE users SET last_login=? WHERE id=?", (now, user["id"]))
+        db.execute(
+            "INSERT INTO audit(user_id,action,created) VALUES(?,'sign_in',?)", (user["id"], now)
+        )
+        return {
+            "data": {"returnPath": "/admin/accounts" if user["role"] == "admin" else "/apps"},
+            "browser": {
+                "cookies": [self.directive("login"), self.directive("session", session, lifetime)]
+                + (
+                    [
+                        self.directive(
+                            "device",
+                            known_device.issue(self.anonymous.key, user, now),
+                            known_device.LIFETIME,
+                        )
+                    ]
+                    if user["issuer"] == "local"
+                    else []
+                )
+            },
+        }
+
+    def login(self, request: Request) -> Response:
+        self.anonymous_post(request)
+        now = self.clock()
+        body = request.body
+        required = {"csrfToken", "username", "password"}
+        if (
+            not isinstance(body, dict)
+            or not required <= set(body)
+            or set(body) - required - {"method", "totp", "role"}
+        ):
+            raise HttpError(400, "INVALID_REQUEST", "Invalid sign-in fields.")
+        method = body.get("method", "commons")
+        if method not in ("commons", "local"):
+            raise HttpError(400, "INVALID_REQUEST", "Invalid sign-in method.")
+        verified = None
+        if method == "local":
+            from .local_auth import authenticate as local_authenticate
+            from .local_security import username as local_username
+
+            try:
+                name = local_username(body["username"])
+                supplied = body["password"]
+                if not isinstance(supplied, str) or len(supplied.encode("utf-8")) > 1024:
+                    raise ValueError("invalid credentials")
+            except (ValueError, UnicodeError):
+                raise HttpError(
+                    401,
+                    "INVALID_CREDENTIALS",
+                    "Username, password or authentication code is incorrect.",
+                ) from None
+            verified = local_authenticate(
+                self,
+                name,
+                supplied,
+                body.get("totp"),
+                client_address_bucket(request),
+                device=known_device.read(request, self.config.device_cookie),
+            )
+            issuer, subject = "local", verified["subject"]
+            profile = {"username": name, "displayName": verified["display_name"]}
+        else:
+            self.address_limits.check(request, "start", now)
+            try:
+                checked = credentials({"username": body["username"], "password": body["password"]})
+            except ValueError:
+                raise HttpError(
+                    400, "INVALID_REQUEST", "Username or password exceeds the allowed bounds."
+                ) from None
+            profile = self.check_identity(checked, client_address_bucket(request), now)
+            issuer, subject = self.config.issuer, profile["subject"]
         with self.database.connect(write=True) as db:
             existing = db.execute(
-                "SELECT * FROM users WHERE issuer=? AND subject=?",
-                (self.config.commons_origin, user["subject"]),
+                "SELECT * FROM users WHERE issuer=? AND subject=?", (issuer, subject)
             ).fetchone()
-            if existing is not None and not existing["enabled"]:
+            if existing is not None and (not existing["enabled"] or existing["status"] != "active"):
                 raise HttpError(
                     403,
                     "ACCOUNT_DISABLED",
                     "Your portal account is disabled. Contact course staff.",
                 )
-            user_id = existing["id"] if existing else str(uuid.uuid4())
-            db.execute(
-                "INSERT INTO users(id,issuer,subject,username,display_name,created,last_login) VALUES(?,?,?,?,?,?,?) ON CONFLICT(issuer,subject) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,last_login=excluded.last_login",
-                (
-                    user_id,
-                    self.config.commons_origin,
-                    user["subject"],
-                    user["username"],
-                    user["displayName"],
-                    now,
-                    now,
-                ),
+            if verified is not None and (
+                existing is None or existing["generation"] != verified["generation"]
+            ):
+                raise HttpError(
+                    401,
+                    "INVALID_CREDENTIALS",
+                    "Username, password or authentication code is incorrect.",
+                )
+            identifier = existing["id"] if existing is not None else str(uuid.uuid4())
+            if issuer != "local":
+                db.execute(
+                    "INSERT INTO users(id,issuer,subject,username,display_name,created,last_login) VALUES(?,?,?,?,?,?,?) ON CONFLICT(issuer,subject) DO UPDATE SET username=excluded.username,display_name=excluded.display_name",
+                    (
+                        identifier,
+                        issuer,
+                        subject,
+                        profile["username"],
+                        profile["displayName"],
+                        self.clock(),
+                        self.clock(),
+                    ),
+                )
+            row = db.execute("SELECT * FROM users WHERE id=?", (identifier,)).fetchone()
+            if row is None:
+                raise HttpError(401, "INVALID_CREDENTIALS", "Sign-in could not complete.")
+            response = self.mint(
+                db, dict(row), request, reauthenticated=issuer == "local" and row["role"] == "admin"
             )
-            old = self.cookies(request).get(self.config.session_cookie)
-            if old:
-                db.execute("DELETE FROM sessions WHERE token=?", (digest(old),))
-            db.execute(
-                "INSERT INTO sessions VALUES(?,?,?,?,?)",
-                (digest(session), user_id, now, now, now + self.config.absolute_seconds),
-            )
-            db.execute(
-                "INSERT INTO audit(user_id,action,created) VALUES(?,'sign_in',?)", (user_id, now)
-            )
-        return Response(
-            200,
-            {
-                "data": {"returnPath": "/apps"},
-                "browser": {
-                    "cookies": [
-                        self.directive("login"),
-                        self.directive("session", session, self.config.absolute_seconds),
-                    ]
-                },
-            },
-        )
+        return Response(200, response)
 
     def check_identity(self, checked: dict[str, str], address: str, now: float) -> dict[str, Any]:
         reservation = self.failures.reserve(checked["username"], address, now)
@@ -258,37 +381,74 @@ class Auth:
         finally:
             self.failures.finish(reservation, failed=failed, succeeded=succeeded)
 
+    def session_row(
+        self, db: sqlite3.Connection, sid: str, now: float, kind: str | None = None
+    ) -> dict[str, Any]:
+        row = db.execute(
+            "SELECT users.*,sessions.expires,sessions.last_used,sessions.kind,sessions.generation AS session_generation,sessions.reauthenticated_at FROM sessions JOIN users ON user_id=users.id WHERE token=?",
+            (sid,),
+        ).fetchone()
+        idle = self.config.idle_seconds
+        if row is not None and row["kind"] != "owner":
+            idle = min(ADMIN_IDLE_SECONDS if row["kind"] == "admin" else IDLE_SECONDS, idle)
+        if (
+            row is None
+            or row["expires"] <= now
+            or row["last_used"] + idle <= now
+            or row["generation"] != row["session_generation"]
+            or row["role"] != row["kind"]
+        ):
+            raise HttpError(401, "SESSION_EXPIRED", "Sign in to continue.")
+        if not row["enabled"] or row["status"] != "active":
+            raise HttpError(403, "ACCOUNT_DISABLED", "This account is disabled.")
+        if row["kind"] == "admin":
+            factor = db.execute(
+                "SELECT totp_confirmed FROM local_accounts WHERE user_id=?", (row["id"],)
+            ).fetchone()
+            if row["issuer"] != "local" or factor is None or not factor["totp_confirmed"]:
+                raise HttpError(401, "SESSION_EXPIRED", "Sign in to continue.")
+        if (
+            kind == "staff"
+            and row["kind"] not in ("staff", "admin")
+            or kind == "admin"
+            and row["kind"] != "admin"
+        ):
+            raise HttpError(403, "ACCESS_DENIED", "This session cannot access this view.")
+        return dict(row)
+
+    @staticmethod
+    def check_csrf(db: sqlite3.Connection, request: Request, sid: str, now: float) -> None:
+        csrf = request.headers.get("x-csrf-token", "")
+        found = db.execute(
+            "SELECT 1 FROM csrf_tokens WHERE token=? AND session=? AND expires>?",
+            (digest(csrf), sid, now),
+        ).fetchone()
+        if found is None:
+            raise HttpError(403, "CSRF_REJECTED", "Refresh this page before trying again.")
+
     def authenticate(
-        self, request: Request, *, mutation: bool = False
+        self,
+        request: Request,
+        *,
+        mutation: bool = False,
+        kind: str | None = None,
+        csrf: bool = False,
+        touch: bool = True,
     ) -> tuple[dict[str, Any], str]:
         token = self.cookies(request).get(self.config.session_cookie)
         sid, now = digest(token or ""), self.clock()
-        with self.database.connect(write=True) as db:
-            row = db.execute(
-                "SELECT users.*, sessions.expires, sessions.last_used FROM sessions JOIN users ON user_id=users.id WHERE token=?",
-                (sid,),
-            ).fetchone()
-            if (
-                row is None
-                or row["expires"] <= now
-                or row["last_used"] + self.config.idle_seconds <= now
-            ):
-                raise HttpError(401, "SESSION_EXPIRED", "Sign in to continue.")
-            if not row["enabled"]:
-                raise HttpError(403, "ACCOUNT_DISABLED", "This account is disabled.")
+        with self.database.connect(write=touch) as db:
+            user = self.session_row(db, sid, now, kind)
             if mutation:
                 self.portal_origin(request)
-                csrf = request.headers.get("x-csrf-token", "")
-                found = db.execute(
-                    "SELECT 1 FROM csrf_tokens WHERE token=? AND session=? AND expires>?",
-                    (digest(csrf), sid, now),
-                ).fetchone()
-                if found is None:
-                    raise HttpError(403, "CSRF_REJECTED", "Refresh this page before trying again.")
-            db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
-            return dict(row), sid
+            if mutation or csrf:
+                self.check_csrf(db, request, sid, now)
+            if touch:
+                db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
+            return user, sid
 
     def bootstrap(self, request: Request) -> Response:
+        self.read_origin(request)
         user, sid = self.authenticate(request)
         token, now = opaque(), self.clock()
         with self.database.connect(write=True) as db:
@@ -312,7 +472,13 @@ class Auth:
                     },
                     "csrfToken": token,
                     "expiresAt": utc(user["expires"]),
-                    "features": ["apps", "deployments", "build-logs"],
+                    "role": user["kind"],
+                    "stepUpExpiresAt": utc(user["reauthenticated_at"] + 300)
+                    if user["kind"] == "admin"
+                    else None,
+                    "features": ["apps", "deployments", "build-logs"]
+                    + (["staff-read"] if user["kind"] != "owner" else [])
+                    + (["accounts"] if user["kind"] == "admin" else []),
                 }
             },
         )

@@ -96,8 +96,8 @@ The admin role exposes two mode-`0660` Unix sockets:
 
 | Socket | Peer | Capability |
 | --- | --- | --- |
-| `/run/<namespace>-controller/project.sock` | `management-broker` UID/GID | Health and non-destructive product routes |
-| `/run/<namespace>-controller/privileged.sock` | Operator UID/GID | Administrator reads, cascade application deletion, and storage deletion |
+| `/run/<namespace>-controller/project.sock` | `management-broker` UID/GID | Health, product routes and confirmed storage deletion |
+| `/run/<namespace>-controller/privileged.sock` | Operator UID/GID | Administrator reads and cascade application deletion |
 
 The server authenticates every connection with Linux `SO_PEERCRED` before
 parsing HTTP. HTTP input cannot select or upgrade a socket capability. The
@@ -354,19 +354,19 @@ be absent; missing accepted evidence or transport failures remain unknown.
 
 Application, deployment, operation, and managed-resource IDs are canonical UUIDs.
 OpenStack flavor IDs are opaque strings (for example `4200`), not UUIDs.
-The project socket exposes these non-destructive
-routes; the delete routes shown below are installed only on the privileged
-socket.
+The project socket exposes these product routes. Cascade application deletion
+is installed only on the privileged socket; storage deletion is a project
+capability guarded by the portal admin role.
 
 | Method and route | Purpose |
 | --- | --- |
 | `GET /v1/health` | Project-socket readiness |
 | `POST /v1/applications` | Create a controller application from a slug |
-| `GET /v1/applications/{id}` | Read one application |
+| `GET /v1/applications/{id}` | Read one application, including a `requiresMaintenance` boolean for retained primary IPv4; no reservation/provider identifiers |
 | `POST /v1/applications/{id}/enable` | Enable an accepted application |
 | `POST /v1/applications/{id}/disable` | Disable an application |
 | `POST /v1/applications/{id}/delete` | Privileged cascade deletion with slug confirmation |
-| `POST /v1/applications/{id}/deployments` | Start a typed exact-commit deployment |
+| `POST /v1/applications/{id}/deployments` | Typed exact-commit deployment; optional boolean `maintenance` and reviewed object `plan`; accepted sizing is preserved when plan is absent; worker reuse remains operator-only |
 | `GET /v1/applications/{id}/deployments` | List bounded deployment history |
 | `GET /v1/deployments/{id}` | Read one deployment attempt |
 | `GET /v1/deployments/{id}/build-log` | Read bounded retained build output |
@@ -381,7 +381,7 @@ socket.
 | `PATCH /v1/storage/{id}/label` | Change its display label |
 | `POST /v1/storage/{id}/verify` | Verify provider identity and health |
 | `POST /v1/storage/{id}/rotate` | Rotate scoped credentials |
-| `DELETE /v1/storage/{id}` | Privileged deletion with machine-name confirmation |
+| `DELETE /v1/storage/{id}` | Project deletion with machine-name confirmation and optional boolean S3 purge; the broker exposes this only to stepped-up local admins |
 | `GET /v1/operations/{id}` | Poll an accepted mutation |
 
 The privileged socket also exposes administrator views and operator-only sizing operations.
@@ -395,10 +395,10 @@ acceptance, and cleanup lifecycle. See [Size an application](OPERATIONS.md#size-
 | `GET /v1/admin/images` | Hosted role-image selection records |
 | `POST /v1/admin/images/{role}/selection` | Compare-and-swap exact hosted role-image metadata after provider validation; only worker/builder affect hosted provisioning |
 | `GET /v1/admin/applications` | Paginated global application list |
-| `GET /v1/admin/applications/{id}/fixed-ip` | Reservation state; reserved ports include fresh exact attachment evidence; staff only |
+| `GET /v1/admin/applications/{id}/fixed-ip` | Reservation state; reserved ports include fresh exact attachment evidence; deployment operators only |
 | `POST /v1/admin/applications/{id}/fixed-ip/plan` | Read-only primary-port plan with `{networkId, subnetId, address}`; availability unproven until reservation |
 | `POST /v1/admin/applications/{id}/fixed-ip` | App-locked `{action:"reserve", networkId, subnetId, address}` or `{action:"release"}`; see [retained primary IPv4](OPERATIONS.md#retain-a-worker-primary-fixed-ipv4) |
-| `GET /v1/admin/applications/{id}/public-ip` | Recorded optional outbound IPv4 reservation; staff only |
+| `GET /v1/admin/applications/{id}/public-ip` | Recorded optional outbound IPv4 reservation; deployment operators only |
 | `POST /v1/admin/applications/{id}/public-ip/plan` | Read-only quota and routed-network capability check with `{externalNetworkId}` |
 | `POST /v1/admin/applications/{id}/public-ip` | App-locked `allocate`, `attach`, `release`, or `reconcile`; see [public IPv4 operations](OPERATIONS.md#reserve-a-stable-outbound-ipv4) |
 | `GET /v1/admin/applications/{id}/resize-plan` | Observe a sizing plan; requires one `flavor` query parameter |
@@ -565,7 +565,7 @@ No class-app cookies/session or browser-relayed identity result is accepted.
 
 Sign-in is same-origin JSON with an anonymous HMAC CSRF token and Strict binder
 cookie. Sessions are opaque server-side records: __Host-/Secure/HttpOnly/Lax,
-Path=/, no Domain, 8 h absolute and 30 min idle. Mutations check exact Origin and
+Path=/, no Domain, 8 h absolute and 30 min idle for owners. Mutations check exact Origin and
 session CSRF. Password changes and Commons archiving do not end already issued
 portal sessions; logout, local revocation, expiry and restore do. Per-address
 admission and fixed 60-second failure budgets per exact username and address
@@ -578,7 +578,7 @@ identified by Commons origin and stable UUID rather than mutable username.
 The owner API exposes only their own apps/config/deployments/build logs/intents,
 environment names and storage resources,
 returning 404 for another owner's IDs. Defaults are two apps and one external
-mutation per owner, with staff overrides. Broker transactions reserve ownership
+mutation per owner, with local-admin quota overrides. Broker transactions reserve ownership
 and quota and persist the intent plus a separate controller idempotency key before
 calling project.sock. Unknown outcomes repeat that exact key/request; known 202
 operations are polled. Only terminal confirmed/not_required cleanup settles an
@@ -625,16 +625,244 @@ changes and credential rotation require a deploy, whose review lists injected
 names only. The overview compares saved revisions and completed rotations with
 the accepted deployment.
 
-These routes are protocol 2 additions in a matched broker/web pair. The image's
-activation contract remains broker/web/auth protocol 2, broker schema 2 and
-controller API 1. There is no schema migration, controller privilege change or
-admin image change.
+Owner resources originally shipped as protocol-2 release additions. The current
+account model uses a matched protocol-3/schema-3 pair and approved admin image
+replacement; the resource projections and keyed fingerprints remain unchanged.
 
-Schema 2 checks immutable migration records, removes assertion flows/replays and
-session key IDs, invalidates authentication and preserves users/apps/quota/intents/
-audit. Unknown schemas/checksums/realms fail closed. Online SQLite snapshots are
+### Local-admin application authority
+
+The closed `/api/v1/admin-apps` namespace maps to broker `/v1/admin-apps` routes,
+never controller `/v1/admin/*`. Owner and staff roles are denied before looking
+up an app or contacting the controller. Admin GETs require Origin checks and a
+session CSRF token; writes require the exact portal Origin and CSRF. The role,
+generation and enabled state are rechecked in the mutation transaction and after
+controller reads. Request-local context variables prevent concurrent threads
+from sharing elevated authority. The normal `/v1/apps` namespace still enforces
+ownership for every role. Adoption always requires step-up. Reassignment is an
+optimistic owner transition and requires step-up; all app mutations share a busy scope across actors.
+
+`GET /v1/admin-apps` pages the broker DB, default 25 and maximum 50, without
+controller fanout. Detail reads use project GET by known UUID. Administrative
+reads use bounded per-account/address buckets (one read/s, burst ten per account;
+two/s, burst twenty per address; two active per account, eight total; browser admin reads queue at two requests) and the
+existing 30-day/2M-row read audit. Mutation intent bodies carry a server-only `_portalAdmin` marker, stripped before
+controller dispatch and omitted from public intent serializers,
+with safe entries in the admin action audit; credentials, values and controller
+refs are excluded. A downgraded account cannot resume an admin intent. Accepted
+operations continue to reconcile; unaccepted admin intents stop for review if
+the actor loses admin authority.
+
+Configuration/environment/storage handlers are the owner implementations from
+`broker/api.py` and `broker/resources.py` reused behind admin authorization. The
+environment fingerprint remains a domain-separated keyed HMAC. Intents store
+names and the server-only admin marker, and controller metadata projections discard values and provider
+credentials. Cross-owner build/runtime logs are not exposed through the admin app
+namespace because they can contain values. Concurrent-operation and environment
+rate limits charge the acting account, with an app-wide busy scope. App creation
+uses a selected owner's quota; adoption and
+reassignment retain existing apps even if their owner is over quota. Storage
+deletion requires a five-minute password/TOTP proof, typed `slug type`, no saved
+binding to that resource, app-scope admission, and a safe audit record.
+
+Adoption POST takes `applicationId` and optional `ownerId` plus an idempotency
+key. Project GET verifies the app, then GET of its active deployment supplies
+strict repository/ref/configuration evidence. The broker checks IDs, revision,
+configuration digest and active-ID stability, validates bindings and imports the
+accepted revision. Missing/legacy snapshots require operator deployment first.
+Controller GET exposes only a retained-IP maintenance boolean; provider IP and
+reservation records stay privileged. Admin deploy accepts maintenance/plan,
+while owner/staff deploy bodies reject those fields. Plan fields, types, known
+current sizing and fingerprint are checked before the broker journals a request;
+the controller validates against fresh cloud evidence at admission. Omitting a plan preserves
+accepted sizing. Class-app consent matches public URL host with Commons origin and is enforced
+server-side for adoption, reassignment, deploy, state and storage changes. Deploy
+and storage consent also apply through ordinary owner routes regardless of role;
+owners still have no stop route. Creating any local account or issuing any invite
+requires step-up, including owner/staff accounts.
+
+### Local identities, roles and admin enrollment
+
+Commons credential checking remains the fixed HTTPS identity integration, with
+stable `(issuer, subject)` identity and no persisted Commons passwords. Local
+accounts have issuer `local`, immutable UUID subject, and a unique canonical
+lowercase username. They store only salted password hashes and private TOTP
+state in broker SQLite. Local and Commons names occupy separate namespaces.
+`POST /auth/login` accepts `method=commons` (default) or `local`, password and
+optional TOTP; client role claims are ignored. The broker assigns the current
+DB role to an immutable session snapshot. Roles are `owner`, `staff`, `admin`;
+SQL and broker checks allow admin only when issuer is local. Every session joins
+current enabled/status/role/generation; security changes increment generation and
+delete all sessions. Staff/admin inherit own-app owner rights, while staff
+catalog endpoints remain metadata-only.
+
+Local hashing uses `hashlib.scrypt`, `N=32768,r=8,p=3,dklen=64`, random 16-byte
+salts, constant-time hash comparison and automatic upgrade after valid login.
+Only bounded supported costs are accepted from stored hashes. Two nonqueued
+hashing slots limit aggregate algorithm memory to roughly 64 MiB. One slot serves
+anonymous local login/enrollment, the other known-device local login and step-up
+from a live admin session. Anonymous work cannot borrow the reserved slot.
+Validated-address budgets admit at most 12 attempts/minute per lane and keep
+anonymous traffic separate from recognized/session traffic, including options
+requests. No hash slot or account-failure row is reserved when capacity is shed.
+OpenSSL is capped at 48 MiB per call; the current unit has no explicit MemoryMax.
+A local five-hash benchmark averaged 0.377 s/hash, about 159 verifications/minute
+per lane (318 total), before provider and transport overhead. Hardware and load
+change that throughput. Failed credential checks have a one-second minimum
+response duration after hash-slot release; busy slots return 503 quickly. A
+single address can consume at most 12 admitted attempts/minute, so anonymous
+fairness is per source; widespread anonymous saturation can still shed new
+browsers/enrollment, while recognized login and live-admin capacity stay reserved.
+The cost corresponds to the 32 MiB option in the
+[OWASP scrypt guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt).
+Passwords must have 12+ characters, at most 1024 UTF-8 bytes and exclude the
+username case-insensitively. Neither passwords nor factors are logged.
+
+TOTP follows [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238): SHA-1, six digits,
+30-second steps and a ±1-step window. A private 160-bit secret is exposed only on
+first enrollment response, as text/otpauth URI; no external QR endpoint is used.
+Accepted counters strictly increase. Admin sessions require a confirmed local
+factor; local owner/staff factors are optional. Admin expiry is 1 h/15 min idle,
+staff 1 h/10 min, capped by shorter owner policy. Sensitive account actions need
+password plus fresh TOTP within five minutes. Password work occurs outside DB
+locks; credentials, generation and budgets are rechecked in the commit transaction.
+
+Wrong passwords consume a rolling per-account budget of 20 failures/hour across
+all addresses. After exhaustion, an unrecognized device performs the standard
+dummy hash and receives the same generic error as a wrong password or unknown
+account. Only a known-device cookie exempts this password budget; a live session
+reserves capacity but does not exempt step-up from it. No unknown-name rows are
+allocated and there is no global backoff-table limit to lock out real accounts.
+Only a correct password can cause a TOTP failure: each failure starts an
+account-wide 30-second exponential backoff (doubling to at most one hour), with
+at most 10 failures in any rolling hour. Login and step-up share these records;
+known-device cookies never bypass TOTP restrictions. Success resets the
+exponential streak, preserving rolling windows so a success cannot reopen the
+hourly guessing budget. Trusted generation changes and restore clear the records.
+
+Successful local sign-in/enrollment issues `__Host-portal-device` over HTTPS,
+HttpOnly, Secure, SameSite=Strict, Path=/, no Domain, expiring in 90 days. The
+cookie carries user UUID, generation and expiry, signed using a domain-separated
+HMAC key derived from the private broker key (`owner-portal/known-device/v1`).
+It recognizes a browser and grants no account/session/role access by itself.
+Malformed, forged, expired, other-account and old-generation cookies are treated
+as unrecognized; logout retains recognition, while every generation bump
+invalidates it. Only loopback development HTTP uses a non-Secure development
+cookie name. The browser neither reads the cookie nor stores it in JavaScript.
+
+The operator creates a hash-only enrollment file under the existing broker-group
+setgid release/config directory, atomically at 0640. Broker reads it through its
+existing read-only sandbox path; no new network permission is needed. IDs are
+consumed in the same transaction that starts enrollment. Invitations/resets are
+72 h hashed single-use DB tokens tied to user generation. Enrollment is bound to
+the anonymous browser binder, lasts ten minutes, and limits code confirmation to
+five failures. Password-reset links with an existing factor count wrong start-phase
+codes per link, reject after five failures, and verify the code before scrypt.
+Finishing enrollment supplies step-up only if a fresh code was verified in that
+finish request. Issuing a password reset clears the old hash; issuing a factor
+reset clears the old secret. Reset targets become pending until enrollment
+completes, including optional-MFA accounts, so they cannot fall back to password
+only. Migration 3 sets the bootstrap fence to its application time; restoring an
+older v1/v2 DB and upgrading cannot replay a still-present enrollment file.
+Restore clears every session/token/handle, preserves roles, fences
+pre-restore files and advances factor counters beyond the restore window.
+The final schema-3 account migration preserves immutable migrations 1/2; old,
+unpublished staff-grant prototype schema-3 checksums are intentionally refused.
+Use fresh development state rather than silently rewriting a migration record.
+
+Admin-only broker/browser endpoints are `/api/v1/accounts` (GET list/search,
+POST local invitation), `/api/v1/accounts/{user}` (PATCH role/state/revoke/reset),
+`/api/v1/accounts/{user}/quotas` (PUT limits), `/api/v1/account-audit` (GET safe
+admin actions), and `/api/v1/reauthenticate` (POST password/TOTP step-up). They do
+not proxy controller administrator routes. Anonymous `/auth/token-info`,
+`/auth/enroll` and `/auth/enroll/finish` require exact Origin and binder CSRF.
+Setup links carry secrets only in fragments and transient POST bodies.
+Admin GETs also require session CSRF and same-origin metadata. Paging defaults
+25/max 50; account search caps at 64 characters, escaped LIKE parameters.
+Account mutations recheck admin authority in their DB transaction and audit
+atomically. Quota changes do not modify ownership or provider resources.
+See [bootstrap and recovery](OPERATIONS.md#bootstrap-or-recover-a-local-admin).
+
+### Read-only course catalog
+
+Only the following browser GET routes exist, mapping to broker paths after
+removing `/api`:
+
+| Route | Query fields | Visible data and source |
+| --- | --- | --- |
+| `/api/v1/staff/owners` | `limit`, `cursor` | Broker user ID, username, display name, local enabled flag; only accounts known to the portal. |
+| `/api/v1/staff/owners/{owner}` | None | The same identity plus effective app/concurrent-deployment quota limits, used and reserved counts from broker quotas/apps/intents and inventory defaults. |
+| `/api/v1/staff/apps` | `limit`, `cursor`, optional `ownerId` | Broker app/owner IDs, slug, lifecycle, saved revision, creation time, sanitized repository URL from the current saved configuration. Rejected create attempts remain visible; they do not consume app quota. |
+| `/api/v1/staff/apps/{app}` | None | Catalog fields plus public URL, desired-running flag, accepted deployment ID/commit/time, coarse process/route health, observation time and stale flag, from one project API app read or its last validated cache. |
+| `/api/v1/staff/apps/{app}/deployments` | `limit`, `cursor` | Per-app project API deployment IDs, app IDs, status, commit, settings revision, cleanup state and requested/updated/accepted/last-healthy times. |
+| `/api/v1/staff/apps/{app}/deployments/{deployment}` | None | The same snapshot fields after checking both requested deployment ID and broker-known parent app association. |
+| `/api/v1/staff/operations` | `limit`, `cursor`, optional `ownerId`/`applicationId` | Broker intent/app/owner IDs, kind/state, coarse stage, cleanup status, creation/update/status-observation time and fixed attention enum. Only broker create/save/deploy intents appear; no controller poll is triggered by this read. |
+
+Repository/public URLs must be HTTPS, at most 512 characters, with no userinfo,
+query, fragment or control characters; invalid values become null. Missing
+commit/timestamp/revision evidence remains null. Health is healthy, unhealthy,
+stopped or unknown; stale observations display unknown health. Unrecognized
+phases/cleanup states map to unknown, never to success. Accepted state survives
+an unavailable live observation. Staff cannot list the entire Commons directory,
+operator-created apps absent from broker ownership, or operator-only operations.
+
+Staff responses use separate recursive field allowlists (`broker/staff.py`),
+never the broader owner serializers. Exclusions include subject/issuer/email and
+other users' sessions, credentials/secrets, ref/branch, all other configuration,
+environment names/values/revisions, storage identifiers/bindings/credentials,
+all logs, raw intent bodies/keys, raw operation IDs/refs/scope/phase/errors/status
+URLs, registry images/digests, worker/provider/IP/sizing/host/capacity records,
+backups/recovery/install state and every privileged administrator payload.
+Deployment UUIDs can coincide with operation UUIDs; they are allowed resource
+identifiers and grant no controller capability.
+
+The broker remains the existing project peer. Project API permits known-app,
+known-deployment and known-operation reads but has no global application,
+deployment or operation list. Global `/v1/admin/*` lists remain privileged;
+the client and host sandbox reject them. Enumeration begins with the broker DB,
+then known app IDs authorize fixed GET paths. App lists fetch no per-row health.
+One staff request can perform at most one upstream read, and staff share one
+upstream slot out of the existing four client slots. Per-app controller history
+currently materializes all attempts before paging; staff history refresh is
+manual and controller behavior/privileges are unchanged.
+
+Staff pages use the same React app/shell, themes, feedback and presentation
+components. Staff navigation covers owners, applications and operations; owner
+navigation and mutation components do not mount in staff mode. Directory pages
+refresh manually; detail/operation polling runs every 15 seconds while visible,
+pauses in hidden tabs, and stops after repeated failures. Idle/absolute expiry,
+logout and access loss cancel queries and clear private in-memory data/CSRF;
+query caches are never persisted. All navigation uses the immutable session role.
+
+All staff collections default to 25 records and cap at 50, with scoped UUID
+cursors and indexed local keyset paging. Unknown/duplicate/empty query fields,
+GET bodies and invalid IDs are rejected. Responses cap at 256 KiB. Fixed read
+limits are 60/minute per user (burst 10), 120/minute per validated address bucket
+(burst 20), two concurrent reads per user and eight globally. IPv6 addresses
+share /64 buckets. Limiter state is bounded (100 users/4096 addresses) and
+process-local; restart resets it. 429/503 responses carry a 30-second retry
+delay. These bound cost/response volume, not eventual disclosure: a compromised
+staff credential can enumerate the entire approved course metadata catalog and
+also manage its own apps. It cannot widen owner
+write scope. Commons password/archival changes still affect new logins only.
+
+Successful staff reads recheck authorization and commit a private read audit
+before sending data. Audit/dependency failure returns 503 without metadata;
+revocation during an upstream call suppresses a result at the final check.
+Already authorized/in-flight responses cannot be retracted. Recovery-console
+quiescing supplies the incident cutover. Account management belongs to local admins; audit-cap maintenance and bootstrap
+belong to [portal operations](OPERATIONS.md#owner-portal-operations).
+
+Schema 3 preserves immutable migration-1/2 checksums and invalidates all sessions,
+adding local credentials, immutable role/generation snapshots, single-use tokens,
+indexed paging and private admin/read audits. No initial admin password exists. Unknown schemas/checksums/realms fail closed. Online SQLite snapshots are
 age-encrypted as the fourth backup class. Four-class off-site bundles coexist with
-legacy three-class evidence, and restore invalidates sessions/anonymous challenges.
+legacy three-class evidence, and restore invalidates sessions/anonymous challenges
+and deletes all account/enrollment tokens while preserving roles and incrementing
+generations. Pre-restore enrollment files are fenced off by issuance time. Read audits retain 30 days with bounded daily pruning on read
+traffic and a 2-million-row cap; cap/commit failure denies staff reads, while
+owner APIs have no audit-cap authorization dependency. Shared DB/disk failure
+can affect both kinds of access.
+
 Restore removes `anonymous.key`; broker startup generates a new key. Existing
 environment-write fingerprints are not rewritten. Repeating an identical edit
 with its old request key then returns `IDEMPOTENCY_CONFLICT`, explaining the
@@ -642,6 +870,7 @@ possible key change and asking for a new request key. Accepted operations can
 still be polled without a value. Unknown or recovery-required intents retain
 their held application scope and need administrator reconciliation before a new
 request can proceed; a key change does not bypass that guard.
+
 
 Broker and web archives bind exact source commit, source tar, runtime files,
 built web asset hashes/manifest, npm/Python locks, Node build version, SBOM,

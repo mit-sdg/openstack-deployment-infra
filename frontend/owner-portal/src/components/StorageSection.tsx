@@ -1,6 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { api, validateBindings, type StorageBinding, type StorageResource } from '../api';
+import {
+  api,
+  resourceApi,
+  validateBindings,
+  type StorageBinding,
+  type StorageResource,
+} from '../api';
 import { time } from '../utils/presentation';
 import { ErrorNotice, Loading } from './Feedback';
 import { Operation } from './Operation';
@@ -10,20 +16,24 @@ export function StorageSection({
   id,
   bindings,
   onChange,
+  service = api,
 }: {
   id: string;
+  service?: ReturnType<typeof resourceApi>;
   bindings: StorageBinding[];
   onChange: (bindings: StorageBinding[]) => void;
 }) {
+  const scope = service === api ? [] : ['admin'];
   const client = useQueryClient();
   const storage = useQuery({
-    queryKey: ['storage', id],
-    queryFn: () => api.storage(id),
-    refetchInterval: 1500,
+    queryKey: [...scope, 'storage', id],
+    queryFn: () => service.storage(id),
+    refetchInterval: service === api ? 1500 : 5000,
+    refetchOnWindowFocus: service === api,
   });
   const environment = useQuery({
-    queryKey: ['environment', id],
-    queryFn: () => api.environment(id),
+    queryKey: [...scope, 'environment', id],
+    queryFn: () => service.environment(id),
   });
   const busy =
     storage.data?.intents.some((intent) => !['succeeded', 'failed'].includes(intent.state)) ||
@@ -55,13 +65,13 @@ export function StorageSection({
       const key = pending.current?.subject === subject ? pending.current.key : crypto.randomUUID();
       pending.current = { subject, key };
       return type
-        ? api.createStorage(id, type, key)
-        : api.storageAction(id, resource!, action!, key);
+        ? service.createStorage(id, type, key)
+        : service.storageAction(id, resource!, action!, key);
     },
     onSuccess: (_result, variables) => {
       if (variables.type) setCreatedType(variables.type);
       pending.current = null;
-      client.invalidateQueries({ queryKey: ['storage', id] });
+      client.invalidateQueries({ queryKey: [...scope, 'storage', id] });
       client.invalidateQueries({ queryKey: ['intents'] });
     },
   });

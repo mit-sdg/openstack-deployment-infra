@@ -10,17 +10,20 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
+import uuid
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+from ..broker.database import Database
 from ..broker.main import serve
 from ..common import canonical
 from ..config import Config
 from ..identity.client import IdentityConfig
 from ..identity.main import serve as serve_identity
 from ..web.server import Reply, WebServer, error_reply
-from .commons import Commons
+from .commons import USERS, Commons
 from .controller import FakeController
 
 
@@ -120,7 +123,7 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, default=9443)
     parser.add_argument("--provider-port", type=int, default=9444)
-    parser.add_argument("--state", type=Path, default=Path(".tmp/owner-portal-credentials"))
+    parser.add_argument("--state", type=Path, default=Path(".tmp/owner-portal-accounts"))
     parser.add_argument(
         "--vite", action="store_true", help="Start Vite on the portal port (requires --http)"
     )
@@ -185,8 +188,33 @@ def run(
     )
     resources.callback(identity.server_close)
     fixture = FakeController(root / "controller.json")
+    fixture.seed_operator_app("00000000-0000-4000-8000-000000000081", config.commons_origin)
+    fixture.seed_operator_app("00000000-0000-4000-8000-000000000083", config.commons_origin)
     controller = fixture.server(config.controller_socket)
     resources.callback(controller.server_close)
+    # Explicit local fixture enrollment before any broker socket/admissions exist.
+    # Production entry points never import this harness or enroll any accounts.
+    from ..broker.bootstrap import enrollment_file
+
+    enrollment_folder = enrollment_file(config).parent
+    enrollment_folder.mkdir(parents=True, mode=0o2750, exist_ok=True)
+    enrollment_folder.chmod(0o2750)
+    database = Database(config)
+    subject, display_name = USERS["taylor"]
+    now = time.time()
+    with database.connect(write=True) as db:
+        row = db.execute(
+            "SELECT id FROM users WHERE issuer=? AND subject=?", (config.issuer, subject)
+        ).fetchone()
+        user_id = row["id"] if row is not None else str(uuid.uuid4())
+        if row is None:
+            db.execute(
+                "INSERT INTO users(id,issuer,subject,username,display_name,enabled,created,last_login) VALUES(?,?,?,'taylor',?,1,?,?)",
+                (user_id, config.issuer, subject, display_name, now, now),
+            )
+        db.execute("UPDATE users SET role='staff',generation=generation+1 WHERE id=?", (user_id,))
+        db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+
     broker, broker_server = serve(config)
     resources.callback(broker.journal.close)
     resources.callback(broker_server.server_close)

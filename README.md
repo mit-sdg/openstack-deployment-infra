@@ -13,8 +13,18 @@ implemented but not deployed, so there is not yet a supported workflow for
 application owners on a live platform. Students will sign in with their class
 username/password, checked server-side with Commons; the merged authenticate
 endpoint must be configured and pass live acceptance before availability is
-claimed. Existing portal sessions expire after 8 h absolute or 30 min idle;
-Commons password changes/archiving do not revoke them.
+claimed. Commons remains the external class-account sign-in method. Local portal
+accounts store salted scrypt password hashes in the broker DB; admins are local
+accounts and must enroll TOTP. Owners manage their own apps, staff also read the
+course catalog, and local admins manage accounts, quotas and any broker app.
+Admins can adopt existing controller apps by UUID, including Commons; class-app
+changes require an extra confirmation and retained-IP deploys require maintenance. Roles are assigned in the
+broker DB and captured at sign-in; security changes revoke all of an account's
+sessions. Owner sessions default to 8 h/30 min idle, staff 1 h/10 min, admin
+1 h/15 min. Commons password changes/archiving do not revoke issued sessions.
+The operator issues a hash-only, single-use setup URL for initial admin enrollment
+or recovery; no password goes in inventory or environment variables. The operator
+dashboard remains separate. See [portal operations](docs/OPERATIONS.md#owner-portal-operations).
 
 Today, an operator can create and recover a platform with:
 

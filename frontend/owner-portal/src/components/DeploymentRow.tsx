@@ -6,15 +6,26 @@ export function DeploymentRow({
   id,
   deployment,
   active,
+  href,
 }: {
   id: string;
-  deployment: import('../api').Deployment;
+  deployment: {
+    deploymentId: string;
+    repositoryCommit: string | null;
+    requestedAt: string | null;
+    configurationRevision: number | null;
+    status: string;
+  };
   active?: string | null;
+  href?: string;
 }) {
   return (
     <div className="deployment-row">
       <div>
-        <Link className="mono app-link" href={`/apps/${id}/deployments/${deployment.deploymentId}`}>
+        <Link
+          className="mono app-link"
+          href={href ?? `/apps/${id}/deployments/${deployment.deploymentId}`}
+        >
           {short(deployment.repositoryCommit)}
         </Link>
         {deployment.deploymentId === active && (
@@ -27,7 +38,7 @@ export function DeploymentRow({
       <Status state={deployment.status} />
       <Link
         className="row-arrow"
-        href={`/apps/${id}/deployments/${deployment.deploymentId}`}
+        href={href ?? `/apps/${id}/deployments/${deployment.deploymentId}`}
         aria-label={`View commit ${short(deployment.repositoryCommit)}`}
       >
         →

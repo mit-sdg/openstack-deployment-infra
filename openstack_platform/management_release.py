@@ -18,10 +18,10 @@ MAXIMUM_ARCHIVE = 128 * 1024**2
 MAXIMUM_MEMBER = 32 * 1024**2
 MAXIMUM_MEMBERS = 4096
 COMPATIBILITY = {
-    "brokerProtocolVersion": 2,
-    "webProtocolVersion": 2,
-    "authProtocolVersion": 2,
-    "brokerSchemaVersion": 2,
+    "brokerProtocolVersion": 3,
+    "webProtocolVersion": 3,
+    "authProtocolVersion": 3,
+    "brokerSchemaVersion": 3,
     "controllerApiVersion": 1,
 }
 BASE = ("__init__.py", "config.py", "contracts.py", "validation.py", "owner_portal_config.py")
@@ -116,6 +116,8 @@ def write_tar(path: Path, files: dict[str, bytes]) -> None:
 
 def runtime_files(source: dict[str, bytes], mode: str) -> dict[str, bytes]:
     names = {f"openstack_platform/{name}" for name in BASE}
+    if mode == "broker":
+        names.add("openstack_platform/durable.py")
     names |= {f"openstack_platform/controller/{name}" for name in CONTROLLER}
     names |= {
         f"openstack_platform/management/{name}"
@@ -213,7 +215,7 @@ def generate(
         for name in source
     ):
         raise ValueError("source archive contains signing material or harness state")
-    requirements = {"python": "3.14", "identityTls": "system-ca", "schemaVersion": 2}
+    requirements = {"python": "3.14", "identityTls": "system-ca", "schemaVersion": 3}
     artifacts = {}
     for mode in ("broker", "web"):
         files = {

@@ -1166,10 +1166,10 @@ def _install_management(args: argparse.Namespace) -> Path:
         if path is not None:
             inputs[name] = _management_input(Path(path), 16384)
     compatibility = {
-        "brokerProtocolVersion": 2,
-        "webProtocolVersion": 2,
-        "authProtocolVersion": 2,
-        "brokerSchemaVersion": 2,
+        "brokerProtocolVersion": 3,
+        "webProtocolVersion": 3,
+        "authProtocolVersion": 3,
+        "brokerSchemaVersion": 3,
         "controllerApiVersion": 1,
     }
     if (

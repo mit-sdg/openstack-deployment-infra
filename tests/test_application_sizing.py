@@ -286,13 +286,17 @@ class ApplicationSizingTests(unittest.TestCase):
             with self.assertRaises(HttpError) as error:
                 project.dispatch(method, f"/v1/admin/applications/{self.app_id}/{suffix}", {}, None)
             self.assertEqual(error.exception.status, 404)
-        with self.assertRaises(HttpError):
-            self.router.dispatch(
-                "POST",
-                f"/v1/applications/{self.app_id}/deployments",
-                {"Idempotency-Key": str(uuid.uuid4())},
-                {**self.body, "plan": plan},
-            )
+        before = db.get_application(self.connection, self.app_id)
+        # Ordinary project deploys preserve custom accepted sizing with no plan.
+        _, operation = self.post(
+            f"/v1/applications/{self.app_id}/deployments", {**self.body, "commit": "b" * 40}
+        )
+        self.assertEqual(operation.status, "succeeded", operation.safe_error)
+        current = db.get_application(self.connection, self.app_id)
+        self.assertEqual(
+            (current.worker_flavor, current.scheduler_cpu_mhz, current.scheduler_memory_mib),
+            (before.worker_flavor, before.scheduler_cpu_mhz, before.scheduler_memory_mib),
+        )
 
     def test_failed_candidate_rolls_back_size_job_and_worker_without_deleting_reused_image(self):
         self.deploy()

@@ -123,6 +123,14 @@ class Config:
             else "__Host-portal-anonymous"
         )
 
+    @property
+    def device_cookie(self) -> str:
+        return (
+            "portal-dev-device"
+            if self.portal_origin.startswith("http:")
+            else "__Host-portal-device"
+        )
+
     @classmethod
     def load(cls, path: Path) -> Config:
         if path.is_symlink() or path.stat().st_size > 65536:

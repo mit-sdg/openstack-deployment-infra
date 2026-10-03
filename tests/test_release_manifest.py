@@ -86,7 +86,7 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertEqual(components["controller"]["apiVersion"], 1)
         self.assertGreaterEqual(components["controller"]["schemaVersion"], 1)
         self.assertEqual(components["ui"]["status"], "shipped")
-        self.assertEqual(components["ui"]["authProtocolVersion"], 2)
+        self.assertEqual(components["ui"]["authProtocolVersion"], 3)
         self.assertEqual(
             components["ui"]["artifactEvidenceFormat"], "openstack-platform-management-artifacts-v1"
         )

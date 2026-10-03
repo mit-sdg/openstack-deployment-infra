@@ -31,17 +31,21 @@ def main() -> None:
     from .config import Config
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("broker", "web", "identity"))
+    parser.add_argument("mode", choices=("broker", "web", "identity", "bootstrap"))
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--requirements", type=Path, required=True)
     parser.add_argument("--smoke", action="store_true")
-    args = parser.parse_args()
+    args, remaining = parser.parse_known_args()
+    if remaining and args.mode != "bootstrap":
+        parser.error("unexpected arguments")
+    if args.mode == "bootstrap" and args.smoke:
+        parser.error("bootstrap is not a service smoke mode")
     requirement = json.loads(args.requirements.read_text())
     if requirement != {
         "python": "3.14",
         "identityTls": "system-ca",
-        "schemaVersion": 2,
+        "schemaVersion": 3,
     } or sys.version_info[:2] != (3, 14):
         raise ValueError("management runtime or schema requirements differ")
     if args.mode == "identity":
@@ -60,6 +64,11 @@ def main() -> None:
         config = Config.load(args.config)
         if config.development:
             raise ValueError("release cannot enable development mode")
+        if args.mode == "bootstrap":
+            from .broker.bootstrap import run as bootstrap
+
+            bootstrap(config, remaining)
+            return
         if args.smoke:
             if args.mode == "broker":
                 from .broker.database import Database
@@ -69,7 +78,7 @@ def main() -> None:
                         dataclasses.replace(config, state_directory=Path(directory))
                     )
                     with database.connect() as connection:
-                        if connection.execute("SELECT version FROM metadata").fetchone()[0] != 2:
+                        if connection.execute("SELECT version FROM metadata").fetchone()[0] != 3:
                             raise ValueError("management schema differs")
             elif args.assets is None or not (args.assets / "index.html").is_file():
                 raise ValueError("web assets are missing")

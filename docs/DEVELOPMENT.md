@@ -190,7 +190,8 @@ uv run python -m openstack_platform.management.dev
 
 Open `https://127.0.0.1:9443/sign-in` and accept the disposable loopback
 certificate. Fixture credentials are `alice` / `local-alice-password`, `bob` /
-`local-bob-password`, and archived `carol` / `local-carol-password`. They are
+`local-bob-password`, archived `carol` / `local-carol-password`, and instructor
+`taylor` / `local-taylor-password`. They are
 public test data, never real class credentials. The fake Commons authenticate
 server always uses HTTPS, including when the portal uses HTTP/Vite. The identity
 client trusts only the harness's public development CA in development mode.
@@ -205,7 +206,8 @@ The real project-router tests in `tests/test_owner_resources.py` cover ownership
 limits, binding validation, no-values projections, same-key recovery and the
 unchanged image activation compatibility dictionaries. The resource Vitest and
 Playwright flows cover write-only edits, renamed/partial PostgreSQL bindings,
-deploy injection names, rotation warnings and the absence of storage deletion.
+deploy injection names, rotation warnings and the absence of storage deletion
+for owners/staff. Admin tests verify step-up and typed storage deletion.
 Environment edits apply immediately to running apps; bindings and rotations
 need deployment. There is no optional dotenv import UI in this release.
 
@@ -221,7 +223,7 @@ paths cannot exceed Linux's 107-byte socket-path limit. Development configuratio
 accepts sockets only below this worktree's `.tmp` or in such a private directory;
 state and the public CA remain confined to `.tmp`. Ctrl-C stops every server and
 Vite child and removes the socket directory; startup failures also remove it. Schema
-2 preserves ownership, quotas, intents and audit while removing legacy assertion
+3 preserves ownership, quotas, intents and audit while removing legacy assertion
 flows/replays and key IDs and invalidating sessions. Legacy fixtures whose
 subjects were usernames are not reassigned by name to Commons UUIDs; use a fresh
 harness directory for the new contract. Unknown schemas or checksum/realm
@@ -246,7 +248,7 @@ The anonymous HMAC binder cookie is HttpOnly, Path=/, SameSite=Strict, Secure
 and __Host-prefixed on HTTPS. Login requires the exact portal Origin plus its
 HMAC CSRF token. Session cookies stay Secure/HttpOnly/Lax and expire after 8 h
 absolute or 30 min idle. Commons password changes or archiving do not end an
-existing portal session. Local portal revocation or logout does. Per-address
+existing Commons portal session. Local security changes, revocation or logout do. Per-address
 limits default to 600 options and 400 login attempts/minute, with IPv6 /64
 buckets. Five failed credentials exhaust a fixed 60-second budget for the exact
 username and address bucket. Pending identity checks reserve budget to prevent
@@ -264,6 +266,53 @@ access, restricted to configured CIDRs or the checked-in Cloudflare ranges plus
 the local systemd-resolved DNS stub. Review the provider ranges when updating the
 inventory. Web accepts only ingress and its overwritten `cf-connecting-ip`;
 X-Forwarded-For and X-Real-Ip never choose rate-limit buckets.
+
+### Exercise local accounts and roles
+
+Use a fresh `.tmp/owner-portal-accounts` state directory for the final schema-3
+account model. The earlier unpublished staff-grant prototype checksum is refused;
+do not edit migration history to make an old test DB appear compatible. Run:
+
+```sh
+uv run python -m openstack_platform.management.dev --state .tmp/owner-portal-accounts
+```
+
+The harness explicitly gives the Taylor Commons fixture role `staff`; its own
+apps and catalog use one immutable role session. Production has no seed admin
+password or account. To exercise bootstrap while the local harness runs, use:
+
+```sh
+uv run openstack-platform-management-bootstrap --config .tmp/owner-portal-accounts/config.json
+```
+
+Open the fragment URL, create a local admin and enroll the one-time displayed
+TOTP key. The development config permits current-user file ownership; production
+requires the operator UID and broker setgid directory. All credentials remain
+public fixture data or locally entered test values; no live Commons or OpenStack
+service is contacted. Use Accounts to create a local staff invitation, redeem it
+in another browser context, then compare owner/staff/admin navigation. Commons
+remains the default sign-in method; local login has a separate method selector,
+never a role selector. Admin roles are prohibited for Commons accounts.
+
+Tests verify scrypt salts/cost upgrades, RFC TOTP vectors/window/replay, hash-only
+24-hour operator files, 72-hour invites/resets, one-time ID consumption, five-minute
+step-up, role/generation transitions, session invalidation, field projections and
+safe audit. Playwright bootstraps an admin, enrolls TOTP, invites local staff,
+checks Commons owner isolation, denies admin pages to non-admin roles, adopts an
+operator class-app fixture, saves its imported configuration and opens its
+maintenance deploy dialog. Tokens
+are removed from address bars and never enter request URLs. Traces/video remain
+disabled. Use the root npm workspace/lockfile and `frontend/shared` from PR #62;
+do not install or regenerate an owner-portal-only lockfile.
+
+The harness seeds two explicitly fake operator applications with retained-address
+metadata and larger sizing, outside broker ownership. The account-flow smoke
+adopts them through the production admin API. Unit/contract tests cover the exact
+controller socket route delta, admin-only maintenance/plan fields, preservation
+of accepted sizing, import integrity and idempotency, cross-actor busy scopes,
+role revocation during reads, keyed environment fingerprints and no-value storage.
+Full retained-IP tests run project maintenance cutovers against the existing
+offline OpenStack/Nomad adapters. No live app is touched.
 
 ## Verify the portal
 

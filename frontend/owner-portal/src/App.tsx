@@ -1,4 +1,4 @@
-import { Link, Route, Switch } from 'wouter';
+import { Link, Route, Switch, useLocation } from 'wouter';
 import { Empty, ErrorNotice, Loading } from './components/Feedback';
 import { useSession } from './hooks/useSession';
 import { ConfigurationPage } from './pages/Configuration';
@@ -9,17 +9,27 @@ import { HistoryPage } from './pages/History';
 import { NewApp } from './pages/NewApp';
 import { Overview } from './pages/Overview';
 import { SignIn } from './pages/SignIn';
+import { StaffPages } from './pages/Staff';
+import { AdminAppsPages } from './pages/AdminApps';
+import { AccountsPage, AdminAuditPage } from './pages/Accounts';
+import { Enrollment } from './pages/Enrollment';
 import { PortalShell } from './shell/PortalShell';
 export function App() {
   const { signIn, session, logout } = useSession();
+  const [location] = useLocation();
+  const elevated = session.data?.role === 'staff' || session.data?.role === 'admin';
   return (
     <PortalShell
       signIn={signIn}
       user={session.data?.user}
+      role={session.data?.role}
+      expiresAt={session.data?.expiresAt}
       logout={() => logout.mutate()}
       loggingOut={logout.isPending}
     >
-      {signIn ? (
+      {location === '/setup' || location === '/activate' ? (
+        <Enrollment key={location} />
+      ) : signIn ? (
         <SignIn />
       ) : session.isPending ? (
         <Loading />
@@ -27,6 +37,51 @@ export function App() {
         <ErrorNotice error={session.error} />
       ) : (
         <Switch>
+          <Route path="/admin/apps/:rest*">
+            {session.data?.role === 'admin' ? (
+              <AdminAppsPages />
+            ) : (
+              <Empty title="Admin access unavailable">
+                This account cannot manage other owners' applications.
+              </Empty>
+            )}
+          </Route>
+          <Route path="/admin/apps">
+            {session.data?.role === 'admin' ? (
+              <AdminAppsPages />
+            ) : (
+              <Empty title="Admin access unavailable">
+                This account cannot manage applications.
+              </Empty>
+            )}
+          </Route>
+          <Route path="/admin/accounts">
+            {session.data?.role === 'admin' ? (
+              <AccountsPage />
+            ) : (
+              <Empty title="Admin access unavailable">
+                This account cannot manage portal accounts.
+              </Empty>
+            )}
+          </Route>
+          <Route path="/admin/audit">
+            {session.data?.role === 'admin' ? (
+              <AdminAuditPage />
+            ) : (
+              <Empty title="Admin access unavailable">
+                This account cannot read the admin audit.
+              </Empty>
+            )}
+          </Route>
+          <Route path="/staff/:rest*">
+            {elevated ? (
+              <StaffPages userId={session.data!.user.id} />
+            ) : (
+              <Empty title="Staff access unavailable">
+                This account cannot read the staff catalog.
+              </Empty>
+            )}
+          </Route>
           <Route path="/apps/new">
             <NewApp />
           </Route>

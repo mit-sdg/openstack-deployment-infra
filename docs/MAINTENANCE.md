@@ -929,12 +929,41 @@ Units and boot path watchers run exclusively through that active selector.
 Selecting the first half leaves activation pending; restarts or reboot retain the
 previous active pair. A rejected marker leaves the active pair unchanged. Stop
 admissions during a coordinated upgrade, back up first, and review
-schema 2/protocol 2/controller API 1. Schema migration is forward and checksum
+schema 3/protocol 3/controller API 1. Schema migration is forward and checksum
 validated; archive selection never performs a blind schema downgrade. Retain the
 pair's source manifest, descriptor, signatures, trust root, SBOM/provenance and
 checksummed archives for rollback review. The GitHub frontend job builds/verifies
 unsigned development archives after its HTTPS smoke at the same source commit;
 it performs no publication.
+
+The final schema-3 account migration upgrades schemas 1/2 with their original
+checksums, preserves user/app/quota/configuration/intent state and invalidates
+sessions. It adds local credentials/TOTP, immutable role/generation snapshots,
+single-use tokens and private admin/read audit. The earlier unpublished grant
+prototype schema-3 checksum is unsupported; reset only disposable development
+state. Do not rewrite a recorded checksum or silently downgrade production data.
+
+Coordinate broker/web/auth protocol 3 and schema 3 in the source manifest,
+archive requirements, isolated smoke, standalone installer, root activation and
+retained-pair validation. The admin image's own activation code pins compatibility;
+a protocol-2 image refuses protocol-3 releases and requires the approved host
+replacement. The bootstrap command is an unprivileged Python entry point in the
+image/controller package and in the broker release. Its mode-0640 hash-only file
+uses the existing operator-owned broker-group setgid config directory; no new
+sandbox access, directory, password inventory or broker TCP permission is needed.
+The same replacement carries project deployment maintenance/plan support, the
+retained-IP warning boolean and project storage deletion. Cascade app deletion
+and controller administrator routes remain privileged. Nix unit isolation is unchanged.
+
+Take a verified backup, quiesce release/backup admissions, install a matched pair,
+verify readiness and take a fresh backup before reopening. Old-schema binaries
+are not compatible rollbacks; retained activation refuses incompatible evidence.
+A schema-3 restore keeps roles and local credential/factor state, increments
+all generations and deletes sessions/invitations/enrollment handles. It rejects
+pre-restore enrollment files and advances factor replay counters beyond the
+restore window. Recover with a new operator enrollment URL and local admin if
+necessary; normal account/role/quota maintenance uses the admin UI. See
+[bootstrap and recovery](OPERATIONS.md#bootstrap-or-recover-a-local-admin).
 
 Admin management preparation uses scoped `systemd-tmpfiles` configurations after
 the state/backup mounts are present. It never runs path-based `install -d`, chown

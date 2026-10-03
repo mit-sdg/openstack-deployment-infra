@@ -16,7 +16,7 @@ from ..runtime import safe_summary
 from ..validation import ValidationError, bounded_text, env_key, resource_name, uuid
 from . import application_runtime as app
 from . import database as db
-from . import sizing, status, storage
+from . import fixed_ip_service, sizing, status, storage
 from .application_service import ApplicationService
 from .async_operations import AsyncOperationExecutor
 from .deployment_config import parse_configuration
@@ -163,7 +163,6 @@ class ControllerAPI:
         router = Router()
         destructive = {
             ("POST", "/v1/applications/{id}/delete"),
-            ("DELETE", "/v1/storage/{id}"),
         }
         routes = (
             ("GET", "/v1/health", self._health),
@@ -462,6 +461,9 @@ class ControllerAPI:
         )
         if model is None:
             raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
+        model["requiresMaintenance"] = (
+            fixed_ip_service.get(self.connection, application.application_id) is not None
+        )
         return Response(200, model)
 
     def _enable_application(self, request: Request) -> Response:
@@ -522,6 +524,8 @@ class ControllerAPI:
                 "requestedRef",
                 "configurationRevision",
                 "configuration",
+                "maintenance",
+                "plan",
             },
             required={
                 "repository",
@@ -531,6 +535,10 @@ class ControllerAPI:
                 "configuration",
             },
         )
+        if type(body.get("maintenance", False)) is not bool or (
+            "plan" in body and not isinstance(body["plan"], dict)
+        ):
+            raise ValidationError("maintenance must be boolean and plan must be an object")
         application = self._application(self._path_uuid(request))
         configuration = parse_configuration(body["configuration"])
         return self._external(
@@ -546,6 +554,8 @@ class ControllerAPI:
                     body["configurationRevision"],
                     configuration,
                     key,
+                    body.get("plan"),
+                    maintenance=body.get("maintenance", False),
                 )
             ),
             kind="app.deploy",
@@ -932,7 +942,7 @@ class ControllerAPI:
         )
         claimed = self._claim(request)
         if claimed.result_id is not None and not self._is_recovery_result(claimed):
-            return self._operation_response(claimed.result_id, admin=True)
+            return self._operation_response(claimed.result_id, admin=False)
         resource = self._resource(self._path_uuid(request))
         purge = body.get("purge", False)
         if not isinstance(purge, bool):
@@ -955,7 +965,7 @@ class ControllerAPI:
             kind="storage.remove",
             scope=f"app-{resource.application_id}",
             claimed=claimed,
-            admin=True,
+            admin=False,
         )
 
     def _get_operation(self, request: Request) -> Response:

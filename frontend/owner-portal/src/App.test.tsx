@@ -123,6 +123,8 @@ describe('typed API', () => {
         json: async () => ({
           data: {
             csrfToken: 'replacement',
+            role: 'owner',
+            stepUpExpiresAt: null,
             expiresAt: '2026-10-01T12:00:00Z',
             user: { id: 'u', displayName: 'Student', username: 'student' },
           },

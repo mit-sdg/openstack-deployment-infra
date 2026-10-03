@@ -21,16 +21,30 @@ the configured Commons HTTPS authenticate endpoint. Commons bb78c5e is the
 implemented contract; this model needs no signed identity assertion or registered
 signing key. Configure the Commons origin and identity egress before rollout.
 Password changes and Commons archiving do not revoke existing portal sessions,
-which expire after 8 h absolute or 30 min idle. Passwords are not saved or logged
+which expire after 8 h absolute or 30 min idle for owners. Staff credential entry
+creates a separate read-only session capped at 1 h absolute and 10 min idle.
+Passwords are not saved or logged
 by the portal. No Commons code is maintained in this repository.
 
 The locally tested owner slice creates individual apps within staff quotas,
 configures a public GitHub repository and Node/Bun settings, deploys an exact
 commit and shows status, health, history and build logs. It grants no SSH,
-OpenStack, Nomad, registry or storage-administrator credentials. Environment
-variables, storage lifecycle, enable/disable and runtime logs are later work.
+OpenStack, Nomad, registry or storage-administrator credentials. Owner environment variables are write-only, and managed storage supports provisioning,
+verification, rotation and saved bindings. Local admins can change running state
+and delete storage with step-up and typed confirmation; runtime logs remain outside the portal.
 Private repositories, Dockerfiles, arbitrary build commands, custom domains,
 teams, scaling, shell access and credential export remain outside this slice.
+
+The same portal supports local accounts and DB-assigned owner/staff/admin roles.
+Staff inherit own-app rights and read the broker-known course catalog. Admins
+must be local accounts with TOTP and manage accounts, quotas and any app through
+the UI, including adoption of an operator app by UUID.
+Commons identities can never be admin. The operator issues a 24-hour single-use
+fragment setup URL without putting any password in inventory or environment.
+See [bootstrap and recovery](OPERATIONS.md#bootstrap-or-recover-a-local-admin).
+The approved admin image replacement carries protocol-3 activation; later portal
+updates install matching broker/web releases. The operator dashboard remains
+separate and no controller administrator payload is exposed by account APIs.
 
 ## What appears in OpenStack
 

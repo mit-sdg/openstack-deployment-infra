@@ -316,6 +316,9 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/client.py` — fixed bounded Unix HTTP client with no TCP fallback.
 - `openstack_platform/management/broker/database.py` — private broker SQLite schema, migration evidence/locking, and short transactions.
 - `openstack_platform/management/broker/journal.py` — durable intent leases, same-key retries, operation polling, and recovery states.
+- `openstack_platform/management/broker/staff.py` — closed metadata projections, catalog paging, read budgets and transactional staff audit.
+- `openstack_platform/management/broker/staff_policy.py` — fixed metadata bounds and URL sanitization.
+- `tests/test_management_staff.py` — staff read-only authority, disclosure, quota/paging/audit and migration/restore evidence.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
 - `openstack_platform/management/web/server.py` — bounded HTTP, static serving, closed broker forwarding, typed cookie directives, and CSP/security headers.
@@ -333,6 +336,10 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/shared/src/theme.js` — external pre-paint script with an app-specific preference key.
 - `frontend/owner-portal/public/favicon.svg` — code-native portal mark.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory TanStack Query setup.
+- `frontend/owner-portal/src/staffApi.ts` — strict staff metadata types/decoders and CSRF-bearing, cancellable GET reads.
+- `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff directory, quota, application, history and operation pages with bounded polling.
+- `frontend/owner-portal/src/Staff.test.tsx` — mode navigation, credential entry, decoder, CSRF, cache clearing and inactivity tests.
+- `frontend/owner-portal/e2e/staff-flow.spec.ts` — loopback staff/owner coexistence, denied writes, joint revocation, expiry and CSP/browser evidence.
 - `frontend/owner-portal/src/api.ts` — typed API/response validation, same-key CSRF retry, and typed settings validation.
 - `frontend/owner-portal/src/App.tsx` — accessible owner routes, configuration, exact-commit review, status/history, and build logs.
 - `frontend/owner-portal/src/app.css` — external dashboard-language tokens, light/dark themes, cards, responsive tables/forms, and drawer styling.
@@ -382,7 +389,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/identity/client.py` — bounded system-CA HTTPS Commons client and typed contract.
 - `openstack_platform/management/identity/main.py` — broker-only Unix identity process and configuration-only readiness.
 - `openstack_platform/management/dev/commons.py` — loopback HTTPS Commons bb78c5e contract double.
-- `tests/test_management_identity.py` — Commons contract, TLS/peer limits and schema-2 migration evidence.
+- `tests/test_management_identity.py` — Commons contract, TLS/peer limits and schema-1/2-to-3 migration evidence.
 - `tests/test_management_dev.py` — long-checkout socket binding, private development directories, path limits and partial-startup cleanup.
 
 - `openstack_platform/management_release.py` — commit-bound broker/web archives and authenticated asset compatibility evidence.
@@ -392,6 +399,25 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/rollback.py` — operator re-verification, smoke and normal activation request for a retained compatible pair and its own config snapshot.
 - `frontend/owner-portal/scripts/build-receipt.mjs` — Node/Git/npm-lock and actual Vite output receipt.
 - `tests/test_management_releases.py` — artifact trust, hostile archives, real-filesystem installation and explicit Node build integration.
+
+- `openstack_platform/management/broker/local_security.py` — bounded stdlib scrypt, TOTP counters and token hashes.
+- `openstack_platform/management/broker/local_auth.py` — local login, persistent backoff and credential/counter rechecks.
+- `openstack_platform/management/broker/bootstrap.py` — operator-owned hash-only enrollment file and setup URL.
+- `openstack_platform/management/broker/accounts.py` — admin account actions, step-up, invites/resets and private audit.
+- `tests/test_management_accounts.py` — local crypto, enrollment replay, roles/generations and account management tests.
+- `frontend/owner-portal/src/adminApi.ts` — typed account-management, quota, step-up and audit requests.
+- `frontend/owner-portal/src/pages/Accounts.tsx` — admin account list/actions, invitations, quotas and audit view.
+- `frontend/owner-portal/src/pages/Enrollment.tsx` — fragment-token setup/reset, local password and TOTP enrollment.
+
+- `openstack_platform/management/broker/admin_apps.py` — request-local admin app authority, adoption, ownership, maintenance consent and stepped-up storage deletion.
+- `tests/test_management_admin_apps.py` — admin app authorization, adoption, resource secrecy, shared busy scopes and replay contracts.
+- `frontend/owner-portal/src/adminAppsApi.ts` — typed admin app requests using the common resource API.
+- `frontend/owner-portal/src/pages/AdminApps.tsx` — managed catalog, adoption, shared configuration/resources, deploy review and sensitive actions.
+- `frontend/owner-portal/src/AdminApps.test.tsx` — role navigation, maintenance confirmations and admin write-only cache tests.
+
+- `tests/test_management_login_admission.py` — distributed password/TOTP budgets, generation-bound device cookies, generic failures and reserved hashing regressions.
+
+- `openstack_platform/management/broker/known_device.py` — private-key HMAC recognition cookies bound to local user IDs, generation and expiry.
 
 ## Keeping this guide current
 

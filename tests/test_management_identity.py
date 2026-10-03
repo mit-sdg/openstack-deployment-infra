@@ -341,7 +341,7 @@ class IdentityTests(ManagementCase):
             server.server_close()
             thread.join(timeout=5)
 
-    def test_schema_two_preserves_ownership_and_invalidates_legacy_authentication(self) -> None:
+    def test_schema_three_preserves_ownership_and_invalidates_legacy_authentication(self) -> None:
         old = self.root / "legacy"
         old.mkdir(mode=0o700)
         path = old / "management.sqlite3"
@@ -367,7 +367,7 @@ class IdentityTests(ManagementCase):
         path.chmod(0o600)
         migrated = Database(dataclasses.replace(self.config, state_directory=old))
         with migrated.connect() as connection:
-            self.assertEqual(connection.execute("SELECT version FROM metadata").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT version FROM metadata").fetchone()[0], 3)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
             self.assertEqual(
                 connection.execute("SELECT id FROM users").fetchone()[0], "legacy-user"
