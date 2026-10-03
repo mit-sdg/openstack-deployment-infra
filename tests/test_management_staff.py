@@ -132,6 +132,47 @@ class StaffTests(ManagementCase):
         detail = self.call("GET", f"/v1/staff/owners/{self.bob}", owner="alice").body["data"]
         self.assertEqual(detail["role"], "owner")
 
+    def test_owner_role_filter_and_activity_kinds(self) -> None:
+        self.create()
+        self.create("bob", "bob-project")
+        self.staff()
+        # The optional role filter lists only matching accounts and pages within them.
+        listed = self.call("GET", "/v1/staff/owners?role=owner", owner="alice").body["data"]
+        self.assertEqual({owner["role"] for owner in listed["items"]}, {"owner"})
+        self.assertNotIn(self.alice, {owner["ownerId"] for owner in listed["items"]})
+        first = self.call("GET", "/v1/staff/owners?role=owner&limit=1", owner="alice").body["data"]
+        if first["nextCursor"]:
+            rest = self.call(
+                "GET",
+                "/v1/staff/owners?role=owner&limit=1&cursor=" + first["nextCursor"],
+                owner="alice",
+            ).body["data"]
+            self.assertEqual({owner["role"] for owner in rest["items"]}, {"owner"})
+        staff = self.call("GET", "/v1/staff/owners?role=staff", owner="alice").body["data"]
+        self.assertEqual([owner["ownerId"] for owner in staff["items"]], [self.alice])
+        for role in ("root", "OWNER"):
+            self.assert_error(
+                "INVALID_REQUEST",
+                lambda r=role: self.call("GET", f"/v1/staff/owners?role={r}", owner="alice"),
+            )
+        self.assert_error(
+            "INVALID_REQUEST",
+            lambda: self.call("GET", "/v1/staff/apps?role=owner", owner="alice"),
+        )
+        # Activity names every broker intent kind and keeps a fallback.
+        operations = self.call("GET", "/v1/staff/operations", owner="alice").body["data"]["items"]
+        ids = [item["intentId"] for item in operations]
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE intents SET kind='env_set' WHERE id=?", (ids[0],))
+            db.execute("UPDATE intents SET kind='mystery' WHERE id=?", (ids[1],))
+        kinds = {
+            item["intentId"]: item["kind"]
+            for item in self.call("GET", "/v1/staff/operations", owner="alice").body["data"][
+                "items"
+            ]
+        }
+        self.assertEqual((kinds[ids[0]], kinds[ids[1]]), ("env_set", "unknown"))
+
     def test_csrf_origin_fetch_metadata_and_closed_queries(self) -> None:
         self.staff()
         for headers, code in (

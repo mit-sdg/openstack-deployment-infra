@@ -104,6 +104,23 @@ class ReadLimits:
             return True
 
 
+ROLES = {"owner", "staff", "admin"}
+ACTIVITY_KINDS = {
+    "create_app",
+    "save_configuration",
+    "deploy",
+    "adopt_app",
+    "env_set",
+    "env_delete",
+    "storage_create",
+    "storage_verify",
+    "storage_rotate",
+    "storage_delete",
+    "app_enable",
+    "app_disable",
+}
+
+
 def enum(value: object, allowed: set[str]) -> str:
     return value if isinstance(value, str) and value in allowed else "unknown"
 
@@ -151,6 +168,8 @@ class StaffReads:
             allowed |= {"limit", "cursor"}
         if route in {"/v1/staff/apps", "/v1/staff/operations"}:
             allowed.add("ownerId")
+        if route == "/v1/staff/owners":
+            allowed.add("role")
         if route == "/v1/staff/operations":
             allowed.add("applicationId")
         if (
@@ -161,6 +180,8 @@ class StaffReads:
             raise HttpError(400, "INVALID_REQUEST", "Invalid staff read fields.")
         for key in {"cursor", "ownerId", "applicationId"} & set(request.query):
             checked_uuid(request.query[key][0])
+        if "role" in request.query and request.query["role"][0] not in ROLES:
+            raise HttpError(400, "INVALID_REQUEST", "Invalid staff read fields.")
         self.page_limit(request)
 
     @staticmethod
@@ -335,7 +356,7 @@ class StaffReads:
             "username": profile(row["username"], 32),
             "displayName": profile(row["display_name"], 256),
             "portalEnabled": row["enabled"] == 1,
-            "role": enum(row["role"], {"owner", "staff", "admin"}),
+            "role": enum(row["role"], ROLES),
         }
 
     @staticmethod
@@ -406,6 +427,10 @@ class StaffReads:
         parameters: list[object] = []
         owner = request.query.get("ownerId", (None,))[0]
         app = request.query.get("applicationId", (None,))[0]
+        role = request.query.get("role", (None,))[0]
+        if role is not None:
+            conditions.append("a.role=?")
+            parameters.append(role)
         if owner is not None:
             self.owner_record(owner)
             conditions.append("a.user_id=?")
@@ -620,7 +645,7 @@ class StaffReads:
             "intentId": identifier(row["id"]),
             "applicationId": identifier(row["app_id"]),
             "ownerId": identifier(row["user_id"]),
-            "kind": enum(row["kind"], {"create_app", "save_configuration", "deploy"}),
+            "kind": enum(row["kind"], ACTIVITY_KINDS),
             "state": state,
             "stage": stage,
             "cleanupState": enum(
