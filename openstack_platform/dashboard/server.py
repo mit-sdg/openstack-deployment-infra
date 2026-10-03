@@ -364,6 +364,9 @@ def serve(server: socketserver.BaseServer, service: DashboardService) -> None:
     """Run the refresh loop and HTTP server until SIGINT or SIGTERM."""
 
     def terminate(_signum: int, _frame: FrameType | None) -> None:
+        # Process-group shutdown can deliver SIGTERM through both the launcher
+        # and the child. The first request owns shutdown; later ones are ignored.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         raise KeyboardInterrupt
 
     previous = signal.signal(signal.SIGTERM, terminate)
@@ -373,9 +376,12 @@ def serve(server: socketserver.BaseServer, service: DashboardService) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        signal.signal(signal.SIGTERM, previous)
-        service.stop()
-        server.server_close()
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            service.stop()
+            server.server_close()
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def run_operator_dashboard(
