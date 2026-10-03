@@ -3,7 +3,9 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
 import {
+  ActionCanceled,
   api,
+  resourceApi,
   validateBindings,
   validateEnvName,
   type Intent,
@@ -210,9 +212,9 @@ describe('owner resources', () => {
       expect(deployment).toHaveBeenCalledWith('app', 7, 'a'.repeat(40), expect.any(String), true),
     );
   });
-  it('requires owner Commons confirmation for storage creation, verification and rotation', async () => {
-    vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: true } as never);
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  it('confirms sign-in app storage changes through an async callback, never window.confirm', async () => {
+    const app = vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: true } as never);
+    const native = vi.spyOn(window, 'confirm');
     const fetcher = vi
       .fn()
       .mockImplementation(() =>
@@ -220,23 +222,48 @@ describe('owner resources', () => {
       );
     vi.stubGlobal('fetch', fetcher);
     try {
-      await expect(api.createStorage('app', 'postgres', 'key')).rejects.toThrow('Action canceled.');
+      // Without a callback, the sign-in app's storage can't change and nothing is sent.
+      await expect(api.createStorage('app', 'postgres', 'key')).rejects.toThrow(
+        'Portal sign-in depends on this app',
+      );
+      let answer = false;
+      const confirm = vi.fn(() => Promise.resolve(answer));
+      const owner = resourceApi('/apps', confirm);
+      await expect(owner.createStorage('app', 'postgres', 'key')).rejects.toBeInstanceOf(
+        ActionCanceled,
+      );
       expect(fetcher).not.toHaveBeenCalled();
-      confirm.mockReturnValue(true);
-      await api.createStorage('app', 'postgres', 'key');
+      answer = true;
+      await owner.createStorage('app', 'postgres', 'key');
       expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
         type: 'postgres',
         identityProviderConfirmed: true,
       });
       for (const action of ['verify', 'rotate'] as const) {
-        await api.storageAction('app', 'resource', action, 'key');
+        await owner.storageAction('app', 'resource', action, 'key');
         expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({
           identityProviderConfirmed: true,
         });
       }
-      expect(confirm).toHaveBeenCalledWith(
-        expect.stringContaining('Portal sign-in depends on this app'),
+      // Other owner apps are not asked and send no confirmation field.
+      app.mockResolvedValue({ identityProvider: false } as never);
+      confirm.mockClear();
+      await owner.storageAction('app', 'resource', 'verify', 'key');
+      expect(confirm).not.toHaveBeenCalled();
+      expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({});
+      // Admin requests let the callback decide, as before.
+      await resourceApi('/admin-apps', () => Promise.resolve(true)).storageAction(
+        'app',
+        'resource',
+        'rotate',
+        'key',
       );
+      expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({
+        identityProviderConfirmed: true,
+      });
+      await resourceApi('/admin-apps').storageAction('app', 'resource', 'rotate', 'key');
+      expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({});
+      expect(native).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }

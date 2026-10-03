@@ -1,4 +1,13 @@
-import { fields, pageData, record, request, resourceApi, type AppRecord, type Intent } from './api';
+import {
+  fields,
+  pageData,
+  record,
+  request,
+  resourceApi,
+  type AppRecord,
+  type ConfirmStorage,
+  type Intent,
+} from './api';
 export type ManagedApp = AppRecord & {
   ownerId: string;
   identityProvider: boolean;
@@ -54,7 +63,7 @@ export const adminAppsApi = {
       body: { applicationId, ...(ownerId ? { ownerId } : {}), identityProviderConfirmed },
       key,
     }),
-  resources: (confirm?: () => boolean) => resourceApi('/admin-apps', confirm),
+  resources: (confirm?: ConfirmStorage) => resourceApi('/admin-apps', confirm),
   deploy: (
     id: string,
     configurationRevision: number,
