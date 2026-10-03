@@ -196,49 +196,44 @@ function query(values: Record<string, string | undefined>) {
   for (const [key, value] of Object.entries(values)) if (value) params.set(key, value);
   return params.size ? `?${params}` : '';
 }
+// Reads run straight away so request() captures the credential epoch at call
+// time. Pages chain related reads (see pages/staff/common.tsx) to stay within
+// the broker's two active reads per account and one controller observation.
+const read = <T>(path: string, decode: (v: unknown) => T, signal?: AbortSignal) =>
+  request(path, decode, undefined, false, signal);
+const pageSize = (limit?: number) => (limit ? String(limit) : undefined);
 export const staffApi = {
-  owners: (cursor?: string, signal?: AbortSignal) =>
-    request('/staff/owners' + query({ cursor }), (v) => page(v, owner), undefined, false, signal),
+  owners: (cursor?: string, signal?: AbortSignal, limit?: number) =>
+    read(
+      '/staff/owners' + query({ limit: pageSize(limit), cursor }),
+      (v) => page(v, owner),
+      signal,
+    ),
   owner: (ownerId: string, signal?: AbortSignal) =>
-    request(
+    read(
       `/staff/owners/${ownerId}`,
       (v) => shape<StaffOwner & { quota: Quota }>(v, { ...ownerChecks, quota }),
-      undefined,
-      false,
       signal,
     ),
-  apps: (ownerId?: string, cursor?: string, signal?: AbortSignal) =>
-    request(
-      '/staff/apps' + query({ ownerId, cursor }),
+  apps: (ownerId?: string, cursor?: string, signal?: AbortSignal, limit?: number) =>
+    read(
+      '/staff/apps' + query({ ownerId, limit: pageSize(limit), cursor }),
       (v) => page(v, catalog),
-      undefined,
-      false,
       signal,
     ),
-  app: (appId: string, signal?: AbortSignal) =>
-    request(`/staff/apps/${appId}`, app, undefined, false, signal),
+  app: (appId: string, signal?: AbortSignal) => read(`/staff/apps/${appId}`, app, signal),
   deployments: (appId: string, cursor?: string, signal?: AbortSignal) =>
-    request(
+    read(
       `/staff/apps/${appId}/deployments` + query({ cursor }),
       (v) => page(v, deployment),
-      undefined,
-      false,
       signal,
     ),
   deployment: (appId: string, deploymentId: string, signal?: AbortSignal) =>
-    request(
-      `/staff/apps/${appId}/deployments/${deploymentId}`,
-      deployment,
-      undefined,
-      false,
-      signal,
-    ),
+    read(`/staff/apps/${appId}/deployments/${deploymentId}`, deployment, signal),
   operations: (ownerId?: string, applicationId?: string, cursor?: string, signal?: AbortSignal) =>
-    request(
+    read(
       '/staff/operations' + query({ ownerId, applicationId, cursor }),
       (v) => page(v, operation),
-      undefined,
-      false,
       signal,
     ),
 };
