@@ -193,6 +193,36 @@ class AdminApplicationTests(ManagementCase):
             ),
         )
 
+    def test_admin_failed_intent_exposes_only_bounded_controller_code(self) -> None:
+        original = self.broker.client.request
+
+        def rejected(method, path, *args, **kwargs):
+            if method == "POST" and path.endswith("/deployments"):
+                return 400, {
+                    "error": {"code": "INVALID_REQUEST", "summary": "PRIVATE_CONTROLLER_TEXT"}
+                }
+            return original(method, path, *args, **kwargs)
+
+        with patch.object(self.broker.client, "request", side_effect=rejected):
+            result = self.call(
+                "POST",
+                self.prefix + "/deployments",
+                {"configurationRevision": 1, "commit": "a" * 40},
+                "admin",
+            ).body["data"]
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["controllerErrorCode"], "INVALID_REQUEST")
+        detail = self.call("GET", f"/v1/intents/{result['intentId']}", owner="admin").body["data"]
+        self.assertEqual(detail["controllerErrorCode"], "INVALID_REQUEST")
+        self.assertNotIn("PRIVATE_CONTROLLER_TEXT", canonical(detail))
+        listing = self.call("GET", "/v1/intents", owner="admin").body["data"]["items"]
+        self.assertEqual(
+            next(item for item in listing if item["intentId"] == result["intentId"])[
+                "controllerErrorCode"
+            ],
+            "INVALID_REQUEST",
+        )
+
     def test_admin_config_and_project_deploy_extras_owners_cannot_forge(self) -> None:
         saved = self.call("GET", self.prefix + "/configuration", owner="admin").body["data"]
         self.call(

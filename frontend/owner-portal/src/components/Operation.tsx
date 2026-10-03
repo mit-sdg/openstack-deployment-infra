@@ -52,6 +52,11 @@ export function Operation({ intent }: { intent: Intent }) {
               : 'Recorded in your workspace'}
         </p>
         {intent.safeError && <p className="operation-error">{intent.safeError}</p>}
+        {intent.controllerErrorCode && (
+          <p className="operation-error">
+            Controller code: <code>{intent.controllerErrorCode}</code>
+          </p>
+        )}
         {intent.operationId && intent.kind === 'deploy' && (
           <Link
             href={`/apps/${intent.appId}/deployments/${intent.operationId}`}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 import time
@@ -11,6 +12,13 @@ from typing import Any
 from ..common import canonical, strict_json, utc
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
+
+
+def controller_error_code(value: object) -> str | None:
+    """Only a bounded public machine code, never upstream free text."""
+    return (
+        value if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", value) else None
+    )
 
 
 def report_exception(error: Exception, intent_id: str = "recovery-scan") -> None:
@@ -168,7 +176,13 @@ class Journal:
                         raise ControllerUnavailable("mismatched operation identity")
                     operation_id, state = result["operationId"], "accepted"
                 elif status in {400, 404, 409, 413, 415, 422}:
-                    code = result.get("error", {}).get("code")
+                    detail = result.get("error")
+                    code = controller_error_code(
+                        detail.get("code") if isinstance(detail, dict) else None
+                    )
+                    # Rejection happens before an operation exists. Keep its
+                    # diagnostic in existing JSON without inventing an operation.
+                    operation = {"controllerErrorCode": code} if code else None
                     if code in {"RECOVERY_REQUIRED", "UNFINISHED_OPERATION", "OPERATION_CONFLICT"}:
                         state, error = "blocked", "This application requires controller recovery."
                     else:
@@ -209,15 +223,21 @@ class Journal:
                 )
 
 
-def intent_model(row: Any) -> dict[str, Any]:
+def intent_model(row: Any, *, diagnostic: bool = False) -> dict[str, Any]:
     body = strict_json(row["body"].encode())
-    return {
+    operation = None if row["operation"] is None else strict_json(row["operation"].encode())
+    code = (
+        controller_error_code(operation.pop("controllerErrorCode", None))
+        if isinstance(operation, dict)
+        else None
+    )
+    model = {
         "intentId": row["id"],
         "appId": row["app_id"],
         "kind": row["kind"],
         "state": row["state"],
         "operationId": row["operation_id"],
-        "operation": None if row["operation"] is None else strict_json(row["operation"].encode()),
+        "operation": operation or None,
         "statusUrl": f"/api/v1/intents/{row['id']}",
         "safeError": row["safe_error"],
         "createdAt": utc(row["created"]),
@@ -231,3 +251,7 @@ def intent_model(row: Any) -> dict[str, Any]:
         "requiresResubmit": row["kind"] in {"env_set", "env_delete"}
         and row["state"] in {"prepared", "unknown", "blocked"},
     }
+
+    if diagnostic:
+        model["controllerErrorCode"] = code
+    return model

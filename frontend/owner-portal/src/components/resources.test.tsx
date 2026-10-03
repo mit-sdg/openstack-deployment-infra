@@ -241,6 +241,28 @@ describe('owner resources', () => {
       vi.unstubAllGlobals();
     }
   });
+  it('explains blocked outputs without offering editable credential bindings', async () => {
+    mocks();
+    vi.mocked(api.storage).mockResolvedValue({
+      items: [
+        {
+          ...resource,
+          unavailableBindings: {
+            password: "PGPASSWORD can't be bound yet; DATABASE_URL already includes the password",
+          },
+        },
+      ],
+      intents: [],
+    });
+    wrap(<StorageSection id="app" bindings={[]} onChange={() => {}} />);
+    expect(
+      await screen.findByText(
+        "PGPASSWORD can't be bound yet; DATABASE_URL already includes the password",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByLabelText('password → environment name')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Bind password/ })).not.toBeInTheDocument();
+  });
   it('shows only injected names on deploy review', async () => {
     Object.defineProperty(HTMLDialogElement.prototype, 'close', {
       configurable: true,
