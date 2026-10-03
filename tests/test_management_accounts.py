@@ -6,14 +6,17 @@ import base64
 import dataclasses
 import io
 import os
+import sqlite3
 import time
-from contextlib import redirect_stderr
+from contextlib import closing, redirect_stderr
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker import bootstrap, local_security
 from openstack_platform.management.broker.accounts import security_change
-from openstack_platform.management.common import canonical
+from openstack_platform.management.broker.database import MIGRATION_2, SCHEMA_V1, Database
+from openstack_platform.management.common import canonical, digest
 from tests.test_management import ManagementCase
 
 
@@ -465,6 +468,54 @@ class AccountsTests(ManagementCase):
                 "futureadmin",
             ),
         )
+
+    def test_legacy_restore_upgrade_fences_still_valid_consumed_bootstrap_file(self) -> None:
+        identity = digest(self.config.portal_origin + "\n" + self.config.issuer)
+        for version in (1, 2):
+            with self.subTest(version=version):
+                snapshot = self.root / f"legacy-{version}.sqlite3"
+                with closing(sqlite3.connect(snapshot)) as db:
+                    db.executescript(SCHEMA_V1 + (MIGRATION_2 if version == 2 else ""))
+                    db.execute("INSERT INTO metadata VALUES(?,?)", (version, identity))
+                    db.execute(
+                        "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,checksum TEXT)"
+                    )
+                    db.execute("INSERT INTO schema_migrations VALUES(1,?)", (digest(SCHEMA_V1),))
+                    if version == 2:
+                        db.execute(
+                            "INSERT INTO schema_migrations VALUES(2,?)", (digest(MIGRATION_2),)
+                        )
+                    db.commit()
+                snapshot.chmod(0o600)
+                if version == 1:
+                    self.admin()
+                consumed = self.bootstrap_token
+                restore_database(snapshot, self.broker.database.path)
+                self.now += 2
+                with patch(
+                    "openstack_platform.management.broker.database.time.time", return_value=self.now
+                ):
+                    self.broker.database = Database(self.config)
+                self.broker.auth.database = self.broker.database
+                with self.broker.database.connect() as db:
+                    self.assertEqual(
+                        db.execute("SELECT COUNT(*) FROM used_tokens").fetchone()[0], 0
+                    )
+                    self.assertEqual(
+                        db.execute("SELECT valid_after FROM token_policy").fetchone()[0], self.now
+                    )
+                self.now += 1
+                self.assert_error(
+                    "TOKEN_INVALID",
+                    lambda consumed=consumed: self.begin(consumed, username="secondadmin"),
+                )
+                self.admin()  # A newly issued operator file still enrolls successfully.
+                Database(self.config)  # Restart must not move the fence again.
+                with self.broker.database.connect() as db:
+                    self.assertEqual(
+                        db.execute("SELECT valid_after FROM token_policy").fetchone()[0],
+                        self.now - 1,
+                    )
 
     def test_enrollment_code_attempts_are_bounded(self) -> None:
         token = urlsplit(bootstrap.issue(self.config, now=self.now)).fragment

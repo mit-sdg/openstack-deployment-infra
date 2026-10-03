@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import os
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -170,6 +171,9 @@ class Database:
                 for statement in MIGRATION_3.split(";"):
                     if statement.strip():
                         db.execute(statement)
+                db.execute(
+                    "UPDATE token_policy SET valid_after=? WHERE singleton=1", (time.time(),)
+                )
                 db.execute("INSERT INTO schema_migrations VALUES(3,?)", (digest(MIGRATION_3),))
             third = db.execute("SELECT checksum FROM schema_migrations WHERE version=3").fetchone()
             if third is None or third[0] != digest(MIGRATION_3):
