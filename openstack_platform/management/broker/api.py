@@ -15,6 +15,7 @@ from ...validation import ValidationError, commit, repository_url, slug
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body, strict_json, utc
 from ..config import Config
+from . import resources
 from .accounts import Accounts
 from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
@@ -32,6 +33,14 @@ DEFAULT_CONFIGURATION: dict[str, Any] = {
 
 
 class Broker:
+    environment_metadata = resources.environment_metadata
+    environment = resources.environment
+    mutate_environment = resources.mutate_environment
+    storage_resources = resources.storage_resources
+    storage = resources.storage
+    mutate_storage = resources.mutate_storage
+    validate_bindings = resources.validate_bindings
+
     def __init__(self, config: Config) -> None:
         self.config = config
         self.database = Database(config)
@@ -63,6 +72,13 @@ class Broker:
             ("GET", "/v1/apps/{app}", self.app),
             ("GET", "/v1/apps/{app}/configuration", self.configuration),
             ("PUT", "/v1/apps/{app}/configuration", self.save),
+            ("GET", "/v1/apps/{app}/environment", self.environment),
+            ("PUT", "/v1/apps/{app}/environment/{key}", self.mutate_environment),
+            ("DELETE", "/v1/apps/{app}/environment/{key}", self.mutate_environment),
+            ("GET", "/v1/apps/{app}/storage", self.storage),
+            ("POST", "/v1/apps/{app}/storage", self.mutate_storage),
+            ("POST", "/v1/apps/{app}/storage/{resource}/verify", self.mutate_storage),
+            ("POST", "/v1/apps/{app}/storage/{resource}/rotate", self.mutate_storage),
             ("POST", "/v1/apps/{app}/deployments", self.deploy),
             ("GET", "/v1/apps/{app}/deployments", self.history),
             ("GET", "/v1/apps/{app}/deployments/{deployment}", self.deployment),
@@ -174,7 +190,7 @@ class Broker:
                 (user_id,),
             ).fetchall()
             held = db.execute(
-                "SELECT COUNT(*) FROM intents WHERE user_id=? AND kind='deploy' AND state NOT IN ('succeeded','failed')",
+                "SELECT COUNT(*) FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','env_set','env_delete') AND state NOT IN ('succeeded','failed')",
                 (user_id,),
             ).fetchone()[0]
         return {
@@ -356,7 +372,28 @@ class Broker:
 
     def app(self, request: Request) -> Response:
         _user, app = self.own(request)
-        return Response(200, {"data": self.app_model(app)})
+        model = self.app_model(app)
+        model["configurationChanged"] = False
+        if model["activeDeploymentId"]:
+            try:
+                status, deployed = self.client.request(
+                    "GET", f"/v1/deployments/{model['activeDeploymentId']}"
+                )
+                if status == 200 and deployed.get("applicationId") == app["id"]:
+                    model["configurationChanged"] = (
+                        deployed.get("configurationRevision") != app["revision"]
+                    )
+                    accepted_at = deployed.get("acceptedAt")
+                    with self.database.connect() as db:
+                        rotated = db.execute(
+                            "SELECT MAX(updated) FROM intents WHERE app_id=? AND kind='storage_rotate' AND state='succeeded'",
+                            (app["id"],),
+                        ).fetchone()[0]
+                    if rotated and accepted_at and str(utc(rotated)) > str(utc(accepted_at)):
+                        model["configurationChanged"] = True
+            except ControllerUnavailable:
+                model["stale"] = True
+        return Response(200, {"data": model})
 
     def existing(self, db: sqlite3.Connection, user: str, key: str, fingerprint: str) -> Any:
         row = db.execute(
@@ -492,11 +529,14 @@ class Broker:
             request.body, {"expectedRevision", "repository", "branch", "configuration"}
         )
         repository, branch = repository_url(body["repository"]), branch_name(body["branch"])
-        configuration = parse_configuration(body["configuration"]).canonical_json()
-        if len(configuration.encode()) > 65536 or body["configuration"].get("storageBindings"):
+        try:
+            configuration = parse_configuration(body["configuration"]).canonical_json()
+        except ValidationError:
             raise HttpError(
-                400, "INVALID_FIELD", "Storage bindings are not available in this phase."
-            )
+                400,
+                "INVALID_CONFIGURATION",
+                "Check configuration fields and storage bindings: targets must be valid, unique, unreserved environment names.",
+            ) from None
         revision = body["expectedRevision"]
         if type(revision) is not int or revision < 0:
             raise HttpError(400, "INVALID_FIELD", "Invalid configuration revision.")
@@ -507,6 +547,7 @@ class Broker:
         with self.database.connect(write=True) as db:
             existing = self.existing(db, user["id"], key, fingerprint)
             if existing is None:
+                self.validate_bindings(db, app["id"], configuration)
                 current = db.execute(
                     "SELECT revision FROM apps WHERE id=?", (app["id"],)
                 ).fetchone()[0]
@@ -565,7 +606,7 @@ class Broker:
                         409, "REVISION_CONFLICT", "Reload the saved settings before deploying."
                     )
                 held = db.execute(
-                    "SELECT * FROM intents WHERE user_id=? AND kind='deploy' AND state NOT IN ('succeeded','failed')",
+                    "SELECT * FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','env_set','env_delete') AND state NOT IN ('succeeded','failed')",
                     (user["id"],),
                 ).fetchall()
                 policy = db.execute(
@@ -583,6 +624,7 @@ class Broker:
                     "SELECT * FROM configurations WHERE app_id=? AND revision=?",
                     (app["id"], revision),
                 ).fetchone()
+                self.validate_bindings(db, app["id"], cfg["configuration"])
                 controller_body = {
                     "repository": cfg["repository"],
                     "requestedRef": cfg["branch"],
@@ -649,6 +691,12 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
+            if row["kind"] in {"env_set", "env_delete"}:
+                raise HttpError(
+                    409,
+                    "ENV_RESUBMIT_REQUIRED",
+                    "Resubmit the environment edit with its original request key and value to recover it.",
+                )
             if row["state"] in {"blocked", "unknown"}:
                 db.execute(
                     "UPDATE intents SET state='prepared',next_retry=0 WHERE id=?", (identifier,)

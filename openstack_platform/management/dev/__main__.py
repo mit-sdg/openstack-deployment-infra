@@ -92,6 +92,20 @@ class HarnessWeb(WebServer):
                 self.fixture.failed_next = True
             elif target == "/__test__/recovery-required":
                 self.fixture.recovery_next = True
+            elif target == "/__test__/pause-storage-creation":
+                with self.fixture.lock:
+                    self.fixture.pause_storage_creation = True
+            elif target == "/__test__/finish-storage-creation":
+                with self.fixture.lock:
+                    self.fixture.pause_storage_creation = False
+                    # Release only storage creates, immediately, after the
+                    # browser has observed real provisioning metadata.
+                    for operation in self.fixture.operations.values():
+                        if (
+                            operation["kind"] == "storage.create"
+                            and operation["status"] == "running"
+                        ):
+                            operation["ready"] = 0
             else:
                 return error_reply(404, "NOT_FOUND")
             return Reply(200, b'{"ready":true}')

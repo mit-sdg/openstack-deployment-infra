@@ -10,6 +10,18 @@ import { useIntentPolling } from '../hooks/useIntentPolling';
 
 export function DeployPage({ id }: { id: string }) {
   const settings = useQuery({ queryKey: ['settings', id], queryFn: () => api.settings(id) });
+  const environment = useQuery({
+    queryKey: ['environment', id],
+    queryFn: () => api.environment(id),
+  });
+  const injectedNames = [
+    ...new Set([
+      ...(environment.data?.items.map((item) => item.name) ?? []),
+      ...(settings.data?.configuration.storageBindings.flatMap((binding) =>
+        Object.values(binding.outputs),
+      ) ?? []),
+    ]),
+  ].sort();
   const [sha, setSha] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [intentId, setIntentId] = useState<string | null>(null);
@@ -107,6 +119,16 @@ export function DeployPage({ id }: { id: string }) {
               <dt>Health path</dt>
               <dd className="mono">{settings.data!.configuration.runtime.healthPath}</dd>
             </dl>
+            <h4>Injected variables</h4>
+            <p className="field-help">Names only. Values are never sent to your browser.</p>
+            <ErrorNotice error={environment.error} />
+            <ul>
+              {injectedNames.map((name) => (
+                <li key={name}>
+                  <code>{name}</code>
+                </li>
+              ))}
+            </ul>
             <Link href={`/apps/${id}/configuration`} className="text-link">
               Edit configuration →
             </Link>
@@ -162,6 +184,7 @@ export function DeployPage({ id }: { id: string }) {
             <dt>Branch label</dt>
             <dd>{settings.data?.branch}</dd>
           </dl>
+          <p>Injected variables: {injectedNames.join(', ') || 'None configured'}</p>
           <div className="notice">
             The branch is a label. This review does not prove the commit is its current head.
             Ordinary deployments may briefly run two versions of your app.

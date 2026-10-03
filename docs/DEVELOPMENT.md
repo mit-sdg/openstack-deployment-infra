@@ -198,6 +198,18 @@ client trusts only the harness's public development CA in development mode.
 Private TLS keys remain in memory via Linux memfd. Only development uses
 cryptography; production identity uses stdlib TLS and system CAs, with no PyJWT.
 
+The configuration page also supports write-only environment edits and
+PostgreSQL/MongoDB/S3 creation, status, bindings, verification and credential
+rotation. The development controller persists only environment names and
+resource metadata; it simulates these operations without retaining values.
+The real project-router tests in `tests/test_owner_resources.py` cover ownership,
+limits, binding validation, no-values projections, same-key recovery and the
+unchanged image activation compatibility dictionaries. The resource Vitest and
+Playwright flows cover write-only edits, renamed/partial PostgreSQL bindings,
+deploy injection names, rotation warnings and the absence of storage deletion.
+Environment edits apply immediately to running apps; bindings and rotations
+need deployment. There is no optional dotenv import UI in this release.
+
 Create an application, save a public repository URL and Node/Bun settings, then
 deploy a full lowercase 40-character hexadecimal fixture commit. Build output,
 health and deployment results are simulated. Example application URLs use

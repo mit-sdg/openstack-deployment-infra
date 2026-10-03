@@ -17,7 +17,9 @@ export function useIntentPolling(id: string | null) {
     queryFn: () => api.intent(id!),
     enabled: !!id,
     refetchInterval: (query) =>
-      query.state.data && ['succeeded', 'failed', 'blocked'].includes(query.state.data.state)
+      query.state.data &&
+      (query.state.data.requiresResubmit ||
+        ['succeeded', 'failed', 'blocked'].includes(query.state.data.state))
         ? false
         : 1000,
   });

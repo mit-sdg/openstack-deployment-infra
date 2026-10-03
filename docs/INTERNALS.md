@@ -576,6 +576,7 @@ addresses remain unaffected and rejections never extend the window. Users are in
 identified by Commons origin and stable UUID rather than mutable username.
 
 The owner API exposes only their own apps/config/deployments/build logs/intents,
+environment names and storage resources,
 returning 404 for another owner's IDs. Defaults are two apps and one external
 mutation per owner, with local-admin quota overrides. Broker transactions reserve ownership
 and quota and persist the intent plus a separate controller idempotency key before
@@ -587,8 +588,46 @@ a transaction. No ownership is inferred from a slug or reassigned by username.
 The UI supports sign-in, my apps/quota/create, public repository/preferred branch,
 typed Node/Bun settings, full-SHA review/deploy, observed status/health, history and
 build logs. React assets are external static files under strict CSP; admin runs
-Python only. Environment values, managed storage, enable/disable and runtime logs
-remain later work. Deletion and global administrator reads remain operator-only.
+Python only. The configuration page supports write-only environment edits and
+one resource per storage type (`postgres`, `mongo`, `s3`) per app, including pending
+creation intents. The controller allows multiple resource names per type; the
+broker deliberately restricts owners to one. Enable/disable and runtime logs
+remain later work. Storage deletion and global administrator reads remain
+operator-only.
+
+Broker resource responses are explicit projections: environment names/revision
+and the controller's whole-environment updated timestamp; storage resource UUID,
+type, label, status, created/verified times and output-to-environment defaults.
+Provider IDs, connection strings and credential values are excluded. Environment
+values pass directly to project.sock; only names, actions and request fingerprints
+are persisted in broker intents/audit. They are never included in portal errors or
+logs. Value-bearing environment request fingerprints use HMAC-SHA256 with a
+subkey derived from the private, crash-durable `anonymous.key` using
+`owner-portal/env-fingerprint/v1` as the domain separator. A broker DB copy or
+backup does not contain the key or a plain value/request digest for offline
+value guessing. Non-secret fingerprints, including environment deletion,
+storage and configuration, retain their existing SHA-256 format.
+
+Accepted edits are polled without values. A lost environment admission or
+controller recovery requires resubmitting the original key and value because
+neither journal stores the body. Such intents are excluded from automatic replay;
+they cannot starve background recovery of other operations. Environment writes
+are limited to 30 new intents per owner per minute and 65,536 UTF-8 bytes per
+value; controller admission also enforces the installed deployment's limits.
+
+Saving bindings checks application ownership, outputs for the storage type,
+valid/unreserved/injective targets and collisions with owner environment names
+or pending edits. The broker serializes binding saves and environment admission
+in SQLite transactions. Storage create/verify/rotate use durable, same-key intent
+reconciliation; the portal shows progress until terminal controller evidence.
+Environment edits restart and health-check running apps immediately. Binding
+changes and credential rotation require a deploy, whose review lists injected
+names only. The overview compares saved revisions and completed rotations with
+the accepted deployment.
+
+Owner resources originally shipped as protocol-2 release additions. The current
+account model uses a matched protocol-3/schema-3 pair and approved admin image
+replacement; the resource projections and keyed fingerprints remain unchanged.
 
 ### Local identities, roles and admin enrollment
 
@@ -731,6 +770,15 @@ generations. Pre-restore enrollment files are fenced off by issuance time. Read 
 traffic and a 2-million-row cap; cap/commit failure denies staff reads, while
 owner APIs have no audit-cap authorization dependency. Shared DB/disk failure
 can affect both kinds of access.
+
+Restore removes `anonymous.key`; broker startup generates a new key. Existing
+environment-write fingerprints are not rewritten. Repeating an identical edit
+with its old request key then returns `IDEMPOTENCY_CONFLICT`, explaining the
+possible key change and asking for a new request key. Accepted operations can
+still be polled without a value. Unknown or recovery-required intents retain
+their held application scope and need administrator reconciliation before a new
+request can proceed; a key change does not bypass that guard.
+
 
 Broker and web archives bind exact source commit, source tar, runtime files,
 built web asset hashes/manifest, npm/Python locks, Node build version, SBOM,

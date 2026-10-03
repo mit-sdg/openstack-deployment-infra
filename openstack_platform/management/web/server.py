@@ -176,7 +176,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(405, "METHOD_NOT_ALLOWED")
             target = path.removeprefix("/api")
         elif re.fullmatch(
-            r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/deployments(?:/[a-f0-9-]{36}(?:/build-log)?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
+            r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}/(?:verify|rotate))?|/deployments(?:/[a-f0-9-]{36}(?:/build-log)?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
             path,
         ):
             target = path.removeprefix("/api")
@@ -442,6 +442,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
     do_GET = dispatch
     do_POST = dispatch
     do_PUT = dispatch
+    do_DELETE = dispatch
 
 
 class HeaderReader(io.BufferedReader):
