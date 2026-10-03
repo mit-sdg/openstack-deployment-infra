@@ -105,7 +105,7 @@ describe('owner resources', () => {
     vi.mocked(api.intent).mockResolvedValue(unknown);
     const write = vi.spyOn(api, 'setEnvironment').mockResolvedValue(intent);
     wrap(<EnvironmentSection id="app" bindings={[]} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Recover edit of TOKEN' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish change to TOKEN' }));
     expect(screen.getByLabelText('Variable name')).toHaveValue('TOKEN');
     expect(screen.getByLabelText('New value')).toHaveValue('');
     fireEvent.change(screen.getByLabelText('New value'), {
@@ -121,21 +121,25 @@ describe('owner resources', () => {
     const remove = vi
       .spyOn(api, 'deleteEnvironment')
       .mockResolvedValue({ ...intent, kind: 'env_delete' });
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const confirm = vi.spyOn(window, 'confirm');
     wrap(<EnvironmentSection id="app" bindings={[]} />);
     const button = await screen.findByRole('button', { name: 'Delete API_TOKEN' });
     fireEvent.click(button);
+    expect(screen.getByRole('dialog')).toHaveTextContent('Delete API_TOKEN?');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(remove).not.toHaveBeenCalled();
-    confirm.mockReturnValue(true);
     fireEvent.click(button);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete variable' }));
     await waitFor(() => expect(remove).toHaveBeenCalledOnce());
+    expect(remove.mock.calls[0].slice(0, 2)).toEqual(['app', 'API_TOKEN']);
+    expect(confirm).not.toHaveBeenCalled();
   });
   it('disables existing types, allows renamed/partial bindings and warns before rotation', async () => {
     mocks();
     const rotate = vi
       .spyOn(api, 'storageAction')
       .mockResolvedValue({ ...intent, kind: 'storage_rotate' });
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirm = vi.spyOn(window, 'confirm');
     let current: StorageBinding[] = [];
     function Editor() {
       const [bindings, setBindings] = useState<StorageBinding[]>([]);
@@ -143,19 +147,33 @@ describe('owner resources', () => {
       return <StorageSection id="app" bindings={bindings} onChange={setBindings} />;
     }
     wrap(<Editor />);
-    await screen.findByRole('button', { name: 'Use default bindings' });
-    expect(screen.getByRole('button', { name: 'Add PostgreSQL' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Use default bindings' }));
+    // Without variables, the row says the app can't connect and offers both paths.
+    expect(await screen.findByText(/can’t connect to PostgreSQL yet/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Use default PostgreSQL variables' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Choose PostgreSQL variable names' }));
+    expect(screen.queryByRole('button', { name: 'Add PostgreSQL' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add MongoDB' })).toBeEnabled();
+    // The editor starts from the defaults.
+    expect(screen.getByLabelText('host → environment name')).toHaveValue('PGHOST');
     fireEvent.change(screen.getByLabelText('url → environment name'), {
       target: { value: 'APP_DATABASE' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Remove host binding' }));
-    expect(current).toEqual([{ resourceId: 'resource', outputs: { url: 'APP_DATABASE' } }]);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove host' }));
+    expect(current).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+    await waitFor(() =>
+      expect(current).toEqual([{ resourceId: 'resource', outputs: { url: 'APP_DATABASE' } }]),
+    );
+    expect(screen.getByRole('button', { name: 'Edit PostgreSQL variables' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Rotate PostgreSQL credentials' }));
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('Redeploy'));
+    expect(screen.getByRole('dialog')).toHaveTextContent('next deploy');
+    expect(rotate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }));
     await waitFor(() => expect(rotate).toHaveBeenCalledOnce());
+    expect(rotate.mock.calls[0].slice(0, 3)).toEqual(['app', 'resource', 'rotate']);
+    expect(confirm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/Ask an administrator/)).toBeVisible();
+    expect(screen.getByText(/Only an admin can delete/)).toBeVisible();
   });
   it('requires Commons confirmation before owner deployment', async () => {
     Object.defineProperty(HTMLDialogElement.prototype, 'close', {
@@ -197,16 +215,14 @@ describe('owner resources', () => {
     });
     const deployment = vi.spyOn(api, 'deploy').mockResolvedValue(intent);
     wrap(<DeployPage id="app" />);
-    fireEvent.change(await screen.findByLabelText('Full commit SHA'), {
+    fireEvent.change(await screen.findByLabelText('Commit SHA'), {
       target: { value: 'a'.repeat(40) },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Review deployment →' }));
-    const submit = screen.getByRole('button', { name: 'Deploy this commit' });
+    fireEvent.click(screen.getByRole('button', { name: 'Review deployment' }));
+    const submit = screen.getByRole('button', { name: 'Deploy' });
     expect(submit).toBeDisabled();
     expect(deployment).not.toHaveBeenCalled();
-    fireEvent.click(
-      screen.getByLabelText('Portal sign-in depends on this app — confirm deployment'),
-    );
+    fireEvent.click(screen.getByLabelText(/Signing in to this portal depends on this app/));
     fireEvent.click(submit);
     await waitFor(() =>
       expect(deployment).toHaveBeenCalledWith('app', 7, 'a'.repeat(40), expect.any(String), true),
@@ -268,6 +284,35 @@ describe('owner resources', () => {
       vi.unstubAllGlobals();
     }
   });
+  it('confirms owner storage changes for the sign-in app in a dialog, not a native prompt', async () => {
+    mocks();
+    vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: true } as never);
+    const confirm = vi.spyOn(window, 'confirm');
+    const fetcher = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify({ data: intent }), { status: 202 })),
+      );
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      wrap(<StorageSection id="app" bindings={[]} onChange={() => {}} />);
+      await waitFor(() => expect(api.app).toHaveBeenCalled());
+      fireEvent.click(await screen.findByRole('button', { name: 'Add MongoDB' }));
+      const submit = screen.getAllByRole('button', { name: 'Add MongoDB' }).at(-1)!;
+      expect(submit).toBeDisabled();
+      fireEvent.click(screen.getByLabelText(/Signing in to this portal depends on this app/));
+      fireEvent.click(submit);
+      await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+      expect(fetcher.mock.calls[0][0]).toBe('/api/v1/apps/app/storage');
+      expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+        type: 'mongo',
+        identityProviderConfirmed: true,
+      });
+      expect(confirm).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('allows PostgreSQL password and S3 secret-key bindings', async () => {
     mocks();
     vi.mocked(api.storage).mockResolvedValue({
@@ -288,14 +333,22 @@ describe('owner resources', () => {
       return <StorageSection id="app" bindings={bindings} onChange={setBindings} />;
     }
     wrap(<Editor />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Bind password to PGPASSWORD' }));
     fireEvent.click(
-      screen.getByRole('button', { name: 'Bind secret_access_key to AWS_SECRET_ACCESS_KEY' }),
+      await screen.findByRole('button', { name: 'Choose PostgreSQL variable names' }),
     );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove password' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add password as PGPASSWORD' }));
     expect(screen.getByLabelText('password → environment name')).toHaveValue('PGPASSWORD');
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Choose S3 storage variable names' }),
+    );
     expect(screen.getByLabelText('secret_access_key → environment name')).toHaveValue(
       'AWS_SECRET_ACCESS_KEY',
     );
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+    expect(await screen.findByText('2 variables')).toBeVisible();
+    expect(await screen.findByText('1 variable')).toBeVisible();
     expect(screen.queryByText(/needs a platform update/)).not.toBeInTheDocument();
   });
   it('shows only injected names on deploy review', async () => {

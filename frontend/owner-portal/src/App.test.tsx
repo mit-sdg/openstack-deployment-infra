@@ -64,15 +64,53 @@ describe('owner configuration', () => {
     );
     expect(screen.getByText(configurationGuidance.scripts)).toBeVisible();
     expect(screen.getByText(configurationGuidance.root, { exact: false })).toBeVisible();
-    expect(screen.getByText(configurationGuidance.locks, { exact: false })).toBeVisible();
+    expect(screen.getByText(/Each needs its lockfile/)).toBeVisible();
     expect(screen.getByText(configurationGuidance.health)).toBeVisible();
     fireEvent.click(screen.getByLabelText(/Bun/));
-    fireEvent.change(screen.getByLabelText('Application port'), { target: { value: '8080' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
+    fireEvent.change(screen.getByLabelText('Port'), { target: { value: '8080' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save.mock.calls[0][1].configuration.build.runtime).toBe('bun');
     expect(save.mock.calls[0][1].configuration.runtime.port).toBe(8080);
     expect(await screen.findByRole('status')).toHaveTextContent('Settings saved');
+  });
+  it('saves default database variables in one click without saving other draft edits', async () => {
+    vi.spyOn(api, 'environment').mockResolvedValue({ revision: 0, updatedAt: null, items: [] });
+    vi.spyOn(api, 'storage').mockResolvedValue({
+      items: [
+        {
+          resourceId: 'db',
+          type: 'postgres',
+          label: 'PostgreSQL',
+          status: 'ready',
+          createdAt: '2026-10-01T00:00:00Z',
+          verifiedAt: null,
+          defaultBindings: { url: 'DATABASE_URL' },
+        },
+      ],
+      intents: [],
+    });
+    vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: false } as never);
+    const save = vi.spyOn(api, 'save').mockResolvedValue({ revision: 2 });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ConfigurationForm id="app" initial={settings} resources />
+      </QueryClientProvider>,
+    );
+    fireEvent.change(screen.getByLabelText('Branch'), { target: { value: 'draft-branch' } });
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Use default PostgreSQL variables' }),
+    );
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const sent = save.mock.calls[0][1];
+    expect(sent.branch).toBe('main');
+    expect(sent.revision).toBe(1);
+    expect(sent.configuration.storageBindings).toEqual([
+      { resourceId: 'db', outputs: { url: 'DATABASE_URL' } },
+    ]);
+    expect(await screen.findByText('1 variable')).toBeVisible();
+    // The draft keeps its unsaved edit.
+    expect(screen.getByLabelText('Branch')).toHaveValue('draft-branch');
   });
   it('explains revision conflicts and preserves the draft', async () => {
     vi.spyOn(api, 'save').mockRejectedValue(
@@ -83,12 +121,12 @@ describe('owner configuration', () => {
         <ConfigurationForm id="app" initial={settings} />
       </QueryClientProvider>,
     );
-    fireEvent.change(screen.getByLabelText('Preferred branch'), {
+    fireEvent.change(screen.getByLabelText('Branch'), {
       target: { value: 'feature/student' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Settings changed in another tab');
-    expect(screen.getByLabelText('Preferred branch')).toHaveValue('feature/student');
+    expect(screen.getByLabelText('Branch')).toHaveValue('feature/student');
   });
   it('reports statuses using text in addition to color', () => {
     render(

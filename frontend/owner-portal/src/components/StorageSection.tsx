@@ -1,5 +1,21 @@
+import {
+  Button,
+  Checkbox,
+  Cluster,
+  Dialog,
+  ErrorAlert,
+  Hint,
+  IconButton,
+  InlineStatus,
+  Input,
+  List,
+  ListItem,
+  LoadingRows,
+  RelativeTime,
+  Section,
+} from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   api,
   configurationGuidance,
@@ -8,230 +24,503 @@ import {
   type StorageBinding,
   type StorageResource,
 } from '../api';
-import { time } from '../utils/presentation';
-import { ErrorNotice, Loading } from './Feedback';
-import { Operation } from './Operation';
+import { QueryError } from './Feedback';
+import { Operation, OperationList } from './Operation';
+import { Status } from './Status';
+import '../pages/app-pages.css';
 
-const labels = { postgres: 'PostgreSQL', mongo: 'MongoDB', s3: 'S3 bucket' };
+const labels = { postgres: 'PostgreSQL', mongo: 'MongoDB', s3: 'S3 storage' };
+const types = ['postgres', 'mongo', 's3'] as const;
+const finished = ['succeeded', 'failed', 'blocked'];
+
+type Request = {
+  type?: StorageResource['type'];
+  resource?: string;
+  action?: 'rotate' | 'verify';
+  /** The person confirmed that portal sign-in depends on this app. */
+  identity?: boolean;
+};
+
+function sentence(value: string) {
+  return value.charAt(0).toUpperCase() + value.slice(1).replaceAll('_', ' ');
+}
+
+/** Editor for the environment variable names one resource sets. */
+function BindingsDialog({
+  resource,
+  outputs,
+  validate,
+  onApply,
+  onClose,
+}: {
+  resource: StorageResource;
+  outputs: Record<string, string>;
+  validate: (outputs: Record<string, string>) => string | null;
+  /** Applies the names; may save them right away (a rejected promise keeps the dialog open). */
+  onApply: (outputs: Record<string, string>) => void | Promise<unknown>;
+  onClose: () => void;
+}) {
+  // A resource without variables starts from the defaults: most apps want them.
+  const [draft, setDraft] = useState<Record<string, string>>(() => ({
+    ...(Object.keys(outputs).length ? outputs : resource.defaultBindings),
+  }));
+  const [error, setError] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
+  const certificates = Object.values(resource.defaultBindings).filter((name) =>
+    /SSLROOTCERT|CA_BUNDLE/.test(name),
+  );
+  function set(name: string, target: string | null) {
+    setError(null);
+    setDraft((current) => {
+      const next = { ...current };
+      if (target === null) delete next[name];
+      else next[name] = target;
+      return next;
+    });
+  }
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`${labels[resource.type]} variables`}
+      footer={
+        <>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setError(null);
+              setDraft({ ...resource.defaultBindings });
+            }}
+          >
+            Reset to defaults
+          </Button>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            loading={saving}
+            onClick={async () => {
+              const invalid = validate(draft);
+              setError(invalid);
+              if (invalid) return;
+              setSaving(true);
+              try {
+                await onApply(draft);
+              } catch (failure) {
+                setError(failure);
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            Save variables
+          </Button>
+        </>
+      }
+    >
+      <Hint>
+        Choose the environment variable name your app reads for each value. Remove the ones your app
+        doesn’t use.
+      </Hint>
+      <div role="group" aria-label={`${labels[resource.type]} bindings`} className="app-bindings">
+        {Object.entries(resource.defaultBindings).map(([name, defaultTarget]) => (
+          <div className="app-binding" key={name}>
+            <code className="app-binding__name">{name}</code>
+            {name in draft ? (
+              <>
+                <Input
+                  id={`${resource.resourceId}-${name}`}
+                  aria-label={`${name} → environment name`}
+                  className="app-mono-input"
+                  value={draft[name]}
+                  autoComplete="off"
+                  autoCapitalize="characters"
+                  spellCheck={false}
+                  onChange={(event) => set(name, event.target.value)}
+                />
+                <IconButton
+                  icon="x"
+                  label={`Remove ${name}`}
+                  className="ui-icon-button--ghost"
+                  onClick={() => set(name, null)}
+                />
+              </>
+            ) : (
+              <>
+                <span className="ui-text-subtle">Not set</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="plus"
+                  aria-label={`Add ${name} as ${defaultTarget}`}
+                  onClick={() => set(name, defaultTarget)}
+                >
+                  Add
+                </Button>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      {!!certificates.length && (
+        <Hint>
+          Keep {certificates.join(' and ')} so your app can verify the TLS certificate when it
+          connects.
+        </Hint>
+      )}
+      <ErrorAlert error={error} />
+    </Dialog>
+  );
+}
+
 export function StorageSection({
   id,
   bindings,
   onChange,
   service = api,
+  notice,
+  save,
 }: {
   id: string;
   service?: ReturnType<typeof resourceApi>;
   bindings: StorageBinding[];
   onChange: (bindings: StorageBinding[]) => void;
+  /**
+   * Saves new bindings straight away. Without it, binding changes only
+   * update the draft through onChange and the parent saves them.
+   */
+  save?: (bindings: StorageBinding[]) => Promise<unknown>;
+  /** Optional message shown at the top of the section, e.g. unsaved changes. */
+  notice?: ReactNode;
 }) {
-  const scope = service === api ? [] : ['admin'];
+  const owner = service === api;
+  const scope = owner ? [] : ['admin'];
   const client = useQueryClient();
   const storage = useQuery({
     queryKey: [...scope, 'storage', id],
     queryFn: () => service.storage(id),
-    refetchInterval: service === api ? 1500 : 5000,
-    refetchOnWindowFocus: service === api,
+    refetchInterval: owner ? 1500 : 5000,
+    refetchOnWindowFocus: owner,
   });
   const environment = useQuery({
     queryKey: [...scope, 'environment', id],
     queryFn: () => service.environment(id),
   });
+  // Owners confirm identity-provider changes in a dialog rather than the
+  // request layer's native prompt. Admin services bring their own confirmation.
+  const app = useQuery({
+    queryKey: ['app', id],
+    queryFn: () => api.app(id),
+    enabled: owner,
+  });
+  const identityProvider = owner && app.data?.identityProvider === true;
   const busy =
     storage.data?.intents.some((intent) => !['succeeded', 'failed'].includes(intent.state)) ||
     environment.data?.intents?.some((intent) => !['succeeded', 'failed'].includes(intent.state));
   const [createdType, setCreatedType] = useState<StorageResource['type'] | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  // Right after adding a resource, open its variables prefilled with defaults.
   useEffect(() => {
     const created = storage.data?.items.find((resource) => resource.type === createdType);
     if (created) {
-      onChange([
-        ...bindings.filter((item) => item.resourceId !== created.resourceId),
-        { resourceId: created.resourceId, outputs: { ...created.defaultBindings } },
-      ]);
+      setEditing(created.resourceId);
       setCreatedType(null);
     }
-  }, [storage.data, createdType, bindings, onChange]);
-  const [error, setError] = useState<string | null>(null);
+  }, [storage.data, createdType]);
+  const [confirming, setConfirming] = useState<Request | null>(null);
+  const [identityConfirmed, setIdentityConfirmed] = useState(false);
+  const [applying, setApplying] = useState<string | null>(null);
+  const [applyError, setApplyError] = useState<unknown>(null);
+  const [started, setStarted] = useState<string[]>([]);
   const pending = useRef<{ subject: string; key: string } | null>(null);
   const action = useMutation({
-    mutationFn: ({
-      type,
-      resource,
-      action,
-    }: {
-      type?: StorageResource['type'];
-      resource?: string;
-      action?: 'rotate' | 'verify';
-    }) => {
+    mutationFn: ({ type, resource, action, identity }: Request) => {
       const subject = type ?? `${resource}/${action}`;
       const key = pending.current?.subject === subject ? pending.current.key : crypto.randomUUID();
       pending.current = { subject, key };
+      const target = owner && identity ? resourceApi('/apps', () => true) : service;
       return type
-        ? service.createStorage(id, type, key)
-        : service.storageAction(id, resource!, action!, key);
+        ? target.createStorage(id, type, key)
+        : target.storageAction(id, resource!, action!, key);
     },
-    onSuccess: (_result, variables) => {
+    onSuccess: (result, variables) => {
       if (variables.type) setCreatedType(variables.type);
       pending.current = null;
+      setStarted((current) => [...current, result.intentId]);
       client.invalidateQueries({ queryKey: [...scope, 'storage', id] });
       client.invalidateQueries({ queryKey: ['intents'] });
     },
   });
-  const invalid = validateBindings(
-    bindings,
-    environment.data?.items.map((item) => item.name) ?? [],
-  );
-  function output(resource: string, name: string, target: string | null) {
-    const current = { ...(bindings.find((item) => item.resourceId === resource)?.outputs ?? {}) };
-    if (target === null) delete current[name];
-    else current[name] = target;
-    onChange([
-      ...bindings.filter((item) => item.resourceId !== resource),
-      ...(Object.keys(current).length ? [{ resourceId: resource, outputs: current }] : []),
-    ]);
+  function request(next: Request) {
+    if (next.action === 'rotate' || identityProvider) {
+      setIdentityConfirmed(false);
+      setConfirming(next);
+    } else action.mutate(next);
   }
+  const names = environment.data?.items.map((item) => item.name) ?? [];
+  const invalid = validateBindings(bindings, names);
+  function withOutputs(resource: string, outputs: Record<string, string>) {
+    return [
+      ...bindings.filter((item) => item.resourceId !== resource),
+      ...(Object.keys(outputs).length ? [{ resourceId: resource, outputs }] : []),
+    ];
+  }
+  function apply(resource: string, outputs: Record<string, string>) {
+    const next = withOutputs(resource, outputs);
+    if (save) return save(next);
+    onChange(next);
+  }
+  async function applyDefaults(resource: StorageResource) {
+    setApplyError(null);
+    // Names that clash with existing variables need a choice: open the editor.
+    if (validateBindings(withOutputs(resource.resourceId, resource.defaultBindings), names)) {
+      setEditing(resource.resourceId);
+      return;
+    }
+    setApplying(resource.resourceId);
+    try {
+      await apply(resource.resourceId, { ...resource.defaultBindings });
+    } catch (failure) {
+      setApplyError(failure);
+    } finally {
+      setApplying(null);
+    }
+  }
+  const editingResource = storage.data?.items.find((item) => item.resourceId === editing);
+  const confirmingResource = storage.data?.items.find(
+    (item) => item.resourceId === confirming?.resource,
+  );
+  const confirmingLabel = labels[confirming?.type ?? confirmingResource?.type ?? 'postgres'];
+  const recent =
+    storage.data?.intents.filter(
+      (intent) => started.includes(intent.intentId) || !finished.includes(intent.state),
+    ) ?? [];
   return (
-    <section className="section card form-card">
-      <div className="form-section">
-        <h2>Databases and storage</h2>
-        <p>One of each type per application. Databases are backed up nightly by the platform.</p>
-        <p className="field-help">
-          {configurationGuidance.postgres} PostgreSQL and S3 use TLS with the platform CA, delivered
-          through PGSSLROOTCERT and AWS_CA_BUNDLE by default. Keep those outputs bound when using
-          TLS verification.
-        </p>
-        <p>Binding changes apply on your next deploy. Save configuration after editing bindings.</p>
-        <div className="button-group">
-          {(['postgres', 'mongo', 's3'] as const).map((type) => (
-            <button
-              className="button"
-              key={type}
-              type="button"
-              disabled={
-                storage.isPending ||
-                !!storage.error ||
-                action.isPending ||
-                busy ||
-                storage.data?.items.some((item) => item.type === type) ||
-                storage.data?.intents.some(
-                  (intent) =>
-                    intent.kind === 'storage_create' &&
-                    intent.type === type &&
-                    !['succeeded', 'failed'].includes(intent.state),
-                )
-              }
-              onClick={() => action.mutate({ type })}
-            >
-              Add {labels[type]}
-            </button>
-          ))}
+    <Section title="Databases and storage" flush>
+      {notice && <div className="app-block">{notice}</div>}
+      {(!!action.error || !!applyError) && (
+        <div className="app-block">
+          <ErrorAlert error={action.error ?? applyError} />
         </div>
-        <ErrorNotice error={storage.error ?? action.error ?? error} />
-        {storage.isPending && <Loading />}
-        {storage.data?.items.map((resource) => {
-          const current =
-            bindings.find((item) => item.resourceId === resource.resourceId)?.outputs ?? {};
-          return (
-            <div className="form-section" key={resource.resourceId}>
-              <h3>
-                {resource.label} <span className="chip">{resource.status}</span>
-              </h3>
-              <p className="field-help">
-                Created {time(resource.createdAt)} · Verified {time(resource.verifiedAt)}
-              </p>
-              <fieldset>
-                <legend>{labels[resource.type]} bindings</legend>
-                {Object.entries(resource.defaultBindings).map(([name, defaultTarget]) => (
-                  <div className="field" key={name}>
-                    <label htmlFor={`${resource.resourceId}-${name}`}>
-                      {name} → environment name
-                    </label>
-                    {name in current ? (
-                      <div className="button-group">
-                        <input
-                          id={`${resource.resourceId}-${name}`}
-                          value={current[name]}
-                          onChange={(event) =>
-                            output(resource.resourceId, name, event.target.value)
-                          }
-                        />
-                        <button
-                          type="button"
-                          className="button button-small"
-                          onClick={() => output(resource.resourceId, name, null)}
-                        >
-                          Remove {name} binding
-                        </button>
-                      </div>
+      )}
+      {storage.isPending ? (
+        <LoadingRows rows={3} />
+      ) : storage.error ? (
+        <div className="app-block">
+          <QueryError query={storage} what="your databases and storage" />
+        </div>
+      ) : (
+        <List label="Databases and storage">
+          {types.map((type) => {
+            const resource = storage.data?.items.find((item) => item.type === type);
+            if (!resource)
+              return (
+                <ListItem key={type} title={labels[type]} meta={<span>Not added</span>}>
+                  <Cluster className="app-resource-actions">
+                    <Button
+                      size="sm"
+                      icon="plus"
+                      disabled={
+                        storage.isPending ||
+                        !!storage.error ||
+                        action.isPending ||
+                        busy ||
+                        storage.data?.intents.some(
+                          (intent) =>
+                            intent.kind === 'storage_create' &&
+                            intent.type === type &&
+                            !['succeeded', 'failed'].includes(intent.state),
+                        )
+                      }
+                      onClick={() => request({ type })}
+                    >
+                      Add {labels[type]}
+                    </Button>
+                  </Cluster>
+                </ListItem>
+              );
+            const outputs =
+              bindings.find((item) => item.resourceId === resource.resourceId)?.outputs ?? {};
+            const count = Object.keys(outputs).length;
+            const ready = resource.status === 'ready';
+            const disabled = action.isPending || !!busy || !ready;
+            return (
+              <ListItem
+                key={type}
+                title={
+                  <span className="app-inline">
+                    {labels[type]}
+                    <Status
+                      state={resource.status === 'provisioning' ? 'creating' : resource.status}
+                      label={
+                        resource.status === 'provisioning'
+                          ? 'Setting up'
+                          : ready
+                            ? undefined
+                            : sentence(resource.status)
+                      }
+                    />
+                  </span>
+                }
+                meta={
+                  <>
+                    {!!count && <span>{`${count} ${count === 1 ? 'variable' : 'variables'}`}</span>}
+                    {resource.verifiedAt ? (
+                      <span>
+                        Verified <RelativeTime value={resource.verifiedAt} />
+                      </span>
                     ) : (
-                      <button
-                        type="button"
-                        className="button button-small"
-                        onClick={() => output(resource.resourceId, name, defaultTarget)}
-                      >
-                        Bind {name} to {defaultTarget}
-                      </button>
+                      <span>
+                        Added <RelativeTime value={resource.createdAt} />
+                      </span>
                     )}
-                  </div>
-                ))}
-                {!Object.keys(current).length && (
-                  <button
-                    type="button"
-                    className="button"
-                    onClick={() =>
-                      onChange([
-                        ...bindings.filter((item) => item.resourceId !== resource.resourceId),
-                        {
-                          resourceId: resource.resourceId,
-                          outputs: { ...resource.defaultBindings },
-                        },
-                      ])
-                    }
-                  >
-                    Use default bindings
-                  </button>
+                  </>
+                }
+              >
+                {!count && (
+                  <InlineStatus tone="warning">
+                    Your app can’t connect to {labels[type]} yet. Give it the connection variables.
+                  </InlineStatus>
                 )}
-              </fieldset>
-              <div className="button-group">
-                <button
-                  type="button"
-                  className="button"
-                  disabled={action.isPending || !!busy || resource.status !== 'ready'}
-                  onClick={() => action.mutate({ resource: resource.resourceId, action: 'verify' })}
-                >
-                  Verify {labels[resource.type]}
-                </button>
-                <button
-                  type="button"
-                  className="button"
-                  disabled={action.isPending || !!busy || resource.status !== 'ready'}
-                  onClick={() => {
-                    setError(null);
-                    if (
-                      window.confirm(
-                        'Rotate credentials? Redeploy your app to pick up the new credentials.',
-                      )
-                    )
-                      action.mutate({ resource: resource.resourceId, action: 'rotate' });
-                  }}
-                >
-                  Rotate {labels[resource.type]} credentials
-                </button>
-              </div>
-              <p>Rotation requires a redeploy to pick up the new credentials.</p>
-              <p>
-                Ask an administrator to delete this database
-                {resource.type === 's3' ? ' or bucket' : ''}.
-              </p>
-            </div>
-          );
-        })}
-        {invalid && <p role="alert">{invalid}</p>}
-        <ul className="operation-list">
-          {storage.data?.intents.slice(0, 6).map((intent) => (
-            <Operation key={intent.intentId} intent={intent} />
-          ))}
-        </ul>
-      </div>
-    </section>
+                <Cluster className="app-resource-actions">
+                  {count ? (
+                    <Button
+                      size="sm"
+                      aria-label={`Edit ${labels[type]} variables`}
+                      onClick={() => setEditing(resource.resourceId)}
+                    >
+                      Edit variables
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        size="sm"
+                        loading={applying === resource.resourceId}
+                        aria-label={`Use default ${labels[type]} variables`}
+                        onClick={() => applyDefaults(resource)}
+                      >
+                        Use default variables
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Choose ${labels[type]} variable names`}
+                        onClick={() => setEditing(resource.resourceId)}
+                      >
+                        Choose names
+                      </Button>
+                    </>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={`Verify ${labels[type]}`}
+                    disabled={disabled}
+                    onClick={() => request({ resource: resource.resourceId, action: 'verify' })}
+                  >
+                    Verify
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={`Rotate ${labels[type]} credentials`}
+                    disabled={disabled}
+                    onClick={() => request({ resource: resource.resourceId, action: 'rotate' })}
+                  >
+                    Rotate credentials
+                  </Button>
+                </Cluster>
+              </ListItem>
+            );
+          })}
+        </List>
+      )}
+      {invalid && (
+        <div className="app-block">
+          <ErrorAlert error={invalid} focus={false} />
+        </div>
+      )}
+      {!!recent.length && (
+        <div className="app-divider">
+          <OperationList label="Storage changes">
+            {recent.slice(0, 6).map((intent) => (
+              <Operation key={intent.intentId} intent={intent} showApp={false} />
+            ))}
+          </OperationList>
+        </div>
+      )}
+      <p className="app-block app-block--subtle ui-hint">
+        Databases are backed up every night. {configurationGuidance.postgres} Only an admin can
+        delete a database or storage.
+      </p>
+      {editingResource && (
+        <BindingsDialog
+          key={editingResource.resourceId}
+          resource={editingResource}
+          outputs={
+            bindings.find((item) => item.resourceId === editingResource.resourceId)?.outputs ?? {}
+          }
+          validate={(outputs) =>
+            validateBindings(
+              [
+                ...bindings.filter((item) => item.resourceId !== editingResource.resourceId),
+                { resourceId: editingResource.resourceId, outputs },
+              ],
+              names,
+            )
+          }
+          onApply={async (outputs) => {
+            await apply(editingResource.resourceId, outputs);
+            setEditing(null);
+          }}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      <Dialog
+        open={confirming !== null}
+        onClose={() => setConfirming(null)}
+        size="sm"
+        title={
+          confirming?.action === 'rotate'
+            ? `Rotate ${confirmingLabel} credentials?`
+            : confirming?.action === 'verify'
+              ? `Verify ${confirmingLabel}?`
+              : `Add ${confirmingLabel}?`
+        }
+        footer={
+          <>
+            <Button onClick={() => setConfirming(null)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={identityProvider && !identityConfirmed}
+              onClick={() => {
+                if (confirming)
+                  action.mutate({ ...confirming, identity: identityProvider && identityConfirmed });
+                setConfirming(null);
+              }}
+            >
+              {confirming?.action === 'rotate'
+                ? 'Rotate credentials'
+                : confirming?.action === 'verify'
+                  ? 'Verify'
+                  : `Add ${confirmingLabel}`}
+            </Button>
+          </>
+        }
+      >
+        {confirming?.action === 'rotate' && (
+          <p>
+            {confirmingLabel} gets new credentials. Your app picks them up on its next deploy, so
+            deploy again after rotating.
+          </p>
+        )}
+        {identityProvider && (
+          <Checkbox
+            label="Signing in to this portal depends on this app. Continue anyway."
+            checked={identityConfirmed}
+            onChange={(event) => setIdentityConfirmed(event.target.checked)}
+          />
+        )}
+      </Dialog>
+    </Section>
   );
 }
