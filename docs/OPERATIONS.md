@@ -1313,38 +1313,74 @@ and S3 TLS use the platform CA through the default `PGSSLROOTCERT` and
 `AWS_CA_BUNDLE` bindings. Renaming these targets requires configuring the client
 to use the renamed CA path variable.
 
-Storage deletion is admin-only. Until an administrator UI exists, an operator
-with approved privileged-socket access handles owner requests. Check the app ID
-and resource UUID against the request, list its storage to obtain the exact
-resource `name`, and take/verify a managed-data backup first. Remove bindings
-from the app's configuration and deploy that configuration so the active
-deployment no longer references the resource. Then use the existing controller
-privileged socket from the approved recovery console on admin (see [application curl setup](APPLICATION_DEPLOYMENTS.md#preconditions-and-access)):
+### Manage applications as a local admin
 
-```sh
-APP_ID=OWNER_APPLICATION_UUID
-RESOURCE_ID=REVIEWED_STORAGE_UUID
-RESOURCE_NAME=EXACT_RESOURCE_NAME
-NAMESPACE=your-installed-namespace
-ADMIN_SOCKET="/run/${NAMESPACE}-controller/privileged.sock"
-jq -n --arg confirmation "$RESOURCE_NAME" '{confirmation: $confirmation}' > storage-delete.json
-curl --unix-socket "$ADMIN_SOCKET" -sS --fail-with-body \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuidgen | tr '[:upper:]' '[:lower:]')" \
-  -X DELETE --data-binary @storage-delete.json "http://localhost/v1/storage/$RESOURCE_ID"
-```
+Sign in with a local admin account and open **Manage applications**. The list
+contains every broker-known application; the controller project socket cannot
+list operator-created applications. To adopt one, obtain its UUID independently,
+leave the owner account ID empty to use your own account (or select an active
+account UUID from Accounts), and choose **Adopt application**. Adoption verifies
+the controller app and imports its current accepted repository, ref, revision
+and validated configuration, including storage bindings. It does not restart,
+resize or recreate the app. Apps without a complete accepted snapshot must first
+be deployed through the operator. Already owned apps are refused; repeating the
+same request key returns the original import.
 
-Poll the returned `statusUrl` on the privileged socket to terminal success and
-verify the resource is absent from `GET /v1/applications/{APP_ID}/storage`.
-Nonempty S3 buckets require an explicit administrator-reviewed `purge: true`;
-without it the controller refuses removal. The project socket and portal have
-no storage DELETE route. No credential values belong in deletion tickets.
+An admin can create an app for an active owner, edit any app's configuration,
+set/replace/delete its environment names, provision/verify/rotate storage,
+deploy exact commits, change its running state and reassign its owner. Creation
+uses the target owner's app quota. Adoption and reassignment preserve existing
+apps even when the recipient exceeds that quota; future creation remains
+quota-limited. Reassignment requires a fresh five-minute password/TOTP step-up,
+the expected current owner and no unfinished app operation. Ordinary My
+applications routes remain scoped to the signed-in owner even for admins.
+Environment values remain write-only for admins. No value is stored in broker
+SQLite, returned in reads, placed in an audit record or cached by the React
+mutation. Unknown environment writes require resubmitting the original value
+and request key; their durable fingerprints retain the keyed HMAC from the
+owner resource implementation. Other unknown operations reuse their original
+controller key.
 
-Install this feature as matching broker/web releases with protocol 2 and schema
-2; the activation compatibility versions are unchanged. No admin image rebuild
-or controller upgrade is needed. Unknown storage outcomes replay the journal's
-original controller key. Unknown environment outcomes require the owner to
-resubmit the same edit with its original key and value; the portal does not
-retain a value for automatic replay.
+The deploy dialog accepts maintenance consent and an optional reviewed sizing
+plan. Without a plan the controller preserves the app's accepted worker flavor,
+CPU and memory, including an adopted class app's larger allocation. Plan
+creation remains an operator capability: obtain a current plan through the
+operator and paste its JSON. An app with a retained primary IPv4 requires
+maintenance; expect brief cutover downtime after the candidate finishes building.
+The broker identifies the Commons app by matching its public URL host with
+`ownerPortal.commonsOrigin`. Deploy, stop/start and storage changes display
+**Portal sign-in depends on this app** and require separate confirmation. Local
+admin sign-in remains available while Commons is stopped; never rely on a
+Commons session for recovery. This confirmation does not prohibit management
+of the class app.
+
+Storage deletion is available only in the admin workspace. Remove the resource's
+bindings from saved configuration and deploy that configuration before deletion.
+Review the app ID and resource type, verify a current managed-data backup, then
+reauthenticate with password and a fresh TOTP code. Type the exact application
+slug followed by a space and `postgres`, `mongo` or `s3`, for example
+`student-app postgres`, in **Delete storage**. This permanently destroys the
+resource and data, including a nonempty S3 bucket. The UI warns that nightly
+platform backups exist; operator-assisted recovery can lose newer data. Poll the
+intent to terminal success and verify the resource disappears. The broker also
+refuses deletion while saved bindings reference the resource, serializes app
+operations across owner/admin actors, and records a safe admin audit entry.
+Owners and staff have no storage-delete or cross-owner write route.
+
+The project controller socket now permits `DELETE /v1/storage/{id}` with its
+existing machine-name confirmation and optional S3 `purge` consent. The broker
+maps typed confirmation to that contract and supplies `purge:true`. Direct
+recovery-console clients must use the project socket for storage deletion.
+Cascade application deletion and every `/v1/admin/*` endpoint remain restricted
+to the privileged socket; the broker receives neither of those capabilities.
+No credential values belong in deletion tickets.
+
+Install matched broker/web releases using protocol 3 and schema 3 together with
+the approved replacement admin image. The image carries protocol-3 activation,
+the unprivileged bootstrap entry point and the controller route changes above.
+There are no Nix isolation changes or new directories. The unreleased schema-3
+prototypes are not migration inputs: only published schema 1/2 databases migrate
+to the final schema 3, and checksum mismatches fail closed.
 
 The validated `ownerPortal` inventory section carries `enabled`, `commonsOrigin`,
 optional identity egress CIDRs/class label and quota/rate/session limits. The

@@ -409,6 +409,12 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/Accounts.tsx` — admin account list/actions, invitations, quotas and audit view.
 - `frontend/owner-portal/src/pages/Enrollment.tsx` — fragment-token setup/reset, local password and TOTP enrollment.
 
+- `openstack_platform/management/broker/admin_apps.py` — request-local admin app authority, adoption, ownership, maintenance consent and stepped-up storage deletion.
+- `tests/test_management_admin_apps.py` — admin app authorization, adoption, resource secrecy, shared busy scopes and replay contracts.
+- `frontend/owner-portal/src/adminAppsApi.ts` — typed admin app requests using the common resource API.
+- `frontend/owner-portal/src/pages/AdminApps.tsx` — managed catalog, adoption, shared configuration/resources, deploy review and sensitive actions.
+- `frontend/owner-portal/src/AdminApps.test.tsx` — role navigation, maintenance confirmations and admin write-only cache tests.
+
 ## Keeping this guide current
 
 When adding, deleting, or renaming a tracked file, update this guide in the same

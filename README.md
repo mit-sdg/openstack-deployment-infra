@@ -16,7 +16,9 @@ endpoint must be configured and pass live acceptance before availability is
 claimed. Commons remains the external class-account sign-in method. Local portal
 accounts store salted scrypt password hashes in the broker DB; admins are local
 accounts and must enroll TOTP. Owners manage their own apps, staff also read the
-course catalog, and admins manage accounts and quotas. Roles are assigned in the
+course catalog, and local admins manage accounts, quotas and any broker app.
+Admins can adopt existing controller apps by UUID, including Commons; class-app
+changes require an extra confirmation and retained-IP deploys require maintenance. Roles are assigned in the
 broker DB and captured at sign-in; security changes revoke all of an account's
 sessions. Owner sessions default to 8 h/30 min idle, staff 1 h/10 min, admin
 1 h/15 min. Commons password changes/archiving do not revoke issued sessions.

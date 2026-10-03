@@ -96,8 +96,8 @@ The admin role exposes two mode-`0660` Unix sockets:
 
 | Socket | Peer | Capability |
 | --- | --- | --- |
-| `/run/<namespace>-controller/project.sock` | `management-broker` UID/GID | Health and non-destructive product routes |
-| `/run/<namespace>-controller/privileged.sock` | Operator UID/GID | Administrator reads, cascade application deletion, and storage deletion |
+| `/run/<namespace>-controller/project.sock` | `management-broker` UID/GID | Health, product routes and confirmed storage deletion |
+| `/run/<namespace>-controller/privileged.sock` | Operator UID/GID | Administrator reads and cascade application deletion |
 
 The server authenticates every connection with Linux `SO_PEERCRED` before
 parsing HTTP. HTTP input cannot select or upgrade a socket capability. The
@@ -354,19 +354,19 @@ be absent; missing accepted evidence or transport failures remain unknown.
 
 Application, deployment, operation, and managed-resource IDs are canonical UUIDs.
 OpenStack flavor IDs are opaque strings (for example `4200`), not UUIDs.
-The project socket exposes these non-destructive
-routes; the delete routes shown below are installed only on the privileged
-socket.
+The project socket exposes these product routes. Cascade application deletion
+is installed only on the privileged socket; storage deletion is a project
+capability guarded by the portal admin role.
 
 | Method and route | Purpose |
 | --- | --- |
 | `GET /v1/health` | Project-socket readiness |
 | `POST /v1/applications` | Create a controller application from a slug |
-| `GET /v1/applications/{id}` | Read one application |
+| `GET /v1/applications/{id}` | Read one application, including a `requiresMaintenance` boolean for retained primary IPv4; no reservation/provider identifiers |
 | `POST /v1/applications/{id}/enable` | Enable an accepted application |
 | `POST /v1/applications/{id}/disable` | Disable an application |
 | `POST /v1/applications/{id}/delete` | Privileged cascade deletion with slug confirmation |
-| `POST /v1/applications/{id}/deployments` | Start a typed exact-commit deployment |
+| `POST /v1/applications/{id}/deployments` | Typed exact-commit deployment; optional boolean `maintenance` and reviewed object `plan`; accepted sizing is preserved when plan is absent; worker reuse remains operator-only |
 | `GET /v1/applications/{id}/deployments` | List bounded deployment history |
 | `GET /v1/deployments/{id}` | Read one deployment attempt |
 | `GET /v1/deployments/{id}/build-log` | Read bounded retained build output |
@@ -381,7 +381,7 @@ socket.
 | `PATCH /v1/storage/{id}/label` | Change its display label |
 | `POST /v1/storage/{id}/verify` | Verify provider identity and health |
 | `POST /v1/storage/{id}/rotate` | Rotate scoped credentials |
-| `DELETE /v1/storage/{id}` | Privileged deletion with machine-name confirmation |
+| `DELETE /v1/storage/{id}` | Project deletion with machine-name confirmation and optional boolean S3 purge; the broker exposes this only to stepped-up local admins |
 | `GET /v1/operations/{id}` | Poll an accepted mutation |
 
 The privileged socket also exposes administrator views and operator-only sizing operations.
@@ -628,6 +628,54 @@ the accepted deployment.
 Owner resources originally shipped as protocol-2 release additions. The current
 account model uses a matched protocol-3/schema-3 pair and approved admin image
 replacement; the resource projections and keyed fingerprints remain unchanged.
+
+### Local-admin application authority
+
+The closed `/api/v1/admin-apps` namespace maps to broker `/v1/admin-apps` routes,
+never controller `/v1/admin/*`. Owner and staff roles are denied before looking
+up an app or contacting the controller. Admin GETs require Origin checks and a
+session CSRF token; writes require the exact portal Origin and CSRF. The role,
+generation and enabled state are rechecked in the mutation transaction and after
+controller reads. Request-local context variables prevent concurrent threads
+from sharing elevated authority. The normal `/v1/apps` namespace still enforces
+ownership for every role. Reassignment is an optimistic owner transition and
+requires step-up; all app mutations share a busy scope across actors.
+
+`GET /v1/admin-apps` pages the broker DB, default 25 and maximum 50, without
+controller fanout. Detail reads use project GET by known UUID. Administrative
+reads use bounded per-account/address buckets (one read/s, burst ten per account;
+two/s, burst twenty per address; two active per account, eight total; browser admin reads queue at two requests) and the
+existing 30-day/2M-row read audit. Mutation intent bodies carry a server-only `_portalAdmin` marker, stripped before
+controller dispatch and omitted from public intent serializers,
+with safe entries in the admin action audit; credentials, values and controller
+refs are excluded. A downgraded account cannot resume an admin intent. Accepted
+operations continue to reconcile; unaccepted admin intents stop for review if
+the actor loses admin authority.
+
+Configuration/environment/storage handlers are the owner implementations from
+`broker/api.py` and `broker/resources.py` reused behind admin authorization. The
+environment fingerprint remains a domain-separated keyed HMAC. Intents store
+names and the server-only admin marker, and controller metadata projections discard values and provider
+credentials. Cross-owner build/runtime logs are not exposed through the admin app
+namespace because they can contain values. Concurrent-operation and environment
+rate limits charge the acting account, with an app-wide busy scope. App creation
+uses a selected owner's quota; adoption and
+reassignment retain existing apps even if their owner is over quota. Storage
+deletion requires a five-minute password/TOTP proof, typed `slug type`, no saved
+binding to that resource, app-scope admission, and a safe audit record.
+
+Adoption POST takes `applicationId` and optional `ownerId` plus an idempotency
+key. Project GET verifies the app, then GET of its active deployment supplies
+strict repository/ref/configuration evidence. The broker checks IDs, revision,
+configuration digest and active-ID stability, validates bindings and imports the
+accepted revision. Missing/legacy snapshots require operator deployment first.
+Controller GET exposes only a retained-IP maintenance boolean; provider IP and
+reservation records stay privileged. Admin deploy accepts maintenance/plan,
+while owner/staff deploy bodies reject those fields. Plan fields, types, known
+current sizing and fingerprint are checked before the broker journals a request;
+the controller validates against fresh cloud evidence at admission. Omitting a plan preserves
+accepted sizing. Class-app consent matches public URL host with Commons origin
+and is enforced server-side for deploy, state and storage changes.
 
 ### Local identities, roles and admin enrollment
 

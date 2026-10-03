@@ -951,6 +951,9 @@ replacement. The bootstrap command is an unprivileged Python entry point in the
 image/controller package and in the broker release. Its mode-0640 hash-only file
 uses the existing operator-owned broker-group setgid config directory; no new
 sandbox access, directory, password inventory or broker TCP permission is needed.
+The same replacement carries project deployment maintenance/plan support, the
+retained-IP warning boolean and project storage deletion. Cascade app deletion
+and controller administrator routes remain privileged. Nix unit isolation is unchanged.
 
 Take a verified backup, quiesce release/backup admissions, install a matched pair,
 verify readiness and take a fresh backup before reopening. Old-schema binaries

@@ -29,14 +29,16 @@ by the portal. No Commons code is maintained in this repository.
 The locally tested owner slice creates individual apps within staff quotas,
 configures a public GitHub repository and Node/Bun settings, deploys an exact
 commit and shows status, health, history and build logs. It grants no SSH,
-OpenStack, Nomad, registry or storage-administrator credentials. Environment
-variables, storage lifecycle, enable/disable and runtime logs are later work.
+OpenStack, Nomad, registry or storage-administrator credentials. Owner environment variables are write-only, and managed storage supports provisioning,
+verification, rotation and saved bindings. Local admins can change running state
+and delete storage with step-up and typed confirmation; runtime logs remain outside the portal.
 Private repositories, Dockerfiles, arbitrary build commands, custom domains,
 teams, scaling, shell access and credential export remain outside this slice.
 
 The same portal supports local accounts and DB-assigned owner/staff/admin roles.
 Staff inherit own-app rights and read the broker-known course catalog. Admins
-must be local accounts with TOTP and manage accounts/quotas through the UI.
+must be local accounts with TOTP and manage accounts, quotas and any app through
+the UI, including adoption of an operator app by UUID.
 Commons identities can never be admin. The operator issues a 24-hour single-use
 fragment setup URL without putting any password in inventory or environment.
 See [bootstrap and recovery](OPERATIONS.md#bootstrap-or-recover-a-local-admin).
