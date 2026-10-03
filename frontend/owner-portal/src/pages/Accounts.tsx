@@ -193,6 +193,7 @@ export function AccountsPage() {
               columns={columns}
               rows={items}
               rowKey={(account) => account.userId}
+              onRowClick={setManaging}
             />
           </Section>
         ) : (
@@ -428,95 +429,100 @@ function ManageDialog({
           <CopyField label="Setup link" value={link.url} hint={linkHint} />
         </Alert>
       )}
-      <Group title="Role">
-        <form
-          className="ui-cluster ui-gap-2 admin-inline-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            action('role', role);
-          }}
-        >
-          <Field label={`Role for ${account.username}`} id={`role-${account.userId}`}>
-            <Select
-              value={role}
-              onChange={(event) => setRole(event.target.value as Account['role'])}
+      <Stack gap={6}>
+        <Group title="Role">
+          <form
+            className="ui-cluster ui-gap-2 admin-inline-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              action('role', role);
+            }}
+          >
+            <Field label={`Role for ${account.username}`} id={`role-${account.userId}`}>
+              <Select
+                value={role}
+                onChange={(event) => setRole(event.target.value as Account['role'])}
+              >
+                <option value="owner">Owner</option>
+                <option value="staff">Staff</option>
+                {local && <option value="admin">Admin</option>}
+              </Select>
+            </Field>
+            <Button type="submit" disabled={role === account.role} loading={busy === 'role'}>
+              Change role
+            </Button>
+          </form>
+        </Group>
+        <Group title="Limits">
+          <form
+            className="ui-stack ui-gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              quota.mutate();
+            }}
+          >
+            <Grid columns={2}>
+              <Field label="Apps" id={`apps-${account.userId}`}>
+                <Input
+                  type="number"
+                  min={0}
+                  max={1000}
+                  required
+                  value={apps}
+                  onChange={(event) => setApps(Number(event.target.value))}
+                />
+              </Field>
+              <Field label="Changes at a time" id={`concurrent-${account.userId}`}>
+                <Input
+                  type="number"
+                  min={0}
+                  max={16}
+                  required
+                  value={concurrent}
+                  onChange={(event) => setConcurrent(Number(event.target.value))}
+                />
+              </Field>
+            </Grid>
+            <div>
+              <Button type="submit" loading={quota.isPending}>
+                Save limits
+              </Button>
+            </div>
+          </form>
+        </Group>
+        <Group title="Access">
+          <div className="ui-cluster ui-gap-2">
+            {local && account.status === 'pending' && (
+              <Button loading={busy === 'invite'} onClick={() => action('invite')}>
+                New invitation link
+              </Button>
+            )}
+            {local && (
+              <>
+                <Button
+                  loading={busy === 'password-reset'}
+                  onClick={() => action('password-reset')}
+                >
+                  Reset password
+                </Button>
+                <Button loading={busy === 'totp-reset'} onClick={() => action('totp-reset')}>
+                  Reset authenticator
+                </Button>
+              </>
+            )}
+            <Button loading={busy === 'revoke-sessions'} onClick={() => action('revoke-sessions')}>
+              Sign out everywhere
+            </Button>
+            <Button
+              variant={account.enabled ? 'danger' : 'secondary'}
+              loading={busy === 'enabled'}
+              onClick={() => action('enabled', !account.enabled)}
             >
-              <option value="owner">Owner</option>
-              <option value="staff">Staff</option>
-              {local && <option value="admin">Admin</option>}
-            </Select>
-          </Field>
-          <Button type="submit" disabled={role === account.role} loading={busy === 'role'}>
-            Change role
-          </Button>
-        </form>
-      </Group>
-      <Group title="Limits">
-        <form
-          className="ui-stack ui-gap-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            quota.mutate();
-          }}
-        >
-          <Grid columns={2}>
-            <Field label="Apps" id={`apps-${account.userId}`}>
-              <Input
-                type="number"
-                min={0}
-                max={1000}
-                required
-                value={apps}
-                onChange={(event) => setApps(Number(event.target.value))}
-              />
-            </Field>
-            <Field label="Changes at a time" id={`concurrent-${account.userId}`}>
-              <Input
-                type="number"
-                min={0}
-                max={16}
-                required
-                value={concurrent}
-                onChange={(event) => setConcurrent(Number(event.target.value))}
-              />
-            </Field>
-          </Grid>
-          <div>
-            <Button type="submit" loading={quota.isPending}>
-              Save limits
+              {account.enabled ? 'Disable account' : 'Enable account'}
             </Button>
           </div>
-        </form>
-      </Group>
-      <Group title="Access">
-        <div className="ui-cluster ui-gap-2">
-          {local && account.status === 'pending' && (
-            <Button loading={busy === 'invite'} onClick={() => action('invite')}>
-              New invitation link
-            </Button>
-          )}
-          {local && (
-            <>
-              <Button loading={busy === 'password-reset'} onClick={() => action('password-reset')}>
-                Reset password
-              </Button>
-              <Button loading={busy === 'totp-reset'} onClick={() => action('totp-reset')}>
-                Reset authenticator
-              </Button>
-            </>
-          )}
-          <Button loading={busy === 'revoke-sessions'} onClick={() => action('revoke-sessions')}>
-            Sign out everywhere
-          </Button>
-          <Button
-            variant={account.enabled ? 'danger' : 'secondary'}
-            loading={busy === 'enabled'}
-            onClick={() => action('enabled', !account.enabled)}
-          >
-            {account.enabled ? 'Disable account' : 'Enable account'}
-          </Button>
-        </div>
-      </Group>
+        </Group>
+      </Stack>
     </Dialog>
   );
 }

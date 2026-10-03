@@ -62,6 +62,7 @@ export function AdminAppsPages() {
 }
 
 function ManagedCatalog() {
+  const [, navigate] = useLocation();
   const [cursor, setCursor] = useState<string | undefined>();
   const [dialog, setDialog] = useState<'create' | 'adopt' | null>(null);
   const catalog = useQuery({
@@ -140,6 +141,7 @@ function ManagedCatalog() {
               columns={columns}
               rows={catalog.data.items}
               rowKey={(app) => app.applicationId}
+              onRowClick={(app) => navigate(`/admin/apps/${app.applicationId}`)}
             />
           </Section>
         ) : (

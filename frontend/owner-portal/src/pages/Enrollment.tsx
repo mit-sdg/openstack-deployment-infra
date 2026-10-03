@@ -17,6 +17,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'wouter';
 import { clearCredentials } from '../api';
 import { authOptionsQuery } from '../authOptions';
+import { Mark } from '../components/Mark';
 import './admin/admin.css';
 
 async function post(path: string, body: unknown) {
@@ -155,7 +156,7 @@ export function Enrollment() {
   );
   if (!token && !stage)
     return (
-      <AuthLayout title="Set up your account" footer={footer}>
+      <AuthLayout title="Set up your account" footer={footer} mark={<Mark />}>
         <Alert tone="danger" title="This link is incomplete">
           Open the full setup link you were sent, or ask an admin for a new one.
         </Alert>
@@ -163,13 +164,13 @@ export function Enrollment() {
     );
   if (options.isPending || info.isPending)
     return (
-      <AuthLayout title="Set up your account" footer={footer}>
+      <AuthLayout title="Set up your account" footer={footer} mark={<Mark />}>
         <LoadingRows rows={3} />
       </AuthLayout>
     );
   if (options.error || info.error)
     return (
-      <AuthLayout title="Set up your account" footer={footer}>
+      <AuthLayout title="Set up your account" footer={footer} mark={<Mark />}>
         <ErrorAlert error={options.error ?? info.error} />
       </AuthLayout>
     );
@@ -181,6 +182,7 @@ export function Enrollment() {
       <AuthLayout
         title={stage.totpSecret ? 'Add your authenticator' : 'Finish setup'}
         footer={footer}
+        mark={<Mark />}
       >
         <ErrorAlert error={finish.error} />
         <form className="ui-stack ui-gap-4" onSubmit={submit} aria-busy={finish.isPending}>
@@ -222,7 +224,7 @@ export function Enrollment() {
       </AuthLayout>
     );
   return (
-    <AuthLayout title={titles[purpose] ?? titles.invite} footer={footer}>
+    <AuthLayout title={titles[purpose] ?? titles.invite} footer={footer} mark={<Mark />}>
       <ErrorAlert error={begin.error} />
       <form className="ui-stack ui-gap-4" onSubmit={submit} aria-busy={begin.isPending}>
         {info.data.username ? (
