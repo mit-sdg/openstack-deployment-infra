@@ -92,7 +92,9 @@ for (const [mode, viewport, colorScheme] of [
         applicationId: string;
       }[];
       // Re-runs reuse the Alice fixture app but do not reuse any authentication state.
-      let appId = known[0]?.applicationId;
+      let appId =
+        known.find((app) => app.slug === 'student-project')?.applicationId ??
+        known[0]?.applicationId;
       if (!appId) {
         await page.getByRole('link', { name: 'Create application', exact: true }).click();
         await page.getByLabel('Application name').fill('student-project');
@@ -164,7 +166,12 @@ for (const [mode, viewport, colorScheme] of [
         fullPage: true,
       });
       await page.goto('/apps');
-      await expect(page.getByText('Healthy', { exact: true })).toBeVisible();
+      await expect(
+        page
+          .locator('tr')
+          .filter({ has: page.locator(`a.app-link[href="/apps/${appId}"]`) })
+          .getByText('Healthy', { exact: true }),
+      ).toBeVisible();
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         window.scrollTo(0, 0);

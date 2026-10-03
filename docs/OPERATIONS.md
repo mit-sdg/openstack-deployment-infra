@@ -1319,7 +1319,7 @@ and resource UUID against the request, list its storage to obtain the exact
 resource `name`, and take/verify a managed-data backup first. Remove bindings
 from the app's configuration and deploy that configuration so the active
 deployment no longer references the resource. Then use the existing controller
-privileged socket (see [application curl setup](APPLICATION_DEPLOYMENTS.md#preconditions-and-access)):
+privileged socket from the approved recovery console on admin (see [application curl setup](APPLICATION_DEPLOYMENTS.md#preconditions-and-access)):
 
 ```sh
 APP_ID=OWNER_APPLICATION_UUID

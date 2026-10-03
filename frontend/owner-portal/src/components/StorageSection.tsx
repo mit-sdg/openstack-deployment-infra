@@ -25,6 +25,9 @@ export function StorageSection({
     queryKey: ['environment', id],
     queryFn: () => api.environment(id),
   });
+  const busy =
+    storage.data?.intents.some((intent) => !['succeeded', 'failed'].includes(intent.state)) ||
+    environment.data?.intents?.some((intent) => !['succeeded', 'failed'].includes(intent.state));
   const [createdType, setCreatedType] = useState<StorageResource['type'] | null>(null);
   useEffect(() => {
     const created = storage.data?.items.find((resource) => resource.type === createdType);
@@ -95,6 +98,7 @@ export function StorageSection({
                 storage.isPending ||
                 !!storage.error ||
                 action.isPending ||
+                busy ||
                 storage.data?.items.some((item) => item.type === type) ||
                 storage.data?.intents.some(
                   (intent) =>
@@ -179,7 +183,7 @@ export function StorageSection({
                 <button
                   type="button"
                   className="button"
-                  disabled={action.isPending || resource.status !== 'ready'}
+                  disabled={action.isPending || !!busy || resource.status !== 'ready'}
                   onClick={() => action.mutate({ resource: resource.resourceId, action: 'verify' })}
                 >
                   Verify {labels[resource.type]}
@@ -187,7 +191,7 @@ export function StorageSection({
                 <button
                   type="button"
                   className="button"
-                  disabled={action.isPending || resource.status !== 'ready'}
+                  disabled={action.isPending || !!busy || resource.status !== 'ready'}
                   onClick={() => {
                     setError(null);
                     if (

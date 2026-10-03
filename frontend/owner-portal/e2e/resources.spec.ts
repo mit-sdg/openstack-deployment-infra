@@ -42,6 +42,13 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
       ),
     )
     .toContain('API_TOKEN');
+  await expect
+    .poll(
+      async () =>
+        (await (await page.request.get(`/api/v1/apps/${id}/environment`)).json()).data.intents
+          .length,
+    )
+    .toBe(0);
   const add = page.getByRole('button', { name: 'Add PostgreSQL', exact: true });
   if (await add.isEnabled()) await add.click();
   const bindings = page.getByRole('group', { name: 'PostgreSQL bindings' });
@@ -80,9 +87,21 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     warning = dialog.message();
     await dialog.accept();
   });
+  const rotated = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname.endsWith('/rotate'),
+  );
   await page.getByRole('button', { name: 'Rotate PostgreSQL credentials' }).click();
+  const rotation = (await (await rotated).json()).data.intentId;
+  await expect
+    .poll(
+      async () => (await (await page.request.get(`/api/v1/intents/${rotation}`)).json()).data.state,
+      { timeout: 15000 },
+    )
+    .toBe('succeeded');
   expect(warning).toContain('Redeploy');
-  await expect(page.getByText('Rotate storage credentials', { exact: true })).toBeVisible();
+  await expect(page.getByText('Rotate storage credentials', { exact: true }).first()).toBeVisible();
   await expect
     .poll(
       async () =>
