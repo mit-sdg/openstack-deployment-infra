@@ -299,33 +299,24 @@ let
                 # outage assertion can observe it without racing automatic retries.
                 Restart = lib.mkForce "no";
               };
-              "${namespace}-controller".serviceConfig.ExecStart = lib.mkForce (
-                lib.concatStringsSep " " [
-                  delayedController
-                  "--platform-config /etc/${namespace}/platform.json"
-                  "--state-directory ${state}/controller/state"
-                  "--policy ${state}/controller/policy.json"
-                  "--socket /run/${namespace}-controller/project.sock"
-                  "--socket-group controller-api"
-                  "--project-peer ${toString constants.accounts.managementBroker.uid}:${toString constants.accounts.managementBroker.gid}"
-                  "--privileged-socket /run/${namespace}-controller/privileged.sock"
-                  "--privileged-socket-group platform-admin"
-                  "--privileged-peer ${toString constants.accounts.operator.uid}:${toString constants.accounts.operator.gid}"
-                  "--max-connections-per-peer 8"
-                ]
-              );
               "vm-restore-active-portal" = {
                 # The admin VM uses disposable tmpfs state. Restore a saved
                 # active pair before path units evaluate it on the second boot.
                 wantedBy = [ "multi-user.target" ];
                 after = [ "${systemdEscapePath state}.mount" ];
-                before = [ "${namespace}-management-broker.path" "${namespace}-management-web.path" ];
+                before = [
+                  "${namespace}-management-broker.path"
+                  "${namespace}-management-web.path"
+                ];
                 unitConfig = {
                   DefaultDependencies = false;
                   RequiresMountsFor = [ state ];
                   ConditionPathExists = "/var/lib/portal-boot-fixture";
                 };
-                serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+                serviceConfig = {
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                };
                 script = ''
                   cp -a /var/lib/portal-boot-fixture/. ${state}/
                   rm -f ${state}/management-broker/identity-sandbox-ok
@@ -417,6 +408,21 @@ let
               "${namespace}-controller" = {
                 after = [ "${namespace}-controller-test-fixture.service" ];
                 requires = [ "${namespace}-controller-test-fixture.service" ];
+                serviceConfig.ExecStart = lib.mkForce (
+                  lib.concatStringsSep " " [
+                    delayedController
+                    "--platform-config /etc/${namespace}/platform.json"
+                    "--state-directory ${state}/controller/state"
+                    "--policy ${state}/controller/policy.json"
+                    "--socket /run/${namespace}-controller/project.sock"
+                    "--socket-group controller-api"
+                    "--project-peer ${toString constants.accounts.managementBroker.uid}:${toString constants.accounts.managementBroker.gid}"
+                    "--privileged-socket /run/${namespace}-controller/privileged.sock"
+                    "--privileged-socket-group platform-admin"
+                    "--privileged-peer ${toString constants.accounts.operator.uid}:${toString constants.accounts.operator.gid}"
+                    "--max-connections-per-peer 8"
+                  ]
+                );
               };
             })
             (lib.mkIf (role == "ingress") {
