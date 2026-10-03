@@ -53,7 +53,9 @@ export function App() {
           <ErrorNotice error={session.error} />
         ) : (
           <Switch>
-            <Route path="/admin/apps/:rest*">
+            {/* Wildcards: in wouter 3 ":rest*" matches one segment only, which
+                sent nested staff and admin pages to "Page not found". */}
+            <Route path="/admin/apps/*">
               {role === 'admin' ? <AdminAppsPages /> : <NoAccess />}
             </Route>
             <Route path="/admin/apps">{role === 'admin' ? <AdminAppsPages /> : <NoAccess />}</Route>
@@ -63,7 +65,7 @@ export function App() {
             <Route path="/admin/audit">
               {role === 'admin' ? <AdminAuditPage /> : <NoAccess />}
             </Route>
-            <Route path="/staff/:rest*">
+            <Route path="/staff/*">
               {elevated ? <StaffPages userId={session.data!.user.id} /> : <NoAccess />}
             </Route>
             <Route path="/apps/new">
