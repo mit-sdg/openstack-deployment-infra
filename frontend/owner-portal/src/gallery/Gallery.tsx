@@ -10,6 +10,11 @@ import {
   Checkbox,
   CodeBlock,
   CopyField,
+  CopyId,
+  Icon,
+  RelativeTime,
+  StatusText,
+  buttonClass,
   DataTable,
   Dialog,
   EmptyState,
@@ -68,6 +73,76 @@ const rows: Row[] = [
     when: '—',
   },
 ];
+type Owner = { id: string; name: string; username: string; enabled: boolean; seen: string };
+const ago = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();
+const owners: Owner[] = [
+  {
+    id: '22222222-2222-4222-8222-222222222222',
+    name: 'Alice Student',
+    username: 'alice',
+    enabled: true,
+    seen: ago(21),
+  },
+  {
+    id: '33333333-3333-4333-8333-333333333333',
+    name: 'Bob Student',
+    username: 'bob',
+    enabled: false,
+    seen: ago(60 * 26),
+  },
+];
+// Compact phone rows: name and status on one line, username and time under it.
+const ownerColumns: Column<Owner>[] = [
+  {
+    key: 'name',
+    header: 'Name',
+    mobile: 'title',
+    cell: (owner) => (
+      <a href="#data" className="ui-link ui-link--plain">
+        {owner.name}
+      </a>
+    ),
+  },
+  {
+    key: 'status',
+    header: 'Status',
+    mobile: 'trailing',
+    cell: (owner) => <Status state={owner.enabled ? 'active' : 'disabled'} />,
+  },
+  {
+    key: 'username',
+    header: 'Username',
+    mobile: 'secondary',
+    cell: (owner) => <span className="ui-text-muted">{owner.username}</span>,
+  },
+  {
+    key: 'id',
+    header: 'ID',
+    mobile: 'hidden',
+    cell: (owner) => <CopyId value={owner.id} label="owner ID" />,
+  },
+  {
+    key: 'seen',
+    header: 'Last sign-in',
+    mobile: 'meta',
+    cell: (owner) => (
+      <span className="ui-text-muted">
+        <RelativeTime value={owner.seen} />
+      </span>
+    ),
+  },
+];
+const deploymentStates = [
+  'queued',
+  'building',
+  'deploying',
+  'live',
+  'succeeded',
+  'failed',
+  'recovery_required',
+  'rolled_back',
+];
+
 const columns: Column<Row>[] = [
   {
     key: 'name',
@@ -470,6 +545,42 @@ export function Gallery() {
               />
             </Section>
           </Grid>
+          <Section
+            title="Owners"
+            flush
+            actions={
+              <a href="#data" className={buttonClass({ variant: 'ghost', size: 'sm' })}>
+                View all
+                <Icon name="chevron-right" />
+              </a>
+            }
+          >
+            <DataTable
+              label="Owners"
+              columns={ownerColumns}
+              rows={owners}
+              rowKey={(owner) => owner.id}
+              onRowClick={() => {}}
+            />
+          </Section>
+          <Section title="Statuses and values">
+            <Example label="Expected">
+              <StatusText>Healthy</StatusText>
+              <Status state="active" />
+              <Status state="live" />
+            </Example>
+            <Example label="Deployments">
+              {deploymentStates.map((state) => (
+                <Status key={state} state={state} />
+              ))}
+            </Example>
+            <Example label="IDs and times">
+              <CopyId value="22222222-2222-4222-8222-222222222222" label="owner ID" />
+              <CopyId value="a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0" label="commit" length={9} />
+              <RelativeTime value={ago(21)} />
+              <RelativeTime value={null} empty="Never" />
+            </Example>
+          </Section>
           <Section title="Code and log">
             <CodeBlock label="Example">{'npm ci\nnpm run build'}</CodeBlock>
             <CodeBlock label="Build log" variant="log">

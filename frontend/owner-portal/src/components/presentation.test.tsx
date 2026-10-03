@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { BoundaryText } from './BoundaryText';
 import { Operation } from './Operation';
 import { ThemeButton } from './ThemeButton';
+import { Status } from './Status';
 import { humanPhase, relativeTime } from '../utils/presentation';
 
 describe('reviewed owner presentation', () => {
@@ -54,5 +55,22 @@ describe('reviewed owner presentation', () => {
       '5 minutes ago',
     );
     expect(humanPhase('image_pushed')).toBe('Image pushed');
+  });
+  it('badges only states that need attention', () => {
+    const { container } = render(
+      <>
+        <Status state="healthy" />
+        <Status state="live" />
+        <Status state="succeeded" quiet="hidden" />
+        <Status state="building" />
+        <Status state="recovery_required" />
+        <Status state="rolled_back" />
+      </>,
+    );
+    const badges = [...container.querySelectorAll('.ui-badge')].map((badge) => badge.textContent);
+    expect(badges).toEqual(['Building', 'Needs attention', 'Rolled back']);
+    expect(screen.getByText('Healthy')).toHaveClass('ui-status-text');
+    expect(screen.getByText('Live')).toHaveClass('ui-status-text');
+    expect(screen.getByText('Succeeded')).toHaveClass('ui-sr-only');
   });
 });

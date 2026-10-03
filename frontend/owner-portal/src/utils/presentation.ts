@@ -20,14 +20,8 @@ export function healthy(app: AppRecord) {
         : 'unknown';
 }
 
-export function relativeTime(value: string, now = Date.now()) {
-  const seconds = Math.round((new Date(value).getTime() - now) / 1000);
-  if (Math.abs(seconds) < 60) return 'just now';
-  const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-  if (Math.abs(seconds) < 3600) return formatter.format(Math.trunc(seconds / 60), 'minute');
-  if (Math.abs(seconds) < 86400) return formatter.format(Math.trunc(seconds / 3600), 'hour');
-  return formatter.format(Math.trunc(seconds / 86400), 'day');
-}
+// Shared with the design system so every page formats times the same way.
+export { relativeTime } from '@openstack-platform/ui';
 export function humanPhase(phase: string) {
   const labels: Record<string, string> = {
     finished: 'Completed',

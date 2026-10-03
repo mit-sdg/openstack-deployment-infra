@@ -8,6 +8,7 @@ import {
   Page,
   PageHeader,
   PageSkeleton,
+  RelativeTime,
   Section,
   buttonClass,
   Icon,
@@ -19,7 +20,7 @@ import { api, type AppRecord } from '../api';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useOwnerIntents } from '../hooks/useIntentPolling';
-import { healthy, relativeTime, short } from '../utils/presentation';
+import { healthy, short } from '../utils/presentation';
 
 const columns: Column<AppRecord>[] = [
   {
@@ -63,18 +64,11 @@ const columns: Column<AppRecord>[] = [
   {
     key: 'deployed',
     header: 'Last deployed',
-    cell: (app) =>
-      app.acceptedDeployment ? (
-        <time
-          className="ui-text-muted"
-          dateTime={app.acceptedDeployment.acceptedAt}
-          title={new Date(app.acceptedDeployment.acceptedAt).toLocaleString()}
-        >
-          {relativeTime(app.acceptedDeployment.acceptedAt)}
-        </time>
-      ) : (
-        <span className="ui-text-subtle">—</span>
-      ),
+    cell: (app) => (
+      <span className="ui-text-muted">
+        <RelativeTime value={app.acceptedDeployment?.acceptedAt} />
+      </span>
+    ),
   },
 ];
 
