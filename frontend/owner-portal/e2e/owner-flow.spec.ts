@@ -8,7 +8,7 @@ async function signIn(page: Page, owner: 'Alice' | 'Bob') {
   await page.getByLabel('Username', { exact: true }).fill(owner.toLowerCase());
   await page.getByLabel('Password', { exact: true }).fill(`local-${owner.toLowerCase()}-password`);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page).toHaveURL(/127\.0\.0\.1:(?:9543|9553|9563)\/apps$/);
+  await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/apps$/);
   await expect(page.getByRole('heading', { name: 'My applications' })).toBeVisible();
 }
 

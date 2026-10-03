@@ -5,7 +5,11 @@ import path from 'node:path';
 const repository = path.resolve('../..');
 const mode = process.env.OWNER_PORTAL_SMOKE_MODE ?? 'https';
 if (!['https', 'http', 'vite'].includes(mode)) throw new Error('Invalid fixture mode');
-const config = path.join(repository, `.tmp/e-accounts-${mode}/config.json`);
+const port = process.env.OWNER_PORTAL_SMOKE_PORT;
+const config = path.join(
+  repository,
+  `.tmp/e-accounts-${mode}${port ? `-${port}` : ''}/config.json`,
+);
 const password = 'private fixture phrase 927184';
 function bootstrapUrl() {
   return execFileSync(
