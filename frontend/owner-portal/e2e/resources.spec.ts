@@ -80,7 +80,8 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
   const postgresStatus = storageSection
     .getByRole('listitem')
     .filter({ hasText: 'PostgreSQL' })
-    .locator('.ui-badge')
+    // Attention states are badges; settled states ("Ready") are quiet status text.
+    .locator('.ui-badge, .ui-status-text')
     .first();
   if (!existingPostgres) {
     await expect(add).toBeEnabled({ timeout: operationTimeout });

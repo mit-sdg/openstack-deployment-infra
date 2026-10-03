@@ -64,8 +64,8 @@ async function createApp(page: Page, slug: string) {
   const known = (await (await page.request.get('/api/v1/apps')).json()).data.items;
   if (known.length) return known[0].applicationId as string;
   await page.getByRole('link', { name: 'Create app', exact: true }).click();
-  await page.getByLabel('Application name').fill(slug);
-  await page.getByRole('button', { name: 'Create application', exact: true }).click();
+  await page.getByLabel('App name').fill(slug);
+  await page.getByRole('button', { name: 'Create app', exact: true }).click();
   await expect(page).toHaveURL(/\/configuration$/);
   return new URL(page.url()).pathname.split('/')[2];
 }
@@ -192,16 +192,11 @@ for (const [layout, viewport, colorScheme] of [
       await expect(page.getByLabel('Repository URL')).toHaveValue(
         'https://github.com/example/class-app',
       );
-      const imported = await page.request.get(`/api/v1/admin-apps/${operatorId}/configuration`, {
-        headers: { 'X-CSRF-Token': liveSession.csrfToken },
-      });
-      const initialRevision = (await imported.json()).data.revision;
-      await page.getByLabel('Health path').fill('/ready');
-      await page.getByRole('button', { name: 'Save configuration', exact: true }).click();
-      await expect(page.getByLabel('Health path')).toHaveValue('/ready');
-      await expect(
-        page.getByText(`Revision ${initialRevision + 1}`, { exact: true }),
-      ).toBeVisible();
+      await page.getByLabel('Health check path').fill('/ready');
+      await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+      // Shown only after the save succeeds.
+      await expect(page.getByText('Settings saved.', { exact: false })).toBeVisible();
+      await expect(page.getByLabel('Health check path')).toHaveValue('/ready');
       await page.getByRole('button', { name: 'Deploy', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: /^Deploy / });
       await expect(dialog).toContainText('this app keeps a fixed IP address');
