@@ -1,25 +1,33 @@
-import { StatusBadge } from '@openstack-platform/ui';
-export function Status({ state, label: customLabel }: { state: string; label?: string }) {
-  const label: Record<string, string> = {
-    succeeded: 'Succeeded',
-    failed: 'Failed',
-    blocked: 'Recovery required',
-    accepted: 'In progress',
-    prepared: 'Queued',
-    unknown: 'Reconnecting',
-    ready: 'Ready',
-    creating: 'Creating',
-    running: 'Running',
-    healthy: 'Healthy',
-    unhealthy: 'Unhealthy',
-    stopped: 'Not running',
-  };
-  const tone = ['succeeded', 'healthy'].includes(state)
-    ? 'good'
-    : ['failed', 'blocked', 'unhealthy'].includes(state)
-      ? 'critical'
-      : ['accepted', 'running', 'prepared', 'creating'].includes(state)
-        ? 'info'
-        : 'neutral';
-  return <StatusBadge label={customLabel ?? label[state] ?? state} tone={tone} />;
+import { Badge, type Tone } from '@openstack-platform/ui';
+
+// One vocabulary for app, deployment and activity states.
+const labels: Record<string, string> = {
+  succeeded: 'Succeeded',
+  failed: 'Failed',
+  blocked: 'Needs attention',
+  accepted: 'In progress',
+  prepared: 'Queued',
+  unknown: 'Unknown',
+  ready: 'Ready',
+  creating: 'Creating',
+  running: 'Running',
+  healthy: 'Healthy',
+  unhealthy: 'Unhealthy',
+  stopped: 'Stopped',
+};
+const tones: Record<string, Tone> = {
+  succeeded: 'success',
+  healthy: 'success',
+  ready: 'success',
+  failed: 'danger',
+  blocked: 'danger',
+  unhealthy: 'danger',
+  accepted: 'info',
+  running: 'info',
+  prepared: 'info',
+  creating: 'info',
+};
+
+export function Status({ state, label }: { state: string; label?: string }) {
+  return <Badge tone={tones[state] ?? 'neutral'}>{label ?? labels[state] ?? state}</Badge>;
 }

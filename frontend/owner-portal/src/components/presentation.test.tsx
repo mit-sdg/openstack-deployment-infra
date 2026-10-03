@@ -10,29 +10,32 @@ describe('reviewed owner presentation', () => {
   it('renders activity with app, commit, relative time and humanized progress', () => {
     render(
       <QueryClientProvider client={new QueryClient()}>
-        <Operation
-          intent={{
-            intentId: 'intent',
-            appId: 'app',
-            appSlug: 'student-project',
-            commit: 'a'.repeat(40),
-            createdAt: new Date().toISOString(),
-            kind: 'deploy',
-            state: 'succeeded',
-            operationId: null,
-            operation: { status: 'succeeded', phase: 'finished', cleanupState: 'confirmed' },
-            safeError: null,
-            controllerErrorCode: 'INVALID_REQUEST',
-          }}
-        />
+        <ul>
+          <Operation
+            intent={{
+              intentId: 'intent',
+              appId: 'app',
+              appSlug: 'student-project',
+              commit: 'a'.repeat(40),
+              createdAt: new Date().toISOString(),
+              kind: 'deploy',
+              state: 'accepted',
+              operationId: null,
+              operation: { status: 'running', phase: 'build_rejected', cleanupState: 'pending' },
+              safeError: null,
+              controllerErrorCode: 'INVALID_REQUEST',
+            }}
+          />
+        </ul>
       </QueryClientProvider>,
     );
     expect(screen.getByText('student-project')).toBeVisible();
     expect(screen.getByText('aaaaaaaaa')).toBeVisible();
     expect(screen.getByText('just now')).toBeVisible();
-    expect(screen.getByText('Completed')).toBeVisible();
+    expect(screen.getByText('Build failed')).toBeVisible();
+    expect(screen.getByText('In progress')).toBeVisible();
     expect(screen.getByText('INVALID_REQUEST')).toBeVisible();
-    expect(screen.queryByText('finished')).toBeNull();
+    expect(screen.queryByText(/build_rejected/)).toBeNull();
   });
   it('places explicit wrap opportunities at URL separators', () => {
     const { container } = render(

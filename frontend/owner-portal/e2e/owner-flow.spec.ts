@@ -9,7 +9,7 @@ async function signIn(page: Page, owner: 'Alice' | 'Bob') {
   await page.getByLabel('Password', { exact: true }).fill(`local-${owner.toLowerCase()}-password`);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/apps$/);
-  await expect(page.getByRole('heading', { name: 'My applications' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible();
 }
 
 for (const [mode, viewport, colorScheme] of [
@@ -96,7 +96,7 @@ for (const [mode, viewport, colorScheme] of [
         known.find((app) => app.slug === 'student-project')?.applicationId ??
         known[0]?.applicationId;
       if (!appId) {
-        await page.getByRole('link', { name: 'Create application', exact: true }).click();
+        await page.getByRole('link', { name: 'Create app', exact: true }).click();
         await page.getByLabel('Application name').fill('student-project');
         await page.getByRole('button', { name: 'Create application', exact: true }).click();
         await expect(page).toHaveURL(/\/apps\/[a-f0-9-]+\/configuration$/);
@@ -170,8 +170,8 @@ for (const [mode, viewport, colorScheme] of [
       await page.goto('/apps');
       await expect(
         page
-          .locator('tr')
-          .filter({ has: page.locator(`a.app-link[href="/apps/${appId}"]`) })
+          .getByRole('row')
+          .filter({ has: page.locator(`a[href="/apps/${appId}"]`) })
           .getByText('Healthy', { exact: true }),
       ).toBeVisible();
       await page.evaluate(() => {
@@ -227,9 +227,11 @@ for (const [mode, viewport, colorScheme] of [
       const bobAppsBody = await bobApps.json();
       expect(bobApps.status(), bobAppsBody.error?.code).toBe(200);
       expect(bobAppsBody.data.items).toHaveLength(0);
+      await bobPage.getByRole('button', { name: /^Account: / }).click();
       await bobPage.getByRole('button', { name: 'Sign out' }).click();
       await expect(bobPage.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
       await bob.close();
+      await page.getByRole('button', { name: /^Account: / }).click();
       await page.getByRole('button', { name: 'Sign out' }).click();
       await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
       expect((await page.request.get('/api/v1/apps')).status()).toBe(401);

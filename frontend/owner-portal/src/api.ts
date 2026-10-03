@@ -101,6 +101,8 @@ export type Session = {
   expiresAt: string;
   role: 'owner' | 'staff' | 'admin';
   stepUpExpiresAt: string | null;
+  /** Brand shown in the shell; absent from older brokers. */
+  platformName?: string;
 };
 export type Page<T> = { items: T[]; nextCursor: string | null; truncated: boolean };
 export type BuildLog = {
@@ -261,6 +263,7 @@ export const api = {
         if (!['owner', 'staff', 'admin'].includes(String(data.role)))
           throw new Error('Invalid session role');
         csrf = data.csrfToken as string;
+        if (typeof data.platformName !== 'string' || !data.platformName) delete data.platformName;
         return data as Session;
       },
       undefined,

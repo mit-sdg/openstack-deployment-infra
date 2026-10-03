@@ -97,8 +97,8 @@ describe('owner configuration', () => {
         <Status state="blocked" />
       </>,
     );
-    expect(screen.getByText('Reconnecting')).toBeVisible();
-    expect(screen.getByText('Recovery required')).toBeVisible();
+    expect(screen.getByText('Unknown')).toBeVisible();
+    expect(screen.getByText('Needs attention')).toBeVisible();
   });
 });
 describe('typed API', () => {

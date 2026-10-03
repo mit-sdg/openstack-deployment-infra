@@ -63,7 +63,7 @@ async function commons(page: Page, name: string) {
 async function createApp(page: Page, slug: string) {
   const known = (await (await page.request.get('/api/v1/apps')).json()).data.items;
   if (known.length) return known[0].applicationId as string;
-  await page.getByRole('link', { name: 'Create application', exact: true }).click();
+  await page.getByRole('link', { name: 'Create app', exact: true }).click();
   await page.getByLabel('Application name').fill(slug);
   await page.getByRole('button', { name: 'Create application', exact: true }).click();
   await expect(page).toHaveURL(/\/configuration$/);
@@ -120,18 +120,18 @@ for (const [layout, viewport, colorScheme] of [
       const foreign = await createApp(ownerPage, 'student-project');
       expect((await staffPage.request.get(`/api/v1/apps/${foreign}`)).status()).toBe(404);
       expect((await ownerPage.request.get(`/api/v1/apps/${own}`)).status()).toBe(404);
-      await staffPage.getByRole('link', { name: 'Staff catalog', exact: true }).click();
+      await staffPage.getByRole('link', { name: 'Staff', exact: true }).click();
       await expect(staffPage.getByRole('heading', { name: 'Owners', exact: true })).toBeVisible();
       await expect(
         staffPage.getByRole('link', { name: 'Alice Student', exact: true }),
       ).toBeVisible();
       await staffPage.goto('/admin/accounts');
       await expect(
-        staffPage.getByRole('heading', { name: 'Admin access unavailable' }),
+        staffPage.getByRole('heading', { name: "You don't have access to this page" }),
       ).toBeVisible();
       await ownerPage.goto('/admin/audit');
       await expect(
-        ownerPage.getByRole('heading', { name: 'Admin access unavailable' }),
+        ownerPage.getByRole('heading', { name: "You don't have access to this page" }),
       ).toBeVisible();
       expect((await staffPage.request.get('/api/v1/accounts')).status()).toBe(403);
       expect((await ownerPage.request.get('/api/v1/account-audit')).status()).toBe(403);
@@ -145,10 +145,10 @@ for (const [layout, viewport, colorScheme] of [
       } finally {
         await replay.close();
       }
-      await page.getByRole('link', { name: 'Audit', exact: true }).click();
+      await page.getByRole('link', { name: 'Audit log', exact: true }).click();
       await expect(page.getByRole('heading', { name: 'Admin audit', exact: true })).toBeVisible();
       await expect(page.getByText('account_invited', { exact: true }).first()).toBeVisible();
-      await page.getByRole('link', { name: 'Manage applications', exact: true }).click();
+      await page.getByRole('link', { name: 'All apps', exact: true }).click();
       await expect(
         page.getByRole('heading', { name: 'Manage applications', exact: true }),
       ).toBeVisible();
@@ -204,7 +204,7 @@ for (const [layout, viewport, colorScheme] of [
       await expect(dialog).toContainText('Portal sign-in depends on this app');
       await staffPage.goto('/admin/apps');
       await expect(
-        staffPage.getByRole('heading', { name: 'Admin access unavailable' }),
+        staffPage.getByRole('heading', { name: "You don't have access to this page" }),
       ).toBeVisible();
       expect((await staffPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
       expect((await ownerPage.request.get('/api/v1/admin-apps')).status()).toBe(403);

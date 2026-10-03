@@ -32,11 +32,11 @@ export function humanPhase(phase: string) {
   const labels: Record<string, string> = {
     finished: 'Completed',
     accepted: 'Health checks passed',
-    building: 'Building exact snapshot',
-    build_rejected: 'Build rejected; cleanup confirmed',
-    queued: 'Waiting for a build slot',
-    executing: 'Starting deployment',
-    startup_interrupted: 'Recovery required',
+    building: 'Building',
+    build_rejected: 'Build failed',
+    queued: 'Waiting to build',
+    executing: 'Starting',
+    startup_interrupted: 'Interrupted',
   };
   return (
     labels[phase] ?? phase.replaceAll('_', ' ').replace(/^./, (letter) => letter.toUpperCase())

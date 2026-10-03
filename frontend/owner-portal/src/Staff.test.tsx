@@ -3,7 +3,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { api, clearCredentials, type Session } from './api';
-import { SignIn } from './pages/SignIn';
 import { staffApi } from './staffApi';
 
 const userId = '11111111-1111-4111-8111-111111111111';
@@ -65,7 +64,9 @@ describe('staff navigation and sign-in', () => {
     vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
     const owners = vi.spyOn(staffApi, 'owners');
     show('/staff/owners');
-    expect(await screen.findByRole('heading', { name: 'Staff access unavailable' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: "You don't have access to this page" }),
+    ).toBeVisible();
     expect(owners).not.toHaveBeenCalled();
     expect(screen.queryByRole('navigation', { name: 'Staff pages' })).not.toBeInTheDocument();
   });
@@ -86,9 +87,7 @@ describe('staff navigation and sign-in', () => {
     const client = show('/staff/owners');
     await screen.findByText(owner.displayName);
     act(() => window.dispatchEvent(new Event('portal-session-ended')));
-    expect(
-      await screen.findByRole('heading', { name: 'Sign in with your class account' }),
-    ).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeVisible();
     expect(screen.queryByText(owner.displayName)).not.toBeInTheDocument();
     expect(client.getQueryCache().findAll({ queryKey: ['staff'] })).toHaveLength(0);
   });
@@ -219,7 +218,9 @@ describe('admin-only account pages', () => {
     const listing = vi.spyOn(adminApi, 'accounts');
     vi.spyOn(api, 'session').mockResolvedValue(session('staff'));
     show('/admin/accounts');
-    expect(await screen.findByRole('heading', { name: 'Admin access unavailable' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: "You don't have access to this page" }),
+    ).toBeVisible();
     expect(listing).not.toHaveBeenCalled();
   });
   it('offers two identity methods without a role selector or staff sign-in upgrade', async () => {
@@ -227,15 +228,23 @@ describe('admin-only account pages', () => {
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => ({ data: { csrfToken: 'anon', providerLabel: 'class account' } }),
+        json: async () => ({
+          data: {
+            csrfToken: 'anon',
+            providerLabel: 'example university account',
+            platformName: 'Example Platform',
+          },
+        }),
       }),
     );
-    show('/sign-in', <SignIn />);
-    expect(screen.getByRole('radio', { name: 'Commons' })).toBeChecked();
-    expect(screen.getByRole('radio', { name: 'Local portal account' })).toBeVisible();
+    show('/sign-in');
+    // The method and brand come from server configuration, never hardcoded names.
+    expect(await screen.findByRole('radio', { name: 'Example university account' })).toBeChecked();
+    expect(await screen.findByText('Example Platform')).toBeVisible();
+    expect(screen.getByRole('radio', { name: 'Local account' })).toBeVisible();
     expect(screen.queryByRole('link', { name: 'Staff sign-in' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('radio', { name: 'Local portal account' }));
-    expect(screen.getByLabelText('Authentication code (when enabled)')).toBeVisible();
+    fireEvent.click(screen.getByRole('radio', { name: 'Local account' }));
+    expect(screen.getByLabelText('Authentication code')).toBeVisible();
     expect(screen.queryByRole('combobox', { name: /role/i })).not.toBeInTheDocument();
   });
 });

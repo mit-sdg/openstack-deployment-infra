@@ -44,10 +44,10 @@ describe('admin application management', () => {
       const list = vi.spyOn(adminAppsApi, 'list');
       show(<App />);
       expect(
-        await screen.findByRole('heading', { name: 'Admin access unavailable' }),
+        await screen.findByRole('heading', { name: "You don't have access to this page" }),
       ).toBeVisible();
       expect(list).not.toHaveBeenCalled();
-      expect(screen.queryByRole('link', { name: 'Manage applications' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument();
     },
   );
   it('queues parallel metadata panels within the two-active-read bound', async () => {
