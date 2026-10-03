@@ -10,7 +10,6 @@ import {
   Hint,
   Input,
   KeyValueList,
-  List,
   LoadingRows,
   Section,
   buttonClass,
@@ -21,7 +20,7 @@ import { Link } from 'wouter';
 import { api, type Settings } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { BoundaryText } from '../components/BoundaryText';
-import { Operation } from '../components/Operation';
+import { Operation, OperationList } from '../components/Operation';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 
 function Names({ names }: { names: string[] }) {
@@ -123,9 +122,9 @@ export function DeployPage({ id }: { id: string }) {
         <>
           {intent.data && (
             <Section title="Deployment progress" flush>
-              <List label="Deployment progress">
+              <OperationList label="Deployment progress">
                 <Operation intent={intent.data} showApp={false} />
-              </List>
+              </OperationList>
             </Section>
           )}
           {intent.data?.state === 'succeeded' && (

@@ -17,7 +17,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, resourceApi, validateEnvName, type StorageBinding } from '../api';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 import { relativeTime } from '../utils/presentation';
-import { Operation } from './Operation';
+import { Operation, OperationList } from './Operation';
 import '../pages/app-pages.css';
 
 export function EnvironmentSection({
@@ -213,9 +213,9 @@ export function EnvironmentSection({
       </form>
       {intent.data && (
         <div className="app-divider">
-          <List label="Variable changes">
+          <OperationList label="Variable changes">
             <Operation intent={intent.data} showApp={false} />
-          </List>
+          </OperationList>
         </div>
       )}
       <Dialog

@@ -25,9 +25,9 @@
 .app-block {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-4);
+  gap: var(--ui-card-gap);
   margin: 0;
-  padding: var(--ui-space-4) var(--ui-space-5);
+  padding: var(--ui-card-padding);
   border-top: 1px solid var(--ui-border);
 }
 .app-block:first-child {
@@ -47,8 +47,8 @@
 .app-settings-group {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 3fr);
-  gap: var(--ui-space-4) var(--ui-space-8);
-  padding: var(--ui-space-6) var(--ui-space-5);
+  gap: var(--ui-field-gap) var(--ui-space-8);
+  padding: var(--ui-group-gap) var(--ui-card-padding);
   border-top: 1px solid var(--ui-border);
 }
 .app-settings-group:first-child {
@@ -60,7 +60,8 @@
 .app-settings-group__title {
   font-size: var(--ui-text-md);
   font-weight: var(--ui-weight-semibold);
-  line-height: var(--ui-control-height);
+  line-height: var(--ui-leading-md);
+  letter-spacing: var(--ui-tracking-md);
 }
 
 /* Environment variable form: name, value and the button on one row. */
@@ -109,15 +110,8 @@
 }
 
 @media (max-width: 640px) {
-  .app-block {
-    padding: var(--ui-space-4);
-  }
   .app-settings-group {
     grid-template-columns: minmax(0, 1fr);
-    padding: var(--ui-space-5) var(--ui-space-4);
-  }
-  .app-settings-group__title {
-    line-height: inherit;
   }
   .app-env-form {
     grid-template-columns: minmax(0, 1fr);

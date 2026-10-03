@@ -12,7 +12,7 @@ import {
 } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link } from 'wouter';
+import { Link, useLocation } from 'wouter';
 import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { Status } from '../components/Status';
@@ -86,6 +86,7 @@ export function HistoryPage({ id }: { id: string }) {
     refetchInterval: 5000,
   });
   const app = useQuery({ queryKey: ['app', id], queryFn: () => api.app(id) });
+  const [, navigate] = useLocation();
   return (
     <AppFrame id={id} active="Deployments">
       {history.isPending ? (
@@ -102,6 +103,9 @@ export function HistoryPage({ id }: { id: string }) {
               columns={columns(id, app.data?.activeDeploymentId)}
               rows={history.data.items}
               rowKey={(deployment) => deployment.deploymentId}
+              onRowClick={(deployment) =>
+                navigate(`/apps/${id}/deployments/${deployment.deploymentId}`)
+              }
             />
           </Section>
           {(cursor || history.data.nextCursor) && (

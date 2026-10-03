@@ -23,7 +23,7 @@ import {
   type StorageResource,
 } from '../api';
 import { relativeTime } from '../utils/presentation';
-import { Operation } from './Operation';
+import { Operation, OperationList } from './Operation';
 import { Status } from './Status';
 import '../pages/app-pages.css';
 
@@ -381,11 +381,11 @@ export function StorageSection({
       )}
       {!!recent.length && (
         <div className="app-divider">
-          <List label="Storage changes">
+          <OperationList label="Storage changes">
             {recent.slice(0, 6).map((intent) => (
               <Operation key={intent.intentId} intent={intent} showApp={false} />
             ))}
-          </List>
+          </OperationList>
         </div>
       )}
       <p className="app-block app-block--subtle ui-hint">
