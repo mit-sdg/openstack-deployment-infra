@@ -75,6 +75,33 @@ let
         peer_policy=PeerPolicy(frozenset({(${toString constants.accounts.managementWeb.uid}, ${toString constants.accounts.managementWeb.gid})})), socket_gid=${toString constants.accounts.managementWeb.gid})
     server.serve_forever()
   '';
+  managementWebProbe = pkgs.writeText "management-web-probe.py" ''
+    import sys
+    sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
+    from openstack_platform.controller.http import ControllerServer, Response, Router
+    router = Router()
+    router.add("GET", "/v1/health", lambda request: Response(200, {"status": "ok"}))
+    server = ControllerServer("${state}/management-web/web-health.sock", router)
+    server.serve_forever()
+  '';
+  delayedController = pkgs.writeShellScript "vm-delayed-controller" ''
+    # Type=simple is active before its controller sockets exist. Hold this gap
+    # open so the broker's real sandbox must wait on API readiness, not After.
+    ${pkgs.coreutils}/bin/sleep 3
+    exec ${packages.controllerPackage}/bin/openstack-platform-controller "$@"
+  '';
+  managementActivationRequest = pkgs.writeText "vm-management-activation-request.py" ''
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
+    from openstack_platform.management.installation import request_activation
+    # The fixture has test entrypoints rather than signed release archives,
+    # but activation requests use the installer's real atomic operator writer.
+    request_activation(
+        Path("${state}/management-broker-releases"), sys.argv[1], sys.argv[2],
+        ${toString constants.accounts.managementBroker.gid},
+    )
+  '';
   managementFakeCommons = pkgs.writeText "vm-fake-commons.py" ''
     import json, socket, ssl, sys
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -284,6 +311,50 @@ let
                 # outage assertion can observe it without racing automatic retries.
                 Restart = lib.mkForce "no";
               };
+              "vm-restore-active-portal" = {
+                # The admin VM uses disposable tmpfs state. Restore a saved
+                # active pair before path units evaluate it on the second boot.
+                wantedBy = [ "multi-user.target" ];
+                after = [ "${systemdEscapePath state}.mount" ];
+                before = [
+                  "${namespace}-management-broker.path"
+                  "${namespace}-management-web.path"
+                ];
+                unitConfig = {
+                  DefaultDependencies = false;
+                  RequiresMountsFor = [ state ];
+                  ConditionPathExists = "/var/lib/portal-boot-fixture";
+                };
+                serviceConfig = {
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                };
+                script = ''
+                  umask 0077
+                  # Copy the children so the private fixture root's 0700 mode
+                  # cannot replace the production state mount's 0755 mode.
+                  cp -a --preserve=all /var/lib/portal-boot-fixture/management-* ${state}/
+                  test "$(stat -c %U:%G:%a ${state})" = root:root:755
+                  test ! -e ${state}/management-broker-releases/activate-request
+                  for component in broker web; do
+                    release=${state}/management-$component-releases/releases/vm-test
+                    for directory in ${state}/management-$component-releases \
+                      ${state}/management-$component-releases/releases \
+                      "$release" "$release/bin" "$release/config" "$release/evidence"; do
+                      test "$(stat -c %U:%G:%a "$directory")" = agentops:management-$component:2750
+                    done
+                    for input in "$release/.complete" "$release/evidence/management-artifacts.json" \
+                      "$release/config/platform.json" "$release/config/management.json"; do
+                      test "$(stat -c %U:%G:%a:%h "$input")" = agentops:management-$component:440:1
+                    done
+                    test "$(stat -c %U:%G:%a:%h "$release/bin/management-$component")" = agentops:management-$component:550:1
+                  done
+                  test "$(stat -c %U:%G:%a:%h ${state}/management-broker-releases/.install.lock)" = agentops:management-broker:600:1
+                  test "$(stat -c %U:%G:%a:%h ${state}/management-broker-releases/releases/vm-test/config/identity.json)" = agentops:management-broker:440:1
+                  test "$(stat -c %U:%G:%a:%h ${state}/management-broker-releases/releases/vm-test/bin/management-identity)" = agentops:management-broker:550:1
+                  rm -f ${state}/management-broker/identity-sandbox-ok
+                '';
+              };
               "vm-fake-commons" = {
                 wantedBy = [ "multi-user.target" ];
                 serviceConfig.ExecStart = "${packages.platformPython}/bin/python ${managementFakeCommons}";
@@ -370,6 +441,21 @@ let
               "${namespace}-controller" = {
                 after = [ "${namespace}-controller-test-fixture.service" ];
                 requires = [ "${namespace}-controller-test-fixture.service" ];
+                serviceConfig.ExecStart = lib.mkForce (
+                  lib.concatStringsSep " " [
+                    delayedController
+                    "--platform-config /etc/${namespace}/platform.json"
+                    "--state-directory ${state}/controller/state"
+                    "--policy ${state}/controller/policy.json"
+                    "--socket /run/${namespace}-controller/project.sock"
+                    "--socket-group controller-api"
+                    "--project-peer ${toString constants.accounts.managementBroker.uid}:${toString constants.accounts.managementBroker.gid}"
+                    "--privileged-socket /run/${namespace}-controller/privileged.sock"
+                    "--privileged-socket-group platform-admin"
+                    "--privileged-peer ${toString constants.accounts.operator.uid}:${toString constants.accounts.operator.gid}"
+                    "--max-connections-per-peer 8"
+                  ]
+                );
               };
             })
             (lib.mkIf (role == "ingress") {
@@ -429,7 +515,7 @@ let
         };
 
       testScript = ''
-        machine.start()
+        machine.start(allow_reboot=True)
         machine.wait_for_unit("multi-user.target")
         machine.wait_for_unit("cloud-final.service")
         machine.succeed("getent passwd agentops >/dev/null")
@@ -556,6 +642,9 @@ let
               commit = "a" * 40
               pair = "b" * 64
               descriptor = json.dumps({"sourceCommit": commit, "pairIdentity": pair, "compatibility": {"brokerProtocolVersion": 3, "webProtocolVersion": 3, "authProtocolVersion": 3, "brokerSchemaVersion": 3, "controllerApiVersion": 1}}, separators=(",", ":"))
+              def request_activation(pair_identity=pair):
+                  machine.succeed(f"runuser -u agentops -- /run/current-system/sw/bin/management-python3.14 ${managementActivationRequest} {commit} {pair_identity}")
+                  machine.succeed("test $(stat -c %U:%G:%a:%h ${state}/management-broker-releases/activate-request) = agentops:management-broker:640:1")
               for component in ("broker", "web"):
                   release = f"${state}/management-{component}-releases/releases/vm-test"
                   machine.succeed(f"install -d -m 2750 -o agentops -g management-{component} {release} {release}/bin {release}/config {release}/evidence")
@@ -567,7 +656,7 @@ let
               machine.succeed("printf '#!/bin/sh\\nexec /run/current-system/sw/bin/management-python3.14 ${managementIdentityBootstrap} --config ${state}/management-active/current/broker/config/identity.json\\n' > ${state}/management-broker-releases/releases/vm-test/bin/management-identity")
               machine.succeed("chown agentops:management-broker ${state}/management-broker-releases/releases/vm-test/bin/*; chmod 0550 ${state}/management-broker-releases/releases/vm-test/bin/*")
               machine.succeed("printf '%s\\n' '{\"commonsOrigin\":\"https://class.example.com:9444\",\"socket\":\"/run/${namespace}-management-identity/identity.sock\",\"development\":false}' > ${state}/management-broker-releases/releases/vm-test/config/identity.json; chown agentops:management-broker ${state}/management-broker-releases/releases/vm-test/config/identity.json; chmod 0440 ${state}/management-broker-releases/releases/vm-test/config/identity.json")
-              machine.succeed("printf '#!/bin/sh\\nexec sleep infinity\\n' > ${state}/management-web-releases/releases/vm-test/bin/management-web; chown agentops:management-web ${state}/management-web-releases/releases/vm-test/bin/management-web; chmod 0550 ${state}/management-web-releases/releases/vm-test/bin/management-web")
+              machine.succeed("printf '#!/bin/sh\\nexec /run/current-system/sw/bin/management-python3.14 ${managementWebProbe}\\n' > ${state}/management-web-releases/releases/vm-test/bin/management-web; chown agentops:management-web ${state}/management-web-releases/releases/vm-test/bin/management-web; chmod 0550 ${state}/management-web-releases/releases/vm-test/bin/management-web")
               machine.succeed("install -m 0600 -o agentops -g management-broker /dev/null ${state}/management-broker-releases/.install.lock")
               machine.wait_for_unit("vm-fake-commons.service")
               # Restarting the required prepare unit can stop its path units.
@@ -575,7 +664,7 @@ let
               machine.succeed("systemctl reset-failed ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-activate.path; systemctl start ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-activate.path")
               for component in ("broker", "web", "activate"):
                   machine.wait_for_unit(f"${namespace}-management-{component}.path")
-              machine.succeed(f"runuser -u agentops -- sh -c 'umask 0027; printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
+              request_activation()
               machine.wait_for_unit("${namespace}-management-broker.service")
               # Record reachability from outside the sandbox before waiting, so a
               # failure separates host DNS/TLS problems from sandbox restrictions.
@@ -606,6 +695,45 @@ let
               machine.fail("runuser -u management-web -- cat ${state}/management-active/current/broker/config/platform.json")
               machine.succeed("! grep -F PLATFORM_ENVIRONMENT= /etc/profile")
               selected_pair = machine.succeed("readlink ${state}/management-active/current").strip()
+              web_health = "runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket ${state}/management-web/web-health.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'"
+              # Persist this already-active pair across the VM's disposable
+              # state mount, then boot without any reset-failed/reactivation.
+              metadata_command = "cd ${state} && find management-active management-broker-releases management-web-releases ! -name activate-request -printf '%p:%U:%G:%m:%n:%y:%l\\n' | sort"
+              fixture_metadata = machine.succeed(metadata_command)
+              machine.succeed("umask 0077; install -d -m 0700 /var/lib/portal-boot-fixture; cp -a --preserve=all ${state}/management-active ${state}/management-broker-releases ${state}/management-web-releases ${state}/management-broker ${state}/management-web /var/lib/portal-boot-fixture/; rm -f /var/lib/portal-boot-fixture/management-broker-releases/activate-request")
+              machine.reboot()
+              machine.wait_for_unit("multi-user.target")
+              machine.wait_for_unit("${namespace}-controller-readiness.service")
+              for component in ("identity", "broker", "web"):
+                  machine.wait_for_unit(f"${namespace}-management-{component}.service")
+              for component in ("broker", "web"):
+                  machine.wait_for_unit(f"${namespace}-management-{component}.path")
+              machine.wait_until_succeeds(broker_health)
+              machine.wait_until_succeeds(web_health)
+              machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
+              assert machine.succeed(metadata_command) == fixture_metadata
+              machine.succeed("test ! -e ${state}/management-broker-releases/activate-request")
+              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
+              # Force a controller restart, including socket directory removal,
+              # and verify the dependency restart chain heals both portal units.
+              before_broker = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
+              before_web = machine.succeed("systemctl show ${namespace}-management-web.service -p MainPID --value").strip()
+              machine.succeed("systemctl restart ${namespace}-controller.service")
+              machine.wait_for_unit("${namespace}-controller-readiness.service")
+              machine.succeed("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket /run/${namespace}-controller/project.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'")
+              machine.wait_until_succeeds(broker_health)
+              machine.wait_until_succeeds(web_health)
+              for component in ("identity", "broker", "web"):
+                  machine.succeed(f"systemctl is-active --quiet ${namespace}-management-{component}.service")
+              for component in ("broker", "web"):
+                  machine.succeed(f"systemctl is-active --quiet ${namespace}-management-{component}.path")
+                  machine.succeed(f"! systemctl is-failed --quiet ${namespace}-management-{component}.path")
+              assert machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip() != before_broker
+              assert machine.succeed("systemctl show ${namespace}-management-web.service -p MainPID --value").strip() != before_web
+              machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
+              assert machine.succeed(metadata_command) == fixture_metadata
+              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
+
               # A staged broker upgrade remains inactive through service and
               # boot-path restarts. The VM state mount is disposable tmpfs.
               next_descriptor = descriptor.replace(pair, "c" * 64)
@@ -614,14 +742,14 @@ let
               machine.succeed("systemctl stop ${namespace}-management-activate.path")
               machine.succeed(f"cp -a ${state}/management-broker-releases/releases/vm-test {next_broker}; printf '%s\\n' '{next_descriptor}' > {next_broker}/evidence/management-artifacts.json")
               machine.succeed("ln -sfn releases/vm-next ${state}/management-broker-releases/current; chown -h agentops:management-broker ${state}/management-broker-releases/current")
-              machine.succeed(f"runuser -u agentops -- sh -c 'printf \"{commit}\\n{'c' * 64}\\n\" > ${state}/management-broker-releases/activate-request'")
+              request_activation("c" * 64)
               machine.fail("systemctl restart ${namespace}-management-activate.service")
               assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
               machine.succeed("systemctl restart ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-broker.service ${namespace}-management-web.service")
               assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
               machine.succeed("test $(readlink -f ${state}/management-active/current/broker) = ${state}/management-broker-releases/releases/vm-test")
               machine.succeed("ln -sfn releases/vm-test ${state}/management-broker-releases/current; chown -h agentops:management-broker ${state}/management-broker-releases/current; systemctl reset-failed ${namespace}-management-activate.service")
-              machine.succeed(f"runuser -u agentops -- sh -c 'printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
+              request_activation()
               machine.succeed("systemctl restart ${namespace}-management-activate.service; systemctl start ${namespace}-management-activate.path")
               machine.wait_until_succeeds(broker_health)
               machine.succeed("systemctl show ${namespace}-management-broker.service -p Wants --value | tr ' ' '\\n' | grep -Fx '${namespace}-management-identity.service'")
@@ -640,14 +768,14 @@ let
               machine.succeed("mv ${state}/management-broker-releases/releases/vm-test/config/identity.vm-save ${state}/management-broker-releases/releases/vm-test/config/identity.json; systemctl reset-failed ${namespace}-management-identity.service; systemctl restart ${namespace}-management-identity.service")
               before = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
               machine.succeed("systemctl reset-failed ${namespace}-management-activate.service ${namespace}-management-broker.service ${namespace}-management-web.service")
-              machine.succeed(f"runuser -u agentops -- sh -c 'umask 0027; printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
+              request_activation()
               machine.wait_until_succeeds(f"pid=$(systemctl show ${namespace}-management-broker.service -p MainPID --value); test $pid -gt 0 && test $pid != {before}")
               machine.wait_for_unit("${namespace}-management-web.service")
               machine.wait_until_succeeds("test $(systemctl show ${namespace}-management-activate.service -p ActiveState --value) = inactive && test $(systemctl show ${namespace}-management-activate.service -p Result --value) = success")
               machine.wait_until_succeeds(broker_health)
               before = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
               machine.succeed("systemctl reset-failed ${namespace}-management-activate.service ${namespace}-management-broker.service ${namespace}-management-web.service")
-              machine.succeed(f"runuser -u agentops -- sh -c 'printf \"{commit}\\n{pair}\\n\" > ${state}/management-broker-releases/activate-request'")
+              request_activation()
               machine.wait_until_succeeds(f"pid=$(systemctl show ${namespace}-management-broker.service -p MainPID --value); test $pid -gt 0 && test $pid != {before}")
               machine.wait_for_unit("${namespace}-management-web.service")
               machine.wait_until_succeeds("test $(systemctl show ${namespace}-management-activate.service -p ActiveState --value) = inactive && test $(systemctl show ${namespace}-management-activate.service -p Result --value) = success")

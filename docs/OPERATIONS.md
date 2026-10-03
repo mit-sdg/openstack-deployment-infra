@@ -1624,6 +1624,17 @@ unit/operation IDs and inspect readiness/configuration/TLS/group/compatibility,
 without capturing credential bodies. An unknown deploy outcome repeats its
 original controller key or polls the recorded operation.
 
+### Portal startup and controller restarts
+
+The broker requires and starts after the existing controller-readiness service,
+which probes the project API only after the controller starts. This also ensures
+both socket paths exist before the broker constructs its mandatory sandbox.
+Controller restarts propagate through readiness to the broker and then web using
+`PartOf`, with the original dependency ordering. Broker/web process failures
+retry after two seconds. Path units retain their existing trigger limits and
+ordering; no sandbox or socket access is relaxed. These unit changes are carried
+by the admin image and need a future approved replacement to deploy.
+
 ### Reactivate a retained portal pair
 
 Stop admissions and back up the broker/controller databases first. Review the

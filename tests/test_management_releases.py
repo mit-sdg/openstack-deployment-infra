@@ -23,7 +23,7 @@ from openstack_platform import release_manifest
 from openstack_platform.config import load_platform, platform_config_identity
 from openstack_platform.management import activation
 from openstack_platform.management.activation import activate
-from openstack_platform.management.installation import development_root
+from openstack_platform.management.installation import development_root, request_activation
 from openstack_platform.management.rollback import reactivate
 from openstack_platform.management.settings import render
 from tests.repository_fixtures import clean_repository
@@ -743,6 +743,34 @@ class ManagementReleaseTests(unittest.TestCase):
         self.assertNotEqual(activate(state, os.geteuid(), self.groups), first)
         self.assertEqual((state / "management-active/current/broker").resolve(), second_broker)
         self.assertEqual((state / "management-active/current/web").resolve(), second_web)
+
+    def test_recreated_activation_marker_preserves_permissions_under_any_umask(self) -> None:
+        broker = INSTALLER.install(self.args("broker"))
+        INSTALLER.install(self.args("web"))
+        state = self.root / "state"
+        active = activate(state, os.geteuid(), self.groups)
+        root = broker.parent.parent
+        marker = root / "activate-request"
+        expected = (self.commit + "\n" + self.document["pairIdentity"] + "\n").encode()
+        for mask in (0o022, 0o077):
+            with self.subTest(umask=oct(mask)):
+                # The boot fixture intentionally omits the marker. A later
+                # operator request must recreate it independently of umask.
+                marker.unlink()
+                previous = os.umask(mask)
+                try:
+                    request_activation(
+                        root, self.commit, self.document["pairIdentity"], self.groups["broker"]
+                    )
+                finally:
+                    os.umask(previous)
+                metadata = marker.stat()
+                self.assertEqual(metadata.st_uid, os.geteuid())
+                self.assertEqual(metadata.st_gid, self.groups["broker"])
+                self.assertEqual(metadata.st_mode & 0o7777, 0o640)
+                self.assertEqual(metadata.st_nlink, 1)
+                self.assertEqual(marker.read_bytes(), expected)
+                self.assertEqual(activate(state, os.geteuid(), self.groups), active)
 
     def test_admin_environment_and_symlinked_development_root_are_rejected(self) -> None:
         with (

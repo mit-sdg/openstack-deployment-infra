@@ -817,14 +817,18 @@ in
     # Identity availability affects new sign-ins, never existing owner sessions.
     wants = [ "${namespace}-management-identity.service" ];
     after = [
-      "${namespace}-controller.service"
+      "${namespace}-controller-readiness.service"
       "${namespace}-management-identity.service"
       "${namespace}-management-prepare.service"
     ];
     requires = [
-      "${namespace}-controller.service"
+      "${namespace}-controller-readiness.service"
       "${namespace}-management-prepare.service"
     ];
+    # Readiness is tied to controller restarts; restart the broker only after
+    # both controller sockets are created and its project API responds. This
+    # preserves the mandatory privileged-socket sandbox mask at every start.
+    partOf = [ "${namespace}-controller-readiness.service" ];
     unitConfig.ConditionPathExists = [
       managementBrokerExecutable
       managementBrokerConfig
@@ -857,6 +861,7 @@ in
       UMask = "0077";
       LimitCORE = 0;
       Restart = "on-failure";
+      RestartSec = 2;
       NoNewPrivileges = true;
       CapabilityBoundingSet = "";
       AmbientCapabilities = "";
@@ -897,6 +902,7 @@ in
     description = "Browser-facing ${platform.displayName} management application";
     after = [ "${namespace}-management-broker.service" ];
     requires = [ "${namespace}-management-broker.service" ];
+    partOf = [ "${namespace}-management-broker.service" ];
     unitConfig.ConditionPathExists = [
       managementWebExecutable
       managementWebConfig
@@ -917,6 +923,7 @@ in
       UMask = "0077";
       LimitCORE = 0;
       Restart = "on-failure";
+      RestartSec = 2;
       NoNewPrivileges = true;
       CapabilityBoundingSet = "";
       AmbientCapabilities = "";

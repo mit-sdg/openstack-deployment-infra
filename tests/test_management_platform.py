@@ -145,6 +145,33 @@ class ManagementPlatformTests(ManagementCase):
         self.assertIn(identity, broker.split("after = [", 1)[1].split("]", 1)[0])
         self.assertNotIn(identity, broker.split("requires = [", 1)[1].split("]", 1)[0])
 
+    def test_portal_waits_for_controller_readiness_and_restarts_as_a_chain(self) -> None:
+        source = (ROOT / "nix/roles/admin.nix").read_text()
+        broker = source.split('systemd.services."${namespace}-management-broker" = {', 1)[1].split(
+            'systemd.services."${namespace}-management-web"', 1
+        )[0]
+        web = source.split('systemd.services."${namespace}-management-web" = {', 1)[1].split(
+            'systemd.paths."${namespace}-management-broker"', 1
+        )[0]
+        readiness = '"${namespace}-controller-readiness.service"'
+        self.assertIn(readiness, broker.split("after = [", 1)[1].split("]", 1)[0])
+        self.assertIn(readiness, broker.split("requires = [", 1)[1].split("]", 1)[0])
+        self.assertIn('partOf = [ "${namespace}-controller-readiness.service" ];', broker)
+        self.assertNotIn('"${namespace}-controller.service"', broker)
+        self.assertIn('partOf = [ "${namespace}-management-broker.service" ];', web)
+        for unit in (broker, web):
+            self.assertIn('Restart = "on-failure";', unit)
+            self.assertIn("RestartSec = 2;", unit)
+            self.assertIn("NoNewPrivileges = true;", unit)
+            self.assertIn('ProtectSystem = "strict";', unit)
+        self.assertIn("controllerPrivilegedSocket", broker)
+        vm = (ROOT / "nix/tests/default.nix").read_text()
+        self.assertIn("machine.reboot()", vm)
+        self.assertIn("vm-restore-active-portal", vm)
+        self.assertIn("systemctl restart ${namespace}-controller.service", vm)
+        self.assertIn("machine.wait_until_succeeds(web_health)", vm)
+        self.assertIn("machine.wait_until_succeeds(broker_health)", vm)
+
     def test_backup_uses_packaged_entrypoint_and_portal_is_independent_of_backups(self) -> None:
         source = (ROOT / "nix/roles/admin.nix").read_text()
         self.assertNotIn("PYTHONPATH=${../..}", source)
