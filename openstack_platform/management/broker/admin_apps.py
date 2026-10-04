@@ -33,7 +33,10 @@ class AdminApps:
     def __init__(self, broker: Broker) -> None:
         self.broker = broker
         # Authority is request-local, including concurrent Unix-server threads.
-        self.read_limits = ReadLimits()
+        # An admin app page reads about eight things per view (details,
+        # settings, variables, storage, logs, deploy key, team), so admins get
+        # a larger budget than staff browsing; reads still run two at a time.
+        self.read_limits = ReadLimits(burst=40, rate=4)
         self.context: ContextVar[tuple[str, bool] | None] = ContextVar(
             "admin_app_actor", default=None
         )
@@ -60,6 +63,8 @@ class AdminApps:
             ("GET", root + "/{app}/deployments", b.history),
             ("GET", root + "/{app}/deployments/{deployment}", b.deployment),
             ("GET", root + "/{app}/logs", b.runtime_logs.handle),
+            *b.source_keys.routes(root),
+            *b.members.routes(root),
             ("PUT", root + "/{app}/owner", self.reassign),
             ("POST", root + "/{app}/state", self.state),
         ]
@@ -517,6 +522,8 @@ class AdminApps:
                     "Resolve this application's current operations before reassigning it.",
                 )
             db.execute("UPDATE apps SET user_id=? WHERE id=?", (owner, app["id"]))
+            # The new owner isn't also a member; other teammates stay.
+            db.execute("DELETE FROM app_members WHERE app_id=? AND user_id=?", (app["id"], owner))
             audit(
                 db,
                 actor["id"],

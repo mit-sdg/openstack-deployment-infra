@@ -8,13 +8,17 @@ release smoke gate meaningful without requiring live credentials.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import shutil
 import ssl
 import stat
+import subprocess
 import tempfile
 import time
 import urllib.parse
+import uuid as uuid_module
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,10 +40,17 @@ from ..controller import application_runtime as application
 from ..controller.application_models import Manifest
 from ..controller.deployment_config import branch_name, parse_configuration, validate_checkout
 from ..controller.nomad_jobs import deployment_worker_ids
-from ..runtime import bounded_http, ensure_private_directory, run
+from ..runtime import (
+    CommandFailure,
+    bounded_http,
+    child_environment,
+    ensure_private_directory,
+    run,
+)
 from ..validation import (
     ValidationError,
     bounded_text,
+    repository_url,
     slug,
     uuid,
 )
@@ -64,6 +75,9 @@ APP_ACTIONS = (
     "app.manifest.verify",
     "app.promote",
     "app.remove",
+    "app.source.check",
+    "app.source.key",
+    "app.startup",
     "app.stop",
     "app.worker.capacity",
     "app.worker.create",
@@ -79,6 +93,8 @@ _PROVIDER_APP_ACTIONS = frozenset(
         "app.manifest.delete",
         "app.manifest.retain",
         "app.manifest.verify",
+        "app.source.check",
+        "app.source.key",
         "app.worker.capacity",
         "app.worker.create",
         "app.worker.delete",
@@ -264,6 +280,93 @@ def _build_log_paths(runtime: HelperRuntime, app_slug: str, build_id: str) -> tu
     return directory / f"{identifier}.log", directory / f"{identifier}.state"
 
 
+SOURCE_KEY = "id_ed25519"
+
+
+def _source_key_directory(runtime: HelperRuntime, app_slug: str) -> Path:
+    """Per-app deploy keys, beside build logs and outside the controller's state."""
+    controller = ensure_private_directory(runtime.admin_state / "controller", create=True)
+    return ensure_private_directory(controller / "source-keys", create=True) / slug(app_slug)
+
+
+def _source_key_file(runtime: HelperRuntime, app_slug: str) -> Path | None:
+    """The app's private deploy key, if it has one."""
+    path = _source_key_directory(runtime, app_slug) / SOURCE_KEY
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise HelperActionError("INVALID_STATE", "deploy key is not a private direct file")
+    return path
+
+
+def _source_public_key(runtime: HelperRuntime, app_slug: str) -> dict[str, str] | None:
+    if _source_key_file(runtime, app_slug) is None:
+        return None
+    path = _source_key_directory(runtime, app_slug) / f"{SOURCE_KEY}.pub"
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+            raise HelperActionError("INVALID_STATE", "deploy public key is malformed")
+        parts = os.read(descriptor, 4096).decode("ascii").split()
+    finally:
+        os.close(descriptor)
+    if len(parts) < 2 or parts[0] != "ssh-ed25519":
+        raise HelperActionError("INVALID_STATE", "deploy public key is malformed")
+    blob = base64.b64decode(parts[1], validate=True)
+    fingerprint = base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+    return {
+        "publicKey": f"{parts[0]} {parts[1]}",
+        "fingerprint": f"SHA256:{fingerprint}",
+        "createdAt": datetime.fromtimestamp(metadata.st_mtime, UTC)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+    }
+
+
+def _create_source_key(runtime: HelperRuntime, app_slug: str, *, replace: bool) -> None:
+    """Make a new ed25519 deploy key; a replacement takes effect all at once."""
+    directory = _source_key_directory(runtime, app_slug)
+    if not replace and _source_key_file(runtime, app_slug) is not None:
+        return
+    staged = Path(tempfile.mkdtemp(prefix=".new-", dir=directory.parent))
+    try:
+        # runtime.run refuses empty arguments, and an unencrypted key needs -N "".
+        # The argv is fixed; output is discarded and the call is bounded.
+        subprocess.run(
+            (
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                f"{runtime.platform.prefix} {app_slug} deploy key",
+                "-f",
+                str(staged / SOURCE_KEY),
+            ),
+            check=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=child_environment(),
+        )
+        os.chmod(staged / SOURCE_KEY, 0o600)
+        retired = None
+        if directory.exists():
+            retired = directory.parent / f".old-{uuid_module.uuid4().hex}"
+            os.rename(directory, retired)
+        os.rename(staged, directory)
+        if retired is not None:
+            shutil.rmtree(retired)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
 def _write_build_log_state(path: Path, state: str) -> None:
     if state not in {"running", "complete", "failed"}:
         raise ValueError("build log state is invalid")
@@ -385,14 +488,50 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
             streamed_log_limit = max(0, build_log_limit - build_log.tell())
             with tempfile.TemporaryDirectory(prefix="platform-source-") as directory:
                 source = Path(directory) / "source"
-                application.acquire_github_commit(
-                    args["repository"],
-                    args["commit"],
-                    source,
-                    maximum_bytes=source_limit,
-                    timeout_seconds=300,
-                    deadline=operation_deadline,
-                )
+
+                def note(text: str) -> None:
+                    room = build_log_limit - build_log.tell()
+                    if room > 0:
+                        build_log.write(text.encode()[:room])
+                        build_log.flush()
+
+                def fetch(ssh_key: Path | None = None) -> None:
+                    application.acquire_github_commit(
+                        args["repository"],
+                        args["commit"],
+                        source,
+                        maximum_bytes=source_limit,
+                        timeout_seconds=300,
+                        deadline=operation_deadline,
+                        ssh_key=ssh_key,
+                    )
+
+                # Public repositories need no key. A private one fails over
+                # HTTPS quickly, then the app's deploy key is tried over SSH.
+                try:
+                    fetch()
+                except CommandFailure:
+                    key = _source_key_file(runtime, app_slug)
+                    if key is None:
+                        note(
+                            "Couldn't fetch this commit from GitHub. If the repository is "
+                            "private, add the app's deploy key (Settings) to it on GitHub.\n"
+                        )
+                        raise HelperActionError(
+                            "SOURCE_REJECTED", "repository or commit could not be fetched"
+                        ) from None
+                    note("The public fetch failed; using the app's deploy key.\n")
+                    try:
+                        fetch(key)
+                    except CommandFailure:
+                        note(
+                            "The deploy key couldn't fetch this commit either. Check that the "
+                            "key is added to this repository on GitHub and the commit is pushed.\n"
+                        )
+                        raise HelperActionError(
+                            "SOURCE_REJECTED", "repository or commit could not be fetched"
+                        ) from None
+                    streamed_log_limit = max(0, build_log_limit - build_log.tell())
                 validate_checkout(configuration, source)
                 manifest = Manifest(
                     configuration.runtime,
@@ -454,6 +593,29 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
         return _read_build_log(args)
     runtime = helper_runtime()
     platform = runtime.platform
+    if action == "app.source.key":
+        _exact_args(args, {"slug", "mode"}, action)
+        app_slug = slug(args["slug"])
+        if args["mode"] not in {"read", "create", "replace"}:
+            raise ValidationError("deploy key mode must be read, create or replace")
+        if args["mode"] != "read":
+            _create_source_key(runtime, app_slug, replace=args["mode"] == "replace")
+        public = _source_public_key(runtime, app_slug)
+        return {"slug": app_slug, "present": public is not None, **(public or {})}
+    if action == "app.source.check":
+        _exact_args(args, {"slug", "repository", "branch"}, action)
+        key = _source_key_file(runtime, slug(args["slug"]))
+        if key is None:
+            return {"keyPresent": False}
+        return {
+            "keyPresent": True,
+            **application.check_github_access(
+                repository_url(args["repository"]),
+                branch_name(args["branch"]),
+                key,
+                timeout_seconds=30,
+            ),
+        }
     if action == "app.build.cleanup":
         _exact_args(args, {"buildId", "slug"}, action)
         build_id = uuid(args["buildId"], field="build ID")

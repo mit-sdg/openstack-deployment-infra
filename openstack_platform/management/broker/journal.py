@@ -21,7 +21,7 @@ def controller_error_code(value: object) -> str | None:
     )
 
 
-BUILD_GUIDANCE = "Check that the repository root contains package.json, each package directory contains its runtime lockfile, and build/start scripts are defined in the root package.json."
+BUILD_GUIDANCE = "The build couldn't use this commit; its build output says why. Check that the commit is pushed to GitHub (a private repository needs the app's deploy key), that the repository root contains package.json, each package directory contains its runtime lockfile, and build/start scripts are defined in the root package.json."
 HEALTH_GUIDANCE = "Check that the health path returns HTTP 2xx with a body of at most 4 KB; use a small endpoint such as /health rather than a full HTML page."
 
 
@@ -330,7 +330,11 @@ class Journal:
                 )
 
 
-def intent_model(row: Any, *, diagnostic: bool = False) -> dict[str, Any]:
+def intent_model(
+    row: Any, *, diagnostic: bool = False, viewer: str | None = None
+) -> dict[str, Any]:
+    """A browser view of an intent. A teammate who isn't its actor (viewer) can't
+    resubmit it, so they get no retry key."""
     body = strict_json(row["body"].encode())
     operation = None if row["operation"] is None else strict_json(row["operation"].encode())
     code = (
@@ -365,6 +369,9 @@ def intent_model(row: Any, *, diagnostic: bool = False) -> dict[str, Any]:
         and row["state"] in {"prepared", "unknown", "blocked"},
     }
 
+    if viewer is not None and row["user_id"] != viewer:
+        model["retryKey"] = None
+        model["requiresResubmit"] = False
     if diagnostic:
         model["controllerErrorCode"] = code
     return model

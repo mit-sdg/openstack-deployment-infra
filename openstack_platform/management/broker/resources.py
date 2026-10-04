@@ -65,7 +65,7 @@ def environment(self: Broker, request: Request) -> Response:
     data = environment_metadata(self, app["id"])
     with self.database.connect() as db:
         data["intents"] = [
-            intent_model(row, diagnostic=user["role"] in {"staff", "admin"})
+            intent_model(row, diagnostic=user["role"] in {"staff", "admin"}, viewer=user["id"])
             for row in db.execute(
                 "SELECT * FROM intents WHERE app_id=? AND kind IN ('env_set','env_delete') AND state NOT IN ('succeeded','failed') ORDER BY created",
                 (app["id"],),
@@ -207,12 +207,15 @@ def storage(self: Broker, request: Request) -> Response:
     with self.database.connect() as db:
         progress = [
             {
-                **intent_model(row, diagnostic=user["role"] in {"staff", "admin"}),
+                **intent_model(
+                    row, diagnostic=user["role"] in {"staff", "admin"}, viewer=user["id"]
+                ),
                 "type": strict_json(row["body"].encode()).get("type"),
             }
+            # Every teammate's storage changes, so nobody starts a duplicate.
             for row in db.execute(
-                "SELECT * FROM intents WHERE user_id=? AND app_id=? AND kind LIKE 'storage_%' ORDER BY created DESC LIMIT 20",
-                (user["id"], app["id"]),
+                "SELECT * FROM intents WHERE app_id=? AND kind LIKE 'storage_%' ORDER BY created DESC LIMIT 20",
+                (app["id"],),
             )
         ]
     return Response(200, {"data": {"items": items, "intents": progress}})

@@ -30,12 +30,14 @@ import {
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Route, Switch, useLocation } from 'wouter';
-import { ApiError, type StorageResource } from '../api';
+import { ApiError, type Configuration, type StorageResource } from '../api';
 import { adminAppsApi, type CatalogApp, type ManagedApp } from '../adminAppsApi';
 import { ConfigurationForm } from './Configuration';
 import { QueryError } from '../components/Feedback';
 import { LogViewer } from '../components/LogViewer';
+import { CommitChecks } from '../components/CommitChecks';
 import { RecentCommits } from '../components/RecentCommits';
+import { TeamSection } from '../components/TeamSection';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useIntentPolling } from '../hooks/useIntentPolling';
@@ -422,7 +424,8 @@ function ManagedApplication({ id }: { id: string }) {
         <SectionSkeleton title rows={4} />
       </PageSkeleton>
     );
-  if (app.error || settings.error) {
+  // A failed background refresh keeps showing the loaded app.
+  if ((app.error && !app.data) || (settings.error && !settings.data)) {
     const missing = app.error instanceof ApiError && app.error.status === 404;
     return (
       <Page>
@@ -524,6 +527,7 @@ function ManagedApplication({ id }: { id: string }) {
         service={service}
         identityProvider={identity}
       />
+      <TeamSection id={id} service={service} />
       <Section title="Danger zone" flush>
         <List label="Danger zone">
           <ListItem
@@ -562,6 +566,7 @@ function ManagedApplication({ id }: { id: string }) {
         revision={settings.data.revision}
         repository={settings.data.repository}
         branch={settings.data.branch}
+        configuration={settings.data.configuration}
         onStarted={started}
       />
       <StateDialog
@@ -647,6 +652,7 @@ function DeployDialog({
   revision,
   repository,
   branch,
+  configuration,
   onStarted,
 }: {
   open: boolean;
@@ -655,6 +661,7 @@ function DeployDialog({
   revision: number;
   repository: string;
   branch: string;
+  configuration: Configuration;
   onStarted: (result: { intentId: string }) => void;
 }) {
   const identity = app.identityProvider;
@@ -706,6 +713,7 @@ function DeployDialog({
           <RecentCommits
             repository={repository}
             branch={branch}
+            latest={() => adminAppsApi.resources().checkSourceKey(app.applicationId)}
             value={sha}
             onSelect={(commit) => setSha(commit.sha)}
           />
@@ -725,6 +733,7 @@ function DeployDialog({
             onChange={(event) => setSha(event.target.value)}
           />
         </Field>
+        {open && <CommitChecks repository={repository} sha={sha} configuration={configuration} />}
         <Checkbox
           label="Allow a brief outage"
           description={

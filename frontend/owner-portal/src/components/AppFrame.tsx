@@ -15,6 +15,7 @@ const tabs = [
   ['Deploy', '/deploy'],
   ['Deployments', '/deployments'],
   ['Logs', '/logs'],
+  ['Team', '/team'],
 ] as const;
 
 /** The app's one state, shown next to its name (see ownerAppState). */

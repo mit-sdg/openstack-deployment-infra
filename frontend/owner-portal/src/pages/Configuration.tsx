@@ -28,6 +28,7 @@ import {
 import { AppFrame } from '../components/AppFrame';
 import { EnvironmentSection } from '../components/EnvironmentSection';
 import { QueryError } from '../components/Feedback';
+import { RepositoryAccess } from '../components/RepositoryAccess';
 import { StorageSection } from '../components/StorageSection';
 import './app-pages.css';
 
@@ -300,6 +301,7 @@ export function ConfigurationForm({
       </form>
       {resources && (
         <>
+          <RepositoryAccess id={id} service={service} saved={savedSettings.revision > 0} />
           <EnvironmentSection
             service={service}
             id={id}

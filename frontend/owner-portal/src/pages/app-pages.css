@@ -113,6 +113,40 @@
   align-items: start;
 }
 
+/* Pre-deploy commit check: one line under the commit field. */
+.app-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ui-space-2);
+  margin: 0;
+}
+.app-check .ui-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--ui-success-text);
+}
+.app-check-list {
+  margin: 0;
+  padding-left: var(--ui-space-5);
+}
+
+/* Why a failed deployment stopped. */
+.app-startup-summary {
+  margin: 0;
+  font-weight: var(--ui-weight-medium);
+}
+.app-startup-events {
+  display: grid;
+  gap: var(--ui-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.app-startup-event {
+  color: var(--ui-text);
+  font-weight: var(--ui-weight-medium);
+}
+
 /* Recent commits: one full-width option per commit. */
 .app-commits .ui-fieldset__options {
   grid-template-columns: minmax(0, 1fr);
@@ -158,4 +192,22 @@
   .app-binding__name {
     grid-column: 1 / -1;
   }
+}
+
+/* Team: add-by-username form in the section footer, notes under the table. */
+.app-team-add {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ui-space-2);
+}
+.app-team-add .ui-field {
+  flex: 1 1 16rem;
+}
+.app-team-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-card-gap);
+  padding: var(--ui-card-padding);
 }

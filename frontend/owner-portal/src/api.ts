@@ -43,6 +43,10 @@ export type Settings = {
 };
 export type AppRecord = {
   applicationId: string;
+  /** "member" for a teammate's app; absent from older brokers. */
+  access?: 'owner' | 'member' | 'admin';
+  /** The owner's name, on apps you're a team member of. */
+  ownerDisplayName?: string | null;
   slug: string;
   url: string | null;
   savedRevision: number;
@@ -75,6 +79,25 @@ export type Intent = {
   names?: string[];
   requiresResubmit?: boolean;
   retryKey?: string | null;
+  /** Who made the change, in an app's activity. */
+  actor?: { displayName: string | null; you: boolean };
+};
+/** Someone who works on an app: its owner, or a team member. */
+export type TeamMember = {
+  userId: string;
+  username: string;
+  displayName: string;
+  method: 'local' | 'provider';
+  role: 'owner' | 'member';
+  addedAt: string | null;
+};
+const teamData = (v: unknown) => {
+  const data = record(v);
+  if (!Array.isArray(data.items)) throw new Error('Invalid service response');
+  data.items.forEach((item) =>
+    fields(item, { userId: 'string', username: 'string', displayName: 'string', role: 'string' }),
+  );
+  return data as { items: TeamMember[]; you?: string; access?: string; left?: boolean };
 };
 export type Deployment = {
   deploymentId: string;
@@ -112,6 +135,31 @@ export type BuildLog = {
   nextOffset: number | null;
   truncated: boolean;
 };
+/** How a removed candidate stopped: Nomad task events and output tails. */
+export type StartupRecord = {
+  captured: boolean;
+  /** False when the app never got a place to run. */
+  found?: boolean;
+  clientStatus?: string;
+  restarts?: number;
+  events?: { type: string; message: string; exitCode: number | null; oomKilled: boolean }[];
+  stdout?: string;
+  stderr?: string;
+  capturedAt?: string | null;
+};
+/** An app's deploy key for a private repository; only the public half. */
+export type SourceKey =
+  { present: false } | { present: true; publicKey: string; fingerprint: string; createdAt: string };
+/** Whether GitHub accepts the deploy key for the saved repository and branch. */
+export type SourceAccess =
+  | { keyPresent: false }
+  | {
+      keyPresent: true;
+      reachable: boolean;
+      head: string | null;
+      branch: string;
+      problem: 'key-refused' | 'not-found' | 'branch-missing' | 'unavailable' | null;
+    };
 /** stdout ("Output") or stderr ("Errors") of the running app. */
 export type LogStream = 'stdout' | 'stderr';
 /** Recent output of an app; `running` is false when nothing runs to read from. */
@@ -329,6 +377,21 @@ export const api = {
       `/apps/${app}/deployments/${deployment}/build-log?lines=200`,
       (v) => fields(v, { text: 'string', state: 'string', truncated: 'boolean' }) as BuildLog,
     ),
+  startupLog: (app: string, deployment: string) =>
+    request(`/apps/${app}/deployments/${deployment}/startup-log`, (v) => {
+      const data = fields(v, { captured: 'boolean' }) as StartupRecord;
+      if (data.captured) {
+        fields(v, { found: 'boolean', stdout: 'string', stderr: 'string', restarts: 'number' });
+        if (!Array.isArray(data.events)) throw new Error('Invalid service response');
+      }
+      return data;
+    }),
+  activity: (app: string) =>
+    request(`/apps/${app}/activity?limit=8`, (v) => {
+      const data = record(v);
+      if (!Array.isArray(data.items)) throw new Error('Invalid service response');
+      return data.items.map(intentData);
+    }),
   logs: (app: string, stream: LogStream) =>
     request(`/apps/${app}/logs?stream=${stream}`, runtimeLogData),
   intents: () => request('/intents?limit=8', (v) => pageData(v, intentData)),
@@ -338,7 +401,7 @@ export const api = {
 };
 export function validateSettings(settings: Settings): string | null {
   if (!/^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(settings.repository))
-    return 'Enter a public GitHub repository URL without credentials or query parameters.';
+    return 'Enter a GitHub repository URL like https://github.com/owner/repo, without credentials or query parameters.';
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(settings.branch) ||
     /\.\.|\/\/|@\{|\.lock$|[/.]$/.test(settings.branch)
@@ -479,5 +542,28 @@ export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
         body: await consentFields(id),
         key,
       }),
+    members: (id: string) => request(`${prefix}/${id}/members`, teamData),
+    addMember: (id: string, username: string) =>
+      request(`${prefix}/${id}/members`, teamData, { method: 'POST', body: { username } }),
+    removeMember: (id: string, userId: string) =>
+      request(`${prefix}/${id}/members/${userId}`, teamData, { method: 'DELETE', body: {} }),
+    sourceKey: (id: string) =>
+      request(`${prefix}/${id}/source-key`, (v) => {
+        const data = fields(v, { present: 'boolean' });
+        if (data.present) fields(v, { publicKey: 'string', fingerprint: 'string' });
+        return data as SourceKey;
+      }),
+    createSourceKey: (id: string, replace = false) =>
+      request(
+        `${prefix}/${id}/source-key`,
+        (v) => fields(v, { present: 'boolean', publicKey: 'string' }) as SourceKey,
+        { method: 'POST', body: replace ? { replace: true } : {} },
+      ),
+    checkSourceKey: (id: string) =>
+      request(
+        `${prefix}/${id}/source-key/check`,
+        (v) => fields(v, { keyPresent: 'boolean' }) as SourceAccess,
+        { method: 'POST', body: {} },
+      ),
   };
 }

@@ -1236,6 +1236,79 @@ class DeploymentTests(unittest.TestCase):
         )
         self.assertEqual(raised.exception.cleanup_evidence["action"], "remove-candidate")
 
+    def test_failed_candidate_startup_is_read_before_removal(self) -> None:
+        job, candidate = self.candidate_job()
+        calls: list[str] = []
+        evidence: dict[str, object] = {
+            "found": True,
+            "clientStatus": "failed",
+            "taskState": "dead",
+            "failed": True,
+            "restarts": 3,
+            "events": [
+                {"type": "Terminated", "message": "Exit Code: 1", "exitCode": 1, "time": 5},
+                {"type": 7},
+            ],
+            "stdout": "x" * 70_000 + "listening\n",
+            "stderr": "Error: Cannot find module 'express'\n",
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
+        }
+
+        def helper(action: str, args: object, **_kwargs: object) -> object:
+            calls.append(action)
+            if action == "app.deploy":
+                return {
+                    "jobId": "demo-app",
+                    "nomadVersion": 4,
+                    "candidateJobSha256": candidate[0],
+                    "candidateImage": candidate[1],
+                }
+            if action == "app.health":
+                return self.health(4, candidate, healthy=False, terminal=True)
+            if action == "app.startup":
+                self.assertEqual(args, {"slug": "demo-app", "jobId": "demo-app", "lines": 200})
+                return evidence
+            return {"jobAbsent": True}
+
+        with self.assertRaises(DeploymentFailed) as raised:
+            deploy_and_cleanup("demo-app", job, helper_caller=helper, sleep=lambda _seconds: None)
+        self.assertEqual(calls[-2:], ["app.startup", "app.remove"])
+        startup = raised.exception.startup
+        assert startup is not None
+        self.assertEqual(startup["stderr"], "Error: Cannot find module 'express'\n")
+        self.assertEqual(len(startup["stdout"].encode()), 65_536)
+        self.assertTrue(startup["stdout"].endswith("listening\n"))
+        self.assertEqual(
+            startup["events"],
+            [
+                {
+                    "type": "Terminated",
+                    "message": "Exit Code: 1",
+                    "exitCode": 1,
+                    "oomKilled": False,
+                    "time": 5,
+                }
+            ],
+        )
+        for answer in (RuntimeError("helper unavailable"), {"found": "yes"}, {"found": True}):
+
+            def unreadable(
+                action: str, args: object, answer: object = answer, **_kwargs: object
+            ) -> object:
+                if action == "app.startup":
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return answer
+                return helper(action, args)
+
+            with self.subTest(answer=answer), self.assertRaises(DeploymentFailed) as raised:
+                deploy_and_cleanup(
+                    "demo-app", job, helper_caller=unreadable, sleep=lambda _seconds: None
+                )
+            self.assertIsNone(raised.exception.startup)
+            self.assertTrue(raised.exception.cleanup_succeeded)
+
     def test_shared_acceptance_reobserves_exact_job_and_public_route_before_database_write(
         self,
     ) -> None:

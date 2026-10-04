@@ -119,6 +119,17 @@ UPDATE metadata SET version=3;
 """
 
 
+# An app's team members. Like observations, the table is additive and outside
+# the numbered schema: a release without teams ignores it, so members simply
+# lose access (fail closed) and backups, restore and activation are unchanged.
+APP_MEMBERS = (
+    "CREATE TABLE IF NOT EXISTS app_members (app_id TEXT NOT NULL REFERENCES apps(id),"
+    " user_id TEXT NOT NULL REFERENCES users(id), added_by TEXT REFERENCES users(id),"
+    " created REAL NOT NULL, PRIMARY KEY(app_id,user_id))",
+    "CREATE INDEX IF NOT EXISTS app_member_user ON app_members(user_id,app_id)",
+)
+
+
 class Database:
     def __init__(self, config: Config) -> None:
         self.path = config.state_directory / "management.sqlite3"
@@ -151,6 +162,8 @@ class Database:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS observations (app_id TEXT PRIMARY KEY REFERENCES apps(id), body TEXT NOT NULL, updated REAL NOT NULL)"
             )
+            for statement in APP_MEMBERS:
+                db.execute(statement)
             db.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL)"
             )

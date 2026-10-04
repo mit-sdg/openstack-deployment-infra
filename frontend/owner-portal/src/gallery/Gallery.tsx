@@ -406,7 +406,10 @@ export function Gallery() {
           >
             <Stack gap={6}>
               <Grid columns={2}>
-                <Field label="Repository URL" hint="Public GitHub repositories only.">
+                <Field
+                  label="Repository URL"
+                  hint="A GitHub repository. Private ones need a deploy key."
+                >
                   <Input placeholder="https://github.com/owner/repo" />
                 </Field>
                 <Field label="Health path" error="Start the path with a slash.">

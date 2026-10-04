@@ -18,7 +18,6 @@ import { DeploymentRow } from '../components/DeploymentRow';
 import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
-import { useOwnerIntents } from '../hooks/useIntentPolling';
 import { ownerAppState, short } from '../utils/presentation';
 
 function Running({ app }: { app: AppRecord }) {
@@ -72,8 +71,13 @@ export function Overview({ id }: { id: string }) {
     queryFn: () => api.history(id),
     refetchInterval: 5000,
   });
-  const intents = useOwnerIntents();
-  const activity = intents.data?.items.filter((intent) => intent.appId === id).slice(0, 6) ?? [];
+  // Everyone's changes to this app, so teammates see each other's deploys.
+  const intents = useQuery({
+    queryKey: ['activity', id],
+    queryFn: () => api.activity(id),
+    refetchInterval: 5000,
+  });
+  const activity = intents.data?.slice(0, 6) ?? [];
   const latest = history.data?.items[0];
   const deploy = (
     <Link href={`/apps/${id}/deploy`} className={buttonClass({ variant: 'primary' })}>

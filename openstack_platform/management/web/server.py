@@ -142,7 +142,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             )
             return Reply(200, file.read_bytes(), content_type, (("Cache-Control", cache),))
         if re.fullmatch(
-            r"/(?:|sign-in|signin|setup|activate|admin/(?:accounts|audit|apps(?:/[a-f0-9-]{36})?)|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|logs|deployments(?:/[a-f0-9-]{36})?))?)?|staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations))",
+            r"/(?:|sign-in|signin|setup|activate|admin/(?:accounts|audit|apps(?:/[a-f0-9-]{36})?)|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|logs|team|deployments(?:/[a-f0-9-]{36})?))?)?|staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations))",
             path,
         ):
             index = self.assets / "index.html"
@@ -173,7 +173,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
         elif re.fullmatch(
-            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/logs|/deployments(?:/[a-f0-9-]{36})?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
+            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/logs|/source-key(?:/check)?|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36})?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
             path,
         ):
             target = path.removeprefix("/api")
@@ -185,7 +185,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(405, "METHOD_NOT_ALLOWED")
             target = path.removeprefix("/api")
         elif re.fullmatch(
-            r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}/(?:verify|rotate))?|/logs|/deployments(?:/[a-f0-9-]{36}(?:/build-log)?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
+            r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}/(?:verify|rotate))?|/logs|/activity|/source-key(?:/check)?|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36}(?:/(?:build-log|startup-log))?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
             path,
         ):
             target = path.removeprefix("/api")
@@ -292,7 +292,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         return f"{names[directive['name']]}={value}; Path=/; Max-Age={age}{secure}; HttpOnly; SameSite={same_site}"
 
     def csp(self) -> str:
-        return "default-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; img-src 'self'; font-src 'self'; connect-src 'self' https://api.github.com; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+        return "default-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; img-src 'self'; font-src 'self'; connect-src 'self' https://api.github.com https://raw.githubusercontent.com; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
 
 
 def error_reply(status: int, code: str) -> Reply:

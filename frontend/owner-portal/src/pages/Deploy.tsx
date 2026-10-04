@@ -23,6 +23,7 @@ import { AppFrame } from '../components/AppFrame';
 import { BoundaryText } from '../components/BoundaryText';
 import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
+import { CommitChecks, CommitProblems, useCommitChecks } from '../components/CommitChecks';
 import { RecentCommits, useRecentCommits } from '../components/RecentCommits';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 
@@ -74,6 +75,11 @@ export function DeployPage({ id }: { id: string }) {
   const [sha, setSha] = useState('');
   const recent = useRecentCommits(settings.data?.repository ?? '', settings.data?.branch ?? '');
   const picked = recent.data?.find((commit) => commit.sha === sha);
+  const checks = useCommitChecks(
+    settings.data?.repository ?? '',
+    sha,
+    settings.data?.configuration,
+  );
   const [error, setError] = useState<string | null>(null);
   const [intentId, setIntentId] = useState<string | null>(null);
   const [review, setReview] = useState(false);
@@ -160,6 +166,7 @@ export function DeployPage({ id }: { id: string }) {
                 <RecentCommits
                   repository={settings.data.repository}
                   branch={settings.data.branch}
+                  latest={() => api.checkSourceKey(id)}
                   value={sha}
                   onSelect={(commit) => {
                     setSha(commit.sha);
@@ -187,6 +194,11 @@ export function DeployPage({ id }: { id: string }) {
                     maxLength={40}
                   />
                 </Field>
+                <CommitChecks
+                  repository={settings.data.repository}
+                  sha={sha}
+                  configuration={settings.data.configuration}
+                />
               </Section>
             </form>
             <Section
@@ -247,6 +259,7 @@ export function DeployPage({ id }: { id: string }) {
             ]}
           />
         )}
+        <CommitProblems checks={checks.data} />
         <Hint>
           Check that this commit is the one you mean: the branch name is only a label. Your app may
           briefly run both versions while the new one starts.

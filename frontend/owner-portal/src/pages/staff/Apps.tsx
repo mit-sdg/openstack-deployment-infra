@@ -80,7 +80,7 @@ export function StaffAppPage({ id }: { id: string }) {
     { enabled: app.isSuccess && !deployments.isPending },
   );
   useFollow(app, [deployments, activity]);
-  const ownerName = useOwnerName(app.data?.ownerId, activity.data?.items);
+  const ownerName = app.data?.ownerDisplayName;
   const back = <Back href="/staff/apps">All apps</Back>;
   if (app.isPending)
     return (
@@ -137,6 +137,14 @@ export function StaffAppPage({ id }: { id: string }) {
                 <CopyId value={data.ownerId} label="owner ID" />
               ),
             },
+            ...(data.members.length
+              ? [
+                  {
+                    label: 'Team',
+                    value: data.members.map((member) => member.displayName).join(', '),
+                  },
+                ]
+              : []),
             { label: 'Created', value: <RelativeTime value={data.createdAt} /> },
             { label: 'Repository', value: <Repository url={data.repository} /> },
             { label: 'ID', value: <CopyId value={id} label="app ID" /> },

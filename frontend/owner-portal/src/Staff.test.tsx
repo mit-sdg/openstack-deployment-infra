@@ -192,6 +192,9 @@ describe('staff detail pages', () => {
     const app = vi.spyOn(staffApi, 'app').mockImplementation(
       track({
         ...catalogApp,
+        ownerUsername: 'alice',
+        ownerDisplayName: 'Alice Student',
+        members: [{ username: 'bob', displayName: 'Bob Student' }],
         url: 'https://weather-dashboard.apps.example.com',
         desiredRunning: true,
         activeDeploymentId: deploymentId,

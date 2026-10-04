@@ -16,6 +16,7 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
     mutationFn: () => api.resume(intent.intentId),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ['intents'] });
+      client.invalidateQueries({ queryKey: ['activity', intent.appId] });
       client.invalidateQueries({ queryKey: ['intent', intent.intentId] });
     },
   });
@@ -52,6 +53,9 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
           {intent.names?.[0] && <code>{intent.names[0]}</code>}
           {intent.commit && <code>{short(intent.commit)}</code>}
           {progress && <span>{progress}</span>}
+          {intent.actor && !intent.actor.you && intent.actor.displayName && (
+            <span>{intent.actor.displayName}</span>
+          )}
           <RelativeTime value={intent.createdAt} />
         </>
       }
@@ -75,6 +79,17 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
             <span className="ui-text-subtle">
               Error code <code>{intent.controllerErrorCode}</code>
             </span>
+          )}
+          {intent.kind === 'deploy' && intent.state === 'failed' && intent.operationId && (
+            <>
+              {' '}
+              <Link
+                href={`/apps/${intent.appId}/deployments/${intent.operationId}`}
+                className="ui-link"
+              >
+                See why it stopped
+              </Link>
+            </>
           )}
         </p>
       )}

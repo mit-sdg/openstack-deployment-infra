@@ -53,11 +53,43 @@ function parse(item: unknown): RecentCommit[] {
 }
 
 /**
- * The newest commits on a branch of a public repository. The request goes
- * straight from the browser to GitHub without cookies or a referrer; private
- * repositories, unknown branches and GitHub's hourly limit for unsigned
- * requests come back as a GitHubError.
+ * GET from GitHub straight from the browser, without cookies or a referrer.
+ * Private repositories, unknown refs and GitHub's hourly limit for unsigned
+ * API requests come back as a GitHubError.
  */
+export async function githubGet(url: string, signal?: AbortSignal): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      cache: 'no-store',
+      ...(url.startsWith('https://api.github.com/')
+        ? { headers: { Accept: 'application/vnd.github+json' } }
+        : {}),
+      signal,
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new GitHubError('unavailable');
+  }
+  // 409: empty repository; 422: no such branch or commit.
+  if ([404, 409, 422].includes(response.status)) throw new GitHubError('not-found');
+  if (response.status === 403 || response.status === 429) throw new GitHubError('rate-limited');
+  if (!response.ok) throw new GitHubError('unavailable');
+  return response;
+}
+
+export async function githubJson(url: string, signal?: AbortSignal): Promise<unknown> {
+  const response = await githubGet(url, signal);
+  try {
+    return await response.json();
+  } catch {
+    throw new GitHubError('unavailable');
+  }
+}
+
+/** The newest commits on a branch of a public repository. */
 export async function recentCommits(
   repository: string,
   branch: string,
@@ -66,33 +98,11 @@ export async function recentCommits(
 ): Promise<RecentCommit[]> {
   const name = githubRepository(repository);
   if (!name) throw new GitHubError('not-found');
-  let response: Response;
-  try {
-    response = await fetch(
-      `https://api.github.com/repos/${name}/commits?` +
-        new URLSearchParams({ sha: branch, per_page: String(count) }),
-      {
-        credentials: 'omit',
-        referrerPolicy: 'no-referrer',
-        cache: 'no-store',
-        headers: { Accept: 'application/vnd.github+json' },
-        signal,
-      },
-    );
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new GitHubError('unavailable');
-  }
-  // 409: empty repository; 422: no such branch.
-  if ([404, 409, 422].includes(response.status)) throw new GitHubError('not-found');
-  if (response.status === 403 || response.status === 429) throw new GitHubError('rate-limited');
-  if (!response.ok) throw new GitHubError('unavailable');
-  let data: unknown;
-  try {
-    data = await response.json();
-  } catch {
-    throw new GitHubError('unavailable');
-  }
+  const data = await githubJson(
+    `https://api.github.com/repos/${name}/commits?` +
+      new URLSearchParams({ sha: branch, per_page: String(count) }),
+    signal,
+  );
   if (!Array.isArray(data)) throw new GitHubError('unavailable');
   return data.slice(0, count).flatMap(parse);
 }

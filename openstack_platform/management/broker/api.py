@@ -23,10 +23,14 @@ from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
 from .journal import Journal, intent_model
+from .members import Members, activity
 from .runtime_logs import RuntimeLogs
+from .source_keys import SourceKeys
 from .staff import StaffReads
 
 RESERVED = {"admin", "api", "auth", "status", "www", "platform", "class"}
+# Apps a user may work on: their own, and those they're a team member of.
+ACCESS = "(user_id=? OR id IN (SELECT app_id FROM app_members WHERE user_id=?))"
 DEFAULT_CONFIGURATION: dict[str, Any] = {
     "schemaVersion": 1,
     "build": {"runtime": "node", "packages": ["."], "buildScript": None, "startScript": "start"},
@@ -54,6 +58,8 @@ class Broker:
         self.accounts = Accounts(self)
         self.admin_apps = AdminApps(self)
         self.runtime_logs = RuntimeLogs(self)
+        self.source_keys = SourceKeys(self)
+        self.members = Members(self)
         self.request_actor: ContextVar[tuple[str, str | None] | None] = ContextVar(
             "app_request_actor", default=None
         )
@@ -91,7 +97,9 @@ class Broker:
             ("GET", "/v1/apps/{app}/deployments", self.history),
             ("GET", "/v1/apps/{app}/deployments/{deployment}", self.deployment),
             ("GET", "/v1/apps/{app}/deployments/{deployment}/build-log", self.build_log),
+            ("GET", "/v1/apps/{app}/deployments/{deployment}/startup-log", self.startup_log),
             ("GET", "/v1/apps/{app}/logs", self.runtime_logs.handle),
+            ("GET", "/v1/apps/{app}/activity", lambda request: activity(self, request)),
             ("GET", "/v1/intents", self.intents),
             ("GET", "/v1/intents/{intent}", self.intent),
             ("POST", "/v1/intents/{intent}/resume", self.resume),
@@ -113,6 +121,8 @@ class Broker:
             ("GET", "/v1/staff/apps/{app}/deployments/{deployment}", self.staff.deployment),
             ("GET", "/v1/staff/operations", self.staff.operations),
         ]
+        routes.extend(self.source_keys.routes("/v1/apps"))
+        routes.extend(self.members.routes("/v1/apps"))
         routes.extend(self.admin_apps.routes())
         for method, path, handler in routes:
 
@@ -152,6 +162,8 @@ class Broker:
                         if request.path.endswith("/build-log")
                         else {"stream"}
                         if request.path.endswith("/logs")
+                        else {"limit"}
+                        if request.path.endswith("/activity")
                         else set()
                     )
                     if set(request.query) - allowed_query:
@@ -197,12 +209,15 @@ class Broker:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT * FROM apps WHERE id=? AND lifecycle!='rejected'"
-                + ("" if admin else " AND user_id=?"),
-                (identifier,) if admin else (identifier, user["id"]),
+                + ("" if admin else " AND " + ACCESS),
+                (identifier,) if admin else (identifier, user["id"], user["id"]),
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Application not found.")
             app = dict(row)
+            app["access"] = (
+                "admin" if admin else "owner" if app["user_id"] == user["id"] else "member"
+            )
         if app["lifecycle"] == "deleted" or (
             (mutation or not request.query) and self.journal.observe_deleted(app["id"])
         ):
@@ -389,10 +404,21 @@ class Broker:
         user, _sid = self.auth.authenticate(request)
         page = self.owned_page(request, user["id"], "apps")
         self.journal.reconcile_page(page["items"])
-        page["items"] = [
-            self.app_model(item) for item in page["items"] if item["lifecycle"] != "deleted"
-        ]
-        page["items"] = [item for item in page["items"] if item["lifecycleState"] != "deleted"]
+        owners = self.owner_names(
+            [item["user_id"] for item in page["items"] if item["user_id"] != user["id"]]
+        )
+        models = []
+        for item in page["items"]:
+            if item["lifecycle"] == "deleted":
+                continue
+            model = self.app_model(item)
+            if model["lifecycleState"] == "deleted":
+                continue
+            model["access"] = "owner" if item["user_id"] == user["id"] else "member"
+            if model["access"] == "member":
+                model["ownerDisplayName"] = owners.get(item["user_id"])
+            models.append(model)
+        page["items"] = models
         return Response(200, {"data": {**page, "quota": self.quota(user["id"])}})
 
     def owned_page(self, request: Request, owner: str, table: str) -> dict[str, Any]:
@@ -408,16 +434,20 @@ class Broker:
             raise HttpError(400, "INVALID_REQUEST", "Invalid page limit.") from None
         if not 1 <= limit <= 100:
             raise HttpError(400, "INVALID_REQUEST", "Page limit must be 1–100.")
-        condition = "user_id=?" + (
+        # Apps include the ones the user is a team member of; intents stay their own.
+        scope, scope_parameters = (
+            (ACCESS, [owner, owner]) if table == "apps" else ("user_id=?", [owner])
+        )
+        condition = scope + (
             " AND lifecycle NOT IN ('rejected','deleted')" if table == "apps" else ""
         )
-        parameters: list[object] = [owner]
+        parameters: list[object] = list(scope_parameters)
         with self.database.connect() as db:
             cursor = request.query.get("cursor", (None,))[0]
             if cursor is not None:
                 point = db.execute(
-                    f"SELECT created,id FROM {table} WHERE user_id=? AND id=?",
-                    (owner, checked_uuid(cursor)),
+                    f"SELECT created,id FROM {table} WHERE {scope} AND id=?",
+                    (*scope_parameters, checked_uuid(cursor)),
                 ).fetchone()
                 if point is None:
                     raise HttpError(400, "INVALID_REQUEST", "Unknown page cursor.")
@@ -436,9 +466,24 @@ class Broker:
             "truncated": len(rows) > limit,
         }
 
+    def owner_names(self, users: list[str]) -> dict[str, str]:
+        if not users:
+            return {}
+        with self.database.connect() as db:
+            return {
+                row["id"]: row["display_name"]
+                for row in db.execute(
+                    f"SELECT id,display_name FROM users WHERE id IN ({','.join('?' * len(users))})",
+                    users,
+                )
+            }
+
     def app(self, request: Request) -> Response:
         _user, app = self.own(request)
         model = self.app_model(app)
+        model["access"] = app["access"]
+        if app["access"] == "member":
+            model["ownerDisplayName"] = self.owner_names([app["user_id"]]).get(app["user_id"])
         model["identityProvider"] = self.admin_apps.identity(model)
         model["configurationChanged"] = False
         if model["activeDeploymentId"]:
@@ -495,7 +540,8 @@ class Broker:
                 self.admin_apps.context.get() is None
                 and context[1] is not None
                 and db.execute(
-                    "SELECT 1 FROM apps WHERE id=? AND user_id=?", (context[1], actor["id"])
+                    "SELECT 1 FROM apps WHERE id=? AND " + ACCESS,
+                    (context[1], actor["id"], actor["id"]),
                 ).fetchone()
                 is None
             ):
@@ -747,18 +793,23 @@ class Broker:
         return self.intent_response(identifier, user["id"], 202)
 
     def intent_response(self, identifier: str, user: str, status: int = 200) -> Response:
+        """An intent its actor started, or one on an app the user works on."""
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT * FROM intents WHERE id=? AND user_id=?", (identifier, user)
+                "SELECT * FROM intents WHERE id=? AND (user_id=? OR app_id IN"
+                " (SELECT id FROM apps WHERE " + ACCESS + "))",
+                (identifier, user, user, user),
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
             actor = db.execute("SELECT role FROM users WHERE id=?", (user,)).fetchone()
             model = intent_model(
-                row, diagnostic=actor is not None and actor[0] in {"staff", "admin"}
+                row,
+                diagnostic=actor is not None and actor[0] in {"staff", "admin"},
+                viewer=user,
             )
             app = db.execute(
-                "SELECT slug FROM apps WHERE id=? AND user_id=?", (row["app_id"], user)
+                "SELECT slug FROM apps WHERE id=? AND " + ACCESS, (row["app_id"], user, user)
             ).fetchone()
             model["appSlug"] = None if app is None else app["slug"]
             return Response(status, {"data": model})
@@ -769,11 +820,15 @@ class Broker:
         with self.database.connect() as db:
             slugs = {
                 row["id"]: row["slug"]
-                for row in db.execute("SELECT id,slug FROM apps WHERE user_id=?", (user["id"],))
+                for row in db.execute(
+                    "SELECT id,slug FROM apps WHERE " + ACCESS, (user["id"], user["id"])
+                )
             }
         page["items"] = [
             {
-                **intent_model(row, diagnostic=user["role"] in {"staff", "admin"}),
+                **intent_model(
+                    row, diagnostic=user["role"] in {"staff", "admin"}, viewer=user["id"]
+                ),
                 "appSlug": slugs.get(row["app_id"]),
             }
             for row in page["items"]
@@ -789,8 +844,11 @@ class Broker:
         object_body(request.body, set())
         identifier = checked_uuid(request.path_parameters["intent"])
         with self.database.connect(write=True) as db:
+            # The actor, or anyone on the app's team, can resume a stuck change.
             row = db.execute(
-                "SELECT * FROM intents WHERE id=? AND user_id=?", (identifier, user["id"])
+                "SELECT * FROM intents WHERE id=? AND (user_id=? OR app_id IN"
+                " (SELECT id FROM apps WHERE " + ACCESS + "))",
+                (identifier, user["id"], user["id"], user["id"]),
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
@@ -807,7 +865,8 @@ class Broker:
             elif (
                 row["kind"] != "create_app"
                 and db.execute(
-                    "SELECT 1 FROM apps WHERE id=? AND user_id=?", (row["app_id"], user["id"])
+                    "SELECT 1 FROM apps WHERE id=? AND " + ACCESS,
+                    (row["app_id"], user["id"], user["id"]),
                 ).fetchone()
                 is None
             ):
@@ -901,6 +960,64 @@ class Broker:
         identifier = checked_uuid(request.path_parameters["deployment"])
         return Response(
             200, {"data": self.read_project(f"/v1/deployments/{identifier}", app["id"])}
+        )
+
+    def startup_log(self, request: Request) -> Response:
+        """Why a removed candidate stopped: its task events and output tails."""
+        _user, app = self.own(request)
+        identifier = checked_uuid(request.path_parameters["deployment"])
+        self.read_project(f"/v1/deployments/{identifier}", app["id"])
+        status, result = self.client.request("GET", f"/v1/deployments/{identifier}/startup-log")
+        if status == 404:
+            # Controllers from before startup records have none to give.
+            return Response(200, {"data": {"captured": False}})
+        record = result.get("startup")
+        if (
+            status != 200
+            or result.get("deploymentId") != identifier
+            or not isinstance(result.get("captured"), bool)
+            or (result["captured"] and not isinstance(record, dict))
+        ):
+            raise ControllerUnavailable("invalid startup record")
+        if not result["captured"]:
+            return Response(200, {"data": {"captured": False}})
+        assert isinstance(record, dict)
+
+        def text(name: str) -> str:
+            value = record.get(name)
+            return value[-65_536:] if isinstance(value, str) else ""
+
+        events = []
+        for event in record.get("events") or []:
+            if isinstance(event, dict) and isinstance(event.get("type"), str):
+                code = event.get("exitCode")
+                events.append(
+                    {
+                        "type": event["type"][:64],
+                        "message": str(event.get("message") or "")[:512],
+                        "exitCode": code
+                        if isinstance(code, int) and not isinstance(code, bool)
+                        else None,
+                        "oomKilled": event.get("oomKilled") is True,
+                    }
+                )
+        restarts = record.get("restarts")
+        return Response(
+            200,
+            {
+                "data": {
+                    "captured": True,
+                    "found": record.get("found") is True,
+                    "clientStatus": str(record.get("clientStatus") or "")[:32],
+                    "restarts": restarts
+                    if isinstance(restarts, int) and not isinstance(restarts, bool)
+                    else 0,
+                    "events": events[-12:],
+                    "stdout": text("stdout"),
+                    "stderr": text("stderr"),
+                    "capturedAt": utc(record.get("capturedAt")),
+                }
+            },
         )
 
     def build_log(self, request: Request) -> Response:

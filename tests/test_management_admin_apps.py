@@ -9,8 +9,10 @@ from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from openstack_platform.controller.http import HttpError
 from openstack_platform.management.broker import bootstrap
 from openstack_platform.management.broker.accounts import security_change
+from openstack_platform.management.broker.staff import ReadLimits
 from openstack_platform.management.common import canonical, digest, strict_json
 from openstack_platform.management.web.server import WebServer
 from tests import test_management_accounts as account_fixtures
@@ -563,6 +565,20 @@ class AdminApplicationTests(ManagementCase):
             "INVALID_REQUEST",
             lambda: self.call("GET", f"/v1/admin-apps/{app}/logs?lines=5", owner="admin"),
         )
+
+    def test_admin_app_pages_have_room_for_their_reads_but_stay_bounded(self) -> None:
+        # One admin app page reads about eight things; staff keep the smaller budget.
+        for _ in range(40):
+            self.assertEqual(self.call("GET", self.prefix, owner="admin").status, 200)
+        self.assert_error("RATE_LIMITED", lambda: self.call("GET", self.prefix, owner="admin"))
+        staff = ReadLimits()
+        for _ in range(10):
+            with staff.reserve("staff", "address", self.now):
+                pass
+        with self.assertRaises(HttpError) as limited:
+            with staff.reserve("staff", "address", self.now):
+                pass
+        self.assertEqual(limited.exception.code, "RATE_LIMITED")
 
     def test_admin_cannot_read_cross_owner_logs_or_privileged_controller_routes(self) -> None:
         self.assert_error(

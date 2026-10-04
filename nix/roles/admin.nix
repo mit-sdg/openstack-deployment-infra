@@ -501,6 +501,8 @@ in
     "d ${controllerState} 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerRoot}/build-logs 0700 ${controllerUser} ${controllerGroup} -"
     "d ${controllerRoot}/helper-diagnostics 0700 ${controllerUser} ${controllerGroup} -"
+    # Per-app deploy keys for private repositories; written only by the helper.
+    "d ${controllerRoot}/source-keys 0700 ${controllerUser} ${controllerGroup} -"
     "d ${operatorRoot} 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${operatorRoot}/secrets 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${operatorRoot}/status 0750 ${operatorAccount.name} ${operatorAccount.name} -"
@@ -700,6 +702,7 @@ in
         controllerState
         "${controllerRoot}/build-logs"
         "${controllerRoot}/helper-diagnostics"
+        "${controllerRoot}/source-keys"
         controllerBackupRoot
       ];
     };

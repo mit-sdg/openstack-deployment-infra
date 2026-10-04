@@ -137,7 +137,7 @@ phase.
 The implemented controller is used by the locally tested owner portal; that
 browser product is not deployed yet. For a deployment request the controller:
 
-1. validates the application UUID/slug, public credential-free GitHub URL,
+1. validates the application UUID/slug, canonical GitHub URL,
    requested ref, exact commit, configuration revision, and closed typed
    configuration;
 2. records an immutable deployment attempt and accepts the external operation
@@ -381,7 +381,11 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}/deployments` | List bounded deployment history |
 | `GET /v1/deployments/{id}` | Read one deployment attempt |
 | `GET /v1/deployments/{id}/build-log` | Read bounded retained build output |
+| `GET /v1/deployments/{id}/startup-log` | Read a removed candidate's startup record (`captured: false` when none) |
 | `GET /v1/applications/{id}/runtime-log` | Read bounded current runtime output; `stream=stdout` (default) or `stderr` |
+| `GET /v1/applications/{id}/source-key` | Read the app's deploy key: public half and fingerprint only |
+| `POST /v1/applications/{id}/source-key` | Create the deploy key if absent, or replace it with `{"replace": true}` |
+| `POST /v1/applications/{id}/source-key/check` | Check `{repository, branch}` with the deploy key; returns the branch head or a named problem |
 | `GET /v1/applications/{id}/environment` | List environment names and metadata, never values |
 | `PUT /v1/applications/{id}/environment/{key}` | Add or replace one value |
 | `DELETE /v1/applications/{id}/environment/{key}` | Remove one caller-owned value |
@@ -443,6 +447,42 @@ can be added to an existing key. The project socket cannot request them.
 
 With `reuseWorker: true`, `worker_reuse.py` pins the actual existing image and
 worker identity, preserves sizing, and rechecks readiness/capacity before stop.
+Team apps keep one owner (`apps.user_id`) plus members in `app_members`, a
+table created idempotently at startup like `observations` and outside the
+numbered schema: backups, restore and activation are unchanged, and a release
+without teams ignores it, so members lose access rather than gain any. Members
+pass the same app gate as the owner for settings, deploys, variables, storage,
+logs and deploy keys; only the owner or an admin adds or removes people
+(`/api/v1/apps/{app}/members`, `/api/v1/admin-apps/{app}/members`), and a member
+can leave. Adding needs the account's exact username and that the person has
+signed in once. Intents stay keyed by their actor: quotas and concurrency count
+the actor, `APP_BUSY` serializes the team, and `GET /api/v1/apps/{app}/activity`
+shows everyone's changes with who made them. Only an intent's actor receives
+its environment retry key. Reassigning an app drops the new owner's membership.
+
+Private repositories use a per-app ed25519 deploy key. The helper creates it
+with `ssh-keygen` under `<adminState>/controller/source-keys/<slug>/` (0600),
+returns only the public half, and never hands the private key to the controller,
+broker or builder. A build first fetches over credential-free HTTPS; if that fails
+and the app has a key, it fetches `ssh://git@ssh.github.com:443/OWNER/REPO.git`
+with `IdentitiesOnly`, `BatchMode` and only GitHub's pinned ed25519 host key, then
+applies the same exact-commit checks. If neither works the helper answers
+`SOURCE_REJECTED`, which the controller treats like a rejected build. The owner
+adds the public key on GitHub as a read-only deploy key; only a repository admin
+can, which ties the app to a repository its owner controls. `app.source.check`
+runs `git ls-remote` with the key and names the problem (`key-refused`,
+`not-found`, `branch-missing`, `unavailable`) without echoing GitHub's output.
+Keys are not in the controller backup; a lost key is replaced from Settings.
+
+Before removing a candidate that never became healthy, the controller calls the
+read-only helper action `app.startup` for that exact job slot: the newest
+allocation's status, restart count, last 12 task events and 200-line output and
+error tails (64 KiB each). It spends at most 30 s or a third of the remaining
+deadline, so removal keeps its time, and a failed read never blocks removal. The
+record is written 0600 to `startup-logs/<application>/<deployment>.json` under
+the controller state directory and served to the app's owner on the failed
+deployment's page.
+
 The helper's exact-identity `app.stop` leaves a stopped Nomad job until terminal
 client allocations are confirmed; empty evidence, desired-stop or lost allocations
 are not proof. `app.worker.capacity` includes the allowlisted worker observation,
@@ -612,9 +652,12 @@ The UI supports sign-in, my apps/quota/create, public repository/preferred branc
 typed Node/Bun settings, full-SHA review/deploy, observed status/health, history,
 build logs and runtime logs. React assets are external static files under strict
 CSP; admin runs Python only. The deploy page lists the branch's five newest
-commits straight from `api.github.com` (the one non-self `connect-src`), without
-cookies or a referrer; private repositories and GitHub's hourly limit for
-unsigned requests fall back to pasting a SHA. Owners read their app's runtime
+commits straight from `api.github.com`, without cookies or a referrer, and checks
+the chosen commit before deploying: one recursive tree read plus `package.json`
+from `raw.githubusercontent.com` (the two non-self `connect-src` origins) against
+the build's `validate_checkout` rules, kept in step by shared cases. Private
+repositories and GitHub's hourly limit for unsigned requests fall back to pasting
+a SHA and letting the build check it. Owners read their app's runtime
 logs (`GET /api/v1/apps/{app}/logs?stream=stdout|stderr`, admins through
 `/api/v1/admin-apps/{app}/logs`); the broker shares each read for 5 s and runs one
 at a time, because the controller serves it from Nomad under its shared lock. The configuration page supports write-only environment edits and

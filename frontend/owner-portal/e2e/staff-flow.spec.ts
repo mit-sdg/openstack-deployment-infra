@@ -97,6 +97,9 @@ for (const [layout, viewport, colorScheme] of [
       const github: string[] = [];
       await admin.route('https://api.github.com/**', (route) => {
         github.push(route.request().url());
+        // The class app's repository is private: its commit can't be read.
+        if (route.request().url().includes('/git/trees/'))
+          return route.fulfill({ status: 404, json: { message: 'Not Found' } });
         return route.fulfill({
           json: [
             {
@@ -218,8 +221,10 @@ for (const [layout, viewport, colorScheme] of [
       const deploy = dialog.getByRole('button', { name: 'Deploy', exact: true });
       await dialog.getByRole('radio', { name: 'Class app fixture' }).check();
       await expect(dialog.getByLabel('Commit', { exact: true })).toHaveValue('c'.repeat(40));
+      await expect(dialog.getByText(/Couldn’t read this commit on GitHub/)).toBeVisible();
       expect(github).toEqual([
         'https://api.github.com/repos/example/class-app/commits?sha=main&per_page=5',
+        `https://api.github.com/repos/example/class-app/git/trees/${'c'.repeat(40)}?recursive=1`,
       ]);
       await expect(deploy).toBeDisabled();
       await dialog.getByLabel('Allow a brief outage', { exact: false }).check();

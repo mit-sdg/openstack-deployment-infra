@@ -10,6 +10,7 @@ import { DeployPage } from './pages/Deploy';
 import { DeploymentPage } from './pages/Deployment';
 import { HistoryPage } from './pages/History';
 import { LogsPage } from './pages/Logs';
+import { TeamPage } from './pages/Team';
 import { NewApp } from './pages/NewApp';
 import { Overview } from './pages/Overview';
 import { SignIn } from './pages/SignIn';
@@ -81,6 +82,7 @@ export function App() {
             </Route>
             <Route path="/apps/:id/deployments">{(p) => <HistoryPage id={p.id} />}</Route>
             <Route path="/apps/:id/logs">{(p) => <LogsPage id={p.id} />}</Route>
+            <Route path="/apps/:id/team">{(p) => <TeamPage id={p.id} />}</Route>
             <Route path="/apps/:id">{(p) => <Overview id={p.id} />}</Route>
             <Route path="/apps">
               <Dashboard />

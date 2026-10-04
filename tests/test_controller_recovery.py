@@ -27,6 +27,7 @@ class ControllerRecoveryTests(TestCase):
         self.reject = True
         self.cleanup = True
         self.generic_failure = False
+        self.rejection = "BUILD_REJECTED"
         self.fixture.api.helper_caller = self.helper
         for role in ("builder", "worker"):
             db.put_image_selection(
@@ -42,7 +43,7 @@ class ControllerRecoveryTests(TestCase):
         self.calls.append(action)
         if action == "app.build":
             raise remote.HelperError(
-                "PROVIDER_UNAVAILABLE" if self.generic_failure else "BUILD_REJECTED",
+                "PROVIDER_UNAVAILABLE" if self.generic_failure else self.rejection,
                 "fixed build failure",
             )
         if action == "app.build.cleanup":
@@ -187,6 +188,14 @@ class ControllerRecoveryTests(TestCase):
         # A different corrected request is admitted rather than stuck behind the old build.
         self.wait(self.deploy(key=self.other_key, commit="b" * 40))
         self.assertEqual(self.calls.count("app.build"), 2)
+
+    def test_unfetchable_source_fails_cleanly_like_a_rejected_build(self):
+        # The helper couldn't fetch the commit, with or without a deploy key.
+        self.rejection = "SOURCE_REJECTED"
+        operation = self.wait(self.deploy())
+        self.assertEqual((operation.status, operation.cleanup_state), ("failed", "confirmed"))
+        self.assertEqual(operation.phase, "build_rejected")
+        self.assertEqual(self.calls, ["app.build", "app.build.cleanup"])
 
     def test_ambiguous_cleanup_retries_cleanup_only_across_restart(self):
         self.cleanup = False

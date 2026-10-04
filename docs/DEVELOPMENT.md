@@ -216,7 +216,7 @@ for owners/staff. Admin tests verify step-up and typed storage deletion.
 Environment edits apply immediately to running apps; bindings and rotations
 need deployment. There is no optional dotenv import UI in this release.
 
-Create an application, save a public repository URL and Node/Bun settings, then
+Create an application, save a repository URL and Node/Bun settings, then
 deploy a full lowercase 40-character hexadecimal fixture commit. Build output,
 health and deployment results are simulated. Example application URLs use
 example.com and are not local endpoints.
@@ -247,8 +247,8 @@ Open `http://127.0.0.1:9445/sign-in`. HTTP is explicit loopback development,
 with unprefixed development cookies. Production entry points reject development
 mode or custom trust. The HTTPS smoke serves built assets under the production
 CSP: scripts/styles/form-action are self-only and connect is self plus
-`https://api.github.com` (the deploy page's recent commits), with no inline
-scripts or styles. Passwords never enter URLs, application browser storage or screenshots.
+`https://api.github.com` and `https://raw.githubusercontent.com` (the deploy
+page's recent commits and commit check), with no inline scripts or styles. Passwords never enter URLs, application browser storage or screenshots.
 
 The anonymous HMAC binder cookie is HttpOnly, Path=/, SameSite=Strict, Secure
 and __Host-prefixed on HTTPS. Login requires the exact portal Origin plus its

@@ -13,6 +13,9 @@ app.manifest.retain
 app.manifest.verify
 app.promote
 app.remove
+app.source.check
+app.source.key
+app.startup
 app.stop
 app.worker.capacity
 app.worker.create

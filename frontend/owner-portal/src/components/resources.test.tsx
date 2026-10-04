@@ -250,20 +250,44 @@ describe('owner resources', () => {
         author: { name: 'Ada', date: '2026-10-03T12:00:00Z' },
       },
     }));
-    const github = vi.fn(() => Promise.resolve(new Response(JSON.stringify(commits))));
+    const github = vi.fn((url: string) =>
+      Promise.resolve(
+        new Response(
+          url.includes('/commits?')
+            ? JSON.stringify(commits)
+            : url.includes('/git/trees/')
+              ? JSON.stringify({
+                  tree: [
+                    { path: 'package.json', type: 'blob', mode: '100644', size: 30 },
+                    { path: 'package-lock.json', type: 'blob', mode: '100644', size: 2 },
+                  ],
+                })
+              : '{"scripts":{"start":"node ."}}',
+        ),
+      ),
+    );
     vi.stubGlobal('fetch', github);
     const deployment = vi.spyOn(api, 'deploy').mockResolvedValue(intent);
     wrap(<DeployPage id="app" />);
     const group = await screen.findByRole('group', { name: 'Recent commits on main' });
     fireEvent.click(await within(group).findByRole('radio', { name: 'Change 2' }));
     expect(screen.getByLabelText('Commit SHA')).toHaveValue('c'.repeat(40));
+    expect(
+      await screen.findByText(
+        'This commit has the package.json, scripts and lockfile the build needs.',
+      ),
+    ).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Review deployment' }));
     expect(screen.getByRole('dialog')).toHaveTextContent('Change 2');
     fireEvent.click(screen.getByRole('button', { name: 'Deploy' }));
     await waitFor(() =>
       expect(deployment).toHaveBeenCalledWith('app', 3, 'c'.repeat(40), expect.any(String), false),
     );
-    expect(github).toHaveBeenCalledOnce();
+    expect(github.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      '/repos/example/app/commits',
+      '/repos/example/app/git/trees/' + 'c'.repeat(40),
+      '/example/app/' + 'c'.repeat(40) + '/package.json',
+    ]);
   });
   it('confirms sign-in app storage changes through an async callback, never window.confirm', async () => {
     const app = vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: true } as never);
