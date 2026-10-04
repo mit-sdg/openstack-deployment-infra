@@ -168,7 +168,7 @@ export async function checkSnapshot(
   return checks;
 }
 
-/** A public GitHub commit's files, read from the browser. */
+/** A public GitHub commit's files, read from the browser (private ones can't be). */
 export async function githubSnapshot(
   repository: string,
   sha: string,

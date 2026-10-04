@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import socket
 import threading
@@ -37,6 +39,9 @@ class FakeController:
         self.drop_next = False
         self.failed_next = False
         self.recovery_next = False
+        self.source_keys: dict[str, dict[str, str]] = {}
+        # None, or the access problem an access check reports.
+        self.source_problem: str | None = None
         self.delay = 0.6
         self.pause_storage_creation = False
         self.error_next: tuple[int, str] | None = None
@@ -137,6 +142,9 @@ class FakeController:
             ("GET", "/v1/deployments/{deployment}/build-log", self.log),
             ("GET", "/v1/deployments/{deployment}/startup-log", self.startup_log),
             ("GET", "/v1/applications/{app}/runtime-log", self.runtime_log),
+            ("GET", "/v1/applications/{app}/source-key", self.source_key),
+            ("POST", "/v1/applications/{app}/source-key", self.source_key),
+            ("POST", "/v1/applications/{app}/source-key/check", self.source_check),
             ("GET", "/v1/operations/{operation}", self.operation),
             ("GET", "/v1/applications/{app}/environment", self.environment),
             ("PUT", "/v1/applications/{app}/environment/{key}", self.environment_write),
@@ -443,6 +451,40 @@ class FakeController:
         if attempt is None:
             raise HttpError(404, "DEPLOYMENT_NOT_FOUND", "Deployment does not exist.")
         return Response(200, attempt.copy())
+
+    def source_key(self, request: Request) -> Response:
+        app = request.path_parameters["app"]
+        if app not in self.apps:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        keys = self.source_keys
+        if request.method == "POST" and (
+            app not in keys or (isinstance(request.body, dict) and request.body.get("replace"))
+        ):
+            blob = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + os.urandom(32)
+            fingerprint = base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+            keys[app] = {
+                "publicKey": "ssh-ed25519 " + base64.b64encode(blob).decode(),
+                "fingerprint": "SHA256:" + fingerprint,
+                "createdAt": utc(time.time()) or "",
+            }
+        key = keys.get(app)
+        return Response(200, {"applicationId": app, "present": key is not None, **(key or {})})
+
+    def source_check(self, request: Request) -> Response:
+        app = request.path_parameters["app"]
+        if app not in self.source_keys:
+            return Response(200, {"applicationId": app, "keyPresent": False})
+        problem = self.source_problem
+        return Response(
+            200,
+            {
+                "applicationId": app,
+                "keyPresent": True,
+                "reachable": problem is None,
+                "head": None if problem else "0123456789abcdef0123456789abcdef01234567",
+                "problem": problem,
+            },
+        )
 
     def startup_log(self, request: Request) -> Response:
         identifier = request.path_parameters["deployment"]

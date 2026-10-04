@@ -166,6 +166,7 @@ export function DeployPage({ id }: { id: string }) {
                 <RecentCommits
                   repository={settings.data.repository}
                   branch={settings.data.branch}
+                  latest={() => api.checkSourceKey(id)}
                   value={sha}
                   onSelect={(commit) => {
                     setSha(commit.sha);

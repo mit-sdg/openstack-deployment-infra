@@ -216,7 +216,7 @@ for owners/staff. Admin tests verify step-up and typed storage deletion.
 Environment edits apply immediately to running apps; bindings and rotations
 need deployment. There is no optional dotenv import UI in this release.
 
-Create an application, save a public repository URL and Node/Bun settings, then
+Create an application, save a repository URL and Node/Bun settings, then
 deploy a full lowercase 40-character hexadecimal fixture commit. Build output,
 health and deployment results are simulated. Example application URLs use
 example.com and are not local endpoints.

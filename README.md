@@ -44,11 +44,11 @@ socket. The dashboard's generated browser assets are committed with the CLI, so
 operator installation requires no Node tooling. See the
 [dashboard preview and frontend checks](docs/DEVELOPMENT.md#preview-the-operator-dashboard).
 
-The implemented local application workflow supports public, credential-free GitHub
-repositories and typed Node or Bun configuration. Users will not receive SSH,
-OpenStack, Nomad, registry, or database-administrator credentials. Private
-repositories, arbitrary build commands, and Dockerfiles are outside the current
-contract. Owners can set write-only environment variables and provision one
+The implemented local application workflow supports GitHub repositories (public
+ones credential-free, private ones through a per-app read-only deploy key) and
+typed Node or Bun configuration. Users will not receive SSH, OpenStack, Nomad,
+registry, or database-administrator credentials. Arbitrary build commands and
+Dockerfiles are outside the current contract. Owners can set write-only environment variables and provision one
 PostgreSQL database, MongoDB database, and S3 bucket per app. They choose which
 storage outputs bind to which environment names; credentials never appear in
 portal responses. Storage deletion requires an administrator. PostgreSQL connections currently

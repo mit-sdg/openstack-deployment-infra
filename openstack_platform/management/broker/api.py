@@ -24,6 +24,7 @@ from .client import ControllerUnavailable, ProjectClient
 from .database import Database
 from .journal import Journal, intent_model
 from .runtime_logs import RuntimeLogs
+from .source_keys import SourceKeys
 from .staff import StaffReads
 
 RESERVED = {"admin", "api", "auth", "status", "www", "platform", "class"}
@@ -54,6 +55,7 @@ class Broker:
         self.accounts = Accounts(self)
         self.admin_apps = AdminApps(self)
         self.runtime_logs = RuntimeLogs(self)
+        self.source_keys = SourceKeys(self)
         self.request_actor: ContextVar[tuple[str, str | None] | None] = ContextVar(
             "app_request_actor", default=None
         )
@@ -114,6 +116,7 @@ class Broker:
             ("GET", "/v1/staff/apps/{app}/deployments/{deployment}", self.staff.deployment),
             ("GET", "/v1/staff/operations", self.staff.operations),
         ]
+        routes.extend(self.source_keys.routes("/v1/apps"))
         routes.extend(self.admin_apps.routes())
         for method, path, handler in routes:
 

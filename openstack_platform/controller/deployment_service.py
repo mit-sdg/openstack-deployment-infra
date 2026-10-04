@@ -293,7 +293,9 @@ def _call_build(
     try:
         return helper_caller(config, "app.build", arguments, deadline=deadline)
     except remote.HelperError as error:
-        if error.code != "BUILD_REJECTED":
+        # SOURCE_REJECTED: GitHub wouldn't give this commit, with or without the
+        # app's deploy key. Like a rejected build, retrying the same input can't help.
+        if error.code not in {"BUILD_REJECTED", "SOURCE_REJECTED"}:
             raise
         db.checkpoint_operation(connection, operation_id, phase="build_rejected")
         _finish_rejected_build(

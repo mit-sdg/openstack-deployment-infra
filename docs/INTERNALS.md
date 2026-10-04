@@ -137,7 +137,7 @@ phase.
 The implemented controller is used by the locally tested owner portal; that
 browser product is not deployed yet. For a deployment request the controller:
 
-1. validates the application UUID/slug, public credential-free GitHub URL,
+1. validates the application UUID/slug, canonical GitHub URL,
    requested ref, exact commit, configuration revision, and closed typed
    configuration;
 2. records an immutable deployment attempt and accepts the external operation
@@ -383,6 +383,9 @@ capability guarded by the portal admin role.
 | `GET /v1/deployments/{id}/build-log` | Read bounded retained build output |
 | `GET /v1/deployments/{id}/startup-log` | Read a removed candidate's startup record (`captured: false` when none) |
 | `GET /v1/applications/{id}/runtime-log` | Read bounded current runtime output; `stream=stdout` (default) or `stderr` |
+| `GET /v1/applications/{id}/source-key` | Read the app's deploy key: public half and fingerprint only |
+| `POST /v1/applications/{id}/source-key` | Create the deploy key if absent, or replace it with `{"replace": true}` |
+| `POST /v1/applications/{id}/source-key/check` | Check `{repository, branch}` with the deploy key; returns the branch head or a named problem |
 | `GET /v1/applications/{id}/environment` | List environment names and metadata, never values |
 | `PUT /v1/applications/{id}/environment/{key}` | Add or replace one value |
 | `DELETE /v1/applications/{id}/environment/{key}` | Remove one caller-owned value |
@@ -444,6 +447,20 @@ can be added to an existing key. The project socket cannot request them.
 
 With `reuseWorker: true`, `worker_reuse.py` pins the actual existing image and
 worker identity, preserves sizing, and rechecks readiness/capacity before stop.
+Private repositories use a per-app ed25519 deploy key. The helper creates it
+with `ssh-keygen` under `<adminState>/controller/source-keys/<slug>/` (0600),
+returns only the public half, and never hands the private key to the controller,
+broker or builder. A build first fetches over credential-free HTTPS; if that fails
+and the app has a key, it fetches `ssh://git@ssh.github.com:443/OWNER/REPO.git`
+with `IdentitiesOnly`, `BatchMode` and only GitHub's pinned ed25519 host key, then
+applies the same exact-commit checks. If neither works the helper answers
+`SOURCE_REJECTED`, which the controller treats like a rejected build. The owner
+adds the public key on GitHub as a read-only deploy key; only a repository admin
+can, which ties the app to a repository its owner controls. `app.source.check`
+runs `git ls-remote` with the key and names the problem (`key-refused`,
+`not-found`, `branch-missing`, `unavailable`) without echoing GitHub's output.
+Keys are not in the controller backup; a lost key is replaced from Settings.
+
 Before removing a candidate that never became healthy, the controller calls the
 read-only helper action `app.startup` for that exact job slot: the newest
 allocation's status, restart count, last 12 task events and 200-line output and

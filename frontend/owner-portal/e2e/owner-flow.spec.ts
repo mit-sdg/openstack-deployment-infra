@@ -149,6 +149,15 @@ for (const [mode, viewport, colorScheme] of [
               .configuration.build.runtime,
         )
         .toBe('bun');
+      // A private repository: the app gets a deploy key to add on GitHub.
+      const access = page.getByRole('region', { name: 'Private repository' });
+      // Layouts share one app, so later runs find the key already made.
+      const create = access.getByRole('button', { name: 'Create deploy key' });
+      await expect(create.or(access.getByLabel('Deploy key'))).toBeVisible();
+      if (await create.isVisible()) await create.click();
+      await expect(access.getByLabel('Deploy key')).toHaveValue(/^ssh-ed25519 /);
+      await access.getByRole('button', { name: 'Check access' }).click();
+      await expect(access.getByText('GitHub accepts the key. main is at 012345678.')).toBeVisible();
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         window.scrollTo(0, 0);

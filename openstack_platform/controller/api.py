@@ -13,13 +13,20 @@ from typing import Any, Literal
 from .. import openstack, remote
 from ..config import Config
 from ..runtime import safe_summary
-from ..validation import ValidationError, bounded_text, env_key, resource_name, uuid
+from ..validation import (
+    ValidationError,
+    bounded_text,
+    env_key,
+    repository_url,
+    resource_name,
+    uuid,
+)
 from . import application_runtime as app
 from . import database as db
 from . import fixed_ip_service, sizing, status, storage
 from .application_service import ApplicationService
 from .async_operations import AsyncOperationExecutor
-from .deployment_config import parse_configuration
+from .deployment_config import branch_name, parse_configuration
 from .deployment_reads import configuration_snapshot, source_repository
 from .deployment_service import (
     DeploymentDeadlineError,
@@ -30,7 +37,7 @@ from .environment_service import EnvironmentMutationRequest, EnvironmentService
 from .http import HttpError, Request, Response, Router
 from .image_service import IMAGE_SELECTION_KIND, ImageSelectionService, hosted_role
 from .log_service import LogService
-from .service_support import ServiceDeadlineError
+from .service_support import ServiceDeadlineError, operation_deadline
 from .storage_service import StorageMutationRequest, StorageService
 
 API_VERSION = 1
@@ -177,6 +184,9 @@ class ControllerAPI:
             ("GET", "/v1/deployments/{id}/build-log", self._build_log),
             ("GET", "/v1/deployments/{id}/startup-log", self._startup_log),
             ("GET", "/v1/applications/{id}/runtime-log", self._runtime_log),
+            ("GET", "/v1/applications/{id}/source-key", self._get_source_key),
+            ("POST", "/v1/applications/{id}/source-key", self._create_source_key),
+            ("POST", "/v1/applications/{id}/source-key/check", self._check_source_key),
             ("GET", "/v1/applications/{id}/environment", self._get_environment),
             ("PUT", "/v1/applications/{id}/environment/{key}", self._put_environment),
             ("DELETE", "/v1/applications/{id}/environment/{key}", self._delete_environment),
@@ -745,6 +755,94 @@ class ControllerAPI:
                 "state": chunk.state,
                 "nextOffset": chunk.next_offset,
                 "truncated": chunk.truncated,
+            },
+        )
+
+    def _source_key(self, application: db.Application, mode: str) -> Response:
+        """The app's deploy key, as its public half only; the helper keeps the rest."""
+        result = self.helper_caller(
+            self.config,
+            "app.source.key",
+            {"slug": application.slug, "mode": mode},
+            deadline=operation_deadline(self.config),
+        )
+        present = result.get("present")
+        public = result.get("publicKey")
+        if not isinstance(present, bool) or (
+            present
+            and (
+                not isinstance(public, str)
+                or not public.startswith("ssh-ed25519 ")
+                or len(public) > 256
+                or not str(result.get("fingerprint", "")).startswith("SHA256:")
+                or not isinstance(result.get("createdAt"), str)
+            )
+        ):
+            raise app.ApplicationError("helper returned an invalid deploy key")
+        return Response(
+            200,
+            {
+                "applicationId": application.application_id,
+                "present": present,
+                **(
+                    {
+                        "publicKey": public,
+                        "fingerprint": result["fingerprint"],
+                        "createdAt": result["createdAt"],
+                    }
+                    if present
+                    else {}
+                ),
+            },
+        )
+
+    def _get_source_key(self, request: Request) -> Response:
+        self._no_query(request)
+        return self._source_key(self._application(self._path_uuid(request)), "read")
+
+    def _create_source_key(self, request: Request) -> Response:
+        self._no_query(request)
+        body = self._body(request, allowed={"replace"}, allow_absent=True)
+        if not isinstance(body.get("replace", False), bool):
+            raise HttpError(400, "INVALID_BODY", "replace must be boolean")
+        mode = "replace" if body.get("replace") else "create"
+        return self._source_key(self._application(self._path_uuid(request)), mode)
+
+    def _check_source_key(self, request: Request) -> Response:
+        self._no_query(request)
+        application = self._application(self._path_uuid(request))
+        body = self._body(
+            request, allowed={"repository", "branch"}, required={"repository", "branch"}
+        )
+        result = self.helper_caller(
+            self.config,
+            "app.source.check",
+            {
+                "slug": application.slug,
+                "repository": repository_url(body["repository"]),
+                "branch": branch_name(body["branch"]),
+            },
+            deadline=operation_deadline(self.config),
+        )
+        if result.get("keyPresent") is False:
+            return Response(200, {"applicationId": application.application_id, "keyPresent": False})
+        head = result.get("head")
+        problem = result.get("problem")
+        if (
+            result.get("keyPresent") is not True
+            or not isinstance(result.get("reachable"), bool)
+            or not (head is None or (isinstance(head, str) and len(head) == 40))
+            or problem not in {None, "key-refused", "not-found", "branch-missing", "unavailable"}
+        ):
+            raise app.ApplicationError("helper returned invalid repository access evidence")
+        return Response(
+            200,
+            {
+                "applicationId": application.application_id,
+                "keyPresent": True,
+                "reachable": result["reachable"],
+                "head": head,
+                "problem": problem,
             },
         )
 

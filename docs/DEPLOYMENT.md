@@ -27,13 +27,15 @@ Passwords are not saved or logged
 by the portal. No Commons code is maintained in this repository.
 
 The locally tested owner slice creates individual apps within staff quotas,
-configures a public GitHub repository and Node/Bun settings, deploys an exact
-commit and shows status, health, history and build logs. It grants no SSH,
+configures a GitHub repository and Node/Bun settings, deploys an exact
+commit and shows status, health, history and build logs. A private repository
+needs the app's deploy key, which the portal creates and the owner adds to the
+repository on GitHub as a read-only deploy key. It grants no SSH,
 OpenStack, Nomad, registry or storage-administrator credentials. Owner environment variables are write-only, and managed storage supports provisioning,
 verification, rotation and saved bindings. Local admins can change running state
-and delete storage with step-up and typed confirmation; runtime logs remain outside the portal.
-Private repositories, Dockerfiles, arbitrary build commands, custom domains,
-teams, scaling, shell access and credential export remain outside this slice.
+and delete storage with step-up and typed confirmation. Dockerfiles, arbitrary
+build commands, custom domains, teams, scaling, shell access and credential
+export remain outside this slice.
 
 The same portal supports local accounts and DB-assigned owner/staff/admin roles.
 Staff inherit own-app rights and read the broker-known course catalog. Admins
@@ -137,8 +139,8 @@ independent controls that limit what each component can do:
   not a public TCP port. Linux peer credentials separate ordinary project
   operations from destructive operator operations. The browser renderer
   will not be able to open either controller socket directly.
-- **Typed application input.** The controller accepts a public,
-  credential-free GitHub URL, exact commit, supported package scripts, runtime
+- **Typed application input.** The controller accepts a canonical GitHub URL
+  (fetched credential-free, or with the app's deploy key), exact commit, supported package scripts, runtime
   port and health path, and typed storage bindings. It rejects shell commands,
   Dockerfiles, host paths, provider IDs, and unknown fields.
 - **Separated backups.** Hosted-controller state, external operator state, and

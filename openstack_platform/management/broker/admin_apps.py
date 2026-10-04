@@ -60,6 +60,7 @@ class AdminApps:
             ("GET", root + "/{app}/deployments", b.history),
             ("GET", root + "/{app}/deployments/{deployment}", b.deployment),
             ("GET", root + "/{app}/logs", b.runtime_logs.handle),
+            *b.source_keys.routes(root),
             ("PUT", root + "/{app}/owner", self.reassign),
             ("POST", root + "/{app}/state", self.state),
         ]

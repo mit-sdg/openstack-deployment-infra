@@ -14,10 +14,12 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
 import tarfile
+import tempfile
 import time
 import uuid as uuid_module
 from collections.abc import Callable, Mapping, Sequence
@@ -25,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
+from urllib.parse import urlsplit
 
 from ..config import Config, PlatformConfig, RuntimeImages
 from ..contracts import (
@@ -422,6 +425,110 @@ def _source_size(root: Path, maximum_bytes: int) -> int:
     return total
 
 
+# GitHub's SSH endpoint on port 443, so deploy keys need no extra egress, and
+# its published ed25519 host key (SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU,
+# https://api.github.com/meta). A rotation must be released here.
+GITHUB_SSH_HOST = "ssh.github.com"
+GITHUB_SSH_PORT = 443
+GITHUB_SSH_HOST_KEY = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+)
+
+
+def github_ssh_url(repository: str) -> str:
+    """The deploy-key SSH URL for a canonical https://github.com/OWNER/REPO."""
+    path = urlsplit(repository_url(repository)).path
+    return f"ssh://git@{GITHUB_SSH_HOST}:{GITHUB_SSH_PORT}{path}.git"
+
+
+def _github_ssh_environment(ssh_key: Path, directory: Path) -> dict[str, str]:
+    """GIT_SSH_COMMAND that uses only this key and only GitHub's pinned host key."""
+    known_hosts = directory / "known_hosts"
+    known_hosts.write_text(f"[{GITHUB_SSH_HOST}]:{GITHUB_SSH_PORT} {GITHUB_SSH_HOST_KEY}\n")
+    command = [
+        "ssh",
+        "-F",
+        os.devnull,
+        "-i",
+        str(ssh_key),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "IdentityAgent=none",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        f"GlobalKnownHostsFile={os.devnull}",
+        "-o",
+        "HostKeyAlgorithms=ssh-ed25519",
+        "-o",
+        "ConnectTimeout=20",
+    ]
+    return {"GIT_SSH_COMMAND": " ".join(shlex.quote(part) for part in command)}
+
+
+def check_github_access(
+    repository: str,
+    branch: str,
+    ssh_key: Path,
+    *,
+    timeout_seconds: float = 30,
+    command_runner: Callable[..., Any] = run,
+) -> dict[str, Any]:
+    """Whether a deploy key can read a repository, and its branch's newest commit.
+
+    Problems are named, never echoed: key-refused, not-found, branch-missing or
+    unavailable. GitHub's error text stays inside this function.
+    """
+    with tempfile.TemporaryDirectory(prefix="platform-github-ssh-") as directory:
+        environment = {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            **_github_ssh_environment(ssh_key, Path(directory)),
+        }
+        try:
+            listed = command_runner(
+                (
+                    "git",
+                    "-c",
+                    "protocol.file.allow=never",
+                    "ls-remote",
+                    "--heads",
+                    github_ssh_url(repository),
+                    f"refs/heads/{branch}",
+                ),
+                timeout_seconds=timeout_seconds,
+                stdout_limit=65_536,
+                stderr_limit=65_536,
+                env=environment,
+            )
+        except CommandFailure as error:
+            detail = b"" if error.result is None else bytes(error.result.stderr or b"")
+            problem = (
+                "key-refused"
+                if b"Permission denied (publickey)" in detail
+                else "not-found"
+                if b"Repository not found" in detail
+                else "unavailable"
+            )
+            return {"reachable": False, "head": None, "problem": problem}
+    for line in listed.stdout.decode("ascii", errors="replace").splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref == f"refs/heads/{branch}" and re.fullmatch(r"[0-9a-f]{40}", sha):
+            return {"reachable": True, "head": sha, "problem": None}
+    return {"reachable": True, "head": None, "problem": "branch-missing"}
+
+
 def acquire_github_commit(
     repository: str,
     source_commit: str,
@@ -431,20 +538,26 @@ def acquire_github_commit(
     timeout_seconds: float = 300,
     deadline: float | None = None,
     command_runner: Callable[..., Any] = run,
+    ssh_key: Path | None = None,
 ) -> Path:
-    """Acquire exactly one full commit from a credential-free public GitHub URL.
+    """Acquire exactly one full commit from a GitHub repository.
 
-    Git receives no credential environment and cannot use file transport or an
-    interactive prompt. The commit identity is checked before repository
-    metadata is removed from the bounded build context. Dockerfile-named files
-    may remain as inert source; the builder selects a separately generated
-    recipe rather than a file from this checkout.
+    Without ssh_key the fetch is credential-free HTTPS, for public repositories.
+    With it, the fetch uses that deploy key over SSH and GitHub's pinned host
+    key, for private ones. Git otherwise receives no credential environment and
+    cannot use file transport or an interactive prompt. The commit identity is
+    checked before repository metadata is removed from the bounded build
+    context. Dockerfile-named files may remain as inert source; the builder
+    selects a separately generated recipe rather than a file from this checkout.
     """
     canonical_repository = repository_url(repository)
     expected_commit = commit(source_commit)
     root = Path(destination)
     if root.exists() or root.is_symlink():
         raise ValidationError("source destination must not already exist")
+    ssh_material = (
+        None if ssh_key is None else tempfile.TemporaryDirectory(prefix="platform-github-ssh-")
+    )
     root.mkdir(mode=0o700, parents=False)
     git_options = (
         "-c",
@@ -471,6 +584,10 @@ def acquire_github_commit(
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_SYSTEM": os.devnull,
     }
+    source_url = canonical_repository
+    if ssh_key is not None and ssh_material is not None:
+        source_url = github_ssh_url(canonical_repository)
+        environment.update(_github_ssh_environment(ssh_key, Path(ssh_material.name)))
 
     def bounds() -> dict[str, Any]:
         return {
@@ -494,7 +611,7 @@ def acquire_github_commit(
                 "--quiet",
                 "--depth=1",
                 "--no-tags",
-                canonical_repository,
+                source_url,
                 expected_commit,
             ),
             **bounds(),
@@ -571,6 +688,9 @@ def acquire_github_commit(
     except BaseException:
         shutil.rmtree(root, ignore_errors=True)
         raise
+    finally:
+        if ssh_material is not None:
+            ssh_material.cleanup()
 
 
 def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe:

@@ -710,6 +710,7 @@ function DeployDialog({
           <RecentCommits
             repository={repository}
             branch={branch}
+            latest={() => adminAppsApi.resources().checkSourceKey(app.applicationId)}
             value={sha}
             onSelect={(commit) => setSha(commit.sha)}
           />

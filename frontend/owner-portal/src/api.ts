@@ -124,6 +124,19 @@ export type StartupRecord = {
   stderr?: string;
   capturedAt?: string | null;
 };
+/** An app's deploy key for a private repository; only the public half. */
+export type SourceKey =
+  { present: false } | { present: true; publicKey: string; fingerprint: string; createdAt: string };
+/** Whether GitHub accepts the deploy key for the saved repository and branch. */
+export type SourceAccess =
+  | { keyPresent: false }
+  | {
+      keyPresent: true;
+      reachable: boolean;
+      head: string | null;
+      branch: string;
+      problem: 'key-refused' | 'not-found' | 'branch-missing' | 'unavailable' | null;
+    };
 /** stdout ("Output") or stderr ("Errors") of the running app. */
 export type LogStream = 'stdout' | 'stderr';
 /** Recent output of an app; `running` is false when nothing runs to read from. */
@@ -359,7 +372,7 @@ export const api = {
 };
 export function validateSettings(settings: Settings): string | null {
   if (!/^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(settings.repository))
-    return 'Enter a public GitHub repository URL without credentials or query parameters.';
+    return 'Enter a GitHub repository URL like https://github.com/owner/repo, without credentials or query parameters.';
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(settings.branch) ||
     /\.\.|\/\/|@\{|\.lock$|[/.]$/.test(settings.branch)
@@ -500,5 +513,23 @@ export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
         body: await consentFields(id),
         key,
       }),
+    sourceKey: (id: string) =>
+      request(`${prefix}/${id}/source-key`, (v) => {
+        const data = fields(v, { present: 'boolean' });
+        if (data.present) fields(v, { publicKey: 'string', fingerprint: 'string' });
+        return data as SourceKey;
+      }),
+    createSourceKey: (id: string, replace = false) =>
+      request(
+        `${prefix}/${id}/source-key`,
+        (v) => fields(v, { present: 'boolean', publicKey: 'string' }) as SourceKey,
+        { method: 'POST', body: replace ? { replace: true } : {} },
+      ),
+    checkSourceKey: (id: string) =>
+      request(
+        `${prefix}/${id}/source-key/check`,
+        (v) => fields(v, { keyPresent: 'boolean' }) as SourceAccess,
+        { method: 'POST', body: {} },
+      ),
   };
 }
