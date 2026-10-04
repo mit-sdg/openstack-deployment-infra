@@ -3,14 +3,13 @@
  *
  * Cascade layers, lowest first:
  *   ui-base  element resets and defaults
- *   legacy   reserved for pre-redesign page CSS while pages are rebuilt
- *   ui       components and utilities (always win over legacy rules)
- * App CSS outside any layer wins over all three; keep it to page layout.
+ *   ui       components and utilities
+ * App CSS outside any layer wins over both; keep it to page layout.
  *
  * Every size here is a token from tokens.css. Do not add raw pixel values
  * except for hairlines (1px) and icon geometry.
  */
-@layer ui-base, legacy, ui;
+@layer ui-base, ui;
 
 @layer ui-base {
   *,

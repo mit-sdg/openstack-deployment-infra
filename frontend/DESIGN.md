@@ -114,9 +114,8 @@ Alignment rules:
 - Motion: `--ui-duration-fast` 120ms for hovers, `--ui-duration` 200ms for
   overlays. Reduced motion turns animation off.
 
-Styles live in cascade layers: `ui-base` (resets), `legacy` (pre-redesign page
-CSS, see [Migration](#migration)) and `ui` (components). Components always win
-over legacy rules.
+Styles live in two cascade layers: `ui-base` (resets) and `ui` (components).
+Page CSS outside any layer wins over both, so keep it to page layout.
 
 ### Gallery
 
@@ -295,59 +294,18 @@ One word per state, everywhere. Pages pass a state key to the portal
 | local account; `providerLabel` for the other | Commons account, portal account                  |
 | activity                                     | operations, intents, audit (except "Audit log")  |
 
-## Migration
+## Adding or changing pages
 
-Pages that are not rebuilt yet keep their old class names, styled by
-`owner-portal/src/styles/legacy.css` in the lower `legacy` layer. That file
-maps the old color variables to the new tokens, so old pages already follow the
-theme.
-
-Legacy element rules (headings, labels, inputs…) are fenced off from
-anything inside `Page`, `AuthLayout` or `Dialog`, and base rules (body type,
-links, focus) come only from `ui.css`. So a rebuilt page must render its
-content inside `Page` (or `AuthLayout` for signed-out flows) to be measured
-against the system values exactly.
-
-When you rebuild a page:
-
-1. Rewrite it with design-system components. Keep every API call, query key,
+1. Build pages from design-system components. Keep every API call, query key,
    mutation, CSRF/step-up flow, confirmation and write-only behavior.
 2. Keep accessible names that tests depend on, or update the tests. Never
    weaken a security assertion.
-3. Don't edit `legacy.css`, `frontend/shared` or the shell. If something is
-   missing, compose it from existing components or use a page CSS file (below)
-   and note the gap for a later design-system change.
-4. Page-only layout CSS goes in a file next to your pages (for example
-   `src/pages/app/app-pages.css`), imported by your page module, using tokens
-   and unlayered `.your-prefix-*` class names.
-
-`legacy.css` is deleted in a final cleanup once no page renders legacy class
-names.
-
-## Phase 2 tracks
-
-The remaining pages split into three tracks with disjoint files. No track edits
-`frontend/shared`, `App.tsx`, `shell/`, `styles/`, `api.ts`, `authOptions.ts`,
-`components/{Status,Operation,Feedback,ThemeButton,Mark,BoundaryText}.tsx`,
-`utils/presentation.ts` or `hooks/useSession.ts`.
-
-| Track                 | Pages and routes                                                                                                                            | Files it owns                                                                                                                                                                                                                                                                       |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A. App workspace      | New app `/apps/new`; app overview `/apps/:id`; settings `/apps/:id/configuration`; deploy `/apps/:id/deploy`; history and deployment detail | `pages/{NewApp,Overview,Configuration,Deploy,History,Deployment}.tsx`, `components/{AppFrame,DeploymentRow,EnvironmentSection,StorageSection}.tsx`, `hooks/useIntentPolling.ts`, `App.test.tsx`, `components/resources.test.tsx`, `e2e/owner-flow.spec.ts`, `e2e/resources.spec.ts` |
-| B. Staff              | `/staff/owners`, `/staff/owners/:id`, `/staff/apps`, `/staff/apps/:id` and its deployments, `/staff/operations`                             | `pages/Staff.tsx` (split into `pages/staff/*` if useful), `staffApi.ts`, `Staff.test.tsx`                                                                                                                                                                                           |
-| C. Admin and accounts | `/admin/apps`, `/admin/apps/:id`; `/admin/accounts`; `/admin/audit`; account setup `/setup` and `/activate`                                 | `pages/{AdminApps,Accounts,Enrollment}.tsx`, `adminApi.ts`, `adminAppsApi.ts`, `AdminApps.test.tsx`, `e2e/staff-flow.spec.ts`                                                                                                                                                       |
-
-Notes for tracks:
-
-- Track C reuses `EnvironmentSection` and `StorageSection` from track A on
-  admin app pages. Track A keeps their props compatible; track C only passes
-  props.
-- Track C: `Enrollment` should read `/auth/options` through `authOptionsQuery`
-  (`src/authOptions.ts`) so the shell shows the platform name on `/setup`. Also
-  remove the hardcoded "Commons" from the admin adoption confirmation.
-- Track B: staff tabs (Owners, All apps, Activity) are already in the shell;
-  remove the in-page "Staff view · read only" eyebrow.
-- Each track runs the smoke on its own port: `OWNER_PORTAL_SMOKE_PORT=96x0 npm
---prefix frontend/owner-portal run smoke`.
-- Each track adds before/after screenshots at 1440×900 and 390×844 in light
-  and dark.
+3. Render page content inside `Page` (or `AuthLayout` for signed-out flows) so
+   it follows the system's spacing and type exactly.
+4. Page-only layout CSS goes in a file next to the pages (for example
+   `src/pages/app-pages.css`), imported by the page module, using tokens and
+   unlayered `.prefix-*` class names. When a pattern is needed on more than one
+   page, add it to `frontend/shared` and the gallery instead.
+5. When a change adds a bundled dependency or font, add its licence to
+   `frontend/THIRD_PARTY_NOTICES.md`. Builds ship that file as
+   `third-party-notices.txt`.

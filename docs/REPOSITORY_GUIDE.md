@@ -347,8 +347,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/e2e/staff-flow.spec.ts` — loopback staff/owner coexistence, denied writes, joint revocation, expiry and CSP/browser evidence.
 - `frontend/owner-portal/src/api.ts` — typed API/response validation, same-key CSRF retry, and typed settings validation.
 - `frontend/owner-portal/src/App.tsx` — accessible owner routes, configuration, exact-commit review, status/history, and build logs.
-- `frontend/owner-portal/src/styles/app.css` — portal stylesheet entry: shared fonts, tokens and design system, then the legacy layer.
-- `frontend/owner-portal/src/styles/legacy.css` — pre-redesign page styles in a lower cascade layer, kept off rebuilt pages.
+- `frontend/owner-portal/src/styles/app.css` — portal stylesheet entry: shared fonts, tokens and design system.
 - `frontend/owner-portal/src/authOptions.ts` — one shared anonymous sign-in options query (CSRF token, provider label, platform name).
 - `frontend/owner-portal/src/Shell.test.tsx` — shell navigation, account menu, platform name and phone menu tests.
 - `frontend/owner-portal/src/Routing.test.tsx` — nested staff and admin routes render their pages, not the not-found page.
