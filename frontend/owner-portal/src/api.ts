@@ -349,6 +349,18 @@ export const api = {
       (v) => ({ app: appData(record(v).app), intent: intentData(record(v).intent) }),
       { method: 'POST', body: { slug }, key },
     ),
+  state: (id: string, desiredRunning: boolean, key: string, identityProviderConfirmed = false) =>
+    request(`/apps/${id}/state`, intentData, {
+      method: 'POST',
+      body: { desiredRunning, ...(identityProviderConfirmed ? { identityProviderConfirmed } : {}) },
+      key,
+    }),
+  restart: (id: string, key: string, identityProviderConfirmed = false) =>
+    request(`/apps/${id}/restart`, intentData, {
+      method: 'POST',
+      body: identityProviderConfirmed ? { identityProviderConfirmed } : {},
+      key,
+    }),
   deploy: (
     id: string,
     revision: number,

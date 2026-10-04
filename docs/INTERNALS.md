@@ -376,6 +376,7 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}` | Read one application, including a `requiresMaintenance` boolean for retained primary IPv4; no reservation/provider identifiers |
 | `POST /v1/applications/{id}/enable` | Enable an accepted application |
 | `POST /v1/applications/{id}/disable` | Disable an application |
+| `POST /v1/applications/{id}/restart` | Restart the exact accepted running task in place |
 | `POST /v1/applications/{id}/delete` | Privileged cascade deletion with slug confirmation |
 | `POST /v1/applications/{id}/deployments` | Typed exact-commit deployment; optional boolean `maintenance` and reviewed object `plan`; accepted sizing is preserved when plan is absent; worker reuse remains operator-only |
 | `GET /v1/applications/{id}/deployments` | List bounded deployment history |
@@ -663,7 +664,9 @@ logs (`GET /api/v1/apps/{app}/logs?stream=stdout|stderr`, admins through
 at a time, because the controller serves it from Nomad under its shared lock. The configuration page supports write-only environment edits and
 one resource per storage type (`postgres`, `mongo`, `s3`) per app, including pending
 creation intents. The controller allows multiple resource names per type; the
-broker deliberately restricts owners to one. Enable/disable remains later work. Storage deletion and global administrator reads remain
+broker deliberately restricts owners to one. Owner/team stop and start use the same app-scoped lifecycle intents as admins.
+Restart journals a bounded exact-allocation task restart; uncertain calls are not
+automatically repeated. Storage deletion and global administrator reads remain
 operator-only.
 
 Broker resource responses are explicit projections: environment names/revision
@@ -771,7 +774,7 @@ the controller validates against fresh cloud evidence at admission. Omitting a p
 accepted sizing. Class-app consent matches public URL host with Commons origin and is enforced
 server-side for adoption, reassignment, deploy, state and storage changes. Deploy
 and storage consent also apply through ordinary owner routes regardless of role;
-owners still have no stop route. Creating any local account or issuing any invite
+owner stop/start/restart enforce the same consent. Creating any local account or issuing any invite
 requires step-up, including owner/staff accounts.
 
 ### Local identities, roles and admin enrollment

@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { api, ApiError, configurationGuidance, validateSettings, type Settings } from './api';
 import { Status } from './components/Status';
+import { Overview } from './pages/Overview';
 import { ConfigurationForm } from './pages/Configuration';
 
 const settings: Settings = {
@@ -182,5 +183,50 @@ describe('typed API', () => {
     expect(fetch.mock.calls[0][1].headers['Idempotency-Key']).toBe('fixed-key');
     expect(fetch.mock.calls[2][1].headers['Idempotency-Key']).toBe('fixed-key');
     expect(fetch.mock.calls[2][1].headers['X-CSRF-Token']).toBe('replacement');
+  });
+});
+
+describe('owner app controls', () => {
+  it('confirms a restart and uses one idempotency key while preserving the version', async () => {
+    const app = {
+      applicationId: 'app',
+      slug: 'demo',
+      savedRevision: 1,
+      lifecycleState: 'ready',
+      desiredRunning: true,
+      stale: false,
+      activeDeploymentId: 'deployment',
+      acceptedDeployment: {
+        deploymentId: 'deployment',
+        sourceCommit: 'a'.repeat(40),
+        acceptedAt: '2026-10-01T00:00:00Z',
+      },
+    };
+    vi.spyOn(api, 'app').mockResolvedValue(app as never);
+    vi.spyOn(api, 'history').mockResolvedValue({ items: [], nextCursor: null, truncated: false });
+    vi.spyOn(api, 'activity').mockResolvedValue([]);
+    const restart = vi
+      .spyOn(api, 'restart')
+      .mockResolvedValue({ intentId: 'restart', state: 'accepted' } as never);
+    vi.spyOn(api, 'intent').mockResolvedValue({
+      intentId: 'restart',
+      kind: 'app_restart',
+      appId: 'app',
+      state: 'succeeded',
+    } as never);
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <Overview id="app" />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Restart app' }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('same server');
+    expect(screen.getByRole('dialog')).toHaveTextContent('brief interruption');
+    expect(restart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Restart app' })[1]);
+    await waitFor(() => expect(restart).toHaveBeenCalledOnce());
+    expect(restart.mock.calls[0]).toEqual(['app', expect.stringMatching(/^[a-f0-9-]{36}$/), false]);
   });
 });

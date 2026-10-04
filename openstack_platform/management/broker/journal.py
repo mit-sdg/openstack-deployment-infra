@@ -295,7 +295,9 @@ class Journal:
                     else:
                         state, error = (
                             "failed",
-                            "The request was rejected. The slug may be unavailable or the input invalid.",
+                            "Restart is not available yet. Ask an admin to update the platform."
+                            if intent["kind"] == "app_restart" and status == 404
+                            else "The request was rejected. The slug may be unavailable or the input invalid.",
                         )
                 else:
                     raise ControllerUnavailable("unknown controller admission")

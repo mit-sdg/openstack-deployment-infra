@@ -141,6 +141,33 @@ class ApplicationActionTests(unittest.TestCase):
             sleep=lambda _seconds: None,
         )
 
+    def test_restart_targets_only_the_exact_running_allocation(self) -> None:
+        allocation = "00000000-0000-4000-8000-000000000042"
+        self.nomad.allocations[0].update(ID=allocation, JobID="demo-app")
+        args = {
+            "slug": "demo-app",
+            "jobId": "demo-app",
+            "candidateJobSha256": CANDIDATE_SHA,
+            "candidateImage": CANDIDATE_IMAGE,
+        }
+        self.assertEqual(self.actions["app.restart"](args), {"restarted": True})
+        self.assertEqual(
+            self.nomad.calls[-1][0], ("fixed-nomad-wrapper", "alloc", "restart", allocation, "app")
+        )
+        for mutation in ({"JobID": "other-app"}, {"JobVersion": 6}, {"ClientStatus": "dead"}):
+            with self.subTest(mutation=mutation):
+                previous = dict(self.nomad.allocations[0])
+                self.nomad.allocations[0].update(mutation)
+                with self.assertRaises(HelperActionError):
+                    self.actions["app.restart"](args)
+                self.nomad.allocations[0] = previous
+        self.nomad.allocations.append(dict(self.nomad.allocations[0]))
+        with self.assertRaises(HelperActionError):
+            self.actions["app.restart"](args)
+        self.nomad.allocations.pop()
+        with self.assertRaises(HelperActionError):
+            self.actions["app.restart"]({**args, "candidateJobSha256": "f" * 64})
+
     def test_action_surface_is_complete_and_small(self) -> None:
         self.assertEqual(
             set(self.actions),
@@ -152,6 +179,7 @@ class ApplicationActionTests(unittest.TestCase):
                 "app.remove",
                 "app.startup",
                 "app.stop",
+                "app.restart",
                 "app.env.set",
                 "app.env.remove",
                 "app.env.list",

@@ -177,6 +177,7 @@ class ControllerAPI:
             ("GET", "/v1/applications/{id}", self._get_application),
             ("POST", "/v1/applications/{id}/enable", self._enable_application),
             ("POST", "/v1/applications/{id}/disable", self._disable_application),
+            ("POST", "/v1/applications/{id}/restart", self._restart_application),
             ("POST", "/v1/applications/{id}/delete", self._delete_application),
             ("POST", "/v1/applications/{id}/deployments", self._create_deployment),
             ("GET", "/v1/applications/{id}/deployments", self._list_deployments),
@@ -500,6 +501,19 @@ class ControllerAPI:
                 connection, self.config, self.state_directory, helper_caller=self.helper_caller
             ).disable(application.application_id, request_id=key),
             kind="app.disable",
+            scope=f"app-{application.application_id}",
+        )
+
+    def _restart_application(self, request: Request) -> Response:
+        self._no_query(request)
+        self._body(request, allowed=set(), allow_absent=True)
+        application = self._application(self._path_uuid(request))
+        return self._external(
+            request,
+            lambda connection, key: ApplicationService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).restart(application.application_id, request_id=key),
+            kind="app.restart",
             scope=f"app-{application.application_id}",
         )
 

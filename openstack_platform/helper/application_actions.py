@@ -620,6 +620,61 @@ def _promote_handler(
     return handle
 
 
+def _restart_handler(
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+    response_limit: int,
+) -> Handler:
+    def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
+        _exact_args(args, {"slug", "jobId", "candidateJobSha256", "candidateImage"}, "app.restart")
+        application_slug = slug(args["slug"])
+        job_id = args["jobId"]
+        if job_id not in {application_slug, f"{application_slug}-candidate"}:
+            raise ValidationError("Nomad job ID is not an application deployment job")
+        sha256_hex(args["candidateJobSha256"], field="candidate job SHA-256")
+        oci_digest_pin(args["candidateImage"], field="candidate image")
+        deadline = time.monotonic() + min(timeout_seconds, 30)
+
+        def bounds() -> dict[str, Any]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HelperActionError("RESTART_TIMEOUT", "task restart exceeded its deadline")
+            return {
+                "command_runner": command_runner,
+                "nomad_command": nomad_command,
+                "timeout_seconds": remaining,
+                "response_limit": response_limit,
+            }
+
+        identity = _inspected_candidate(job_id, **bounds())
+        if identity is None or identity[1:] != (args["candidateJobSha256"], args["candidateImage"]):
+            raise HelperActionError("JOB_IDENTITY_MISMATCH", "accepted job identity changed")
+        running = [
+            item
+            for item in _allocations(job_id, **bounds())
+            if item.get("ClientStatus") == "running" and item.get("DesiredStatus") == "run"
+        ]
+        if (
+            len(running) != 1
+            or running[0].get("JobVersion") != identity[0]
+            or running[0].get("JobID") != job_id
+        ):
+            raise HelperActionError("ALLOCATION_NOT_FOUND", "one exact running task is required")
+        allocation_id = uuid(running[0].get("ID"), field="allocation ID")
+        command_runner(
+            (*nomad_command, "alloc", "restart", allocation_id, "app"),
+            timeout_seconds=bounds()["timeout_seconds"],
+            stdout_limit=65_536,
+            stderr_limit=65_536,
+            check=True,
+        )
+        return {"restarted": True}
+
+    return handle
+
+
 def _logs_handler(
     *,
     command_runner: Callable[..., Any],
@@ -1417,6 +1472,12 @@ def handlers(
             response_limit=response_limit,
         ),
         "app.startup": _startup_handler(
+            command_runner=command_runner,
+            nomad_command=command,
+            timeout_seconds=timeout_seconds,
+            response_limit=response_limit,
+        ),
+        "app.restart": _restart_handler(
             command_runner=command_runner,
             nomad_command=command,
             timeout_seconds=timeout_seconds,

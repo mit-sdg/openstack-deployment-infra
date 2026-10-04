@@ -228,6 +228,37 @@ class ProductServiceTests(unittest.TestCase):
         )
         return created.application_id, server_id, port_id, image
 
+    def test_restart_preserves_the_worker_and_never_repeats_uncertain_calls(self) -> None:
+        application_id, server_id, port_id, _image = self.accepted_application()
+        helper = mock.Mock(return_value={"restarted": True})
+        service = ApplicationService(
+            self.connection, self.config, self.root / "service-state", helper_caller=helper
+        )
+        key = "00000000-0000-4000-8000-000000000071"
+        service.restart(application_id, request_id=key)
+        self.assertEqual(helper.call_count, 1)
+        self.assertEqual(helper.call_args.args[1], "app.restart")
+        current = db.get_application(self.connection, application_id)
+        self.assertEqual((current.worker_server_id, current.worker_port_id), (server_id, port_id))
+        self.assertTrue(current.desired_running)
+        self.assertEqual(db.get_operation(self.connection, key).status, "succeeded")
+        interrupted = "00000000-0000-4000-8000-000000000072"
+        db.begin_operation(
+            self.connection,
+            operation_id=interrupted,
+            kind="app.restart",
+            scope=f"app-{application_id}",
+            phase="restart_requested",
+            deadline_at=db.utc_now(),
+            refs=dict(db.get_operation(self.connection, key).refs),
+        )
+        service.restart(application_id, request_id=interrupted)
+        self.assertEqual(helper.call_count, 1)
+        self.assertEqual(db.get_operation(self.connection, interrupted).status, "failed")
+        db.set_application_runtime(self.connection, application_id, running=False)
+        with self.assertRaises(ValidationError):
+            service.restart(application_id, request_id="00000000-0000-4000-8000-000000000073")
+
     def test_disable_stops_exact_runtime_and_preserves_accepted_state(self) -> None:
         application_id, server_id, port_id, image = self.accepted_application()
         calls: list[tuple[str, dict[str, object]]] = []

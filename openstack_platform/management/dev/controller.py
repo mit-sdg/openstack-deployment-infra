@@ -145,6 +145,7 @@ class FakeController:
             ("GET", "/v1/applications/{app}/source-key", self.source_key),
             ("POST", "/v1/applications/{app}/source-key", self.source_key),
             ("POST", "/v1/applications/{app}/source-key/check", self.source_check),
+            ("POST", "/v1/applications/{app}/restart", self.restart),
             ("GET", "/v1/operations/{operation}", self.operation),
             ("GET", "/v1/applications/{app}/environment", self.environment),
             ("PUT", "/v1/applications/{app}/environment/{key}", self.environment_write),
@@ -748,6 +749,17 @@ class FakeController:
             raise HttpError(400, "INVALID_BODY", "Confirmation mismatch.")
         self.resources.pop(request.path_parameters["resource"])
         return self.resource_operation(request, resource["applicationId"], "storage.remove")
+
+    def restart(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay is not None:
+            return replay
+        app = request.path_parameters["app"]
+        if app not in self.apps:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        if not self.apps[app]["desiredRunning"]:
+            raise HttpError(409, "APP_STOPPED", "The app must be running.")
+        return self.resource_operation(request, app, "app.restart")
 
     def running_state(self, request: Request) -> Response:
         replay = self.replay(request)

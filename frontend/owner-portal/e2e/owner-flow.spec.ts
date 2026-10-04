@@ -231,6 +231,34 @@ for (const [mode, viewport, colorScheme] of [
         path: path.join(screenshots, `${mode}-build-log.png`),
         fullPage: true,
       });
+      await page.goto(`/apps/${appId}`);
+      for (const action of ['Restart', 'Stop', 'Start']) {
+        await page.getByRole('button', { name: `${action} app`, exact: true }).click();
+        const dialog = page.getByRole('dialog');
+        await expect(dialog).toBeVisible();
+        await expect(dialog).toContainText(
+          action === 'Restart'
+            ? 'brief interruption'
+            : action === 'Stop'
+              ? 'frees its server'
+              : 'last deployed version',
+        );
+        await dialog.getByRole('button', { name: `${action} app`, exact: true }).click();
+        await expect(
+          page
+            .getByText(
+              `App ${action === 'Restart' ? 'restarted' : action === 'Stop' ? 'stopped' : 'started'}`,
+              { exact: false },
+            )
+            .first(),
+        ).toBeVisible();
+        await expect(
+          page.getByRole('button', {
+            name: action === 'Stop' ? 'Start app' : 'Stop app',
+            exact: true,
+          }),
+        ).toBeEnabled();
+      }
       await page.goto(`/apps/${appId}/logs`);
       await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
       await page.evaluate(() => {

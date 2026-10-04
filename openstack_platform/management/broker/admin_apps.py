@@ -67,6 +67,7 @@ class AdminApps:
             *b.members.routes(root),
             ("PUT", root + "/{app}/owner", self.reassign),
             ("POST", root + "/{app}/state", self.state),
+            ("POST", root + "/{app}/restart", self.restart),
         ]
 
     def handle(self, request: Request, handler: Callable[[Request], Response]) -> Response:
@@ -553,6 +554,20 @@ class AdminApps:
             "app_" + action,
             "POST",
             f"/v1/applications/{app['id']}/{action}",
+            {},
+        )
+
+    def restart(self, request: Request) -> Response:
+        b = self.broker
+        actor, app = b.own(request, mutation=True)
+        b.identity_mutation_body(request, app, set())
+        return self.dispatch(
+            request,
+            actor,
+            app,
+            "app_restart",
+            "POST",
+            f"/v1/applications/{app['id']}/restart",
             {},
         )
 

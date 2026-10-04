@@ -75,6 +75,7 @@ APP_ACTIONS = (
     "app.manifest.verify",
     "app.promote",
     "app.remove",
+    "app.restart",
     "app.source.check",
     "app.source.key",
     "app.startup",

@@ -162,6 +162,23 @@ class ControllerAPITests(unittest.TestCase):
             )
         self.assertEqual(error.exception.code, "NOT_FOUND")
 
+    def test_task_restart_is_project_scoped_idempotent_and_busy_guarded(self) -> None:
+        application = self.create_application().body["applicationId"]
+        service = mock.Mock()
+        with mock.patch(
+            "openstack_platform.controller.api.ApplicationService", return_value=service
+        ):
+            route = f"/v1/applications/{application}/restart"
+            key = "00000000-0000-4000-8000-000000000081"
+            response = self.dispatch("POST", route, {}, self.headers(key))
+            self.assertEqual(response.status, 202)
+            self.api.wait_for_operations()
+            replay = self.dispatch("POST", route, {}, self.headers(key))
+            self.assertEqual(replay.body["operationId"], response.body["operationId"])
+            self.assertEqual(service.restart.call_count, 1)
+            with self.assertRaises(HttpError):
+                self.dispatch("POST", route, {"allocationId": "other"}, self.headers(key))
+
     def test_runtime_log_reads_the_selected_stream(self) -> None:
         application = self.create_application().body["applicationId"]
         calls: list[dict[str, object]] = []

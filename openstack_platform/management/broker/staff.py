@@ -133,6 +133,7 @@ INTENT_KINDS = frozenset(
         "adopt_app",
         "app_enable",
         "app_disable",
+        "app_restart",
     }
 )
 
