@@ -83,6 +83,11 @@
   margin-top: var(--ui-space-2);
 }
 
+/* Storage rows can run to several lines: keep their actions on the title line. */
+.app-resources .ui-list__item {
+  align-items: flex-start;
+}
+
 /* Binding editor rows: output, variable name and an action on one line. */
 .app-bindings {
   display: flex;

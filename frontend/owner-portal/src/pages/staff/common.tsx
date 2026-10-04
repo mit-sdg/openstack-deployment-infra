@@ -361,7 +361,11 @@ export function deploymentColumns(app: string, live?: string | null): Column<Sta
       key: 'status',
       header: 'Status',
       mobile: 'trailing',
-      cell: (deployment) => <Status state={deployment.status} />,
+      // The live deployment is marked by its commit; repeating "Succeeded" adds nothing.
+      cell: (deployment) =>
+        deployment.deploymentId === live && deployment.status === 'succeeded' ? null : (
+          <Status state={deployment.status} />
+        ),
     },
     {
       key: 'requested',

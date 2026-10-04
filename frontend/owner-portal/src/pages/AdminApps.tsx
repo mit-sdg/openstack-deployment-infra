@@ -67,6 +67,9 @@ function ManagedCatalog() {
     queryFn: () => adminAppsApi.list(cursor),
   });
   const stepUp = useStepUp();
+  // The catalog knows only an app's lifecycle, not its health. A created app
+  // shows no state; the column appears only when some app needs attention.
+  const attention = (catalog.data?.items ?? []).some((app) => app.lifecycleState !== 'ready');
   const columns: Column<CatalogApp>[] = [
     {
       key: 'name',
@@ -78,12 +81,17 @@ function ManagedCatalog() {
         </Link>
       ),
     },
-    {
-      key: 'status',
-      header: 'Status',
-      mobile: 'trailing',
-      cell: (app) => <Status state={app.lifecycleState} />,
-    },
+    ...(attention
+      ? [
+          {
+            key: 'status',
+            header: 'Status',
+            mobile: 'trailing' as const,
+            cell: (app: CatalogApp) =>
+              app.lifecycleState === 'ready' ? null : <Status state={app.lifecycleState} />,
+          },
+        ]
+      : []),
     {
       key: 'owner',
       header: 'Owner',
