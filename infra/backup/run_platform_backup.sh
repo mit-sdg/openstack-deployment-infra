@@ -10,6 +10,8 @@ BACKUP_ROOT=${BACKUP_ROOT:-$PLATFORM_BACKUPS/$PLATFORM_NAMESPACE}
 AGE=${AGE:-$PLATFORM_ROOT/bin/age}
 AGE_KEY=${AGE_KEY:-$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt}
 AGE_KEYGEN=${AGE_KEYGEN:-$PLATFORM_ROOT/bin/age-keygen}
+GARAGE_VERIFY_SCRIPT=${GARAGE_VERIFY_SCRIPT:-$SCRIPT_DIR/verify_garage_backup.py}
+SERVICE_CHECK_PYTHON=${SERVICE_CHECK_PYTHON:-$PLATFORM_ROOT/tools/service-check-venv/bin/python}
 EMIT_SCRIPT=${EMIT_SCRIPT:-$PLATFORM_ROOT/persistent/platform/infra/backup/emit_logical_backup.sh}
 RETENTION_DAYS=${RETENTION_DAYS:-14}
 
@@ -33,6 +35,10 @@ for service in postgres mongodb garage; do
       --output "$tmp/${service}.age"
   test -s "$tmp/${service}.age"
   "$AGE" --decrypt --identity "$AGE_KEY" "$tmp/${service}.age" >/dev/null
+  if [[ $service == garage ]]; then
+    "$AGE" --decrypt --identity "$AGE_KEY" "$tmp/garage.age" | \
+      "$SERVICE_CHECK_PYTHON" "$GARAGE_VERIFY_SCRIPT"
+  fi
   echo "$service backup verified"
 done
 (

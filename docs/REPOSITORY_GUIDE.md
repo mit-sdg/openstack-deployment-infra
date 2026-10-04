@@ -61,7 +61,9 @@ operator, the helper, CI, or systemd. They are not a second public CLI.
 
 ### Backup and recovery
 
-- `infra/backup/emit_garage_backup.py` — streams a restorable Garage object catalog and payload archive.
+- `infra/backup/emit_garage_backup.py` — grants read-only backup access and streams every app bucket, key grant and object.
+- `infra/backup/garage_catalog.py` — validates bounded Garage catalogs, reads admin inventory and remaps offline restored bucket identities.
+- `infra/backup/verify_garage_backup.py` — validates object archives and compares coverage with the admin bucket inventory.
 - `infra/backup/emit_logical_backup.sh` — selects PostgreSQL, MongoDB, or Garage and emits its logical backup stream.
 - `infra/backup/full_loss_recovery_drill.sh` — verifies or performs a bounded full-loss drill from an off-site bundle and escrowed identities.
 - `infra/backup/init_garage_backup_key.py` — creates and persists the non-expiring read-only Garage backup key once.
@@ -263,6 +265,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_dashboard.py` — dashboard admin reader, parser, probe, status projection, refresh, HTTP security, command, static asset, and release-identity tests.
 - `tests/test_deployment_config.py` — typed deployment configuration and Git branch/ref resolution tests.
 - `tests/test_documentation.py` — documentation links, consolidated reader paths, interface claims, route coverage, and repository-index checks.
+- `tests/test_garage_backup.py` — tests read-only grants, complete bucket coverage, bounded archives and key/object recovery.
 - `tests/test_full_loss_recovery_drill.py` — full and verify-only recovery drill command/evidence/failure-boundary tests.
 - `tests/test_hardening_properties.py` — generated property cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
 - `tests/test_helper_registry_artifact.py` — scoped read-only artifact graph verification, missing content, digest tampering, and secret-safe results.

@@ -558,6 +558,18 @@ The deployment has three independent backup classes:
    `<paths.backups>/controller`.
 3. **Managed data:** encrypted PostgreSQL, MongoDB, and Garage catalog/data under timestamped namespace directories.
 
+Garage's S3 bucket list is scoped to the calling key. Backup uses the admin API
+bucket inventory for platform-prefix app aliases, grants the `platform-backup`
+key read access at creation and again before export, and explicitly denies write
+and owner access. Every app bucket must be readable. Garage catalog format 2
+includes original bucket IDs, quotas, app keys and grants inside `garage.age`;
+verification compares catalog buckets and IDs with the admin inventory. Restore
+creates buckets through the admin API, imports the original app keys, restores
+objects/grants and remaps new bucket IDs in the offline replacement controller
+SQLite. Its temporary backup-key write grants are revoked even on failure;
+unconfirmed revocation prevents success evidence. Legacy catalog format 1 remains
+inspectable, but nonempty restore requires separate key/grant recovery.
+
 Each accepted set uses ciphertext/data, checksums, and a final manifest as its
 commit marker. Managed restore verification uses disposable PostgreSQL and
 MongoDB containers and validates Garage archives before writing

@@ -762,6 +762,13 @@ printf '%s\n' "$managed_backup"
 grep -Eq '^platform backup complete: .+$' <<<"$managed_backup"
 ```
 
+Garage export enumerates platform-prefix app buckets through the admin API,
+backfills read-only `platform-backup` grants, and fails if any bucket is unreadable.
+Verification compares the catalog with that same admin inventory, so an empty
+or partial archive cannot pass while app buckets exist. A bucket created/deleted
+between backup and verification requires a fresh backup. Garage catalog format 2
+also retains app S3 keys, bucket quotas and grants, encrypted inside `garage.age`.
+
 New managed-data sets use `format_version=3` and contain encrypted
 `postgres.age`, `mongodb.age`, and `garage.age`, plus `MANIFEST` and
 `SHA256SUMS`. App OCI images are excluded. Older format-2 sets remain accepted
@@ -979,7 +986,24 @@ The work path must be absent. The drill imports and verifies the bundle,
 restores both SQLite databases to private replacement directories, verifies
 restored image/application/accepted-deployment records, and runs destructive
 managed replacement restore. `DRILL-EVIDENCE.json` is committed only after all
-SQLite and managed restore checks succeed.
+SQLite and managed restore checks succeed. The Garage fixture must include
+objects and app grants to exercise recovery beyond an empty catalog. Restore
+imports app keys with their original IDs/secrets and recreates read/write app
+grants. The backup key gains write only during restore; every touched bucket is
+returned to read-only access before success is reported. Revocation failure
+requires an operator to deny write/owner on that key before reopening services.
+
+Garage creates new bucket IDs. The drill passes its offline replacement hosted
+SQLite through `GARAGE_RESTORE_CONTROLLER_DATABASE`; restore validates each
+original bucket name/ID against `managed_resources`, then commits the new IDs in
+one transaction. For standalone `restore_managed_data.sh --yes DIRECTORY`, set
+that variable to your private, current-user-owned mode-0600 replacement hosted
+SQLite with no WAL/SHM sidecars. Keep the controller and backup units stopped;
+install the remapped SQLite through the hosted restore launcher afterwards.
+Keep the original snapshot for retry. Catalog-format-1 archives have no app keys
+or grants: inspection remains supported, but nonempty restore refuses until
+separate key/grant recovery is performed. Older backups cannot recover S3 data
+that their ungranted key omitted.
 
 For archive and SQLite inspection without service mutation:
 

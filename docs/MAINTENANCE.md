@@ -1009,3 +1009,9 @@ backup-volume mount dependency. Retain and verify existing format-2 evidence;
 it remains readable. New sets exclude app images. After full restore, follow
 [rebuild app images](OPERATIONS.md#rebuild-app-images-after-full-restore) using
 the controller's accepted commits and settings before reopening apps.
+
+The same admin update grants read-only backup access on new app buckets and
+backfills existing buckets at backup time. After replacement, run a fresh
+managed-data backup and its coverage check; retain the resulting catalog-format-2
+archive before claiming S3 full-loss recovery. The Garage storage image stays
+pinned to v2.3.0; these changes use its existing admin API.

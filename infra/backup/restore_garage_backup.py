@@ -1,125 +1,179 @@
 #!/usr/bin/env python3
-"""Restore a bounded Garage catalog archive from stdin without path extraction."""
+"""Restore Garage objects, keys and grants with temporary write permission."""
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import sys
 import tarfile
 from pathlib import Path
-
-import boto3
-from botocore.config import Config
-from botocore.exceptions import ClientError
+from typing import Any, BinaryIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib.platform_config import load  # noqa: E402
-from lib.platform_contract import CONTRACT  # noqa: E402
-
-CONFIG = load()
-HOST = CONFIG["addresses"]["storage"]
-ROOT = Path(CONFIG["paths"]["root"])
-SECRETS_FILE = Path(os.environ.get("GARAGE_BACKUP_SECRETS", ROOT / "secrets/garage-backup.env"))
-CA_FILE = os.environ.get("GARAGE_CA_FILE", str(ROOT / "secrets/nomad-cli/internal-ca.pem"))
-MAX_OBJECTS = 100_000
-MAX_OBJECT_BYTES = int(os.environ.get("GARAGE_RESTORE_MAX_OBJECT_BYTES", str(8 * 1024**3)))
-BUCKET = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
+from backup.garage_catalog import (  # noqa: E402
+    app_buckets,
+    backup_grant,
+    object_payloads,
+    read_manifest,
+    remap_controller,
+    runtime,
+)
 
 
-def secrets() -> dict[str, str]:
-    metadata = SECRETS_FILE.lstat()
-    if not SECRETS_FILE.is_file() or SECRETS_FILE.is_symlink() or metadata.st_mode & 0o077:
-        raise RuntimeError("Garage backup secret file must be a direct private file")
-    values = dict(line.split("=", 1) for line in SECRETS_FILE.read_text().splitlines() if line)
-    if values.keys() != {"GARAGE_BACKUP_ACCESS_KEY", "GARAGE_BACKUP_SECRET_KEY"}:
-        raise RuntimeError("Garage backup secret file has unexpected keys")
-    return values
+def restore_archive(
+    admin: Any,
+    s3: Any,
+    prefix: str,
+    creds: dict[str, str],
+    stream: BinaryIO,
+    *,
+    controller_database: Path | None = None,
+) -> tuple[int, int]:
+    key_id = creds["GARAGE_BACKUP_ACCESS_KEY"]
+    touched: list[str] = []
+    mapping = []
+    with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+        manifest = read_manifest(archive)
+        if manifest["format_version"] == 1 and manifest["buckets"]:
+            raise RuntimeError(
+                "Legacy Garage archives have no app keys; recover grants separately before restore"
+            )
+        metadata = manifest.get("bucket_metadata", [])
+        if metadata and controller_database is None:
+            raise RuntimeError(
+                "Garage bucket restore requires the offline replacement controller database"
+            )
+        # Look up keys without treating an admin transport failure as absence.
+        keys = admin.request("ListKeys")
+        if not isinstance(keys, list) or len(keys) >= 10_000:
+            raise RuntimeError("Garage key inventory is malformed or may be truncated")
+        known_keys = {item["id"] for item in keys}
+        if key_id not in known_keys:
+            admin.request(
+                "ImportKey",
+                {
+                    "accessKeyId": key_id,
+                    "secretAccessKey": creds["GARAGE_BACKUP_SECRET_KEY"],
+                    "name": "platform-backup",
+                },
+            )
+        admin.request("UpdateKey", {"deny": {"createBucket": True}}, id=key_id)
+        existing = {item["name"]: item for item in app_buckets(admin, prefix)}
+        try:
+            for bucket in metadata:
+                if not bucket["name"].startswith(prefix + "-"):
+                    raise RuntimeError("Garage archive belongs to a different prefix")
+                current = existing.get(bucket["name"])
+                if current is None:
+                    current = admin.request("CreateBucket", {"globalAlias": bucket["name"]})
+                identifier = current["id"]
+                # Include in cleanup before a call that may apply then lose its response.
+                touched.append(identifier)
+                backup_grant(admin, identifier, key_id, write=True)
+                for alias in bucket["aliases"]:
+                    if alias != bucket["name"]:
+                        admin.request(
+                            "AddBucketAlias", {"bucketId": identifier, "globalAlias": alias}
+                        )
+                admin.request("UpdateBucket", {"quotas": bucket["quotas"]}, id=identifier)
+                for key in bucket["keys"]:
+                    if key["accessKeyId"] not in known_keys:
+                        admin.request(
+                            "ImportKey",
+                            {
+                                name: key[name]
+                                for name in ("accessKeyId", "secretAccessKey", "name")
+                            },
+                        )
+                        known_keys.add(key["accessKeyId"])
+                    observed = admin.request(
+                        "GetKeyInfo", id=key["accessKeyId"], showSecretKey="true"
+                    )
+                    if any(
+                        observed.get(name) != key[name]
+                        for name in ("accessKeyId", "secretAccessKey", "name")
+                    ):
+                        raise RuntimeError("Garage app key conflicts with restore identity")
+                    admin.request(
+                        "DenyBucketKey",
+                        {
+                            "bucketId": identifier,
+                            "accessKeyId": key["accessKeyId"],
+                            "permissions": {"read": False, "write": False, "owner": True},
+                        },
+                    )
+                    admin.request(
+                        "AllowBucketKey",
+                        {
+                            "bucketId": identifier,
+                            "accessKeyId": key["accessKeyId"],
+                            "permissions": key["permissions"],
+                        },
+                    )
+                restored_info = admin.request("GetBucketInfo", id=identifier)
+                for key in bucket["keys"]:
+                    matches = [
+                        grant
+                        for grant in restored_info.get("keys", [])
+                        if grant.get("accessKeyId") == key["accessKeyId"]
+                    ]
+                    if len(matches) != 1 or matches[0].get("permissions") != key["permissions"]:
+                        raise RuntimeError("Garage restored app grant could not be confirmed")
+                mapping.append(
+                    {"name": bucket["name"], "old_id": bucket["id"], "new_id": identifier}
+                )
+            seen = 0
+            for record, body in object_payloads(archive, manifest):
+                s3.put_object(
+                    Bucket=record["bucket"],
+                    Key=record["key"],
+                    Body=body,
+                    ContentLength=record["size"],
+                )
+                if (
+                    s3.head_object(Bucket=record["bucket"], Key=record["key"]).get("ContentLength")
+                    != record["size"]
+                ):
+                    raise RuntimeError("Garage restored object size did not match")
+                seen += 1
+            if controller_database is not None:
+                remap_controller(controller_database, mapping)
+        finally:
+            # Attempt every revocation even if one fails. A revocation failure
+            # must prevent successful restore evidence, including on an error path.
+            failed = False
+            for identifier in touched:
+                try:
+                    backup_grant(admin, identifier, key_id)
+                except Exception:
+                    failed = True
+            if failed:
+                raise RuntimeError("Garage restore backup write revocation is unconfirmed")
+    return seen, len(manifest["buckets"])
 
 
 def main() -> int:
     try:
-        creds = secrets()
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=f"https://{HOST}:{CONTRACT['ports']['garageS3']}",
-            region_name="garage",
-            aws_access_key_id=creds["GARAGE_BACKUP_ACCESS_KEY"],
-            aws_secret_access_key=creds["GARAGE_BACKUP_SECRET_KEY"],
-            verify=CA_FILE,
-            config=Config(connect_timeout=8, read_timeout=120, retries={"max_attempts": 2}),
-        )
-        with tarfile.open(fileobj=sys.stdin.buffer, mode="r|gz") as archive:
-            member = archive.next()
-            if (
-                member is None
-                or member.name != "manifest.json"
-                or not member.isfile()
-                or member.size > 64 * 1024**2
-            ):
-                raise RuntimeError("Garage archive manifest is missing or unsafe")
-            handle = archive.extractfile(member)
-            manifest = json.load(handle) if handle is not None else None
-            if not isinstance(manifest, dict) or manifest.get("format_version") != 1:
-                raise RuntimeError("Garage archive manifest is unsupported")
-            buckets = manifest.get("buckets")
-            objects = manifest.get("objects")
-            if (
-                not isinstance(buckets, list)
-                or not isinstance(objects, list)
-                or len(objects) > MAX_OBJECTS
-                or any(not isinstance(item, str) or not BUCKET.fullmatch(item) for item in buckets)
-            ):
-                raise RuntimeError("Garage archive inventory is malformed")
-            for bucket in buckets:
-                try:
-                    s3.create_bucket(Bucket=bucket)
-                except ClientError as error:
-                    if error.response.get("Error", {}).get("Code") not in {
-                        "BucketAlreadyExists",
-                        "BucketAlreadyOwnedByYou",
-                    }:
-                        raise
-            seen = 0
-            for member in archive:
-                if (
-                    seen >= len(objects)
-                    or member.name != f"objects/{seen:012d}.bin"
-                    or not member.isfile()
-                ):
-                    raise RuntimeError("Garage archive object order is malformed")
-                record = objects[seen]
-                if not isinstance(record, dict):
-                    raise RuntimeError("Garage archive object record is malformed")
-                size = record.get("size")
-                bucket = record.get("bucket")
-                key = record.get("key")
-                if (
-                    isinstance(size, bool)
-                    or not isinstance(size, int)
-                    or not 0 <= size <= MAX_OBJECT_BYTES
-                    or member.size != size
-                    or bucket not in buckets
-                    or not isinstance(key, str)
-                    or not key
-                    or len(key.encode()) > 1024
-                ):
-                    raise RuntimeError("Garage archive object is unsafe")
-                body = archive.extractfile(member)
-                if body is None:
-                    raise RuntimeError("Garage archive object is unreadable")
-                s3.put_object(Bucket=bucket, Key=key, Body=body, ContentLength=size)
-                observed = s3.head_object(Bucket=bucket, Key=key).get("ContentLength")
-                if observed != size:
-                    raise RuntimeError("Garage restored object size did not match")
-                seen += 1
-            if seen != len(objects):
-                raise RuntimeError("Garage archive omitted objects")
-        print(f"garage-restore=verified objects={seen} buckets={len(buckets)}")
+        admin, s3, prefix, creds = runtime()
+        path = os.environ.get("GARAGE_RESTORE_CONTROLLER_DATABASE")
+        try:
+            objects, buckets = restore_archive(
+                admin,
+                s3,
+                prefix,
+                creds,
+                sys.stdin.buffer,
+                controller_database=Path(path) if path else None,
+            )
+        finally:
+            s3.close()
+        print(f"garage-restore=verified objects={objects} buckets={buckets}")
         return 0
-    except (OSError, ValueError, RuntimeError, tarfile.TarError, ClientError) as error:
-        print(f"Garage restore failed: {error}", file=sys.stderr)
+    except Exception:
+        print(
+            "Garage restore failed; objects, app grants or read-only backup access could not be confirmed",
+            file=sys.stderr,
+        )
         return 1
 
 

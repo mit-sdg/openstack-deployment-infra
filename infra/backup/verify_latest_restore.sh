@@ -1,10 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+GARAGE_VERIFY_SCRIPT=${GARAGE_VERIFY_SCRIPT:-}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib/platform-config.sh
 source "$SCRIPT_DIR/../lib/platform-config.sh"
 load_platform_config
+GARAGE_VERIFY_SCRIPT=${GARAGE_VERIFY_SCRIPT:-$SCRIPT_DIR/verify_garage_backup.py}
 export POSTGRES_IMAGE=${POSTGRES_IMAGE:-$PLATFORM_POSTGRES_IMAGE}
 export MONGODB_IMAGE=${MONGODB_IMAGE:-$PLATFORM_MONGODB_IMAGE}
 
@@ -93,26 +95,8 @@ done
 admin_shell 'podman exec $MONGO_RESTORE_CONTAINER mongosh --quiet --eval '"'"'if (db.getSiblingDB("admin").getCollectionNames().length < 1) quit(1)'"'"''
 echo "mongodb restore=verified"
 
-"$AGE" --decrypt --identity "$AGE_KEY" "$latest/garage.age" | python3 -c '
-import json,sys,tarfile
-archive=tarfile.open(fileobj=sys.stdin.buffer,mode="r|gz")
-manifest_member=archive.next()
-assert manifest_member.name=="manifest.json"
-manifest=json.load(archive.extractfile(manifest_member))
-assert manifest["format_version"]==1
-seen=0
-for member in archive:
-    if member.name=="manifest.json":
-        continue
-    expected=manifest["objects"][seen]
-    assert member.name==f"objects/{seen:012d}.bin"
-    assert member.size==expected["size"]
-    payload=archive.extractfile(member)
-    while payload.read(1024*1024): pass
-    seen+=1
-assert seen==len(manifest["objects"])
-assert isinstance(manifest["buckets"], list)
-'
+"$AGE" --decrypt --identity "$AGE_KEY" "$latest/garage.age" | \
+  "${SERVICE_CHECK_PYTHON:-python3}" "$GARAGE_VERIFY_SCRIPT"
 echo "garage restore archive=verified"
 if grep -qx 'format_version=2' "$latest/MANIFEST"; then
   echo "legacy registry.age skipped; app images are rebuilt after restore"

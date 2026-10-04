@@ -554,6 +554,7 @@ let
               machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'SECRETS_FILE=%t/${namespace}-backup-private/storage-bootstrap.env'")
               machine.succeed("systemctl show ${namespace}-platform-backup.service -p Requires --value | grep -F '${builtins.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" backups)}.mount'")
               machine.fail("systemctl cat ${namespace}-platform-backup.service | grep -F REGISTRY_BACKUP_")
+              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F '/backup/verify_garage_backup.py'")
               machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran && rm ${state}/operator/status/managed-backup-probe-ran")
               machine.succeed("test $(stat -c %U:%G:%a ${root}/secrets/storage-bootstrap.env) = agentops:platform-controller:640")
               machine.fail("test -e /run/credentials/${namespace}-platform-backup.service/storage-bootstrap")

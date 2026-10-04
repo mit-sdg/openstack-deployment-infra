@@ -30,7 +30,9 @@ AGE=${AGE:-age}
 OPERATOR_RESTORE_LAUNCHER=${OPERATOR_RESTORE_LAUNCHER:-openstack-platform-restore}
 HOSTED_RESTORE_LAUNCHER=${HOSTED_RESTORE_LAUNCHER:-openstack-platform-controller-restore}
 BROKER_RESTORE_LAUNCHER=${BROKER_RESTORE_LAUNCHER:-openstack-platform-management-broker-backup}
+GARAGE_VERIFY_SCRIPT=${GARAGE_VERIFY_SCRIPT:-}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+GARAGE_VERIFY_SCRIPT=${GARAGE_VERIFY_SCRIPT:-$SCRIPT_DIR/verify_garage_backup.py}
 MANAGED_RESTORE_LAUNCHER=${MANAGED_RESTORE_LAUNCHER:-$SCRIPT_DIR/restore_managed_data.sh}
 umask 077
 install -d -m 0700 "$WORK"
@@ -95,21 +97,8 @@ PYKEYS
 fi
 
 managed="$IMPORTED/managed-data"
-"$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/garage.age" | python3 -c '
-import json,sys,tarfile
-archive=tarfile.open(fileobj=sys.stdin.buffer,mode="r|gz")
-member=archive.next()
-assert member is not None and member.name=="manifest.json"
-manifest=json.load(archive.extractfile(member))
-assert manifest["format_version"]==1 and isinstance(manifest["objects"],list)
-seen=0
-while (member:=archive.next()) is not None:
- assert member.name==f"objects/{seen:012d}.bin"
- payload=archive.extractfile(member)
- while payload.read(1024*1024): pass
- seen+=1
-assert seen==len(manifest["objects"])
-'
+"$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/garage.age" | \
+  "${SERVICE_CHECK_PYTHON:-python3}" "$GARAGE_VERIFY_SCRIPT" --offline
 echo "recovery archives=verified"
 
 if [[ $MODE == --verify-only ]]; then
@@ -192,7 +181,7 @@ finally:
 PY
 )"
 
-managed_output="$(PLATFORM_CONFIG="$PLATFORM_CONFIG" AGE_KEY="$MANAGED_IDENTITY" "$MANAGED_RESTORE_LAUNCHER" --yes "$managed")"
+managed_output="$(PLATFORM_CONFIG="$PLATFORM_CONFIG" AGE_KEY="$MANAGED_IDENTITY" GARAGE_RESTORE_CONTROLLER_DATABASE="$hosted_destination" "$MANAGED_RESTORE_LAUNCHER" --yes "$managed")"
 printf '%s\n' "$managed_output"
 grep -Eq '^managed-data-restore=verified source=' <<<"$managed_output"
 

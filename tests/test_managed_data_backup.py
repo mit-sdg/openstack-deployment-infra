@@ -41,6 +41,7 @@ fi
         )
         self._tool("age-keygen", "echo age1fixture\n")
         self._tool("emit", 'echo "$1 fixture data"\n')
+        self._tool("verify.py", "cat >/dev/null\n")
         self._tool("podman", "cat >/dev/null\n")
         self.environment = {
             **os.environ,
@@ -50,6 +51,7 @@ fi
             "AGE": str(self.bin / "age"),
             "AGE_KEY": str(self.key),
             "AGE_KEYGEN": str(self.bin / "age-keygen"),
+            "GARAGE_VERIFY_SCRIPT": str(self.bin / "verify.py"),
             "EMIT_SCRIPT": str(self.bin / "emit"),
             "SECRETS_FILE": str(self.secrets),
             "SERVICE_CHECK_PYTHON": str(self.bin / "podman"),

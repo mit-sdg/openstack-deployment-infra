@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import test_garage_backup as garage_fixtures
+
 
 class FullLossRecoveryDrillTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -73,12 +75,7 @@ class FullLossRecoveryDrillTests(unittest.TestCase):
 
     def _managed_archives(self) -> None:
         managed = self.bundle / "managed-data"
-        stream = io.BytesIO()
-        with tarfile.open(fileobj=stream, mode="w:gz") as archive:
-            payload = json.dumps({"format_version": 1, "objects": []}).encode()
-            member = tarfile.TarInfo("manifest.json")
-            member.size = len(payload)
-            archive.addfile(member, io.BytesIO(payload))
+        stream, _, _ = garage_fixtures.GarageBackupTests().archive()
         (managed / "garage.age").write_bytes(stream.getvalue())
         for path in managed.iterdir():
             path.chmod(0o600)
@@ -158,6 +155,8 @@ if [[ -n $keys ]]; then
  python3 - "$keys" "$destination" "$keys_destination" <<'PYKEYS'
 import sqlite3,sys
 from pathlib import Path
+
+from tests import test_garage_backup as garage_fixtures
 from openstack_platform.controller.source_key_backup import prepare_source_key_restore,commit_source_key_restore
 connection=sqlite3.connect(sys.argv[2])
 destination=Path(sys.argv[3])

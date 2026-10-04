@@ -1206,6 +1206,7 @@ in
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
+        "GARAGE_VERIFY_SCRIPT=${infra}/backup/verify_garage_backup.py"
         "SECRETS_FILE=%t/${namespace}-backup-private/storage-bootstrap.env"
         # Rootless Podman needs the NixOS setuid newuidmap/newgidmap wrappers.
         "PATH=/run/wrappers/bin:${
