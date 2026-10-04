@@ -43,7 +43,7 @@ function When({ value }: { value: string | null }) {
 /** Active is the expected state; the portal Status keeps it quiet. */
 function AccountState({ account }: { account: Account }) {
   if (!account.enabled) return <Status state="disabled" />;
-  if (account.status === 'pending') return <Status state="pending" label="Setup pending" />;
+  if (account.status === 'pending') return <Status state="pending" />;
   return <Status state="active" />;
 }
 

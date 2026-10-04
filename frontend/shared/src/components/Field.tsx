@@ -53,7 +53,9 @@ export function Field({
 }) {
   const generated = useId();
   const controlId = id ?? generated;
-  const hintId = hint ? `${controlId}-hint` : undefined;
+  // An error replaces the hint, so the two never stack or disagree; errors
+  // must therefore state the rule themselves.
+  const hintId = hint && !error ? `${controlId}-hint` : undefined;
   const errorId = error ? `${controlId}-error` : undefined;
   return (
     <div className={`ui-field ${className}`.trim()}>
@@ -78,7 +80,7 @@ export function Field({
           <span>{error}</span>
         </p>
       )}
-      {hint && (
+      {hint && !error && (
         <p id={hintId} className="ui-hint">
           {hint}
         </p>

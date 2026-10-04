@@ -1157,6 +1157,14 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+  /* A disabled option dims its label too, not just the control. */
+  .ui-choice:has(.ui-choice__input:disabled, .ui-switch__input:disabled) {
+    cursor: not-allowed;
+  }
+  .ui-choice:has(.ui-choice__input:disabled, .ui-switch__input:disabled)
+    .ui-choice__text {
+    opacity: 0.5;
+  }
   .ui-choice__text {
     display: flex;
     flex-direction: column;

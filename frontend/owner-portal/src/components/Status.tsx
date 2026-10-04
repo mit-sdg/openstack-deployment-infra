@@ -28,6 +28,8 @@ const labels: Record<string, string> = {
   disabled: 'Disabled',
   rolled_back: 'Rolled back',
   not_deployed: 'Not deployed',
+  // Accounts.
+  pending: 'Setup pending',
 };
 const tones: Record<string, Tone> = {
   succeeded: 'success',
@@ -47,6 +49,7 @@ const tones: Record<string, Tone> = {
   recovery_required: 'danger',
   unhealthy: 'danger',
   rejected: 'danger',
+  pending: 'warning',
 };
 /** The normal, expected states. They never get a badge. */
 export const defaultStates = new Set(['succeeded', 'healthy', 'ready', 'active', 'live']);

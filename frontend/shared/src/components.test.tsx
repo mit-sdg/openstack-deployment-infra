@@ -28,21 +28,29 @@ import {
 } from "./index";
 
 describe("form fields", () => {
-  it("labels the control and describes it with its hint and error", () => {
-    render(
+  it("labels the control and describes it with its hint, or its error instead", () => {
+    const { rerender } = render(
+      <Field label="Health path" hint="Use /health.">
+        <Input defaultValue="/health" />
+      </Field>,
+    );
+    const input = screen.getByLabelText("Health path");
+    expect(input).not.toHaveAttribute("aria-invalid");
+    expect(input).toHaveAccessibleDescription("Use /health.");
+    rerender(
       <Field
         label="Health path"
         hint="Use /health."
-        error="Start with a slash."
+        error="Start the path with a slash, like /health."
       >
         <Input defaultValue="health" />
       </Field>,
     );
-    const input = screen.getByLabelText("Health path");
     expect(input).toHaveAttribute("aria-invalid", "true");
     expect(input).toHaveAccessibleDescription(
-      "Start with a slash. Use /health.",
+      "Start the path with a slash, like /health.",
     );
+    expect(screen.queryByText("Use /health.")).toBeNull();
   });
   it("keeps optional markers out of the accessible label", () => {
     render(
