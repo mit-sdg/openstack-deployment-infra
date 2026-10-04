@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import http.client
+import json
 import os
 import socket
 import tempfile
@@ -200,6 +201,23 @@ class CeremonyTests(ManagementCase):
             self.assert_error(
                 "NOT_FOUND", lambda route=route: self.call("POST", "/v1/auth/" + route, {})
             )
+
+    def test_options_and_session_expose_configured_display_labels(self) -> None:
+        options = self.call("GET", "/v1/auth/options").body["data"]
+        self.assertEqual(options["providerLabel"], "class account")
+        self.assertEqual(options["platformName"], "App platform")
+        self.login()
+        session = self.call("GET", "/v1/session", owner="alice").body["data"]
+        self.assertEqual(session["platformName"], "App platform")
+        self.config = dataclasses.replace(
+            self.config, platform_name="Example Platform", class_label="Example account"
+        )
+        self.broker.auth.config = self.config
+        options = self.call("GET", "/v1/auth/options").body["data"]
+        self.assertEqual(
+            (options["providerLabel"], options["platformName"]),
+            ("Example account", "Example Platform"),
+        )
 
     def test_generic_invalid_disabled_and_unavailable_errors(self) -> None:
         self.assert_error("INVALID_CREDENTIALS", lambda: self.attempt("missing", "incorrect"))
@@ -976,6 +994,54 @@ class WebTransportTests(ManagementCase):
         ):
             self.assertIn(self.web_request(path).status, {400, 404})
         self.assertEqual(self.web_request("/", {"Host": "evil.example.com"}).status, 400)
+
+    def test_unknown_page_navigations_get_the_app_shell_with_404(self) -> None:
+        navigation = {"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
+        for path in (
+            "/no-such-page",
+            "/staff/no-such-page",
+            "/admin/whatever",
+            "/staff/owners/a/b",
+        ):
+            for headers in (navigation, {"Sec-Fetch-Mode": "navigate"}):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", self.web.server_port, timeout=2
+                )
+                connection.request("GET", path, headers={"Host": "127.0.0.1:18080", **headers})
+                response = connection.getresponse()
+                body = response.read()
+                connection.close()
+                self.assertEqual(response.status, 404, path)
+                self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
+                self.assertIn(b"Owner portal", body)
+                policy = response.getheader("Content-Security-Policy") or ""
+                self.assertEqual(policy, self.web.csp())
+                self.assertEqual(response.getheader("X-Frame-Options"), "DENY")
+                self.assertEqual(response.getheader("Cache-Control"), "no-store")
+                self.assertEqual(response.getheader("Referrer-Policy"), "strict-origin")
+        # Non-navigations, API/auth paths and assets keep the JSON 404.
+        for path, headers in (
+            ("/no-such-page", {}),
+            ("/no-such-page", {"Accept": "*/*"}),
+            ("/api/v1/no-such-route", navigation),
+            ("/auth/no-such-route", navigation),
+            ("/assets/missing.js", navigation),
+            ("/missing.js", {"Accept": "*/*"}),
+        ):
+            connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
+            connection.request("GET", path, headers={"Host": "127.0.0.1:18080", **headers})
+            response = connection.getresponse()
+            body = response.read()
+            connection.close()
+            self.assertEqual(response.status, 404, path)
+            self.assertEqual(response.getheader("Content-Type"), "application/json", path)
+            self.assertEqual(json.loads(body)["error"]["code"], "NOT_FOUND")
+        # Unsafe paths are still rejected before any page is served.
+        self.assertEqual(self.web_request("/../config.json", navigation).status, 400)
+        self.assertEqual(self.web_request("/assets/%2e%2e/config", navigation).status, 400)
+        self.assertEqual(
+            self.web_request("/x", {**navigation, "Host": "evil.example.com"}).status, 400
+        )
 
     def test_cookie_directives_and_response_limit(self) -> None:
         https = dataclasses.replace(self.config, portal_origin="https://platform.example.com")

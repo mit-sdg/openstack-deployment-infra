@@ -41,7 +41,6 @@ export function useSession() {
     return () => window.clearTimeout(timer);
   }, [signIn, session.data?.expiresAt]);
   useEffect(() => {
-    document.title = `${location.startsWith('/staff') ? 'Staff view' : 'My applications'} · Owner portal`;
     document.getElementById('main')?.focus();
   }, [location]);
   return { signIn, session, logout };

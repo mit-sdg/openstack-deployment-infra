@@ -337,12 +337,29 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/public/favicon.svg` — code-native portal mark.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory TanStack Query setup.
 - `frontend/owner-portal/src/staffApi.ts` — strict staff metadata types/decoders and CSRF-bearing, cancellable GET reads.
-- `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff directory, quota, application, history and operation pages with bounded polling.
+- `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff route table and session-activity provider.
+- `frontend/owner-portal/src/pages/staff/common.tsx` — staff polling and chained reads, paging, load and not-found states, table columns and activity rows.
+- `frontend/owner-portal/src/pages/staff/Owners.tsx` — staff owner list and owner page with quotas, apps and recent activity.
+- `frontend/owner-portal/src/pages/staff/Apps.tsx` — staff app list (owner filter) and app page with health, deployments and activity.
+- `frontend/owner-portal/src/pages/staff/Deployments.tsx` — staff deployment history and deployment pages.
+- `frontend/owner-portal/src/pages/staff/Activity.tsx` — staff activity feed with owner and app filters.
 - `frontend/owner-portal/src/Staff.test.tsx` — mode navigation, credential entry, decoder, CSRF, cache clearing and inactivity tests.
 - `frontend/owner-portal/e2e/staff-flow.spec.ts` — loopback staff/owner coexistence, denied writes, joint revocation, expiry and CSP/browser evidence.
 - `frontend/owner-portal/src/api.ts` — typed API/response validation, same-key CSRF retry, and typed settings validation.
 - `frontend/owner-portal/src/App.tsx` — accessible owner routes, configuration, exact-commit review, status/history, and build logs.
-- `frontend/owner-portal/src/app.css` — external dashboard-language tokens, light/dark themes, cards, responsive tables/forms, and drawer styling.
+- `frontend/owner-portal/src/styles/app.css` — portal stylesheet entry: shared fonts, tokens and design system.
+- `frontend/owner-portal/src/authOptions.ts` — one shared anonymous sign-in options query (CSRF token, provider label, platform name).
+- `frontend/owner-portal/src/Shell.test.tsx` — shell navigation, account menu, platform name and phone menu tests.
+- `frontend/owner-portal/src/Routing.test.tsx` — nested staff and admin routes render their pages, not the not-found page.
+- `frontend/owner-portal/src/pages/app-pages.css` — app workspace page layout built from design tokens.
+- `frontend/owner-portal/src/pages/admin/common.tsx` — admin step-up dialog flow, owner picker, debouncing and plain error wording.
+- `frontend/owner-portal/src/pages/admin/admin.css` — admin and account page layout built from design tokens.
+- `frontend/owner-portal/src/pages/admin/QrCode.tsx` — authenticator setup QR code rendered as plain SVG.
+- `frontend/owner-portal/src/pages/admin/QrCode.test.tsx` — spec-level QR decoder round-trip tests for the setup code.
+- `frontend/owner-portal/gallery.html` — Vite-dev-only entry for the component gallery; not part of production builds.
+- `frontend/owner-portal/src/gallery/main.tsx` — component gallery root for screenshot review.
+- `frontend/owner-portal/src/gallery/Gallery.tsx` — every design system component in its variants and states.
+- `frontend/owner-portal/src/gallery/gallery.css` — gallery-only layout helpers.
 - `frontend/owner-portal/src/test-setup.ts` — Vitest DOM assertions and component cleanup.
 - `frontend/owner-portal/src/App.test.tsx` — configuration behavior, errors, status semantics, API decoding, and CSRF retry tests.
 - `frontend/owner-portal/e2e/owner-flow.spec.ts` — two-owner HTTPS product smoke, lost-response recovery, strict CSP, and sanitized visual evidence.
@@ -357,6 +374,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/Mark.tsx` — shared owner Mark component and presentation behavior.
 - `frontend/owner-portal/src/components/Operation.tsx` — shared owner Operation component and presentation behavior.
 - `frontend/owner-portal/src/components/Status.tsx` — shared owner Status component and presentation behavior.
+- `frontend/owner-portal/src/components/Repository.tsx` — repository links labelled with their short owner/repo name.
 - `frontend/owner-portal/src/components/StorageSection.tsx` — owner storage provisioning, bindings, verification and rotation controls.
 - `frontend/owner-portal/src/components/ThemeButton.tsx` — shared owner ThemeButton component and presentation behavior.
 - `frontend/owner-portal/src/components/presentation.test.tsx` — shared owner presentation.test component and presentation behavior.
@@ -461,18 +479,34 @@ is tracked.
 - `frontend/scripts/source-policy.test.mjs` — rejection tests for unsafe source and cross-app dependencies.
 - `frontend/shared/package.json` — source-only shared presentation exports and React peer dependency.
 - `frontend/shared/src/BoundaryText.tsx` — text-only line-break opportunities for URLs and paths.
-- `frontend/shared/src/Feedback.tsx` — parameterized empty/loading/error presentation and focus policy.
-- `frontend/shared/src/Layout.tsx` — presentation-only card, activity row and shell slots.
+- `frontend/shared/src/legacy/Feedback.tsx` — pre-redesign empty/loading/error presentation used by the operator dashboard.
+- `frontend/shared/src/legacy/Layout.tsx` — pre-redesign card, activity row and shell slots used by the operator dashboard.
 - `frontend/shared/src/Mark.tsx` — common code-native SVG brand mark.
-- `frontend/shared/src/StatusBadge.tsx` — explicit label/tone status presentation with an optional indicator.
-- `frontend/shared/src/ThemeButton.tsx` — system/light/dark selection with an app-specific storage key.
+- `frontend/shared/src/legacy/StatusBadge.tsx` — pre-redesign label/tone status presentation used by the operator dashboard.
+- `frontend/shared/src/legacy/ThemeButton.tsx` — pre-redesign system/light/dark selector used by the operator dashboard.
+- `frontend/shared/src/Icon.tsx` — design-system SVG icon set.
+- `frontend/shared/src/components/Button.tsx` — buttons and icon buttons with variants, sizes, loading state and spinner.
+- `frontend/shared/src/components/Data.tsx` — data tables with phone row roles, lists, key–value lists, code/log view and copy field.
+- `frontend/shared/src/components/Feedback.tsx` — badges, quiet status text, alerts, load errors, empty states, skeletons and toasts.
+- `frontend/shared/src/components/Field.tsx` — labelled fields with hints and errors, inputs, password input, select, textarea, checkbox, radio and switch.
+- `frontend/shared/src/components/Overlay.tsx` — modal dialog (a bottom sheet on phones), tab navigation and segmented control.
+- `frontend/shared/src/components/Page.tsx` — page, page header, section, card, layout primitives and the sign-in layout.
+- `frontend/shared/src/components/Shell.tsx` — app shell with brand, role navigation, account menu and phone menu.
+- `frontend/shared/src/components/Text.tsx` — relative times and copyable short IDs.
+- `frontend/shared/src/components/ThemeToggle.tsx` — system/light/dark theme toggle and stored preference.
+- `frontend/shared/src/components.test.tsx` — design system component behaviour and accessibility tests.
+- `frontend/shared/src/fonts.css` — self-hosted Inter and JetBrains Mono, Latin subset, from pinned npm packages.
+- `frontend/shared/src/ui.css` — design system styles in cascade layers above the legacy layer.
+- `frontend/DESIGN.md` — portal design system: tokens, components, layout, status vocabulary and copy rules.
+- `frontend/THIRD_PARTY_NOTICES.md` — licences for the bundled fonts and QR code encoder.
 - `frontend/shared/src/index.ts` — explicit shared presentation export surface.
 - `frontend/shared/src/presentation.test.tsx` — escaped text and independent theme-preference checks.
-- `frontend/shared/src/primitives.css` — shared base controls, cards, statuses and preference rules.
+- `frontend/shared/src/legacy/primitives.css` — pre-redesign base controls, cards and statuses used by the operator dashboard.
+- `frontend/shared/src/legacy/tokens.css` — pre-redesign light/dark surface, typography and status tokens used by the operator dashboard.
 - `frontend/shared/src/test-setup.ts` — shared test DOM cleanup and preference reset.
-- `frontend/shared/src/tokens.css` — common light/dark surface, typography and status tokens.
+- `frontend/shared/src/tokens.css` — design tokens: light-dark() colors, type scale, spacing, radii, shadows, motion and control sizes.
 - `frontend/shared/tsconfig.json` — strict shared component TypeScript checks.
 - `frontend/shared/vite.config.ts` — shared component Vitest browser-like test configuration.
-- `openstack_platform/dashboard/static/assets/index-HVBM2P2O.js` — generated operator React production bundle.
+- `openstack_platform/dashboard/static/assets/index-DrkvrrYi.js` — generated operator React production bundle.
 - `openstack_platform/dashboard/static/assets/style-D_0t2pU2.css` — generated operator shared/operator production stylesheet.
 - `frontend/scripts/theme-plugin.ts` — emits the shared external theme bootstrap and serves it in the portal Vite preview.

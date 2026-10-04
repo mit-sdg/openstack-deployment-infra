@@ -148,6 +148,15 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             index = self.assets / "index.html"
             if index.is_file() and index.stat().st_size <= 1048576:
                 return Reply(200, index.read_bytes(), "text/html; charset=utf-8")
+        # A browser navigating to an unknown page gets the app shell with a 404
+        # status, so the app renders its own "Page not found". Asset and script
+        # requests keep the JSON 404 (the /api/ and /auth/ prefixes never get here).
+        if not path.startswith("/assets/") and (
+            headers.get("sec-fetch-mode") == "navigate" or "text/html" in headers.get("accept", "")
+        ):
+            index = self.assets / "index.html"
+            if index.is_file() and index.stat().st_size <= 1048576:
+                return Reply(404, index.read_bytes(), "text/html; charset=utf-8")
         return error_reply(404, "NOT_FOUND")
 
     def forward(

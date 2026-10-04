@@ -101,6 +101,8 @@ export type Session = {
   expiresAt: string;
   role: 'owner' | 'staff' | 'admin';
   stepUpExpiresAt: string | null;
+  /** Brand shown in the shell; absent from older brokers. */
+  platformName?: string;
 };
 export type Page<T> = { items: T[]; nextCursor: string | null; truncated: boolean };
 export type BuildLog = {
@@ -261,6 +263,7 @@ export const api = {
         if (!['owner', 'staff', 'admin'].includes(String(data.role)))
           throw new Error('Invalid session role');
         csrf = data.csrfToken as string;
+        if (typeof data.platformName !== 'string' || !data.platformName) delete data.platformName;
         return data as Session;
       },
       undefined,
@@ -374,16 +377,33 @@ export function validateBindings(bindings: StorageBinding[], names: string[]): s
   return null;
 }
 
+/** Thrown when someone declines a storage confirmation; never shown as an error. */
+export class ActionCanceled extends Error {
+  constructor() {
+    super('Action canceled.');
+  }
+}
+
+/**
+ * Asks to confirm a storage change on the app that runs portal sign-in, for
+ * example in a Dialog. Resolve true to continue.
+ */
+export type ConfirmStorage = () => boolean | Promise<boolean>;
+
 // Both workspaces use the same resource requests and write-only controls.
-export function resourceApi(prefix = '/apps', confirmStorage?: () => boolean) {
+// Owner requests confirm only for the sign-in app; admin requests let the
+// callback decide. There is no native confirm fallback: owner storage changes
+// on the sign-in app need a ConfirmStorage callback.
+export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
   async function consentFields(id: string) {
-    if (!confirmStorage) {
-      if (prefix !== '/apps' || !(await api.app(id)).identityProvider) return {};
-      if (!window.confirm('Portal sign-in depends on this app. Confirm this storage change?'))
-        throw new Error('Action canceled.');
-      return { identityProviderConfirmed: true };
-    }
-    if (!confirmStorage()) throw new Error('Action canceled.');
+    if (prefix === '/apps') {
+      if (!(await api.app(id)).identityProvider) return {};
+      if (!confirmStorage)
+        throw new Error(
+          'Portal sign-in depends on this app. Confirm storage changes from its settings page.',
+        );
+    } else if (!confirmStorage) return {};
+    if (!(await confirmStorage())) throw new ActionCanceled();
     return { identityProviderConfirmed: true };
   }
   return {

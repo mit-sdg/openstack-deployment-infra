@@ -1,5 +1,5 @@
-@import "@openstack-platform/ui/tokens.css";
-@import "@openstack-platform/ui/primitives.css";
+@import "@openstack-platform/ui/legacy/tokens.css";
+@import "@openstack-platform/ui/legacy/primitives.css";
 
 :root {
   --bar-empty: #e6e6e2;

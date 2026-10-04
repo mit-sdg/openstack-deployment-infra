@@ -1,5 +1,9 @@
 import { useState } from "react";
-import { ActivityRow, Card, type Tone } from "@openstack-platform/ui";
+import {
+  ActivityRow,
+  LegacyCard as Card,
+  type LegacyTone as Tone,
+} from "@openstack-platform/ui";
 import { Icon, ToneIcon } from "./Icons";
 import {
   Badge,

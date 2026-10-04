@@ -20,11 +20,20 @@ export type AdminAudit = {
   action: string;
   details: Record<string, unknown>;
   createdAt: string;
+  actorUsername: string | null;
+  actorDisplayName: string | null;
+  targetUsername: string | null;
+  targetDisplayName: string | null;
 };
 export const adminApi = {
-  accounts: (q = '', cursor?: string) =>
+  accounts: (q = '', cursor?: string, limit?: number) =>
     request(
-      '/accounts?' + new URLSearchParams({ ...(q ? { q } : {}), ...(cursor ? { cursor } : {}) }),
+      '/accounts?' +
+        new URLSearchParams({
+          ...(q ? { q } : {}),
+          ...(cursor ? { cursor } : {}),
+          ...(limit ? { limit: String(limit) } : {}),
+        }),
       (v) =>
         pageData(
           v,

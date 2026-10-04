@@ -1,4 +1,4 @@
-import type { Tone } from "@openstack-platform/ui";
+import type { LegacyTone as Tone } from "@openstack-platform/ui";
 
 export type Status = { key: string; label: string; tone: Tone };
 export type History = { at: string; tone: Tone };

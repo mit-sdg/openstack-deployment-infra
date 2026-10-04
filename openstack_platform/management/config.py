@@ -102,6 +102,8 @@ class Config:
     anonymous_options_per_minute: int = 600
     anonymous_starts_per_minute: int = 400
     class_label: str = "class account"
+    # Shown as the portal brand; production derives it from inventory displayName.
+    platform_name: str = "App platform"
 
     @property
     def issuer(self) -> str:
@@ -157,6 +159,7 @@ class Config:
             "anonymousOptionsPerMinute",
             "anonymousStartsPerMinute",
             "classLabel",
+            "platformName",
         }
         if (
             not isinstance(value, dict)
@@ -215,6 +218,7 @@ class Config:
             raise ValueError("invalid ingress peers")
         peers = [str(ipaddress.ip_address(peer)) for peer in peers]
         header = value.get("clientAddressHeader")
+        platform_name = text(value.get("platformName", "App platform"), 120)
         if development:
             if header is not None:
                 raise ValueError("development uses the actual loopback peer")
@@ -236,6 +240,9 @@ class Config:
                 if name != "platformConfig"
             ):
                 raise ValueError("management configuration differs from platform inventory")
+            platform_name = text(platform.get("displayName"), 120)
+            if value.get("platformName", platform_name) != platform_name:
+                raise ValueError("platform name must match platform inventory")
             peer = str(ipaddress.ip_address(platform.get("addresses.ingress")))
             if peers and peers != [peer]:
                 raise ValueError("trusted ingress must match platform inventory")
@@ -259,4 +266,5 @@ class Config:
             anonymous_options_per_minute=limits[4],
             anonymous_starts_per_minute=limits[5],
             class_label=text(value.get("classLabel", "class account"), 80),
+            platform_name=platform_name,
         )

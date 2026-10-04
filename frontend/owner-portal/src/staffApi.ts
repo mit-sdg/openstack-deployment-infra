@@ -5,7 +5,10 @@ export type StaffOwner = {
   username: string;
   displayName: string;
   portalEnabled: boolean;
+  role: 'owner' | 'staff' | 'admin';
 };
+/** Owner names that list rows carry, so lists need no per-owner reads. */
+type OwnerName = { ownerUsername: string; ownerDisplayName: string };
 export type StaffCatalogApp = {
   applicationId: string;
   ownerId: string;
@@ -15,6 +18,7 @@ export type StaffCatalogApp = {
   createdAt: string | null;
   repository: string | null;
 };
+export type StaffAppRow = StaffCatalogApp & OwnerName;
 export type StaffApp = StaffCatalogApp & {
   url: string | null;
   desiredRunning: boolean;
@@ -40,9 +44,10 @@ export type StaffDeployment = {
   acceptedAt: string | null;
   lastHealthyAt: string | null;
 };
-export type StaffOperation = {
+export type StaffOperation = OwnerName & {
   intentId: string;
   applicationId: string;
+  applicationSlug: string;
   ownerId: string;
   kind: string;
   state: string;
@@ -102,7 +107,9 @@ const ownerChecks = {
   username: text(32),
   displayName: text(256),
   portalEnabled: bool,
+  role: state('owner', 'staff', 'admin'),
 };
+const ownerName = { ownerUsername: text(32), ownerDisplayName: text(256) };
 const owner = (v: unknown) => shape<StaffOwner>(v, ownerChecks);
 const catalogChecks = {
   applicationId: id,
@@ -113,7 +120,7 @@ const catalogChecks = {
   createdAt: stamp,
   repository: url,
 };
-const catalog = (v: unknown) => shape<StaffCatalogApp>(v, catalogChecks);
+const catalog = (v: unknown) => shape<StaffAppRow>(v, { ...catalogChecks, ...ownerName });
 const health = state('healthy', 'unhealthy', 'stopped', 'unknown');
 const app = (v: unknown) =>
   shape<StaffApp>(v, {
@@ -158,8 +165,24 @@ const operation = (v: unknown) =>
   shape<StaffOperation>(v, {
     intentId: id,
     applicationId: id,
+    applicationSlug: text(40),
     ownerId: id,
-    kind: state('create_app', 'save_configuration', 'deploy', 'unknown'),
+    ...ownerName,
+    kind: state(
+      'create_app',
+      'save_configuration',
+      'deploy',
+      'adopt_app',
+      'env_set',
+      'env_delete',
+      'storage_create',
+      'storage_verify',
+      'storage_rotate',
+      'storage_delete',
+      'app_enable',
+      'app_disable',
+      'unknown',
+    ),
     state: state('prepared', 'unknown', 'accepted', 'succeeded', 'failed', 'blocked'),
     stage: state('queued', 'building', 'deploying', 'verifying', 'settled', 'recovery', 'unknown'),
     cleanupState: cleanup,
@@ -197,8 +220,14 @@ function query(values: Record<string, string | undefined>) {
   return params.size ? `?${params}` : '';
 }
 export const staffApi = {
-  owners: (cursor?: string, signal?: AbortSignal) =>
-    request('/staff/owners' + query({ cursor }), (v) => page(v, owner), undefined, false, signal),
+  owners: (cursor?: string, signal?: AbortSignal, role?: StaffOwner['role']) =>
+    request(
+      '/staff/owners' + query({ role, cursor }),
+      (v) => page(v, owner),
+      undefined,
+      false,
+      signal,
+    ),
   owner: (ownerId: string, signal?: AbortSignal) =>
     request(
       `/staff/owners/${ownerId}`,

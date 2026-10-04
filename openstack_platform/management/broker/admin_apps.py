@@ -16,11 +16,12 @@ from ...controller.http import HttpError, Request, Response
 from ...controller.storage_contract import RESOURCE_OUTPUTS
 from ...validation import flavor_reference, repository_url, slug
 from ...validation import uuid as checked_uuid
-from ..common import canonical, digest
+from ..common import canonical, digest, strict_json
 from .accounts import audit
 from .client import ControllerUnavailable
 from .resources import operation_quota
-from .staff import ReadLimits
+from .staff import ReadLimits, profile
+from .staff_policy import public_url
 
 if TYPE_CHECKING:
     from .api import Broker
@@ -286,7 +287,7 @@ class AdminApps:
         limit, cursor = b.staff.page_limit(request), request.query.get("cursor", (None,))[0]
         with b.database.connect() as db:
             parameters: list[object] = []
-            where = "lifecycle NOT IN ('rejected','deleted')"
+            where = "a.lifecycle NOT IN ('rejected','deleted')"
             if cursor:
                 point = db.execute(
                     "SELECT created,id FROM apps WHERE id=?",
@@ -294,12 +295,17 @@ class AdminApps:
                 ).fetchone()
                 if point is None:
                     raise HttpError(400, "INVALID_REQUEST", "Unknown page cursor.")
-                where += " AND (created<? OR (created=? AND id<?))"
+                where += " AND (a.created<? OR (a.created=? AND a.id<?))"
                 parameters.extend([point["created"], point["created"], point["id"]])
+            # Owner names and the last cached observation come from SQLite in
+            # the same read, so the list needs no per-row controller reads.
             rows = [
                 dict(row)
                 for row in db.execute(
-                    f"SELECT * FROM apps WHERE {where} ORDER BY created DESC,id DESC LIMIT ?",
+                    "SELECT a.*,u.username AS owner_username,u.display_name AS owner_display_name,"
+                    "o.body AS observation FROM apps a JOIN users u ON u.id=a.user_id"
+                    f" LEFT JOIN observations o ON o.app_id=a.id WHERE {where}"
+                    " ORDER BY a.created DESC,a.id DESC LIMIT ?",
                     (*parameters, limit + 1),
                 )
             ]
@@ -316,6 +322,7 @@ class AdminApps:
                             "ownerId": row["user_id"],
                             "savedRevision": row["revision"],
                             "lifecycleState": row["lifecycle"],
+                            **self.catalog_extras(row),
                         }
                         for row in rows[:limit]
                         if row["lifecycle"] != "deleted"
@@ -326,13 +333,40 @@ class AdminApps:
             },
         )
 
+    @staticmethod
+    def catalog_extras(row: dict[str, Any]) -> dict[str, Any]:
+        """Additive list fields: the owner's names and the last observed URL and deploy."""
+        observed: dict[str, Any] = {}
+        if row["observation"] is not None:
+            try:
+                value = strict_json(row["observation"].encode())
+                observed = value if isinstance(value, dict) else {}
+            except ValueError:
+                observed = {}
+        accepted = observed.get("acceptedDeployment")
+        deployed = accepted.get("acceptedAt") if isinstance(accepted, dict) else None
+        return {
+            "ownerUsername": profile(row["owner_username"], 32),
+            "ownerDisplayName": profile(row["owner_display_name"], 256),
+            "url": public_url(observed.get("url")),
+            "lastDeployedAt": deployed
+            if isinstance(deployed, str) and len(deployed) <= 40
+            else None,
+        }
+
     def detail(self, request: Request) -> Response:
         _user, app = self.broker.own(request)
         response = self.broker.app(request)
         model = dict(cast(dict[str, Any], response.body)["data"])
         current = self.observed(app["id"])
+        with self.broker.database.connect() as db:
+            owner = db.execute(
+                "SELECT username,display_name FROM users WHERE id=?", (app["user_id"],)
+            ).fetchone()
         model.update(
             ownerId=app["user_id"],
+            ownerUsername=profile(owner["username"], 32),
+            ownerDisplayName=profile(owner["display_name"], 256),
             identityProvider=self.identity(current),
             requiresMaintenance=current.get("requiresMaintenance") is True,
             sizing=current.get("sizing"),

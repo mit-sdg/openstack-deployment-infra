@@ -6,8 +6,11 @@
   "exports": {
     ".": "./src/index.ts",
     "./tokens.css": "./src/tokens.css",
-    "./primitives.css": "./src/primitives.css",
-    "./theme.js": "./src/theme.js"
+    "./ui.css": "./src/ui.css",
+    "./legacy/tokens.css": "./src/legacy/tokens.css",
+    "./legacy/primitives.css": "./src/legacy/primitives.css",
+    "./theme.js": "./src/theme.js",
+    "./fonts.css": "./src/fonts.css"
   },
   "peerDependencies": {
     "react": "19.3.0"
@@ -18,10 +21,14 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@types/react": "19.3.0",
-    "@testing-library/react": "16.3.3",
     "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@types/react": "19.3.0",
     "jsdom": "30.1.1",
     "vitest": "5.0.3"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0"
   }
 }

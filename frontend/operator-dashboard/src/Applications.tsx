@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Card } from "@openstack-platform/ui";
+import { LegacyCard as Card } from "@openstack-platform/ui";
 import { Icon } from "./Icons";
 import {
   Badge,
