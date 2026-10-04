@@ -17,7 +17,7 @@ class ManagementPlatformTests(ManagementCase):
             (ROOT / "openstack_platform/owner_portal_config.py").read_bytes(),
         )
 
-    def production_config(self) -> dict:
+    def production_config(self, **owner_portal: object) -> dict:
         from openstack_platform.config import load_platform
         from openstack_platform.management.settings import configuration
 
@@ -29,6 +29,7 @@ class ManagementPlatformTests(ManagementCase):
             "enabled": True,
             "commonsOrigin": "https://class.example.com",
             "classLabel": "class account",
+            **owner_portal,
         }
         path = self.root / "platform.json"
         path.write_text(json.dumps(value))
@@ -47,18 +48,26 @@ class ManagementPlatformTests(ManagementCase):
             with self.assertRaises(ValueError):
                 Config.load(path)
 
-    def test_platform_name_derives_from_inventory_display_name(self) -> None:
+    def test_portal_name_derives_from_inventory_display_name(self) -> None:
         path = self.root / "management.json"
         value = self.production_config()
         path.write_text(json.dumps(value))
-        self.assertEqual(Config.load(path).platform_name, "Example Platform")
-        value["platformName"] = "Example Platform"
+        self.assertEqual(Config.load(path).platform_name, "Example Platform Apps")
+        value["platformName"] = "Example Platform Apps"
         path.write_text(json.dumps(value))
-        self.assertEqual(Config.load(path).platform_name, "Example Platform")
+        self.assertEqual(Config.load(path).platform_name, "Example Platform Apps")
         value["platformName"] = "Another Platform"
         path.write_text(json.dumps(value))
         with self.assertRaises(ValueError):
             Config.load(path)
+
+    def test_inventory_portal_name_overrides_the_default(self) -> None:
+        path = self.root / "management.json"
+        path.write_text(json.dumps(self.production_config(portalName="Example Hosting")))
+        self.assertEqual(Config.load(path).platform_name, "Example Hosting")
+        for invalid in ("", " padded ", "x" * 81, "tab\there", 7):
+            with self.subTest(portal_name=invalid), self.assertRaises(ValueError):
+                self.production_config(portalName=invalid)
 
     def test_rate_configuration_is_validated_and_inventory_bound(self) -> None:
         path = self.root / "management.json"

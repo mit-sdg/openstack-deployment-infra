@@ -97,7 +97,9 @@ export function Dashboard() {
     );
   const { items, quota } = apps.data;
   const used = quota.apps.used + quota.apps.reserved;
-  const full = used >= quota.apps.limit;
+  // Accounts without limits (admins) see no count and are never full.
+  const limit = quota.apps.limit;
+  const full = limit !== null && used >= limit;
   const create = (
     <Link href="/apps/new" className={buttonClass({ variant: 'primary' })}>
       <Icon name="plus" />
@@ -109,9 +111,10 @@ export function Dashboard() {
       <PageHeader
         title="Apps"
         meta={
-          items.length > 0 && (
+          items.length > 0 &&
+          limit !== null && (
             <Badge tone="neutral" dot={false}>
-              {used} of {quota.apps.limit}
+              {used} of {limit}
               <span className="ui-sr-only"> apps used</span>
             </Badge>
           )
@@ -120,7 +123,7 @@ export function Dashboard() {
       />
       {full && items.length > 0 && (
         <Alert tone="info">
-          You’ve reached your limit of {quota.apps.limit} apps. Ask staff if you need more.
+          You’ve reached your limit of {limit} apps. Ask staff if you need more.
         </Alert>
       )}
       {items.length ? (

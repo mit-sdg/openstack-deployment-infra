@@ -102,7 +102,8 @@ class Config:
     anonymous_options_per_minute: int = 600
     anonymous_starts_per_minute: int = 400
     class_label: str = "class account"
-    # Shown as the portal brand; production derives it from inventory displayName.
+    # Shown as the portal brand. Production uses the inventory's
+    # ownerPortal.portalName, or "<displayName> Apps" without one.
     platform_name: str = "App platform"
 
     @property
@@ -240,7 +241,12 @@ class Config:
                 if name != "platformConfig"
             ):
                 raise ValueError("management configuration differs from platform inventory")
-            platform_name = text(platform.get("displayName"), 120)
+            from ..owner_portal_config import validate as owner_portal
+
+            portal_settings = owner_portal(platform.document.get("ownerPortal", {"enabled": False}))
+            platform_name = portal_settings.get("portalName") or text(
+                f"{text(platform.get('displayName'), 120)} Apps", 128
+            )
             if value.get("platformName", platform_name) != platform_name:
                 raise ValueError("platform name must match platform inventory")
             peer = str(ipaddress.ip_address(platform.get("addresses.ingress")))

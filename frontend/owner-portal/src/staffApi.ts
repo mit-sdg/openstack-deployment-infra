@@ -200,7 +200,7 @@ function quota(v: unknown): boolean {
       ['apps', 'concurrentOperations'].map((key) => [
         key,
         (v: unknown) => {
-          shape(v, { limit: integer, used: integer, reserved: integer });
+          shape(v, { limit: nullable(integer), used: integer, reserved: integer });
           return true;
         },
       ]),

@@ -204,7 +204,13 @@ export function StaffOwnerPage({ id }: { id: string }) {
           columns={2}
           items={[
             { label: 'Username', value: data.username },
-            { label: 'Apps', value: `${apps.used + apps.reserved} of ${apps.limit}` },
+            {
+              label: 'Apps',
+              value:
+                apps.limit === null
+                  ? String(apps.used + apps.reserved)
+                  : `${apps.used + apps.reserved} of ${apps.limit}`,
+            },
             { label: 'ID', value: <CopyId value={id} label="owner ID" /> },
           ]}
         />

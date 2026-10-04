@@ -255,6 +255,64 @@ class AdminApplicationTests(ManagementCase):
             ),
         )
 
+    def test_admin_accounts_have_no_app_or_operation_limits(self) -> None:
+        from openstack_platform.management.broker import resources
+
+        limit = self.config.app_limit
+        own = [self.create("admin", f"admin-own-{index}") for index in range(limit + 2)]
+        session = self.call("GET", "/v1/session", owner="admin").body["data"]
+        self.assertEqual(
+            (session["quota"]["apps"]["limit"], session["quota"]["concurrentOperations"]["limit"]),
+            (None, None),
+        )
+        listing = self.call("GET", "/v1/accounts", owner="admin").body["data"]["items"]
+        accounts = {item["userId"]: item for item in listing}
+        admin = accounts[self.admin_user]
+        self.assertEqual((admin["appLimit"], admin["concurrencyLimit"]), (None, None))
+        self.assertEqual(accounts[self.owner]["appLimit"], limit)
+        staff_view = self.call("GET", f"/v1/staff/owners/{self.admin_user}", owner="admin")
+        quota = staff_view.body["data"]["quota"]
+        self.assertEqual(
+            (quota["apps"]["limit"], quota["concurrentOperations"]["limit"]), (None, None)
+        )
+        self.assertEqual(quota["apps"]["used"], limit + 2)
+        self.assert_error(
+            "ADMIN_UNLIMITED",
+            lambda: self.call(
+                "PUT",
+                f"/v1/accounts/{self.admin_user}/quotas",
+                {"apps": 1, "concurrentOperations": 1},
+                "admin",
+            ),
+        )
+        # Held operations beyond the concurrency limit don't block an admin,
+        # but they still block an owner; one change per app still applies.
+        held = own[: self.config.concurrency_limit + 1]
+        with self.broker.database.connect(write=True) as db:
+            for user, app in [(self.admin_user, app) for app in held] + [(self.owner, self.app_id)]:
+                db.execute(
+                    "INSERT INTO intents(id,user_id,app_id,kind,client_key,controller_key,fingerprint,method,path,body,state,created,updated) VALUES(?,?,?,'deploy',?,?,'f','POST','/v1/x','{}','running',?,?)",
+                    (
+                        str(uuid.uuid4()),
+                        user,
+                        app,
+                        str(uuid.uuid4()),
+                        str(uuid.uuid4()),
+                        self.now,
+                        self.now,
+                    ),
+                )
+            resources.operation_quota(self.broker, db, self.admin_user, own[-1])
+            self.assert_error(
+                "APP_BUSY",
+                lambda: resources.operation_quota(self.broker, db, self.admin_user, held[0]),
+            )
+            if self.config.concurrency_limit <= 1:
+                self.assert_error(
+                    "QUOTA_EXCEEDED",
+                    lambda: resources.operation_quota(self.broker, db, self.owner, own[-1]),
+                )
+
     def test_admin_failed_intent_exposes_only_bounded_controller_code(self) -> None:
         original = self.broker.client.request
 

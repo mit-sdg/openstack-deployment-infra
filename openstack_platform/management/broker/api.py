@@ -221,6 +221,7 @@ class Broker:
 
     def quota(self, user_id: str) -> dict[str, Any]:
         with self.database.connect() as db:
+            unlimited = resources.is_admin(db, user_id)
             policy = db.execute("SELECT * FROM quotas WHERE user_id=?", (user_id,)).fetchone()
             apps = db.execute(
                 "SELECT lifecycle,COUNT(*) n FROM apps WHERE user_id=? AND lifecycle NOT IN ('rejected','deleted') GROUP BY lifecycle",
@@ -232,12 +233,20 @@ class Broker:
             ).fetchone()[0]
         return {
             "apps": {
-                "limit": self.config.app_limit if policy is None else policy["apps"],
+                "limit": None
+                if unlimited
+                else self.config.app_limit
+                if policy is None
+                else policy["apps"],
                 "used": sum(row["n"] for row in apps if row["lifecycle"] == "ready"),
                 "reserved": sum(row["n"] for row in apps if row["lifecycle"] != "ready"),
             },
             "concurrentOperations": {
-                "limit": self.config.concurrency_limit if policy is None else policy["concurrent"],
+                "limit": None
+                if unlimited
+                else self.config.concurrency_limit
+                if policy is None
+                else policy["concurrent"],
                 "used": held,
                 "reserved": 0,
             },
@@ -534,13 +543,18 @@ class Broker:
             if existing is not None:
                 identifier, app_id = existing["id"], existing["app_id"]
             else:
-                policy = db.execute("SELECT apps FROM quotas WHERE user_id=?", (owner,)).fetchone()
-                count = db.execute(
-                    "SELECT COUNT(*) FROM apps WHERE user_id=? AND lifecycle NOT IN ('rejected','deleted')",
-                    (owner,),
-                ).fetchone()[0]
-                if count >= (self.config.app_limit if policy is None else policy[0]):
-                    raise HttpError(409, "QUOTA_EXCEEDED", "Your application quota is full.")
+                # Admin accounts have no app limit; an admin creating an app
+                # for an owner still uses that owner's quota.
+                if not resources.is_admin(db, owner):
+                    policy = db.execute(
+                        "SELECT apps FROM quotas WHERE user_id=?", (owner,)
+                    ).fetchone()
+                    count = db.execute(
+                        "SELECT COUNT(*) FROM apps WHERE user_id=? AND lifecycle NOT IN ('rejected','deleted')",
+                        (owner,),
+                    ).fetchone()[0]
+                    if count >= (self.config.app_limit if policy is None else policy[0]):
+                        raise HttpError(409, "QUOTA_EXCEEDED", "Your application quota is full.")
                 if db.execute("SELECT 1 FROM apps WHERE slug=?", (name,)).fetchone():
                     raise HttpError(409, "SLUG_UNAVAILABLE", "Choose another application name.")
                 app_id = str(uuid.uuid4())

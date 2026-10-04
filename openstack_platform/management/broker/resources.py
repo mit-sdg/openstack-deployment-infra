@@ -309,6 +309,12 @@ def validate_bindings(
                 )
 
 
+def is_admin(db: sqlite3.Connection, user_id: str) -> bool:
+    """Admin accounts have no app or concurrency limits."""
+    row = db.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+    return row is not None and row[0] == "admin"
+
+
 def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: str) -> None:
     held = db.execute(
         "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable') AND state NOT IN ('succeeded','failed')",
@@ -321,6 +327,8 @@ def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: 
         raise HttpError(
             409, "APP_BUSY", "Wait for or recover this application's current operation first."
         )
+    if is_admin(db, user_id):
+        return
     policy = db.execute("SELECT concurrent FROM quotas WHERE user_id=?", (user_id,)).fetchone()
     if len(held) >= (self.config.concurrency_limit if policy is None else policy[0]):
         raise HttpError(409, "QUOTA_EXCEEDED", "Wait for your current operation to finish.")

@@ -604,6 +604,8 @@ class Accounts:
         with self.broker.database.connect(write=True) as db:
             self.checked_actor(db, sid)
             user = self.target(db, request.path_parameters["user"])
+            if user["role"] == "admin":
+                raise HttpError(409, "ADMIN_UNLIMITED", "Admin accounts have no limits.")
             db.execute(
                 "INSERT INTO quotas VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET apps=excluded.apps,concurrent=excluded.concurrent",
                 (user["id"], body["apps"], body["concurrentOperations"]),
@@ -655,8 +657,9 @@ class Accounts:
                 "method": "local" if row["issuer"] == "local" else "commons",
                 "lastSignIn": utc(row["last_login"]) if row["last_login"] else None,
                 "appCount": row["app_count"],
-                "appLimit": row["app_limit"],
-                "concurrencyLimit": row["concurrent_limit"],
+                # Admin accounts have no limits.
+                "appLimit": None if row["role"] == "admin" else row["app_limit"],
+                "concurrencyLimit": None if row["role"] == "admin" else row["concurrent_limit"],
                 "totpEnabled": bool(row["totp_enabled"]),
             }
             for row in rows[:limit]

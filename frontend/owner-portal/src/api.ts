@@ -90,9 +90,10 @@ export type Deployment = {
   requestedAt: string;
   acceptedAt: string | null;
 };
+/** Usage and limits; `limit` is null for accounts without limits (admins). */
 export type Quota = {
-  apps: { used: number; reserved: number; limit: number };
-  concurrentOperations: { used: number; reserved: number; limit: number };
+  apps: { used: number; reserved: number; limit: number | null };
+  concurrentOperations: { used: number; reserved: number; limit: number | null };
 };
 export type Session = {
   user: { id: string; username: string; displayName: string };
