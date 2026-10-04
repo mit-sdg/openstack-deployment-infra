@@ -10,7 +10,7 @@ import sqlite3
 import time
 from contextlib import closing, redirect_stderr
 from unittest.mock import patch
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker import bootstrap, local_security
@@ -184,6 +184,19 @@ class AccountsTests(ManagementCase):
                 db.execute("SELECT totp_confirmed FROM local_accounts").fetchone()[0], 1
             )
         self.assertNotIn("private secure phrase", content)
+
+    def test_authenticator_uri_names_the_platform(self) -> None:
+        url = bootstrap.issue(self.config, now=self.now)
+        started, _csrf, _headers = self.begin(urlsplit(url).fragment, username="rootadmin")
+        uri = urlsplit(started["otpauthUri"])
+        self.assertEqual((uri.scheme, uri.netloc), ("otpauth", "totp"))
+        self.assertEqual(uri.path, "/App%20platform:rootadmin")
+        query = parse_qs(uri.query)
+        self.assertEqual(query["issuer"], ["App platform"])
+        self.assertEqual(query["secret"], [started["totpSecret"]])
+        self.assertEqual(
+            (query["algorithm"], query["digits"], query["period"]), (["SHA1"], ["6"], ["30"])
+        )
 
     def test_bootstrap_expiry_malformed_unsafe_file_origin_csrf_and_no_token_logs(self) -> None:
         token = urlsplit(bootstrap.issue(self.config, now=self.now)).fragment

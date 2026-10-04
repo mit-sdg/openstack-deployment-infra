@@ -17,7 +17,6 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'wouter';
 import { clearCredentials } from '../api';
 import { authOptionsQuery } from '../authOptions';
-import { Mark } from '../components/Mark';
 import './admin/admin.css';
 import { QrCode } from './admin/QrCode';
 
@@ -157,7 +156,7 @@ export function Enrollment() {
   );
   if (!token && !stage)
     return (
-      <AuthLayout title="Set up your account" footer={footer} mark={<Mark />}>
+      <AuthLayout title="Set up your account" footer={footer}>
         <Alert tone="danger" title="This link is incomplete">
           Open the full setup link you were sent, or ask an admin for a new one.
         </Alert>
@@ -165,13 +164,13 @@ export function Enrollment() {
     );
   if (options.isPending || info.isPending)
     return (
-      <AuthLayout title="Set up your account" footer={footer} mark={<Mark />}>
+      <AuthLayout title="Set up your account" footer={footer}>
         <LoadingRows rows={3} />
       </AuthLayout>
     );
   if (options.error || info.error)
     return (
-      <AuthLayout title="Set up your account" footer={footer} mark={<Mark />}>
+      <AuthLayout title="Set up your account" footer={footer}>
         <Alert tone="danger" title={(options.error ?? info.error)!.message}>
           {info.error ? 'Ask an admin for a new link.' : 'Reload the page to try again.'}
         </Alert>
@@ -185,7 +184,6 @@ export function Enrollment() {
       <AuthLayout
         title={stage.totpSecret ? 'Add your authenticator' : 'Finish setup'}
         footer={footer}
-        mark={<Mark />}
       >
         <ErrorAlert error={finish.error} />
         <form className="ui-stack ui-gap-4" onSubmit={submit} aria-busy={finish.isPending}>
@@ -236,7 +234,7 @@ export function Enrollment() {
       </AuthLayout>
     );
   return (
-    <AuthLayout title={titles[purpose] ?? titles.invite} footer={footer} mark={<Mark />}>
+    <AuthLayout title={titles[purpose] ?? titles.invite} footer={footer}>
       <ErrorAlert error={begin.error} />
       <form className="ui-stack ui-gap-4" onSubmit={submit} aria-busy={begin.isPending}>
         {info.data.username ? (

@@ -296,13 +296,18 @@ class Accounts:
             raise HttpError(
                 403, "TOKEN_INVALID", "The link or enrollment fields are invalid."
             ) from None
+        issuer = self.broker.config.platform_name
         return Response(
             200,
             {
                 "data": {
                     "enrollmentToken": handle,
                     "totpSecret": secret,
-                    "otpauthUri": f"otpauth://totp/Portal:{quote(name)}?secret={secret}&issuer=Portal&algorithm=SHA1&digits=6&period=30"
+                    # Authenticator apps list the entry under the platform's name.
+                    "otpauthUri": (
+                        f"otpauth://totp/{quote(issuer, safe='')}:{quote(name)}?secret={secret}"
+                        f"&issuer={quote(issuer, safe='')}&algorithm=SHA1&digits=6&period=30"
+                    )
                     if secret
                     else None,
                 }
