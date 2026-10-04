@@ -1413,10 +1413,48 @@ application, watch progress, verify access and rotate credentials. Each output
 can bind to an owner-chosen environment name or be left unbound. Targets must be
 unique, unreserved and distinct from owner environment names. Save the bindings
 and deploy to apply them. Rotation also requires a redeploy to pick up new
-credentials. The platform's managed-data backup timer runs nightly; PostgreSQL
-and S3 TLS use the platform CA through the default `PGSSLROOTCERT` and
-`AWS_CA_BUNDLE` bindings. Renaming these targets requires configuring the client
-to use the renamed CA path variable.
+credentials. The platform's managed-data backup timer runs nightly. Every app
+job sets the reserved `NODE_EXTRA_CA_CERTS` to the platform CA, so Node and Bun
+clients verify PostgreSQL, MongoDB and S3 TLS without extra settings; the
+PostgreSQL `sslrootcert` output also names that file. Apps deployed before this
+change get it on their next deploy. S3 binds five outputs: `endpoint`,
+`region` (always `garage`), `bucket`, `access_key_id` and `secret_access_key`.
+The endpoint is an IP address, so the AWS SDK and Bun address buckets by path
+without a path-style setting. Bun reads `S3_ENDPOINT` rather than the default
+`AWS_ENDPOINT_URL_S3`, so Bun apps should rename that target. Older S3 resources
+keep two retired keys (`ca_bundle`, `force_path_style`) in their app variable
+until the next credential rotation removes them; they never reach an app that
+binds the resource.
+
+S3 also offers `public_endpoint` (default `S3_PUBLIC_ENDPOINT`), the public S3
+API at `https://s3.<domain>`. Public ingress routes it to Garage with the
+browser's `Host` unchanged, so presigned URLs signed for it work from browsers.
+Traefik answers CORS for app origins (`https://<app>.<domain>`, including
+previews) for `GET`, `HEAD`, `PUT` and `POST` and exposes `ETag`; buckets need no
+CORS configuration, and Garage still requires a valid signature for every
+request. Keep server-side calls on `endpoint` and sign browser links with a
+second client:
+
+```js
+// Bun
+const url = Bun.s3.presign(key, { method: "PUT", expiresIn: 600, endpoint: process.env.S3_PUBLIC_ENDPOINT });
+// AWS SDK: a hostname endpoint needs path-style addressing
+const signer = new S3Client({ endpoint: process.env.S3_PUBLIC_ENDPOINT, forcePathStyle: true });
+```
+
+The public hostname sits behind the same Cloudflare limits as apps, including
+the 100 MB request body limit on the free plan; send larger uploads as presigned
+multipart parts. Responses carry `Cloudflare-CDN-Cache-Control: no-store`, so
+Cloudflare never caches a signed download. Every app job also sets
+`AWS_REQUEST_CHECKSUM_CALCULATION=when_required`; without it the AWS SDK signs
+an empty-body checksum into presigned PUT URLs and Garage rejects the upload.
+Ingress normalizes `//` and `..` in paths, so object keys used through the
+public endpoint must not contain them. Every app job also sets
+`AWS_REQUEST_CHECKSUM_CALCULATION=when_required`; without it the AWS SDK signs
+an empty-body checksum into presigned PUT URLs and Garage rejects the upload.
+Ingress normalizes `//` and `..` in paths, so object keys used through the
+public endpoint must not contain them. App slugs have at least three
+characters, so no app can claim `s3`.
 
 The repository root must contain `package.json`, and each selected package
 directory must contain its runtime lockfile. Build and start scripts come from

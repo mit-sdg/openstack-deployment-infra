@@ -21,7 +21,7 @@ from .service_support import (
     remaining_seconds,
     wall_deadline,
 )
-from .storage_contract import PLATFORM_ENVIRONMENT_KEYS, RESERVED_ENVIRONMENT_PREFIX
+from .storage_contract import RESERVED_ENVIRONMENT_KEYS, RESERVED_ENVIRONMENT_PREFIX
 
 EnvironmentAction = Literal["set", "unset", "import"]
 
@@ -93,7 +93,7 @@ class EnvironmentService:
         ):
             raise app.ApplicationError("interrupted environment intent is malformed")
         intended_names = {env_key(item) for item in intended}
-        if intended_names & PLATFORM_ENVIRONMENT_KEYS or any(
+        if intended_names & RESERVED_ENVIRONMENT_KEYS or any(
             name.startswith(RESERVED_ENVIRONMENT_PREFIX) for name in intended_names
         ):
             raise app.ApplicationError("interrupted staff environment intent used a reserved key")
@@ -197,7 +197,7 @@ class EnvironmentService:
             protected = {
                 name
                 for name in intended_names
-                if name in PLATFORM_ENVIRONMENT_KEYS
+                if name in RESERVED_ENVIRONMENT_KEYS
                 or name.startswith(RESERVED_ENVIRONMENT_PREFIX)
                 or (name in ownership and ownership[name] != "staff")
             }

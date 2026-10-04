@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import shutil
@@ -945,6 +946,15 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
     host = platform.get("addresses.storage")
     if not isinstance(host, str):
         raise HelperActionError("DEPENDENCY_UNAVAILABLE", "storage inventory is invalid")
+    if resource_type == "s3":
+        # Apps get no path-style setting: S3 clients address buckets by path
+        # only because the endpoint host is an IP address.
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            raise HelperActionError(
+                "DEPENDENCY_UNAVAILABLE", "S3 endpoint host must be an IP address"
+            ) from None
     ca = str(_nomad_secrets(runtime) / "internal-ca.pem")
     secrets = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
     nomad = _nomad_client(runtime)

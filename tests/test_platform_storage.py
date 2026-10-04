@@ -22,12 +22,19 @@ from openstack_platform.controller.storage import (
     verify,
 )
 from openstack_platform.controller.storage_contract import (
+    APPLICATION_CA_PATH,
     ENVIRONMENT_KEYS,
     FIXED_PLATFORM_ENVIRONMENT,
+    JOB_ENVIRONMENT,
+    OUTPUT_ENVIRONMENT_KEYS,
     PLATFORM_ENVIRONMENT_KEYS,
+    RESERVED_ENVIRONMENT_KEYS,
+    RESOURCE_OUTPUTS,
     canonical_secret_keys,
     canonicalize_environment,
+    derived_output,
     platform_environment_values,
+    retired_secret_keys,
     storage_owner,
 )
 from openstack_platform.helper import production
@@ -110,8 +117,56 @@ class ControllerStorageTests(unittest.TestCase):
         self.assertEqual(values["PORT"], "8080")
         self.assertEqual(set(values), PLATFORM_ENVIRONMENT_KEYS)
         self.assertEqual(FIXED_PLATFORM_ENVIRONMENT["NODE_ENV"], "production")
+        # Node and Bun trust the platform CA without any per-client setting.
+        # The job sets it directly, so it is reserved but never a Variable item.
+        self.assertEqual(
+            JOB_ENVIRONMENT,
+            {
+                "NODE_EXTRA_CA_CERTS": APPLICATION_CA_PATH,
+                "AWS_REQUEST_CHECKSUM_CALCULATION": "when_required",
+            },
+        )
+        self.assertNotIn("NODE_EXTRA_CA_CERTS", values)
+        self.assertIn("NODE_EXTRA_CA_CERTS", RESERVED_ENVIRONMENT_KEYS)
+        self.assertTrue(PLATFORM_ENVIRONMENT_KEYS < RESERVED_ENVIRONMENT_KEYS)
         with self.assertRaises(ValidationError):
             platform_environment_values(APP_ID, "demo-app", 0)
+
+    def test_s3_binds_only_what_clients_need(self) -> None:
+        self.assertEqual(
+            RESOURCE_OUTPUTS["s3"],
+            (
+                "endpoint",
+                "public_endpoint",
+                "region",
+                "access_key_id",
+                "secret_access_key",
+                "bucket",
+            ),
+        )
+        self.assertEqual(set(OUTPUT_ENVIRONMENT_KEYS["s3"]), set(RESOURCE_OUTPUTS["s3"]))
+        # The public endpoint is configuration, never stored with credentials.
+        self.assertNotIn(
+            "STORAGE__S3__DEFAULT__PUBLIC_ENDPOINT", canonical_secret_keys("s3", "default")
+        )
+        self.assertEqual(
+            derived_output("s3", "public_endpoint", domain="apps.example"),
+            "https://s3.apps.example",
+        )
+        with self.assertRaises(ValidationError):
+            derived_output("s3", "endpoint", domain="apps.example")
+        environment = s3_environment("https://10.0.0.5:9000", "demo-bucket", "key", "secret")
+        self.assertEqual(set(environment), set(ENVIRONMENT_KEYS["s3"]))
+        self.assertEqual(
+            retired_secret_keys("s3", "uploads"),
+            ("STORAGE__S3__UPLOADS__CA_BUNDLE", "STORAGE__S3__UPLOADS__FORCE_PATH_STYLE"),
+        )
+        self.assertEqual(retired_secret_keys("postgres", "default"), ())
+        self.assertTrue(
+            set(retired_secret_keys("s3", "default")).isdisjoint(
+                canonical_secret_keys("s3", "default")
+            )
+        )
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -1363,6 +1418,71 @@ class HelperStorageTests(unittest.TestCase):
         self.assertEqual(nomad.items["STORAGE__S3__DEFAULT__ACCESS_KEY_ID"], "new-key")
         self.assertLess(events.index("healthy-evidence"), events.index("/DeleteKey"))
 
+    def retired(self) -> dict[str, str]:
+        """What an older release also stored for the same bucket."""
+        return {
+            "STORAGE__S3__DEFAULT__CA_BUNDLE": "/platform-ca/internal-ca.crt",
+            "STORAGE__S3__DEFAULT__FORCE_PATH_STYLE": "true",
+        }
+
+    def test_s3_credential_writes_drop_keys_older_releases_stored(self) -> None:
+        events: list[str] = []
+        nomad = MemoryNomad({**self.initial(), **self.retired()})
+        args = {
+            "applicationId": APP_ID,
+            "applicationSlug": "demo-app",
+            "resourceName": "default",
+            "providerId": "bucket-id",
+            "providerName": "demo-bucket",
+        }
+        # Reads accept a variable that still holds the retired keys.
+        verified = s3_verify_handler(
+            {**args, "operationId": "44444444-4444-4444-8444-444444444444", "recover": False},
+            admin=Garage(events),
+            scoped_client=lambda _access, _secret: S3Client(events),
+            nomad=nomad,
+            endpoint="https://storage:9000",
+        )
+        self.assertTrue(verified["verified"])
+        self.assertEqual(len(nomad.writes), 0)
+        result = s3_rotate_handler(
+            {**args, "operationId": "44444444-4444-4444-8444-444444444444", "recover": False},
+            admin=Garage(events),
+            scoped_client=lambda _access, _secret: S3Client(events),
+            nomad=nomad,
+            endpoint="https://storage:9000",
+            observe_evidence=lambda *_args: RotationEvidence(True, nomad.index),
+        )
+        self.assertTrue(result["retired"])
+        self.assertEqual(nomad.items["STORAGE__S3__DEFAULT__ACCESS_KEY_ID"], "new-key")
+        self.assertEqual(nomad.items["STAFF_SENTINEL"], "preserve-me")
+        for key in self.retired():
+            self.assertNotIn(key, nomad.items)
+
+    def test_s3_remove_drops_keys_older_releases_stored(self) -> None:
+        events: list[str] = []
+        nomad = MemoryNomad({**self.initial(), **self.retired()})
+        result = s3_remove_handler(
+            {
+                "applicationId": APP_ID,
+                "applicationSlug": "demo-app",
+                "resourceName": "default",
+                "providerId": "bucket-id",
+                "providerName": "demo-bucket",
+                "confirmName": "default",
+                "purge": False,
+                "preflight": False,
+                "operationId": "44444444-4444-4444-8444-444444444444",
+                "recover": False,
+            },
+            admin=Garage(events),
+            scoped_client=lambda _access, _secret: S3Client(events),
+            nomad=nomad,
+        )
+        self.assertTrue(result["environmentRemoved"])
+        self.assertEqual({key for key in nomad.items if key.startswith("STORAGE__")}, set())
+        self.assertEqual(nomad.items["STAFF_SENTINEL"], "preserve-me")
+
     def test_s3_remove_checks_confirmation_and_absence_before_owned_key_removal(self) -> None:
         events: list[str] = []
         garage = Garage(events)
@@ -1533,12 +1653,26 @@ class HelperStorageTests(unittest.TestCase):
         self.assertNotIn(SENTINEL, repr(credential))
         self.assertNotIn(SENTINEL, repr(credential.environment))
 
+    def test_production_s3_requires_an_ip_endpoint_for_path_style_clients(self) -> None:
+        platform = mock.Mock(prefix="example")
+        platform.get.side_effect = lambda key, *_rest: (
+            "/srv/app-platform" if key == "paths.root" else "storage.internal"
+        )
+        runtime = mock.Mock(platform=platform, root=Path("/srv/app-platform"))
+        with (
+            mock.patch.object(production, "helper_runtime", return_value=runtime),
+            mock.patch.object(production, "_read_environment") as secrets,
+        ):
+            with self.assertRaisesRegex(HelperActionError, "IP address"):
+                production._storage_handlers("storage.s3.create")
+        secrets.assert_not_called()
+
     def test_production_create_observer_requires_fresh_scheduler_and_public_health(self) -> None:
         platform = mock.Mock(prefix="example")
         # Key-aware: a blanket return value gave paths.root a hostname, which is
-        # not a usable deployment root.
+        # not a usable deployment root. Production storage addresses are IPs.
         platform.get.side_effect = lambda key, *_rest: (
-            "/srv/app-platform" if key == "paths.root" else "storage.internal"
+            "/srv/app-platform" if key == "paths.root" else "10.0.0.5"
         )
         events: list[str] = []
         garage = Garage(events)

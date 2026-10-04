@@ -408,9 +408,10 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
             self.assertNotIn(plain.hexdigest().encode(), database_bytes)
             self.assertNotIn(plain.digest(), database_bytes)
         self.assertIn("env_set:API_TOKEN", dump)
-        for name in ("PORT", "STORAGE__TOKEN", "lowercase", "A" * 129):
+        reserved = ("PORT", "NODE_EXTRA_CA_CERTS", "STORAGE__TOKEN")
+        for name in (*reserved, "lowercase", "A" * 129):
             self.assert_error(
-                "RESERVED_ENV_NAME" if name in ("PORT", "STORAGE__TOKEN") else "INVALID_ENV_NAME",
+                "RESERVED_ENV_NAME" if name in reserved else "INVALID_ENV_NAME",
                 lambda name=name: self.call(
                     "PUT",
                     f"/v1/apps/{self.app_id}/environment/{name}",

@@ -31,6 +31,10 @@ let
   hostRule = lib.concatMapStringsSep " || " (host: "Host(`${host}`)") (
     [ platform.domain ] ++ platform.recoveryDomains
   );
+  # Public S3 API for presigned URLs. Garage still checks every signature;
+  # the router keeps the browser's Host so those signatures verify.
+  publicS3Host = "s3.${platform.domain}";
+  appOrigin = "^https://[a-z0-9-]+\\.${lib.escapeRegex platform.domain}$";
   staticIngressRoutes = platform.staticIngressRoutes or { };
   staticIngressRouters = lib.mapAttrs' (
     name: route:
@@ -128,19 +132,58 @@ let
           service = "platform-portal";
           middlewares = [ "platform-security-headers" ];
         };
+        platform-s3 = {
+          entryPoints = [ "web" ];
+          rule = "Host(`${publicS3Host}`)";
+          # Above healthz, so every path on this host is an S3 request.
+          priority = 20000;
+          service = "platform-s3";
+          middlewares = [ "platform-s3-browser" ];
+        };
       }
       // staticIngressRouters;
       services = {
         platform-portal.loadBalancer.servers = [
           { url = "http://${platform.addresses.admin}:${toString constants.ports.managementWeb}"; }
         ];
+        platform-s3.loadBalancer = {
+          servers = [
+            { url = "https://${platform.addresses.storage}:${toString constants.ports.garageS3}"; }
+          ];
+          passHostHeader = true;
+          serversTransport = "platform-internal-ca";
+        };
       }
       // staticIngressServices;
+      # Storage's certificate carries its IP and chains to the platform CA.
+      serversTransports.platform-internal-ca.rootCAs = [ "${configRoot}/pki/internal-ca.pem" ];
       middlewares.platform-security-headers.headers = {
         contentTypeNosniff = true;
         # Preserve management-web's origin-safe HTML policy and no-referrer
         # API policy. Overriding this header breaks native sign-in POSTs.
         frameDeny = true;
+      };
+      # Browsers on any app page may use presigned URLs; Traefik answers the
+      # CORS preflight itself, so buckets need no CORS configuration.
+      middlewares.platform-s3-browser.headers = {
+        accessControlAllowOriginListRegex = [ appOrigin ];
+        accessControlAllowMethods = [
+          "GET"
+          "HEAD"
+          "PUT"
+          "POST"
+        ];
+        accessControlAllowHeaders = [ "*" ];
+        accessControlExposeHeaders = [ "ETag" ];
+        accessControlMaxAge = 3600;
+        addVaryHeader = true;
+        customResponseHeaders = {
+          # Signed responses must not outlive their URL in Cloudflare's cache.
+          Cloudflare-CDN-Cache-Control = "no-store";
+          # Garage adds "*" to error responses; drop it so only the CORS
+          # settings above decide which origins may read a response.
+          Access-Control-Allow-Origin = "";
+        };
       };
     };
   };

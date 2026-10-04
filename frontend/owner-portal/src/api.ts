@@ -466,9 +466,14 @@ export function validateEnvName(name: string): string | null {
   if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name))
     return 'Use A–Z, 0–9 and underscores, starting with A–Z (at most 128 characters).';
   if (
-    ['NODE_ENV', 'PLATFORM_ENV', 'PLATFORM_PROJECT_ID', 'PLATFORM_PROJECT_SLUG', 'PORT'].includes(
-      name,
-    ) ||
+    [
+      'NODE_ENV',
+      'NODE_EXTRA_CA_CERTS',
+      'PLATFORM_ENV',
+      'PLATFORM_PROJECT_ID',
+      'PLATFORM_PROJECT_SLUG',
+      'PORT',
+    ].includes(name) ||
     name.startsWith('STORAGE__')
   )
     return 'This name is reserved by the platform.';

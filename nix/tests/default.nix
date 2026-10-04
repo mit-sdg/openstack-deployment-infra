@@ -838,6 +838,14 @@ let
               machine.fail("grep -F referrerPolicy /etc/traefik/dynamic/platform.yaml")
               machine.succeed("grep -F contentTypeNosniff /etc/traefik/dynamic/platform.yaml")
               machine.succeed("grep -F frameDeny /etc/traefik/dynamic/platform.yaml")
+              # Public S3: storage over the platform CA, CORS preflight answered
+              # by Traefik for app origins only.
+              machine.succeed("grep -F 'https://${platform.addresses.storage}:9000' /etc/traefik/dynamic/platform.yaml")
+              machine.succeed("grep -F '/etc/${namespace}/pki/internal-ca.pem' /etc/traefik/dynamic/platform.yaml")
+              preflight = "${pkgs.curl}/bin/curl --silent --include --request OPTIONS --header 'Host: s3.${platform.domain}' --header 'Access-Control-Request-Method: PUT' http://127.0.0.1/app-bucket/key --header Origin:"
+              machine.wait_until_succeeds(f"{preflight}https://demo.${platform.domain} | tr -d '\\r' | grep -Fix 'access-control-allow-origin: https://demo.${platform.domain}'", timeout=30)
+              machine.fail(f"{preflight}https://evil.example | grep -Fi access-control-allow-origin")
+              machine.fail(f"{preflight}https://${platform.domain} | grep -Fi access-control-allow-origin")
               # A hostile client reaching a non-loopback origin address cannot
               # select the management router merely by supplying its Host.
               machine.fail("ip=$(hostname -I | awk '{print $1}'); ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --header 'Host: ${platform.domain}' http://$ip/")

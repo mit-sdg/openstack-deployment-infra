@@ -55,7 +55,7 @@ function mocks() {
 }
 describe('owner resources', () => {
   it('rejects reserved, invalid, duplicate and colliding binding names', () => {
-    for (const name of ['PORT', 'STORAGE__SECRET', 'lower', 'A'.repeat(129)])
+    for (const name of ['PORT', 'NODE_EXTRA_CA_CERTS', 'STORAGE__SECRET', 'lower', 'A'.repeat(129)])
       expect(validateEnvName(name)).not.toBeNull();
     expect(
       validateBindings([{ resourceId: 'resource', outputs: { url: 'DB', host: 'DB' } }], []),

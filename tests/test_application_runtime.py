@@ -924,6 +924,43 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("hasPrefix", job)
         self.assertNotIn(r"\n{{ end }}", job)
 
+    def test_job_keeps_retired_s3_keys_out_of_a_bound_apps_environment(self) -> None:
+        manifest = Manifest(
+            "node",
+            (".",),
+            None,
+            "start",
+            3000,
+            "/health",
+            (
+                StorageBinding(
+                    "default",
+                    "s3",
+                    (("bucket", "S3_BUCKET"), ("public_endpoint", "S3_PUBLIC_ENDPOINT")),
+                ),
+            ),
+        )
+        job = render_nomad_job(
+            application_id=APP_ID,
+            application_slug="demo-app",
+            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
+            manifest=manifest,
+            platform=self.platform(),
+            cpu_mhz=1000,
+            memory_mib=2048,
+            source_commit=COMMIT,
+            recipe_hash="c" * 64,
+        )
+        for output in ("CA_BUNDLE", "FORCE_PATH_STYLE", "ENDPOINT", "SECRET_ACCESS_KEY"):
+            self.assertIn(f'(ne $key "STORAGE__S3__DEFAULT__{output}")', job)
+        self.assertIn('NODE_EXTRA_CA_CERTS = "/platform-ca/internal-ca.crt"', job)
+        self.assertIn('AWS_REQUEST_CHECKSUM_CALCULATION = "when_required"', job)
+        # The public endpoint is set by the job, not read from the Variable.
+        domain = self.platform().domain
+        self.assertIn(f'S3_PUBLIC_ENDPOINT = "https://s3.{domain}"', job)
+        self.assertNotIn("STORAGE__S3__DEFAULT__PUBLIC_ENDPOINT", job)
+        self.assertIn('destination = "/platform-ca"', job)
+
     def test_job_has_only_application_placement_and_explicit_standard_resources(self) -> None:
         job = render_nomad_job(
             application_id=APP_ID,

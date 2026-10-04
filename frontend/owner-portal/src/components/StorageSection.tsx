@@ -67,7 +67,7 @@ function BindingsDialog({
   const [error, setError] = useState<unknown>(null);
   const [saving, setSaving] = useState(false);
   const certificates = Object.values(resource.defaultBindings).filter((name) =>
-    /SSLROOTCERT|CA_BUNDLE/.test(name),
+    /SSLROOTCERT/.test(name),
   );
   function set(name: string, target: string | null) {
     setError(null);
@@ -165,6 +165,12 @@ function BindingsDialog({
         <Hint>
           Keep {certificates.join(' and ')} so your app can verify the TLS certificate when it
           connects.
+        </Hint>
+      )}
+      {'public_endpoint' in resource.defaultBindings && (
+        <Hint>
+          Use the private endpoint from your server. Sign browser upload and download links with the
+          public endpoint; browsers on your app’s pages can use them directly.
         </Hint>
       )}
       <ErrorAlert error={error} />

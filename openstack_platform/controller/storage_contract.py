@@ -29,14 +29,30 @@ RESOURCE_OUTPUTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "mongo": ("uri",),
         "s3": (
             "endpoint",
+            "public_endpoint",
             "region",
             "access_key_id",
             "secret_access_key",
-            "ca_bundle",
             "bucket",
-            "force_path_style",
         ),
     }
+)
+# Outputs that come from platform configuration rather than a provider. The job
+# renders them directly, so they are never stored with the credentials.
+DERIVED_OUTPUTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {"postgres": (), "mongo": (), "s3": ("public_endpoint",)}
+)
+# The public S3 API answers at this label of the platform domain, which no app
+# may use as its slug. Browsers reach it through public ingress, so presigned
+# URLs signed for it work from an app's pages.
+PUBLIC_S3_LABEL = "s3"
+# Outputs earlier releases published. Existing app variables can still hold
+# their keys until the resource's credentials are next written, which removes
+# them; they never reach an app's environment. S3 clients need neither: the
+# endpoint is an IP address, so they address buckets by path, and every app
+# trusts the platform CA through NODE_EXTRA_CA_CERTS.
+RETIRED_OUTPUTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {"postgres": (), "mongo": (), "s3": ("ca_bundle", "force_path_style")}
 )
 # Provider helpers still construct values using these familiar local aliases.
 ENVIRONMENT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
@@ -57,10 +73,8 @@ ENVIRONMENT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "AWS_REGION",
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
-            "AWS_CA_BUNDLE",
             "S3_ENDPOINT",
             "S3_BUCKET",
-            "S3_FORCE_PATH_STYLE",
         ),
     }
 )
@@ -73,12 +87,11 @@ OUTPUT_ENVIRONMENT_KEYS: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "s3": MappingProxyType(
             {
                 "endpoint": "AWS_ENDPOINT_URL_S3",
+                "public_endpoint": "S3_PUBLIC_ENDPOINT",
                 "region": "AWS_REGION",
                 "access_key_id": "AWS_ACCESS_KEY_ID",
                 "secret_access_key": "AWS_SECRET_ACCESS_KEY",
-                "ca_bundle": "AWS_CA_BUNDLE",
                 "bucket": "S3_BUCKET",
-                "force_path_style": "S3_FORCE_PATH_STYLE",
             }
         ),
     }
@@ -95,22 +108,62 @@ def canonical_secret_key(resource_type: str, name: str, output: str) -> str:
     checked_name = resource_name(name)
     if resource_type not in RESOURCE_TYPES or output not in RESOURCE_OUTPUTS[resource_type]:
         raise ValidationError("managed-storage output is invalid")
+    return _secret_key(resource_type, checked_name, output)
+
+
+def _secret_key(resource_type: str, checked_name: str, output: str) -> str:
     # Hyphens are the only non-alphanumeric resource-name character, making this
     # encoding injective. The prefix is reserved from staff runtime keys.
     return f"STORAGE__{resource_type.upper()}__{checked_name.replace('-', '_').upper()}__{output.upper()}"
 
 
+def stored_outputs(resource_type: str) -> tuple[str, ...]:
+    """Outputs a provider writes into the app Variable."""
+    derived = DERIVED_OUTPUTS[resource_type]
+    return tuple(output for output in RESOURCE_OUTPUTS[resource_type] if output not in derived)
+
+
 def canonical_secret_keys(resource_type: str, name: str) -> tuple[str, ...]:
     return tuple(
         canonical_secret_key(resource_type, name, output)
-        for output in RESOURCE_OUTPUTS[resource_type]
+        for output in stored_outputs(resource_type)
     )
+
+
+def public_s3_endpoint(domain: str) -> str:
+    return f"https://{PUBLIC_S3_LABEL}.{domain}"
+
+
+def derived_output(resource_type: str, output: str, *, domain: str) -> str:
+    if output not in DERIVED_OUTPUTS.get(resource_type, ()):
+        raise ValidationError("managed-storage output is not derived")
+    return public_s3_endpoint(domain)
+
+
+def retired_secret_keys(resource_type: str, name: str) -> tuple[str, ...]:
+    """Keys of RETIRED_OUTPUTS that an older release may have stored."""
+    checked_name = resource_name(name)
+    if resource_type not in RESOURCE_TYPES:
+        raise ValidationError("storage type must be postgres, mongo, or s3")
+    return tuple(
+        _secret_key(resource_type, checked_name, output)
+        for output in RETIRED_OUTPUTS[resource_type]
+    )
+
+
+def _stored_mapping(resource_type: str) -> dict[str, str]:
+    outputs = stored_outputs(resource_type)
+    return {
+        output: key
+        for output, key in OUTPUT_ENVIRONMENT_KEYS[resource_type].items()
+        if output in outputs
+    }
 
 
 def canonicalize_environment(
     resource_type: str, name: str, values: Mapping[str, str]
 ) -> dict[str, str]:
-    mapping = OUTPUT_ENVIRONMENT_KEYS[resource_type]
+    mapping = _stored_mapping(resource_type)
     if values.keys() != set(ENVIRONMENT_KEYS[resource_type]):
         raise ValidationError("provider environment outputs are incomplete")
     if resource_type == "s3" and values["AWS_ENDPOINT_URL_S3"] != values["S3_ENDPOINT"]:
@@ -125,7 +178,7 @@ def provider_environment(
     resource_type: str, name: str, values: Mapping[str, str]
 ) -> dict[str, str]:
     """Convert canonical app-variable items back at the provider boundary."""
-    mapping = OUTPUT_ENVIRONMENT_KEYS[resource_type]
+    mapping = _stored_mapping(resource_type)
     expected = set(canonical_secret_keys(resource_type, name))
     if values.keys() != expected:
         raise ValidationError("managed-storage secret outputs are incomplete")
@@ -144,6 +197,23 @@ FIXED_PLATFORM_ENVIRONMENT: Mapping[str, str] = MappingProxyType(
 PLATFORM_ENVIRONMENT_KEYS = frozenset(
     {*FIXED_PLATFORM_ENVIRONMENT, "PLATFORM_PROJECT_ID", "PLATFORM_PROJECT_SLUG", "PORT"}
 )
+# Every app container mounts the platform CA here (see nomad_jobs).
+APPLICATION_CA_PATH = "/platform-ca/internal-ca.crt"
+# Rendered straight into each app job, like HOST. Unlike the values above they
+# never enter the app's Variable, so running jobs stay untouched until their
+# next deploy.
+JOB_ENVIRONMENT: Mapping[str, str] = MappingProxyType(
+    {
+        # Node and Bun verify the platform's TLS services (S3, PostgreSQL,
+        # MongoDB) with no client settings.
+        "NODE_EXTRA_CA_CERTS": APPLICATION_CA_PATH,
+        # The AWS SDK otherwise signs an empty-body CRC32 into presigned PUT
+        # URLs, which Garage then rejects for any real upload.
+        "AWS_REQUEST_CHECKSUM_CALCULATION": "when_required",
+    }
+)
+# Names owners and staff cannot set or bind.
+RESERVED_ENVIRONMENT_KEYS = PLATFORM_ENVIRONMENT_KEYS | frozenset(JOB_ENVIRONMENT)
 RESERVED_ENVIRONMENT_PREFIX = "STORAGE__"
 
 

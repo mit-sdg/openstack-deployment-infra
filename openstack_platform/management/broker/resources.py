@@ -13,7 +13,7 @@ from ...controller.deployment_config import parse_configuration
 from ...controller.http import HttpError, Request, Response
 from ...controller.storage_contract import (
     OUTPUT_ENVIRONMENT_KEYS,
-    PLATFORM_ENVIRONMENT_KEYS,
+    RESERVED_ENVIRONMENT_KEYS,
     RESERVED_ENVIRONMENT_PREFIX,
     RESOURCE_OUTPUTS,
 )
@@ -36,7 +36,7 @@ def owner_key(value: object) -> str:
             "INVALID_ENV_NAME",
             "Use an uppercase name starting with A–Z, containing only A–Z, 0–9 and underscores (at most 128 characters).",
         ) from None
-    if name in PLATFORM_ENVIRONMENT_KEYS or name.startswith(RESERVED_ENVIRONMENT_PREFIX):
+    if name in RESERVED_ENVIRONMENT_KEYS or name.startswith(RESERVED_ENVIRONMENT_PREFIX):
         raise HttpError(400, "RESERVED_ENV_NAME", "This variable name is reserved by the platform.")
     return name
 

@@ -35,6 +35,7 @@ from .deployment_config import DeploymentConfiguration, branch_name
 from .deployment_reads import source_repository
 from .log_service import STARTUP_LOG_BYTES, startup_log_path
 from .storage_contract import (
+    DERIVED_OUTPUTS,
     PLATFORM_ENVIRONMENT_KEYS,
     canonical_secret_key,
     platform_environment_values,
@@ -696,7 +697,8 @@ def _validate_storage_bindings(
                 f"storage binding {binding.name!r} references a missing or inactive {binding.resource_type} resource"
             )
         for output, target in binding.environment:
-            required_keys.add(canonical_secret_key(binding.resource_type, binding.name, output))
+            if output not in DERIVED_OUTPUTS[binding.resource_type]:
+                required_keys.add(canonical_secret_key(binding.resource_type, binding.name, output))
             targets.add(target)
     observed = app.list_environment(
         application_slug,
