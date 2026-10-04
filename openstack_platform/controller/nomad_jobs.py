@@ -28,10 +28,12 @@ from ..validation import (
 )
 from .application_models import Manifest
 from .storage_contract import (
-    PLATFORM_ENVIRONMENT_KEYS,
+    JOB_ENVIRONMENT,
+    RESERVED_ENVIRONMENT_KEYS,
     canonical_secret_key,
     canonical_secret_keys,
     platform_environment_values,
+    retired_secret_keys,
 )
 
 
@@ -93,11 +95,14 @@ def render_nomad_job(
         for output, target in binding.environment
     )
     excluded_keys = sorted(
-        PLATFORM_ENVIRONMENT_KEYS
+        RESERVED_ENVIRONMENT_KEYS
         | {
             key
             for binding in manifest.storage_bindings
-            for key in canonical_secret_keys(binding.resource_type, binding.name)
+            for key in (
+                *canonical_secret_keys(binding.resource_type, binding.name),
+                *retired_secret_keys(binding.resource_type, binding.name),
+            )
         }
     )
     comparisons = " ".join(f'(ne $key "{key}")' for key in excluded_keys)
@@ -109,7 +114,10 @@ def render_nomad_job(
     platform_environment = "\n".join(
         f"        {key} = {json.dumps(value)}"
         for key, value in sorted(
-            platform_environment_values(identifier, app_slug, manifest.port).items()
+            {
+                **platform_environment_values(identifier, app_slug, manifest.port),
+                **JOB_ENVIRONMENT,
+            }.items()
         )
     )
     job = f'''job "{job_id}" {{

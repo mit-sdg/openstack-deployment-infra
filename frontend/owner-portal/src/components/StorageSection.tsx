@@ -67,7 +67,7 @@ function BindingsDialog({
   const [error, setError] = useState<unknown>(null);
   const [saving, setSaving] = useState(false);
   const certificates = Object.values(resource.defaultBindings).filter((name) =>
-    /SSLROOTCERT|CA_BUNDLE/.test(name),
+    /SSLROOTCERT/.test(name),
   );
   function set(name: string, target: string | null) {
     setError(null);

@@ -26,9 +26,11 @@ from ..contracts import (
     POSTGRES_PORT,
 )
 from ..controller.storage_contract import (
+    APPLICATION_CA_PATH,
     canonical_secret_keys,
     canonicalize_environment,
     provider_environment,
+    retired_secret_keys,
     storage_owner,
 )
 from ..validation import ValidationError, resource_name, slug, uuid
@@ -46,7 +48,6 @@ _RESOURCE_CONTEXT: ContextVar[tuple[str, str]] = ContextVar(
     "storage_resource", default=("mongo", "default")
 )
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{1,62}")
-APPLICATION_CA_PATH = "/platform-ca/internal-ca.crt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1022,10 +1023,8 @@ def s3_environment(endpoint: str, bucket: str, access_key: str, secret_key: str)
             "AWS_REGION": "garage",
             "AWS_ACCESS_KEY_ID": access_key,
             "AWS_SECRET_ACCESS_KEY": secret_key,
-            "AWS_CA_BUNDLE": APPLICATION_CA_PATH,
             "S3_ENDPOINT": endpoint,
             "S3_BUCKET": bucket,
-            "S3_FORCE_PATH_STYLE": "true",
         }
     )
 
@@ -1218,8 +1217,6 @@ def s3_verify(
         or credential.provider_name != values.get("S3_BUCKET")
         or values.get("AWS_ACCESS_KEY_ID") != credential.credential_name
         or values.get("AWS_REGION") != "garage"
-        or values.get("S3_FORCE_PATH_STYLE") != "true"
-        or values.get("AWS_CA_BUNDLE") != APPLICATION_CA_PATH
     ):
         raise HelperActionError("IDENTITY_MISMATCH", "S3 credential identity does not match")
     client = scoped_client(values["AWS_ACCESS_KEY_ID"], values["AWS_SECRET_ACCESS_KEY"])
@@ -1751,13 +1748,16 @@ def _publish(
 ) -> VariableUpdate:
     name = _RESOURCE_CONTEXT.get()[1]
     keys = canonical_secret_keys(resource_type, name)
+    retired = retired_secret_keys(resource_type, name)
     owner = storage_owner(resource_type, name)
+    # Writing credentials also drops keys an older release stored.
     return update_owned_items(
         nomad,
         variable_path(application_slug),
-        {key: owner for key in keys},
+        {key: owner for key in (*keys, *retired)},
         owner=owner,
         updates=canonicalize_environment(resource_type, name, environment),
+        removals=retired,
     )
 
 
@@ -1765,7 +1765,7 @@ def _remove_environment(
     nomad: VariableClient, application_slug: str, resource_type: str
 ) -> VariableUpdate:
     name = _RESOURCE_CONTEXT.get()[1]
-    keys = canonical_secret_keys(resource_type, name)
+    keys = (*canonical_secret_keys(resource_type, name), *retired_secret_keys(resource_type, name))
     owner = storage_owner(resource_type, name)
     return update_owned_items(
         nomad,

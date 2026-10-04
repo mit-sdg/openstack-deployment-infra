@@ -1682,9 +1682,7 @@ class RepositoryLiveDriver:
                 "region": "ACCEPTANCE_S3_REGION",
                 "access_key_id": "ACCEPTANCE_S3_ACCESS_KEY_ID",
                 "secret_access_key": "ACCEPTANCE_S3_SECRET_ACCESS_KEY",
-                "ca_bundle": "ACCEPTANCE_S3_CA_BUNDLE",
                 "bucket": "ACCEPTANCE_S3_BUCKET",
-                "force_path_style": "ACCEPTANCE_S3_FORCE_PATH_STYLE",
             },
         }
         bindings = [

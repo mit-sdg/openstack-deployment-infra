@@ -1413,10 +1413,18 @@ application, watch progress, verify access and rotate credentials. Each output
 can bind to an owner-chosen environment name or be left unbound. Targets must be
 unique, unreserved and distinct from owner environment names. Save the bindings
 and deploy to apply them. Rotation also requires a redeploy to pick up new
-credentials. The platform's managed-data backup timer runs nightly; PostgreSQL
-and S3 TLS use the platform CA through the default `PGSSLROOTCERT` and
-`AWS_CA_BUNDLE` bindings. Renaming these targets requires configuring the client
-to use the renamed CA path variable.
+credentials. The platform's managed-data backup timer runs nightly. Every app
+job sets the reserved `NODE_EXTRA_CA_CERTS` to the platform CA, so Node and Bun
+clients verify PostgreSQL, MongoDB and S3 TLS without extra settings; the
+PostgreSQL `sslrootcert` output also names that file. Apps deployed before this
+change get it on their next deploy. S3 binds five outputs: `endpoint`,
+`region` (always `garage`), `bucket`, `access_key_id` and `secret_access_key`.
+The endpoint is an IP address, so the AWS SDK and Bun address buckets by path
+without a path-style setting. Bun reads `S3_ENDPOINT` rather than the default
+`AWS_ENDPOINT_URL_S3`, so Bun apps should rename that target. Older S3 resources
+keep two retired keys (`ca_bundle`, `force_path_style`) in their app variable
+until the next credential rotation removes them; they never reach an app that
+binds the resource.
 
 The repository root must contain `package.json`, and each selected package
 directory must contain its runtime lockfile. Build and start scripts come from

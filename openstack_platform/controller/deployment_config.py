@@ -23,7 +23,7 @@ from ..validation import (
 )
 from .application_models import Manifest, StorageBinding
 from .storage_contract import (
-    PLATFORM_ENVIRONMENT_KEYS,
+    RESERVED_ENVIRONMENT_KEYS,
     RESERVED_ENVIRONMENT_PREFIX,
     RESOURCE_OUTPUTS,
 )
@@ -189,7 +189,7 @@ def parse_configuration(payload: bytes | str | Mapping[str, Any]) -> DeploymentC
             if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", output):
                 raise ValidationError("storage output name is malformed")
             target = env_key(raw_target)
-            if target in PLATFORM_ENVIRONMENT_KEYS or target.startswith(
+            if target in RESERVED_ENVIRONMENT_KEYS or target.startswith(
                 RESERVED_ENVIRONMENT_PREFIX
             ):
                 raise ValidationError(f"storage binding target {target!r} is reserved")
