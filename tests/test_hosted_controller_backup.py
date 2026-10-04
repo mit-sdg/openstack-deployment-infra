@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import io
 import json
+import os
+import shutil
 import sqlite3
+import tarfile
 import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 from openstack_platform.controller import database as db
+from openstack_platform.controller import source_key_backup as keys
 from openstack_platform.controller.hosted_backup import HostedBackupError, backup_hosted_database
 
 
@@ -81,6 +87,94 @@ class HostedControllerBackupTests(unittest.TestCase):
             self.assertEqual(recovered.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         finally:
             recovered.close()
+
+    def _keys(self) -> Path:
+        root = self.root / "source-keys"
+        root.mkdir(mode=0o700)
+        directory = root / "hosted-app"
+        directory.mkdir(mode=0o700)
+        for name in keys.KEY_NAMES:
+            path = directory / name
+            path.write_bytes(
+                b"private fixture" if name == "id_ed25519" else b"ssh-ed25519 public fixture"
+            )
+            path.chmod(0o600)
+        os.utime(directory / "id_ed25519.pub", ns=(1234567890000000000, 1234567890000000000))
+        return root
+
+    def test_key_archive_is_paired_encrypted_and_restores_modes_and_public_mtime(self) -> None:
+        root = self._keys()
+        # Existing helper versions used ssh-keygen's 0644 public-file default.
+        (root / "hosted-app/id_ed25519.pub").chmod(0o644)
+        (root / ".new-hosted-app").mkdir()
+        (root / "unknown-app").mkdir()
+        name, _ = backup_hosted_database(
+            self.connection,
+            self.backups,
+            source_keys_root=root,
+            age_recipient="age1testrecipient",
+            age_command=str(self._age()),
+        )
+        manifest = json.loads((self.backups / (name + ".manifest")).read_text())
+        key_name = manifest["sourceKeys"]
+        self.assertTrue((self.backups / (key_name + ".manifest")).is_file())
+        plaintext = self.root / "keys.tar"
+        plaintext.write_bytes((self.backups / key_name).read_bytes().split(b"\n", 1)[1])
+        plaintext.chmod(0o600)
+        with tarfile.open(plaintext) as archive:
+            self.assertEqual(
+                set(archive.getnames()), {"hosted-app/id_ed25519", "hosted-app/id_ed25519.pub"}
+            )
+        destination = self.root / "restored-keys"
+        staging = keys.prepare_source_key_restore(plaintext, self.connection, destination)
+        keys.commit_source_key_restore(staging, destination)
+        public = destination / "hosted-app/id_ed25519.pub"
+        self.assertEqual(public.stat().st_mtime_ns, 1234567890000000000)
+        self.assertEqual(public.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(public.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(public.stat().st_uid, os.geteuid())
+        self.assertFalse(list((self.state / "backup-work").iterdir()))
+
+    def test_key_backup_retries_a_directory_replacement_and_refuses_links(self) -> None:
+        root = self._keys()
+        original = keys._read_key
+        replaced = False
+
+        def race(directory, name):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                os.rename(root / "hosted-app", root / ".old-hosted-app")
+                shutil.copytree(root / ".old-hosted-app", root / "hosted-app")
+                raise FileNotFoundError("replacement race")
+            return original(directory, name)
+
+        with mock.patch.object(keys, "_read_key", race):
+            keys.write_source_key_archive(self.connection, root, self.root / "race.tar")
+        public = root / "hosted-app/id_ed25519.pub"
+        public.unlink()
+        public.symlink_to(root / ".old-hosted-app/id_ed25519.pub")
+        with self.assertRaises(OSError):
+            keys.write_source_key_archive(self.connection, root, self.root / "link.tar")
+
+    def test_key_restore_refuses_unknown_slugs_links_duplicates_and_incomplete_pairs(self) -> None:
+        for name, kind in (
+            ("../id_ed25519", tarfile.REGTYPE),
+            ("unknown/id_ed25519", tarfile.REGTYPE),
+            ("hosted-app/id_ed25519", tarfile.SYMTYPE),
+            ("hosted-app/id_ed25519", tarfile.REGTYPE),
+        ):
+            with self.subTest(name=name, kind=kind):
+                path = self.root / "invalid.tar"
+                with tarfile.open(path, "w") as archive:
+                    member = tarfile.TarInfo(name)
+                    member.type = kind
+                    member.size = 4
+                    archive.addfile(member, io.BytesIO(b"test"))
+                path.chmod(0o600)
+                with self.assertRaises(keys.SourceKeyBackupError):
+                    keys.prepare_source_key_restore(path, self.connection, self.root / "restored")
+                self.assertFalse(list(self.root.glob(".source-keys-restore-*")))
 
     def test_bad_age_output_leaves_no_accepted_or_plaintext_backup(self) -> None:
         with self.assertRaisesRegex(HostedBackupError, "age-v1"):

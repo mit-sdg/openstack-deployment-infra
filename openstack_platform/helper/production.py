@@ -362,6 +362,7 @@ def _create_source_key(runtime: HelperRuntime, app_slug: str, *, replace: bool) 
             env=child_environment(),
         )
         os.chmod(staged / SOURCE_KEY, 0o600)
+        os.chmod(staged / f"{SOURCE_KEY}.pub", 0o600)
         retired = None
         if directory.exists():
             retired = directory.parent / f".old-{uuid_module.uuid4().hex}"

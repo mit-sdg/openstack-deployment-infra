@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -17,6 +18,11 @@ from typing import NoReturn
 from . import durable, runtime
 from .config import load_platform
 from .controller import database as db
+from .controller.source_key_backup import (
+    SourceKeyBackupError,
+    commit_source_key_restore,
+    prepare_source_key_restore,
+)
 from .installation import OPERATOR_BIN
 from .validation import ValidationError, uuid
 
@@ -371,6 +377,8 @@ def restore_database(
     maximum_bytes: int = _MAX_BACKUP_BYTES,
     identity: db.DeploymentIdentity | None = None,
     expected_recovery_required_operation: str | None = None,
+    source_keys_archive: Path | None = None,
+    source_keys_directory: Path | None = None,
 ) -> RestoreResult:
     """Verify an offline controller backup and atomically replace ``destination``.
 
@@ -407,7 +415,11 @@ def restore_database(
     if old_sidecars and not os.path.lexists(destination_path):
         _fail("SQLite WAL/SHM sidecars exist without a controller database")
 
+    if (source_keys_archive is None) != (source_keys_directory is None):
+        _fail("deploy-key restore requires both archive and destination")
     temporary_path: Path | None = None
+    keys_staging: Path | None = None
+    database_committed = False
     try:
         for stale in sorted(
             destination_path.parent.glob(f".{destination_path.name}.restore-*.tmp")
@@ -444,6 +456,14 @@ def restore_database(
             maximum_bytes=maximum_bytes,
         )
         schema_version = _verify_candidate(temporary_path, identity=identity)
+        if source_keys_archive is not None and source_keys_directory is not None:
+            snapshot = sqlite3.connect(f"file:{temporary_path}?mode=ro", uri=True)
+            try:
+                keys_staging = prepare_source_key_restore(
+                    source_keys_archive, snapshot, source_keys_directory
+                )
+            finally:
+                snapshot.close()
         _direct_private_file(
             temporary_path,
             label="verified restore candidate",
@@ -460,6 +480,10 @@ def restore_database(
         except durable.DurableReplaceError as error:
             raise RestoreError("offline SQLite restore could not be committed durably") from error
         temporary_path = None
+        database_committed = True
+        if keys_staging is not None and source_keys_directory is not None:
+            commit_source_key_restore(keys_staging, source_keys_directory)
+            keys_staging = None
         for sidecar in old_sidecars:
             sidecar.unlink(missing_ok=True)
         directory_descriptor = os.open(
@@ -473,9 +497,22 @@ def restore_database(
         return RestoreResult(destination_path, schema_version, "ok")
     except RestoreError:
         raise
-    except (OSError, sqlite3.Error, subprocess.SubprocessError) as error:
-        raise RestoreError("offline SQLite restore failed before atomic replacement") from error
+    except (
+        OSError,
+        sqlite3.Error,
+        subprocess.SubprocessError,
+        SourceKeyBackupError,
+        durable.DurableReplaceError,
+    ) as error:
+        message = (
+            "SQLite was restored but deploy-key restore did not complete; keep the controller stopped and repeat restore"
+            if database_committed
+            else "offline SQLite restore failed before atomic replacement"
+        )
+        raise RestoreError(message) from error
     finally:
+        if keys_staging is not None:
+            shutil.rmtree(keys_staging, ignore_errors=True)
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
             for sidecar in _sidecar_paths(temporary_path):
@@ -491,6 +528,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--platform-config", type=Path, required=True)
     parser.add_argument("--age-identity", type=Path)
+    parser.add_argument("--source-keys-archive", type=Path)
+    parser.add_argument("--source-keys-directory", type=Path)
     parser.add_argument(
         "--replace-current-recovery-required-operation",
         metavar="OPERATION_UUID",
@@ -513,6 +552,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.destination,
                 age_identity=args.age_identity,
                 identity=identity,
+                source_keys_archive=args.source_keys_archive,
+                source_keys_directory=args.source_keys_directory,
                 expected_recovery_required_operation=(
                     args.replace_current_recovery_required_operation
                 ),

@@ -142,6 +142,44 @@ class RecoveryBundleTests(unittest.TestCase):
         self.assertEqual(recovery_bundle.verify_bundle(imported), manifest)
         self.assertTrue((imported / "managed-data" / "registry.age").is_file())
 
+    def _key_trio(self) -> str:
+        root = self.sources["hosted-controller"]
+        manifest_path = next(root.glob("*.manifest"))
+        manifest = json.loads(manifest_path.read_text())
+        key_name = "hosted-controller-source-keys-20260830T120000Z.tar.age"
+        payload = b"age-encryption.org/v1\nkey evidence"
+        digest = hashlib.sha256(payload).hexdigest()
+        self._file(root / key_name, payload)
+        self._file(root / (key_name + ".sha256"), f"{digest}  {key_name}\n".encode())
+        self._file(
+            root / (key_name + ".manifest"),
+            json.dumps(
+                {
+                    "format": "openstack-platform-hosted-controller-source-keys-v1",
+                    "name": key_name,
+                    "sha256": digest,
+                }
+            ).encode(),
+        )
+        manifest["sourceKeys"] = key_name
+        self._file(manifest_path, json.dumps(manifest).encode())
+        return key_name
+
+    def test_v3_binds_key_trio_and_accepts_previous_bundle_formats(self) -> None:
+        key_name = self._key_trio()
+        root = self.sources["hosted-controller"]
+        bundle = self.export()
+        metadata = recovery_bundle.verify_bundle(bundle)
+        self.assertEqual(metadata["format"], "openstack-platform-offsite-recovery-v3")
+        self.assertIn("hosted-controller/" + key_name, {item["path"] for item in metadata["files"]})
+        imported_root = self.root / "import"
+        imported_root.mkdir(mode=0o700)
+        imported = recovery_bundle.import_bundle(bundle, imported_root)
+        self.assertEqual(recovery_bundle.verify_bundle(imported), metadata)
+        (root / key_name).unlink()
+        with self.assertRaises(recovery_bundle.RecoveryBundleError):
+            recovery_bundle._selected_component_files("hosted-controller", root)
+
     def test_manifest_or_payload_tampering_is_refused(self) -> None:
         bundle = self.export()
         payload = bundle / "managed-data" / "garage.age"

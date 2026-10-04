@@ -17,6 +17,7 @@ from .. import durable, runtime
 from ..config import load
 from ..validation import ValidationError
 from . import database as db
+from .source_key_backup import SourceKeyBackupError
 
 _AGE_HEADER = b"age-encryption.org/v1\n"
 
@@ -78,51 +79,33 @@ def _write_file(path: Path, content: bytes, *, mode: int) -> None:
     os.chmod(path, mode)
 
 
-def backup_hosted_database(
-    connection: sqlite3.Connection,
-    backup_root: str | Path,
+def _encrypt_backup(
+    plaintext: Path,
+    backup_root: Path,
     *,
+    name: str,
+    timestamp: str,
+    manifest_format: str,
     age_recipient: str,
     age_command: str,
-    created_at: datetime | None = None,
+    extra_manifest: dict[str, str] | None = None,
 ) -> tuple[str, str]:
-    """Create an online SQLite backup, encrypt it, and commit an evidence trio.
-
-    The final manifest is the commit marker. Plaintext exists only in a private
-    temporary directory and is removed on success or failure.
-    """
     if not age_recipient.startswith("age1") or any(
         character.isspace() for character in age_recipient
     ):
         _fail("hosted-controller backup requires a valid public age recipient")
     root = _private_directory(Path(backup_root), mode=0o750)
     staging = _private_directory(root / ".staging", mode=0o750)
-    timestamp = (created_at or datetime.now(UTC)).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    name = f"hosted-controller-{timestamp}.sqlite3.age"
     final_ciphertext = root / name
     final_checksum = root / f"{name}.sha256"
     final_manifest = root / f"{name}.manifest"
     if any(os.path.lexists(path) for path in (final_ciphertext, final_checksum, final_manifest)):
         _fail("hosted-controller backup name already exists")
 
-    database_rows = connection.execute("PRAGMA database_list").fetchall()
-    database_name = next((row[2] for row in database_rows if row[1] == "main"), "")
-    if not database_name:
-        _fail("hosted controller database has no direct filesystem path")
-    work_root = _private_directory(Path(database_name).parent / "backup-work", mode=0o700)
-    plaintext: Path | None = None
     staged_ciphertext: Path | None = None
     staged_checksum: Path | None = None
     staged_manifest: Path | None = None
     try:
-        descriptor, plaintext_name = tempfile.mkstemp(
-            prefix=".hosted-backup-", suffix=".sqlite3", dir=work_root
-        )
-        os.close(descriptor)
-        plaintext = Path(plaintext_name)
-        plaintext.unlink()
-        db.backup_database(connection, plaintext)
-
         descriptor, ciphertext_name = tempfile.mkstemp(
             prefix=f".{name}.", suffix=".tmp", dir=staging
         )
@@ -171,11 +154,12 @@ def backup_hosted_database(
         _fsync_directory(staging)
         _write_file(staged_checksum, f"{digest}  {name}\n".encode(), mode=0o640)
         manifest = {
-            "format": "openstack-platform-hosted-controller-backup-v1",
+            "format": manifest_format,
             "name": name,
             "sha256": digest,
             "createdAt": timestamp,
         }
+        manifest.update(extra_manifest or {})
         _write_file(
             staged_manifest,
             (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode(),
@@ -199,12 +183,74 @@ def backup_hosted_database(
         _fsync_directory(staging)
         _fsync_directory(root)
         return name, digest
-    except (OSError, db.DatabaseError, runtime.RuntimeFailure) as error:
-        raise HostedBackupError("hosted-controller backup failed before commit") from error
     finally:
-        for path in (plaintext, staged_ciphertext, staged_checksum, staged_manifest):
+        for path in (staged_ciphertext, staged_checksum, staged_manifest):
             if path is not None:
                 path.unlink(missing_ok=True)
+
+
+def backup_hosted_database(
+    connection: sqlite3.Connection,
+    backup_root: str | Path,
+    *,
+    age_recipient: str,
+    age_command: str,
+    created_at: datetime | None = None,
+    source_keys_root: Path | None = None,
+) -> tuple[str, str]:
+    """Commit SQLite and an optional paired key archive to the escrow recipient.
+
+    The SQLite manifest commits last and binds the separately committed archive.
+    Neither plaintext database nor key archive survives the private workspace.
+    """
+    timestamp = (created_at or datetime.now(UTC)).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    name = f"hosted-controller-{timestamp}.sqlite3.age"
+    root = _private_directory(Path(backup_root), mode=0o750)
+    if any(os.path.lexists(root / (name + suffix)) for suffix in ("", ".sha256", ".manifest")):
+        _fail("hosted-controller backup name already exists")
+    database_name = next(
+        (row[2] for row in connection.execute("PRAGMA database_list") if row[1] == "main"), ""
+    )
+    if not database_name:
+        _fail("hosted controller database has no direct filesystem path")
+    work_root = _private_directory(Path(database_name).parent / "backup-work", mode=0o700)
+    try:
+        with tempfile.TemporaryDirectory(prefix=".hosted-backup-", dir=work_root) as directory:
+            plaintext = Path(directory) / "controller.sqlite3"
+            db.backup_database(connection, plaintext)
+            extra: dict[str, str] = {}
+            if source_keys_root is not None:
+                from .source_key_backup import write_source_key_archive
+
+                keys = Path(directory) / "source-keys.tar"
+                snapshot = sqlite3.connect(f"file:{plaintext}?mode=ro", uri=True)
+                try:
+                    write_source_key_archive(snapshot, source_keys_root, keys)
+                finally:
+                    snapshot.close()
+                keys_name = f"hosted-controller-source-keys-{timestamp}.tar.age"
+                _encrypt_backup(
+                    keys,
+                    root,
+                    name=keys_name,
+                    timestamp=timestamp,
+                    manifest_format="openstack-platform-hosted-controller-source-keys-v1",
+                    age_recipient=age_recipient,
+                    age_command=age_command,
+                )
+                extra["sourceKeys"] = keys_name
+            return _encrypt_backup(
+                plaintext,
+                root,
+                name=name,
+                timestamp=timestamp,
+                manifest_format="openstack-platform-hosted-controller-backup-v1",
+                age_recipient=age_recipient,
+                age_command=age_command,
+                extra_manifest=extra,
+            )
+    except (OSError, db.DatabaseError, runtime.RuntimeFailure) as error:
+        raise HostedBackupError("hosted-controller backup failed before commit") from error
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -214,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-directory", type=Path, required=True)
     parser.add_argument("--backup-root", type=Path, required=True)
     parser.add_argument("--age-command", required=True)
+    parser.add_argument("--source-keys-root", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         configuration = load(args.platform_config, args.policy)
@@ -229,11 +276,13 @@ def main(argv: list[str] | None = None) -> int:
                     args.backup_root,
                     age_recipient=configuration.policy.backup_age_recipient,
                     age_command=args.age_command,
+                    source_keys_root=args.source_keys_root,
                 )
             finally:
                 connection.close()
     except (
         HostedBackupError,
+        SourceKeyBackupError,
         ValidationError,
         db.DatabaseError,
         runtime.RuntimeFailure,

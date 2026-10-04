@@ -51,7 +51,7 @@ class FullLossRecoveryDrillTests(unittest.TestCase):
             CREATE TABLE operations(status TEXT);
             CREATE TABLE operation_dispatches(status TEXT);
             CREATE TABLE image_selections(role TEXT);
-            CREATE TABLE applications(application_id TEXT);
+            CREATE TABLE applications(application_id TEXT, slug TEXT);
             CREATE TABLE deployment_attempts(
               application_id TEXT, deployment_id TEXT, status TEXT
             );
@@ -60,7 +60,7 @@ class FullLossRecoveryDrillTests(unittest.TestCase):
         )
         connection.execute("INSERT INTO schema_migrations VALUES (2, ?)", ("a" * 64,))
         if hosted:
-            connection.execute("INSERT INTO applications VALUES ('app-1')")
+            connection.execute("INSERT INTO applications VALUES ('app-1','drill-app')")
             connection.execute(
                 "INSERT INTO deployment_attempts VALUES ('app-1','deploy-1','succeeded')"
             )
@@ -141,16 +141,32 @@ printf 'hosted' >>"$DRILL_TEST_LOG"; printf ' %q' "$@" >>"$DRILL_TEST_LOG"; prin
 [[ ${FAIL_HOSTED:-0} != 1 ]] || exit 1
 backup=$1; shift
 destination=
+keys=
+keys_destination=
 while (($#)); do
  case $1 in
   --destination) destination=$2; shift 2 ;;
   --platform-config) shift 2 ;;
+  --source-keys-archive) keys=$2; shift 2 ;;
+  --source-keys-directory) keys_destination=$2; shift 2 ;;
   --yes) shift ;;
   *) exit 64 ;;
  esac
 done
 [[ -n $destination && ! -e $destination ]]
 cp -- "$backup" "$destination"
+if [[ -n $keys ]]; then
+ python3 - "$keys" "$destination" "$keys_destination" <<'PYKEYS'
+import sqlite3,sys
+from pathlib import Path
+from openstack_platform.controller.source_key_backup import prepare_source_key_restore,commit_source_key_restore
+connection=sqlite3.connect(sys.argv[2])
+destination=Path(sys.argv[3])
+staging=prepare_source_key_restore(Path(sys.argv[1]),connection,destination)
+commit_source_key_restore(staging,destination)
+connection.close()
+PYKEYS
+fi
 echo 'restore=verified schema-version=2 integrity=ok'
 """,
         )
@@ -217,6 +233,30 @@ echo 'managed-data-restore=verified source=fake'
         )
         self.assertIn("managed --yes", calls)
         self.assertNotIn("/srv/openstack-platform/state", calls)
+
+    def test_full_drill_restores_paired_keys_and_verify_only_rejects_bad_keys(self) -> None:
+        source = self.bundle / "hosted-controller/source-keys.tar.age"
+        with tarfile.open(source, "w") as archive:
+            for name in ("id_ed25519", "id_ed25519.pub"):
+                member = tarfile.TarInfo("drill-app/" + name)
+                member.size = 4
+                member.mode = 0o600
+                archive.addfile(member, io.BytesIO(b"test"))
+        source.chmod(0o600)
+        result, work = self._run("--full")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            (work / "replacements/source-keys/drill-app/id_ed25519").read_bytes(), b"test"
+        )
+        self.assertEqual(
+            json.loads((work / "DRILL-EVIDENCE.json").read_text())["sourceKeys"], "restored"
+        )
+        with tarfile.open(source, "w") as archive:
+            member = tarfile.TarInfo("other-app/id_ed25519")
+            member.size = 4
+            archive.addfile(member, io.BytesIO(b"test"))
+        result, work = self._run("--verify-only")
+        self.assertNotEqual(result.returncode, 0)
 
     def test_restore_failures_cannot_emit_complete_evidence(self) -> None:
         for failure in ("FAIL_OPERATOR", "FAIL_HOSTED", "FAIL_MANAGED"):

@@ -475,7 +475,12 @@ adds the public key on GitHub as a read-only deploy key; only a repository admin
 can, which ties the app to a repository its owner controls. `app.source.check`
 runs `git ls-remote` with the key and names the problem (`key-refused`,
 `not-found`, `branch-missing`, `unavailable`) without echoing GitHub's output.
-Keys are not in the controller backup; a lost key is replaced from Settings.
+Keys are backed up separately alongside the hosted-controller SQLite snapshot,
+encrypted to the off-platform escrow recipient. The database manifest binds the
+paired key archive. Only direct private/public files for snapshot slugs are read;
+helper replacement directories are excluded. Offline restore validates slugs and
+pairs, installs controller-owned 0700 directories/0600 files, and preserves public
+key mtimes for the portal's createdAt display.
 
 Before removing a candidate that never became healthy, the controller calls the
 read-only helper action `app.startup` for that exact job slot: the newest
@@ -540,7 +545,8 @@ mutation.
 
 The deployment has three independent backup classes:
 
-1. **Hosted controller:** the live controller SQLite database under admin state,
+1. **Hosted controller:** the live controller SQLite database and a separately
+   committed deploy-key archive under admin state,
    encrypted on admin to `<paths.backups>/hosted-controller` with its private
    identity held off-platform.
 2. **External operator state:** the operator CLI SQLite database, backed up
@@ -554,6 +560,8 @@ commit marker. Managed restore verification uses disposable PostgreSQL and
 MongoDB containers and validates Garage/OCI archives before writing
 `RESTORE-MANIFEST`.
 
+Version-3 off-site bundles include the SQLite manifest’s matching deploy-key
+archive; legacy versions 1 and 2 remain accepted without keys.
 Off-site export chooses only committed sets, verifies every copy, writes an
 append-only canonical manifest, and updates a credential-free health receipt.
 The destination must be a distinct mounted filesystem and provider retention is

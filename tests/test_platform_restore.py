@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import sqlite3
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +62,38 @@ class OfflineRestoreTests(unittest.TestCase):
             )
         db.backup_database(connection, self.source)
         connection.close()
+
+    def test_deploy_keys_are_validated_before_database_replacement(self) -> None:
+        self._write_backup()
+        archive = self.root / "keys.tar"
+
+        def write(name):
+            with tarfile.open(archive, "w") as handle:
+                for key in ("id_ed25519", "id_ed25519.pub"):
+                    member = tarfile.TarInfo(f"{name}/{key}")
+                    member.size = 4
+                    member.mtime = 1234567890
+                    handle.addfile(member, io.BytesIO(b"test"))
+            archive.chmod(0o600)
+
+        write("other-app")
+        with self.assertRaises(restore.RestoreError):
+            restore.restore_database(
+                self.source,
+                self.destination,
+                source_keys_archive=archive,
+                source_keys_directory=self.root / "keys",
+            )
+        self.assertFalse(self.destination.exists())
+        write("demo-app")
+        restore.restore_database(
+            self.source,
+            self.destination,
+            source_keys_archive=archive,
+            source_keys_directory=self.root / "keys",
+        )
+        self.assertEqual((self.root / "keys/demo-app/id_ed25519").read_bytes(), b"test")
+        self.assertEqual((self.root / "keys/demo-app/id_ed25519.pub").stat().st_mtime, 1234567890)
 
     def test_restore_migrates_verifies_and_atomically_replaces_state(self) -> None:
         self._write_backup()

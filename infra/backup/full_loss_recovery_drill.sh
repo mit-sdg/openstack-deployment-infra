@@ -69,6 +69,32 @@ if [[ -d $IMPORTED/management-broker ]]; then
   "$BROKER_RESTORE_LAUNCHER" verify "$scratch/management-broker.sqlite3"
 fi
 
+keys_arguments=()
+key_archive=$(find "$IMPORTED/hosted-controller" -maxdepth 1 -type f -name '*.tar.age' -print -quit)
+if [[ -n $key_archive ]]; then
+  "$AGE" --decrypt --identity "$CONTROLLER_IDENTITY" --output "$scratch/source-keys.tar" "$key_archive"
+  chmod 0600 "$scratch/source-keys.tar"
+  python3 - "$scratch/source-keys.tar" "$scratch/hosted-controller.sqlite3" <<'PYKEYS'
+import os,sqlite3,sys,tarfile
+assert os.stat(sys.argv[1]).st_size<=32*1024*1024
+connection=sqlite3.connect(f"file:{sys.argv[2]}?mode=ro",uri=True)
+allowed={row[0] for row in connection.execute("SELECT slug FROM applications")}
+connection.close()
+pairs={}
+with tarfile.open(sys.argv[1],"r:") as archive:
+ for member in archive:
+  parts=member.name.split("/")
+  assert len(parts)==2 and parts[0] in allowed and parts[1] in {"id_ed25519","id_ed25519.pub"}
+  assert member.isfile() and 0 < member.size <= 16384
+  seen=pairs.setdefault(parts[0],set())
+  assert parts[1] not in seen
+  seen.add(parts[1])
+  assert len(archive.extractfile(member).read())==member.size
+assert all(pair=={"id_ed25519","id_ed25519.pub"} for pair in pairs.values())
+PYKEYS
+  keys_arguments=(--source-keys-archive "$scratch/source-keys.tar" --source-keys-directory "$WORK/replacements/source-keys")
+fi
+
 managed="$IMPORTED/managed-data"
 "$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/registry.age" | \
   python3 "$REGISTRY_ARTIFACT_SCRIPT" verify
@@ -118,6 +144,7 @@ hosted_output="$(
     "$scratch/hosted-controller.sqlite3" \
     --destination "$hosted_destination" \
     --platform-config "$PLATFORM_CONFIG" \
+    "${keys_arguments[@]}" \
     --yes
 )"
 printf '%s\n' "$hosted_output"
@@ -172,9 +199,9 @@ managed_output="$(PLATFORM_CONFIG="$PLATFORM_CONFIG" AGE_KEY="$MANAGED_IDENTITY"
 printf '%s\n' "$managed_output"
 grep -Eq '^managed-data-restore=verified source=' <<<"$managed_output"
 
-python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" <<'PY'
+python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" "$scratch/source-keys.tar" <<'PY'
 import json,os,sys
-path,bundle,counts,broker_path=sys.argv[1:]
+path,bundle,counts,broker_path,keys_path=sys.argv[1:]
 evidence={
  "bundle":bundle,
  "controllerState":{
@@ -188,6 +215,8 @@ evidence={
  "records":json.loads(counts),
  "registryArtifacts":"restored",
 }
+if os.path.isfile(keys_path):
+ evidence["sourceKeys"]="restored"
 if os.path.isfile(broker_path):
  import sqlite3
  connection=sqlite3.connect(f"file:{broker_path}?mode=ro",uri=True)

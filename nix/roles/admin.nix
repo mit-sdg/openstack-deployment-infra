@@ -156,7 +156,7 @@ let
       ${packages.controllerPackage}/bin/openstack-platform-management-broker-backup restore "$input" \
       --destination ${managementBrokerState}/management.sqlite3 \
       --config ${managementBrokerConfig} --yes
-    ${pkgs.util-linux}/bin/runuser -u ${managementBrokerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input"
+    ${pkgs.util-linux}/bin/runuser -u ${managementBrokerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input" "$keys"
   '';
   managementPrepare = pkgs.writeShellScript "${namespace}-management-prepare" ''
     set -euo pipefail
@@ -255,6 +255,15 @@ let
         exit 69
       fi
     done
+    keys=${lib.escapeShellArg "${controllerRoot}/restore-source-keys.tar"}
+    keys_arguments=()
+    if [[ -e "$keys" || -L "$keys" ]]; then
+      [[ -f "$keys" && ! -L "$keys" && $(${pkgs.coreutils}/bin/stat -c %U:%a "$keys") == ${controllerUser}:600 ]] || {
+        echo "deploy-key restore input must be a direct ${controllerUser}-owned mode-0600 file" >&2
+        exit 77
+      }
+      keys_arguments=(--source-keys-archive "$keys" --source-keys-directory ${controllerRoot}/source-keys)
+    fi
     input=${lib.escapeShellArg hostedControllerRestoreInput}
     [[ -f "$input" && ! -L "$input" ]]
     [[ $(${pkgs.coreutils}/bin/stat -c %U:%a "$input") == ${controllerUser}:600 ]] || {
@@ -267,8 +276,9 @@ let
       --destination ${controllerState}/platform.sqlite3 \
       --platform-config ${platformJson} \
       "''${recovery_arguments[@]}" \
+      "''${keys_arguments[@]}" \
       --yes
-    ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input"
+    ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input" "$keys"
   '';
 
   openstackClient = pkgs.writeShellScriptBin "platform-openstack" ''
@@ -578,6 +588,7 @@ in
         "--policy ${controllerPolicy}"
         "--state-directory ${controllerState}"
         "--backup-root ${hostedControllerBackupRoot}"
+        "--source-keys-root ${controllerRoot}/source-keys"
         "--age-command ${pkgs.age}/bin/age"
       ];
       NoNewPrivileges = true;

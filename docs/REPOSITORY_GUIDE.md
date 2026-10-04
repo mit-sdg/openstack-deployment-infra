@@ -178,6 +178,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/maintenance.py` — journals verified process stop and optional worker removal after build/preflight, under the deployment's application lock.
 - `openstack_platform/controller/worker_reuse.py` — read-only exact accepted-worker identity, image, and capacity validation for same-worker deployments.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
+- `openstack_platform/controller/source_key_backup.py` — bounded no-follow deploy-key archive creation and offline restore staging with validated database slugs.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
 - `openstack_platform/controller/image_service.py` — validated hosted role-image metadata selection and immutable worker/builder provisioning snapshots.

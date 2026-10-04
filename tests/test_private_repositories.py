@@ -225,6 +225,43 @@ class HelperDeployKeyTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.key("delete")
 
+    def test_generated_key_archive_preserves_public_creation_time(self) -> None:
+        from openstack_platform.controller import database as controller_db
+        from openstack_platform.controller.source_key_backup import (
+            commit_source_key_restore,
+            prepare_source_key_restore,
+            write_source_key_archive,
+        )
+
+        created = self.key("create")
+        connection = controller_db.connect(self.root / "platform.sqlite3")
+        controller_db.migrate(connection)
+        try:
+            controller_db.put_application(
+                connection,
+                application_id=BUILD,
+                application_slug="notes",
+                worker_flavor="small",
+                scheduler_cpu_mhz=500,
+                scheduler_memory_mib=512,
+            )
+            archive = self.root / "keys.tar"
+            write_source_key_archive(connection, self.root / "controller/source-keys", archive)
+            target = self.root / "restored"
+            commit_source_key_restore(
+                prepare_source_key_restore(archive, connection, target), target
+            )
+            self.assertEqual(
+                " ".join((target / "notes/id_ed25519.pub").read_text().split()[:2]),
+                created["publicKey"],
+            )
+            self.assertEqual(
+                (target / "notes/id_ed25519.pub").stat().st_mtime_ns,
+                (self.root / "controller/source-keys/notes/id_ed25519.pub").stat().st_mtime_ns,
+            )
+        finally:
+            connection.close()
+
     def test_private_source_reads_require_a_key_and_suppress_git_errors(self) -> None:
         args = {"slug": "notes", "repository": "https://github.com/ada/notes", "branch": "main"}
         self.assertEqual(
