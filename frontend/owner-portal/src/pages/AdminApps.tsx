@@ -506,8 +506,11 @@ function ManagedApplication({ id }: { id: string }) {
           </OperationList>
         </Section>
       )}
+      {/* Keyed by app only, like the owner page: the form tracks the saved
+          revision itself, so a save doesn't remount it and lose its
+          confirmation. */}
       <ConfigurationForm
-        key={id + ':' + settings.data.revision}
+        key={id}
         id={id}
         initial={settings.data}
         resources
