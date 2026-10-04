@@ -990,3 +990,28 @@ Use [retained pair reactivation](OPERATIONS.md#reactivate-a-retained-portal-pair
 to roll back compatible executables and their own inventory snapshots. The
 operator command re-verifies retained evidence and payloads before smoke and
 uses the same staged selectors, install lock, marker and root activation path.
+
+
+### Hosted deploy-key backup upgrade
+
+The hosted controller, helper and root restore launcher ship in the admin image.
+Replace that image to adopt deploy-key backup/restore support. Before replacement,
+retain the existing SQLite/managed-data backups; after readiness, run the hosted
+backup service and verify both committed SQLite and source-key trios. Require a
+version-3 off-site bundle before claiming deploy-key full-loss recovery. Older
+bundles remain accepted but contain no deploy keys. See [hosted restore](OPERATIONS.md#restore-the-hosted-controller).
+
+### Managed-data backup format upgrade
+
+The admin image supplies the backup services, restore scripts, monitoring and
+Garage helpers. Replace the admin image to adopt managed-data format 3 and its
+backup-volume mount dependency. Retain and verify existing format-2 evidence;
+it remains readable. New sets exclude app images. After full restore, follow
+[rebuild app images](OPERATIONS.md#rebuild-app-images-after-full-restore) using
+the controller's accepted commits and settings before reopening apps.
+
+The same admin update grants read-only backup access on new app buckets and
+backfills existing buckets at backup time. After replacement, run a fresh
+managed-data backup and its coverage check; retain the resulting catalog-format-2
+archive before claiming S3 full-loss recovery. The Garage storage image stays
+pinned to v2.3.0; these changes use its existing admin API.

@@ -143,6 +143,62 @@ class ApplicationService:
             False,
         )
 
+    def restart(self, application_identifier: str, *, request_id: str) -> None:
+        """Restart the accepted task once, without rebuilding or replacing its worker."""
+        deadline = min(operation_deadline(self.config), time.monotonic() + 30)
+        scope = f"app-{application_identifier}"
+        with runtime.lock(self.state_directory, scope, deadline=deadline):
+            current = db.get_application(self.connection, application_identifier)
+            if current is None or not current.desired_running:
+                raise ValidationError("restart requires a running application")
+            deployment = db.get_deployment(self.connection, application_identifier)
+            if deployment is None:
+                raise ValidationError("restart requires an accepted deployment")
+            refs: dict[str, object] = {
+                "application_id": current.application_id,
+                "job_id": app.nomad_job_id(deployment.nomad_job, current.slug),
+                "job_sha256": deployment.nomad_job_sha256,
+                "image": deployment.image_digest,
+            }
+            operation, resuming = self._operation(
+                current, "app.restart", refs, deadline, operation_id=request_id
+            )
+            # A restart is transient and cannot be observed reliably after a lost
+            # response. Never replay a checkpointed request and interrupt twice.
+            if resuming and operation.phase == "restart_requested":
+                db.mark_failed(
+                    self.connection,
+                    operation.operation_id,
+                    "restart outcome is unknown; inspect the app before requesting another restart",
+                    cleanup_state="not_required",
+                )
+                return
+            db.checkpoint_operation(
+                self.connection, operation.operation_id, phase="restart_requested", refs=refs
+            )
+            try:
+                result = self.helper_caller(
+                    self.config,
+                    "app.restart",
+                    {
+                        "slug": current.slug,
+                        "jobId": refs["job_id"],
+                        "candidateJobSha256": refs["job_sha256"],
+                        "candidateImage": refs["image"],
+                    },
+                    deadline=deadline,
+                )
+                if result.get("restarted") is not True:
+                    raise app.ApplicationError("task restart was not confirmed")
+                db.mark_succeeded(
+                    self.connection, operation.operation_id, cleanup_state="not_required"
+                )
+            except Exception as error:
+                db.mark_failed(
+                    self.connection, operation.operation_id, error, cleanup_state="not_required"
+                )
+                raise
+
     def disable(
         self, application_identifier: str, *, request_id: str | None = None
     ) -> ApplicationLifecycleChanged:

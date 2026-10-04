@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 from unittest.mock import patch
 
+from openstack_platform.controller.http import HttpError
 from openstack_platform.management.broker import bootstrap
 from openstack_platform.management.broker.members import MAXIMUM_MEMBERS
 from openstack_platform.management.common import strict_json
@@ -85,11 +86,48 @@ class TeamTests(ManagementCase):
             lambda: self.call("GET", f"/v1/apps/{self.app}/activity?limit=500", owner="alice"),
         )
 
+    def test_team_state_controls_share_busy_scope_and_restart_is_compatible(self) -> None:
+        self.add("bob")
+        route = f"/v1/apps/{self.app}"
+        self.assert_error(
+            "NOT_FOUND",
+            lambda: self.call("POST", route + "/state", {"desiredRunning": True}, "taylor"),
+        )
+        result = self.call("POST", route + "/state", {"desiredRunning": True}, "bob").body["data"]
+        self.assert_error("APP_BUSY", lambda: self.call("POST", route + "/restart", {}, "alice"))
+        self.broker.journal.dispatch(result["intentId"])
+        result = self.call("POST", route + "/restart", {}, "bob").body["data"]
+        self.broker.journal.dispatch(result["intentId"])
+        self.assertEqual(
+            self.call("GET", "/v1/intents/" + result["intentId"], owner="bob").body["data"][
+                "state"
+            ],
+            "succeeded",
+        )
+        request = self.broker.client.request
+
+        def older(method, path, *args, **kwargs):
+            if path.endswith("/restart"):
+                return 404, {"error": {"code": "NOT_FOUND", "summary": "unsafe"}}
+            return request(method, path, *args, **kwargs)
+
+        with patch.object(self.broker.client, "request", older):
+            result = self.call("POST", route + "/restart", {}, "alice").body["data"]
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("not available yet", result["safeError"])
+        self.assertNotIn("unsafe", result["safeError"])
+
     def test_only_the_owner_manages_people_and_members_can_leave(self) -> None:
         self.add("bob")
         self.assert_error("OWNER_ONLY", lambda: self.add("taylor", owner="bob"))
         self.assert_error("OWNER_ONLY", lambda: self.remove(self.alice, owner="bob"))
-        self.assert_error("ACCOUNT_NOT_FOUND", lambda: self.add("nobody"))
+        with self.assertRaises(HttpError) as error:
+            self.add("nobody")
+        self.assertEqual(error.exception.code, "ACCOUNT_NOT_REGISTERED")
+        self.assertEqual(
+            error.exception.summary,
+            "nobody isn't registered yet. Ask them to sign in to the portal once, then add them.",
+        )
         self.assert_error("ALREADY_OWNER", lambda: self.add("alice"))
         for user in (self.taylor, str(uuid.uuid4()), "not-a-uuid"):
             with self.subTest(user=user):

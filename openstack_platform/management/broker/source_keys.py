@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...controller.http import HttpError, Request, Response
 from ...validation import ValidationError, commit
+from ..common import digest
 from .accounts import audit
 from .client import ControllerUnavailable
 
@@ -38,6 +39,8 @@ class SourceKeys:
             ("GET", root + "/{app}/source-key", self.read),
             ("POST", root + "/{app}/source-key", self.create),
             ("POST", root + "/{app}/source-key/check", self.check),
+            ("POST", root + "/{app}/source/commits", self.commits),
+            ("POST", root + "/{app}/source/check", self.preflight),
         ]
 
     def controller(self, method: str, path: str, body: object = None) -> dict[str, Any]:
@@ -147,6 +150,97 @@ class SourceKeys:
                     {"repository": settings["repository"], "branch": settings["branch"]},
                 )
                 shared = self.check_model(result, settings["branch"])
+                with self.lock:
+                    self.checked[app["id"]] = (self.clock(), target, shared)
+            return Response(200, {"data": shared})
+        finally:
+            self.checking.release()
+
+    def commits(self, request: Request) -> Response:
+        return self.source_read(request, preflight=False)
+
+    def preflight(self, request: Request) -> Response:
+        return self.source_read(request, preflight=True)
+
+    def source_read(self, request: Request, *, preflight: bool) -> Response:
+        _user, app = self.broker.own(request, mutation=True)
+        body = {} if request.body is None else request.body
+        fields = {"commit", "configurationRevision"} if preflight else set()
+        if not isinstance(body, dict) or set(body) != fields:
+            raise HttpError(400, "INVALID_REQUEST", "Unexpected repository check fields.")
+        with self.broker.database.connect() as db:
+            settings = db.execute(
+                "SELECT * FROM configurations WHERE app_id=? ORDER BY revision DESC LIMIT 1",
+                (app["id"],),
+            ).fetchone()
+        if settings is None:
+            raise HttpError(409, "SETTINGS_REQUIRED", "Save the repository in settings first.")
+        values = {"repository": settings["repository"]}
+        if preflight:
+            if (
+                type(body["configurationRevision"]) is not int
+                or body["configurationRevision"] != settings["revision"]
+            ):
+                raise HttpError(
+                    409,
+                    "REVISION_CONFLICT",
+                    "Settings changed. Reload before checking this commit.",
+                )
+            values.update(commit=commit(body["commit"]), configuration=settings["configuration"])
+        else:
+            values["branch"] = settings["branch"]
+        mode = "check" if preflight else "commits"
+        target = mode + ":" + digest(str(settings["revision"]) + str(values))
+        if not self.checking.acquire(timeout=WAIT_SECONDS):
+            raise HttpError(
+                503,
+                "CHECK_BUSY",
+                "Another repository check is running. Try again in a few seconds.",
+                retryable=True,
+            )
+        try:
+            shared = self.recent(app["id"], target)
+            if shared is None:
+                status, result = self.broker.client.request(
+                    "POST",
+                    f"/v1/applications/{app['id']}/source/{mode}",
+                    values,
+                    timeout_seconds=30,
+                )
+                if status == 404:
+                    raise HttpError(
+                        409,
+                        "SOURCE_READS_UNAVAILABLE",
+                        "Private repository checks aren't available yet. The build checks your commit when you deploy.",
+                    )
+                if status != 200:
+                    raise HttpError(
+                        503,
+                        "SOURCE_UNAVAILABLE",
+                        "Couldn’t read this repository. Check deploy key access in Settings, then try again.",
+                        retryable=True,
+                    )
+                if (
+                    result.get("applicationId") != app["id"]
+                    or type(result.get("keyPresent")) is not bool
+                ):
+                    raise ControllerUnavailable("invalid source identity")
+                items = result.get("items", [])
+                if not isinstance(items, list) or len(items) > (102 if preflight else 5):
+                    raise ControllerUnavailable("invalid source items")
+                allowed = (
+                    {"id", "label", "state", "problem"}
+                    if preflight
+                    else {"sha", "message", "author", "date"}
+                )
+                shared = {
+                    "keyPresent": result["keyPresent"],
+                    "items": [
+                        {key: value for key, value in item.items() if key in allowed}
+                        for item in items
+                        if isinstance(item, dict)
+                    ],
+                }
                 with self.lock:
                     self.checked[app["id"]] = (self.clock(), target, shared)
             return Response(200, {"data": shared})

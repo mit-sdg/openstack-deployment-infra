@@ -255,6 +255,15 @@ let
         exit 69
       fi
     done
+    keys=${lib.escapeShellArg "${controllerRoot}/restore-source-keys.tar"}
+    keys_arguments=()
+    if [[ -e "$keys" || -L "$keys" ]]; then
+      [[ -f "$keys" && ! -L "$keys" && $(${pkgs.coreutils}/bin/stat -c %U:%a "$keys") == ${controllerUser}:600 ]] || {
+        echo "deploy-key restore input must be a direct ${controllerUser}-owned mode-0600 file" >&2
+        exit 77
+      }
+      keys_arguments=(--source-keys-archive "$keys" --source-keys-directory ${controllerRoot}/source-keys)
+    fi
     input=${lib.escapeShellArg hostedControllerRestoreInput}
     [[ -f "$input" && ! -L "$input" ]]
     [[ $(${pkgs.coreutils}/bin/stat -c %U:%a "$input") == ${controllerUser}:600 ]] || {
@@ -267,8 +276,9 @@ let
       --destination ${controllerState}/platform.sqlite3 \
       --platform-config ${platformJson} \
       "''${recovery_arguments[@]}" \
+      "''${keys_arguments[@]}" \
       --yes
-    ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input"
+    ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input" "$keys"
   '';
 
   openstackClient = pkgs.writeShellScriptBin "platform-openstack" ''
@@ -578,6 +588,7 @@ in
         "--policy ${controllerPolicy}"
         "--state-directory ${controllerState}"
         "--backup-root ${hostedControllerBackupRoot}"
+        "--source-keys-root ${controllerRoot}/source-keys"
         "--age-command ${pkgs.age}/bin/age"
       ];
       NoNewPrivileges = true;
@@ -1178,6 +1189,8 @@ in
 
   systemd.services."${namespace}-platform-backup" = {
     description = "Create encrypted logical platform backups";
+    after = [ backupMountUnit ];
+    requires = [ backupMountUnit ];
     unitConfig.ConditionPathExists = "${root}/persistent/secrets/backup-age-key.txt";
     serviceConfig = {
       Type = "oneshot";
@@ -1193,11 +1206,8 @@ in
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
-        "REGISTRY_ARTIFACT_SCRIPT=${infra}/backup/registry_artifact.py"
-        "REGISTRY_BACKUP_SECRETS=%t/${namespace}-backup-private/storage-bootstrap.env"
-        "REGISTRY_BACKUP_MAX_FILE_BYTES=1099511627776"
-        "REGISTRY_BACKUP_MAX_TOTAL_BYTES=4398046511104"
-        "REGISTRY_BACKUP_MAX_MANIFEST_BYTES=67108864"
+        "GARAGE_VERIFY_SCRIPT=${infra}/backup/verify_garage_backup.py"
+        "SECRETS_FILE=%t/${namespace}-backup-private/storage-bootstrap.env"
         # Rootless Podman needs the NixOS setuid newuidmap/newgidmap wrappers.
         "PATH=/run/wrappers/bin:${
           lib.makeBinPath [
@@ -1219,7 +1229,7 @@ in
       UMask = "0077";
       # Read operator-controlled inputs as the operator. Root must not copy
       # an attacker-selected source into credentials accessible to this UID.
-      # The registry parser still gets a private mode-0600 runtime copy.
+      # Backup tools get a private mode-0600 runtime copy.
       LimitCORE = 0;
       ExecStart = "${infra}/backup/run_platform_backup.sh";
     };

@@ -61,14 +61,15 @@ operator, the helper, CI, or systemd. They are not a second public CLI.
 
 ### Backup and recovery
 
-- `infra/backup/emit_garage_backup.py` — streams a restorable Garage object catalog and payload archive.
+- `infra/backup/emit_garage_backup.py` — grants read-only backup access and streams every app bucket, key grant and object.
+- `infra/backup/garage_catalog.py` — validates bounded Garage catalogs, reads admin inventory and remaps offline restored bucket identities.
+- `infra/backup/verify_garage_backup.py` — validates object archives and compares coverage with the admin bucket inventory.
 - `infra/backup/emit_logical_backup.sh` — selects PostgreSQL, MongoDB, or Garage and emits its logical backup stream.
 - `infra/backup/full_loss_recovery_drill.sh` — verifies or performs a bounded full-loss drill from an off-site bundle and escrowed identities.
 - `infra/backup/init_garage_backup_key.py` — creates and persists the non-expiring read-only Garage backup key once.
-- `infra/backup/registry_artifact.py` — exports or imports bounded OCI Distribution manifests and reachable blobs as a validated tar stream.
 - `infra/backup/restore_garage_backup.py` — restores a Garage catalog stream without extracting untrusted paths.
 - `infra/backup/restore_managed_data.sh` — destructively restores verified managed-data evidence into replacement services.
-- `infra/backup/run_platform_backup.sh` — coordinates encrypted managed-service and registry backup evidence.
+- `infra/backup/run_platform_backup.sh` — coordinates encrypted managed-service backup evidence.
 - `infra/backup/verify_latest_restore.sh` — restores the latest managed backups into disposable containers and records verification evidence.
 
 ### First-boot configuration
@@ -178,6 +179,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/maintenance.py` — journals verified process stop and optional worker removal after build/preflight, under the deployment's application lock.
 - `openstack_platform/controller/worker_reuse.py` — read-only exact accepted-worker identity, image, and capacity validation for same-worker deployments.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
+- `openstack_platform/controller/source_key_backup.py` — bounded no-follow deploy-key archive creation and offline restore staging with validated database slugs.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
 - `openstack_platform/controller/image_service.py` — validated hosted role-image metadata selection and immutable worker/builder provisioning snapshots.
@@ -263,6 +265,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_dashboard.py` — dashboard admin reader, parser, probe, status projection, refresh, HTTP security, command, static asset, and release-identity tests.
 - `tests/test_deployment_config.py` — typed deployment configuration and Git branch/ref resolution tests.
 - `tests/test_documentation.py` — documentation links, consolidated reader paths, interface claims, route coverage, and repository-index checks.
+- `tests/test_garage_backup.py` — tests read-only grants, complete bucket coverage, bounded archives and key/object recovery.
 - `tests/test_full_loss_recovery_drill.py` — full and verify-only recovery drill command/evidence/failure-boundary tests.
 - `tests/test_hardening_properties.py` — generated property cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
 - `tests/test_helper_registry_artifact.py` — scoped read-only artifact graph verification, missing content, digest tampering, and secret-safe results.
@@ -297,7 +300,6 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_platform_setup.py` — environment parsing, read-only preflight, inventory generation, hosted-controller gates, resume, and CLI tests.
 - `tests/test_platform_storage.py` — controller storage state machine and concrete PostgreSQL/MongoDB/Garage helper tests.
 - `tests/test_recovery_bundle.py` — off-site export/import, manifest bounds, mount validation, scheduling, and receipt tests.
-- `tests/test_registry_artifact_streaming.py` — bounded OCI manifest/blob export and import graph-validation tests.
 - `tests/test_release_manifest.py` — component manifest, SBOM, provenance, signature, bundle, and source-binding tests.
 - `tests/test_role_artifact_manifest.py` — post-build QCOW2/Nix closure/publication artifact evidence and tamper tests.
 - `tests/test_verify_persistent_host.py` — exact provider projection validation for safely reusing persistent hosts.
@@ -421,6 +423,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/resources.py` — owner environment and storage routes, validation, and secret-free projections.
 - `tests/test_management_contract.py` — real project-socket broker contract and fake/real wire-shape, errors, cleanup, and read evidence.
 - `openstack_platform/management/backup.py` — online SQLite backup, encrypted evidence, verification and offline session-invalidating restore.
+- `tests/test_managed_data_backup.py` — hermetic data-only backup and legacy restore compatibility checks.
 - `tests/test_management_backup.py` — fourth-class backup, off-site compatibility, restore guards and full-loss drill tests.
 - `tests/test_management_platform.py` — explicit ingress identity configuration and Nix hosting boundary checks.
 

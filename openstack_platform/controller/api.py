@@ -16,6 +16,7 @@ from ..runtime import safe_summary
 from ..validation import (
     ValidationError,
     bounded_text,
+    commit,
     env_key,
     repository_url,
     resource_name,
@@ -177,6 +178,7 @@ class ControllerAPI:
             ("GET", "/v1/applications/{id}", self._get_application),
             ("POST", "/v1/applications/{id}/enable", self._enable_application),
             ("POST", "/v1/applications/{id}/disable", self._disable_application),
+            ("POST", "/v1/applications/{id}/restart", self._restart_application),
             ("POST", "/v1/applications/{id}/delete", self._delete_application),
             ("POST", "/v1/applications/{id}/deployments", self._create_deployment),
             ("GET", "/v1/applications/{id}/deployments", self._list_deployments),
@@ -187,6 +189,8 @@ class ControllerAPI:
             ("GET", "/v1/applications/{id}/source-key", self._get_source_key),
             ("POST", "/v1/applications/{id}/source-key", self._create_source_key),
             ("POST", "/v1/applications/{id}/source-key/check", self._check_source_key),
+            ("POST", "/v1/applications/{id}/source/commits", self._source_commits),
+            ("POST", "/v1/applications/{id}/source/check", self._source_preflight),
             ("GET", "/v1/applications/{id}/environment", self._get_environment),
             ("PUT", "/v1/applications/{id}/environment/{key}", self._put_environment),
             ("DELETE", "/v1/applications/{id}/environment/{key}", self._delete_environment),
@@ -238,7 +242,18 @@ class ControllerAPI:
         def call(request: Request) -> Response:
             # A slow provider observation must not block operation polling or
             # liveness. Polling uses its own connection, never the shared writer.
-            independent = handler in (self._get_operation, self._health)
+            # Slow external reads of one app (Nomad logs, deploy-key git reads)
+            # also skip the lock: they read the database through their own
+            # snapshot and must not stall deploys and status reads behind them.
+            independent = handler in (
+                self._get_operation,
+                self._health,
+                self._runtime_log,
+                self._get_source_key,
+                self._check_source_key,
+                self._source_commits,
+                self._source_preflight,
+            )
             with nullcontext() if independent else self._lock:
                 try:
                     return handler(request)
@@ -329,6 +344,15 @@ class ControllerAPI:
 
     def _application(self, identifier: str) -> db.Application:
         application = db.get_application(self.connection, uuid(identifier, field="application ID"))
+        if application is None:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
+        return application
+
+    def _application_snapshot(self, identifier: str) -> db.Application:
+        """The app from a private read-only connection, for handlers outside the lock."""
+        with closing(db.connect(self._database_path, create=False)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            application = db.get_application(connection, uuid(identifier, field="application ID"))
         if application is None:
             raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
         return application
@@ -500,6 +524,19 @@ class ControllerAPI:
                 connection, self.config, self.state_directory, helper_caller=self.helper_caller
             ).disable(application.application_id, request_id=key),
             kind="app.disable",
+            scope=f"app-{application.application_id}",
+        )
+
+    def _restart_application(self, request: Request) -> Response:
+        self._no_query(request)
+        self._body(request, allowed=set(), allow_absent=True)
+        application = self._application(self._path_uuid(request))
+        return self._external(
+            request,
+            lambda connection, key: ApplicationService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).restart(application.application_id, request_id=key),
+            kind="app.restart",
             scope=f"app-{application.application_id}",
         )
 
@@ -798,7 +835,7 @@ class ControllerAPI:
 
     def _get_source_key(self, request: Request) -> Response:
         self._no_query(request)
-        return self._source_key(self._application(self._path_uuid(request)), "read")
+        return self._source_key(self._application_snapshot(self._path_uuid(request)), "read")
 
     def _create_source_key(self, request: Request) -> Response:
         self._no_query(request)
@@ -808,9 +845,107 @@ class ControllerAPI:
         mode = "replace" if body.get("replace") else "create"
         return self._source_key(self._application(self._path_uuid(request)), mode)
 
+    def _source_commits(self, request: Request) -> Response:
+        return self._source_read(request, preflight=False)
+
+    def _source_preflight(self, request: Request) -> Response:
+        return self._source_read(request, preflight=True)
+
+    def _source_read(self, request: Request, *, preflight: bool) -> Response:
+        self._no_query(request)
+        application = self._application_snapshot(self._path_uuid(request))
+        fields = (
+            {"repository", "commit", "configuration"} if preflight else {"repository", "branch"}
+        )
+        body = self._body(request, allowed=fields, required=fields)
+        values: dict[str, object] = {
+            "slug": application.slug,
+            "repository": repository_url(body["repository"]),
+        }
+        if preflight:
+            values.update(
+                commit=commit(body["commit"]),
+                configuration=parse_configuration(body["configuration"]).canonical_json(),
+            )
+        else:
+            values["branch"] = branch_name(body["branch"])
+        try:
+            result = self.helper_caller(
+                self.config,
+                "app.source.preflight" if preflight else "app.source.commits",
+                values,
+                # The helper's git reads stop at 25 s; the broker waits 30 s.
+                deadline=min(operation_deadline(self.config), time.monotonic() + 27),
+            )
+        except (remote.HelperError, ServiceDeadlineError):
+            raise HttpError(
+                503,
+                "SOURCE_UNAVAILABLE",
+                "Repository information is unavailable. Try again later.",
+                retryable=True,
+            ) from None
+        if result.get("keyPresent") is False:
+            return Response(200, {"applicationId": application.application_id, "keyPresent": False})
+        items = result.get("items")
+        if result.get("keyPresent") is not True or not isinstance(items, list):
+            raise app.ApplicationError("helper returned invalid source evidence")
+        expected: set[str] = set()
+        if preflight:
+            configuration = parse_configuration(body["configuration"])
+            expected = {
+                "package-json",
+                "script:" + configuration.start_script,
+                *("lockfile:" + package for package in configuration.packages),
+            }
+            if configuration.build_script is not None:
+                expected.add("script:" + configuration.build_script)
+        if len(items) > (len(expected) if preflight else 5):
+            raise app.ApplicationError("helper source evidence exceeds its bounds")
+        projected: list[dict[str, object]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise app.ApplicationError("helper source item is invalid")
+            if preflight:
+                if item.get("id") not in expected or item.get("state") not in {
+                    "ok",
+                    "problem",
+                    "unknown",
+                }:
+                    raise app.ApplicationError("helper checkout check is invalid")
+                projected.append(
+                    {
+                        key: bounded_text(item[key], field="checkout check", maximum=512)
+                        for key in (
+                            "id",
+                            "label",
+                            "state",
+                            *(["problem"] if item.get("state") == "problem" else []),
+                        )
+                    }
+                )
+            else:
+                projected.append(
+                    {
+                        "sha": commit(item.get("sha")),
+                        "message": bounded_text(
+                            item.get("message"), field="commit message", maximum=200
+                        ),
+                        "author": None
+                        if item.get("author") is None
+                        else bounded_text(item["author"], field="commit author", maximum=100),
+                        "date": bounded_text(item.get("date"), field="commit date", maximum=40),
+                    }
+                )
+        if preflight and {item["id"] for item in projected} != expected:
+            raise app.ApplicationError("helper checkout checks are incomplete")
+        return Response(
+            200,
+            {"applicationId": application.application_id, "keyPresent": True, "items": projected},
+        )
+
     def _check_source_key(self, request: Request) -> Response:
         self._no_query(request)
-        application = self._application(self._path_uuid(request))
+        application = self._application_snapshot(self._path_uuid(request))
         body = self._body(
             request, allowed={"repository", "branch"}, required={"repository", "branch"}
         )
@@ -860,12 +995,10 @@ class ControllerAPI:
         )
 
     def _runtime_log(self, request: Request) -> Response:
-        application = self._application(self._path_uuid(request))
+        application = self._application_snapshot(self._path_uuid(request))
         lines, _offset = self._log_query(request, allow_offset=False, allow_stream=True)
         stream = self._single_query(request, "stream") or "stdout"
-        chunk = self.logs.runtime(
-            application.application_id, lines=lines, stderr=stream == "stderr"
-        )
+        chunk = self.logs.runtime_for(application, lines=lines, stderr=stream == "stderr")
         return Response(
             200,
             {

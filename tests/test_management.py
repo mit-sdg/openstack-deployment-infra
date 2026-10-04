@@ -994,6 +994,31 @@ class WebTransportTests(ManagementCase):
                 reply = self.web.forward(route.method, browser, "", {}, b"")
                 self.assertNotIn(reply.status, {404, 405}, json.loads(reply.body))
 
+    def test_only_repository_reads_wait_longer_for_the_broker(self) -> None:
+        app = str(uuid.uuid4())
+        waits = {}
+        for path in (
+            f"/api/v1/apps/{app}/source/commits",
+            f"/api/v1/apps/{app}/source/check",
+            f"/api/v1/admin-apps/{app}/source/check",
+            f"/api/v1/apps/{app}/logs",
+            f"/api/v1/apps/{app}/source-key/check",
+        ):
+            with patch.object(
+                self.web.broker, "request", return_value=(200, {"data": {}})
+            ) as request:
+                self.web.forward("POST" if "source" in path else "GET", path, "", {}, b"")
+            waits[path.split(app)[1]] = request.call_args.kwargs["timeout_seconds"]
+        self.assertEqual(
+            waits,
+            {
+                "/source/commits": 35,
+                "/source/check": 35,
+                "/logs": None,
+                "/source-key/check": None,
+            },
+        )
+
     def test_account_changes_use_patch_end_to_end(self) -> None:
         connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
         connection.request(

@@ -231,6 +231,82 @@ for (const [mode, viewport, colorScheme] of [
         path: path.join(screenshots, `${mode}-build-log.png`),
         fullPage: true,
       });
+      await page.getByRole('link', { name: 'Deploy this commit again' }).click();
+      await expect(page.getByLabel('Commit SHA')).toHaveValue(sha);
+      await expect(
+        page.getByText(
+          'Deploying this commit again uses your app’s current saved settings and environment variables.',
+        ),
+      ).toBeVisible();
+      await page.goto(`/apps/${appId}/deployments`);
+      await expect(
+        page.getByRole('link', { name: 'Deploy this commit again' }).first(),
+      ).toHaveAttribute('href', /commit=/);
+      await page.goto(`/apps/${appId}`);
+      await page.getByRole('link', { name: 'Deploy latest', exact: true }).click();
+      await expect(page.getByRole('dialog')).toContainText(commits[0].sha);
+      await expect(page.getByRole('dialog')).toContainText('current saved settings');
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+      // Browser GitHub cannot see the private repository; the platform's key
+      // supplies the same commit picker and checks, without real network use.
+      await context.route('https://api.github.com/**', (route) =>
+        route.fulfill({ status: 404, json: {}, headers: cors }),
+      );
+      await page.goto(`/apps/${appId}/deploy`);
+      await page.getByRole('radio', { name: 'Private repository fixture' }).check();
+      await expect(page.getByLabel('Commit SHA')).toHaveValue(
+        '0123456789abcdef0123456789abcdef01234567',
+      );
+      await expect(
+        page.getByText('This commit has the package.json, scripts and lockfile the build needs.'),
+      ).toBeVisible();
+      await page.getByRole('button', { name: 'Review deployment' }).click();
+      await expect(page.getByRole('dialog')).toContainText('Private repository fixture');
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+      // Subsequent public checks use the original hermetic fixture handler.
+      await context.unroute('https://api.github.com/**');
+      await context.route('https://api.github.com/**', (route) => {
+        const url = route.request().url();
+        if (!url.includes('/git/trees/')) return route.fulfill({ json: commits, headers: cors });
+        return route.fulfill({
+          json: {
+            tree: [
+              { path: 'package.json', type: 'blob', mode: '100644', size: 40 },
+              { path: 'bun.lock', type: 'blob', mode: '100644', size: 2 },
+            ],
+            truncated: false,
+          },
+          headers: cors,
+        });
+      });
+      await page.goto(`/apps/${appId}`);
+      for (const action of ['Restart', 'Stop', 'Start']) {
+        await page.getByRole('button', { name: `${action} app`, exact: true }).click();
+        const dialog = page.getByRole('dialog');
+        await expect(dialog).toBeVisible();
+        await expect(dialog).toContainText(
+          action === 'Restart'
+            ? 'brief interruption'
+            : action === 'Stop'
+              ? 'frees its server'
+              : 'last deployed version',
+        );
+        await dialog.getByRole('button', { name: `${action} app`, exact: true }).click();
+        await expect(
+          page
+            .getByText(
+              `App ${action === 'Restart' ? 'restarted' : action === 'Stop' ? 'stopped' : 'started'}`,
+              { exact: false },
+            )
+            .first(),
+        ).toBeVisible();
+        await expect(
+          page.getByRole('button', {
+            name: action === 'Stop' ? 'Start app' : 'Stop app',
+            exact: true,
+          }),
+        ).toBeEnabled();
+      }
       await page.goto(`/apps/${appId}/logs`);
       await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
       await page.evaluate(() => {
@@ -331,6 +407,13 @@ for (const [mode, viewport, colorScheme] of [
       // Alice adds Bob to the app's team; he can then work on it, and leave.
       await page.goto(`/apps/${appId}/team`);
       const team = page.getByRole('region', { name: 'Team' });
+      await team.getByLabel('Add by username').fill('unregistered-fixture');
+      await team.getByRole('button', { name: 'Add to team' }).click();
+      await expect(
+        team.getByText(
+          "unregistered-fixture isn't registered yet. Ask them to sign in to the portal once, then add them.",
+        ),
+      ).toBeVisible();
       await team.getByLabel('Add by username').fill('bob');
       await team.getByRole('button', { name: 'Add to team' }).click();
       await expect(team.getByRole('table', { name: 'Team' })).toContainText('Bob Student');

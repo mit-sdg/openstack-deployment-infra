@@ -210,30 +210,18 @@ def parse_configuration(payload: bytes | str | Mapping[str, Any]) -> DeploymentC
     )
 
 
-def validate_checkout(
-    configuration: DeploymentConfiguration,
-    source_root: str | Path,
-    *,
-    maximum_package_bytes: int = 65_536,
-    maximum_lockfile_bytes: int = 1_048_576,
+def _checkout_lockfile(
+    configuration: DeploymentConfiguration, root: Path, package: str, maximum: int
 ) -> None:
-    """Validate UI-selected package inputs in an acquired exact checkout."""
-    if not isinstance(configuration, DeploymentConfiguration):
-        raise ValidationError("deployment configuration snapshot is malformed")
-    root = Path(source_root).resolve(strict=True)
-    if not root.is_dir():
-        raise ValidationError("source checkout is not a directory")
-    lock_names = (
-        ("bun.lock", "bun.lockb") if configuration.runtime == "bun" else ("package-lock.json",)
-    )
-    for package in configuration.packages:
-        directory = resolve_inside(root, package, field="package path")
-        if not directory.is_dir():
-            raise ValidationError(f"package {package!r} is not a source directory")
-        locks = [directory / name for name in lock_names]
-        if not any(_direct_file(path, maximum_lockfile_bytes) for path in locks):
-            raise ValidationError(f"package {package!r} is missing its supported lockfile")
+    directory = resolve_inside(root, package, field="package path")
+    if not directory.is_dir():
+        raise ValidationError(f"package {package!r} is not a source directory")
+    names = ("bun.lock", "bun.lockb") if configuration.runtime == "bun" else ("package-lock.json",)
+    if not any(_direct_file(directory / name, maximum) for name in names):
+        raise ValidationError(f"package {package!r} is missing its supported lockfile")
 
+
+def _checkout_scripts(root: Path, maximum_package_bytes: int) -> dict[str, Any]:
     package_json = root / "package.json"
     if not _direct_file(package_json, maximum_package_bytes):
         raise ValidationError("source root is missing a bounded direct package.json")
@@ -261,14 +249,82 @@ def validate_checkout(
     value = _load_json(raw)
     if not isinstance(value, dict) or not isinstance(value.get("scripts"), dict):
         raise ValidationError("package.json scripts must be an object")
-    scripts = value["scripts"]
-    required = (configuration.start_script,) + (
-        () if configuration.build_script is None else (configuration.build_script,)
-    )
-    for name in required:
+    return dict(value["scripts"])
+
+
+def validate_checkout(
+    configuration: DeploymentConfiguration,
+    source_root: str | Path,
+    *,
+    maximum_package_bytes: int = 65_536,
+    maximum_lockfile_bytes: int = 1_048_576,
+) -> None:
+    """Validate UI-selected package inputs in an acquired exact checkout."""
+    if not isinstance(configuration, DeploymentConfiguration):
+        raise ValidationError("deployment configuration snapshot is malformed")
+    root = Path(source_root).resolve(strict=True)
+    if not root.is_dir():
+        raise ValidationError("source checkout is not a directory")
+    for package in configuration.packages:
+        _checkout_lockfile(configuration, root, package, maximum_lockfile_bytes)
+    scripts = _checkout_scripts(root, maximum_package_bytes)
+    for name in dict.fromkeys((configuration.start_script, configuration.build_script)):
+        if name is None:
+            continue
         command = scripts.get(name)
         if not isinstance(command, str) or not command:
             raise ValidationError(f"package.json is missing configured script {name!r}")
+
+
+def checkout_checks(
+    configuration: DeploymentConfiguration, source_root: Path
+) -> list[dict[str, str]]:
+    """Named advisory results from the exact validators the build uses.
+
+    Return only release-owned guidance; JSON input and parser errors stay private.
+    """
+    root = source_root.resolve(strict=True)
+    manifest = {"id": "package-json", "label": "package.json in the repository root", "state": "ok"}
+    checks = [manifest]
+    scripts: dict[str, Any] | None = None
+    try:
+        scripts = _checkout_scripts(root, 65_536)
+    except (ValidationError, OSError):
+        manifest.update(
+            state="problem",
+            problem='Add a valid package.json with a "scripts" section to the repository root. It must be a direct file at most 64 KB.',
+        )
+    for name in dict.fromkeys((configuration.start_script, configuration.build_script)):
+        if name is None:
+            continue
+        command = None if scripts is None else scripts.get(name)
+        check = {
+            "id": f"script:{name}",
+            "label": f'Script "{name}"',
+            "state": "unknown"
+            if scripts is None
+            else "ok"
+            if isinstance(command, str) and command
+            else "problem",
+        }
+        if check["state"] == "problem":
+            check["problem"] = f'package.json has no "{name}" script.'
+        checks.append(check)
+    for package in configuration.packages:
+        where = "the repository root" if package == "." else package
+        check = {"id": f"lockfile:{package}", "label": f"Lockfile in {where}", "state": "ok"}
+        try:
+            _checkout_lockfile(configuration, root, package, 1_048_576)
+        except (ValidationError, OSError):
+            lock_name = (
+                "bun.lock or bun.lockb" if configuration.runtime == "bun" else "package-lock.json"
+            )
+            check.update(
+                state="problem",
+                problem=f"Commit a direct {lock_name} file at most 1 MB in {where}.",
+            )
+        checks.append(check)
+    return checks
 
 
 def _direct_file(path: Path, maximum_bytes: int) -> bool:

@@ -173,7 +173,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
         elif re.fullmatch(
-            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/logs|/source-key(?:/check)?|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36})?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
+            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/restart|/logs|/source-key(?:/check)?|/source/(?:commits|check)|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36})?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
             path,
         ):
             target = path.removeprefix("/api")
@@ -185,7 +185,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(405, "METHOD_NOT_ALLOWED")
             target = path.removeprefix("/api")
         elif re.fullmatch(
-            r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}/(?:verify|rotate))?|/logs|/activity|/source-key(?:/check)?|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36}(?:/(?:build-log|startup-log))?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
+            r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}/(?:verify|rotate))?|/state|/restart|/logs|/activity|/source-key(?:/check)?|/source/(?:commits|check)|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36}(?:/(?:build-log|startup-log))?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
             path,
         ):
             target = path.removeprefix("/api")
@@ -231,7 +231,13 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             except ValueError:
                 return error_reply(400, "INVALID_CLIENT_ADDRESS")
             status, value = self.broker.request(
-                method, target + ("?" + query if query else ""), body, headers=forwarded
+                method,
+                target + ("?" + query if query else ""),
+                body,
+                headers=forwarded,
+                # Deploy-key repository reads fetch from GitHub (bounded at 30 s
+                # in the broker); everything else keeps the short wait.
+                timeout_seconds=35 if re.search(r"/source/(?:commits|check)$", target) else None,
             )
             if status == 401:
                 return Reply(

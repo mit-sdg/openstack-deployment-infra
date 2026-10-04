@@ -794,7 +794,7 @@ class Garage:
         self.events = events
         self.deleted: list[str] = []
         self.created_names: list[str] = []
-        self.keys = {"old-key": "application-demo-app-00000000"}
+        self.keys = {"old-key": "application-demo-app-00000000", "backup-key": "platform-backup"}
         self.alias = "demo-bucket"
         self.absent = False
 

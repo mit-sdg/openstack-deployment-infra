@@ -34,7 +34,7 @@ Today, an operator can create and recover a platform with:
 - a read-only operator dashboard for role, application, operation, and
   platform-health status;
 - separate encrypted backups for controller, operator, broker identity/ownership
-  state, and managed data, including retained application images; and
+  state, deploy keys, and managed data; and
 - a local controller and locally tested owner portal with isolated identity checks.
 
 The operator dashboard and owner portal use shared React presentation components

@@ -376,6 +376,7 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}` | Read one application, including a `requiresMaintenance` boolean for retained primary IPv4; no reservation/provider identifiers |
 | `POST /v1/applications/{id}/enable` | Enable an accepted application |
 | `POST /v1/applications/{id}/disable` | Disable an application |
+| `POST /v1/applications/{id}/restart` | Restart the exact accepted running task in place |
 | `POST /v1/applications/{id}/delete` | Privileged cascade deletion with slug confirmation |
 | `POST /v1/applications/{id}/deployments` | Typed exact-commit deployment; optional boolean `maintenance` and reviewed object `plan`; accepted sizing is preserved when plan is absent; worker reuse remains operator-only |
 | `GET /v1/applications/{id}/deployments` | List bounded deployment history |
@@ -386,6 +387,8 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}/source-key` | Read the app's deploy key: public half and fingerprint only |
 | `POST /v1/applications/{id}/source-key` | Create the deploy key if absent, or replace it with `{"replace": true}` |
 | `POST /v1/applications/{id}/source-key/check` | Check `{repository, branch}` with the deploy key; returns the branch head or a named problem |
+| `POST /v1/applications/{id}/source/commits` | Read five recent saved-branch commits through the app deploy key |
+| `POST /v1/applications/{id}/source/check` | Check an exact fetched commit against the build checkout validators |
 | `GET /v1/applications/{id}/environment` | List environment names and metadata, never values |
 | `PUT /v1/applications/{id}/environment/{key}` | Add or replace one value |
 | `DELETE /v1/applications/{id}/environment/{key}` | Remove one caller-owned value |
@@ -472,14 +475,23 @@ adds the public key on GitHub as a read-only deploy key; only a repository admin
 can, which ties the app to a repository its owner controls. `app.source.check`
 runs `git ls-remote` with the key and names the problem (`key-refused`,
 `not-found`, `branch-missing`, `unavailable`) without echoing GitHub's output.
-Keys are not in the controller backup; a lost key is replaced from Settings.
+Keys are backed up separately alongside the hosted-controller SQLite snapshot,
+encrypted to the off-platform escrow recipient. The database manifest binds the
+paired key archive. Only direct private/public files for snapshot slugs are read;
+helper replacement directories are excluded. Offline restore validates slugs and
+pairs, installs controller-owned 0700 directories/0600 files, and preserves public
+key mtimes for the portal's createdAt display.
 
 Before removing a candidate that never became healthy, the controller calls the
 read-only helper action `app.startup` for that exact job slot: the newest
 allocation's status, restart count, last 12 task events and 200-line output and
 error tails (64 KiB each). It spends at most 30 s or a third of the remaining
 deadline, so removal keeps its time, and a failed read never blocks removal. The
-record is written 0600 to `startup-logs/<application>/<deployment>.json` under
+health poll now has an absolute cutoff that reserves time for the startup read,
+job removal, worker and artifact cleanup. Helper calls and sleeps count against
+that cutoff; slow reads cannot spend the reserved tail. If cleanup still cannot
+be confirmed within the operation deadline, the existing recovery-required path
+retains the candidate identity. The record is written 0600 to `startup-logs/<application>/<deployment>.json` under
 the controller state directory and served to the app's owner on the failed
 deployment's page.
 
@@ -537,26 +549,42 @@ mutation.
 
 The deployment has three independent backup classes:
 
-1. **Hosted controller:** the live controller SQLite database under admin state,
+1. **Hosted controller:** the live controller SQLite database and a separately
+   committed deploy-key archive under admin state,
    encrypted on admin to `<paths.backups>/hosted-controller` with its private
    identity held off-platform.
 2. **External operator state:** the operator CLI SQLite database, backed up
    locally with SQLite's online API and encrypted to
    `<paths.backups>/controller`.
-3. **Managed data:** encrypted PostgreSQL, MongoDB, Garage catalog/data, and
-   retained OCI manifests/blobs under timestamped namespace directories.
+3. **Managed data:** encrypted PostgreSQL, MongoDB, and Garage catalog/data under timestamped namespace directories.
+
+Garage's S3 bucket list is scoped to the calling key. Backup uses the admin API
+bucket inventory for platform-prefix app aliases, grants the `platform-backup`
+key read access at creation and again before export, and explicitly denies write
+and owner access. Every app bucket must be readable. Garage catalog format 2
+includes original bucket IDs, quotas, app keys and grants inside `garage.age`;
+verification compares catalog buckets and IDs with the admin inventory. Restore
+creates buckets through the admin API, imports the original app keys, restores
+objects/grants and remaps new bucket IDs in the offline replacement controller
+SQLite. Its temporary backup-key write grants are revoked even on failure;
+unconfirmed revocation prevents success evidence. Legacy catalog format 1 remains
+inspectable, but nonempty restore requires separate key/grant recovery.
 
 Each accepted set uses ciphertext/data, checksums, and a final manifest as its
 commit marker. Managed restore verification uses disposable PostgreSQL and
-MongoDB containers and validates Garage/OCI archives before writing
+MongoDB containers and validates Garage archives before writing
 `RESTORE-MANIFEST`.
 
+Version-3 off-site bundles include the SQLite manifest’s matching deploy-key
+archive; legacy versions 1 and 2 remain accepted without keys.
 Off-site export chooses only committed sets, verifies every copy, writes an
 append-only canonical manifest, and updates a credential-free health receipt.
 The destination must be a distinct mounted filesystem and provider retention is
 operator-owned. Full-loss recovery restores both SQLite databases and managed
-data into explicit replacement targets; it does not depend on GitHub or the
-original registry because retained OCI artifacts are included.
+data into explicit replacement targets. Managed-data format 3 excludes app OCI
+images; format 2 remains verifiable, but restore skips its registry archive. Apps
+need their accepted commits rebuilt from GitHub after full loss. See the
+[rebuild procedure](OPERATIONS.md#rebuild-app-images-after-full-restore).
 
 ## Network and workload isolation
 
@@ -650,20 +678,30 @@ a transaction. No ownership is inferred from a slug or reassigned by username.
 
 The UI supports sign-in, my apps/quota/create, public repository/preferred branch,
 typed Node/Bun settings, full-SHA review/deploy, observed status/health, history,
-build logs and runtime logs. React assets are external static files under strict
+build logs and runtime logs. Deployment history/detail can select an earlier
+commit for a new build with current saved settings and environment variables.
+Overview's Deploy latest resolves the saved branch afresh, then opens the same
+exact-commit review dialog; it never deploys a moving branch without review.
+React assets are external static files under strict
 CSP; admin runs Python only. The deploy page lists the branch's five newest
 commits straight from `api.github.com`, without cookies or a referrer, and checks
 the chosen commit before deploying: one recursive tree read plus `package.json`
 from `raw.githubusercontent.com` (the two non-self `connect-src` origins) against
 the build's `validate_checkout` rules, kept in step by shared cases. Private
-repositories and GitHub's hourly limit for unsigned requests fall back to pasting
-a SHA and letting the build check it. Owners read their app's runtime
+repositories and GitHub's hourly limit fall back to bounded platform reads when
+the app has a deploy key: five shallow commits and named exact-checkout checks
+using the build validators. Broker owner/admin routes share reads for ten seconds,
+serialize them with access checks, bind checkout checks to the saved settings
+revision, and project only metadata and fixed guidance. Older controllers retain
+the deploy-key head check and pasted-SHA build fallback. Owners read their app's runtime
 logs (`GET /api/v1/apps/{app}/logs?stream=stdout|stderr`, admins through
 `/api/v1/admin-apps/{app}/logs`); the broker shares each read for 5 s and runs one
 at a time, because the controller serves it from Nomad under its shared lock. The configuration page supports write-only environment edits and
 one resource per storage type (`postgres`, `mongo`, `s3`) per app, including pending
 creation intents. The controller allows multiple resource names per type; the
-broker deliberately restricts owners to one. Enable/disable remains later work. Storage deletion and global administrator reads remain
+broker deliberately restricts owners to one. Owner/team stop and start use the same app-scoped lifecycle intents as admins.
+Restart journals a bounded exact-allocation task restart; uncertain calls are not
+automatically repeated. Storage deletion and global administrator reads remain
 operator-only.
 
 Broker resource responses are explicit projections: environment names/revision
@@ -771,7 +809,7 @@ the controller validates against fresh cloud evidence at admission. Omitting a p
 accepted sizing. Class-app consent matches public URL host with Commons origin and is enforced
 server-side for adoption, reassignment, deploy, state and storage changes. Deploy
 and storage consent also apply through ordinary owner routes regardless of role;
-owners still have no stop route. Creating any local account or issuing any invite
+owner stop/start/restart enforce the same consent. Creating any local account or issuing any invite
 requires step-up, including owner/staff accounts.
 
 ### Local identities, roles and admin enrollment

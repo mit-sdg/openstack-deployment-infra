@@ -214,6 +214,11 @@ for (const [layout, viewport, colorScheme] of [
       // Shown only after the save succeeds.
       await expect(page.getByText('Settings saved.', { exact: false })).toBeVisible();
       await expect(page.getByLabel('Health check path')).toHaveValue('/ready');
+      // Give the class-app fixture a deploy key so its checkout check falls
+      // back to the platform when the browser cannot read the commit.
+      const privateAccess = page.getByRole('region', { name: 'Private repository' });
+      await privateAccess.getByRole('button', { name: 'Create deploy key' }).click();
+      await expect(privateAccess.getByLabel('Deploy key')).toHaveValue(/^ssh-ed25519 /);
       await page.getByRole('button', { name: 'Deploy', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: /^Deploy / });
       await expect(dialog).toContainText('this app keeps a fixed IP address');
@@ -221,7 +226,9 @@ for (const [layout, viewport, colorScheme] of [
       const deploy = dialog.getByRole('button', { name: 'Deploy', exact: true });
       await dialog.getByRole('radio', { name: 'Class app fixture' }).check();
       await expect(dialog.getByLabel('Commit', { exact: true })).toHaveValue('c'.repeat(40));
-      await expect(dialog.getByText(/Couldn’t read this commit on GitHub/)).toBeVisible();
+      await expect(
+        dialog.getByText('This commit has the package.json, scripts and lockfile the build needs.'),
+      ).toBeVisible();
       expect(github).toEqual([
         'https://api.github.com/repos/example/class-app/commits?sha=main&per_page=5',
         `https://api.github.com/repos/example/class-app/git/trees/${'c'.repeat(40)}?recursive=1`,

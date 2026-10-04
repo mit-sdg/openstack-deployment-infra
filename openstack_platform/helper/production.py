@@ -50,6 +50,7 @@ from ..runtime import (
 from ..validation import (
     ValidationError,
     bounded_text,
+    commit,
     repository_url,
     slug,
     uuid,
@@ -75,8 +76,11 @@ APP_ACTIONS = (
     "app.manifest.verify",
     "app.promote",
     "app.remove",
+    "app.restart",
     "app.source.check",
+    "app.source.commits",
     "app.source.key",
+    "app.source.preflight",
     "app.startup",
     "app.stop",
     "app.worker.capacity",
@@ -94,6 +98,8 @@ _PROVIDER_APP_ACTIONS = frozenset(
         "app.manifest.retain",
         "app.manifest.verify",
         "app.source.check",
+        "app.source.commits",
+        "app.source.preflight",
         "app.source.key",
         "app.worker.capacity",
         "app.worker.create",
@@ -281,6 +287,9 @@ def _build_log_paths(runtime: HelperRuntime, app_slug: str, build_id: str) -> tu
 
 
 SOURCE_KEY = "id_ed25519"
+# Deploy-key repository reads; the controller (30 s), broker and web (35 s)
+# wait a little longer each, so a slow but successful read still arrives.
+SOURCE_READ_SECONDS = 25
 
 
 def _source_key_directory(runtime: HelperRuntime, app_slug: str) -> Path:
@@ -356,6 +365,7 @@ def _create_source_key(runtime: HelperRuntime, app_slug: str, *, replace: bool) 
             env=child_environment(),
         )
         os.chmod(staged / SOURCE_KEY, 0o600)
+        os.chmod(staged / f"{SOURCE_KEY}.pub", 0o600)
         retired = None
         if directory.exists():
             retired = directory.parent / f".old-{uuid_module.uuid4().hex}"
@@ -602,6 +612,38 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             _create_source_key(runtime, app_slug, replace=args["mode"] == "replace")
         public = _source_public_key(runtime, app_slug)
         return {"slug": app_slug, "present": public is not None, **(public or {})}
+    if action in {"app.source.commits", "app.source.preflight"}:
+        expected = (
+            {"slug", "repository", "branch"}
+            if action == "app.source.commits"
+            else {"slug", "repository", "commit", "configuration"}
+        )
+        _exact_args(args, expected, action)
+        key = _source_key_file(runtime, slug(args["slug"]))
+        if key is None:
+            return {"keyPresent": False}
+        try:
+            items = (
+                application.recent_github_commits(
+                    repository_url(args["repository"]),
+                    branch_name(args["branch"]),
+                    key,
+                    timeout_seconds=SOURCE_READ_SECONDS,
+                )
+                if action == "app.source.commits"
+                else application.check_github_checkout(
+                    repository_url(args["repository"]),
+                    commit(args["commit"]),
+                    args["configuration"],
+                    key,
+                    timeout_seconds=SOURCE_READ_SECONDS,
+                )
+            )
+        except (application.ApplicationError, CommandFailure, OSError, ValueError):
+            raise HelperActionError(
+                "SOURCE_UNAVAILABLE", "Could not read the repository with its deploy key"
+            ) from None
+        return {"keyPresent": True, "items": items}
     if action == "app.source.check":
         _exact_args(args, {"slug", "repository", "branch"}, action)
         key = _source_key_file(runtime, slug(args["slug"]))

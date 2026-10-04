@@ -33,7 +33,13 @@ describe('app team', () => {
       addMember: vi.fn((_id: string, username: string) =>
         username === 'bob'
           ? Promise.resolve({ items: [owner, bob] })
-          : Promise.reject(new ApiError(404, 'ACCOUNT_NOT_FOUND', 'No account has this username.')),
+          : Promise.reject(
+              new ApiError(
+                404,
+                'ACCOUNT_NOT_REGISTERED',
+                "nobody isn't registered yet. Ask them to sign in to the portal once, then add them.",
+              ),
+            ),
       ),
       removeMember: vi.fn(() => Promise.resolve({ items: [owner], left: false })),
     };
@@ -43,7 +49,11 @@ describe('app team', () => {
     expect(within(team).getByText('(you)')).toBeVisible();
     fireEvent.change(screen.getByLabelText('Add by username'), { target: { value: 'nobody' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add to team' }));
-    expect(await screen.findByText('No account has this username.')).toBeVisible();
+    expect(
+      await screen.findByText(
+        "nobody isn't registered yet. Ask them to sign in to the portal once, then add them.",
+      ),
+    ).toBeVisible();
     fireEvent.change(screen.getByLabelText('Add by username'), { target: { value: ' bob ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add to team' }));
     expect(await within(team).findByText('Bob Student')).toBeVisible();

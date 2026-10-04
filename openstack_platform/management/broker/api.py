@@ -93,6 +93,8 @@ class Broker:
             ("POST", "/v1/apps/{app}/storage", self.mutate_storage),
             ("POST", "/v1/apps/{app}/storage/{resource}/verify", self.mutate_storage),
             ("POST", "/v1/apps/{app}/storage/{resource}/rotate", self.mutate_storage),
+            ("POST", "/v1/apps/{app}/state", self.admin_apps.state),
+            ("POST", "/v1/apps/{app}/restart", self.admin_apps.restart),
             ("POST", "/v1/apps/{app}/deployments", self.deploy),
             ("GET", "/v1/apps/{app}/deployments", self.history),
             ("GET", "/v1/apps/{app}/deployments/{deployment}", self.deployment),
@@ -248,7 +250,7 @@ class Broker:
                 (user_id,),
             ).fetchall()
             held = db.execute(
-                "SELECT COUNT(*) FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable') AND state NOT IN ('succeeded','failed')",
+                "SELECT COUNT(*) FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed')",
                 (user_id,),
             ).fetchone()[0]
         return {

@@ -45,6 +45,45 @@ describe('commit checks', () => {
     expect(screen.getByText('Commit package-lock.json in the repository root.')).toBeVisible();
   });
 
+  it('uses private checkout checks with the saved revision after a browser failure', async () => {
+    github({}, '', 404);
+    const source = {
+      sourceKey: vi.fn(() =>
+        Promise.resolve({
+          present: true as const,
+          publicKey: 'ssh-ed25519 fixture',
+          fingerprint: 'SHA256:fixture',
+          createdAt: '',
+        }),
+      ),
+      recentSourceCommits: vi.fn(),
+      checkSourceCommit: vi.fn(() =>
+        Promise.resolve([
+          {
+            id: 'script:build',
+            label: 'Build script',
+            state: 'problem' as const,
+            problem: 'package.json has no "build" script.',
+          },
+        ]),
+      ),
+    };
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <CommitChecks
+          repository="https://github.com/ada/private"
+          sha={'c'.repeat(40)}
+          configuration={configuration}
+          platform={{ id: 'app', revision: 7, service: source }}
+        />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('package.json has no "build" script.')).toBeVisible();
+    expect(source.checkSourceCommit).toHaveBeenCalledWith('app', 'c'.repeat(40), 7);
+  });
+
   it('says when GitHub can’t show the commit, and waits for a full SHA', async () => {
     const fetcher = github({}, '', 404);
     const { unmount } = show('abc');

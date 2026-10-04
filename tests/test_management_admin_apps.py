@@ -696,11 +696,11 @@ class AdminApplicationTests(ManagementCase):
                         ),
                     )
             self.assert_error(
-                "NOT_FOUND",
+                "IDENTITY_CONFIRMATION_REQUIRED",
                 lambda prefix=prefix, account=account: self.call(
                     "POST", prefix + "/state", {"desiredRunning": False}, account
                 ),
-            )  # Owners have no stop capability.
+            )
             storage = self.call(
                 "POST",
                 prefix + "/storage",

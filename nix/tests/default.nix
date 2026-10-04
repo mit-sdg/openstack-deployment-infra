@@ -187,18 +187,14 @@ let
         rm -f "$out"/*.csr "$out"/*.ext "$out"/*.srl
   '';
 
-  registryBackupCredentialProbe = pkgs.writeText "registry-backup-credential-probe.py" ''
+  managedBackupCredentialProbe = pkgs.writeText "managed-backup-credential-probe.py" ''
     import os
     import shutil
     import subprocess
     import stat
-    import sys
     from pathlib import Path
 
-    sys.path.insert(0, "${../../infra}")
-    from backup.registry_artifact import credentials, _runtime_paths
-
-    Path("${state}/operator/status/registry-backup-probe-ran").touch()
+    Path("${state}/operator/status/managed-backup-probe-ran").touch()
     for name in ("newuidmap", "newgidmap"):
         assert shutil.which(name) == "/run/wrappers/bin/" + name
     subprocess.run(
@@ -207,21 +203,14 @@ let
     )
     loaded = Path("${state}/operator/secrets/storage-bootstrap.env")
     private = Path("/run/${namespace}-backup-private/storage-bootstrap.env")
-    assert _runtime_paths()[0] == private
+    assert Path(os.environ["SECRETS_FILE"]) == private
     assert private.read_bytes() == loaded.read_bytes()
     assert stat.S_IMODE(private.stat().st_mode) == 0o600
     assert stat.S_IMODE(private.parent.stat().st_mode) == 0o700
     assert private.stat().st_uid == os.geteuid()
-    assert credentials(private).startswith("Basic ")
     assert Path(os.environ["AGE_KEY"]).is_file()
     shared = Path("${root}/secrets/storage-bootstrap.env")
     assert stat.S_IMODE(shared.stat().st_mode) == 0o640
-    try:
-        credentials(shared)
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("registry accepted a group-readable shared source")
   '';
 
   pkiEtc = {
@@ -298,7 +287,7 @@ let
               # Exercise the real backup unit's User, Environment, private copy
               # and source guards without contacting any managed service.
               "${namespace}-platform-backup".serviceConfig.ExecStart =
-                lib.mkForce "${packages.python}/bin/python ${registryBackupCredentialProbe}";
+                lib.mkForce "${packages.python}/bin/python ${managedBackupCredentialProbe}";
               "${namespace}-management-identity".serviceConfig = {
                 # Mirror production: the fake class app on loopback plus the
                 # local resolver stubs used for name resolution.
@@ -562,24 +551,27 @@ let
               machine.succeed("systemctl show ${namespace}-controller.service nomad.service -p LimitCORE --value | grep -vFx infinity")
               machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
               machine.succeed("! systemctl cat ${namespace}-platform-backup.service | grep -F 'LoadCredential='")
-              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'REGISTRY_BACKUP_SECRETS=%t/${namespace}-backup-private/storage-bootstrap.env'")
-              machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/registry-backup-probe-ran && rm ${state}/operator/status/registry-backup-probe-ran")
+              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'SECRETS_FILE=%t/${namespace}-backup-private/storage-bootstrap.env'")
+              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -Fx -- \"Requires=$(systemd-escape --path --suffix=mount ${backups})\"")
+              machine.fail("systemctl cat ${namespace}-platform-backup.service | grep -F REGISTRY_BACKUP_")
+              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F '/backup/verify_garage_backup.py'")
+              machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran && rm ${state}/operator/status/managed-backup-probe-ran")
               machine.succeed("test $(stat -c %U:%G:%a ${root}/secrets/storage-bootstrap.env) = agentops:platform-controller:640")
               machine.fail("test -e /run/credentials/${namespace}-platform-backup.service/storage-bootstrap")
               machine.fail("test -e /run/${namespace}-backup-private")
               machine.succeed("chmod 0644 ${root}/secrets/storage-bootstrap.env")
               machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
+              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
               machine.succeed("chmod 0640 ${root}/secrets/storage-bootstrap.env; chgrp agentops ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
               machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
+              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
               machine.succeed("chown root:platform-controller ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
               machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
+              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
               machine.succeed("chown agentops:platform-controller ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.env ${root}/secrets/storage-bootstrap.real; ln -s storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
               machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/registry-backup-probe-ran")
-              machine.succeed("rm ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service && systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/registry-backup-probe-ran")
+              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
+              machine.succeed("rm ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service && systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran")
               machine.succeed("! journalctl --boot --output=cat | grep -F controller-secret")
               machine.succeed("systemctl cat nomad.service | grep -F 'LoadCredential=nomad-gossip-key:/etc/${namespace}/secrets/nomad-gossip-key'")
               machine.succeed("systemctl cat nomad.service | grep -F '${namespace}-credential-guard /etc/${namespace}/secrets/nomad-gossip-key root'")
@@ -791,6 +783,11 @@ let
               machine.wait_for_unit("${namespace}-management-web.service")
               machine.wait_until_succeeds(broker_health)
               machine.fail("systemctl start ${namespace}-management-broker-backup.service")
+              # Managed backups must not write into the root disk either.
+              machine.succeed("rm -f ${state}/operator/status/managed-backup-probe-ran")
+              machine.fail("systemctl start ${namespace}-platform-backup.service")
+              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
+              machine.succeed("systemctl reset-failed ${namespace}-platform-backup.service")
               machine.succeed(f"rm -r '/run/systemd/system/{backup_mount}.d'; systemctl daemon-reload; systemctl reset-failed '{backup_mount}'; systemctl start '{backup_mount}'")
               # Remounting disposable tmpfs loses its fixture directories.
               # Recreate only backup paths before the remaining assertions.
@@ -823,6 +820,8 @@ let
               machine.succeed("test $(stat -c %U:%G:%a ${backups}/${constants.directories.hostedControllerBackup}) = platform-controller:agentops:750")
               machine.succeed("systemctl is-enabled ${namespace}-hosted-controller-backup.timer")
               machine.succeed("systemctl cat ${namespace}-hosted-controller-backup.service | grep -F -- '--backup-root ${backups}/${constants.directories.hostedControllerBackup}'")
+              machine.succeed("systemctl cat ${namespace}-hosted-controller-backup.service | grep -F -- '--source-keys-root ${state}/controller/source-keys'")
+              machine.succeed("test $(stat -c %U:%a ${state}/controller/source-keys) = platform-controller:700")
               machine.succeed("test -x /run/current-system/sw/bin/openstack-platform-hosted-controller-restore")
               machine.fail("runuser -u agentops -- openstack-platform-hosted-controller-restore --yes")
               machine.fail("systemctl cat ${namespace}-managed-usage.service")

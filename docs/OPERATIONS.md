@@ -702,9 +702,9 @@ The deployment has three independent backup classes:
 
 | Backup | Source | Accepted location | Identity custody |
 | --- | --- | --- | --- |
-| Hosted controller | Admin controller SQLite | `<paths.backups>/hosted-controller` | Operator escrow; not admin |
+| Hosted controller | Admin controller SQLite and deploy keys | `<paths.backups>/hosted-controller` | Operator escrow; not admin |
 | External operator state | Operator CLI SQLite | `<paths.backups>/controller` | Operator escrow |
-| Managed data | PostgreSQL, MongoDB, Garage, retained OCI artifacts | `<paths.backups>/<namespace>/<timestamp>` | Admin plus separate operator escrow |
+| Managed data | PostgreSQL, MongoDB, Garage | `<paths.backups>/<namespace>/<timestamp>` | Admin plus separate operator escrow |
 
 One class does not substitute for another.
 
@@ -719,7 +719,11 @@ ssh -F "$SSH_CONFIG" platform-admin -- \
 
 Success reports `hosted-controller-backup=... sha256=...`. A committed set has
 ciphertext, checksum, and final manifest. The daily timer runs as the controller
-account; the private age identity remains off-platform.
+account; the private age identity remains off-platform. New backups also commit
+`hosted-controller-source-keys-<timestamp>.tar.age`, its checksum and manifest,
+and bind that exact archive in the SQLite manifest's `sourceKeys` field. Verify
+both trios. Version-3 off-site bundles copy the paired archive automatically;
+versions 1/2 remain readable but cannot restore keys that were never backed up.
 
 ### External operator-state backup
 
@@ -752,17 +756,24 @@ managed_backup="$(
     EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_logical_backup.sh" \
     SERVICE_CHECK_PYTHON=python3 \
     GARAGE_EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_garage_backup.py" \
-    REGISTRY_ARTIFACT_SCRIPT="$PLATFORM_ROOT/infra/backup/registry_artifact.py" \
     "$PLATFORM_ROOT/infra/backup/run_platform_backup.sh"
 )"
 printf '%s\n' "$managed_backup"
 grep -Eq '^platform backup complete: .+$' <<<"$managed_backup"
 ```
 
-The set contains encrypted `postgres.age`, `mongodb.age`, `garage.age`, and
-`registry.age`, plus `MANIFEST` and `SHA256SUMS`. OCI blobs stream through
-bounded verification and are retained according to controller registry
-retention.
+Garage export enumerates platform-prefix app buckets through the admin API,
+backfills read-only `platform-backup` grants, and fails if any bucket is unreadable.
+Verification compares the catalog with that same admin inventory, so an empty
+or partial archive cannot pass while app buckets exist. A bucket created/deleted
+between backup and verification requires a fresh backup. Garage catalog format 2
+also retains app S3 keys, bucket quotas and grants, encrypted inside `garage.age`.
+
+New managed-data sets use `format_version=3` and contain encrypted
+`postgres.age`, `mongodb.age`, and `garage.age`, plus `MANIFEST` and
+`SHA256SUMS`. App OCI images are excluded. Older format-2 sets remain accepted
+with their four checksummed archives; restore skips `registry.age` and reports
+that images must be rebuilt.
 
 Restore-check the newest set without touching live services:
 
@@ -780,7 +791,7 @@ grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' \
 ```
 
 The check starts temporary PostgreSQL and MongoDB containers and validates the
-Garage and OCI archives. It writes `RESTORE-MANIFEST` only after all checks pass
+Garage archive. It writes `RESTORE-MANIFEST` only after all checks pass
 and removes temporary resources on success or failure.
 
 ### Verify backup schedules
@@ -848,7 +859,12 @@ This operation replaces the live hosted-controller SQLite database. Before
 starting, verify the selected manifest/checksum, decrypt the ciphertext on the
 operator recovery host, and stage a direct mode-`0600` SQLite file on admin as
 `/home/agentops/hosted-controller-restore.sqlite3`. Never copy the age identity
-to admin.
+to admin. For a snapshot whose manifest contains `sourceKeys`, also verify and
+decrypt that named tar archive on the recovery host. Transfer the plaintext as
+`/home/agentops/hosted-controller-source-keys.tar` with mode 0600. Treat it as
+private-key material; do not unpack it manually. Legacy snapshots without a key
+archive leave existing keys unchanged; after complete loss, replace missing keys
+in each app's Settings and update the read-only deploy keys on GitHub.
 
 In an approval-gated root recovery session on the selected admin host:
 
@@ -861,6 +877,11 @@ sudo install -m 0600 -o platform-controller -g platform-controller \
   /home/agentops/hosted-controller-restore.sqlite3 \
   "$PLATFORM_ADMIN_STATE/controller/restore-input.sqlite3"
 sudo rm -f /home/agentops/hosted-controller-restore.sqlite3
+# For snapshots with a paired deploy-key archive:
+sudo install -m 0600 -o platform-controller -g platform-controller \
+  /home/agentops/hosted-controller-source-keys.tar \
+  "$PLATFORM_ADMIN_STATE/controller/restore-source-keys.tar"
+sudo rm -f /home/agentops/hosted-controller-source-keys.tar
 sudo openstack-platform-hosted-controller-restore --yes
 sudo systemctl start \
   "$PLATFORM_NAMESPACE-controller.service" \
@@ -870,7 +891,12 @@ sudo systemctl start \
 The launcher refuses active controller/backup units and unsafe input. It
 validates deployment identity, complete known schema, SQLite integrity, foreign
 keys, and unfinished operations before atomic replacement. On refusal, the
-current database remains unchanged.
+current database remains unchanged. With a key archive, every entry is validated
+against the replacement database before either state is changed. Keys are restored
+as platform-controller-owned 0700 directories and 0600 files; the public key's
+mtime is retained. SQLite and key-directory selection are separate filesystem
+commits: if interrupted after SQLite replacement, keep the controller stopped,
+retain the staged inputs, and repeat restore before starting it.
 
 A persistent admin-image cutover can deadlock when controller preparation
 refuses changed image selections while the retained database has one known
@@ -943,7 +969,7 @@ install -d -m 0700 /private/path/offline-state
 Full mode is destructive to the services named by its replacement inventory.
 Provision empty replacement PostgreSQL, MongoDB, Garage, and registry services.
 Do not point the replacement configuration at healthy or nonempty services.
-The off-site bundle must contain both SQLite classes, all four managed archives,
+The off-site bundle must contain both SQLite classes, all three managed data archives,
 an operator image selection, and at least one accepted hosted deployment.
 
 ```bash
@@ -960,7 +986,24 @@ The work path must be absent. The drill imports and verifies the bundle,
 restores both SQLite databases to private replacement directories, verifies
 restored image/application/accepted-deployment records, and runs destructive
 managed replacement restore. `DRILL-EVIDENCE.json` is committed only after all
-SQLite and managed restore checks succeed.
+SQLite and managed restore checks succeed. The Garage fixture must include
+objects and app grants to exercise recovery beyond an empty catalog. Restore
+imports app keys with their original IDs/secrets and recreates read/write app
+grants. The backup key gains write only during restore; every touched bucket is
+returned to read-only access before success is reported. Revocation failure
+requires an operator to deny write/owner on that key before reopening services.
+
+Garage creates new bucket IDs. The drill passes its offline replacement hosted
+SQLite through `GARAGE_RESTORE_CONTROLLER_DATABASE`; restore validates each
+original bucket name/ID against `managed_resources`, then commits the new IDs in
+one transaction. For standalone `restore_managed_data.sh --yes DIRECTORY`, set
+that variable to your private, current-user-owned mode-0600 replacement hosted
+SQLite with no WAL/SHM sidecars. Keep the controller and backup units stopped;
+install the remapped SQLite through the hosted restore launcher afterwards.
+Keep the original snapshot for retry. Catalog-format-1 archives have no app keys
+or grants: inspection remains supported, but nonempty restore refuses until
+separate key/grant recovery is performed. Older backups cannot recover S3 data
+that their ungranted key omitted.
 
 For archive and SQLite inspection without service mutation:
 
@@ -975,6 +1018,50 @@ infra/backup/full_loss_recovery_drill.sh --verify-only \
 
 Verify-only cannot create `DRILL-EVIDENCE.json` and is not a completed
 full-loss drill.
+
+## Rebuild app images after full restore
+
+A full data restore leaves the replacement registry empty. Rebuild each app's
+accepted commit; starting or restarting an app cannot supply its missing image.
+Repository access, retained deploy keys (or replacement keys), selected builder
+and worker images, and runtime secrets must be available before rebuilding.
+Runtime environment values live in Nomad Variables and are not in SQLite or
+managed-data backups; restore those from your separate secret escrow first.
+
+Use the authenticated `admin` and `project` transports from
+[Deploy an application](APPLICATION_DEPLOYMENTS.md#preconditions-and-access).
+Page `GET /v1/admin/applications?limit=100` using its `nextCursor`; for each app
+with an `activeDeploymentId`, save `GET /v1/deployments/{activeDeploymentId}`.
+That record supplies `sourceRepository`, `repositoryRef`, `repositoryCommit`,
+`configuration`, and `configurationRevision`. If source evidence is missing,
+resolve it from the retained deployment request before proceeding.
+
+For each app, set `APP_ID`, save that accepted record as
+`previous-deployment.json`, and construct a fresh deployment request:
+
+```bash
+jq -e '{repository: .sourceRepository, ref: .repositoryRef,
+  commit: .repositoryCommit, configuration: .configuration,
+  configurationRevision: .configurationRevision}
+  | select(.repository != null and .configuration != null)' \
+  previous-deployment.json > rebuild.json
+python3 -c 'import uuid; print(uuid.uuid4())' > rebuild-key.txt
+project -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<rebuild-key.txt)" --data-binary @- \
+  "http://localhost/v1/applications/$APP_ID/deployments" \
+  < rebuild.json > rebuild-operation.json
+STATUS_URL=$(jq -er .statusUrl rebuild-operation.json)
+project "http://localhost$STATUS_URL" > rebuild-status.json
+```
+
+Poll the same status URL until `succeeded`; follow the deployment runbook's
+recovery procedure for `recovery_required` and keep the same request/key on
+retry. Verify the app's accepted commit and public health before proceeding to
+the next app. For retained-primary-IP apps, use the privileged deployment
+runbook with a fresh sizing plan and `maintenance:true`; ordinary project
+deployments cannot authorize that cutover. Rebuilding enables a stopped app;
+record its original desired state and disable it again after verification if it
+should remain stopped.
 
 ## Replace a persistent host
 

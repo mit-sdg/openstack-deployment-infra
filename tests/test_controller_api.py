@@ -4,10 +4,12 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+from openstack_platform import remote
 from openstack_platform.config import (
     Config,
     Limits,
@@ -161,6 +163,83 @@ class ControllerAPITests(unittest.TestCase):
                 {"confirmation": "default"},
             )
         self.assertEqual(error.exception.code, "NOT_FOUND")
+
+    def test_task_restart_is_project_scoped_idempotent_and_busy_guarded(self) -> None:
+        application = self.create_application().body["applicationId"]
+        service = mock.Mock()
+        with mock.patch(
+            "openstack_platform.controller.api.ApplicationService", return_value=service
+        ):
+            route = f"/v1/applications/{application}/restart"
+            key = "00000000-0000-4000-8000-000000000081"
+            response = self.dispatch("POST", route, {}, self.headers(key))
+            self.assertEqual(response.status, 202)
+            self.api.wait_for_operations()
+            replay = self.dispatch("POST", route, {}, self.headers(key))
+            self.assertEqual(replay.body["operationId"], response.body["operationId"])
+            self.assertEqual(service.restart.call_count, 1)
+            with self.assertRaises(HttpError):
+                self.dispatch("POST", route, {"allocationId": "other"}, self.headers(key))
+
+    def test_private_source_routes_validate_inputs_and_project_metadata(self) -> None:
+        application = self.create_application().body["applicationId"]
+        source = f"/v1/applications/{application}/source/"
+        repository = "https://github.com/ada/notes"
+        configuration = {
+            "schemaVersion": 1,
+            "build": {
+                "runtime": "node",
+                "packages": ["."],
+                "buildScript": "build",
+                "startScript": "start",
+            },
+            "runtime": {"port": 3000, "healthPath": "/health"},
+            "storageBindings": [],
+        }
+        self.api.helper_caller = mock.Mock(
+            return_value={
+                "keyPresent": True,
+                "items": [
+                    {
+                        "sha": "a" * 40,
+                        "message": "Change",
+                        "author": "Ada",
+                        "date": "2026-10-04T00:00:00Z",
+                        "secret": "hidden",
+                    }
+                ],
+            }
+        )
+        response = self.dispatch(
+            "POST", source + "commits", {"repository": repository, "branch": "main"}
+        )
+        self.assertNotIn("secret", repr(response.body))
+        self.api.helper_caller.return_value = {
+            "keyPresent": True,
+            "items": [
+                {"id": name, "label": name, "state": "ok"}
+                for name in ("package-json", "script:start", "script:build", "lockfile:.")
+            ],
+        }
+        response = self.dispatch(
+            "POST",
+            source + "check",
+            {"repository": repository, "commit": "a" * 40, "configuration": configuration},
+        )
+        self.assertEqual(len(response.body["items"]), 4)
+        with self.assertRaises(HttpError):
+            self.dispatch(
+                "POST",
+                source + "check",
+                {"repository": repository, "commit": "bad", "configuration": configuration},
+            )
+        self.api.helper_caller.side_effect = remote.HelperError(
+            "SOURCE_UNAVAILABLE", "unsafe stderr"
+        )
+        with self.assertRaises(HttpError) as error:
+            self.dispatch("POST", source + "commits", {"repository": repository, "branch": "main"})
+        self.assertEqual(error.exception.code, "SOURCE_UNAVAILABLE")
+        self.assertNotIn("unsafe", str(error.exception))
 
     def test_runtime_log_reads_the_selected_stream(self) -> None:
         application = self.create_application().body["applicationId"]
@@ -660,6 +739,53 @@ class ControllerAPITests(unittest.TestCase):
             finally:
                 release.set()
             slow.result(timeout=2)
+
+    def test_slow_app_reads_do_not_wait_for_or_hold_the_api_lock(self) -> None:
+        application = self.create_application().body["applicationId"]
+
+        def helper(_config, action, values, *, deadline=None):
+            if action == "app.logs":
+                return {"text": "ready\n"}
+            if action == "app.source.key":
+                return {"present": False}
+            if action == "app.source.check":
+                return {"keyPresent": False}
+            if action in {"app.source.commits", "app.source.preflight"}:
+                return {"keyPresent": False}
+            raise AssertionError(action)
+
+        self.api.helper_caller = helper
+        self.api.logs.helper_caller = helper
+        reads = [
+            ("GET", f"/v1/applications/{application}/runtime-log", None),
+            ("GET", f"/v1/applications/{application}/source-key", None),
+            (
+                "POST",
+                f"/v1/applications/{application}/source-key/check",
+                {"repository": "https://github.com/example/demo-app", "branch": "main"},
+            ),
+            (
+                "POST",
+                f"/v1/applications/{application}/source/commits",
+                {"repository": "https://github.com/example/demo-app", "branch": "main"},
+            ),
+        ]
+        # A locked request (a deploy admission, say) is in progress: these reads
+        # still answer, from their own snapshot.
+        pool = ThreadPoolExecutor(max_workers=len(reads))
+        self.api._lock.acquire()
+        try:
+            futures = [
+                pool.submit(self.dispatch, method, path, body) for method, path, body in reads
+            ]
+            statuses = [future.result(timeout=5).status for future in futures]
+        finally:
+            self.api._lock.release()
+            pool.shutdown(wait=True)
+        self.assertEqual(statuses, [200] * len(reads))
+        with self.assertRaises(HttpError) as missing:
+            self.dispatch("GET", f"/v1/applications/{uuid.uuid4()}/runtime-log")
+        self.assertEqual(missing.exception.code, "APPLICATION_NOT_FOUND")
 
     def test_both_operation_routes_use_an_independent_query_only_snapshot(self) -> None:
         identifier = "00000000-0000-4000-8000-000000000071"

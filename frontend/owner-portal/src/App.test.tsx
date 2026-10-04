@@ -3,6 +3,9 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { api, ApiError, configurationGuidance, validateSettings, type Settings } from './api';
 import { Status } from './components/Status';
+import { DeployPage } from './pages/Deploy';
+import * as github from './utils/github';
+import { Overview } from './pages/Overview';
 import { ConfigurationForm } from './pages/Configuration';
 
 const settings: Settings = {
@@ -183,4 +186,153 @@ describe('typed API', () => {
     expect(fetch.mock.calls[2][1].headers['Idempotency-Key']).toBe('fixed-key');
     expect(fetch.mock.calls[2][1].headers['X-CSRF-Token']).toBe('replacement');
   });
+});
+
+describe('owner app controls', () => {
+  it('refreshes the app as soon as a stop finishes', async () => {
+    const app = {
+      applicationId: 'app',
+      slug: 'demo',
+      savedRevision: 1,
+      lifecycleState: 'ready',
+      desiredRunning: true,
+      stale: false,
+      activeDeploymentId: 'deployment',
+      acceptedDeployment: {
+        deploymentId: 'deployment',
+        sourceCommit: 'a'.repeat(40),
+        acceptedAt: '2026-10-01T00:00:00Z',
+      },
+    };
+    const read = vi.spyOn(api, 'app').mockResolvedValue(app as never);
+    vi.spyOn(api, 'history').mockResolvedValue({ items: [], nextCursor: null, truncated: false });
+    vi.spyOn(api, 'activity').mockResolvedValue([]);
+    vi.spyOn(api, 'state').mockImplementation(async () => {
+      read.mockResolvedValue({ ...app, desiredRunning: false } as never);
+      return { intentId: 'stop', state: 'accepted' } as never;
+    });
+    vi.spyOn(api, 'intent').mockResolvedValue({
+      intentId: 'stop',
+      kind: 'app_disable',
+      appId: 'app',
+      state: 'succeeded',
+    } as never);
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <Overview id="app" />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop app' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Stop app' })[1]);
+    expect(await screen.findByRole('button', { name: 'Start app' })).toBeEnabled();
+  });
+
+  it('confirms a restart and uses one idempotency key while preserving the version', async () => {
+    const app = {
+      applicationId: 'app',
+      slug: 'demo',
+      savedRevision: 1,
+      lifecycleState: 'ready',
+      desiredRunning: true,
+      stale: false,
+      activeDeploymentId: 'deployment',
+      acceptedDeployment: {
+        deploymentId: 'deployment',
+        sourceCommit: 'a'.repeat(40),
+        acceptedAt: '2026-10-01T00:00:00Z',
+      },
+    };
+    vi.spyOn(api, 'app').mockResolvedValue(app as never);
+    vi.spyOn(api, 'history').mockResolvedValue({ items: [], nextCursor: null, truncated: false });
+    vi.spyOn(api, 'activity').mockResolvedValue([]);
+    const restart = vi
+      .spyOn(api, 'restart')
+      .mockResolvedValue({ intentId: 'restart', state: 'accepted' } as never);
+    vi.spyOn(api, 'intent').mockResolvedValue({
+      intentId: 'restart',
+      kind: 'app_restart',
+      appId: 'app',
+      state: 'succeeded',
+    } as never);
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <Overview id="app" />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Restart app' }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('same server');
+    expect(screen.getByRole('dialog')).toHaveTextContent('brief interruption');
+    expect(restart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Restart app' })[1]);
+    await waitFor(() => expect(restart).toHaveBeenCalledOnce());
+    expect(restart.mock.calls[0]).toEqual(['app', expect.stringMatching(/^[a-f0-9-]{36}$/), false]);
+  });
+});
+
+describe('redeploy selection', () => {
+  function show(search: string) {
+    window.history.replaceState(null, '', `/apps/app/deploy${search}`);
+    vi.spyOn(api, 'settings').mockResolvedValue(settings);
+    vi.spyOn(api, 'app').mockResolvedValue({
+      slug: 'demo',
+      savedRevision: 1,
+      lifecycleState: 'ready',
+      desiredRunning: true,
+    } as never);
+    vi.spyOn(api, 'environment').mockResolvedValue({ revision: 1, items: [], updatedAt: null });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(new Response('{}', { status: 404 }))),
+    );
+    return render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <DeployPage id="app" />
+      </QueryClientProvider>,
+    );
+  }
+  it('selects the exact old commit while explaining current settings', async () => {
+    vi.spyOn(github, 'recentCommits').mockResolvedValue([]);
+    show('?commit=' + 'a'.repeat(40));
+    expect(await screen.findByLabelText('Commit SHA')).toHaveValue('a'.repeat(40));
+    expect(
+      screen.getByText(
+        'Deploying this commit again uses your app’s current saved settings and environment variables.',
+      ),
+    ).toBeVisible();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+  it.each([false, true])(
+    'reviews the newest saved branch commit (private: %s)',
+    async (privateRepo) => {
+      const read = vi.spyOn(github, 'recentCommits');
+      if (privateRepo) read.mockRejectedValue(new github.GitHubError('not-found'));
+      else
+        read.mockResolvedValue([
+          { sha: 'b'.repeat(40), message: 'Newest', author: null, date: null },
+        ]);
+      vi.spyOn(api, 'checkSourceKey').mockResolvedValue({
+        keyPresent: true,
+        reachable: true,
+        head: 'b'.repeat(40),
+        branch: 'main',
+        problem: null,
+      });
+      const deploy = vi.spyOn(api, 'deploy');
+      show('?latest=1');
+      expect(await screen.findByRole('dialog')).toHaveTextContent('b'.repeat(40));
+      expect(screen.getByRole('dialog')).toHaveTextContent('current saved settings');
+      expect(deploy).not.toHaveBeenCalled();
+      expect(read).toHaveBeenCalledWith(
+        settings.repository,
+        settings.branch,
+        expect.any(AbortSignal),
+      );
+    },
+  );
 });

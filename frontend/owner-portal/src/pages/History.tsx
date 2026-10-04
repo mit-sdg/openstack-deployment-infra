@@ -54,6 +54,19 @@ function columns(id: string, active: string | null | undefined): Column<Deployme
       ),
     },
     {
+      key: 'deploy',
+      header: 'Deploy again',
+      mobile: 'field',
+      cell: (deployment) => (
+        <Link
+          href={`/apps/${id}/deploy?commit=${deployment.repositoryCommit}`}
+          className={buttonClass({ size: 'sm', variant: 'ghost' })}
+        >
+          Deploy this commit again
+        </Link>
+      ),
+    },
+    {
       key: 'live',
       header: 'Went live',
       mobile: 'hidden',

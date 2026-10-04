@@ -714,6 +714,12 @@ function DeployDialog({
             repository={repository}
             branch={branch}
             latest={() => adminAppsApi.resources().checkSourceKey(app.applicationId)}
+            platform={{
+              id: app.applicationId,
+              revision,
+              scope: 'admin',
+              service: adminAppsApi.resources(),
+            }}
             value={sha}
             onSelect={(commit) => setSha(commit.sha)}
           />
@@ -733,7 +739,19 @@ function DeployDialog({
             onChange={(event) => setSha(event.target.value)}
           />
         </Field>
-        {open && <CommitChecks repository={repository} sha={sha} configuration={configuration} />}
+        {open && (
+          <CommitChecks
+            repository={repository}
+            sha={sha}
+            configuration={configuration}
+            platform={{
+              id: app.applicationId,
+              revision,
+              scope: 'admin',
+              service: adminAppsApi.resources(),
+            }}
+          />
+        )}
         <Checkbox
           label="Allow a brief outage"
           description={

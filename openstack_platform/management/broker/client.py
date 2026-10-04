@@ -40,6 +40,8 @@ class ProjectClient:
         body: object = None,
         key: str | None = None,
         headers: dict[str, str] | None = None,
+        *,
+        timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any]]:
         if (
             not path.startswith("/v1/")
@@ -50,7 +52,11 @@ class ProjectClient:
             raise ValueError("invalid project request")
         if not self.capacity.acquire(timeout=self.timeout):
             raise ControllerUnavailable("local connection capacity")
-        connection = UnixConnection(self.path, self.timeout)
+        timeout = self.timeout if timeout_seconds is None else timeout_seconds
+        if not 0 < timeout <= 35:
+            self.capacity.release()
+            raise ValueError("invalid project timeout")
+        connection = UnixConnection(self.path, timeout)
         try:
             supplied = {"Content-Type": "application/json", **(headers or {})}
             if key:

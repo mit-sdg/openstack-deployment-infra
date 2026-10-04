@@ -30,9 +30,10 @@ AGE=${AGE:-age}
 OPERATOR_RESTORE_LAUNCHER=${OPERATOR_RESTORE_LAUNCHER:-openstack-platform-restore}
 HOSTED_RESTORE_LAUNCHER=${HOSTED_RESTORE_LAUNCHER:-openstack-platform-controller-restore}
 BROKER_RESTORE_LAUNCHER=${BROKER_RESTORE_LAUNCHER:-openstack-platform-management-broker-backup}
+GARAGE_VERIFY_SCRIPT=${GARAGE_VERIFY_SCRIPT:-}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+GARAGE_VERIFY_SCRIPT=${GARAGE_VERIFY_SCRIPT:-$SCRIPT_DIR/verify_garage_backup.py}
 MANAGED_RESTORE_LAUNCHER=${MANAGED_RESTORE_LAUNCHER:-$SCRIPT_DIR/restore_managed_data.sh}
-REGISTRY_ARTIFACT_SCRIPT=${REGISTRY_ARTIFACT_SCRIPT:-$SCRIPT_DIR/registry_artifact.py}
 umask 077
 install -d -m 0700 "$WORK"
 "$RECOVERY" verify "$BUNDLE"
@@ -69,24 +70,35 @@ if [[ -d $IMPORTED/management-broker ]]; then
   "$BROKER_RESTORE_LAUNCHER" verify "$scratch/management-broker.sqlite3"
 fi
 
+keys_arguments=()
+key_archive=$(find "$IMPORTED/hosted-controller" -maxdepth 1 -type f -name '*.tar.age' -print -quit)
+if [[ -n $key_archive ]]; then
+  "$AGE" --decrypt --identity "$CONTROLLER_IDENTITY" --output "$scratch/source-keys.tar" "$key_archive"
+  chmod 0600 "$scratch/source-keys.tar"
+  python3 - "$scratch/source-keys.tar" "$scratch/hosted-controller.sqlite3" <<'PYKEYS'
+import os,sqlite3,sys,tarfile
+assert os.stat(sys.argv[1]).st_size<=32*1024*1024
+connection=sqlite3.connect(f"file:{sys.argv[2]}?mode=ro",uri=True)
+allowed={row[0] for row in connection.execute("SELECT slug FROM applications")}
+connection.close()
+pairs={}
+with tarfile.open(sys.argv[1],"r:") as archive:
+ for member in archive:
+  parts=member.name.split("/")
+  assert len(parts)==2 and parts[0] in allowed and parts[1] in {"id_ed25519","id_ed25519.pub"}
+  assert member.isfile() and 0 < member.size <= 16384
+  seen=pairs.setdefault(parts[0],set())
+  assert parts[1] not in seen
+  seen.add(parts[1])
+  assert len(archive.extractfile(member).read())==member.size
+assert all(pair=={"id_ed25519","id_ed25519.pub"} for pair in pairs.values())
+PYKEYS
+  keys_arguments=(--source-keys-archive "$scratch/source-keys.tar" --source-keys-directory "$WORK/replacements/source-keys")
+fi
+
 managed="$IMPORTED/managed-data"
-"$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/registry.age" | \
-  python3 "$REGISTRY_ARTIFACT_SCRIPT" verify
-"$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/garage.age" | python3 -c '
-import json,sys,tarfile
-archive=tarfile.open(fileobj=sys.stdin.buffer,mode="r|gz")
-member=archive.next()
-assert member is not None and member.name=="manifest.json"
-manifest=json.load(archive.extractfile(member))
-assert manifest["format_version"]==1 and isinstance(manifest["objects"],list)
-seen=0
-while (member:=archive.next()) is not None:
- assert member.name==f"objects/{seen:012d}.bin"
- payload=archive.extractfile(member)
- while payload.read(1024*1024): pass
- seen+=1
-assert seen==len(manifest["objects"])
-'
+"$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/garage.age" | \
+  "${SERVICE_CHECK_PYTHON:-python3}" "$GARAGE_VERIFY_SCRIPT" --offline
 echo "recovery archives=verified"
 
 if [[ $MODE == --verify-only ]]; then
@@ -118,6 +130,7 @@ hosted_output="$(
     "$scratch/hosted-controller.sqlite3" \
     --destination "$hosted_destination" \
     --platform-config "$PLATFORM_CONFIG" \
+    "${keys_arguments[@]}" \
     --yes
 )"
 printf '%s\n' "$hosted_output"
@@ -168,13 +181,13 @@ finally:
 PY
 )"
 
-managed_output="$(PLATFORM_CONFIG="$PLATFORM_CONFIG" AGE_KEY="$MANAGED_IDENTITY" "$MANAGED_RESTORE_LAUNCHER" --yes "$managed")"
+managed_output="$(PLATFORM_CONFIG="$PLATFORM_CONFIG" AGE_KEY="$MANAGED_IDENTITY" GARAGE_RESTORE_CONTROLLER_DATABASE="$hosted_destination" "$MANAGED_RESTORE_LAUNCHER" --yes "$managed")"
 printf '%s\n' "$managed_output"
 grep -Eq '^managed-data-restore=verified source=' <<<"$managed_output"
 
-python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" <<'PY'
+python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" "$scratch/source-keys.tar" <<'PY'
 import json,os,sys
-path,bundle,counts,broker_path=sys.argv[1:]
+path,bundle,counts,broker_path,keys_path=sys.argv[1:]
 evidence={
  "bundle":bundle,
  "controllerState":{
@@ -186,8 +199,10 @@ evidence={
  "format":"openstack-platform-full-loss-drill-v2",
  "managedData":"restored",
  "records":json.loads(counts),
- "registryArtifacts":"restored",
+ "appImages":"rebuild-by-redeploy",
 }
+if os.path.isfile(keys_path):
+ evidence["sourceKeys"]="restored"
 if os.path.isfile(broker_path):
  import sqlite3
  connection=sqlite3.connect(f"file:{broker_path}?mode=ro",uri=True)

@@ -1055,6 +1055,22 @@ def _retire_owned_s3_key(admin: Any, *, key_id: str, expected_name: str) -> None
         raise _recovery_required("s3", "cleanup", "confirm operation-owned access-key absence")
 
 
+def _s3_grant_backup_read(admin: Any, bucket_id: str) -> None:
+    key_id = _s3_key_by_name(admin, "platform-backup")
+    if key_id is None:
+        raise HelperActionError("BACKUP_KEY_MISSING", "Garage backup key must be initialized")
+    values = {"bucketId": bucket_id, "accessKeyId": key_id}
+    # Garage AllowBucketKey merges grants; false does not revoke a prior grant.
+    admin.request(
+        "/DenyBucketKey",
+        {**values, "permissions": {"read": False, "write": True, "owner": True}},
+    )
+    admin.request(
+        "/AllowBucketKey",
+        {**values, "permissions": {"read": True, "write": False, "owner": False}},
+    )
+
+
 def s3_create(
     admin: Any,
     *,
@@ -1119,6 +1135,7 @@ def s3_create(
                 "permissions": {"read": True, "write": True, "owner": False},
             },
         )
+        _s3_grant_backup_read(admin, bucket_info["id"])
         info = _s3_bucket_info(admin, provider_id=bucket_info["id"])
         if info is None:
             raise HelperActionError(

@@ -87,8 +87,8 @@ class Members:
             if not candidates:
                 raise HttpError(
                     404,
-                    "ACCOUNT_NOT_FOUND",
-                    "No account has this username. They need to sign in to the portal once first.",
+                    "ACCOUNT_NOT_REGISTERED",
+                    f"{name} isn't registered yet. Ask them to sign in to the portal once, then add them.",
                 )
             target = candidates[0]["id"]
             if target == app["user_id"]:

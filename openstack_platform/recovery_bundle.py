@@ -36,9 +36,15 @@ _FORMAT = "openstack-platform-offsite-recovery-v1"
 _COMPONENTS = ("hosted-controller", "operator-state", "managed-data")
 _MANAGEMENT_FORMAT = "openstack-platform-offsite-recovery-v2"
 _MANAGEMENT_COMPONENTS = (*_COMPONENTS, "management-broker")
+_KEYS_FORMAT = "openstack-platform-offsite-recovery-v3"
 
 
 def bundle_components(manifest: dict[str, Any]) -> tuple[str, ...]:
+    if manifest["format"] == _KEYS_FORMAT:
+        components = manifest.get("components")
+        if components not in [list(_COMPONENTS), list(_MANAGEMENT_COMPONENTS)]:
+            _fail("recovery manifest components are unsupported")
+        return tuple(components)
     return _MANAGEMENT_COMPONENTS if manifest["format"] == _MANAGEMENT_FORMAT else _COMPONENTS
 
 
@@ -194,6 +200,20 @@ def _selected_component_files(
         _fail(f"latest committed {name} backup is incomplete")
     for path in selected:
         _regular(path, maximum=bounds.maximum_file_bytes)
+    if name == "hosted-controller":
+        try:
+            metadata = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            _fail("hosted-controller manifest is malformed")
+        keys = metadata.get("sourceKeys") if isinstance(metadata, dict) else None
+        if keys is not None:
+            if not isinstance(keys, str) or not re.fullmatch(
+                r"hosted-controller-source-keys-20[0-9]{6}T[0-9]{6}Z\.tar\.age", keys
+            ):
+                _fail("deploy-key archive name is invalid")
+            selected.extend(root / (keys + suffix) for suffix in ("", ".sha256", ".manifest"))
+            for path in selected:
+                _regular(path, maximum=bounds.maximum_file_bytes)
     return selected
 
 
@@ -226,8 +246,19 @@ def _validate_component(
     observed: dict[str, str] = {}
     by_name = {path.name: path for path in files}
     names = set(by_name)
-    if name in {"hosted-controller", "operator-state", "management-broker"}:
-        ciphertext = [item for item in names if item.endswith(".sqlite3.age")]
+    if name in {
+        "hosted-controller",
+        "operator-state",
+        "management-broker",
+        "hosted-controller-source-keys",
+    }:
+        ciphertext = [
+            item
+            for item in names
+            if item.endswith(
+                ".tar.age" if name == "hosted-controller-source-keys" else ".sqlite3.age"
+            )
+        ]
         if (
             len(ciphertext) != 1
             or not {
@@ -244,7 +275,7 @@ def _validate_component(
         if by_name[selected + ".sha256"].read_text() != f"{digest}  {selected}\n":
             _fail(f"{name} committed checksum does not match")
         manifest_path = by_name[selected + ".manifest"]
-        if name in {"hosted-controller", "management-broker"}:
+        if name in {"hosted-controller", "management-broker", "hosted-controller-source-keys"}:
             try:
                 manifest = json.loads(manifest_path.read_text())
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -255,12 +286,30 @@ def _validate_component(
                 != (
                     "openstack-platform-management-broker-backup-v1"
                     if name == "management-broker"
+                    else "openstack-platform-hosted-controller-source-keys-v1"
+                    if name == "hosted-controller-source-keys"
                     else "openstack-platform-hosted-controller-backup-v1"
                 )
                 or manifest.get("name") != selected
                 or manifest.get("sha256") != digest
             ):
                 _fail("hosted-controller manifest does not match its ciphertext")
+            if name == "hosted-controller" and manifest.get("sourceKeys") is not None:
+                keys = manifest["sourceKeys"]
+                if not isinstance(keys, str) or not re.fullmatch(
+                    r"hosted-controller-source-keys-20[0-9]{6}T[0-9]{6}Z\.tar\.age", keys
+                ):
+                    _fail("deploy-key archive name is invalid")
+                paths = [by_name.get(keys + suffix) for suffix in ("", ".sha256", ".manifest")]
+                if any(path is None for path in paths):
+                    _fail("hosted-controller deploy-key evidence is incomplete")
+                observed.update(
+                    _validate_component(
+                        "hosted-controller-source-keys",
+                        [path for path in paths if path is not None],
+                        bounds=bounds,
+                    )
+                )
         else:
             manifest = _key_values(manifest_path)
             if (
@@ -272,24 +321,26 @@ def _validate_component(
             ):
                 _fail("operator-state manifest does not match its ciphertext")
     else:
+        if "MANIFEST" not in names:
+            _fail("managed-data evidence omits its manifest")
+        manifest = _key_values(by_name["MANIFEST"])
+        version = manifest.get("format_version")
+        archives: tuple[str, ...] = ("postgres.age", "mongodb.age", "garage.age")
+        if version == "2" and manifest.get("registry") == "distribution-artifacts-tar-gzip":
+            archives += ("registry.age",)
+        elif version != "3" or "registry" in manifest:
+            _fail("managed-data manifest is not a supported recovery format")
         required = {
             "postgres.age",
             "mongodb.age",
             "garage.age",
-            "registry.age",
             "SHA256SUMS",
             "MANIFEST",
         }
-        if not required <= names:
-            _fail("managed-data evidence omits encrypted data or retained OCI artifacts")
-        manifest = _key_values(by_name["MANIFEST"])
-        if (
-            manifest.get("format_version") != "2"
-            or manifest.get("registry") != "distribution-artifacts-tar-gzip"
-        ):
-            _fail("managed-data manifest is not the recovery-capable format")
+        if not (required | set(archives)) <= names or (version == "3" and "registry.age" in names):
+            _fail("managed-data evidence does not match its encrypted data inventory")
         expected_sums = ""
-        for filename in ("postgres.age", "mongodb.age", "garage.age", "registry.age"):
+        for filename in archives:
             _age_file(by_name[filename])
             digest = _digest(by_name[filename], maximum=bounds.maximum_file_bytes)
             observed[filename] = digest
@@ -399,11 +450,16 @@ def export_bundle(
     if os.path.lexists(destination) or os.path.lexists(staging):
         _fail("recovery bundle already exists")
 
+    hosted_selected = _selected_component_files(
+        "hosted-controller", sources["hosted-controller"], bounds=bounds
+    )
+    includes_keys = any(path.name.endswith(".tar.age") for path in hosted_selected)
+    components = _MANAGEMENT_COMPONENTS if "management-broker" in sources else _COMPONENTS
     inventory: list[dict[str, Any]] = []
     total = 0
     try:
         staging.mkdir(mode=0o700)
-        for component in _MANAGEMENT_COMPONENTS if "management-broker" in sources else _COMPONENTS:
+        for component in components:
             selected = _selected_component_files(component, sources[component], bounds=bounds)
             _validate_component(component, selected, bounds=bounds)
             component_root = staging / component
@@ -426,7 +482,11 @@ def export_bundle(
         checksums = "".join(f"{item['sha256']}  {item['path']}\n" for item in inventory).encode()
         _write_new(staging / "SHA256SUMS", checksums)
         manifest = {
-            "format": _MANAGEMENT_FORMAT if "management-broker" in sources else _FORMAT,
+            "format": _KEYS_FORMAT
+            if includes_keys
+            else _MANAGEMENT_FORMAT
+            if "management-broker" in sources
+            else _FORMAT,
             "bundle": bundle_name,
             "deployment": deployment,
             "createdAt": timestamp,
@@ -437,6 +497,8 @@ def export_bundle(
             },
             "totalBytes": total,
         }
+        if includes_keys:
+            manifest["components"] = list(components)
         _write_new(staging / "MANIFEST.json", _manifest_bytes(manifest))
         _write_new(
             staging / "MANIFEST.json.sha256",
@@ -468,7 +530,11 @@ def _load_manifest(bundle: Path) -> dict[str, Any]:
         value = json.loads(path.read_bytes())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RecoveryBundleError("recovery manifest is malformed") from error
-    if not isinstance(value, dict) or value.get("format") not in {_FORMAT, _MANAGEMENT_FORMAT}:
+    if not isinstance(value, dict) or value.get("format") not in {
+        _FORMAT,
+        _MANAGEMENT_FORMAT,
+        _KEYS_FORMAT,
+    }:
         _fail("recovery manifest format is unsupported")
     if value.get("bundle") != bundle.name or not isinstance(value.get("files"), list):
         _fail("recovery manifest identity or inventory is malformed")
@@ -509,6 +575,10 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
             {f"{component}/{name}": digest for name, digest in component_digests.items()}
         )
         actual.update(f"{component}/{path.name}" for path in selected)
+    if manifest["format"] == _KEYS_FORMAT and not any(
+        name.startswith("hosted-controller/") and name.endswith(".tar.age") for name in actual
+    ):
+        _fail("v3 recovery bundle omits deploy keys")
     expected: set[str] = set()
     for record in records:
         if not isinstance(record, dict) or set(record) != {"path", "bytes", "sha256"}:
@@ -796,7 +866,7 @@ def recovery_status(
         raise RecoveryBundleError("off-site export receipt is malformed") from error
     if (
         not isinstance(value, dict)
-        or value.get("format") not in {_FORMAT, _MANAGEMENT_FORMAT}
+        or value.get("format") not in {_FORMAT, _MANAGEMENT_FORMAT, _KEYS_FORMAT}
         or value.get("deployment") != platform.namespace
         or not isinstance(value.get("bundle"), str)
         or not _NAME.fullmatch(value["bundle"])
@@ -815,7 +885,9 @@ def recovery_status(
     bundle = config.destination / value["bundle"]
     manifest = _load_manifest(bundle)
     _manifest_bounds(manifest)
-    if _management_backup_required(platform) and manifest["format"] != _MANAGEMENT_FORMAT:
+    if _management_backup_required(platform) and "management-broker" not in bundle_components(
+        manifest
+    ):
         _fail("initialized management broker requires a fourth-class off-site bundle")
     if value["format"] != manifest["format"]:
         _fail("off-site receipt format does not match the retained bundle")

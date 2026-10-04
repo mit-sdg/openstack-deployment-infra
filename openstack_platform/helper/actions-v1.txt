@@ -13,8 +13,11 @@ app.manifest.retain
 app.manifest.verify
 app.promote
 app.remove
+app.restart
 app.source.check
+app.source.commits
 app.source.key
+app.source.preflight
 app.startup
 app.stop
 app.worker.capacity

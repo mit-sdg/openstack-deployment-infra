@@ -21,7 +21,6 @@ AGE_KEY=${AGE_KEY:-$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt}
 SECRETS_FILE=${SECRETS_FILE:-$PLATFORM_ROOT/secrets/storage-bootstrap.env}
 SERVICE_CHECK_PYTHON=${SERVICE_CHECK_PYTHON:-$PLATFORM_ROOT/tools/service-check-venv/bin/python}
 GARAGE_RESTORE_SCRIPT=${GARAGE_RESTORE_SCRIPT:-$SCRIPT_DIR/restore_garage_backup.py}
-REGISTRY_ARTIFACT_SCRIPT=${REGISTRY_ARTIFACT_SCRIPT:-$SCRIPT_DIR/registry_artifact.py}
 POSTGRES_IMAGE=${POSTGRES_IMAGE:-$PLATFORM_POSTGRES_IMAGE}
 MONGODB_IMAGE=${MONGODB_IMAGE:-$PLATFORM_MONGODB_IMAGE}
 CA_FILE=${CA_FILE:-$PLATFORM_ROOT/secrets/nomad-cli/internal-ca.pem}
@@ -38,17 +37,20 @@ import re,sys
 root=Path(sys.argv[1])
 expected={
  "created_at": re.compile(r"[0-9]{8}T[0-9]{6}Z"),
- "format_version": re.compile("2"),
+ "format_version": re.compile("[23]"),
  "postgres": re.compile("pg_dumpall-clean-if-exists"),
  "mongodb": re.compile("mongodump-archive-gzip"),
  "object_storage": re.compile("garage-s3-catalog-tar-gzip"),
- "registry": re.compile("distribution-artifacts-tar-gzip"),
 }
 values={}
 for line in (root/"MANIFEST").read_text().splitlines():
  key,sep,value=line.partition("=")
  if not sep or key in values: raise SystemExit("managed-data manifest is malformed")
  values[key]=value
+archives=["garage.age","mongodb.age","postgres.age"]
+if values.get("format_version")=="2":
+ expected["registry"]=re.compile("distribution-artifacts-tar-gzip")
+ archives.append("registry.age")
 if values.keys()!=expected.keys() or any(not expected[k].fullmatch(v) for k,v in values.items()):
  raise SystemExit("managed-data manifest is unsupported")
 lines=(root/"SHA256SUMS").read_text().splitlines()
@@ -57,7 +59,7 @@ for line in lines:
  match=re.fullmatch(r"[0-9a-f]{64}  (postgres\.age|mongodb\.age|garage\.age|registry\.age)",line)
  if match is None: raise SystemExit("managed-data checksums are malformed")
  names.append(match.group(1))
-if sorted(names)!=["garage.age","mongodb.age","postgres.age","registry.age"]:
+if sorted(names)!=archives:
  raise SystemExit("managed-data checksum inventory is incomplete")
 PY
 (cd "$EVIDENCE" && sha256sum --strict --check SHA256SUMS >/dev/null)
@@ -85,7 +87,8 @@ echo "mongodb managed restore=complete"
 
 "$AGE" --decrypt --identity "$AGE_KEY" "$EVIDENCE/garage.age" | \
   "$SERVICE_CHECK_PYTHON" "$GARAGE_RESTORE_SCRIPT"
-"$AGE" --decrypt --identity "$AGE_KEY" "$EVIDENCE/registry.age" | \
-  "$SERVICE_CHECK_PYTHON" "$REGISTRY_ARTIFACT_SCRIPT" import
+if grep -qx 'format_version=2' "$EVIDENCE/MANIFEST"; then
+  echo "legacy registry.age skipped; rebuild app images by redeploying accepted commits"
+fi
 
 echo "managed-data-restore=verified source=$(basename "$EVIDENCE")"

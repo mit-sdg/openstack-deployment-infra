@@ -8,9 +8,11 @@ import {
   RelativeTime,
   Section,
   SectionSkeleton,
+  buttonClass,
 } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
+import { Link } from 'wouter';
 import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { QueryError } from '../components/Feedback';
@@ -102,6 +104,15 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
             actions={<Status state={attempt.data.status} />}
           >
             <Details deployment={attempt.data} />
+            <div>
+              <Link
+                href={`/apps/${id}/deploy?commit=${attempt.data.repositoryCommit}`}
+                className={buttonClass()}
+              >
+                Deploy this commit again
+              </Link>
+            </div>
+            <Hint>This uses your app’s current saved settings and environment variables.</Hint>
           </Section>
           {startup.data?.captured && (
             <StartupRecordSection

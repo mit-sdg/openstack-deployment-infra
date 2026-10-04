@@ -344,7 +344,7 @@ class Fixture:
                     "public_ingress": "healthy",
                     "managed_services": "healthy",
                     "nomad": {"ready_clients": workers, "raft": "healthy"},
-                    "backup": {"age_hours": 5.2, "encrypted": True, "registry_artifacts": True},
+                    "backup": {"age_hours": 5.2, "encrypted": True, "format_version": 3},
                     "offsite_recovery": {
                         "configured": True,
                         "mounted": True,

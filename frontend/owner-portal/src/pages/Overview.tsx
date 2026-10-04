@@ -1,5 +1,10 @@
 import {
   Alert,
+  Button,
+  Checkbox,
+  Cluster,
+  Dialog,
+  ErrorAlert,
   EmptyState,
   Icon,
   KeyValueList,
@@ -10,13 +15,15 @@ import {
   SectionSkeleton,
   buttonClass,
 } from '@openstack-platform/ui';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'wouter';
 import { api, type AppRecord } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { DeploymentRow } from '../components/DeploymentRow';
 import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
+import { useIntentPolling } from '../hooks/useIntentPolling';
 import { Status } from '../components/Status';
 import { ownerAppState, short } from '../utils/presentation';
 
@@ -60,6 +67,94 @@ function Running({ app }: { app: AppRecord }) {
   return <KeyValueList columns={2} items={items} />;
 }
 
+function RuntimeActions({ app }: { app: AppRecord }) {
+  const [action, setAction] = useState<'stop' | 'start' | 'restart' | null>(null);
+  const [consent, setConsent] = useState(false);
+  const [key, setKey] = useState('');
+  const [intentId, setIntentId] = useState<string | null>(null);
+  const intent = useIntentPolling(intentId);
+  const client = useQueryClient();
+  useEffect(() => {
+    if (intent.data && ['succeeded', 'failed'].includes(intent.data.state)) {
+      client.invalidateQueries({ queryKey: ['app', app.applicationId] });
+      client.invalidateQueries({ queryKey: ['activity', app.applicationId] });
+    }
+  }, [intent.data?.state, intentId, client, app.applicationId]);
+  const change = useMutation({
+    mutationFn: () =>
+      action === 'restart'
+        ? api.restart(app.applicationId, key, consent)
+        : api.state(app.applicationId, action === 'start', key, consent),
+    onSuccess: (result) => {
+      setIntentId(result.intentId);
+      setAction(null);
+      client.invalidateQueries({ queryKey: ['activity', app.applicationId] });
+    },
+  });
+  const busy =
+    change.isPending ||
+    (!!intentId && (!intent.data || !['succeeded', 'failed'].includes(intent.data.state)));
+  function open(next: 'stop' | 'start' | 'restart') {
+    change.reset();
+    setConsent(false);
+    setKey(crypto.randomUUID());
+    setAction(next);
+  }
+  return (
+    <>
+      <Section title="App controls">
+        <Cluster>
+          <Button disabled={busy} onClick={() => open(app.desiredRunning ? 'stop' : 'start')}>
+            {app.desiredRunning ? 'Stop app' : 'Start app'}
+          </Button>
+          <Button disabled={busy || !app.desiredRunning} onClick={() => open('restart')}>
+            Restart app
+          </Button>
+        </Cluster>
+        {intent.data && (
+          <OperationList label="App control activity">
+            <Operation intent={intent.data} showApp={false} />
+          </OperationList>
+        )}
+      </Section>
+      <Dialog
+        open={!!action}
+        onClose={() => setAction(null)}
+        title={`${action === 'stop' ? 'Stop' : action === 'start' ? 'Start' : 'Restart'} ${app.slug}?`}
+        footer={
+          <>
+            <Button onClick={() => setAction(null)}>Cancel</Button>
+            <Button
+              variant={action === 'stop' ? 'danger' : 'primary'}
+              loading={change.isPending}
+              disabled={app.identityProvider && !consent}
+              onClick={() => change.mutate()}
+            >
+              {action === 'stop' ? 'Stop app' : action === 'start' ? 'Start app' : 'Restart app'}
+            </Button>
+          </>
+        }
+      >
+        <ErrorAlert error={change.error} />
+        <p>
+          {action === 'stop'
+            ? 'The app goes offline and frees its server. Its settings and data are kept.'
+            : action === 'start'
+              ? 'The app comes back with its last deployed version.'
+              : 'The app restarts with its current version on the same server. There will be a brief interruption.'}
+        </p>
+        {app.identityProvider && (
+          <Checkbox
+            checked={consent}
+            onChange={(event) => setConsent(event.target.checked)}
+            label="I understand this interrupts portal sign-in"
+          />
+        )}
+      </Dialog>
+    </>
+  );
+}
+
 export function Overview({ id }: { id: string }) {
   const app = useQuery({
     queryKey: ['app', id],
@@ -80,9 +175,14 @@ export function Overview({ id }: { id: string }) {
   const activity = intents.data?.slice(0, 6) ?? [];
   const latest = history.data?.items[0];
   const deploy = (
-    <Link href={`/apps/${id}/deploy`} className={buttonClass({ variant: 'primary' })}>
-      Deploy
-    </Link>
+    <>
+      <Link href={`/apps/${id}/deploy?latest=1`} className={buttonClass()}>
+        Deploy latest
+      </Link>
+      <Link href={`/apps/${id}/deploy`} className={buttonClass({ variant: 'primary' })}>
+        Deploy
+      </Link>
+    </>
   );
   return (
     <AppFrame id={id} active="Overview">
@@ -139,6 +239,7 @@ export function Overview({ id }: { id: string }) {
                 </EmptyState>
               </div>
             )}
+            {app.data.acceptedDeployment && <RuntimeActions app={app.data} />}
             {history.error && <QueryError query={history} what="deployments" />}
             {/* The current deployment is already shown above; list the latest
                 only when a newer attempt is in progress or failed. */}

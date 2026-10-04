@@ -142,6 +142,44 @@ class RecoveryBundleTests(unittest.TestCase):
         self.assertEqual(recovery_bundle.verify_bundle(imported), manifest)
         self.assertTrue((imported / "managed-data" / "registry.age").is_file())
 
+    def _key_trio(self) -> str:
+        root = self.sources["hosted-controller"]
+        manifest_path = next(root.glob("*.manifest"))
+        manifest = json.loads(manifest_path.read_text())
+        key_name = "hosted-controller-source-keys-20260830T120000Z.tar.age"
+        payload = b"age-encryption.org/v1\nkey evidence"
+        digest = hashlib.sha256(payload).hexdigest()
+        self._file(root / key_name, payload)
+        self._file(root / (key_name + ".sha256"), f"{digest}  {key_name}\n".encode())
+        self._file(
+            root / (key_name + ".manifest"),
+            json.dumps(
+                {
+                    "format": "openstack-platform-hosted-controller-source-keys-v1",
+                    "name": key_name,
+                    "sha256": digest,
+                }
+            ).encode(),
+        )
+        manifest["sourceKeys"] = key_name
+        self._file(manifest_path, json.dumps(manifest).encode())
+        return key_name
+
+    def test_v3_binds_key_trio_and_accepts_previous_bundle_formats(self) -> None:
+        key_name = self._key_trio()
+        root = self.sources["hosted-controller"]
+        bundle = self.export()
+        metadata = recovery_bundle.verify_bundle(bundle)
+        self.assertEqual(metadata["format"], "openstack-platform-offsite-recovery-v3")
+        self.assertIn("hosted-controller/" + key_name, {item["path"] for item in metadata["files"]})
+        imported_root = self.root / "import"
+        imported_root.mkdir(mode=0o700)
+        imported = recovery_bundle.import_bundle(bundle, imported_root)
+        self.assertEqual(recovery_bundle.verify_bundle(imported), metadata)
+        (root / key_name).unlink()
+        with self.assertRaises(recovery_bundle.RecoveryBundleError):
+            recovery_bundle._selected_component_files("hosted-controller", root)
+
     def test_manifest_or_payload_tampering_is_refused(self) -> None:
         bundle = self.export()
         payload = bundle / "managed-data" / "garage.age"
@@ -165,8 +203,33 @@ class RecoveryBundleTests(unittest.TestCase):
 
     def test_export_refuses_managed_backup_without_registry_artifacts(self) -> None:
         (self.sources["managed-data"] / "registry.age").unlink()
-        with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "OCI artifacts"):
+        with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "inventory"):
             self.export()
+
+    def test_v3_managed_data_exports_without_images_and_requires_all_data(self) -> None:
+        root = self.sources["managed-data"]
+        (root / "registry.age").unlink()
+        self._file(
+            root / "SHA256SUMS",
+            b"\n".join((root / "SHA256SUMS").read_bytes().splitlines()[:3]) + b"\n",
+        )
+        self._file(
+            root / "MANIFEST",
+            (root / "MANIFEST")
+            .read_bytes()
+            .replace(b"format_version=2", b"format_version=3")
+            .replace(b"registry=distribution-artifacts-tar-gzip\n", b""),
+        )
+        bundle = self.export()
+        manifest = recovery_bundle.verify_bundle(bundle)
+        self.assertNotIn("managed-data/registry.age", {item["path"] for item in manifest["files"]})
+        for name in ("postgres.age", "mongodb.age", "garage.age"):
+            with self.subTest(name=name):
+                original = (root / name).read_bytes()
+                (root / name).unlink()
+                with self.assertRaises(recovery_bundle.RecoveryBundleError):
+                    recovery_bundle._validate_component("managed-data", list(root.iterdir()))
+                self._file(root / name, original)
 
     def test_scheduled_export_refuses_same_filesystem_local_destination(self) -> None:
         platform, config, mountinfo = self._scheduled_environment()

@@ -106,6 +106,22 @@ class ManagementBackupTests(ManagementCase):
             "openstack-platform-offsite-recovery-v1",
         )
 
+    def test_v3_export_includes_broker_and_paired_deploy_keys(self) -> None:
+        fixture = bundle_fixtures.RecoveryBundleTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        key_name = fixture._key_trio()
+        self.make_backup()
+        exported = recovery_bundle.export_bundle(
+            fixture.destination,
+            {**fixture.sources, "management-broker": self.destination},
+            deployment="portal-keys",
+        )
+        manifest = recovery_bundle.verify_bundle(exported)
+        self.assertEqual(manifest["format"], "openstack-platform-offsite-recovery-v3")
+        self.assertIn("management-broker", recovery_bundle.bundle_components(manifest))
+        self.assertIn("hosted-controller/" + key_name, {item["path"] for item in manifest["files"]})
+
     def test_source_discovery_cannot_omit_required_broker_backup(self) -> None:
         fixture = bundle_fixtures.RecoveryBundleTests()
         fixture.setUp()
