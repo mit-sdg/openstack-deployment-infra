@@ -479,8 +479,14 @@ class StaffReads:
         owner = checked_uuid(request.path_parameters["owner"])
         result = self.owner_record(owner)
         quota = self.broker.quota(owner)
+        # Admin accounts have no limits: their limit is null.
         result["quota"] = {
-            key: {field: number(quota[key][field]) for field in ("limit", "used", "reserved")}
+            key: {
+                field: None
+                if field == "limit" and quota[key][field] is None
+                else number(quota[key][field])
+                for field in ("limit", "used", "reserved")
+            }
             for key in ("apps", "concurrentOperations")
         }
         return result

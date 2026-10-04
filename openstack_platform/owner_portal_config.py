@@ -22,7 +22,7 @@ def validate(value: object) -> dict[str, Any]:
         not isinstance(value, Mapping)
         or type(value.get("enabled")) is not bool
         or set(value)
-        - {"enabled", "commonsOrigin", "identityEgressCidrs", "classLabel"}
+        - {"enabled", "commonsOrigin", "identityEgressCidrs", "classLabel", "portalName"}
         - set(LIMITS)
     ):
         raise ValueError("ownerPortal has invalid or unknown fields")
@@ -79,6 +79,16 @@ def validate(value: object) -> dict[str, Any]:
     ):
         raise ValueError("ownerPortal classLabel is invalid")
     result["classLabel"] = label
+    # Optional portal brand; without it the portal reads "<displayName> Apps".
+    if "portalName" in result:
+        name = result["portalName"]
+        if (
+            not isinstance(name, str)
+            or not 1 <= len(name) <= 80
+            or name != name.strip()
+            or any(ord(char) < 32 for char in name)
+        ):
+            raise ValueError("ownerPortal portalName is invalid")
     for name, (default, low, high) in LIMITS.items():
         limit = result.get(name, default)
         if type(limit) is not int or not low <= limit <= high:

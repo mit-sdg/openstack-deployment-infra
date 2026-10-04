@@ -41,6 +41,13 @@ function When({ value }: { value: string | null }) {
 }
 
 /** Active is the expected state; the portal Status keeps it quiet. */
+/** "1 of 2" for accounts with a limit; just the count for admins. */
+function appUsage(account: Account) {
+  return account.appLimit === null
+    ? String(account.appCount)
+    : `${account.appCount} of ${account.appLimit}`;
+}
+
 function AccountState({ account }: { account: Account }) {
   if (!account.enabled) return <Status state="disabled" />;
   if (account.status === 'pending') return <Status state="pending" />;
@@ -88,7 +95,7 @@ export function AccountsPage() {
       key: 'role',
       header: 'Role',
       mobile: 'meta',
-      cell: (account) => roleNames[account.role],
+      cell: (account) => <span className="ui-text-muted">{roleNames[account.role]}</span>,
     },
     {
       key: 'method',
@@ -102,11 +109,7 @@ export function AccountsPage() {
       key: 'apps',
       header: 'Apps',
       mobile: 'hidden',
-      cell: (account) => (
-        <span className="ui-text-muted ui-tabular">
-          {account.appCount} of {account.appLimit}
-        </span>
-      ),
+      cell: (account) => <span className="ui-text-muted ui-tabular">{appUsage(account)}</span>,
     },
     {
       key: 'last',
@@ -346,8 +349,8 @@ function ManageDialog({
   run: ReturnType<typeof useStepUp>['run'];
 }) {
   const [role, setRole] = useState(account.role);
-  const [apps, setApps] = useState(account.appLimit);
-  const [concurrent, setConcurrent] = useState(account.concurrencyLimit);
+  const [apps, setApps] = useState(account.appLimit ?? 0);
+  const [concurrent, setConcurrent] = useState(account.concurrencyLimit ?? 0);
   const [link, setLink] = useState<{ title: string; url: string } | null>(null);
   const client = useQueryClient();
   const toast = useToast();
@@ -406,7 +409,7 @@ function ManageDialog({
                 : 'Local'
               : provider,
           },
-          { label: 'Apps', value: `${account.appCount} of ${account.appLimit}` },
+          { label: 'Apps', value: appUsage(account) },
           { label: 'Last sign-in', value: <When value={account.lastSignIn} /> },
           { label: 'Account ID', value: <CopyId value={account.userId} label="account ID" /> },
         ]}
@@ -439,43 +442,46 @@ function ManageDialog({
             Change role
           </Button>
         </form>
-        <Group title="Limits">
-          <form
-            className="ui-stack ui-gap-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              quota.mutate();
-            }}
-          >
-            <Grid columns={2}>
-              <Field label="Apps" id={`apps-${account.userId}`}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={1000}
-                  required
-                  value={apps}
-                  onChange={(event) => setApps(Number(event.target.value))}
-                />
-              </Field>
-              <Field label="Changes at a time" id={`concurrent-${account.userId}`}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={16}
-                  required
-                  value={concurrent}
-                  onChange={(event) => setConcurrent(Number(event.target.value))}
-                />
-              </Field>
-            </Grid>
-            <div>
-              <Button type="submit" loading={quota.isPending}>
-                Save limits
-              </Button>
-            </div>
-          </form>
-        </Group>
+        {/* Admin accounts have no limits. */}
+        {account.appLimit !== null && (
+          <Group title="Limits">
+            <form
+              className="ui-stack ui-gap-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                quota.mutate();
+              }}
+            >
+              <Grid columns={2}>
+                <Field label="Apps" id={`apps-${account.userId}`}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={1000}
+                    required
+                    value={apps}
+                    onChange={(event) => setApps(Number(event.target.value))}
+                  />
+                </Field>
+                <Field label="Changes at a time" id={`concurrent-${account.userId}`}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={16}
+                    required
+                    value={concurrent}
+                    onChange={(event) => setConcurrent(Number(event.target.value))}
+                  />
+                </Field>
+              </Grid>
+              <div>
+                <Button type="submit" loading={quota.isPending}>
+                  Save limits
+                </Button>
+              </div>
+            </form>
+          </Group>
+        )}
         <Group title="Access">
           <div className="ui-cluster ui-gap-2">
             {local && account.status === 'pending' && (
@@ -601,12 +607,6 @@ export function AdminAuditPage() {
   );
   const columns: Column<AdminAudit>[] = [
     { key: 'action', header: 'Action', mobile: 'title', cell: (row) => auditLabel(row) },
-    {
-      key: 'when',
-      header: 'When',
-      mobile: 'trailing',
-      cell: (row) => <When value={row.createdAt} />,
-    },
     { key: 'target', header: 'Account', mobile: 'secondary', cell: target },
     {
       key: 'actor',
@@ -634,6 +634,12 @@ export function AdminAuditPage() {
           <span className="ui-text-subtle">—</span>
         );
       },
+    },
+    {
+      key: 'when',
+      header: 'When',
+      mobile: 'trailing',
+      cell: (row) => <When value={row.createdAt} />,
     },
   ];
   if (audit.isPending)

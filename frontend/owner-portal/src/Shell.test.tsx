@@ -34,14 +34,14 @@ const app: AppRecord = {
   stale: false,
   observedAt: null,
 };
-function mockApps(items: AppRecord[], used = items.length) {
+function mockApps(items: AppRecord[], used = items.length, limit: number | null = 2) {
   vi.spyOn(api, 'apps').mockResolvedValue({
     items,
     nextCursor: null,
     truncated: false,
     quota: {
-      apps: { used, reserved: 0, limit: 2 },
-      concurrentOperations: { used: 0, reserved: 0, limit: 1 },
+      apps: { used, reserved: 0, limit },
+      concurrentOperations: { used: 0, reserved: 0, limit: limit === null ? null : 1 },
     },
   });
   vi.spyOn(api, 'intents').mockResolvedValue({ items: [], nextCursor: null, truncated: false });
@@ -69,9 +69,12 @@ describe('portal shell', () => {
     show('/apps');
     expect(await screen.findByRole('heading', { name: 'Apps', level: 1 })).toBeVisible();
     expect(screen.getByRole('link', { name: 'Example Platform home' })).toBeVisible();
-    await waitFor(() => expect(document.title).toBe('Apps · Example Platform'));
+    // The apps section is titled by the brand alone; other sections lead with their name.
+    await waitFor(() => expect(document.title).toBe('Example Platform'));
     expect(document.body.textContent).not.toMatch(/Owner portal|My applications/);
     expect(pageTitle('/staff/owners')).toBe('Staff');
+    expect(pageTitle('/admin/accounts', 'Example Platform')).toBe('Admin · Example Platform');
+    expect(pageTitle('/apps/abc/configuration', 'Example Platform')).toBe('Example Platform');
   });
   it('shows section links by role and signs out from the account menu', async () => {
     vi.spyOn(api, 'session').mockResolvedValue(session('admin'));
@@ -167,6 +170,14 @@ describe('app list', () => {
     show('/apps');
     expect(await screen.findByText(/reached your limit of 2 apps/)).toBeVisible();
     expect(screen.queryByRole('link', { name: 'Create app' })).toBeNull();
+  });
+  it('shows admins no quota and never a full limit', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue(session('admin'));
+    mockApps([app, { ...app, applicationId: 'app-2', slug: 'second' }], 5, null);
+    show('/apps');
+    expect(await screen.findByRole('link', { name: 'Create app' })).toBeVisible();
+    expect(screen.queryByText(/of 2|of null|apps used/)).toBeNull();
+    expect(screen.queryByText(/reached your limit/)).toBeNull();
   });
   it('keeps the page header and offers Retry when apps fail to load', async () => {
     vi.spyOn(api, 'session').mockResolvedValue(session('owner'));

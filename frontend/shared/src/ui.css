@@ -541,7 +541,14 @@
     white-space: nowrap;
     font-weight: var(--ui-weight-medium);
   }
+  /* The role badge sits after the name, at its natural width. */
+  .ui-account__identity > .ui-badge {
+    grid-row: 1;
+    grid-column: 2;
+    justify-self: start;
+  }
   .ui-account__detail {
+    grid-row: 2;
     grid-column: 1 / -1;
     max-width: 100%;
     overflow: hidden;

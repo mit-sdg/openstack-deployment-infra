@@ -1413,7 +1413,9 @@ prototypes are not migration inputs: only published schema 1/2 databases migrate
 to the final schema 3, and checksum mismatches fail closed.
 
 The validated `ownerPortal` inventory section carries `enabled`, `commonsOrigin`,
-optional identity egress CIDRs/class label and quota/rate/session limits. The
+optional identity egress CIDRs/class label, an optional `portalName`, and
+quota/rate/session limits. The portal's brand is `portalName`, or
+"`displayName` Apps" without one. The
 production renderer is `openstack-platform-management-config --platform-config
 PATH`. It writes prepared broker/web/identity configs below the operator-owned
 setgid roots, copying validated inventory as the operator; root does not write
@@ -1430,6 +1432,9 @@ CA updates belong to the admin image, not a per-account key rotation.
 Defaults are two apps and one held external mutation per owner. Local admins
 edit per-owner quotas in **Accounts**; lower limits stop new admission without
 cancelling existing operations or deleting apps. Disabled apps still count.
+Admin accounts have no app or concurrency limits, so their limits read as null.
+Apps an admin creates for an owner still count against that owner's quota, and
+every app still accepts one change at a time.
 Staff/admin catalog reads enumerate only broker-known resources; global
 controller administrator views remain outside this public portal.
 

@@ -10,8 +10,9 @@ export type Account = {
   lastSignIn: string | null;
   appCount: number;
   totpEnabled: boolean;
-  appLimit: number;
-  concurrencyLimit: number;
+  /** Null for admin accounts, which have no limits. */
+  appLimit: number | null;
+  concurrencyLimit: number | null;
 };
 export type AdminAudit = {
   id: number;
@@ -35,23 +36,23 @@ export const adminApi = {
           ...(limit ? { limit: String(limit) } : {}),
         }),
       (v) =>
-        pageData(
-          v,
-          (item) =>
-            fields(item, {
-              userId: 'string',
-              username: 'string',
-              displayName: 'string',
-              role: 'string',
-              enabled: 'boolean',
-              status: 'string',
-              method: 'string',
-              appCount: 'number',
-              totpEnabled: 'boolean',
-              appLimit: 'number',
-              concurrencyLimit: 'number',
-            }) as Account,
-        ),
+        pageData(v, (item) => {
+          const account = fields(item, {
+            userId: 'string',
+            username: 'string',
+            displayName: 'string',
+            role: 'string',
+            enabled: 'boolean',
+            status: 'string',
+            method: 'string',
+            appCount: 'number',
+            totpEnabled: 'boolean',
+          });
+          for (const key of ['appLimit', 'concurrencyLimit'])
+            if (account[key] !== null && typeof account[key] !== 'number')
+              throw new Error('Invalid service response');
+          return account as Account;
+        }),
     ),
   create: (username: string, displayName: string, role: string) =>
     request(
