@@ -10,6 +10,46 @@ export function short(value: string | null | undefined) {
   return value ? value.slice(0, 9) : 'No deployment';
 }
 
+/**
+ * The one user-facing state of an app, for every page and role. Lifecycle
+ * comes first (creating / not created), then whether it ever went live, then
+ * runtime: stopped, healthy, unhealthy or unknown (stale or unobserved).
+ * "Ready" is a lifecycle detail and is never shown for an app.
+ */
+export type AppState =
+  'creating' | 'rejected' | 'not_deployed' | 'stopped' | 'healthy' | 'unhealthy' | 'unknown';
+export function appState(app: {
+  lifecycle: string;
+  deployed: boolean;
+  running: boolean;
+  stale: boolean;
+  health: 'healthy' | 'unhealthy' | 'unknown';
+}): AppState {
+  if (app.lifecycle === 'creating') return 'creating';
+  if (app.lifecycle === 'rejected') return 'rejected';
+  if (!app.deployed) return 'not_deployed';
+  if (!app.running) return 'stopped';
+  if (app.stale) return 'unknown';
+  return app.health;
+}
+/** appState for an owner or admin app record. */
+export function ownerAppState(app: AppRecord): AppState {
+  const { routeHealthy, allocationHealthy } = app.health ?? {};
+  return appState({
+    lifecycle: app.lifecycleState,
+    deployed: !!app.acceptedDeployment,
+    running: app.desiredRunning,
+    stale: app.stale,
+    health:
+      routeHealthy && allocationHealthy
+        ? 'healthy'
+        : routeHealthy === false || allocationHealthy === false
+          ? 'unhealthy'
+          : 'unknown',
+  });
+}
+
+/** @deprecated Use ownerAppState, which also covers lifecycle and first deploy. */
 export function healthy(app: AppRecord) {
   return app.stale
     ? 'unknown'
@@ -20,25 +60,45 @@ export function healthy(app: AppRecord) {
         : 'unknown';
 }
 
-export function relativeTime(value: string, now = Date.now()) {
-  const seconds = Math.round((new Date(value).getTime() - now) / 1000);
-  if (Math.abs(seconds) < 60) return 'just now';
-  const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-  if (Math.abs(seconds) < 3600) return formatter.format(Math.trunc(seconds / 60), 'minute');
-  if (Math.abs(seconds) < 86400) return formatter.format(Math.trunc(seconds / 3600), 'hour');
-  return formatter.format(Math.trunc(seconds / 86400), 'day');
-}
+// Shared with the design system so every page formats times the same way.
+export { relativeTime } from '@openstack-platform/ui';
 export function humanPhase(phase: string) {
   const labels: Record<string, string> = {
     finished: 'Completed',
     accepted: 'Health checks passed',
-    building: 'Building exact snapshot',
-    build_rejected: 'Build rejected; cleanup confirmed',
-    queued: 'Waiting for a build slot',
-    executing: 'Starting deployment',
-    startup_interrupted: 'Recovery required',
+    building: 'Building',
+    build_rejected: 'Build failed',
+    queued: 'Waiting to build',
+    executing: 'Starting',
+    startup_interrupted: 'Interrupted',
   };
   return (
     labels[phase] ?? phase.replaceAll('_', ' ').replace(/^./, (letter) => letter.toUpperCase())
   );
+}
+
+// Activity titles are events, phrased by outcome: "Deployed" when it
+// succeeded, "Deploying" while it runs, and the noun ("Deployment") next to a
+// Failed or Needs attention badge. Keys are exactly the broker's INTENT_KINDS
+// (openstack_platform/management/broker/staff.py); a test keeps them in sync.
+export const activityTitles: Record<string, [done: string, running: string, noun: string]> = {
+  create_app: ['App created', 'Creating app', 'App creation'],
+  save_configuration: ['Settings saved', 'Saving settings', 'Settings change'],
+  deploy: ['Deployed', 'Deploying', 'Deployment'],
+  env_set: ['Variable set', 'Setting variable', 'Variable change'],
+  env_delete: ['Variable deleted', 'Deleting variable', 'Variable deletion'],
+  storage_create: ['Storage added', 'Adding storage', 'Storage creation'],
+  storage_verify: ['Storage checked', 'Checking storage', 'Storage check'],
+  storage_rotate: ['Credentials rotated', 'Rotating credentials', 'Credential rotation'],
+  storage_delete: ['Storage deleted', 'Deleting storage', 'Storage deletion'],
+  adopt_app: ['App adopted', 'Adopting app', 'App adoption'],
+  app_enable: ['App started', 'Starting app', 'App start'],
+  app_disable: ['App stopped', 'Stopping app', 'App stop'],
+};
+const otherChange: [string, string, string] = ['Change made', 'Making change', 'Change'];
+export function activityTitle(kind: string, state: string) {
+  const [done, running, noun] = activityTitles[kind] ?? otherChange;
+  if (state === 'succeeded') return done;
+  if (['failed', 'blocked', 'unknown', 'rejected'].includes(state)) return noun;
+  return running;
 }

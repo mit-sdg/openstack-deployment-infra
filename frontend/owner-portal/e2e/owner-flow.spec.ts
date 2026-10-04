@@ -8,8 +8,8 @@ async function signIn(page: Page, owner: 'Alice' | 'Bob') {
   await page.getByLabel('Username', { exact: true }).fill(owner.toLowerCase());
   await page.getByLabel('Password', { exact: true }).fill(`local-${owner.toLowerCase()}-password`);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page).toHaveURL(/127\.0\.0\.1:(?:9543|9553|9563)\/apps$/);
-  await expect(page.getByRole('heading', { name: 'My applications' })).toBeVisible();
+  await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/apps$/);
+  await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible();
 }
 
 for (const [mode, viewport, colorScheme] of [
@@ -96,19 +96,19 @@ for (const [mode, viewport, colorScheme] of [
         known.find((app) => app.slug === 'student-project')?.applicationId ??
         known[0]?.applicationId;
       if (!appId) {
-        await page.getByRole('link', { name: 'Create application', exact: true }).click();
-        await page.getByLabel('Application name').fill('student-project');
-        await page.getByRole('button', { name: 'Create application', exact: true }).click();
+        await page.getByRole('link', { name: 'Create app', exact: true }).click();
+        await page.getByLabel('App name').fill('student-project');
+        await page.getByRole('button', { name: 'Create app', exact: true }).click();
         await expect(page).toHaveURL(/\/apps\/[a-f0-9-]+\/configuration$/);
         appId = new URL(page.url()).pathname.split('/')[2];
       } else await page.goto(`/apps/${appId}/configuration`);
       await page.getByLabel('Repository URL').fill('https://github.com/example/student-app');
-      await page.getByLabel('Preferred branch').fill('main');
+      await page.getByLabel('Branch', { exact: true }).fill('main');
       await page.getByLabel('Bun', { exact: false }).check();
       await page.getByLabel('Start script').fill('start');
-      await page.getByLabel('Application port').fill('3000');
-      await page.getByLabel('Health path').fill('/health');
-      await page.getByRole('button', { name: 'Save configuration' }).click();
+      await page.getByLabel('Port', { exact: true }).fill('3000');
+      await page.getByLabel('Health check path').fill('/health');
+      await page.getByRole('button', { name: 'Save settings' }).click();
       await expect(page.getByRole('status').filter({ hasText: 'Settings saved.' })).toContainText(
         'Settings saved.',
       );
@@ -129,7 +129,7 @@ for (const [mode, viewport, colorScheme] of [
       });
       await page.getByRole('link', { name: 'Deploy', exact: true }).click();
       const sha = crypto.randomUUID().replaceAll('-', '') + 'a'.repeat(8);
-      await page.getByLabel('Full commit SHA').fill(sha);
+      await page.getByLabel('Commit SHA').fill(sha);
       await page.getByRole('button', { name: 'Review deployment' }).click();
       await expect(page.getByRole('dialog')).toBeVisible();
       await expect(page.getByRole('dialog')).toContainText(sha);
@@ -145,7 +145,7 @@ for (const [mode, viewport, colorScheme] of [
           body: '{}',
         });
       });
-      await page.getByRole('button', { name: 'Deploy this commit', exact: true }).click();
+      await page.getByRole('dialog').getByRole('button', { name: 'Deploy', exact: true }).click();
       await expect(page.getByText('Deployment succeeded.', { exact: false })).toBeVisible({
         timeout: 30000,
       });
@@ -170,8 +170,8 @@ for (const [mode, viewport, colorScheme] of [
       await page.goto('/apps');
       await expect(
         page
-          .locator('tr')
-          .filter({ has: page.locator(`a.app-link[href="/apps/${appId}"]`) })
+          .getByRole('row')
+          .filter({ has: page.locator(`a[href="/apps/${appId}"]`) })
           .getByText('Healthy', { exact: true }),
       ).toBeVisible();
       await page.evaluate(() => {
@@ -227,9 +227,11 @@ for (const [mode, viewport, colorScheme] of [
       const bobAppsBody = await bobApps.json();
       expect(bobApps.status(), bobAppsBody.error?.code).toBe(200);
       expect(bobAppsBody.data.items).toHaveLength(0);
+      await bobPage.getByRole('button', { name: /^Account: / }).click();
       await bobPage.getByRole('button', { name: 'Sign out' }).click();
       await expect(bobPage.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
       await bob.close();
+      await page.getByRole('button', { name: /^Account: / }).click();
       await page.getByRole('button', { name: 'Sign out' }).click();
       await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
       expect((await page.request.get('/api/v1/apps')).status()).toBe(401);

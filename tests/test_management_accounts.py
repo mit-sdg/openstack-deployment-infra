@@ -10,7 +10,7 @@ import sqlite3
 import time
 from contextlib import closing, redirect_stderr
 from unittest.mock import patch
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker import bootstrap, local_security
@@ -185,6 +185,19 @@ class AccountsTests(ManagementCase):
             )
         self.assertNotIn("private secure phrase", content)
 
+    def test_authenticator_uri_names_the_platform(self) -> None:
+        url = bootstrap.issue(self.config, now=self.now)
+        started, _csrf, _headers = self.begin(urlsplit(url).fragment, username="rootadmin")
+        uri = urlsplit(started["otpauthUri"])
+        self.assertEqual((uri.scheme, uri.netloc), ("otpauth", "totp"))
+        self.assertEqual(uri.path, "/App%20platform:rootadmin")
+        query = parse_qs(uri.query)
+        self.assertEqual(query["issuer"], ["App platform"])
+        self.assertEqual(query["secret"], [started["totpSecret"]])
+        self.assertEqual(
+            (query["algorithm"], query["digits"], query["period"]), (["SHA1"], ["6"], ["30"])
+        )
+
     def test_bootstrap_expiry_malformed_unsafe_file_origin_csrf_and_no_token_logs(self) -> None:
         token = urlsplit(bootstrap.issue(self.config, now=self.now)).fragment
         csrf, headers = self.anonymous()
@@ -318,6 +331,32 @@ class AccountsTests(ManagementCase):
             {"role", "enabled", "quotas", "revoke-sessions"} <= {row["action"] for row in actions}
         )
         self.assertNotIn(self.admin_secret, canonical(actions))
+        # Additive names for actor and target, read in the same query.
+        with self.broker.database.connect() as db:
+            names = {
+                row["id"]: (row["username"], row["display_name"])
+                for row in db.execute("SELECT id,username,display_name FROM users")
+            }
+        for row in actions:
+            self.assertEqual(
+                set(row),
+                {
+                    "id",
+                    "actorId",
+                    "targetId",
+                    "action",
+                    "details",
+                    "createdAt",
+                    "actorUsername",
+                    "actorDisplayName",
+                    "targetUsername",
+                    "targetDisplayName",
+                },
+            )
+            for side in ("actor", "target"):
+                identifier = row[side + "Id"]
+                expected = names[identifier] if identifier else (None, None)
+                self.assertEqual((row[side + "Username"], row[side + "DisplayName"]), expected)
 
     def test_admin_local_login_mfa_replay_backoff_and_rehash(self) -> None:
         self.admin()

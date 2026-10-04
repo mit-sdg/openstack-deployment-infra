@@ -104,7 +104,30 @@ class ReadLimits:
             return True
 
 
-def enum(value: object, allowed: set[str]) -> str:
+ROLES = {"owner", "staff", "admin"}
+
+# Every intent kind the broker records (owner, staff-owned and admin
+# mutations). Staff activity shows the kind only, never names or values. The
+# portal's activity titles cover exactly this set (owner-portal tests read it).
+INTENT_KINDS = frozenset(
+    {
+        "create_app",
+        "save_configuration",
+        "deploy",
+        "env_set",
+        "env_delete",
+        "storage_create",
+        "storage_verify",
+        "storage_rotate",
+        "storage_delete",
+        "adopt_app",
+        "app_enable",
+        "app_disable",
+    }
+)
+
+
+def enum(value: object, allowed: set[str] | frozenset[str]) -> str:
     return value if isinstance(value, str) and value in allowed else "unknown"
 
 
@@ -151,6 +174,8 @@ class StaffReads:
             allowed |= {"limit", "cursor"}
         if route in {"/v1/staff/apps", "/v1/staff/operations"}:
             allowed.add("ownerId")
+        if route == "/v1/staff/owners":
+            allowed.add("role")
         if route == "/v1/staff/operations":
             allowed.add("applicationId")
         if (
@@ -161,6 +186,8 @@ class StaffReads:
             raise HttpError(400, "INVALID_REQUEST", "Invalid staff read fields.")
         for key in {"cursor", "ownerId", "applicationId"} & set(request.query):
             checked_uuid(request.query[key][0])
+        if "role" in request.query and request.query["role"][0] not in ROLES:
+            raise HttpError(400, "INVALID_REQUEST", "Invalid staff read fields.")
         self.page_limit(request)
 
     @staticmethod
@@ -322,7 +349,7 @@ class StaffReads:
     def owner_record(self, owner: str) -> dict[str, Any]:
         with self.broker.database.connect() as db:
             row = db.execute(
-                "SELECT id,username,display_name,enabled FROM users WHERE id=?", (owner,)
+                "SELECT id,username,display_name,enabled,role FROM users WHERE id=?", (owner,)
             ).fetchone()
         if row is None:
             raise HttpError(404, "NOT_FOUND", "Owner not found.")
@@ -335,7 +362,23 @@ class StaffReads:
             "username": profile(row["username"], 32),
             "displayName": profile(row["display_name"], 256),
             "portalEnabled": row["enabled"] == 1,
+            "role": enum(row["role"], ROLES),
         }
+
+    @staticmethod
+    def with_owner(
+        model: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
+        """Adds the owner's name to list rows so staff lists need no per-owner reads."""
+
+        def project(row: dict[str, Any]) -> dict[str, Any]:
+            return {
+                **model(row),
+                "ownerUsername": profile(row["owner_username"], 32),
+                "ownerDisplayName": profile(row["owner_display_name"], 256),
+            }
+
+        return project
 
     def app_record(self, app: str) -> dict[str, Any]:
         with self.broker.database.connect() as db:
@@ -365,16 +408,24 @@ class StaffReads:
 
     def local_page(self, request: Request, table: str) -> dict[str, Any]:
         sources = {
-            "users": ("users a", "a.id,a.username,a.display_name,a.enabled", self.owner_model),
+            "users": (
+                "users a",
+                "a.id,a.username,a.display_name,a.enabled,a.role",
+                self.owner_model,
+            ),
             "apps": (
-                "apps a LEFT JOIN configurations c ON c.app_id=a.id AND c.revision=a.revision",
-                "a.id,a.user_id,a.slug,a.lifecycle,a.revision,a.created,c.repository",
-                self.catalog_model,
+                "apps a LEFT JOIN configurations c ON c.app_id=a.id AND c.revision=a.revision"
+                " JOIN users u ON u.id=a.user_id",
+                "a.id,a.user_id,a.slug,a.lifecycle,a.revision,a.created,c.repository,"
+                "u.username AS owner_username,u.display_name AS owner_display_name",
+                self.with_owner(self.catalog_model),
             ),
             "intents": (
-                "intents a",
-                "a.id,a.user_id,a.app_id,a.kind,a.state,a.operation,a.created,a.updated",
-                self.operation_model,
+                "intents a JOIN users u ON u.id=a.user_id LEFT JOIN apps p ON p.id=a.app_id",
+                "a.id,a.user_id,a.app_id,a.kind,a.state,a.operation,a.created,a.updated,"
+                "u.username AS owner_username,u.display_name AS owner_display_name,"
+                "p.slug AS app_slug",
+                self.with_owner(self.activity_model),
             ),
         }
         source, columns, model = sources[table]
@@ -382,6 +433,10 @@ class StaffReads:
         parameters: list[object] = []
         owner = request.query.get("ownerId", (None,))[0]
         app = request.query.get("applicationId", (None,))[0]
+        role = request.query.get("role", (None,))[0]
+        if role is not None:
+            conditions.append("a.role=?")
+            parameters.append(role)
         if owner is not None:
             self.owner_record(owner)
             conditions.append("a.user_id=?")
@@ -561,6 +616,11 @@ class StaffReads:
     def operations(self, request: Request) -> dict[str, Any]:
         return self.local_page(request, "intents")
 
+    @classmethod
+    def activity_model(cls, row: dict[str, Any]) -> dict[str, Any]:
+        """An operation as a staff activity row, named by its app's slug."""
+        return {**cls.operation_model(row), "applicationSlug": slug(row["app_slug"])}
+
     @staticmethod
     def operation_model(row: dict[str, Any]) -> dict[str, Any]:
         operation = strict_json(row["operation"].encode()) if row["operation"] is not None else {}
@@ -591,7 +651,7 @@ class StaffReads:
             "intentId": identifier(row["id"]),
             "applicationId": identifier(row["app_id"]),
             "ownerId": identifier(row["user_id"]),
-            "kind": enum(row["kind"], {"create_app", "save_configuration", "deploy"}),
+            "kind": enum(row["kind"], INTENT_KINDS),
             "state": state,
             "stage": stage,
             "cleanupState": enum(

@@ -1,4 +1,7 @@
-import { ThemeButton as SharedThemeButton } from '@openstack-platform/ui';
+import { ThemeToggle } from '@openstack-platform/ui';
+
+export const themeStorageKey = 'owner-portal-theme';
+
 export function ThemeButton() {
-  return <SharedThemeButton storageKey="owner-portal-theme" />;
+  return <ThemeToggle storageKey={themeStorageKey} />;
 }

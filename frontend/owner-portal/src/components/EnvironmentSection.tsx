@@ -1,10 +1,26 @@
+import {
+  Alert,
+  Button,
+  Cluster,
+  Dialog,
+  ErrorAlert,
+  Field,
+  Hint,
+  InlineStatus,
+  Input,
+  List,
+  ListItem,
+  LoadingRows,
+  RelativeTime,
+  Section,
+} from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { api, resourceApi, validateEnvName, type StorageBinding } from '../api';
 import { useIntentPolling } from '../hooks/useIntentPolling';
-import { time } from '../utils/presentation';
-import { ErrorNotice, Loading } from './Feedback';
-import { Operation } from './Operation';
+import { QueryError } from './Feedback';
+import { Operation, OperationList } from './Operation';
+import '../pages/app-pages.css';
 
 export function EnvironmentSection({
   id,
@@ -22,6 +38,7 @@ export function EnvironmentSection({
     refetchInterval: 5000,
   });
   const [name, setName] = useState('');
+  const [removing, setRemoving] = useState<string | null>(null);
   const valueField = useRef<HTMLInputElement>(null);
   const attempt = useRef<{ key: string; name: string; action: 'set' | 'delete' } | null>(null);
   const [intentId, setIntentId] = useState<string | null>(null);
@@ -59,142 +76,172 @@ export function EnvironmentSection({
       client.invalidateQueries({ queryKey: [...scope, 'environment', id] });
     },
   });
+  const recoverable =
+    environment.data?.intents?.filter((item) => item.requiresResubmit && item.retryKey) ?? [];
+  const items = environment.data?.items ?? [];
   return (
-    <section className="section card form-card">
-      <div className="form-section">
-        <h2>Environment variables</h2>
-        <p>
-          Values are write-only. Changes restart a running application and apply immediately after
-          health checks pass.
+    <Section title="Environment variables" flush>
+      {environment.isPending ? (
+        <LoadingRows rows={2} />
+      ) : environment.error ? (
+        <div className="app-block">
+          <QueryError query={environment} what="your environment variables" />
+        </div>
+      ) : items.length ? (
+        <List label="Environment variables">
+          {items.map((item) => (
+            <ListItem
+              key={item.name}
+              title={<code>{item.name}</code>}
+              meta={
+                item.updatedAt && (
+                  <span>
+                    Updated <RelativeTime value={item.updatedAt} />
+                  </span>
+                )
+              }
+              trailing={
+                <Cluster gap={1}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={`Replace ${item.name}`}
+                    onClick={() => {
+                      setName(item.name);
+                      setError(null);
+                      valueField.current?.focus();
+                    }}
+                  >
+                    Replace
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={`Delete ${item.name}`}
+                    disabled={edit.isPending || !!busy}
+                    onClick={() => setRemoving(item.name)}
+                  >
+                    Delete
+                  </Button>
+                </Cluster>
+              }
+            />
+          ))}
+        </List>
+      ) : (
+        <p className="app-block ui-text-muted">
+          No variables yet. Add API keys and other settings your app reads at runtime.
         </p>
-        {environment.isPending ? (
-          <Loading />
-        ) : environment.error ? (
-          <ErrorNotice error={environment.error} />
-        ) : (
-          <div className="table-scroll">
-            <table className="resource-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Environment updated</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {environment.data?.items.map((item) => (
-                  <tr key={item.name}>
-                    <td>
-                      <code>{item.name}</code>
-                    </td>
-                    <td>{time(item.updatedAt)}</td>
-                    <td>
-                      <button
-                        className="button button-small"
-                        type="button"
-                        onClick={() => {
-                          setName(item.name);
-                          valueField.current?.focus();
-                        }}
-                      >
-                        Replace
-                      </button>{' '}
-                      <button
-                        className="button button-small"
-                        type="button"
-                        disabled={edit.isPending || !!busy}
-                        onClick={() => {
-                          if (
-                            window.confirm(
-                              `Delete environment variable ${item.name}? This restarts a running application.`,
-                            )
-                          )
-                            edit.mutate({ action: 'delete', name: item.name });
-                        }}
-                      >
-                        Delete {item.name}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      )}
+      {recoverable.map((item) => {
+        const target = item.names?.[0];
+        const deleting = item.kind === 'env_delete';
+        return (
+          <div className="app-block" key={item.intentId}>
+            <Alert
+              tone="warning"
+              action={
+                <Button
+                  size="sm"
+                  aria-label={`Finish change to ${target}`}
+                  onClick={() => {
+                    if (!target || !item.retryKey) return;
+                    attempt.current = {
+                      key: item.retryKey,
+                      name: target,
+                      action: deleting ? 'delete' : 'set',
+                    };
+                    setName(target);
+                    setIntentId(item.intentId);
+                    if (deleting) setRemoving(target);
+                    else valueField.current?.focus();
+                  }}
+                >
+                  Finish change
+                </Button>
+              }
+            >
+              {deleting
+                ? `Deleting ${target} didn’t finish.`
+                : `Your change to ${target} didn’t finish.`}
+            </Alert>
           </div>
+        );
+      })}
+      <form
+        className="app-block app-block--subtle"
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault();
+          const invalid =
+            validateEnvName(name) ??
+            (bindings.some((binding) => Object.values(binding.outputs).includes(name))
+              ? `${name} is already set by a database or storage connection. Choose another name.`
+              : null);
+          setError(invalid);
+          if (!invalid) edit.mutate({ action: 'set', name });
+        }}
+      >
+        <div className="app-env-form">
+          <Field label="Variable name" id="env-name">
+            <Input
+              className="app-mono-input"
+              value={name}
+              autoComplete="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              placeholder="API_KEY"
+              onChange={(event) => setName(event.target.value)}
+              required
+            />
+          </Field>
+          <Field label="New value" id="env-value">
+            <Input type="password" ref={valueField} autoComplete="new-password" />
+          </Field>
+          <Button type="submit" disabled={edit.isPending || !!busy} loading={edit.isPending}>
+            Save variable
+          </Button>
+        </div>
+        <Hint>
+          Values are never shown again after you save. Saving restarts your app if it’s running.
+        </Hint>
+        <ErrorAlert error={error ?? edit.error} />
+        {intent.data?.requiresResubmit && (
+          <InlineStatus tone="warning">
+            Enter the same value again and save to finish this change. Values are never stored in
+            your browser.
+          </InlineStatus>
         )}
-        <p className="field-help">
-          The timestamp is for the whole environment revision. Existing values are never displayed.
-        </p>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            const invalid =
-              validateEnvName(name) ??
-              (bindings.some((binding) => Object.values(binding.outputs).includes(name))
-                ? `${name} is a storage binding target.`
-                : null);
-            setError(invalid);
-            if (!invalid) edit.mutate({ action: 'set', name });
-          }}
-        >
-          <div className="fields-grid">
-            <div className="field">
-              <label htmlFor="env-name">Variable name</label>
-              <input
-                id="env-name"
-                value={name}
-                autoComplete="off"
-                onChange={(event) => setName(event.target.value)}
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="env-value">New value</label>
-              <input id="env-value" type="password" ref={valueField} autoComplete="new-password" />
-            </div>
-          </div>
-          <ErrorNotice error={error ?? edit.error} />
-          <button className="button button-primary" disabled={edit.isPending || !!busy}>
-            Add or replace variable
-          </button>
-        </form>
-        {environment.data?.intents
-          ?.filter((item) => item.requiresResubmit && item.retryKey)
-          .map((item) => (
-            <button
-              key={item.intentId}
-              type="button"
-              className="button"
+      </form>
+      {intent.data && (
+        <div className="app-divider">
+          <OperationList label="Variable changes">
+            <Operation intent={intent.data} showApp={false} />
+          </OperationList>
+        </div>
+      )}
+      <Dialog
+        open={removing !== null}
+        onClose={() => setRemoving(null)}
+        size="sm"
+        title={`Delete ${removing ?? ''}?`}
+        footer={
+          <>
+            <Button onClick={() => setRemoving(null)}>Cancel</Button>
+            <Button
+              variant="danger"
               onClick={() => {
-                const target = item.names?.[0];
-                if (!target || !item.retryKey) return;
-                attempt.current = {
-                  key: item.retryKey,
-                  name: target,
-                  action: item.kind === 'env_delete' ? 'delete' : 'set',
-                };
-                setName(target);
-                setIntentId(item.intentId);
-                if (item.kind === 'env_delete') {
-                  if (window.confirm(`Retry deleting ${target}?`))
-                    edit.mutate({ action: 'delete', name: target });
-                } else valueField.current?.focus();
+                if (removing) edit.mutate({ action: 'delete', name: removing });
+                setRemoving(null);
               }}
             >
-              Recover {item.kind === 'env_delete' ? 'deletion' : 'edit'} of {item.names?.[0]}
-            </button>
-          ))}
-        {intent.data && (
-          <ul className="operation-list">
-            <Operation intent={intent.data} />
-          </ul>
-        )}
-        {intent.data?.requiresResubmit && (
-          <p role="status">
-            Re-enter the same value and submit again to recover this edit. Its value was not saved
-            by the portal.
-          </p>
-        )}
-      </div>
-    </section>
+              Delete variable
+            </Button>
+          </>
+        }
+      >
+        <p>Your app stops receiving this variable. If it’s running, it restarts.</p>
+      </Dialog>
+    </Section>
   );
 }
