@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 from unittest.mock import patch
 
+from openstack_platform.controller.http import HttpError
 from openstack_platform.management.broker import bootstrap
 from openstack_platform.management.broker.members import MAXIMUM_MEMBERS
 from openstack_platform.management.common import strict_json
@@ -120,7 +121,13 @@ class TeamTests(ManagementCase):
         self.add("bob")
         self.assert_error("OWNER_ONLY", lambda: self.add("taylor", owner="bob"))
         self.assert_error("OWNER_ONLY", lambda: self.remove(self.alice, owner="bob"))
-        self.assert_error("ACCOUNT_NOT_FOUND", lambda: self.add("nobody"))
+        with self.assertRaises(HttpError) as error:
+            self.add("nobody")
+        self.assertEqual(error.exception.code, "ACCOUNT_NOT_REGISTERED")
+        self.assertEqual(
+            error.exception.summary,
+            "nobody isn't registered yet. Ask them to sign in to the portal once, then add them.",
+        )
         self.assert_error("ALREADY_OWNER", lambda: self.add("alice"))
         for user in (self.taylor, str(uuid.uuid4()), "not-a-uuid"):
             with self.subTest(user=user):

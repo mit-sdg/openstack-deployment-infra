@@ -407,6 +407,13 @@ for (const [mode, viewport, colorScheme] of [
       // Alice adds Bob to the app's team; he can then work on it, and leave.
       await page.goto(`/apps/${appId}/team`);
       const team = page.getByRole('region', { name: 'Team' });
+      await team.getByLabel('Add by username').fill('unregistered-fixture');
+      await team.getByRole('button', { name: 'Add to team' }).click();
+      await expect(
+        team.getByText(
+          "unregistered-fixture isn't registered yet. Ask them to sign in to the portal once, then add them.",
+        ),
+      ).toBeVisible();
       await team.getByLabel('Add by username').fill('bob');
       await team.getByRole('button', { name: 'Add to team' }).click();
       await expect(team.getByRole('table', { name: 'Team' })).toContainText('Bob Student');
