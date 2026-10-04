@@ -67,7 +67,11 @@ for (const [mode, viewport, colorScheme] of [
       context.on('request', (request) => {
         const url = new URL(request.url());
         // GitHub's API is served by the route below and never reached.
-        if (!['127.0.0.1', 'localhost', 'api.github.com'].includes(url.hostname))
+        if (
+          !['127.0.0.1', 'localhost', 'api.github.com', 'raw.githubusercontent.com'].includes(
+            url.hostname,
+          )
+        )
           unexpectedNetwork.push(url.hostname);
       });
       // The Deploy page lists recent commits straight from GitHub's API; serve
@@ -80,12 +84,20 @@ for (const [mode, viewport, colorScheme] of [
         },
       }));
       const github: import('@playwright/test').Request[] = [];
+      const cors = { 'Access-Control-Allow-Origin': '*' };
       await context.route('https://api.github.com/**', (route) => {
         github.push(route.request());
-        return route.fulfill({
-          json: commits,
-          headers: { 'Access-Control-Allow-Origin': '*' },
-        });
+        const url = route.request().url();
+        if (!url.includes('/git/trees/')) return route.fulfill({ json: commits, headers: cors });
+        // Fixture change 1 forgot its lockfile; the others are complete.
+        const tree = [{ path: 'package.json', type: 'blob', mode: '100644', size: 40 }];
+        if (!url.includes(commits[0].sha))
+          tree.push({ path: 'bun.lock', type: 'blob', mode: '100644', size: 2 });
+        return route.fulfill({ json: { tree, truncated: false }, headers: cors });
+      });
+      await context.route('https://raw.githubusercontent.com/**', (route) => {
+        github.push(route.request());
+        return route.fulfill({ body: '{"scripts":{"start":"node server.js"}}', headers: cors });
       });
       await page.goto('/sign-in');
       await page.getByLabel('Username', { exact: true }).fill('alice');
@@ -147,15 +159,28 @@ for (const [mode, viewport, colorScheme] of [
       });
       await page.getByRole('link', { name: 'Deploy', exact: true }).click();
       const sha = commits[1].sha;
+      await page.getByRole('radio', { name: 'Fixture change 1' }).check();
+      await expect(page.getByText('This commit will fail to build')).toBeVisible();
+      await expect(
+        page.getByText('Commit bun.lock in the repository root.'),
+      ).toBeVisible();
       await page.getByRole('radio', { name: 'Fixture change 2' }).check();
       await expect(page.getByLabel('Commit SHA')).toHaveValue(sha);
-      expect(github).toHaveLength(1);
-      expect(github[0].url()).toBe(
+      await expect(
+        page.getByText('This commit has the package.json, scripts and lockfile the build needs.'),
+      ).toBeVisible();
+      expect(github.map((request) => request.url())).toEqual([
         'https://api.github.com/repos/example/student-app/commits?sha=main&per_page=5',
-      );
-      const githubHeaders = await github[0].allHeaders();
-      expect(githubHeaders.cookie).toBeUndefined();
-      expect(githubHeaders.referer).toBeUndefined();
+        `https://api.github.com/repos/example/student-app/git/trees/${commits[0].sha}?recursive=1`,
+        `https://raw.githubusercontent.com/example/student-app/${commits[0].sha}/package.json`,
+        `https://api.github.com/repos/example/student-app/git/trees/${sha}?recursive=1`,
+        `https://raw.githubusercontent.com/example/student-app/${sha}/package.json`,
+      ]);
+      for (const request of github) {
+        const headers = await request.allHeaders();
+        expect(headers.cookie).toBeUndefined();
+        expect(headers.referer).toBeUndefined();
+      }
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         window.scrollTo(0, 0);

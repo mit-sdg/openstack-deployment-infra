@@ -292,7 +292,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         return f"{names[directive['name']]}={value}; Path=/; Max-Age={age}{secure}; HttpOnly; SameSite={same_site}"
 
     def csp(self) -> str:
-        return "default-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; img-src 'self'; font-src 'self'; connect-src 'self' https://api.github.com; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+        return "default-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; img-src 'self'; font-src 'self'; connect-src 'self' https://api.github.com https://raw.githubusercontent.com; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
 
 
 def error_reply(status: int, code: str) -> Reply:

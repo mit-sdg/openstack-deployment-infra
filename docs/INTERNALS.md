@@ -612,9 +612,12 @@ The UI supports sign-in, my apps/quota/create, public repository/preferred branc
 typed Node/Bun settings, full-SHA review/deploy, observed status/health, history,
 build logs and runtime logs. React assets are external static files under strict
 CSP; admin runs Python only. The deploy page lists the branch's five newest
-commits straight from `api.github.com` (the one non-self `connect-src`), without
-cookies or a referrer; private repositories and GitHub's hourly limit for
-unsigned requests fall back to pasting a SHA. Owners read their app's runtime
+commits straight from `api.github.com`, without cookies or a referrer, and checks
+the chosen commit before deploying: one recursive tree read plus `package.json`
+from `raw.githubusercontent.com` (the two non-self `connect-src` origins) against
+the build's `validate_checkout` rules, kept in step by shared cases. Private
+repositories and GitHub's hourly limit for unsigned requests fall back to pasting
+a SHA and letting the build check it. Owners read their app's runtime
 logs (`GET /api/v1/apps/{app}/logs?stream=stdout|stderr`, admins through
 `/api/v1/admin-apps/{app}/logs`); the broker shares each read for 5 s and runs one
 at a time, because the controller serves it from Nomad under its shared lock. The configuration page supports write-only environment edits and

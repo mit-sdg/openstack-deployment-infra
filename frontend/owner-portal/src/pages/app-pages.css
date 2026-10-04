@@ -113,6 +113,23 @@
   align-items: start;
 }
 
+/* Pre-deploy commit check: one line under the commit field. */
+.app-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ui-space-2);
+  margin: 0;
+}
+.app-check .ui-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--ui-success-text);
+}
+.app-check-list {
+  margin: 0;
+  padding-left: var(--ui-space-5);
+}
+
 /* Recent commits: one full-width option per commit. */
 .app-commits .ui-fieldset__options {
   grid-template-columns: minmax(0, 1fr);

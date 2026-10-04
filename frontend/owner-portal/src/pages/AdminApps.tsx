@@ -30,11 +30,12 @@ import {
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Route, Switch, useLocation } from 'wouter';
-import { ApiError, type StorageResource } from '../api';
+import { ApiError, type Configuration, type StorageResource } from '../api';
 import { adminAppsApi, type CatalogApp, type ManagedApp } from '../adminAppsApi';
 import { ConfigurationForm } from './Configuration';
 import { QueryError } from '../components/Feedback';
 import { LogViewer } from '../components/LogViewer';
+import { CommitChecks } from '../components/CommitChecks';
 import { RecentCommits } from '../components/RecentCommits';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
@@ -562,6 +563,7 @@ function ManagedApplication({ id }: { id: string }) {
         revision={settings.data.revision}
         repository={settings.data.repository}
         branch={settings.data.branch}
+        configuration={settings.data.configuration}
         onStarted={started}
       />
       <StateDialog
@@ -647,6 +649,7 @@ function DeployDialog({
   revision,
   repository,
   branch,
+  configuration,
   onStarted,
 }: {
   open: boolean;
@@ -655,6 +658,7 @@ function DeployDialog({
   revision: number;
   repository: string;
   branch: string;
+  configuration: Configuration;
   onStarted: (result: { intentId: string }) => void;
 }) {
   const identity = app.identityProvider;
@@ -725,6 +729,7 @@ function DeployDialog({
             onChange={(event) => setSha(event.target.value)}
           />
         </Field>
+        {open && <CommitChecks repository={repository} sha={sha} configuration={configuration} />}
         <Checkbox
           label="Allow a brief outage"
           description={
