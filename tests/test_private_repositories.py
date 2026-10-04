@@ -80,6 +80,74 @@ class DeployKeyFetchTests(unittest.TestCase):
         self.assertEqual(seen["known_text"], f"[ssh.github.com]:443 {app.GITHUB_SSH_HOST_KEY}\n")
         self.assertFalse(Path(str(seen["known_hosts"])).exists())
 
+    def test_recent_commits_use_shallow_key_fetch_and_fixed_bounded_fields(self) -> None:
+        calls = []
+
+        def runner(argv, **bounds):
+            calls.append((argv, bounds))
+            output = (
+                (
+                    COMMIT + "\0" + "Change " + "x" * 250 + "\0Ada\0" + "2026-10-04T00:00:00Z\0"
+                ).encode()
+                if "log" in argv
+                else b""
+            )
+            return SimpleNamespace(stdout=output)
+
+        key = Path("/private/id_ed25519")
+        result = app.recent_github_commits(
+            "https://github.com/ada/notes", "main", key, command_runner=runner
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["sha"], COMMIT)
+        self.assertEqual(len(result[0]["message"]), 200)
+        self.assertIn("--depth=5", calls[1][0])
+        self.assertIn("--filter=blob:none", calls[1][0])
+        self.assertIn("refs/heads/main", calls[1][0])
+        self.assertTrue(all(0 < bounds["timeout_seconds"] <= 30 for _, bounds in calls))
+        self.assertIn("IdentitiesOnly=yes", calls[1][1]["env"]["GIT_SSH_COMMAND"])
+        with self.assertRaises(app.ApplicationError):
+            app.recent_github_commits(
+                "https://github.com/ada/notes",
+                "main",
+                key,
+                command_runner=lambda *_a, **_k: SimpleNamespace(stdout=b"not parseable"),
+            )
+
+    def test_checkout_checks_fetch_exact_source_with_real_build_rules(self) -> None:
+        configuration = {
+            "schemaVersion": 1,
+            "build": {
+                "runtime": "node",
+                "packages": ["."],
+                "buildScript": "build",
+                "startScript": "start",
+            },
+            "runtime": {"port": 3000, "healthPath": "/health"},
+            "storageBindings": [],
+        }
+
+        def runner(argv, **bounds):
+            root = Path(argv[argv.index("-C") + 1]) if "-C" in argv else Path(argv[-1])
+            if "init" in argv:
+                (root / ".git").mkdir()
+            if "checkout" in argv:
+                (root / "package.json").write_text('{"scripts":{"start":"node ."}}')
+            return SimpleNamespace(stdout=(COMMIT + "\n").encode() if "rev-parse" in argv else b"")
+
+        checked = app.check_github_checkout(
+            "https://github.com/ada/notes",
+            COMMIT,
+            configuration,
+            Path("/private/key"),
+            command_runner=runner,
+        )
+        self.assertEqual(
+            [item["id"] for item in checked if item["state"] == "problem"],
+            ["script:build", "lockfile:."],
+        )
+        self.assertNotIn("node .", repr(checked))
+
     def test_access_check_names_problems_without_echoing_github(self) -> None:
         def failing(stderr: bytes):
             def runner(argv: tuple[str, ...], **_kwargs: object) -> object:
@@ -156,6 +224,20 @@ class HelperDeployKeyTests(unittest.TestCase):
         )
         with self.assertRaises(ValidationError):
             self.key("delete")
+
+    def test_private_source_reads_require_a_key_and_suppress_git_errors(self) -> None:
+        args = {"slug": "notes", "repository": "https://github.com/ada/notes", "branch": "main"}
+        self.assertEqual(
+            production._provider_app("app.source.commits", args), {"keyPresent": False}
+        )
+        self.key("create")
+        with mock.patch.object(
+            app, "recent_github_commits", side_effect=CommandFailure("private stderr secret")
+        ):
+            with self.assertRaises(HelperActionError) as error:
+                production._provider_app("app.source.commits", args)
+        self.assertEqual(error.exception.code, "SOURCE_UNAVAILABLE")
+        self.assertNotIn("secret", str(error.exception))
 
     def test_access_check_uses_the_apps_key_and_needs_one(self) -> None:
         args = {"slug": "notes", "repository": "https://github.com/ada/notes", "branch": "main"}

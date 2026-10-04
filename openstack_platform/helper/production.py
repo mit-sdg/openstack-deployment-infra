@@ -50,6 +50,7 @@ from ..runtime import (
 from ..validation import (
     ValidationError,
     bounded_text,
+    commit,
     repository_url,
     slug,
     uuid,
@@ -77,6 +78,8 @@ APP_ACTIONS = (
     "app.remove",
     "app.restart",
     "app.source.check",
+    "app.source.commits",
+    "app.source.preflight",
     "app.source.key",
     "app.startup",
     "app.stop",
@@ -95,6 +98,8 @@ _PROVIDER_APP_ACTIONS = frozenset(
         "app.manifest.retain",
         "app.manifest.verify",
         "app.source.check",
+        "app.source.commits",
+        "app.source.preflight",
         "app.source.key",
         "app.worker.capacity",
         "app.worker.create",
@@ -603,6 +608,36 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
             _create_source_key(runtime, app_slug, replace=args["mode"] == "replace")
         public = _source_public_key(runtime, app_slug)
         return {"slug": app_slug, "present": public is not None, **(public or {})}
+    if action in {"app.source.commits", "app.source.preflight"}:
+        expected = (
+            {"slug", "repository", "branch"}
+            if action == "app.source.commits"
+            else {"slug", "repository", "commit", "configuration"}
+        )
+        _exact_args(args, expected, action)
+        key = _source_key_file(runtime, slug(args["slug"]))
+        if key is None:
+            return {"keyPresent": False}
+        try:
+            items = (
+                application.recent_github_commits(
+                    repository_url(args["repository"]),
+                    branch_name(args["branch"]),
+                    key,
+                )
+                if action == "app.source.commits"
+                else application.check_github_checkout(
+                    repository_url(args["repository"]),
+                    commit(args["commit"]),
+                    args["configuration"],
+                    key,
+                )
+            )
+        except (application.ApplicationError, CommandFailure, OSError, ValueError):
+            raise HelperActionError(
+                "SOURCE_UNAVAILABLE", "Could not read the repository with its deploy key"
+            ) from None
+        return {"keyPresent": True, "items": items}
     if action == "app.source.check":
         _exact_args(args, {"slug", "repository", "branch"}, action)
         key = _source_key_file(runtime, slug(args["slug"]))

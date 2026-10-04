@@ -77,12 +77,18 @@ export function DeployPage({ id }: { id: string }) {
   const selected = search.get('commit') ?? '';
   const latest = search.get('latest') === '1';
   const [sha, setSha] = useState(/^[a-f0-9]{40}$/.test(selected) ? selected : '');
-  const recent = useRecentCommits(settings.data?.repository ?? '', settings.data?.branch ?? '');
+  const platform = { id, revision: settings.data?.revision ?? 0, service: api };
+  const recent = useRecentCommits(
+    settings.data?.repository ?? '',
+    settings.data?.branch ?? '',
+    platform,
+  );
   const picked = recent.data?.find((commit) => commit.sha === sha);
   const checks = useCommitChecks(
     settings.data?.repository ?? '',
     sha,
     settings.data?.configuration,
+    platform,
   );
   const [error, setError] = useState<string | null>(null);
   const [intentId, setIntentId] = useState<string | null>(null);
@@ -103,8 +109,16 @@ export function DeployPage({ id }: { id: string }) {
           commit = (await recentCommits(repository!, branch!, abort.signal))[0]?.sha ?? null;
         } catch {
           if (abort.signal.aborted) return;
-          const access = await api.checkSourceKey(id);
-          commit = access.keyPresent && access.reachable ? access.head : null;
+          try {
+            if ((await api.sourceKey(id)).present)
+              commit = (await api.recentSourceCommits(id))[0]?.sha ?? null;
+          } catch {
+            /* Older platforms still expose a deploy-key head check. */
+          }
+          if (!commit) {
+            const access = await api.checkSourceKey(id);
+            commit = access.keyPresent && access.reachable ? access.head : null;
+          }
         }
         if (abort.signal.aborted) return;
         if (!commit) throw new Error('missing latest commit');
@@ -218,6 +232,7 @@ export function DeployPage({ id }: { id: string }) {
                   repository={settings.data.repository}
                   branch={settings.data.branch}
                   latest={() => api.checkSourceKey(id)}
+                  platform={platform}
                   value={sha}
                   onSelect={(commit) => {
                     setSha(commit.sha);
@@ -249,6 +264,7 @@ export function DeployPage({ id }: { id: string }) {
                   repository={settings.data.repository}
                   sha={sha}
                   configuration={settings.data.configuration}
+                  platform={platform}
                 />
               </Section>
             </form>

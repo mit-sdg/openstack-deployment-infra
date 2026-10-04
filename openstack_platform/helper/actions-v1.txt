@@ -15,6 +15,8 @@ app.promote
 app.remove
 app.restart
 app.source.check
+app.source.commits
+app.source.preflight
 app.source.key
 app.startup
 app.stop

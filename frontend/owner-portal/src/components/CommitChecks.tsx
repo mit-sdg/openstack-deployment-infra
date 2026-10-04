@@ -1,6 +1,6 @@
 import { Alert, Hint, Icon } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
-import type { Configuration } from '../api';
+import type { Configuration, SourceReadOptions } from '../api';
 import { GitHubError } from '../utils/github';
 import { checkCommit, type CommitCheck } from '../utils/preflight';
 import '../pages/app-pages.css';
@@ -11,15 +11,31 @@ export function canCheck(repository: string, sha: string) {
 }
 
 /** Pre-deploy checks of a commit against the build's rules, from GitHub. */
-export function useCommitChecks(repository: string, sha: string, configuration?: Configuration) {
+export function useCommitChecks(
+  repository: string,
+  sha: string,
+  configuration?: Configuration,
+  platform?: SourceReadOptions,
+) {
   return useQuery({
     queryKey: [
       'commit-checks',
+      platform?.scope ?? '',
+      platform?.id ?? '',
+      platform?.revision ?? 0,
       repository,
       sha,
       configuration ? JSON.stringify(configuration) : '',
     ],
-    queryFn: ({ signal }) => checkCommit(repository, sha, configuration!, signal),
+    queryFn: async ({ signal }) => {
+      try {
+        return await checkCommit(repository, sha, configuration!, signal);
+      } catch (error) {
+        if (signal.aborted || !platform || !(await platform.service.sourceKey(platform.id)).present)
+          throw error;
+        return platform.service.checkSourceCommit(platform.id, sha, platform.revision);
+      }
+    },
     enabled: canCheck(repository, sha) && !!configuration,
     // A commit never changes; the settings are part of the key.
     staleTime: Infinity,
@@ -51,12 +67,14 @@ export function CommitChecks({
   repository,
   sha,
   configuration,
+  platform,
 }: {
   repository: string;
   sha: string;
   configuration: Configuration;
+  platform?: SourceReadOptions;
 }) {
-  const checks = useCommitChecks(repository, sha, configuration);
+  const checks = useCommitChecks(repository, sha, configuration, platform);
   if (!canCheck(repository, sha)) return null;
   if (checks.isPending)
     return (

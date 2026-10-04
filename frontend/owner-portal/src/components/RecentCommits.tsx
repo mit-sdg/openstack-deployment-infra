@@ -1,6 +1,6 @@
 import { Button, Fieldset, Hint, LoadingRows, Radio, RelativeTime } from '@openstack-platform/ui';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import type { SourceAccess } from '../api';
+import type { SourceAccess, SourceReadOptions } from '../api';
 import { useId } from 'react';
 import { GitHubError, recentCommits, type RecentCommit } from '../utils/github';
 import '../pages/app-pages.css';
@@ -14,10 +14,25 @@ const problems = {
 };
 
 /** Query for the newest commits on a branch, shared by pickers of the same branch. */
-export function useRecentCommits(repository: string, branch: string) {
+export function useRecentCommits(repository: string, branch: string, platform?: SourceReadOptions) {
   return useQuery({
-    queryKey: ['github-commits', repository, branch],
-    queryFn: ({ signal }) => recentCommits(repository, branch, signal),
+    queryKey: [
+      'github-commits',
+      repository,
+      branch,
+      platform?.scope ?? '',
+      platform?.id ?? '',
+      platform?.revision ?? 0,
+    ],
+    queryFn: async ({ signal }) => {
+      try {
+        return await recentCommits(repository, branch, signal);
+      } catch (error) {
+        if (signal.aborted || !platform || !(await platform.service.sourceKey(platform.id)).present)
+          throw error;
+        return platform.service.recentSourceCommits(platform.id);
+      }
+    },
     enabled: !!repository && !!branch,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
@@ -75,6 +90,7 @@ export function RecentCommits({
   value,
   onSelect,
   latest,
+  platform,
 }: {
   repository: string;
   branch: string;
@@ -82,9 +98,10 @@ export function RecentCommits({
   onSelect: (commit: RecentCommit) => void;
   /** Reads the branch's newest commit with the app's deploy key. */
   latest?: () => Promise<SourceAccess>;
+  platform?: SourceReadOptions;
 }) {
   const name = useId();
-  const commits = useRecentCommits(repository, branch);
+  const commits = useRecentCommits(repository, branch, platform);
   const legend = `Recent commits on ${branch}`;
   if (commits.isPending)
     return (
@@ -97,9 +114,7 @@ export function RecentCommits({
     return (
       <>
         <Hint>{problems[problem]}</Hint>
-        {problem === 'not-found' && latest && (
-          <LatestWithKey branch={branch} latest={latest} onSelect={onSelect} />
-        )}
+        {latest && <LatestWithKey branch={branch} latest={latest} onSelect={onSelect} />}
       </>
     );
   }

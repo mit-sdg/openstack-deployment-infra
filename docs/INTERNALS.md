@@ -387,6 +387,8 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}/source-key` | Read the app's deploy key: public half and fingerprint only |
 | `POST /v1/applications/{id}/source-key` | Create the deploy key if absent, or replace it with `{"replace": true}` |
 | `POST /v1/applications/{id}/source-key/check` | Check `{repository, branch}` with the deploy key; returns the branch head or a named problem |
+| `POST /v1/applications/{id}/source/commits` | Read five recent saved-branch commits through the app deploy key |
+| `POST /v1/applications/{id}/source/check` | Check an exact fetched commit against the build checkout validators |
 | `GET /v1/applications/{id}/environment` | List environment names and metadata, never values |
 | `PUT /v1/applications/{id}/environment/{key}` | Add or replace one value |
 | `DELETE /v1/applications/{id}/environment/{key}` | Remove one caller-owned value |
@@ -661,8 +663,12 @@ commits straight from `api.github.com`, without cookies or a referrer, and check
 the chosen commit before deploying: one recursive tree read plus `package.json`
 from `raw.githubusercontent.com` (the two non-self `connect-src` origins) against
 the build's `validate_checkout` rules, kept in step by shared cases. Private
-repositories and GitHub's hourly limit for unsigned requests fall back to pasting
-a SHA and letting the build check it. Owners read their app's runtime
+repositories and GitHub's hourly limit fall back to bounded platform reads when
+the app has a deploy key: five shallow commits and named exact-checkout checks
+using the build validators. Broker owner/admin routes share reads for ten seconds,
+serialize them with access checks, bind checkout checks to the saved settings
+revision, and project only metadata and fixed guidance. Older controllers retain
+the deploy-key head check and pasted-SHA build fallback. Owners read their app's runtime
 logs (`GET /api/v1/apps/{app}/logs?stream=stdout|stderr`, admins through
 `/api/v1/admin-apps/{app}/logs`); the broker shares each read for 5 s and runs one
 at a time, because the controller serves it from Nomad under its shared lock. The configuration page supports write-only environment edits and

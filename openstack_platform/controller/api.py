@@ -16,6 +16,7 @@ from ..runtime import safe_summary
 from ..validation import (
     ValidationError,
     bounded_text,
+    commit,
     env_key,
     repository_url,
     resource_name,
@@ -188,6 +189,8 @@ class ControllerAPI:
             ("GET", "/v1/applications/{id}/source-key", self._get_source_key),
             ("POST", "/v1/applications/{id}/source-key", self._create_source_key),
             ("POST", "/v1/applications/{id}/source-key/check", self._check_source_key),
+            ("POST", "/v1/applications/{id}/source/commits", self._source_commits),
+            ("POST", "/v1/applications/{id}/source/check", self._source_preflight),
             ("GET", "/v1/applications/{id}/environment", self._get_environment),
             ("PUT", "/v1/applications/{id}/environment/{key}", self._put_environment),
             ("DELETE", "/v1/applications/{id}/environment/{key}", self._delete_environment),
@@ -821,6 +824,103 @@ class ControllerAPI:
             raise HttpError(400, "INVALID_BODY", "replace must be boolean")
         mode = "replace" if body.get("replace") else "create"
         return self._source_key(self._application(self._path_uuid(request)), mode)
+
+    def _source_commits(self, request: Request) -> Response:
+        return self._source_read(request, preflight=False)
+
+    def _source_preflight(self, request: Request) -> Response:
+        return self._source_read(request, preflight=True)
+
+    def _source_read(self, request: Request, *, preflight: bool) -> Response:
+        self._no_query(request)
+        application = self._application(self._path_uuid(request))
+        fields = (
+            {"repository", "commit", "configuration"} if preflight else {"repository", "branch"}
+        )
+        body = self._body(request, allowed=fields, required=fields)
+        values: dict[str, object] = {
+            "slug": application.slug,
+            "repository": repository_url(body["repository"]),
+        }
+        if preflight:
+            values.update(
+                commit=commit(body["commit"]),
+                configuration=parse_configuration(body["configuration"]).canonical_json(),
+            )
+        else:
+            values["branch"] = branch_name(body["branch"])
+        try:
+            result = self.helper_caller(
+                self.config,
+                "app.source.preflight" if preflight else "app.source.commits",
+                values,
+                deadline=min(operation_deadline(self.config), time.monotonic() + 30),
+            )
+        except (remote.HelperError, ServiceDeadlineError):
+            raise HttpError(
+                503,
+                "SOURCE_UNAVAILABLE",
+                "Repository information is unavailable. Try again later.",
+                retryable=True,
+            ) from None
+        if result.get("keyPresent") is False:
+            return Response(200, {"applicationId": application.application_id, "keyPresent": False})
+        items = result.get("items")
+        if result.get("keyPresent") is not True or not isinstance(items, list):
+            raise app.ApplicationError("helper returned invalid source evidence")
+        expected: set[str] = set()
+        if preflight:
+            configuration = parse_configuration(body["configuration"])
+            expected = {
+                "package-json",
+                "script:" + configuration.start_script,
+                *("lockfile:" + package for package in configuration.packages),
+            }
+            if configuration.build_script is not None:
+                expected.add("script:" + configuration.build_script)
+        if len(items) > (len(expected) if preflight else 5):
+            raise app.ApplicationError("helper source evidence exceeds its bounds")
+        projected: list[dict[str, object]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise app.ApplicationError("helper source item is invalid")
+            if preflight:
+                if item.get("id") not in expected or item.get("state") not in {
+                    "ok",
+                    "problem",
+                    "unknown",
+                }:
+                    raise app.ApplicationError("helper checkout check is invalid")
+                projected.append(
+                    {
+                        key: bounded_text(item[key], field="checkout check", maximum=512)
+                        for key in (
+                            "id",
+                            "label",
+                            "state",
+                            *(["problem"] if item.get("state") == "problem" else []),
+                        )
+                    }
+                )
+            else:
+                projected.append(
+                    {
+                        "sha": commit(item.get("sha")),
+                        "message": bounded_text(
+                            item.get("message"), field="commit message", maximum=200
+                        ),
+                        "author": None
+                        if item.get("author") is None
+                        else bounded_text(item["author"], field="commit author", maximum=100),
+                        "date": bounded_text(item.get("date"), field="commit date", maximum=40),
+                    }
+                )
+        if preflight and {item["id"] for item in projected} != expected:
+            raise app.ApplicationError("helper checkout checks are incomplete")
+        return Response(
+            200,
+            {"applicationId": application.application_id, "keyPresent": True, "items": projected},
+        )
 
     def _check_source_key(self, request: Request) -> Response:
         self._no_query(request)

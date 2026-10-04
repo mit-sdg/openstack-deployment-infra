@@ -247,6 +247,38 @@ for (const [mode, viewport, colorScheme] of [
       await expect(page.getByRole('dialog')).toContainText(commits[0].sha);
       await expect(page.getByRole('dialog')).toContainText('current saved settings');
       await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+      // Browser GitHub cannot see the private repository; the platform's key
+      // supplies the same commit picker and checks, without real network use.
+      await context.route('https://api.github.com/**', (route) =>
+        route.fulfill({ status: 404, json: {}, headers: cors }),
+      );
+      await page.goto(`/apps/${appId}/deploy`);
+      await page.getByRole('radio', { name: 'Private repository fixture' }).check();
+      await expect(page.getByLabel('Commit SHA')).toHaveValue(
+        '0123456789abcdef0123456789abcdef01234567',
+      );
+      await expect(
+        page.getByText('This commit has the package.json, scripts and lockfile the build needs.'),
+      ).toBeVisible();
+      await page.getByRole('button', { name: 'Review deployment' }).click();
+      await expect(page.getByRole('dialog')).toContainText('Private repository fixture');
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+      // Subsequent public checks use the original hermetic fixture handler.
+      await context.unroute('https://api.github.com/**');
+      await context.route('https://api.github.com/**', (route) => {
+        const url = route.request().url();
+        if (!url.includes('/git/trees/')) return route.fulfill({ json: commits, headers: cors });
+        return route.fulfill({
+          json: {
+            tree: [
+              { path: 'package.json', type: 'blob', mode: '100644', size: 40 },
+              { path: 'bun.lock', type: 'blob', mode: '100644', size: 2 },
+            ],
+            truncated: false,
+          },
+          headers: cors,
+        });
+      });
       await page.goto(`/apps/${appId}`);
       for (const action of ['Restart', 'Stop', 'Start']) {
         await page.getByRole('button', { name: `${action} app`, exact: true }).click();

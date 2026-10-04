@@ -529,6 +529,95 @@ def check_github_access(
     return {"reachable": True, "head": None, "problem": "branch-missing"}
 
 
+def recent_github_commits(
+    repository: str,
+    branch: str,
+    ssh_key: Path,
+    *,
+    timeout_seconds: float = 30,
+    command_runner: Callable[..., Any] = run,
+) -> list[dict[str, str | None]]:
+    """Read five commits with the pinned deploy-key transport and bounded output."""
+    from .deployment_config import branch_name
+
+    target = github_ssh_url(repository)
+    ref = f"refs/heads/{branch_name(branch)}"
+    deadline = time.monotonic() + timeout_seconds
+    with tempfile.TemporaryDirectory(prefix="platform-source-history-") as directory:
+        root = Path(directory)
+        environment = {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            **_github_ssh_environment(ssh_key, root),
+        }
+        argv = ("git", "-c", "protocol.file.allow=never", "-C", str(root))
+
+        def invoke(*arguments: str) -> Any:
+            return command_runner(
+                (*argv, *arguments),
+                timeout_seconds=_deadline_timeout(
+                    timeout_seconds, deadline, operation="source history"
+                ),
+                stdout_limit=65_536,
+                stderr_limit=65_536,
+                env=environment,
+            )
+
+        invoke("init", "--quiet")
+        invoke("fetch", "--quiet", "--no-tags", "--depth=5", "--filter=blob:none", target, ref)
+        logged = invoke("log", "-5", "-z", "--format=%H%x00%s%x00%an%x00%aI", "FETCH_HEAD", "--")
+        fields = logged.stdout.decode("utf-8", errors="replace").rstrip("\x00").split("\x00")
+        if not logged.stdout:
+            return []
+        if len(fields) % 4 or len(fields) > 20:
+            raise ApplicationError("source history format is invalid")
+        result: list[dict[str, str | None]] = []
+        for offset in range(0, len(fields), 4):
+            sha, message, author, date = fields[offset : offset + 4]
+            try:
+                commit(sha)
+                datetime.fromisoformat(date)
+            except ValueError:
+                raise ApplicationError("source history identity is invalid") from None
+            result.append(
+                {
+                    "sha": sha,
+                    "message": message[:200] or "(no message)",
+                    "author": author[:100] or None,
+                    "date": date[:40],
+                }
+            )
+        return result
+
+
+def check_github_checkout(
+    repository: str,
+    source_commit: str,
+    configuration: bytes | str | Mapping[str, Any],
+    ssh_key: Path,
+    *,
+    timeout_seconds: float = 30,
+    command_runner: Callable[..., Any] = run,
+) -> list[dict[str, str]]:
+    """Fetch a bounded exact checkout, returning named checks rather than files."""
+    from .deployment_config import checkout_checks, parse_configuration
+
+    settings = parse_configuration(configuration)
+    with tempfile.TemporaryDirectory(prefix="platform-source-check-") as directory:
+        source = acquire_github_commit(
+            repository,
+            source_commit,
+            Path(directory) / "source",
+            timeout_seconds=timeout_seconds,
+            deadline=time.monotonic() + timeout_seconds,
+            command_runner=command_runner,
+            ssh_key=ssh_key,
+        )
+        return checkout_checks(settings, source)
+
+
 def acquire_github_commit(
     repository: str,
     source_commit: str,

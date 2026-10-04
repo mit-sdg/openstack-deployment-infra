@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+from openstack_platform import remote
 from openstack_platform.config import (
     Config,
     Limits,
@@ -178,6 +179,66 @@ class ControllerAPITests(unittest.TestCase):
             self.assertEqual(service.restart.call_count, 1)
             with self.assertRaises(HttpError):
                 self.dispatch("POST", route, {"allocationId": "other"}, self.headers(key))
+
+    def test_private_source_routes_validate_inputs_and_project_metadata(self) -> None:
+        application = self.create_application().body["applicationId"]
+        source = f"/v1/applications/{application}/source/"
+        repository = "https://github.com/ada/notes"
+        configuration = {
+            "schemaVersion": 1,
+            "build": {
+                "runtime": "node",
+                "packages": ["."],
+                "buildScript": "build",
+                "startScript": "start",
+            },
+            "runtime": {"port": 3000, "healthPath": "/health"},
+            "storageBindings": [],
+        }
+        self.api.helper_caller = mock.Mock(
+            return_value={
+                "keyPresent": True,
+                "items": [
+                    {
+                        "sha": "a" * 40,
+                        "message": "Change",
+                        "author": "Ada",
+                        "date": "2026-10-04T00:00:00Z",
+                        "secret": "hidden",
+                    }
+                ],
+            }
+        )
+        response = self.dispatch(
+            "POST", source + "commits", {"repository": repository, "branch": "main"}
+        )
+        self.assertNotIn("secret", repr(response.body))
+        self.api.helper_caller.return_value = {
+            "keyPresent": True,
+            "items": [
+                {"id": name, "label": name, "state": "ok"}
+                for name in ("package-json", "script:start", "script:build", "lockfile:.")
+            ],
+        }
+        response = self.dispatch(
+            "POST",
+            source + "check",
+            {"repository": repository, "commit": "a" * 40, "configuration": configuration},
+        )
+        self.assertEqual(len(response.body["items"]), 4)
+        with self.assertRaises(HttpError):
+            self.dispatch(
+                "POST",
+                source + "check",
+                {"repository": repository, "commit": "bad", "configuration": configuration},
+            )
+        self.api.helper_caller.side_effect = remote.HelperError(
+            "SOURCE_UNAVAILABLE", "unsafe stderr"
+        )
+        with self.assertRaises(HttpError) as error:
+            self.dispatch("POST", source + "commits", {"repository": repository, "branch": "main"})
+        self.assertEqual(error.exception.code, "SOURCE_UNAVAILABLE")
+        self.assertNotIn("unsafe", str(error.exception))
 
     def test_runtime_log_reads_the_selected_stream(self) -> None:
         application = self.create_application().body["applicationId"]

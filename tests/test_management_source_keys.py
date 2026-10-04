@@ -81,6 +81,44 @@ class SourceKeyTests(ManagementCase):
             ),
         )
 
+    def test_private_commit_and_checkout_reads_are_scoped_shared_and_revision_bound(self) -> None:
+        self.save(self.app)
+        self.key("POST", {})
+        route = f"/v1/apps/{self.app}/source/"
+        first = self.call("POST", route + "commits", {}, "alice").body["data"]
+        self.assertEqual(first["items"][0]["message"], "Private repository fixture")
+        self.assertEqual(self.call("POST", route + "commits", {}, "alice").body["data"], first)
+        calls = [path for _m, path, _k in self.fixture.calls if path.endswith("/source/commits")]
+        self.assertEqual(len(calls), 1)
+        body = {"commit": "a" * 40, "configurationRevision": 1}
+        checked = self.call("POST", route + "check", body, "alice").body["data"]
+        self.assertEqual(
+            {item["id"] for item in checked["items"]},
+            {"package-json", "script:start", "lockfile:."},
+        )
+        self.assert_error(
+            "REVISION_CONFLICT",
+            lambda: self.call(
+                "POST", route + "check", {**body, "configurationRevision": 2}, "alice"
+            ),
+        )
+        self.assert_error(
+            "INVALID_REQUEST",
+            lambda: self.call(
+                "POST", route + "commits", {"repository": "https://github.com/other/repo"}, "alice"
+            ),
+        )
+        self.login("bob")
+        self.assert_error("NOT_FOUND", lambda: self.call("POST", route + "commits", {}, "bob"))
+        with patch.object(
+            self.broker.client, "request", return_value=(404, {"error": {"code": "NOT_FOUND"}})
+        ):
+            self.now += source_keys.SHARE_SECONDS
+            self.assert_error(
+                "SOURCE_READS_UNAVAILABLE",
+                lambda: self.call("POST", route + "commits", {}, "alice"),
+            )
+
     def test_controllers_without_deploy_keys_say_so(self) -> None:
         request = self.broker.client.request
 

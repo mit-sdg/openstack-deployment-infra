@@ -78,6 +78,42 @@ describe('private repository access', () => {
     await waitFor(() => expect(screen.queryByText('Private repository')).toBeNull());
   });
 
+  it('lists private commits with the same picker after a browser failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(new Response('{}', { status: 404 }))),
+    );
+    const source = {
+      sourceKey: vi.fn(() => Promise.resolve(key)),
+      recentSourceCommits: vi.fn(() =>
+        Promise.resolve([
+          {
+            sha: 'c'.repeat(40),
+            message: 'Private change',
+            author: 'Ada',
+            date: '2026-10-04T00:00:00Z',
+          },
+        ]),
+      ),
+      checkSourceCommit: vi.fn(),
+    };
+    const onSelect = vi.fn();
+    wrap(
+      <RecentCommits
+        repository="https://github.com/ada/private"
+        branch="main"
+        value=""
+        onSelect={onSelect}
+        platform={{ id: 'app', revision: 1, service: source }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('radio', { name: 'Private change' }));
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ sha: 'c'.repeat(40), author: 'Ada' }),
+    );
+    expect(source.recentSourceCommits).toHaveBeenCalledWith('app');
+  });
+
   it('offers the latest commit through the deploy key when GitHub hides the repository', async () => {
     vi.stubGlobal(
       'fetch',

@@ -9,7 +9,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from openstack_platform.controller.deployment_config import parse_configuration, validate_checkout
+from openstack_platform.controller.deployment_config import (
+    checkout_checks,
+    parse_configuration,
+    validate_checkout,
+)
 
 CASES = Path(__file__).resolve().parents[1] / "frontend/owner-portal/src/utils/preflight-cases.json"
 
@@ -41,6 +45,11 @@ class CheckoutPreflightParityTests(unittest.TestCase):
                         "runtime": {"port": 3000, "healthPath": "/health"},
                         "storageBindings": [],
                     }
+                )
+                named = checkout_checks(configuration, root)
+                self.assertEqual(
+                    sorted(check["id"] for check in named if check["state"] == "problem"),
+                    sorted(case["problems"]),
                 )
                 if case["problems"]:
                     with self.assertRaises((ValueError, OSError)):

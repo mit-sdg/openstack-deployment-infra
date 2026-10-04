@@ -1,3 +1,16 @@
+import type { RecentCommit } from './utils/github';
+import type { CommitCheck } from './utils/preflight';
+
+export type SourceReadOptions = {
+  id: string;
+  revision: number;
+  scope?: 'admin';
+  service: Pick<
+    ReturnType<typeof resourceApi>,
+    'sourceKey' | 'recentSourceCommits' | 'checkSourceCommit'
+  >;
+};
+
 export const configurationGuidance = {
   root: 'The repository root must contain package.json.',
   locks:
@@ -559,6 +572,41 @@ export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
       request(`${prefix}/${id}/members`, teamData, { method: 'POST', body: { username } }),
     removeMember: (id: string, userId: string) =>
       request(`${prefix}/${id}/members/${userId}`, teamData, { method: 'DELETE', body: {} }),
+    recentSourceCommits: (id: string) =>
+      request(
+        `${prefix}/${id}/source/commits`,
+        (v) => {
+          const data = fields(v, { keyPresent: 'boolean' });
+          if (!data.keyPresent) return [] as RecentCommit[];
+          if (!Array.isArray(data.items) || data.items.length > 5)
+            throw new Error('Invalid service response');
+          return data.items.map((item) => {
+            const commit = fields(item, { sha: 'string', message: 'string' });
+            if (!/^[a-f0-9]{40}$/.test(commit.sha as string))
+              throw new Error('Invalid service response');
+            return commit as RecentCommit;
+          });
+        },
+        { method: 'POST', body: {} },
+      ),
+    checkSourceCommit: (id: string, commit: string, configurationRevision: number) =>
+      request(
+        `${prefix}/${id}/source/check`,
+        (v) => {
+          const data = fields(v, { keyPresent: 'boolean' });
+          if (!data.keyPresent) throw new Error('No deploy key');
+          if (!Array.isArray(data.items) || data.items.length > 102)
+            throw new Error('Invalid service response');
+          return data.items.map((item) => {
+            const check = fields(item, { id: 'string', label: 'string', state: 'string' });
+            if (!['ok', 'problem', 'unknown'].includes(check.state as string))
+              throw new Error('Invalid service response');
+            if (check.state === 'problem') fields(item, { problem: 'string' });
+            return check as CommitCheck;
+          });
+        },
+        { method: 'POST', body: { commit, configurationRevision } },
+      ),
     sourceKey: (id: string) =>
       request(`${prefix}/${id}/source-key`, (v) => {
         const data = fields(v, { present: 'boolean' });

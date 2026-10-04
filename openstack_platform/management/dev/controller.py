@@ -145,6 +145,8 @@ class FakeController:
             ("GET", "/v1/applications/{app}/source-key", self.source_key),
             ("POST", "/v1/applications/{app}/source-key", self.source_key),
             ("POST", "/v1/applications/{app}/source-key/check", self.source_check),
+            ("POST", "/v1/applications/{app}/source/commits", self.source_commits),
+            ("POST", "/v1/applications/{app}/source/check", self.source_preflight),
             ("POST", "/v1/applications/{app}/restart", self.restart),
             ("GET", "/v1/operations/{operation}", self.operation),
             ("GET", "/v1/applications/{app}/environment", self.environment),
@@ -470,6 +472,49 @@ class FakeController:
             }
         key = keys.get(app)
         return Response(200, {"applicationId": app, "present": key is not None, **(key or {})})
+
+    def source_commits(self, request: Request) -> Response:
+        app = request.path_parameters["app"]
+        if app not in self.source_keys:
+            return Response(200, {"applicationId": app, "keyPresent": False})
+        return Response(
+            200,
+            {
+                "applicationId": app,
+                "keyPresent": True,
+                "items": [
+                    {
+                        "sha": "0123456789abcdef0123456789abcdef01234567",
+                        "message": "Private repository fixture",
+                        "author": "Fixture Author",
+                        "date": "2026-10-04T00:00:00Z",
+                    }
+                ],
+            },
+        )
+
+    def source_preflight(self, request: Request) -> Response:
+        from ...controller.deployment_config import parse_configuration
+
+        app = request.path_parameters["app"]
+        if app not in self.source_keys:
+            return Response(200, {"applicationId": app, "keyPresent": False})
+        assert isinstance(request.body, dict)
+        configuration = parse_configuration(request.body["configuration"])
+        ids = ["package-json", "script:" + configuration.start_script]
+        if configuration.build_script:
+            ids.append("script:" + configuration.build_script)
+        ids.extend("lockfile:" + package for package in configuration.packages)
+        return Response(
+            200,
+            {
+                "applicationId": app,
+                "keyPresent": True,
+                "items": [
+                    {"id": identifier, "label": identifier, "state": "ok"} for identifier in ids
+                ],
+            },
+        )
 
     def source_check(self, request: Request) -> Response:
         app = request.path_parameters["app"]
