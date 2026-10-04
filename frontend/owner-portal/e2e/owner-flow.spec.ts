@@ -231,6 +231,22 @@ for (const [mode, viewport, colorScheme] of [
         path: path.join(screenshots, `${mode}-build-log.png`),
         fullPage: true,
       });
+      await page.getByRole('link', { name: 'Deploy this commit again' }).click();
+      await expect(page.getByLabel('Commit SHA')).toHaveValue(sha);
+      await expect(
+        page.getByText(
+          'Deploying this commit again uses your app’s current saved settings and environment variables.',
+        ),
+      ).toBeVisible();
+      await page.goto(`/apps/${appId}/deployments`);
+      await expect(
+        page.getByRole('link', { name: 'Deploy this commit again' }).first(),
+      ).toHaveAttribute('href', /commit=/);
+      await page.goto(`/apps/${appId}`);
+      await page.getByRole('link', { name: 'Deploy latest', exact: true }).click();
+      await expect(page.getByRole('dialog')).toContainText(commits[0].sha);
+      await expect(page.getByRole('dialog')).toContainText('current saved settings');
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
       await page.goto(`/apps/${appId}`);
       for (const action of ['Restart', 'Stop', 'Start']) {
         await page.getByRole('button', { name: `${action} app`, exact: true }).click();

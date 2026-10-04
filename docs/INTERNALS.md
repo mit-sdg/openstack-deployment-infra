@@ -651,7 +651,11 @@ a transaction. No ownership is inferred from a slug or reassigned by username.
 
 The UI supports sign-in, my apps/quota/create, public repository/preferred branch,
 typed Node/Bun settings, full-SHA review/deploy, observed status/health, history,
-build logs and runtime logs. React assets are external static files under strict
+build logs and runtime logs. Deployment history/detail can select an earlier
+commit for a new build with current saved settings and environment variables.
+Overview's Deploy latest resolves the saved branch afresh, then opens the same
+exact-commit review dialog; it never deploys a moving branch without review.
+React assets are external static files under strict
 CSP; admin runs Python only. The deploy page lists the branch's five newest
 commits straight from `api.github.com`, without cookies or a referrer, and checks
 the chosen commit before deploying: one recursive tree read plus `package.json`

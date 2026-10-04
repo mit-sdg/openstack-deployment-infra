@@ -168,9 +168,14 @@ export function Overview({ id }: { id: string }) {
   const activity = intents.data?.slice(0, 6) ?? [];
   const latest = history.data?.items[0];
   const deploy = (
-    <Link href={`/apps/${id}/deploy`} className={buttonClass({ variant: 'primary' })}>
-      Deploy
-    </Link>
+    <>
+      <Link href={`/apps/${id}/deploy?latest=1`} className={buttonClass()}>
+        Deploy latest
+      </Link>
+      <Link href={`/apps/${id}/deploy`} className={buttonClass({ variant: 'primary' })}>
+        Deploy
+      </Link>
+    </>
   );
   return (
     <AppFrame id={id} active="Overview">
