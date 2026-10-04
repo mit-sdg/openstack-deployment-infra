@@ -37,6 +37,19 @@
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
   }
+  /* Avoid one-word last lines in prose; balance short headings. */
+  p,
+  dd,
+  .ui-hint,
+  .ui-empty__text,
+  .ui-alert__text {
+    text-wrap: pretty;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
   #root {
     min-height: 100dvh;
     display: flex;
@@ -723,7 +736,9 @@
         (var(--ui-section-header-height) - var(--ui-control-height)) / 2
       )
       var(--ui-card-padding);
-    border-bottom: 1px solid var(--ui-border);
+    /* The separator takes no space, so the padding above fits one control
+       exactly and headers with and without actions are the same height. */
+    box-shadow: inset 0 -1px 0 var(--ui-border);
   }
   .ui-section__title {
     font-weight: var(--ui-weight-semibold);
