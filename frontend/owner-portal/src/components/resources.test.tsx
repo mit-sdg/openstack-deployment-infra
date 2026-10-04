@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
 import {
@@ -227,6 +227,43 @@ describe('owner resources', () => {
     await waitFor(() =>
       expect(deployment).toHaveBeenCalledWith('app', 7, 'a'.repeat(40), expect.any(String), true),
     );
+  });
+  it('deploys a recent commit picked from GitHub', async () => {
+    mocks();
+    vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: false } as never);
+    vi.spyOn(api, 'settings').mockResolvedValue({
+      revision: 3,
+      repository: 'https://github.com/example/app',
+      branch: 'main',
+      configurationSha256: null,
+      configuration: {
+        schemaVersion: 1,
+        build: { runtime: 'node', packages: ['.'], buildScript: null, startScript: 'start' },
+        runtime: { port: 3000, healthPath: '/health' },
+        storageBindings: [],
+      },
+    });
+    const commits = ['b', 'c'].map((digit, index) => ({
+      sha: digit.repeat(40),
+      commit: {
+        message: `Change ${index + 1}\n\nDetails`,
+        author: { name: 'Ada', date: '2026-10-03T12:00:00Z' },
+      },
+    }));
+    const github = vi.fn(() => Promise.resolve(new Response(JSON.stringify(commits))));
+    vi.stubGlobal('fetch', github);
+    const deployment = vi.spyOn(api, 'deploy').mockResolvedValue(intent);
+    wrap(<DeployPage id="app" />);
+    const group = await screen.findByRole('group', { name: 'Recent commits on main' });
+    fireEvent.click(await within(group).findByRole('radio', { name: 'Change 2' }));
+    expect(screen.getByLabelText('Commit SHA')).toHaveValue('c'.repeat(40));
+    fireEvent.click(screen.getByRole('button', { name: 'Review deployment' }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('Change 2');
+    fireEvent.click(screen.getByRole('button', { name: 'Deploy' }));
+    await waitFor(() =>
+      expect(deployment).toHaveBeenCalledWith('app', 3, 'c'.repeat(40), expect.any(String), false),
+    );
+    expect(github).toHaveBeenCalledOnce();
   });
   it('confirms sign-in app storage changes through an async callback, never window.confirm', async () => {
     const app = vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: true } as never);

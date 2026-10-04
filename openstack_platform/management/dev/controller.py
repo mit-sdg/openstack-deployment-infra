@@ -135,6 +135,7 @@ class FakeController:
             ("GET", "/v1/applications/{app}/deployments", self.history),
             ("GET", "/v1/deployments/{deployment}", self.deployment),
             ("GET", "/v1/deployments/{deployment}/build-log", self.log),
+            ("GET", "/v1/applications/{app}/runtime-log", self.runtime_log),
             ("GET", "/v1/operations/{operation}", self.operation),
             ("GET", "/v1/applications/{app}/environment", self.environment),
             ("PUT", "/v1/applications/{app}/environment/{key}", self.environment_write),
@@ -441,6 +442,34 @@ class FakeController:
         if attempt is None:
             raise HttpError(404, "DEPLOYMENT_NOT_FOUND", "Deployment does not exist.")
         return Response(200, attempt.copy())
+
+    def runtime_log(self, request: Request) -> Response:
+        app = self.apps.get(request.path_parameters["app"])
+        if app is None:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        if set(request.query) - {"lines", "stream"} or request.query.get(
+            "stream", ("stdout",)
+        ) not in (("stdout",), ("stderr",)):
+            raise HttpError(400, "INVALID_QUERY", "Log query is invalid.")
+        if not app["desiredRunning"] or not app["activeDeploymentId"]:
+            raise HttpError(502, "ALLOCATION_NOT_FOUND", "No running allocation was found.")
+        stream = request.query.get("stream", ("stdout",))[0]
+        text = (
+            "Warning: SESSION_SECRET is short\n"
+            if stream == "stderr"
+            else "> start\n> node server.js\n\nListening on port 3000\nGET /health 200 2 ms\n"
+        )
+        return Response(
+            200,
+            {
+                "applicationId": app["applicationId"],
+                "stream": stream,
+                "text": text,
+                "state": "running",
+                "nextOffset": len(text.encode()),
+                "truncated": False,
+            },
+        )
 
     def log(self, request: Request) -> Response:
         identifier = request.path_parameters["deployment"]

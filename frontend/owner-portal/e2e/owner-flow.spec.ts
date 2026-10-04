@@ -66,8 +66,26 @@ for (const [mode, viewport, colorScheme] of [
       });
       context.on('request', (request) => {
         const url = new URL(request.url());
-        if (!['127.0.0.1', 'localhost'].includes(url.hostname))
+        // GitHub's API is served by the route below and never reached.
+        if (!['127.0.0.1', 'localhost', 'api.github.com'].includes(url.hostname))
           unexpectedNetwork.push(url.hostname);
+      });
+      // The Deploy page lists recent commits straight from GitHub's API; serve
+      // them here, and check the browser sends no cookies or referrer there.
+      const commits = [1, 2, 3].map((n) => ({
+        sha: crypto.randomUUID().replaceAll('-', '') + String(n).repeat(8),
+        commit: {
+          message: `Fixture change ${n}\n\nBody`,
+          author: { name: 'Fixture Author', date: new Date().toISOString() },
+        },
+      }));
+      const github: import('@playwright/test').Request[] = [];
+      await context.route('https://api.github.com/**', (route) => {
+        github.push(route.request());
+        return route.fulfill({
+          json: commits,
+          headers: { 'Access-Control-Allow-Origin': '*' },
+        });
       });
       await page.goto('/sign-in');
       await page.getByLabel('Username', { exact: true }).fill('alice');
@@ -128,11 +146,25 @@ for (const [mode, viewport, colorScheme] of [
         fullPage: true,
       });
       await page.getByRole('link', { name: 'Deploy', exact: true }).click();
-      const sha = crypto.randomUUID().replaceAll('-', '') + 'a'.repeat(8);
-      await page.getByLabel('Commit SHA').fill(sha);
+      const sha = commits[1].sha;
+      await page.getByRole('radio', { name: 'Fixture change 2' }).check();
+      await expect(page.getByLabel('Commit SHA')).toHaveValue(sha);
+      expect(github).toHaveLength(1);
+      expect(github[0].url()).toBe(
+        'https://api.github.com/repos/example/student-app/commits?sha=main&per_page=5',
+      );
+      const githubHeaders = await github[0].allHeaders();
+      expect(githubHeaders.cookie).toBeUndefined();
+      expect(githubHeaders.referer).toBeUndefined();
+      await page.evaluate(() => {
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        window.scrollTo(0, 0);
+      });
+      await page.screenshot({ path: path.join(screenshots, `${mode}-deploy.png`), fullPage: true });
       await page.getByRole('button', { name: 'Review deployment' }).click();
       await expect(page.getByRole('dialog')).toBeVisible();
       await expect(page.getByRole('dialog')).toContainText(sha);
+      await expect(page.getByRole('dialog')).toContainText('Fixture change 2');
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         window.scrollTo(0, 0);
@@ -167,6 +199,15 @@ for (const [mode, viewport, colorScheme] of [
         path: path.join(screenshots, `${mode}-build-log.png`),
         fullPage: true,
       });
+      await page.goto(`/apps/${appId}/logs`);
+      await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
+      await page.evaluate(() => {
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        window.scrollTo(0, 0);
+      });
+      await page.screenshot({ path: path.join(screenshots, `${mode}-logs.png`), fullPage: true });
+      await page.getByRole('radio', { name: 'Errors' }).check();
+      await expect(page.getByLabel('App errors')).toContainText('SESSION_SECRET');
       await page.goto('/apps');
       await expect(
         page
@@ -221,6 +262,7 @@ for (const [mode, viewport, colorScheme] of [
         `/api/v1/apps/${appId}/configuration`,
         `/api/v1/apps/${appId}/deployments/${attempt.deploymentId}`,
         `/api/v1/apps/${appId}/deployments/${attempt.deploymentId}/build-log`,
+        `/api/v1/apps/${appId}/logs`,
       ])
         expect((await bobPage.request.get(route)).status()).toBe(404);
       const bobApps = await bobPage.request.get('/api/v1/apps');

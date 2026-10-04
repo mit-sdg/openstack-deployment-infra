@@ -112,6 +112,26 @@ export type BuildLog = {
   nextOffset: number | null;
   truncated: boolean;
 };
+/** stdout ("Output") or stderr ("Errors") of the running app. */
+export type LogStream = 'stdout' | 'stderr';
+/** Recent output of an app; `running` is false when nothing runs to read from. */
+export type RuntimeLog = {
+  stream: LogStream;
+  running: boolean;
+  text: string;
+  truncated: boolean;
+  lines: number;
+  observedAt: string;
+};
+export const runtimeLogData = (v: unknown) =>
+  fields(v, {
+    stream: 'string',
+    running: 'boolean',
+    text: 'string',
+    truncated: 'boolean',
+    lines: 'number',
+    observedAt: 'string',
+  }) as RuntimeLog;
 
 export class ApiError extends Error {
   constructor(
@@ -309,6 +329,8 @@ export const api = {
       `/apps/${app}/deployments/${deployment}/build-log?lines=200`,
       (v) => fields(v, { text: 'string', state: 'string', truncated: 'boolean' }) as BuildLog,
     ),
+  logs: (app: string, stream: LogStream) =>
+    request(`/apps/${app}/logs?stream=${stream}`, runtimeLogData),
   intents: () => request('/intents?limit=8', (v) => pageData(v, intentData)),
   intent: (id: string) => request(`/intents/${id}`, intentData),
   resume: (id: string) =>

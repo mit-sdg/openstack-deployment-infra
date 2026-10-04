@@ -6,6 +6,7 @@ import dataclasses
 import http.client
 import json
 import os
+import re
 import socket
 import tempfile
 import threading
@@ -29,7 +30,7 @@ from openstack_platform.management.broker.database import Database
 from openstack_platform.management.common import canonical, opaque
 from openstack_platform.management.config import Config
 from openstack_platform.management.dev.controller import FakeController
-from openstack_platform.management.web.server import WebServer
+from openstack_platform.management.web.server import WebHandler, WebServer
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -974,6 +975,38 @@ class WebTransportTests(ManagementCase):
         response.read()
         connection.close()
         return response
+
+    def test_every_broker_route_reaches_the_broker_through_the_web_server(self) -> None:
+        # Browser-unreachable broker routes; everything else must pass the web server.
+        internal = {("GET", "/v1/health")}
+        samples = {"key": "TOKEN"}
+        for route in self.router._routes:
+            path = re.sub(
+                r"\(\?P<(\w+)>\[\^/\]\+\)",
+                lambda match: samples.get(match.group(1), str(uuid.uuid4())),
+                route.pattern.pattern[1:-1],
+            ).replace("\\", "")
+            if (route.method, path) in internal:
+                continue
+            browser = path.removeprefix("/v1") if path.startswith("/v1/auth/") else "/api" + path
+            with self.subTest(method=route.method, path=path):
+                self.assertTrue(hasattr(WebHandler, "do_" + route.method))
+                reply = self.web.forward(route.method, browser, "", {}, b"")
+                self.assertNotIn(reply.status, {404, 405}, json.loads(reply.body))
+
+    def test_account_changes_use_patch_end_to_end(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
+        connection.request(
+            "PATCH",
+            f"/api/v1/accounts/{uuid.uuid4()}",
+            body=b'{"action":"role","value":"staff"}',
+            headers={"Host": "127.0.0.1:18080", "Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        # No broker listens here: reaching it proves the web server forwarded the PATCH.
+        self.assertEqual((response.status, body["error"]["code"]), (503, "BROKER_UNAVAILABLE"))
 
     def test_host_routes_headers_and_private_assets(self) -> None:
         response = self.web_request("/apps")

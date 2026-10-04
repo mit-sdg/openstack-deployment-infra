@@ -23,6 +23,7 @@ from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
 from .journal import Journal, intent_model
+from .runtime_logs import RuntimeLogs
 from .staff import StaffReads
 
 RESERVED = {"admin", "api", "auth", "status", "www", "platform", "class"}
@@ -52,6 +53,7 @@ class Broker:
         self.staff = StaffReads(self)
         self.accounts = Accounts(self)
         self.admin_apps = AdminApps(self)
+        self.runtime_logs = RuntimeLogs(self)
         self.request_actor: ContextVar[tuple[str, str | None] | None] = ContextVar(
             "app_request_actor", default=None
         )
@@ -89,6 +91,7 @@ class Broker:
             ("GET", "/v1/apps/{app}/deployments", self.history),
             ("GET", "/v1/apps/{app}/deployments/{deployment}", self.deployment),
             ("GET", "/v1/apps/{app}/deployments/{deployment}/build-log", self.build_log),
+            ("GET", "/v1/apps/{app}/logs", self.runtime_logs.handle),
             ("GET", "/v1/intents", self.intents),
             ("GET", "/v1/intents/{intent}", self.intent),
             ("POST", "/v1/intents/{intent}/resume", self.resume),
@@ -147,6 +150,8 @@ class Broker:
                         or request.path.endswith("/deployments")
                         else {"lines", "offset"}
                         if request.path.endswith("/build-log")
+                        else {"stream"}
+                        if request.path.endswith("/logs")
                         else set()
                     )
                     if set(request.query) - allowed_query:

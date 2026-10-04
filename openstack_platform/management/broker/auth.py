@@ -488,7 +488,7 @@ class Auth:
                     if user["kind"] == "admin"
                     else None,
                     "platformName": self.config.platform_name,
-                    "features": ["apps", "deployments", "build-logs"]
+                    "features": ["apps", "deployments", "build-logs", "runtime-logs"]
                     + (["staff-read"] if user["kind"] != "owner" else [])
                     + (["accounts"] if user["kind"] == "admin" else []),
                 }

@@ -59,6 +59,7 @@ class AdminApps:
             ("POST", root + "/{app}/deployments", b.deploy),
             ("GET", root + "/{app}/deployments", b.history),
             ("GET", root + "/{app}/deployments/{deployment}", b.deployment),
+            ("GET", root + "/{app}/logs", b.runtime_logs.handle),
             ("PUT", root + "/{app}/owner", self.reassign),
             ("POST", root + "/{app}/state", self.state),
         ]
@@ -76,6 +77,8 @@ class AdminApps:
             if request.path == "/v1/admin-apps" or request.path.endswith("/deployments")
             else {"lines", "offset"}
             if request.path.endswith("/build-log")
+            else {"stream"}
+            if request.path.endswith("/logs")
             else set()
         )
         if (

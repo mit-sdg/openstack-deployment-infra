@@ -4,9 +4,11 @@ import {
   record,
   request,
   resourceApi,
+  runtimeLogData,
   type AppRecord,
   type ConfirmStorage,
   type Intent,
+  type LogStream,
 } from './api';
 export type ManagedApp = AppRecord & {
   ownerId: string;
@@ -36,6 +38,8 @@ const nullableString = (value: unknown) => {
 };
 const intent = (v: unknown) => fields(v, { intentId: 'string', state: 'string' }) as Intent;
 export const adminAppsApi = {
+  logs: (id: string, stream: LogStream) =>
+    request(`/admin-apps/${id}/logs?stream=${stream}`, runtimeLogData),
   list: (cursor?: string) =>
     request('/admin-apps' + (cursor ? `?cursor=${cursor}` : ''), (v) =>
       pageData(v, (item) => {
