@@ -189,6 +189,46 @@ describe('typed API', () => {
 });
 
 describe('owner app controls', () => {
+  it('refreshes the app as soon as a stop finishes', async () => {
+    const app = {
+      applicationId: 'app',
+      slug: 'demo',
+      savedRevision: 1,
+      lifecycleState: 'ready',
+      desiredRunning: true,
+      stale: false,
+      activeDeploymentId: 'deployment',
+      acceptedDeployment: {
+        deploymentId: 'deployment',
+        sourceCommit: 'a'.repeat(40),
+        acceptedAt: '2026-10-01T00:00:00Z',
+      },
+    };
+    const read = vi.spyOn(api, 'app').mockResolvedValue(app as never);
+    vi.spyOn(api, 'history').mockResolvedValue({ items: [], nextCursor: null, truncated: false });
+    vi.spyOn(api, 'activity').mockResolvedValue([]);
+    vi.spyOn(api, 'state').mockImplementation(async () => {
+      read.mockResolvedValue({ ...app, desiredRunning: false } as never);
+      return { intentId: 'stop', state: 'accepted' } as never;
+    });
+    vi.spyOn(api, 'intent').mockResolvedValue({
+      intentId: 'stop',
+      kind: 'app_disable',
+      appId: 'app',
+      state: 'succeeded',
+    } as never);
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <Overview id="app" />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop app' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Stop app' })[1]);
+    expect(await screen.findByRole('button', { name: 'Start app' })).toBeEnabled();
+  });
+
   it('confirms a restart and uses one idempotency key while preserving the version', async () => {
     const app = {
       applicationId: 'app',

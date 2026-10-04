@@ -156,7 +156,7 @@ let
       ${packages.controllerPackage}/bin/openstack-platform-management-broker-backup restore "$input" \
       --destination ${managementBrokerState}/management.sqlite3 \
       --config ${managementBrokerConfig} --yes
-    ${pkgs.util-linux}/bin/runuser -u ${managementBrokerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input" "$keys"
+    ${pkgs.util-linux}/bin/runuser -u ${managementBrokerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input"
   '';
   managementPrepare = pkgs.writeShellScript "${namespace}-management-prepare" ''
     set -euo pipefail

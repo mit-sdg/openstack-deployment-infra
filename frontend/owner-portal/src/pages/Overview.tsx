@@ -15,7 +15,7 @@ import {
   SectionSkeleton,
   buttonClass,
 } from '@openstack-platform/ui';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'wouter';
 import { api, type AppRecord } from '../api';
@@ -74,6 +74,12 @@ function RuntimeActions({ app }: { app: AppRecord }) {
   const [intentId, setIntentId] = useState<string | null>(null);
   const intent = useIntentPolling(intentId);
   const client = useQueryClient();
+  useEffect(() => {
+    if (intent.data && ['succeeded', 'failed'].includes(intent.data.state)) {
+      client.invalidateQueries({ queryKey: ['app', app.applicationId] });
+      client.invalidateQueries({ queryKey: ['activity', app.applicationId] });
+    }
+  }, [intent.data?.state, intentId, client, app.applicationId]);
   const change = useMutation({
     mutationFn: () =>
       action === 'restart'
@@ -86,7 +92,8 @@ function RuntimeActions({ app }: { app: AppRecord }) {
     },
   });
   const busy =
-    change.isPending || (!!intent.data && !['succeeded', 'failed'].includes(intent.data.state));
+    change.isPending ||
+    (!!intentId && (!intent.data || !['succeeded', 'failed'].includes(intent.data.state)));
   function open(next: 'stop' | 'start' | 'restart') {
     change.reset();
     setConsent(false);

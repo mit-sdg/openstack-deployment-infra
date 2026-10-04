@@ -10,6 +10,7 @@ let
   managementIdentityBootstrap = pkgs.writeText "management-identity-bootstrap.py" ''
     import faulthandler
     import signal
+    import sys
     # Test-only: SIGUSR1 dumps every thread's stack without stopping the service.
     stacks = open("/run/${namespace}-management-identity/stacks.txt", "w")
     faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
@@ -191,7 +192,6 @@ let
     import shutil
     import subprocess
     import stat
-    import sys
     from pathlib import Path
 
     Path("${state}/operator/status/managed-backup-probe-ran").touch()
@@ -552,7 +552,7 @@ let
               machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
               machine.succeed("! systemctl cat ${namespace}-platform-backup.service | grep -F 'LoadCredential='")
               machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'SECRETS_FILE=%t/${namespace}-backup-private/storage-bootstrap.env'")
-              machine.succeed("systemctl show ${namespace}-platform-backup.service -p Requires --value | grep -F '${builtins.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" backups)}.mount'")
+              machine.succeed("systemctl show ${namespace}-platform-backup.service -p Requires --value | grep -F -- \"$(systemd-escape --path ${backups}).mount\"")
               machine.fail("systemctl cat ${namespace}-platform-backup.service | grep -F REGISTRY_BACKUP_")
               machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F '/backup/verify_garage_backup.py'")
               machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran && rm ${state}/operator/status/managed-backup-probe-ran")

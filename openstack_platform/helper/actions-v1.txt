@@ -16,8 +16,8 @@ app.remove
 app.restart
 app.source.check
 app.source.commits
-app.source.preflight
 app.source.key
+app.source.preflight
 app.startup
 app.stop
 app.worker.capacity

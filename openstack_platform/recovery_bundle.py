@@ -325,7 +325,7 @@ def _validate_component(
             _fail("managed-data evidence omits its manifest")
         manifest = _key_values(by_name["MANIFEST"])
         version = manifest.get("format_version")
-        archives = ("postgres.age", "mongodb.age", "garage.age")
+        archives: tuple[str, ...] = ("postgres.age", "mongodb.age", "garage.age")
         if version == "2" and manifest.get("registry") == "distribution-artifacts-tar-gzip":
             archives += ("registry.age",)
         elif version != "3" or "registry" in manifest:

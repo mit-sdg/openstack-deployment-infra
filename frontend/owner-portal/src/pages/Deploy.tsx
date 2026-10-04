@@ -316,10 +316,9 @@ export function DeployPage({ id }: { id: string }) {
               {
                 label: 'Commit',
                 value: <span className="ui-mono ui-break">{sha}</span>,
+                stacked: true,
               },
-              ...(picked
-                ? [{ label: 'Message', value: <span className="ui-break">{picked.message}</span> }]
-                : []),
+              ...(picked ? [{ label: 'Message', value: picked.message }] : []),
               ...summary(settings.data, injectedNames).filter((item) =>
                 ['Repository', 'Branch', 'Environment variables'].includes(item.label),
               ),
