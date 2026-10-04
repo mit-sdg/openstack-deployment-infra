@@ -327,7 +327,8 @@ Worker-local files are disposable; managed data is not copied between workers.
   operation. A changed body with that key is a conflict, not a new deployment.
 
 Build logs: project `GET /v1/deployments/{operationId}/build-log?lines=100`.
-Runtime logs: project `GET /v1/applications/{id}/runtime-log?lines=100`.
+Runtime logs: project `GET /v1/applications/{id}/runtime-log?lines=100` (add
+`&stream=stderr` for standard error).
 Capture them privately; application logs can contain sensitive values. There is
 no `GET /v1/admin/deployments/{id}` route. Use the project read above, or filter
 the paginated `GET /v1/admin/deployments` list.

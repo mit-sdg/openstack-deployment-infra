@@ -319,6 +319,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/staff.py` — closed metadata projections, catalog paging, read budgets and transactional staff audit.
 - `openstack_platform/management/broker/staff_policy.py` — fixed metadata bounds and URL sanitization.
 - `tests/test_management_staff.py` — staff read-only authority, disclosure, quota/paging/audit and migration/restore evidence.
+- `openstack_platform/management/broker/runtime_logs.py` — owner/admin runtime log reads, shared briefly and one at a time so they can't crowd the controller.
+- `tests/test_management_runtime_logs.py` — runtime log ownership, streams, sharing, not-running and older-controller answers, and bounded tails.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
 - `openstack_platform/management/web/server.py` — bounded HTTP, static serving, closed broker forwarding, typed cookie directives, and CSP/security headers.
@@ -373,6 +375,9 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/Feedback.tsx` — shared owner Feedback component and presentation behavior.
 - `frontend/owner-portal/src/components/Mark.tsx` — shared owner Mark component and presentation behavior.
 - `frontend/owner-portal/src/components/Operation.tsx` — shared owner Operation component and presentation behavior.
+- `frontend/owner-portal/src/components/LogViewer.tsx` — app runtime output/errors viewer for owner and admin pages.
+- `frontend/owner-portal/src/components/LogViewer.test.tsx` — log stream switching, refresh, not-running and unavailable-stream tests.
+- `frontend/owner-portal/src/components/RecentCommits.tsx` — recent-commit picker for deploys, read from GitHub by the browser.
 - `frontend/owner-portal/src/components/Status.tsx` — shared owner Status component and presentation behavior.
 - `frontend/owner-portal/src/components/Repository.tsx` — repository links labelled with their short owner/repo name.
 - `frontend/owner-portal/src/components/StorageSection.tsx` — owner storage provisioning, bindings, verification and rotation controls.
@@ -385,12 +390,15 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/Dashboard.tsx` — owner dashboard page module.
 - `frontend/owner-portal/src/pages/Deploy.tsx` — owner deploy page module.
 - `frontend/owner-portal/src/pages/Deployment.tsx` — owner deployment page module.
+- `frontend/owner-portal/src/pages/Logs.tsx` — owner app logs page module.
 - `frontend/owner-portal/src/pages/History.tsx` — owner history page module.
 - `frontend/owner-portal/src/pages/NewApp.tsx` — owner newapp page module.
 - `frontend/owner-portal/src/pages/Overview.tsx` — owner overview page module.
 - `frontend/owner-portal/src/pages/SignIn.tsx` — owner signin page module.
 - `frontend/owner-portal/src/shell/PortalShell.tsx` — responsive portal shell, navigation, theme, and session controls.
 - `frontend/owner-portal/src/utils/presentation.ts` — owner date, commit, health, and operation phase presentation helpers.
+- `frontend/owner-portal/src/utils/github.ts` — cookie-free, referrer-free GitHub API read of a branch's newest commits.
+- `frontend/owner-portal/src/utils/github.test.ts` — GitHub commit parsing, request options and failure mapping tests.
 - `openstack_platform/management/broker/anonymous.py` — private HMAC key, stateless expiring anonymous challenges, and bounded per-client-address limits.
 - `openstack_platform/management/broker/resources.py` — owner environment and storage routes, validation, and secret-free projections.
 - `tests/test_management_contract.py` — real project-socket broker contract and fake/real wire-shape, errors, cleanup, and read evidence.

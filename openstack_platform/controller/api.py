@@ -749,12 +749,16 @@ class ControllerAPI:
 
     def _runtime_log(self, request: Request) -> Response:
         application = self._application(self._path_uuid(request))
-        lines, _offset = self._log_query(request, allow_offset=False)
-        chunk = self.logs.runtime(application.application_id, lines=lines)
+        lines, _offset = self._log_query(request, allow_offset=False, allow_stream=True)
+        stream = self._single_query(request, "stream") or "stdout"
+        chunk = self.logs.runtime(
+            application.application_id, lines=lines, stderr=stream == "stderr"
+        )
         return Response(
             200,
             {
                 "applicationId": application.application_id,
+                "stream": stream,
                 "text": chunk.text,
                 "state": chunk.state,
                 "nextOffset": chunk.next_offset,
@@ -1417,10 +1421,20 @@ class ControllerAPI:
             "truncated": truncated,
         }
 
-    def _log_query(self, request: Request, *, allow_offset: bool) -> tuple[int, int | None]:
+    def _log_query(
+        self, request: Request, *, allow_offset: bool, allow_stream: bool = False
+    ) -> tuple[int, int | None]:
         allowed = {"lines", "offset"} if allow_offset else {"lines"}
+        if allow_stream:
+            allowed.add("stream")
         if set(request.query) - allowed:
             raise HttpError(400, "INVALID_QUERY", "log query fields are invalid")
+        if allow_stream and self._single_query(request, "stream") not in {
+            None,
+            "stdout",
+            "stderr",
+        }:
+            raise HttpError(400, "INVALID_QUERY", "stream must be stdout or stderr")
         raw_lines = self._single_query(request, "lines")
         try:
             lines = 200 if raw_lines is None else int(raw_lines)

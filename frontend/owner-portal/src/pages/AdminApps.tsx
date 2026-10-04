@@ -34,6 +34,8 @@ import { ApiError, type StorageResource } from '../api';
 import { adminAppsApi, type CatalogApp, type ManagedApp } from '../adminAppsApi';
 import { ConfigurationForm } from './Configuration';
 import { QueryError } from '../components/Feedback';
+import { LogViewer } from '../components/LogViewer';
+import { RecentCommits } from '../components/RecentCommits';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useIntentPolling } from '../hooks/useIntentPolling';
@@ -506,6 +508,11 @@ function ManagedApplication({ id }: { id: string }) {
           </OperationList>
         </Section>
       )}
+      <LogViewer
+        queryKey={['admin', 'logs', id]}
+        read={(stream) => adminAppsApi.logs(id, stream)}
+        idle="Logs appear while the app is running."
+      />
       {/* Keyed by app only, like the owner page: the form tracks the saved
           revision itself, so a save doesn't remount it and lose its
           confirmation. */}
@@ -553,6 +560,8 @@ function ManagedApplication({ id }: { id: string }) {
         onClose={() => setAction(null)}
         app={data}
         revision={settings.data.revision}
+        repository={settings.data.repository}
+        branch={settings.data.branch}
         onStarted={started}
       />
       <StateDialog
@@ -636,12 +645,16 @@ function DeployDialog({
   onClose,
   app,
   revision,
+  repository,
+  branch,
   onStarted,
 }: {
   open: boolean;
   onClose: () => void;
   app: ManagedApp;
   revision: number;
+  repository: string;
+  branch: string;
   onStarted: (result: { intentId: string }) => void;
 }) {
   const identity = app.identityProvider;
@@ -689,7 +702,19 @@ function DeployDialog({
     >
       <form id="admin-deploy" className="ui-stack ui-gap-4" onSubmit={submit}>
         <ErrorAlert error={deploy.error} />
-        <Field label="Commit" id="managed-commit" hint="The full 40-character commit SHA.">
+        {open && repository && (
+          <RecentCommits
+            repository={repository}
+            branch={branch}
+            value={sha}
+            onSelect={(commit) => setSha(commit.sha)}
+          />
+        )}
+        <Field
+          label="Commit"
+          id="managed-commit"
+          hint="Pick a commit above or paste the full 40-character SHA."
+        >
           <Input
             required
             pattern="[a-f0-9]{40}"

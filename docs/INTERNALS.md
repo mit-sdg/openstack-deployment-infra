@@ -381,7 +381,7 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}/deployments` | List bounded deployment history |
 | `GET /v1/deployments/{id}` | Read one deployment attempt |
 | `GET /v1/deployments/{id}/build-log` | Read bounded retained build output |
-| `GET /v1/applications/{id}/runtime-log` | Read bounded current runtime output |
+| `GET /v1/applications/{id}/runtime-log` | Read bounded current runtime output; `stream=stdout` (default) or `stderr` |
 | `GET /v1/applications/{id}/environment` | List environment names and metadata, never values |
 | `PUT /v1/applications/{id}/environment/{key}` | Add or replace one value |
 | `DELETE /v1/applications/{id}/environment/{key}` | Remove one caller-owned value |
@@ -609,13 +609,18 @@ intent; recovery-required/unknown cleanup holds it. Broker/controller do not sha
 a transaction. No ownership is inferred from a slug or reassigned by username.
 
 The UI supports sign-in, my apps/quota/create, public repository/preferred branch,
-typed Node/Bun settings, full-SHA review/deploy, observed status/health, history and
-build logs. React assets are external static files under strict CSP; admin runs
-Python only. The configuration page supports write-only environment edits and
+typed Node/Bun settings, full-SHA review/deploy, observed status/health, history,
+build logs and runtime logs. React assets are external static files under strict
+CSP; admin runs Python only. The deploy page lists the branch's five newest
+commits straight from `api.github.com` (the one non-self `connect-src`), without
+cookies or a referrer; private repositories and GitHub's hourly limit for
+unsigned requests fall back to pasting a SHA. Owners read their app's runtime
+logs (`GET /api/v1/apps/{app}/logs?stream=stdout|stderr`, admins through
+`/api/v1/admin-apps/{app}/logs`); the broker shares each read for 5 s and runs one
+at a time, because the controller serves it from Nomad under its shared lock. The configuration page supports write-only environment edits and
 one resource per storage type (`postgres`, `mongo`, `s3`) per app, including pending
 creation intents. The controller allows multiple resource names per type; the
-broker deliberately restricts owners to one. Enable/disable and runtime logs
-remain later work. Storage deletion and global administrator reads remain
+broker deliberately restricts owners to one. Enable/disable remains later work. Storage deletion and global administrator reads remain
 operator-only.
 
 Broker resource responses are explicit projections: environment names/revision

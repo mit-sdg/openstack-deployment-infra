@@ -1,4 +1,10 @@
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  type ReactNode,
+} from "react";
 import { Icon } from "../Icon";
 
 /**
@@ -78,7 +84,8 @@ export function tabClass(active: boolean) {
 
 /**
  * Page-level tabs made of links (each tab is a route). Mark the current one
- * with tabClass(true) and aria-current="page". Scrolls sideways on phones.
+ * with tabClass(true) and aria-current="page". Scrolls sideways on phones,
+ * starting with the current tab in view.
  */
 export function TabNav({
   label,
@@ -87,8 +94,18 @@ export function TabNav({
   label: string;
   children: ReactNode;
 }) {
+  const ref = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const nav = ref.current;
+    const current = nav?.querySelector('[aria-current="page"]');
+    if (!nav || !current) return;
+    const track = nav.getBoundingClientRect();
+    const tab = current.getBoundingClientRect();
+    if (tab.right > track.right) nav.scrollLeft += tab.right - track.right;
+    else if (tab.left < track.left) nav.scrollLeft -= track.left - tab.left;
+  }, []);
   return (
-    <nav className="ui-tabs" aria-label={label}>
+    <nav ref={ref} className="ui-tabs" aria-label={label}>
       {children}
     </nav>
   );

@@ -1,4 +1,10 @@
-import { useId, useState, type ReactNode } from "react";
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Icon } from "../Icon";
 import { Field } from "./Field";
 
@@ -227,18 +233,27 @@ export function KeyValueList({
 /**
  * Monospaced text block. "log" caps the height and scrolls; it is focusable
  * so keyboard users can scroll it. Text is rendered as text, never HTML.
+ * `end` shows the end first (and again when the text changes), for logs
+ * whose newest lines matter most.
  */
 export function CodeBlock({
   label,
   variant = "block",
+  end = false,
   children,
 }: {
   label: string;
   variant?: "block" | "log";
+  end?: boolean;
   children: string;
 }) {
+  const ref = useRef<HTMLPreElement>(null);
+  useLayoutEffect(() => {
+    if (end && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [end, children]);
   return (
     <pre
+      ref={ref}
       className={`ui-code ui-code--${variant}`}
       tabIndex={0}
       aria-label={label}

@@ -113,6 +113,12 @@
   align-items: start;
 }
 
+/* Recent commits: one full-width option per commit. */
+.app-commits .ui-fieldset__options {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ui-space-2);
+}
+
 /* Environment variable names in a summary. */
 .app-names {
   display: flex;

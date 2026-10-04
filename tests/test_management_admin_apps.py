@@ -553,6 +553,17 @@ class AdminApplicationTests(ManagementCase):
         with self.broker.database.connect() as db:
             self.assertNotIn("PLAN_SECRET_SENTINEL", "\n".join(db.iterdump()))
 
+    def test_admin_reads_any_apps_logs(self) -> None:
+        app = self.adopted(identity=False)
+        result = self.call("GET", f"/v1/admin-apps/{app}/logs?stream=stderr", owner="admin")
+        self.assertEqual(result.body["data"]["stream"], "stderr")
+        self.assertTrue(result.body["data"]["running"])
+        self.assertEqual(result.body["data"]["text"], "Warning: SESSION_SECRET is short\n")
+        self.assert_error(
+            "INVALID_REQUEST",
+            lambda: self.call("GET", f"/v1/admin-apps/{app}/logs?lines=5", owner="admin"),
+        )
+
     def test_admin_cannot_read_cross_owner_logs_or_privileged_controller_routes(self) -> None:
         self.assert_error(
             "NOT_FOUND",

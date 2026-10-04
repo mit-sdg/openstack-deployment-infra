@@ -82,10 +82,12 @@ class LogService:
         application_identifier: str,
         *,
         lines: int,
+        stderr: bool = False,
     ) -> LogChunk:
         application = self._application(application_identifier)
         result = app.application_logs(
             application.slug,
+            stderr=stderr,
             lines=lines,
             follow=False,
             timeout_seconds=self.config.policy.limits.helper_seconds,

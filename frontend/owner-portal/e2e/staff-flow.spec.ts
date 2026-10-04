@@ -93,6 +93,20 @@ for (const [layout, viewport, colorScheme] of [
           managedReads.push(`${response.status()} ${new URL(response.url()).pathname}`);
       });
       admin.on('request', (request) => requestUrls.push(request.url()));
+      // The admin deploy dialog lists recent commits from GitHub; keep it offline.
+      const github: string[] = [];
+      await admin.route('https://api.github.com/**', (route) => {
+        github.push(route.request().url());
+        return route.fulfill({
+          json: [
+            {
+              sha: 'c'.repeat(40),
+              commit: { message: 'Class app fixture', author: { name: 'Staff' } },
+            },
+          ],
+          headers: { 'Access-Control-Allow-Origin': '*' },
+        });
+      });
       await page.goto(url);
       await expect(page).toHaveURL(/\/setup$/);
       await page.getByLabel('Username', { exact: true }).fill('admin' + suffix);
@@ -202,6 +216,11 @@ for (const [layout, viewport, colorScheme] of [
       await expect(dialog).toContainText('this app keeps a fixed IP address');
       await expect(dialog).toContainText('goes offline briefly');
       const deploy = dialog.getByRole('button', { name: 'Deploy', exact: true });
+      await dialog.getByRole('radio', { name: 'Class app fixture' }).check();
+      await expect(dialog.getByLabel('Commit', { exact: true })).toHaveValue('c'.repeat(40));
+      expect(github).toEqual([
+        'https://api.github.com/repos/example/class-app/commits?sha=main&per_page=5',
+      ]);
       await expect(deploy).toBeDisabled();
       await dialog.getByLabel('Allow a brief outage', { exact: false }).check();
       await expect(deploy).toBeDisabled();
@@ -213,6 +232,22 @@ for (const [layout, viewport, colorScheme] of [
       ).toBeVisible();
       expect((await staffPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
       expect((await ownerPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
+      // A class account's role changes through the Accounts page (a PATCH).
+      await commons(otherPage, 'bob');
+      const csrf = { 'X-CSRF-Token': liveSession.csrfToken };
+      const role = async () =>
+        (await (await page.request.get('/api/v1/accounts?q=bob', { headers: csrf })).json()).data
+          .items[0].role as string;
+      const next = (await role()) === 'staff' ? 'owner' : 'staff';
+      await page.getByRole('link', { name: 'Accounts', exact: true }).click();
+      await page.getByRole('button', { name: 'Bob Student', exact: true }).click();
+      const manage = page.getByRole('dialog', { name: 'Bob Student', exact: true });
+      await manage.getByLabel('Role', { exact: true }).selectOption(next);
+      await manage.getByRole('button', { name: 'Change role', exact: true }).click();
+      await expect(page.getByText('Role changed', { exact: true })).toBeVisible();
+      expect(await role()).toBe(next);
     } finally {
       await admin.close();
       await staff.close();

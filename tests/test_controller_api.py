@@ -162,6 +162,34 @@ class ControllerAPITests(unittest.TestCase):
             )
         self.assertEqual(error.exception.code, "NOT_FOUND")
 
+    def test_runtime_log_reads_the_selected_stream(self) -> None:
+        application = self.create_application().body["applicationId"]
+        calls: list[dict[str, object]] = []
+
+        def helper(_config, action, values, *, deadline=None):
+            self.assertEqual(action, "app.logs")
+            calls.append(dict(values))
+            return {"text": "stream " + ("err" if values["stderr"] else "out") + "\n"}
+
+        self.api.logs.helper_caller = helper
+        path = f"/v1/applications/{application}/runtime-log"
+        default = self.dispatch("GET", path + "?lines=20")
+        errors = self.dispatch("GET", path + "?stream=stderr&lines=20")
+        self.assertEqual((default.body["stream"], default.body["text"]), ("stdout", "stream out\n"))
+        self.assertEqual((errors.body["stream"], errors.body["text"]), ("stderr", "stream err\n"))
+        self.assertEqual(
+            calls,
+            [
+                {"slug": "demo-app", "stderr": False, "lines": 20},
+                {"slug": "demo-app", "stderr": True, "lines": 20},
+            ],
+        )
+        for query in ("stream=both", "stream=stdout&stream=stderr", "stream=", "offset=1"):
+            with self.subTest(query=query), self.assertRaises(HttpError) as raised:
+                self.dispatch("GET", f"{path}?{query}")
+            self.assertEqual(raised.exception.code, "INVALID_QUERY")
+        self.assertEqual(len(calls), 2)
+
     def test_project_deployment_validates_and_forwards_plan_and_maintenance(self) -> None:
         application = self.create_application().body["applicationId"]
         body = {

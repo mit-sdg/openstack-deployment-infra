@@ -23,6 +23,7 @@ import { AppFrame } from '../components/AppFrame';
 import { BoundaryText } from '../components/BoundaryText';
 import { QueryError } from '../components/Feedback';
 import { Operation, OperationList } from '../components/Operation';
+import { RecentCommits, useRecentCommits } from '../components/RecentCommits';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 
 function Names({ names }: { names: string[] }) {
@@ -71,6 +72,8 @@ export function DeployPage({ id }: { id: string }) {
   const identity = useQuery({ queryKey: ['app', id], queryFn: () => api.app(id) });
   const [identityConfirmed, setIdentityConfirmed] = useState(false);
   const [sha, setSha] = useState('');
+  const recent = useRecentCommits(settings.data?.repository ?? '', settings.data?.branch ?? '');
+  const picked = recent.data?.find((commit) => commit.sha === sha);
   const [error, setError] = useState<string | null>(null);
   const [intentId, setIntentId] = useState<string | null>(null);
   const [review, setReview] = useState(false);
@@ -154,11 +157,21 @@ export function DeployPage({ id }: { id: string }) {
                   </Button>
                 }
               >
+                <RecentCommits
+                  repository={settings.data.repository}
+                  branch={settings.data.branch}
+                  value={sha}
+                  onSelect={(commit) => {
+                    setSha(commit.sha);
+                    setError(null);
+                    setPendingKey(null);
+                  }}
+                />
                 <Field
                   label="Commit SHA"
                   id="commit"
                   error={error}
-                  hint="Copy the full SHA from GitHub. The deployment always uses this exact commit, even if the branch moves on."
+                  hint="Pick a commit above or paste a full SHA from GitHub. The deployment always uses this exact commit, even if the branch moves on."
                 >
                   <Input
                     className="app-mono-input"
@@ -225,6 +238,9 @@ export function DeployPage({ id }: { id: string }) {
                 label: 'Commit',
                 value: <span className="ui-mono ui-break">{sha}</span>,
               },
+              ...(picked
+                ? [{ label: 'Message', value: <span className="ui-break">{picked.message}</span> }]
+                : []),
               ...summary(settings.data, injectedNames).filter((item) =>
                 ['Repository', 'Branch', 'Environment variables'].includes(item.label),
               ),

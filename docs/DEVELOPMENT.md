@@ -246,8 +246,9 @@ uv run python -m openstack_platform.management.dev \
 Open `http://127.0.0.1:9445/sign-in`. HTTP is explicit loopback development,
 with unprefixed development cookies. Production entry points reject development
 mode or custom trust. The HTTPS smoke serves built assets under the production
-CSP: scripts/styles/connect/form-action are self-only, with no inline scripts or
-styles. Passwords never enter URLs, application browser storage or screenshots.
+CSP: scripts/styles/form-action are self-only and connect is self plus
+`https://api.github.com` (the deploy page's recent commits), with no inline
+scripts or styles. Passwords never enter URLs, application browser storage or screenshots.
 
 The anonymous HMAC binder cookie is HttpOnly, Path=/, SameSite=Strict, Secure
 and __Host-prefixed on HTTPS. Login requires the exact portal Origin plus its
