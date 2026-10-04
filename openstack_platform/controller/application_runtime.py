@@ -173,10 +173,65 @@ class DeploymentFailed(ApplicationError):
         *,
         cleanup_succeeded: bool,
         cleanup_evidence: Mapping[str, Any] | None = None,
+        startup: Mapping[str, Any] | None = None,
     ) -> None:
         self.cleanup_succeeded = cleanup_succeeded
         self.cleanup_evidence = dict(cleanup_evidence or {})
+        # How the removed candidate started (startup_evidence); None when unread.
+        self.startup = None if startup is None else dict(startup)
         super().__init__(message)
+
+
+STARTUP_LINES = 200
+_STARTUP_TEXT_BYTES = 65_536
+
+
+def startup_evidence(value: object) -> dict[str, Any] | None:
+    """Validate helper app.startup output into a bounded, owner-visible record."""
+    if not isinstance(value, Mapping) or value.get("found") not in (True, False):
+        return None
+    if value["found"] is False:
+        return {"found": False}
+
+    def text(name: str) -> str:
+        item = value.get(name)
+        if not isinstance(item, str):
+            raise ValueError(name)
+        return item.encode()[-_STARTUP_TEXT_BYTES:].decode("utf-8", errors="ignore")
+
+    def number(item: object) -> int | None:
+        return item if isinstance(item, int) and not isinstance(item, bool) else None
+
+    events: list[dict[str, Any]] = []
+    raw_events = value.get("events")
+    for event in raw_events[-12:] if isinstance(raw_events, list) else []:
+        if not isinstance(event, Mapping) or not isinstance(event.get("type"), str):
+            continue
+        message = event.get("message")
+        events.append(
+            {
+                "type": event["type"][:64],
+                "message": message[:512] if isinstance(message, str) else "",
+                "exitCode": number(event.get("exitCode")),
+                "oomKilled": event.get("oomKilled") is True,
+                "time": number(event.get("time")),
+            }
+        )
+    try:
+        return {
+            "found": True,
+            "clientStatus": str(value.get("clientStatus", ""))[:32],
+            "taskState": str(value.get("taskState", ""))[:32],
+            "failed": value.get("failed") is True,
+            "restarts": max(0, number(value.get("restarts")) or 0),
+            "events": events,
+            "stdout": text("stdout"),
+            "stderr": text("stderr"),
+            "stdoutTruncated": value.get("stdoutTruncated") is True,
+            "stderrTruncated": value.get("stderrTruncated") is True,
+        }
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1766,6 +1821,19 @@ def deploy_and_cleanup(
         if observation_number < attempts:
             sleep(poll_interval_seconds)
 
+    # The candidate's output and task events disappear with it; read them
+    # first. Best effort: an unreadable record never blocks the cleanup.
+    try:
+        startup = startup_evidence(
+            _call_helper(
+                helper_caller,
+                "app.startup",
+                {"slug": app_slug, "jobId": job_id, "lines": STARTUP_LINES},
+                timeout_seconds=helper_timeout_seconds,
+            )
+        )
+    except Exception:
+        startup = None
     cleanup_succeeded = False
     cleanup_evidence: dict[str, Any] = {}
     try:
@@ -1802,6 +1870,7 @@ def deploy_and_cleanup(
         message,
         cleanup_succeeded=cleanup_succeeded,
         cleanup_evidence=cleanup_evidence,
+        startup=startup,
     ) from failure
 
 

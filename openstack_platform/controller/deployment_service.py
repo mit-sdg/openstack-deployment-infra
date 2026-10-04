@@ -33,6 +33,7 @@ from . import database as db
 from . import image_service, rollback, sizing, worker_reuse
 from .deployment_config import DeploymentConfiguration, branch_name
 from .deployment_reads import source_repository
+from .log_service import STARTUP_LOG_BYTES, startup_log_path
 from .storage_contract import (
     PLATFORM_ENVIRONMENT_KEYS,
     canonical_secret_key,
@@ -183,6 +184,28 @@ def _write_build_log(
     except durable.DurableReplaceError as error:
         raise app.ApplicationError("build log could not be committed durably") from error
     return destination.relative_to(state_directory).as_posix()
+
+
+def _write_startup_log(
+    state_directory: Path,
+    application_id: str,
+    operation_id: str,
+    evidence: Mapping[str, Any],
+) -> None:
+    root = runtime.ensure_private_directory(state_directory / "startup-logs", create=True)
+    runtime.ensure_private_directory(root / application_id, create=True)
+    payload = json.dumps(
+        {**evidence, "capturedAt": db.utc_now()},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+    durable.atomic_write(
+        startup_log_path(state_directory, application_id, operation_id),
+        payload,
+        mode=0o600,
+        maximum_bytes=STARTUP_LOG_BYTES,
+    )
 
 
 def _apply_registry_retention(
@@ -739,6 +762,7 @@ def _deploy_and_accept_application(
     helper_caller: HelperCaller,
     operation_id: str,
     deadline: float,
+    state_directory: Path | None = None,
 ) -> app.DeploymentResult:
     previous = db.get_deployment(connection, spec.application_id)
     _validate_storage_bindings(
@@ -804,6 +828,15 @@ def _deploy_and_accept_application(
     def deployment_helper(
         action: str, values: Mapping[str, Any], **_bounds: object
     ) -> Mapping[str, Any]:
+        if action == "app.startup":
+            # Removing the candidate needs the time more than its record does:
+            # spend at most a third of what is left, and nothing when it's short.
+            remaining = deadline - time.monotonic()
+            if remaining < 10:
+                raise app.ApplicationError("no time left to read startup evidence")
+            return helper_caller(
+                config, action, values, deadline=time.monotonic() + min(30.0, remaining / 3)
+            )
         if action == "app.remove" and worker.refs.get("reuse_worker") is True:
             # Failed candidates must really exit before a same-worker retry or
             # rollback. Do not purge the only scheduler evidence first.
@@ -856,6 +889,13 @@ def _deploy_and_accept_application(
             )
             result = observe(promoted_job, preview=False)
     except app.DeploymentFailed as error:
+        if error.startup is not None and state_directory is not None:
+            try:
+                _write_startup_log(
+                    state_directory, spec.application_id, operation_id, error.startup
+                )
+            except (OSError, ValueError, durable.DurableReplaceError):
+                pass  # The record is diagnostic; the cleanup below is what matters.
         if not error.cleanup_succeeded:
             raise
         # deploy_and_cleanup already confirmed exact job removal. Only a
@@ -1949,6 +1989,7 @@ class DeploymentService:
                 helper_caller=self.helper_caller,
                 operation_id=operation_id,
                 deadline=selected_deadline,
+                state_directory=self.state_directory,
             )
 
         def verify_project() -> None:

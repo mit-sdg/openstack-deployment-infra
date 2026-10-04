@@ -175,6 +175,7 @@ class ControllerAPI:
             ("GET", "/v1/applications/{id}/deployments", self._list_deployments),
             ("GET", "/v1/deployments/{id}", self._get_deployment),
             ("GET", "/v1/deployments/{id}/build-log", self._build_log),
+            ("GET", "/v1/deployments/{id}/startup-log", self._startup_log),
             ("GET", "/v1/applications/{id}/runtime-log", self._runtime_log),
             ("GET", "/v1/applications/{id}/environment", self._get_environment),
             ("PUT", "/v1/applications/{id}/environment/{key}", self._put_environment),
@@ -744,6 +745,19 @@ class ControllerAPI:
                 "state": chunk.state,
                 "nextOffset": chunk.next_offset,
                 "truncated": chunk.truncated,
+            },
+        )
+
+    def _startup_log(self, request: Request) -> Response:
+        self._no_query(request)
+        attempt = self._attempt(self._path_uuid(request))
+        record = self.logs.startup(attempt.application_id, attempt.deployment_id)
+        return Response(
+            200,
+            {
+                "deploymentId": attempt.deployment_id,
+                "captured": record is not None,
+                **({"startup": record} if record is not None else {}),
             },
         )
 

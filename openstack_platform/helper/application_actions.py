@@ -26,7 +26,7 @@ from ..controller.nomad_jobs import (
     nomad_route_marker,
     nomad_route_priority,
 )
-from ..runtime import CommandTimedOut, bounded_http, run
+from ..runtime import CommandFailure, CommandTimedOut, bounded_http, run
 from ..validation import (
     ValidationError,
     bounded_text,
@@ -707,6 +707,125 @@ def _logs_handler(
     return handle
 
 
+STARTUP_TEXT_BYTES = 65_536
+STARTUP_EVENTS = 12
+
+
+def _startup_event(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    kind = value.get("Type")
+    message = value.get("DisplayMessage")
+    exit_code = value.get("ExitCode")
+    moment = value.get("Time")
+    details = value.get("Details")
+    if not isinstance(kind, str) or not kind:
+        return None
+    return {
+        "type": kind[:64],
+        "message": message[:512] if isinstance(message, str) else "",
+        "exitCode": exit_code
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+        else None,
+        "oomKilled": isinstance(details, dict) and details.get("oom_killed") == "true",
+        "time": moment if isinstance(moment, int) and not isinstance(moment, bool) else None,
+    }
+
+
+def _startup_handler(
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+    response_limit: int,
+) -> Handler:
+    """Read-only evidence of how an exact job's newest allocation started.
+
+    A failed candidate is removed right after this read, so the task state,
+    recent events and output tails are the only record of why it failed.
+    """
+
+    def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
+        _exact_args(args, {"slug", "jobId", "lines"}, "app.startup")
+        application_slug = slug(args["slug"])
+        job_id = args["jobId"]
+        lines = args["lines"]
+        if job_id not in (application_slug, f"{application_slug}-candidate"):
+            raise ValidationError("startup evidence job must be one of the application's slots")
+        if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= 500:
+            raise ValidationError("startup log line count is invalid")
+        try:
+            allocations = _allocations(
+                job_id,
+                command_runner=command_runner,
+                nomad_command=nomad_command,
+                timeout_seconds=timeout_seconds,
+                response_limit=response_limit,
+            )
+        except CommandFailure:
+            return {"found": False}
+        newest = max(
+            (item for item in allocations if isinstance(item.get("ID"), str)),
+            key=lambda item: (
+                item.get("CreateIndex", 0) if isinstance(item.get("CreateIndex"), int) else 0
+            ),
+            default=None,
+        )
+        if newest is None:
+            return {"found": False}
+        allocation_id = newest["ID"]
+        if not allocation_id or len(allocation_id) > 128:
+            raise HelperActionError(
+                "NOMAD_RESPONSE_INVALID", "Nomad allocation identity was invalid"
+            )
+        task_states = newest.get("TaskStates")
+        task = task_states.get("app") if isinstance(task_states, dict) else None
+        task = task if isinstance(task, dict) else {}
+        raw_events = task.get("Events")
+        events = [
+            event
+            for event in (
+                _startup_event(item)
+                for item in (raw_events if isinstance(raw_events, list) else [])[-STARTUP_EVENTS:]
+            )
+            if event is not None
+        ]
+        restarts = task.get("Restarts")
+        result: dict[str, Any] = {
+            "found": True,
+            "clientStatus": str(newest.get("ClientStatus", ""))[:32],
+            "taskState": str(task.get("State", ""))[:32],
+            "failed": task.get("Failed") is True,
+            "restarts": restarts
+            if isinstance(restarts, int) and not isinstance(restarts, bool)
+            else 0,
+            "events": events,
+        }
+        for stream in ("stdout", "stderr"):
+            argv = [*nomad_command, "alloc", "logs", "-tail", "-n", str(lines)]
+            if stream == "stderr":
+                argv.append("-stderr")
+            argv.extend((allocation_id, "app"))
+            try:
+                completed = command_runner(
+                    tuple(argv),
+                    timeout_seconds=timeout_seconds,
+                    stdout_limit=STARTUP_TEXT_BYTES,
+                    stderr_limit=65_536,
+                    check=True,
+                )
+            except CommandFailure:
+                # A task that never started has no log files.
+                result[stream] = ""
+                result[f"{stream}Truncated"] = False
+                continue
+            result[stream] = completed.stdout.decode("utf-8", errors="replace")
+            result[f"{stream}Truncated"] = bool(completed.stdout_truncated)
+        return result
+
+    return handle
+
+
 def _stop_handler(
     *,
     command_runner: Callable[..., Any],
@@ -1292,6 +1411,12 @@ def handlers(
         ),
         "app.promote": _promote_handler(
             variable_client,
+            command_runner=command_runner,
+            nomad_command=command,
+            timeout_seconds=timeout_seconds,
+            response_limit=response_limit,
+        ),
+        "app.startup": _startup_handler(
             command_runner=command_runner,
             nomad_command=command,
             timeout_seconds=timeout_seconds,

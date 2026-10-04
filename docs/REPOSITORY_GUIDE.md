@@ -378,6 +378,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/Operation.tsx` — shared owner Operation component and presentation behavior.
 - `frontend/owner-portal/src/components/LogViewer.tsx` — app runtime output/errors viewer for owner and admin pages.
 - `frontend/owner-portal/src/components/LogViewer.test.tsx` — log stream switching, refresh, not-running and unavailable-stream tests.
+- `frontend/owner-portal/src/components/StartupRecord.tsx` — why a failed deployment's new version stopped: summary, events and output.
+- `frontend/owner-portal/src/components/StartupRecord.test.tsx` — startup summary wording and errors-first display tests.
 - `frontend/owner-portal/src/components/RecentCommits.tsx` — recent-commit picker for deploys, read from GitHub by the browser.
 - `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy commit check line and review-dialog problem list.
 - `frontend/owner-portal/src/components/CommitChecks.test.tsx` — commit check problem, unreadable-commit and rate-limit UI tests.

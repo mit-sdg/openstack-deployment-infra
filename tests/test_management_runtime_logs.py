@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import unittest
+import uuid
 from typing import Any
 from unittest.mock import patch
 
@@ -129,3 +130,68 @@ class RuntimeLogTests(ManagementCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartupLogTests(ManagementCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.login()
+        self.app = self.create()
+        self.save(self.app)
+        self.fixture.delay = 0
+
+    def deploy(self, *, fail: bool) -> str:
+        self.fixture.failed_next = fail
+        intent = self.call(
+            "POST",
+            f"/v1/apps/{self.app}/deployments",
+            {"commit": ("2" if fail else "1") * 40, "configurationRevision": 1},
+            "alice",
+        ).body["data"]
+        self.broker.journal.dispatch(intent["intentId"])
+        return str(
+            self.call("GET", f"/v1/intents/{intent['intentId']}", owner="alice").body["data"][
+                "operationId"
+            ]
+        )
+
+    def startup(self, deployment: str, owner: str = "alice") -> Any:
+        return self.call(
+            "GET", f"/v1/apps/{self.app}/deployments/{deployment}/startup-log", owner=owner
+        ).body["data"]
+
+    def test_owner_reads_why_a_failed_deployment_stopped(self) -> None:
+        healthy = self.deploy(fail=False)
+        self.assertEqual(self.startup(healthy), {"captured": False})
+        failed = self.deploy(fail=True)
+        record = self.startup(failed)
+        self.assertTrue(record["captured"] and record["found"])
+        self.assertEqual(record["restarts"], 3)
+        self.assertIn("Cannot find module 'express'", record["stderr"])
+        self.assertEqual(
+            [(event["type"], event["exitCode"]) for event in record["events"]][1],
+            ("Terminated", 1),
+        )
+        self.assertNotIn("taskState", record)
+        self.login("bob")
+        self.assert_error("NOT_FOUND", lambda: self.startup(failed, owner="bob"))
+        self.assert_error(
+            "NOT_FOUND",
+            lambda: self.call(
+                "GET",
+                f"/v1/apps/{self.app}/deployments/{uuid.uuid4()}/startup-log",
+                owner="alice",
+            ),
+        )
+
+    def test_controllers_without_startup_records_report_none(self) -> None:
+        failed = self.deploy(fail=True)
+        request = self.broker.client.request
+
+        def older(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+            if path.endswith("/startup-log"):
+                return 404, {"error": {"code": "NOT_FOUND"}}
+            return request(method, path, *args, **kwargs)
+
+        with patch.object(self.broker.client, "request", older):
+            self.assertEqual(self.startup(failed), {"captured": False})

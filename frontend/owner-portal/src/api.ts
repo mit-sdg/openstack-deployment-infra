@@ -112,6 +112,18 @@ export type BuildLog = {
   nextOffset: number | null;
   truncated: boolean;
 };
+/** How a removed candidate stopped: Nomad task events and output tails. */
+export type StartupRecord = {
+  captured: boolean;
+  /** False when the app never got a place to run. */
+  found?: boolean;
+  clientStatus?: string;
+  restarts?: number;
+  events?: { type: string; message: string; exitCode: number | null; oomKilled: boolean }[];
+  stdout?: string;
+  stderr?: string;
+  capturedAt?: string | null;
+};
 /** stdout ("Output") or stderr ("Errors") of the running app. */
 export type LogStream = 'stdout' | 'stderr';
 /** Recent output of an app; `running` is false when nothing runs to read from. */
@@ -329,6 +341,15 @@ export const api = {
       `/apps/${app}/deployments/${deployment}/build-log?lines=200`,
       (v) => fields(v, { text: 'string', state: 'string', truncated: 'boolean' }) as BuildLog,
     ),
+  startupLog: (app: string, deployment: string) =>
+    request(`/apps/${app}/deployments/${deployment}/startup-log`, (v) => {
+      const data = fields(v, { captured: 'boolean' }) as StartupRecord;
+      if (data.captured) {
+        fields(v, { found: 'boolean', stdout: 'string', stderr: 'string', restarts: 'number' });
+        if (!Array.isArray(data.events)) throw new Error('Invalid service response');
+      }
+      return data;
+    }),
   logs: (app: string, stream: LogStream) =>
     request(`/apps/${app}/logs?stream=${stream}`, runtimeLogData),
   intents: () => request('/intents?limit=8', (v) => pageData(v, intentData)),

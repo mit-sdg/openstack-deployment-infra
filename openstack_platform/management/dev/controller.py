@@ -135,6 +135,7 @@ class FakeController:
             ("GET", "/v1/applications/{app}/deployments", self.history),
             ("GET", "/v1/deployments/{deployment}", self.deployment),
             ("GET", "/v1/deployments/{deployment}/build-log", self.log),
+            ("GET", "/v1/deployments/{deployment}/startup-log", self.startup_log),
             ("GET", "/v1/applications/{app}/runtime-log", self.runtime_log),
             ("GET", "/v1/operations/{operation}", self.operation),
             ("GET", "/v1/applications/{app}/environment", self.environment),
@@ -442,6 +443,46 @@ class FakeController:
         if attempt is None:
             raise HttpError(404, "DEPLOYMENT_NOT_FOUND", "Deployment does not exist.")
         return Response(200, attempt.copy())
+
+    def startup_log(self, request: Request) -> Response:
+        identifier = request.path_parameters["deployment"]
+        if identifier not in self.deployments:
+            raise HttpError(404, "DEPLOYMENT_NOT_FOUND", "Deployment does not exist.")
+        if self.deployments[identifier]["status"] != "failed":
+            return Response(200, {"deploymentId": identifier, "captured": False})
+        return Response(
+            200,
+            {
+                "deploymentId": identifier,
+                "captured": True,
+                "startup": {
+                    "found": True,
+                    "clientStatus": "failed",
+                    "taskState": "dead",
+                    "failed": True,
+                    "restarts": 3,
+                    "events": [
+                        {"type": "Started", "message": "Task started by client", "exitCode": None},
+                        {
+                            "type": "Terminated",
+                            "message": "Exit Code: 1",
+                            "exitCode": 1,
+                            "oomKilled": False,
+                        },
+                        {
+                            "type": "Not Restarting",
+                            "message": "Exceeded allowed attempts 3 in interval 5m0s",
+                            "exitCode": None,
+                        },
+                    ],
+                    "stdout": "> start\n> node server.js\n\n",
+                    "stderr": "Error: Cannot find module 'express'\n    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)\n",
+                    "stdoutTruncated": False,
+                    "stderrTruncated": False,
+                    "capturedAt": utc(time.time()),
+                },
+            },
+        )
 
     def runtime_log(self, request: Request) -> Response:
         app = self.apps.get(request.path_parameters["app"])

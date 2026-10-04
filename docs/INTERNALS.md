@@ -381,6 +381,7 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}/deployments` | List bounded deployment history |
 | `GET /v1/deployments/{id}` | Read one deployment attempt |
 | `GET /v1/deployments/{id}/build-log` | Read bounded retained build output |
+| `GET /v1/deployments/{id}/startup-log` | Read a removed candidate's startup record (`captured: false` when none) |
 | `GET /v1/applications/{id}/runtime-log` | Read bounded current runtime output; `stream=stdout` (default) or `stderr` |
 | `GET /v1/applications/{id}/environment` | List environment names and metadata, never values |
 | `PUT /v1/applications/{id}/environment/{key}` | Add or replace one value |
@@ -443,6 +444,15 @@ can be added to an existing key. The project socket cannot request them.
 
 With `reuseWorker: true`, `worker_reuse.py` pins the actual existing image and
 worker identity, preserves sizing, and rechecks readiness/capacity before stop.
+Before removing a candidate that never became healthy, the controller calls the
+read-only helper action `app.startup` for that exact job slot: the newest
+allocation's status, restart count, last 12 task events and 200-line output and
+error tails (64 KiB each). It spends at most 30 s or a third of the remaining
+deadline, so removal keeps its time, and a failed read never blocks removal. The
+record is written 0600 to `startup-logs/<application>/<deployment>.json` under
+the controller state directory and served to the app's owner on the failed
+deployment's page.
+
 The helper's exact-identity `app.stop` leaves a stopped Nomad job until terminal
 client allocations are confirmed; empty evidence, desired-stop or lost allocations
 are not proof. `app.worker.capacity` includes the allowlisted worker observation,

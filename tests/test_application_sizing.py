@@ -50,6 +50,7 @@ class ApplicationSizingTests(unittest.TestCase):
         self.fail_after_promotion = False
         self.fail_action = None
         self.capacity_override = None
+        self.startup = {"found": False}
         self.api = ControllerAPI(self.connection, self.config, self.root, helper_caller=self.helper)
         self.fixture.api = self.api
         self.router = self.api.router()
@@ -186,6 +187,8 @@ class ApplicationSizingTests(unittest.TestCase):
             return {"absent": True}
         if action == "app.manifest.retain":
             return {"deleted": [], "protected": values["references"]}
+        if action == "app.startup":
+            return self.startup
         raise AssertionError((action, values))
 
     def post(self, path, body, key=None):
@@ -316,6 +319,45 @@ class ApplicationSizingTests(unittest.TestCase):
         self.fail_health = False
         _, retry = self.resize(plan)
         self.assertEqual(retry.status, "succeeded", retry.safe_error)
+
+    def test_failed_deploy_keeps_the_candidates_startup_record_for_its_owner(self):
+        _, first = self.deploy()
+        self.assertEqual(first.status, "succeeded", first.safe_error)
+        path = f"/v1/deployments/{first.operation_id}/startup-log"
+        self.assertEqual(
+            self.router.dispatch("GET", path, {}, None).body,
+            {"deploymentId": first.operation_id, "captured": False},
+        )
+        self.startup = {
+            "found": True,
+            "clientStatus": "failed",
+            "taskState": "dead",
+            "failed": True,
+            "restarts": 3,
+            "events": [{"type": "Terminated", "message": "Exit Code: 1", "exitCode": 1}],
+            "stdout": "> start\n",
+            "stderr": "Error: Cannot find module 'express'\n",
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
+        }
+        self.fail_health = True
+        _, failed = self.deploy()
+        self.assertEqual(failed.status, "failed", failed.safe_error)
+        actions = [action for action, _ in self.calls]
+        self.assertLess(actions.index("app.startup"), actions.index("app.remove"))
+        response = self.router.dispatch(
+            "GET", f"/v1/deployments/{failed.operation_id}/startup-log", {}, None
+        )
+        record = response.body["startup"]
+        self.assertTrue(response.body["captured"])
+        self.assertEqual(record["stderr"], "Error: Cannot find module 'express'\n")
+        self.assertEqual(record["restarts"], 3)
+        self.assertRegex(record["capturedAt"], r"^\d{4}-\d\d-\d\dT")
+        stored = self.root / "startup-logs" / self.app_id / f"{failed.operation_id}.json"
+        self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(HttpError) as error:
+            self.router.dispatch("GET", path + "?lines=5", {}, None)
+        self.assertEqual(error.exception.status, 400)
 
     def test_unavailable_capacity_retries_identical_intent_without_duplicate_worker(self):
         self.deploy()

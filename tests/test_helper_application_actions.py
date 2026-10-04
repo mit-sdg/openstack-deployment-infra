@@ -21,7 +21,7 @@ from openstack_platform.helper.application_actions import (
 )
 from openstack_platform.helper.main import HelperActionError
 from openstack_platform.helper.nomad import CasConflict, SecretItems, VariableSnapshot
-from openstack_platform.runtime import CommandResult, CommandTimedOut
+from openstack_platform.runtime import CommandFailure, CommandResult, CommandTimedOut
 from openstack_platform.validation import ValidationError
 
 SENTINEL = "do-not-render-this-secret"
@@ -150,6 +150,7 @@ class ApplicationActionTests(unittest.TestCase):
                 "app.logs",
                 "app.promote",
                 "app.remove",
+                "app.startup",
                 "app.stop",
                 "app.env.set",
                 "app.env.remove",
@@ -795,6 +796,122 @@ class ApplicationActionTests(unittest.TestCase):
                     "ownership": {"DATABASE_URL": "storage.postgres.default"},
                 }
             )
+
+    def test_startup_reads_newest_allocation_of_an_exact_slot(self) -> None:
+        self.nomad.allocations = [
+            {"ID": "alloc-old", "ClientStatus": "complete", "CreateIndex": 5},
+            {
+                "ID": "alloc-new",
+                "ClientStatus": "failed",
+                "CreateIndex": 30,
+                "TaskStates": {
+                    "app": {
+                        "State": "dead",
+                        "Failed": True,
+                        "Restarts": 3,
+                        "Events": [
+                            {"Type": "Received", "Time": 1},
+                            *(
+                                {
+                                    "Type": "Terminated",
+                                    "DisplayMessage": "Exit Code: 1" + "!" * 600,
+                                    "ExitCode": 1,
+                                    "Time": 2 + index,
+                                    "Details": {"oom_killed": "false"},
+                                }
+                                for index in range(14)
+                            ),
+                            {
+                                "Type": "Not Restarting",
+                                "DisplayMessage": "Exceeded allowed attempts",
+                            },
+                            {"Type": ""},
+                            "not an event",
+                        ],
+                    }
+                },
+            },
+        ]
+        evidence = self.actions["app.startup"](
+            {"slug": "demo-app", "jobId": "demo-app-candidate", "lines": 50}
+        )
+        self.assertEqual(
+            {
+                key: evidence[key]
+                for key in ("found", "clientStatus", "taskState", "failed", "restarts")
+            },
+            {
+                "found": True,
+                "clientStatus": "failed",
+                "taskState": "dead",
+                "failed": True,
+                "restarts": 3,
+            },
+        )
+        self.assertEqual(len(evidence["events"]), 10)
+        self.assertEqual(evidence["events"][-1]["type"], "Not Restarting")
+        self.assertEqual(len(evidence["events"][0]["message"]), 512)
+        self.assertEqual(evidence["events"][0]["exitCode"], 1)
+        self.assertFalse(evidence["events"][0]["oomKilled"])
+        self.assertEqual(evidence["stdout"], "bounded application output\n")
+        self.assertEqual(
+            [call[0] for call in self.nomad.calls[-3:]],
+            [
+                ("fixed-nomad-wrapper", "job", "allocs", "-json", "demo-app-candidate"),
+                ("fixed-nomad-wrapper", "alloc", "logs", "-tail", "-n", "50", "alloc-new", "app"),
+                (
+                    "fixed-nomad-wrapper",
+                    "alloc",
+                    "logs",
+                    "-tail",
+                    "-n",
+                    "50",
+                    "-stderr",
+                    "alloc-new",
+                    "app",
+                ),
+            ],
+        )
+        self.assertEqual(self.nomad.calls[-1][1]["stdout_limit"], 65_536)
+
+    def test_startup_tolerates_missing_jobs_and_logs_and_refuses_other_jobs(self) -> None:
+        self.nomad.allocations = []
+        self.assertEqual(
+            self.actions["app.startup"]({"slug": "demo-app", "jobId": "demo-app", "lines": 5}),
+            {"found": False},
+        )
+        original = self.nomad.__call__
+
+        def failing(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+            if "allocs" in argv and argv[-1] == "demo-app":
+                raise CommandFailure("job missing")
+            if "logs" in argv:
+                raise CommandFailure("task never started")
+            return original(argv, **kwargs)
+
+        self.nomad.allocations = [{"ID": "alloc-1", "ClientStatus": "pending", "CreateIndex": 1}]
+        actions = handlers(
+            self.variables,
+            nomad_command=("fixed-nomad-wrapper",),
+            command_runner=failing,
+            timeout_seconds=1,
+        )
+        self.assertEqual(
+            actions["app.startup"]({"slug": "demo-app", "jobId": "demo-app", "lines": 5}),
+            {"found": False},
+        )
+        evidence = actions["app.startup"](
+            {"slug": "demo-app", "jobId": "demo-app-candidate", "lines": 5}
+        )
+        self.assertEqual((evidence["stdout"], evidence["stderr"], evidence["events"]), ("", "", []))
+        for args in (
+            {"slug": "demo-app", "jobId": "other-app", "lines": 5},
+            {"slug": "demo-app", "jobId": "demo-app", "lines": 0},
+            {"slug": "demo-app", "jobId": "demo-app", "lines": True},
+            {"slug": "demo-app", "jobId": "demo-app"},
+        ):
+            with self.subTest(args=args), self.assertRaises((ValidationError, HelperActionError)):
+                self.actions["app.startup"](args)
 
     def test_logs_and_remove_use_fixed_validated_argv(self) -> None:
         logs = self.actions["app.logs"]({"slug": "demo-app", "stderr": True, "lines": 20})

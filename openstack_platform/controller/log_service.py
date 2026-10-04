@@ -2,17 +2,31 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..config import Config
 from ..validation import ValidationError, uuid
 from . import application_runtime as app
 from . import database as db
 from .service_support import HelperCaller, operation_deadline
+
+STARTUP_LOG_BYTES = 262_144
+
+
+def startup_log_path(state_directory: Path, application_id: str, operation_id: str) -> Path:
+    """Where a failed candidate's startup record lives, by app and deployment."""
+    return (
+        state_directory
+        / "startup-logs"
+        / uuid(application_id, field="application ID")
+        / f"{uuid(operation_id, field='deployment ID')}.json"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +116,26 @@ class LogService:
         if not isinstance(text, str):
             raise app.ApplicationError("helper returned invalid runtime log evidence")
         return LogChunk(text, "running", len(text.encode()), bool(result.get("truncated")))
+
+    def startup(self, application_identifier: str, deployment_id: str) -> dict[str, Any] | None:
+        """The removed candidate's startup record, if one was captured."""
+        application = self._application(application_identifier)
+        path = startup_log_path(self.state_directory, application.application_id, deployment_id)
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return None
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > STARTUP_LOG_BYTES:
+                raise ValidationError("startup record is not a bounded direct file")
+            raw = os.read(descriptor, STARTUP_LOG_BYTES + 1)
+        finally:
+            os.close(descriptor)
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValidationError("startup record is malformed")
+        return value
 
     def build(
         self,

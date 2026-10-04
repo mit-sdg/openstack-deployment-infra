@@ -15,6 +15,7 @@ import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { QueryError } from '../components/Feedback';
 import { Repository } from '../components/Repository';
+import { StartupRecordSection } from '../components/StartupRecord';
 import { Status } from '../components/Status';
 import { short } from '../utils/presentation';
 
@@ -74,6 +75,13 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
     refetchInterval: !paused && attempt.data?.status === 'running' ? 1500 : false,
   });
   const running = attempt.data?.status === 'running';
+  // Only a failed deployment's new version was removed with a record.
+  const startup = useQuery({
+    queryKey: ['startup', id, deployment],
+    queryFn: () => api.startupLog(id, deployment),
+    enabled: attempt.data?.status === 'failed',
+    staleTime: Infinity,
+  });
   return (
     <AppFrame id={id} active="Deployments">
       {attempt.isPending ? (
@@ -95,6 +103,12 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
           >
             <Details deployment={attempt.data} />
           </Section>
+          {startup.data?.captured && (
+            <StartupRecordSection
+              record={startup.data}
+              configuration={attempt.data.configuration}
+            />
+          )}
           <Section
             title="Build output"
             actions={

@@ -76,6 +76,17 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
               Error code <code>{intent.controllerErrorCode}</code>
             </span>
           )}
+          {intent.kind === 'deploy' && intent.state === 'failed' && intent.operationId && (
+            <>
+              {' '}
+              <Link
+                href={`/apps/${intent.appId}/deployments/${intent.operationId}`}
+                className="ui-link"
+              >
+                See why it stopped
+              </Link>
+            </>
+          )}
         </p>
       )}
       <ErrorNotice error={resume.error} />

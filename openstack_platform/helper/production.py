@@ -64,6 +64,7 @@ APP_ACTIONS = (
     "app.manifest.verify",
     "app.promote",
     "app.remove",
+    "app.startup",
     "app.stop",
     "app.worker.capacity",
     "app.worker.create",

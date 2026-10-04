@@ -130,6 +130,23 @@
   padding-left: var(--ui-space-5);
 }
 
+/* Why a failed deployment stopped. */
+.app-startup-summary {
+  margin: 0;
+  font-weight: var(--ui-weight-medium);
+}
+.app-startup-events {
+  display: grid;
+  gap: var(--ui-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.app-startup-event {
+  color: var(--ui-text);
+  font-weight: var(--ui-weight-medium);
+}
+
 /* Recent commits: one full-width option per commit. */
 .app-commits .ui-fieldset__options {
   grid-template-columns: minmax(0, 1fr);

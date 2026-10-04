@@ -161,9 +161,7 @@ for (const [mode, viewport, colorScheme] of [
       const sha = commits[1].sha;
       await page.getByRole('radio', { name: 'Fixture change 1' }).check();
       await expect(page.getByText('This commit will fail to build')).toBeVisible();
-      await expect(
-        page.getByText('Commit bun.lock in the repository root.'),
-      ).toBeVisible();
+      await expect(page.getByText('Commit bun.lock in the repository root.')).toBeVisible();
       await page.getByRole('radio', { name: 'Fixture change 2' }).check();
       await expect(page.getByLabel('Commit SHA')).toHaveValue(sha);
       await expect(
@@ -233,6 +231,32 @@ for (const [mode, viewport, colorScheme] of [
       await page.screenshot({ path: path.join(screenshots, `${mode}-logs.png`), fullPage: true });
       await page.getByRole('radio', { name: 'Errors' }).check();
       await expect(page.getByLabel('App errors')).toContainText('SESSION_SECRET');
+      // A version that crashes on start is removed; its owner can see why.
+      await page.evaluate(async () => {
+        await fetch('/__test__/failed-deployment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+      });
+      await page.goto(`/apps/${appId}/deploy`);
+      await page.getByRole('radio', { name: 'Fixture change 3' }).check();
+      await page.getByRole('button', { name: 'Review deployment' }).click();
+      await page.getByRole('dialog').getByRole('button', { name: 'Deploy', exact: true }).click();
+      await page.getByRole('link', { name: 'See why it stopped' }).click({ timeout: 30000 });
+      await expect(page.getByRole('heading', { name: 'Why it stopped' })).toBeVisible();
+      await expect(
+        page.getByText('Your app exited with code 1. It was restarted 3 times first.'),
+      ).toBeVisible();
+      await expect(page.getByLabel('Startup errors')).toContainText("Cannot find module 'express'");
+      await page.evaluate(() => {
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        window.scrollTo(0, 0);
+      });
+      await page.screenshot({
+        path: path.join(screenshots, `${mode}-why-stopped.png`),
+        fullPage: true,
+      });
       await page.goto('/apps');
       await expect(
         page
@@ -288,6 +312,7 @@ for (const [mode, viewport, colorScheme] of [
         `/api/v1/apps/${appId}/deployments/${attempt.deploymentId}`,
         `/api/v1/apps/${appId}/deployments/${attempt.deploymentId}/build-log`,
         `/api/v1/apps/${appId}/logs`,
+        `/api/v1/apps/${appId}/deployments/${attempt.deploymentId}/startup-log`,
       ])
         expect((await bobPage.request.get(route)).status()).toBe(404);
       const bobApps = await bobPage.request.get('/api/v1/apps');

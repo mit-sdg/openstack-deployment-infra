@@ -91,6 +91,7 @@ class Broker:
             ("GET", "/v1/apps/{app}/deployments", self.history),
             ("GET", "/v1/apps/{app}/deployments/{deployment}", self.deployment),
             ("GET", "/v1/apps/{app}/deployments/{deployment}/build-log", self.build_log),
+            ("GET", "/v1/apps/{app}/deployments/{deployment}/startup-log", self.startup_log),
             ("GET", "/v1/apps/{app}/logs", self.runtime_logs.handle),
             ("GET", "/v1/intents", self.intents),
             ("GET", "/v1/intents/{intent}", self.intent),
@@ -901,6 +902,64 @@ class Broker:
         identifier = checked_uuid(request.path_parameters["deployment"])
         return Response(
             200, {"data": self.read_project(f"/v1/deployments/{identifier}", app["id"])}
+        )
+
+    def startup_log(self, request: Request) -> Response:
+        """Why a removed candidate stopped: its task events and output tails."""
+        _user, app = self.own(request)
+        identifier = checked_uuid(request.path_parameters["deployment"])
+        self.read_project(f"/v1/deployments/{identifier}", app["id"])
+        status, result = self.client.request("GET", f"/v1/deployments/{identifier}/startup-log")
+        if status == 404:
+            # Controllers from before startup records have none to give.
+            return Response(200, {"data": {"captured": False}})
+        record = result.get("startup")
+        if (
+            status != 200
+            or result.get("deploymentId") != identifier
+            or not isinstance(result.get("captured"), bool)
+            or (result["captured"] and not isinstance(record, dict))
+        ):
+            raise ControllerUnavailable("invalid startup record")
+        if not result["captured"]:
+            return Response(200, {"data": {"captured": False}})
+        assert isinstance(record, dict)
+
+        def text(name: str) -> str:
+            value = record.get(name)
+            return value[-65_536:] if isinstance(value, str) else ""
+
+        events = []
+        for event in record.get("events") or []:
+            if isinstance(event, dict) and isinstance(event.get("type"), str):
+                code = event.get("exitCode")
+                events.append(
+                    {
+                        "type": event["type"][:64],
+                        "message": str(event.get("message") or "")[:512],
+                        "exitCode": code
+                        if isinstance(code, int) and not isinstance(code, bool)
+                        else None,
+                        "oomKilled": event.get("oomKilled") is True,
+                    }
+                )
+        restarts = record.get("restarts")
+        return Response(
+            200,
+            {
+                "data": {
+                    "captured": True,
+                    "found": record.get("found") is True,
+                    "clientStatus": str(record.get("clientStatus") or "")[:32],
+                    "restarts": restarts
+                    if isinstance(restarts, int) and not isinstance(restarts, bool)
+                    else 0,
+                    "events": events[-12:],
+                    "stdout": text("stdout"),
+                    "stderr": text("stderr"),
+                    "capturedAt": utc(record.get("capturedAt")),
+                }
+            },
         )
 
     def build_log(self, request: Request) -> Response:
