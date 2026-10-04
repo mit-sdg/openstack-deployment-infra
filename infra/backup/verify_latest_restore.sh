@@ -31,12 +31,17 @@ for line in (root / "MANIFEST").read_text().splitlines():
     values[key] = value
 expected = {
     "created_at": root.name,
-    "format_version": "2",
+    "format_version": values.get("format_version"),
     "postgres": "pg_dumpall-clean-if-exists",
     "mongodb": "mongodump-archive-gzip",
     "object_storage": "garage-s3-catalog-tar-gzip",
-    "registry": "distribution-artifacts-tar-gzip",
 }
+archives = ["postgres.age", "mongodb.age", "garage.age"]
+if values.get("format_version") == "2":
+    expected["registry"] = "distribution-artifacts-tar-gzip"
+    archives.append("registry.age")
+elif values.get("format_version") != "3":
+    raise SystemExit("backup format is unsupported")
 if values != expected:
     raise SystemExit("backup manifest does not match the restore contract")
 checksum_lines = (root / "SHA256SUMS").read_text().splitlines()
@@ -46,9 +51,9 @@ for line in checksum_lines:
     if match is None:
         raise SystemExit("backup checksums are malformed")
     checksum_names.append(match.group(1))
-if sorted(checksum_names) != ["garage.age", "mongodb.age", "postgres.age", "registry.age"]:
+if sorted(checksum_names) != sorted(archives):
     raise SystemExit("backup checksum inventory does not match")
-for name in ("postgres.age", "mongodb.age", "garage.age", "registry.age"):
+for name in archives:
     with (root / name).open("rb") as handle:
         if handle.read(22) != b"age-encryption.org/v1\n":
             raise SystemExit(f"{name} is not age v1 ciphertext")
@@ -109,9 +114,9 @@ assert seen==len(manifest["objects"])
 assert isinstance(manifest["buckets"], list)
 '
 echo "garage restore archive=verified"
-"$AGE" --decrypt --identity "$AGE_KEY" "$latest/registry.age" | \
-  "$SERVICE_CHECK_PYTHON" "$PLATFORM_ROOT/infra/backup/registry_artifact.py" verify
-echo "registry recovery artifacts=verified"
+if grep -qx 'format_version=2' "$latest/MANIFEST"; then
+  echo "legacy registry.age skipped; app images are rebuilt after restore"
+fi
 remote_cleanup
 trap - EXIT
 verified_at=$(date -u +%Y%m%dT%H%M%SZ)
@@ -124,7 +129,6 @@ verified_at=$verified_at
 postgres=verified
 mongodb=verified
 garage=verified
-registry=verified
 EOF
 chmod 0600 "$restore_evidence"
 mv "$restore_evidence" "$latest/RESTORE-MANIFEST"

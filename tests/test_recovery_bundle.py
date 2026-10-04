@@ -203,8 +203,33 @@ class RecoveryBundleTests(unittest.TestCase):
 
     def test_export_refuses_managed_backup_without_registry_artifacts(self) -> None:
         (self.sources["managed-data"] / "registry.age").unlink()
-        with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "OCI artifacts"):
+        with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "inventory"):
             self.export()
+
+    def test_v3_managed_data_exports_without_images_and_requires_all_data(self) -> None:
+        root = self.sources["managed-data"]
+        (root / "registry.age").unlink()
+        self._file(
+            root / "SHA256SUMS",
+            b"\n".join((root / "SHA256SUMS").read_bytes().splitlines()[:3]) + b"\n",
+        )
+        self._file(
+            root / "MANIFEST",
+            (root / "MANIFEST")
+            .read_bytes()
+            .replace(b"format_version=2", b"format_version=3")
+            .replace(b"registry=distribution-artifacts-tar-gzip\n", b""),
+        )
+        bundle = self.export()
+        manifest = recovery_bundle.verify_bundle(bundle)
+        self.assertNotIn("managed-data/registry.age", {item["path"] for item in manifest["files"]})
+        for name in ("postgres.age", "mongodb.age", "garage.age"):
+            with self.subTest(name=name):
+                original = (root / name).read_bytes()
+                (root / name).unlink()
+                with self.assertRaises(recovery_bundle.RecoveryBundleError):
+                    recovery_bundle._validate_component("managed-data", list(root.iterdir()))
+                self._file(root / name, original)
 
     def test_scheduled_export_refuses_same_filesystem_local_destination(self) -> None:
         platform, config, mountinfo = self._scheduled_environment()

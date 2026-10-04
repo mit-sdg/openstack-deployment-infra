@@ -439,3 +439,8 @@ Hosted-controller backups also encrypt each app's private/public deploy-key pair
 to the off-platform controller escrow recipient. Keep that identity outside admin;
 the managed-data identity does not protect deploy keys. See [backup all state
 classes](OPERATIONS.md#back-up-all-state-classes) for paired archive verification.
+
+Managed-data backups contain PostgreSQL, MongoDB and S3 data; app images are
+rebuilt from each accepted commit after full restore. Recovery therefore needs
+repository access and separately escrowed runtime secrets. See the
+[full-restore rebuild procedure](OPERATIONS.md#rebuild-app-images-after-full-restore).

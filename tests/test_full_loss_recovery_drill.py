@@ -73,7 +73,6 @@ class FullLossRecoveryDrillTests(unittest.TestCase):
 
     def _managed_archives(self) -> None:
         managed = self.bundle / "managed-data"
-        (managed / "registry.age").write_bytes(b"registry archive")
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode="w:gz") as archive:
             payload = json.dumps({"format_version": 1, "objects": []}).encode()
@@ -179,11 +178,6 @@ printf 'managed' >>"$DRILL_TEST_LOG"; printf ' %q' "$@" >>"$DRILL_TEST_LOG"; pri
 echo 'managed-data-restore=verified source=fake'
 """,
         )
-        self.registry = self.bin / "registry.py"
-        self.registry.write_text(
-            "import sys\nassert sys.argv[1] == 'verify'\nsys.stdin.buffer.read()\n"
-        )
-        self.registry.chmod(0o600)
 
     def _run(
         self, mode: str, *, failure: str | None = None
@@ -196,7 +190,6 @@ echo 'managed-data-restore=verified source=fake'
             "OPERATOR_RESTORE_LAUNCHER": str(self.operator),
             "HOSTED_RESTORE_LAUNCHER": str(self.hosted),
             "MANAGED_RESTORE_LAUNCHER": str(self.managed),
-            "REGISTRY_ARTIFACT_SCRIPT": str(self.registry),
             "DRILL_TEST_LOG": str(self.log),
         }
         if failure:
@@ -225,6 +218,7 @@ echo 'managed-data-restore=verified source=fake'
         evidence = json.loads((work / "DRILL-EVIDENCE.json").read_text())
         self.assertEqual(evidence["format"], "openstack-platform-full-loss-drill-v2")
         self.assertEqual(evidence["managedData"], "restored")
+        self.assertEqual(evidence["appImages"], "rebuild-by-redeploy")
         self.assertEqual(evidence["records"]["acceptedDeployments"], 1)
         calls = self.log.read_text()
         self.assertIn(f"--replacement-state-directory {work}/replacements/operator-state", calls)

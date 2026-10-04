@@ -1000,3 +1000,12 @@ retain the existing SQLite/managed-data backups; after readiness, run the hosted
 backup service and verify both committed SQLite and source-key trios. Require a
 version-3 off-site bundle before claiming deploy-key full-loss recovery. Older
 bundles remain accepted but contain no deploy keys. See [hosted restore](OPERATIONS.md#restore-the-hosted-controller).
+
+### Managed-data backup format upgrade
+
+The admin image supplies the backup services, restore scripts, monitoring and
+Garage helpers. Replace the admin image to adopt managed-data format 3 and its
+backup-volume mount dependency. Retain and verify existing format-2 evidence;
+it remains readable. New sets exclude app images. After full restore, follow
+[rebuild app images](OPERATIONS.md#rebuild-app-images-after-full-restore) using
+the controller's accepted commits and settings before reopening apps.

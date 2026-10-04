@@ -704,7 +704,7 @@ The deployment has three independent backup classes:
 | --- | --- | --- | --- |
 | Hosted controller | Admin controller SQLite and deploy keys | `<paths.backups>/hosted-controller` | Operator escrow; not admin |
 | External operator state | Operator CLI SQLite | `<paths.backups>/controller` | Operator escrow |
-| Managed data | PostgreSQL, MongoDB, Garage, retained OCI artifacts | `<paths.backups>/<namespace>/<timestamp>` | Admin plus separate operator escrow |
+| Managed data | PostgreSQL, MongoDB, Garage | `<paths.backups>/<namespace>/<timestamp>` | Admin plus separate operator escrow |
 
 One class does not substitute for another.
 
@@ -756,17 +756,17 @@ managed_backup="$(
     EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_logical_backup.sh" \
     SERVICE_CHECK_PYTHON=python3 \
     GARAGE_EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_garage_backup.py" \
-    REGISTRY_ARTIFACT_SCRIPT="$PLATFORM_ROOT/infra/backup/registry_artifact.py" \
     "$PLATFORM_ROOT/infra/backup/run_platform_backup.sh"
 )"
 printf '%s\n' "$managed_backup"
 grep -Eq '^platform backup complete: .+$' <<<"$managed_backup"
 ```
 
-The set contains encrypted `postgres.age`, `mongodb.age`, `garage.age`, and
-`registry.age`, plus `MANIFEST` and `SHA256SUMS`. OCI blobs stream through
-bounded verification and are retained according to controller registry
-retention.
+New managed-data sets use `format_version=3` and contain encrypted
+`postgres.age`, `mongodb.age`, and `garage.age`, plus `MANIFEST` and
+`SHA256SUMS`. App OCI images are excluded. Older format-2 sets remain accepted
+with their four checksummed archives; restore skips `registry.age` and reports
+that images must be rebuilt.
 
 Restore-check the newest set without touching live services:
 
@@ -784,7 +784,7 @@ grep -Eq '^latest platform restore=verified evidence=.+/RESTORE-MANIFEST$' \
 ```
 
 The check starts temporary PostgreSQL and MongoDB containers and validates the
-Garage and OCI archives. It writes `RESTORE-MANIFEST` only after all checks pass
+Garage archive. It writes `RESTORE-MANIFEST` only after all checks pass
 and removes temporary resources on success or failure.
 
 ### Verify backup schedules
@@ -962,7 +962,7 @@ install -d -m 0700 /private/path/offline-state
 Full mode is destructive to the services named by its replacement inventory.
 Provision empty replacement PostgreSQL, MongoDB, Garage, and registry services.
 Do not point the replacement configuration at healthy or nonempty services.
-The off-site bundle must contain both SQLite classes, all four managed archives,
+The off-site bundle must contain both SQLite classes, all three managed data archives,
 an operator image selection, and at least one accepted hosted deployment.
 
 ```bash
@@ -994,6 +994,50 @@ infra/backup/full_loss_recovery_drill.sh --verify-only \
 
 Verify-only cannot create `DRILL-EVIDENCE.json` and is not a completed
 full-loss drill.
+
+## Rebuild app images after full restore
+
+A full data restore leaves the replacement registry empty. Rebuild each app's
+accepted commit; starting or restarting an app cannot supply its missing image.
+Repository access, retained deploy keys (or replacement keys), selected builder
+and worker images, and runtime secrets must be available before rebuilding.
+Runtime environment values live in Nomad Variables and are not in SQLite or
+managed-data backups; restore those from your separate secret escrow first.
+
+Use the authenticated `admin` and `project` transports from
+[Deploy an application](APPLICATION_DEPLOYMENTS.md#preconditions-and-access).
+Page `GET /v1/admin/applications?limit=100` using its `nextCursor`; for each app
+with an `activeDeploymentId`, save `GET /v1/deployments/{activeDeploymentId}`.
+That record supplies `sourceRepository`, `repositoryRef`, `repositoryCommit`,
+`configuration`, and `configurationRevision`. If source evidence is missing,
+resolve it from the retained deployment request before proceeding.
+
+For each app, set `APP_ID`, save that accepted record as
+`previous-deployment.json`, and construct a fresh deployment request:
+
+```bash
+jq -e '{repository: .sourceRepository, ref: .repositoryRef,
+  commit: .repositoryCommit, configuration: .configuration,
+  configurationRevision: .configurationRevision}
+  | select(.repository != null and .configuration != null)' \
+  previous-deployment.json > rebuild.json
+python3 -c 'import uuid; print(uuid.uuid4())' > rebuild-key.txt
+project -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(<rebuild-key.txt)" --data-binary @- \
+  "http://localhost/v1/applications/$APP_ID/deployments" \
+  < rebuild.json > rebuild-operation.json
+STATUS_URL=$(jq -er .statusUrl rebuild-operation.json)
+project "http://localhost$STATUS_URL" > rebuild-status.json
+```
+
+Poll the same status URL until `succeeded`; follow the deployment runbook's
+recovery procedure for `recovery_required` and keep the same request/key on
+retry. Verify the app's accepted commit and public health before proceeding to
+the next app. For retained-primary-IP apps, use the privileged deployment
+runbook with a fresh sizing plan and `maintenance:true`; ordinary project
+deployments cannot authorize that cutover. Rebuilding enables a stopped app;
+record its original desired state and disable it again after verification if it
+should remain stopped.
 
 ## Replace a persistent host
 

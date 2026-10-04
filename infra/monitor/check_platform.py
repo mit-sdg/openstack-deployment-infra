@@ -93,16 +93,23 @@ def main() -> int:
             "postgres.age",
             "mongodb.age",
             "garage.age",
-            "registry.age",
             "SHA256SUMS",
             "MANIFEST",
         }
+        manifest = dict(
+            line.split("=", 1) for line in (latest / "MANIFEST").read_text().splitlines()
+        )
+        version = manifest.get("format_version")
+        if version == "2":
+            required.add("registry.age")
+        elif version != "3":
+            raise RuntimeError("latest platform backup format is unsupported")
         if not required <= {path.name for path in latest.iterdir()}:
             raise RuntimeError("latest platform backup is incomplete")
         checks["backup"] = {
             "age_hours": round(age_hours, 2),
             "encrypted": True,
-            "registry_artifacts": True,
+            "format_version": int(version),
         }
 
         offsite = json.loads(

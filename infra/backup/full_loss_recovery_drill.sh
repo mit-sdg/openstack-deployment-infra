@@ -32,7 +32,6 @@ HOSTED_RESTORE_LAUNCHER=${HOSTED_RESTORE_LAUNCHER:-openstack-platform-controller
 BROKER_RESTORE_LAUNCHER=${BROKER_RESTORE_LAUNCHER:-openstack-platform-management-broker-backup}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 MANAGED_RESTORE_LAUNCHER=${MANAGED_RESTORE_LAUNCHER:-$SCRIPT_DIR/restore_managed_data.sh}
-REGISTRY_ARTIFACT_SCRIPT=${REGISTRY_ARTIFACT_SCRIPT:-$SCRIPT_DIR/registry_artifact.py}
 umask 077
 install -d -m 0700 "$WORK"
 "$RECOVERY" verify "$BUNDLE"
@@ -96,8 +95,6 @@ PYKEYS
 fi
 
 managed="$IMPORTED/managed-data"
-"$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/registry.age" | \
-  python3 "$REGISTRY_ARTIFACT_SCRIPT" verify
 "$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/garage.age" | python3 -c '
 import json,sys,tarfile
 archive=tarfile.open(fileobj=sys.stdin.buffer,mode="r|gz")
@@ -213,7 +210,7 @@ evidence={
  "format":"openstack-platform-full-loss-drill-v2",
  "managedData":"restored",
  "records":json.loads(counts),
- "registryArtifacts":"restored",
+ "appImages":"rebuild-by-redeploy",
 }
 if os.path.isfile(keys_path):
  evidence["sourceKeys"]="restored"

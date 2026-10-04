@@ -321,24 +321,26 @@ def _validate_component(
             ):
                 _fail("operator-state manifest does not match its ciphertext")
     else:
+        if "MANIFEST" not in names:
+            _fail("managed-data evidence omits its manifest")
+        manifest = _key_values(by_name["MANIFEST"])
+        version = manifest.get("format_version")
+        archives = ("postgres.age", "mongodb.age", "garage.age")
+        if version == "2" and manifest.get("registry") == "distribution-artifacts-tar-gzip":
+            archives += ("registry.age",)
+        elif version != "3" or "registry" in manifest:
+            _fail("managed-data manifest is not a supported recovery format")
         required = {
             "postgres.age",
             "mongodb.age",
             "garage.age",
-            "registry.age",
             "SHA256SUMS",
             "MANIFEST",
         }
-        if not required <= names:
-            _fail("managed-data evidence omits encrypted data or retained OCI artifacts")
-        manifest = _key_values(by_name["MANIFEST"])
-        if (
-            manifest.get("format_version") != "2"
-            or manifest.get("registry") != "distribution-artifacts-tar-gzip"
-        ):
-            _fail("managed-data manifest is not the recovery-capable format")
+        if not (required | set(archives)) <= names or (version == "3" and "registry.age" in names):
+            _fail("managed-data evidence does not match its encrypted data inventory")
         expected_sums = ""
-        for filename in ("postgres.age", "mongodb.age", "garage.age", "registry.age"):
+        for filename in archives:
             _age_file(by_name[filename])
             digest = _digest(by_name[filename], maximum=bounds.maximum_file_bytes)
             observed[filename] = digest

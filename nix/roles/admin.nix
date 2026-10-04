@@ -1189,6 +1189,8 @@ in
 
   systemd.services."${namespace}-platform-backup" = {
     description = "Create encrypted logical platform backups";
+    after = [ backupMountUnit ];
+    requires = [ backupMountUnit ];
     unitConfig.ConditionPathExists = "${root}/persistent/secrets/backup-age-key.txt";
     serviceConfig = {
       Type = "oneshot";
@@ -1204,11 +1206,7 @@ in
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
-        "REGISTRY_ARTIFACT_SCRIPT=${infra}/backup/registry_artifact.py"
-        "REGISTRY_BACKUP_SECRETS=%t/${namespace}-backup-private/storage-bootstrap.env"
-        "REGISTRY_BACKUP_MAX_FILE_BYTES=1099511627776"
-        "REGISTRY_BACKUP_MAX_TOTAL_BYTES=4398046511104"
-        "REGISTRY_BACKUP_MAX_MANIFEST_BYTES=67108864"
+        "SECRETS_FILE=%t/${namespace}-backup-private/storage-bootstrap.env"
         # Rootless Podman needs the NixOS setuid newuidmap/newgidmap wrappers.
         "PATH=/run/wrappers/bin:${
           lib.makeBinPath [
@@ -1230,7 +1228,7 @@ in
       UMask = "0077";
       # Read operator-controlled inputs as the operator. Root must not copy
       # an attacker-selected source into credentials accessible to this UID.
-      # The registry parser still gets a private mode-0600 runtime copy.
+      # Backup tools get a private mode-0600 runtime copy.
       LimitCORE = 0;
       ExecStart = "${infra}/backup/run_platform_backup.sh";
     };

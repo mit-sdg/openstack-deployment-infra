@@ -556,12 +556,11 @@ The deployment has three independent backup classes:
 2. **External operator state:** the operator CLI SQLite database, backed up
    locally with SQLite's online API and encrypted to
    `<paths.backups>/controller`.
-3. **Managed data:** encrypted PostgreSQL, MongoDB, Garage catalog/data, and
-   retained OCI manifests/blobs under timestamped namespace directories.
+3. **Managed data:** encrypted PostgreSQL, MongoDB, and Garage catalog/data under timestamped namespace directories.
 
 Each accepted set uses ciphertext/data, checksums, and a final manifest as its
 commit marker. Managed restore verification uses disposable PostgreSQL and
-MongoDB containers and validates Garage/OCI archives before writing
+MongoDB containers and validates Garage archives before writing
 `RESTORE-MANIFEST`.
 
 Version-3 off-site bundles include the SQLite manifest’s matching deploy-key
@@ -570,8 +569,10 @@ Off-site export chooses only committed sets, verifies every copy, writes an
 append-only canonical manifest, and updates a credential-free health receipt.
 The destination must be a distinct mounted filesystem and provider retention is
 operator-owned. Full-loss recovery restores both SQLite databases and managed
-data into explicit replacement targets; it does not depend on GitHub or the
-original registry because retained OCI artifacts are included.
+data into explicit replacement targets. Managed-data format 3 excludes app OCI
+images; format 2 remains verifiable, but restore skips its registry archive. Apps
+need their accepted commits rebuilt from GitHub after full loss. See the
+[rebuild procedure](OPERATIONS.md#rebuild-app-images-after-full-restore).
 
 ## Network and workload isolation
 
