@@ -8,6 +8,35 @@
 let
   namespace = platform.namespace;
   ports = constants.ports;
+  # SigV4 covers Host, so each S3 name forwards the value its clients signed.
+  garageS3VirtualHost =
+    { host, default }:
+    {
+      onlySSL = true;
+      listen = [
+        {
+          addr = "0.0.0.0";
+          port = ports.garageS3;
+          ssl = true;
+          extraParameters = lib.optional default "default_server";
+        }
+      ];
+      sslCertificate = "/etc/${namespace}/pki/storage.pem";
+      sslCertificateKey = "/etc/${namespace}/pki/storage-key.pem";
+      locations."/" = {
+        proxyPass = "http://127.0.0.1:19000";
+        extraConfig = ''
+          proxy_http_version 1.1;
+          proxy_set_header Host ${host};
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_request_buffering off;
+          proxy_buffering off;
+          proxy_read_timeout 900s;
+          proxy_send_timeout 900s;
+          client_max_body_size 0;
+        '';
+      };
+    };
   data = platform.paths.data;
   infra = ../../infra;
   systemdEscapePath =
@@ -372,32 +401,16 @@ in
     enable = true;
     recommendedProxySettings = false;
     virtualHosts = {
-      "${platform.internalNames.objectStorage}" = {
-        onlySSL = true;
-        listen = [
-          {
-            addr = "0.0.0.0";
-            port = ports.garageS3;
-            ssl = true;
-          }
-        ];
-        sslCertificate = "/etc/${namespace}/pki/storage.pem";
-        sslCertificateKey = "/etc/${namespace}/pki/storage-key.pem";
-        locations."/" = {
-          proxyPass = "http://127.0.0.1:19000";
-          extraConfig = ''
-            proxy_http_version 1.1;
-            # SigV4 signs Host exactly as the client sent it: <ip>:port from
-            # apps, s3.<domain> through public ingress for presigned URLs.
-            proxy_set_header Host $http_host;
-            proxy_set_header X-Forwarded-Proto https;
-            proxy_request_buffering off;
-            proxy_buffering off;
-            proxy_read_timeout 900s;
-            proxy_send_timeout 900s;
-            client_max_body_size 0;
-          '';
-        };
+      # Apps sign Host as <storage IP>:port; this stays the default server.
+      "${platform.internalNames.objectStorage}" = garageS3VirtualHost {
+        host = "$host:$server_port";
+        default = true;
+      };
+      # Public ingress keeps the browser's Host, so presigned URLs signed for
+      # s3.<domain> verify. The same certificate serves both names.
+      "s3.${platform.domain}" = garageS3VirtualHost {
+        host = "$host";
+        default = false;
       };
       "${platform.internalNames.storage}" = {
         onlySSL = true;

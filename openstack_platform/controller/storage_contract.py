@@ -199,11 +199,19 @@ PLATFORM_ENVIRONMENT_KEYS = frozenset(
 )
 # Every app container mounts the platform CA here (see nomad_jobs).
 APPLICATION_CA_PATH = "/platform-ca/internal-ca.crt"
-# Rendered straight into each app job, like HOST, so Node and Bun verify the
-# platform's TLS services (S3, PostgreSQL, MongoDB) with no client settings.
-# Unlike the values above it never enters the app's Variable, so jobs that are
-# already running stay untouched until their next deploy.
-JOB_ENVIRONMENT: Mapping[str, str] = MappingProxyType({"NODE_EXTRA_CA_CERTS": APPLICATION_CA_PATH})
+# Rendered straight into each app job, like HOST. Unlike the values above they
+# never enter the app's Variable, so running jobs stay untouched until their
+# next deploy.
+JOB_ENVIRONMENT: Mapping[str, str] = MappingProxyType(
+    {
+        # Node and Bun verify the platform's TLS services (S3, PostgreSQL,
+        # MongoDB) with no client settings.
+        "NODE_EXTRA_CA_CERTS": APPLICATION_CA_PATH,
+        # The AWS SDK otherwise signs an empty-body CRC32 into presigned PUT
+        # URLs, which Garage then rejects for any real upload.
+        "AWS_REQUEST_CHECKSUM_CALCULATION": "when_required",
+    }
+)
 # Names owners and staff cannot set or bind.
 RESERVED_ENVIRONMENT_KEYS = PLATFORM_ENVIRONMENT_KEYS | frozenset(JOB_ENVIRONMENT)
 RESERVED_ENVIRONMENT_PREFIX = "STORAGE__"

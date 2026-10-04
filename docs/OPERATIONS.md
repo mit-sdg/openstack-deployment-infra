@@ -1445,7 +1445,15 @@ const signer = new S3Client({ endpoint: process.env.S3_PUBLIC_ENDPOINT, forcePat
 The public hostname sits behind the same Cloudflare limits as apps, including
 the 100 MB request body limit on the free plan; send larger uploads as presigned
 multipart parts. Responses carry `Cloudflare-CDN-Cache-Control: no-store`, so
-Cloudflare never caches a signed download. App slugs have at least three
+Cloudflare never caches a signed download. Every app job also sets
+`AWS_REQUEST_CHECKSUM_CALCULATION=when_required`; without it the AWS SDK signs
+an empty-body checksum into presigned PUT URLs and Garage rejects the upload.
+Ingress normalizes `//` and `..` in paths, so object keys used through the
+public endpoint must not contain them. Every app job also sets
+`AWS_REQUEST_CHECKSUM_CALCULATION=when_required`; without it the AWS SDK signs
+an empty-body checksum into presigned PUT URLs and Garage rejects the upload.
+Ingress normalizes `//` and `..` in paths, so object keys used through the
+public endpoint must not contain them. App slugs have at least three
 characters, so no app can claim `s3`.
 
 The repository root must contain `package.json`, and each selected package

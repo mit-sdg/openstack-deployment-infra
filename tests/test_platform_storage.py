@@ -119,7 +119,13 @@ class ControllerStorageTests(unittest.TestCase):
         self.assertEqual(FIXED_PLATFORM_ENVIRONMENT["NODE_ENV"], "production")
         # Node and Bun trust the platform CA without any per-client setting.
         # The job sets it directly, so it is reserved but never a Variable item.
-        self.assertEqual(JOB_ENVIRONMENT, {"NODE_EXTRA_CA_CERTS": APPLICATION_CA_PATH})
+        self.assertEqual(
+            JOB_ENVIRONMENT,
+            {
+                "NODE_EXTRA_CA_CERTS": APPLICATION_CA_PATH,
+                "AWS_REQUEST_CHECKSUM_CALCULATION": "when_required",
+            },
+        )
         self.assertNotIn("NODE_EXTRA_CA_CERTS", values)
         self.assertIn("NODE_EXTRA_CA_CERTS", RESERVED_ENVIRONMENT_KEYS)
         self.assertTrue(PLATFORM_ENVIRONMENT_KEYS < RESERVED_ENVIRONMENT_KEYS)

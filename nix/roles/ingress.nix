@@ -177,8 +177,13 @@ let
         accessControlExposeHeaders = [ "ETag" ];
         accessControlMaxAge = 3600;
         addVaryHeader = true;
-        # Signed responses must not outlive their URL in Cloudflare's cache.
-        customResponseHeaders.Cloudflare-CDN-Cache-Control = "no-store";
+        customResponseHeaders = {
+          # Signed responses must not outlive their URL in Cloudflare's cache.
+          Cloudflare-CDN-Cache-Control = "no-store";
+          # Garage adds "*" to error responses; drop it so only the CORS
+          # settings above decide which origins may read a response.
+          Access-Control-Allow-Origin = "";
+        };
       };
     };
   };

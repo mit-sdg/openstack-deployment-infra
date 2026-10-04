@@ -954,6 +954,7 @@ class DeploymentTests(unittest.TestCase):
         for output in ("CA_BUNDLE", "FORCE_PATH_STYLE", "ENDPOINT", "SECRET_ACCESS_KEY"):
             self.assertIn(f'(ne $key "STORAGE__S3__DEFAULT__{output}")', job)
         self.assertIn('NODE_EXTRA_CA_CERTS = "/platform-ca/internal-ca.crt"', job)
+        self.assertIn('AWS_REQUEST_CHECKSUM_CALCULATION = "when_required"', job)
         # The public endpoint is set by the job, not read from the Variable.
         domain = self.platform().domain
         self.assertIn(f'S3_PUBLIC_ENDPOINT = "https://s3.{domain}"', job)
