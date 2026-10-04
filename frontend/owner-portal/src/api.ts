@@ -43,6 +43,10 @@ export type Settings = {
 };
 export type AppRecord = {
   applicationId: string;
+  /** "member" for a teammate's app; absent from older brokers. */
+  access?: 'owner' | 'member' | 'admin';
+  /** The owner's name, on apps you're a team member of. */
+  ownerDisplayName?: string | null;
   slug: string;
   url: string | null;
   savedRevision: number;
@@ -75,6 +79,25 @@ export type Intent = {
   names?: string[];
   requiresResubmit?: boolean;
   retryKey?: string | null;
+  /** Who made the change, in an app's activity. */
+  actor?: { displayName: string | null; you: boolean };
+};
+/** Someone who works on an app: its owner, or a team member. */
+export type TeamMember = {
+  userId: string;
+  username: string;
+  displayName: string;
+  method: 'local' | 'provider';
+  role: 'owner' | 'member';
+  addedAt: string | null;
+};
+const teamData = (v: unknown) => {
+  const data = record(v);
+  if (!Array.isArray(data.items)) throw new Error('Invalid service response');
+  data.items.forEach((item) =>
+    fields(item, { userId: 'string', username: 'string', displayName: 'string', role: 'string' }),
+  );
+  return data as { items: TeamMember[]; you?: string; access?: string; left?: boolean };
 };
 export type Deployment = {
   deploymentId: string;
@@ -363,6 +386,12 @@ export const api = {
       }
       return data;
     }),
+  activity: (app: string) =>
+    request(`/apps/${app}/activity?limit=8`, (v) => {
+      const data = record(v);
+      if (!Array.isArray(data.items)) throw new Error('Invalid service response');
+      return data.items.map(intentData);
+    }),
   logs: (app: string, stream: LogStream) =>
     request(`/apps/${app}/logs?stream=${stream}`, runtimeLogData),
   intents: () => request('/intents?limit=8', (v) => pageData(v, intentData)),
@@ -513,6 +542,11 @@ export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
         body: await consentFields(id),
         key,
       }),
+    members: (id: string) => request(`${prefix}/${id}/members`, teamData),
+    addMember: (id: string, username: string) =>
+      request(`${prefix}/${id}/members`, teamData, { method: 'POST', body: { username } }),
+    removeMember: (id: string, userId: string) =>
+      request(`${prefix}/${id}/members/${userId}`, teamData, { method: 'DELETE', body: {} }),
     sourceKey: (id: string) =>
       request(`${prefix}/${id}/source-key`, (v) => {
         const data = fields(v, { present: 'boolean' });

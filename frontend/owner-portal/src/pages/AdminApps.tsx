@@ -37,6 +37,7 @@ import { QueryError } from '../components/Feedback';
 import { LogViewer } from '../components/LogViewer';
 import { CommitChecks } from '../components/CommitChecks';
 import { RecentCommits } from '../components/RecentCommits';
+import { TeamSection } from '../components/TeamSection';
 import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useIntentPolling } from '../hooks/useIntentPolling';
@@ -423,7 +424,8 @@ function ManagedApplication({ id }: { id: string }) {
         <SectionSkeleton title rows={4} />
       </PageSkeleton>
     );
-  if (app.error || settings.error) {
+  // A failed background refresh keeps showing the loaded app.
+  if ((app.error && !app.data) || (settings.error && !settings.data)) {
     const missing = app.error instanceof ApiError && app.error.status === 404;
     return (
       <Page>
@@ -525,6 +527,7 @@ function ManagedApplication({ id }: { id: string }) {
         service={service}
         identityProvider={identity}
       />
+      <TeamSection id={id} service={service} />
       <Section title="Danger zone" flush>
         <List label="Danger zone">
           <ListItem

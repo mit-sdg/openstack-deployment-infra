@@ -19,19 +19,22 @@ export type StaffCatalogApp = {
   repository: string | null;
 };
 export type StaffAppRow = StaffCatalogApp & OwnerName;
-export type StaffApp = StaffCatalogApp & {
-  url: string | null;
-  desiredRunning: boolean;
-  activeDeploymentId: string | null;
-  acceptedDeployment: {
-    deploymentId: string;
-    sourceCommit: string | null;
-    acceptedAt: string | null;
-  } | null;
-  health: { process: string; route: string };
-  observedAt: string | null;
-  stale: boolean;
-};
+export type StaffApp = StaffCatalogApp &
+  OwnerName & {
+    /** Teammates who also work on the app; the owner isn't listed. */
+    members: { username: string; displayName: string }[];
+    url: string | null;
+    desiredRunning: boolean;
+    activeDeploymentId: string | null;
+    acceptedDeployment: {
+      deploymentId: string;
+      sourceCommit: string | null;
+      acceptedAt: string | null;
+    } | null;
+    health: { process: string; route: string };
+    observedAt: string | null;
+    stale: boolean;
+  };
 export type StaffDeployment = {
   deploymentId: string;
   applicationId: string;
@@ -125,6 +128,14 @@ const health = state('healthy', 'unhealthy', 'stopped', 'unknown');
 const app = (v: unknown) =>
   shape<StaffApp>(v, {
     ...catalogChecks,
+    ...ownerName,
+    members: (v) =>
+      Array.isArray(v) &&
+      v.length <= 10 &&
+      v.every((member) => {
+        shape(member, { username: text(32), displayName: text(256) });
+        return true;
+      }),
     url,
     desiredRunning: bool,
     activeDeploymentId: nullable(id),

@@ -328,6 +328,28 @@ for (const [mode, viewport, colorScheme] of [
       const bobAppsBody = await bobApps.json();
       expect(bobApps.status(), bobAppsBody.error?.code).toBe(200);
       expect(bobAppsBody.data.items).toHaveLength(0);
+      // Alice adds Bob to the app's team; he can then work on it, and leave.
+      await page.goto(`/apps/${appId}/team`);
+      const team = page.getByRole('region', { name: 'Team' });
+      await team.getByLabel('Add by username').fill('bob');
+      await team.getByRole('button', { name: 'Add to team' }).click();
+      await expect(team.getByRole('table', { name: 'Team' })).toContainText('Bob Student');
+      await page.evaluate(() => {
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        window.scrollTo(0, 0);
+      });
+      await page.screenshot({ path: path.join(screenshots, `${mode}-team.png`), fullPage: true });
+      await bobPage.goto('/apps');
+      await expect(bobPage.getByText('Alice Student’s app')).toBeVisible();
+      expect((await bobPage.request.get(`/api/v1/apps/${appId}/logs`)).status()).toBe(200);
+      await bobPage.goto(`/apps/${appId}/team`);
+      await bobPage.getByRole('button', { name: 'Leave', exact: true }).click();
+      await bobPage
+        .getByRole('dialog', { name: 'Leave this app?' })
+        .getByRole('button', { name: 'Leave app' })
+        .click();
+      await expect(bobPage).toHaveURL(/\/apps$/);
+      expect((await bobPage.request.get(`/api/v1/apps/${appId}`)).status()).toBe(404);
       await bobPage.getByRole('button', { name: /^Account: / }).click();
       await bobPage.getByRole('button', { name: 'Sign out' }).click();
       await expect(bobPage.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();

@@ -30,9 +30,16 @@ const columns: Column<AppRecord>[] = [
     header: 'Name',
     mobile: 'title',
     cell: (app) => (
-      <Link href={`/apps/${app.applicationId}`} className="ui-link ui-link--plain">
-        {app.slug}
-      </Link>
+      <span className="ui-cluster ui-gap-2">
+        <Link href={`/apps/${app.applicationId}`} className="ui-link ui-link--plain">
+          {app.slug}
+        </Link>
+        {app.access === 'member' && (
+          <span className="ui-text-muted ui-text-sm">
+            {app.ownerDisplayName ? `${app.ownerDisplayName}’s app` : 'Shared'}
+          </span>
+        )}
+      </span>
     ),
   },
   {

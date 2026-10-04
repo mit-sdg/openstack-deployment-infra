@@ -319,6 +319,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/staff.py` — closed metadata projections, catalog paging, read budgets and transactional staff audit.
 - `openstack_platform/management/broker/staff_policy.py` — fixed metadata bounds and URL sanitization.
 - `tests/test_management_staff.py` — staff read-only authority, disclosure, quota/paging/audit and migration/restore evidence.
+- `openstack_platform/management/broker/members.py` — team members of an app (owner/admin managed, members can leave) and the app activity feed.
+- `tests/test_management_teams.py` — member access and quota, owner-only team changes, leaving, limits, write re-checks, retry keys and admin reassignment.
 - `openstack_platform/management/broker/source_keys.py` — owner/admin deploy key routes: public half only, audited changes, shared one-at-a-time access checks.
 - `tests/test_management_source_keys.py` — deploy key ownership, audit, shared access checks and older-controller answers.
 - `tests/test_private_repositories.py` — pinned GitHub host key, deploy-key fetch and access check, helper key lifecycle and build fallback.
@@ -381,6 +383,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/Operation.tsx` — shared owner Operation component and presentation behavior.
 - `frontend/owner-portal/src/components/LogViewer.tsx` — app runtime output/errors viewer for owner and admin pages.
 - `frontend/owner-portal/src/components/LogViewer.test.tsx` — log stream switching, refresh, not-running and unavailable-stream tests.
+- `frontend/owner-portal/src/components/TeamSection.tsx` — app team table with add, remove and leave, for owner and admin pages.
+- `frontend/owner-portal/src/components/TeamSection.test.tsx` — owner team management and member leave tests.
 - `frontend/owner-portal/src/components/RepositoryAccess.tsx` — Settings section for a private repository's deploy key and access check.
 - `frontend/owner-portal/src/components/RepositoryAccess.test.tsx` — deploy key creation, access results, replacement and private-repo latest-commit tests.
 - `frontend/owner-portal/src/components/StartupRecord.tsx` — why a failed deployment's new version stopped: summary, events and output.
@@ -401,6 +405,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/Deploy.tsx` — owner deploy page module.
 - `frontend/owner-portal/src/pages/Deployment.tsx` — owner deployment page module.
 - `frontend/owner-portal/src/pages/Logs.tsx` — owner app logs page module.
+- `frontend/owner-portal/src/pages/Team.tsx` — owner app team page module.
 - `frontend/owner-portal/src/pages/History.tsx` — owner history page module.
 - `frontend/owner-portal/src/pages/NewApp.tsx` — owner newapp page module.
 - `frontend/owner-portal/src/pages/Overview.tsx` — owner overview page module.

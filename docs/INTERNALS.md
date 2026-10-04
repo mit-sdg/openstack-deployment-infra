@@ -447,6 +447,19 @@ can be added to an existing key. The project socket cannot request them.
 
 With `reuseWorker: true`, `worker_reuse.py` pins the actual existing image and
 worker identity, preserves sizing, and rechecks readiness/capacity before stop.
+Team apps keep one owner (`apps.user_id`) plus members in `app_members`, a
+table created idempotently at startup like `observations` and outside the
+numbered schema: backups, restore and activation are unchanged, and a release
+without teams ignores it, so members lose access rather than gain any. Members
+pass the same app gate as the owner for settings, deploys, variables, storage,
+logs and deploy keys; only the owner or an admin adds or removes people
+(`/api/v1/apps/{app}/members`, `/api/v1/admin-apps/{app}/members`), and a member
+can leave. Adding needs the account's exact username and that the person has
+signed in once. Intents stay keyed by their actor: quotas and concurrency count
+the actor, `APP_BUSY` serializes the team, and `GET /api/v1/apps/{app}/activity`
+shows everyone's changes with who made them. Only an intent's actor receives
+its environment retry key. Reassigning an app drops the new owner's membership.
+
 Private repositories use a per-app ed25519 deploy key. The helper creates it
 with `ssh-keygen` under `<adminState>/controller/source-keys/<slug>/` (0600),
 returns only the public half, and never hands the private key to the controller,

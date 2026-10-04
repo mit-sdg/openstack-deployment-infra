@@ -34,7 +34,14 @@ class Bucket:
 
 
 class ReadLimits:
-    def __init__(self) -> None:
+    """Token buckets per person and network address, plus active-read caps.
+
+    burst/rate are a person's reads at once and per second; an address gets twice
+    that. Staff use the defaults; admin app pages read more per view.
+    """
+
+    def __init__(self, burst: int = 10, rate: float = 1) -> None:
+        self.burst, self.rate = burst, rate
         self.lock = threading.Lock()
         self.users: dict[str, Bucket] = {}
         self.addresses: dict[str, Bucket] = {}
@@ -73,9 +80,12 @@ class ReadLimits:
                 raise HttpError(
                     429, "RATE_LIMITED", "Staff reads are temporarily limited.", retryable=True
                 )
-            person = self.users.setdefault(user, Bucket(10, now))
-            network = self.addresses.setdefault(address, Bucket(20, now))
-            for item, rate, maximum in ((person, 1, 10), (network, 2, 20)):
+            person = self.users.setdefault(user, Bucket(self.burst, now))
+            network = self.addresses.setdefault(address, Bucket(2 * self.burst, now))
+            for item, rate, maximum in (
+                (person, self.rate, self.burst),
+                (network, 2 * self.rate, 2 * self.burst),
+            ):
                 item.tokens = min(maximum, item.tokens + max(0, now - item.updated) * rate)
                 item.updated = now
             if person.tokens < 1 or network.tokens < 1 or person.active >= 2 or self.active >= 8:
@@ -383,7 +393,7 @@ class StaffReads:
     def app_record(self, app: str) -> dict[str, Any]:
         with self.broker.database.connect() as db:
             row = db.execute(
-                "SELECT a.id,a.user_id,a.slug,a.lifecycle,a.revision,a.created,c.repository FROM apps a LEFT JOIN configurations c ON c.app_id=a.id AND c.revision=a.revision WHERE a.id=?",
+                "SELECT a.id,a.user_id,a.slug,a.lifecycle,a.revision,a.created,c.repository,u.username AS owner_username,u.display_name AS owner_display_name FROM apps a LEFT JOIN configurations c ON c.app_id=a.id AND c.revision=a.revision LEFT JOIN users u ON u.id=a.user_id WHERE a.id=?",
                 (app,),
             ).fetchone()
         if row is None:
@@ -539,6 +549,24 @@ class StaffReads:
             },
             observedAt=utc(observed.get("observedAt")),
             stale=observed.get("stale") is not False,
+        )
+        # The owner from the app itself: activity rows name whoever acted.
+        with self.broker.database.connect() as db:
+            members = db.execute(
+                "SELECT u.username,u.display_name FROM app_members m JOIN users u ON u.id=m.user_id"
+                " WHERE m.app_id=? ORDER BY m.created,u.id LIMIT 10",
+                (app["id"],),
+            ).fetchall()
+        result.update(
+            ownerUsername=profile(app["owner_username"], 32),
+            ownerDisplayName=profile(app["owner_display_name"], 256),
+            members=[
+                {
+                    "username": profile(row["username"], 32),
+                    "displayName": profile(row["display_name"], 256),
+                }
+                for row in members
+            ],
         )
         return result
 

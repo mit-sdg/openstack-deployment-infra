@@ -142,7 +142,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             )
             return Reply(200, file.read_bytes(), content_type, (("Cache-Control", cache),))
         if re.fullmatch(
-            r"/(?:|sign-in|signin|setup|activate|admin/(?:accounts|audit|apps(?:/[a-f0-9-]{36})?)|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|logs|deployments(?:/[a-f0-9-]{36})?))?)?|staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations))",
+            r"/(?:|sign-in|signin|setup|activate|admin/(?:accounts|audit|apps(?:/[a-f0-9-]{36})?)|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|logs|team|deployments(?:/[a-f0-9-]{36})?))?)?|staff/(?:owners(?:/[a-f0-9-]{36})?|apps(?:/[a-f0-9-]{36}(?:/deployments(?:/[a-f0-9-]{36})?)?)?|operations))",
             path,
         ):
             index = self.assets / "index.html"
@@ -173,7 +173,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
         elif re.fullmatch(
-            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/logs|/source-key(?:/check)?|/deployments(?:/[a-f0-9-]{36})?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
+            r"/api/v1/(?:admin-apps(?:/adopt|/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/state|/logs|/source-key(?:/check)?|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36})?)?)?|accounts(?:/[a-f0-9-]{36}(?:/quotas)?)?|account-audit|reauthenticate)",
             path,
         ):
             target = path.removeprefix("/api")
@@ -185,7 +185,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(405, "METHOD_NOT_ALLOWED")
             target = path.removeprefix("/api")
         elif re.fullmatch(
-            r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}/(?:verify|rotate))?|/logs|/source-key(?:/check)?|/deployments(?:/[a-f0-9-]{36}(?:/(?:build-log|startup-log))?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
+            r"/api/v1/(?:session|logout|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}/(?:verify|rotate))?|/logs|/activity|/source-key(?:/check)?|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36}(?:/(?:build-log|startup-log))?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
             path,
         ):
             target = path.removeprefix("/api")

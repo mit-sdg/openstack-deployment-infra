@@ -193,3 +193,21 @@
     grid-column: 1 / -1;
   }
 }
+
+/* Team: add-by-username form in the section footer, notes under the table. */
+.app-team-add {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ui-space-2);
+}
+.app-team-add .ui-field {
+  flex: 1 1 16rem;
+}
+.app-team-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-card-gap);
+  padding: var(--ui-card-padding);
+}

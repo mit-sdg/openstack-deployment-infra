@@ -33,9 +33,10 @@ needs the app's deploy key, which the portal creates and the owner adds to the
 repository on GitHub as a read-only deploy key. It grants no SSH,
 OpenStack, Nomad, registry or storage-administrator credentials. Owner environment variables are write-only, and managed storage supports provisioning,
 verification, rotation and saved bindings. Local admins can change running state
-and delete storage with step-up and typed confirmation. Dockerfiles, arbitrary
-build commands, custom domains, teams, scaling, shell access and credential
-export remain outside this slice.
+and delete storage with step-up and typed confirmation. An owner can add
+teammates who change settings, deploy and read logs; the app counts against the
+owner's limit only. Dockerfiles, arbitrary build commands, custom domains,
+scaling, shell access and credential export remain outside this slice.
 
 The same portal supports local accounts and DB-assigned owner/staff/admin roles.
 Staff inherit own-app rights and read the broker-known course catalog. Admins
