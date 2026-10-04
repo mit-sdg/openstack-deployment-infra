@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -738,6 +739,53 @@ class ControllerAPITests(unittest.TestCase):
             finally:
                 release.set()
             slow.result(timeout=2)
+
+    def test_slow_app_reads_do_not_wait_for_or_hold_the_api_lock(self) -> None:
+        application = self.create_application().body["applicationId"]
+
+        def helper(_config, action, values, *, deadline=None):
+            if action == "app.logs":
+                return {"text": "ready\n"}
+            if action == "app.source.key":
+                return {"present": False}
+            if action == "app.source.check":
+                return {"keyPresent": False}
+            if action in {"app.source.commits", "app.source.preflight"}:
+                return {"keyPresent": False}
+            raise AssertionError(action)
+
+        self.api.helper_caller = helper
+        self.api.logs.helper_caller = helper
+        reads = [
+            ("GET", f"/v1/applications/{application}/runtime-log", None),
+            ("GET", f"/v1/applications/{application}/source-key", None),
+            (
+                "POST",
+                f"/v1/applications/{application}/source-key/check",
+                {"repository": "https://github.com/example/demo-app", "branch": "main"},
+            ),
+            (
+                "POST",
+                f"/v1/applications/{application}/source/commits",
+                {"repository": "https://github.com/example/demo-app", "branch": "main"},
+            ),
+        ]
+        # A locked request (a deploy admission, say) is in progress: these reads
+        # still answer, from their own snapshot.
+        pool = ThreadPoolExecutor(max_workers=len(reads))
+        self.api._lock.acquire()
+        try:
+            futures = [
+                pool.submit(self.dispatch, method, path, body) for method, path, body in reads
+            ]
+            statuses = [future.result(timeout=5).status for future in futures]
+        finally:
+            self.api._lock.release()
+            pool.shutdown(wait=True)
+        self.assertEqual(statuses, [200] * len(reads))
+        with self.assertRaises(HttpError) as missing:
+            self.dispatch("GET", f"/v1/applications/{uuid.uuid4()}/runtime-log")
+        self.assertEqual(missing.exception.code, "APPLICATION_NOT_FOUND")
 
     def test_both_operation_routes_use_an_independent_query_only_snapshot(self) -> None:
         identifier = "00000000-0000-4000-8000-000000000071"

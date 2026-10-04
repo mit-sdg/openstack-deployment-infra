@@ -242,7 +242,18 @@ class ControllerAPI:
         def call(request: Request) -> Response:
             # A slow provider observation must not block operation polling or
             # liveness. Polling uses its own connection, never the shared writer.
-            independent = handler in (self._get_operation, self._health)
+            # Slow external reads of one app (Nomad logs, deploy-key git reads)
+            # also skip the lock: they read the database through their own
+            # snapshot and must not stall deploys and status reads behind them.
+            independent = handler in (
+                self._get_operation,
+                self._health,
+                self._runtime_log,
+                self._get_source_key,
+                self._check_source_key,
+                self._source_commits,
+                self._source_preflight,
+            )
             with nullcontext() if independent else self._lock:
                 try:
                     return handler(request)
@@ -333,6 +344,15 @@ class ControllerAPI:
 
     def _application(self, identifier: str) -> db.Application:
         application = db.get_application(self.connection, uuid(identifier, field="application ID"))
+        if application is None:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
+        return application
+
+    def _application_snapshot(self, identifier: str) -> db.Application:
+        """The app from a private read-only connection, for handlers outside the lock."""
+        with closing(db.connect(self._database_path, create=False)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            application = db.get_application(connection, uuid(identifier, field="application ID"))
         if application is None:
             raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
         return application
@@ -815,7 +835,7 @@ class ControllerAPI:
 
     def _get_source_key(self, request: Request) -> Response:
         self._no_query(request)
-        return self._source_key(self._application(self._path_uuid(request)), "read")
+        return self._source_key(self._application_snapshot(self._path_uuid(request)), "read")
 
     def _create_source_key(self, request: Request) -> Response:
         self._no_query(request)
@@ -833,7 +853,7 @@ class ControllerAPI:
 
     def _source_read(self, request: Request, *, preflight: bool) -> Response:
         self._no_query(request)
-        application = self._application(self._path_uuid(request))
+        application = self._application_snapshot(self._path_uuid(request))
         fields = (
             {"repository", "commit", "configuration"} if preflight else {"repository", "branch"}
         )
@@ -854,7 +874,8 @@ class ControllerAPI:
                 self.config,
                 "app.source.preflight" if preflight else "app.source.commits",
                 values,
-                deadline=min(operation_deadline(self.config), time.monotonic() + 30),
+                # The helper's git reads stop at 25 s; the broker waits 30 s.
+                deadline=min(operation_deadline(self.config), time.monotonic() + 27),
             )
         except (remote.HelperError, ServiceDeadlineError):
             raise HttpError(
@@ -924,7 +945,7 @@ class ControllerAPI:
 
     def _check_source_key(self, request: Request) -> Response:
         self._no_query(request)
-        application = self._application(self._path_uuid(request))
+        application = self._application_snapshot(self._path_uuid(request))
         body = self._body(
             request, allowed={"repository", "branch"}, required={"repository", "branch"}
         )
@@ -974,12 +995,10 @@ class ControllerAPI:
         )
 
     def _runtime_log(self, request: Request) -> Response:
-        application = self._application(self._path_uuid(request))
+        application = self._application_snapshot(self._path_uuid(request))
         lines, _offset = self._log_query(request, allow_offset=False, allow_stream=True)
         stream = self._single_query(request, "stream") or "stdout"
-        chunk = self.logs.runtime(
-            application.application_id, lines=lines, stderr=stream == "stderr"
-        )
+        chunk = self.logs.runtime_for(application, lines=lines, stderr=stream == "stderr")
         return Response(
             200,
             {

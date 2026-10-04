@@ -231,7 +231,13 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             except ValueError:
                 return error_reply(400, "INVALID_CLIENT_ADDRESS")
             status, value = self.broker.request(
-                method, target + ("?" + query if query else ""), body, headers=forwarded
+                method,
+                target + ("?" + query if query else ""),
+                body,
+                headers=forwarded,
+                # Deploy-key repository reads fetch from GitHub (bounded at 30 s
+                # in the broker); everything else keeps the short wait.
+                timeout_seconds=35 if re.search(r"/source/(?:commits|check)$", target) else None,
             )
             if status == 401:
                 return Reply(

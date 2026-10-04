@@ -287,6 +287,9 @@ def _build_log_paths(runtime: HelperRuntime, app_slug: str, build_id: str) -> tu
 
 
 SOURCE_KEY = "id_ed25519"
+# Deploy-key repository reads; the controller (30 s), broker and web (35 s)
+# wait a little longer each, so a slow but successful read still arrives.
+SOURCE_READ_SECONDS = 25
 
 
 def _source_key_directory(runtime: HelperRuntime, app_slug: str) -> Path:
@@ -625,6 +628,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                     repository_url(args["repository"]),
                     branch_name(args["branch"]),
                     key,
+                    timeout_seconds=SOURCE_READ_SECONDS,
                 )
                 if action == "app.source.commits"
                 else application.check_github_checkout(
@@ -632,6 +636,7 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
                     commit(args["commit"]),
                     args["configuration"],
                     key,
+                    timeout_seconds=SOURCE_READ_SECONDS,
                 )
             )
         except (application.ApplicationError, CommandFailure, OSError, ValueError):

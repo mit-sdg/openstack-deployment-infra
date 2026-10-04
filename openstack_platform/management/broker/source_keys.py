@@ -205,7 +205,7 @@ class SourceKeys:
                     "POST",
                     f"/v1/applications/{app['id']}/source/{mode}",
                     values,
-                    timeout_seconds=35,
+                    timeout_seconds=30,
                 )
                 if status == 404:
                     raise HttpError(

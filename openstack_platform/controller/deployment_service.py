@@ -858,9 +858,12 @@ def _deploy_and_accept_application(
         # Job removal, optional quiescence, worker deletion and manifest cleanup
         # still need bounded calls after health polling. Reserve a proportion
         # when the remaining operation budget cannot fit all nominal bounds.
+        # Removal, worker deletion and manifest cleanup usually finish well
+        # inside a minute each; reserving more would cut off slow but healthy
+        # starts. If cleanup still runs out, the existing recovery path applies.
         cleanup_calls = 4 if worker.refs.get("reuse_worker") is True else 3
         reserve = min(
-            remaining * 2 / 3, 30 + cleanup_calls * min(120, config.policy.limits.helper_seconds)
+            remaining * 2 / 3, 30 + cleanup_calls * min(60, config.policy.limits.helper_seconds)
         )
         health_deadline = deadline - reserve
         return app.deploy_and_cleanup(

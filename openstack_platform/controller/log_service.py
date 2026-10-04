@@ -98,7 +98,14 @@ class LogService:
         lines: int,
         stderr: bool = False,
     ) -> LogChunk:
-        application = self._application(application_identifier)
+        return self.runtime_for(
+            self._application(application_identifier), lines=lines, stderr=stderr
+        )
+
+    def runtime_for(
+        self, application: db.Application, *, lines: int, stderr: bool = False
+    ) -> LogChunk:
+        """Read an already-resolved app's logs; touches no database connection."""
         result = app.application_logs(
             application.slug,
             stderr=stderr,
