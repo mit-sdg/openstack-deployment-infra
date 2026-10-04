@@ -552,7 +552,7 @@ let
               machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
               machine.succeed("! systemctl cat ${namespace}-platform-backup.service | grep -F 'LoadCredential='")
               machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'SECRETS_FILE=%t/${namespace}-backup-private/storage-bootstrap.env'")
-              machine.succeed("systemctl show ${namespace}-platform-backup.service -p Requires --value | grep -F -- \"$(systemd-escape --path ${backups}).mount\"")
+              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -Fx -- \"Requires=$(systemd-escape --path --suffix=mount ${backups})\"")
               machine.fail("systemctl cat ${namespace}-platform-backup.service | grep -F REGISTRY_BACKUP_")
               machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F '/backup/verify_garage_backup.py'")
               machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran && rm ${state}/operator/status/managed-backup-probe-ran")
@@ -783,6 +783,11 @@ let
               machine.wait_for_unit("${namespace}-management-web.service")
               machine.wait_until_succeeds(broker_health)
               machine.fail("systemctl start ${namespace}-management-broker-backup.service")
+              # Managed backups must not write into the root disk either.
+              machine.succeed("rm -f ${state}/operator/status/managed-backup-probe-ran")
+              machine.fail("systemctl start ${namespace}-platform-backup.service")
+              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
+              machine.succeed("systemctl reset-failed ${namespace}-platform-backup.service")
               machine.succeed(f"rm -r '/run/systemd/system/{backup_mount}.d'; systemctl daemon-reload; systemctl reset-failed '{backup_mount}'; systemctl start '{backup_mount}'")
               # Remounting disposable tmpfs loses its fixture directories.
               # Recreate only backup paths before the remaining assertions.
