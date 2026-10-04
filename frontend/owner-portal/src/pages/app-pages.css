@@ -121,6 +121,15 @@
   }
   .app-env-form {
     grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-field-gap);
+  }
+  /* Storage rows carry up to three actions: put them on their own line. */
+  .app-resources .ui-list__item {
+    flex-wrap: wrap;
+  }
+  .app-resources .ui-list__trailing {
+    flex-basis: 100%;
+    flex-wrap: wrap;
   }
   .app-binding {
     grid-template-columns: minmax(0, 1fr) auto;

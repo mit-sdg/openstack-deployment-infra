@@ -256,8 +256,9 @@ export function StorageSection({
       client.invalidateQueries({ queryKey: ['intents'] });
     },
   });
+  // Owners confirm adding storage because only an admin can delete it.
   function request(next: Request) {
-    if (next.action === 'rotate' || identityProvider) {
+    if (next.action === 'rotate' || identityProvider || (owner && next.type)) {
       setIdentityConfirmed(false);
       setConfirming(next);
     } else action.mutate(next);
@@ -315,130 +316,152 @@ export function StorageSection({
           <QueryError query={storage} what="your databases and storage" />
         </div>
       ) : (
-        <List label="Databases and storage">
-          {types.map((type) => {
-            const resource = storage.data?.items.find((item) => item.type === type);
-            if (!resource)
-              return (
-                <ListItem key={type} title={labels[type]} meta={<span>Not added</span>}>
-                  <Cluster className="app-resource-actions">
-                    <Button
-                      size="sm"
-                      icon="plus"
-                      disabled={
-                        storage.isPending ||
-                        !!storage.error ||
-                        action.isPending ||
-                        busy ||
-                        storage.data?.intents.some(
-                          (intent) =>
-                            intent.kind === 'storage_create' &&
-                            intent.type === type &&
-                            !['succeeded', 'failed'].includes(intent.state),
-                        )
-                      }
-                      onClick={() => request({ type })}
-                    >
-                      Add {labels[type]}
-                    </Button>
-                  </Cluster>
-                </ListItem>
-              );
-            const outputs =
-              bindings.find((item) => item.resourceId === resource.resourceId)?.outputs ?? {};
-            const count = Object.keys(outputs).length;
-            const ready = resource.status === 'ready';
-            const disabled = action.isPending || !!busy || !ready;
-            return (
-              <ListItem
-                key={type}
-                title={
-                  <span className="app-inline">
-                    {labels[type]}
-                    <Status
-                      state={resource.status === 'provisioning' ? 'creating' : resource.status}
-                      label={
-                        resource.status === 'provisioning'
-                          ? 'Setting up'
-                          : ready
-                            ? undefined
-                            : sentence(resource.status)
-                      }
-                    />
-                  </span>
-                }
-                meta={
-                  <>
-                    {!!count && <span>{`${count} ${count === 1 ? 'variable' : 'variables'}`}</span>}
-                    {resource.verifiedAt ? (
-                      <span>
-                        Verified <RelativeTime value={resource.verifiedAt} />
-                      </span>
-                    ) : (
-                      <span>
-                        Added <RelativeTime value={resource.createdAt} />
-                      </span>
-                    )}
-                  </>
-                }
-              >
-                {!count && (
-                  <InlineStatus tone="warning">
-                    Your app can’t connect to {labels[type]} yet. Give it the connection variables.
-                  </InlineStatus>
-                )}
-                <Cluster className="app-resource-actions">
-                  {count ? (
-                    <Button
-                      size="sm"
-                      aria-label={`Edit ${labels[type]} variables`}
-                      onClick={() => setEditing(resource.resourceId)}
-                    >
-                      Edit variables
-                    </Button>
-                  ) : (
-                    <>
+        <div className="app-resources">
+          <List label="Databases and storage">
+            {types.map((type) => {
+              const resource = storage.data?.items.find((item) => item.type === type);
+              if (!resource)
+                return (
+                  <ListItem
+                    key={type}
+                    title={labels[type]}
+                    meta={<span>Not added</span>}
+                    trailing={
                       <Button
                         size="sm"
-                        loading={applying === resource.resourceId}
-                        aria-label={`Use default ${labels[type]} variables`}
-                        onClick={() => applyDefaults(resource)}
+                        icon="plus"
+                        disabled={
+                          storage.isPending ||
+                          !!storage.error ||
+                          action.isPending ||
+                          busy ||
+                          storage.data?.intents.some(
+                            (intent) =>
+                              intent.kind === 'storage_create' &&
+                              intent.type === type &&
+                              !['succeeded', 'failed'].includes(intent.state),
+                          )
+                        }
+                        loading={action.isPending && action.variables?.type === type}
+                        onClick={() => request({ type })}
                       >
-                        Use default variables
+                        Add {labels[type]}
+                      </Button>
+                    }
+                  />
+                );
+              const outputs =
+                bindings.find((item) => item.resourceId === resource.resourceId)?.outputs ?? {};
+              const count = Object.keys(outputs).length;
+              const ready = resource.status === 'ready';
+              const disabled = action.isPending || !!busy || !ready;
+              return (
+                <ListItem
+                  key={type}
+                  title={
+                    <span className="app-inline">
+                      {labels[type]}
+                      <Status
+                        state={resource.status === 'provisioning' ? 'creating' : resource.status}
+                        label={
+                          resource.status === 'provisioning'
+                            ? 'Setting up'
+                            : ready
+                              ? undefined
+                              : sentence(resource.status)
+                        }
+                      />
+                    </span>
+                  }
+                  trailing={
+                    <>
+                      {!!count && (
+                        <Button
+                          size="sm"
+                          aria-label={`Edit ${labels[type]} variables`}
+                          onClick={() => setEditing(resource.resourceId)}
+                        >
+                          Edit variables
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Verify ${labels[type]}`}
+                        disabled={disabled}
+                        loading={
+                          action.isPending &&
+                          action.variables?.resource === resource.resourceId &&
+                          action.variables?.action === 'verify'
+                        }
+                        onClick={() => request({ resource: resource.resourceId, action: 'verify' })}
+                      >
+                        Verify
                       </Button>
                       <Button
                         size="sm"
                         variant="ghost"
-                        aria-label={`Choose ${labels[type]} variable names`}
-                        onClick={() => setEditing(resource.resourceId)}
+                        aria-label={`Rotate ${labels[type]} credentials`}
+                        disabled={disabled}
+                        loading={
+                          action.isPending &&
+                          action.variables?.resource === resource.resourceId &&
+                          action.variables?.action === 'rotate'
+                        }
+                        onClick={() => request({ resource: resource.resourceId, action: 'rotate' })}
                       >
-                        Choose names
+                        Rotate credentials
                       </Button>
                     </>
+                  }
+                  meta={
+                    <>
+                      {!!count && (
+                        <span>{`${count} ${count === 1 ? 'variable' : 'variables'}`}</span>
+                      )}
+                      {resource.verifiedAt ? (
+                        <span>
+                          Verified <RelativeTime value={resource.verifiedAt} />
+                        </span>
+                      ) : (
+                        <span>
+                          Added <RelativeTime value={resource.createdAt} />
+                        </span>
+                      )}
+                    </>
+                  }
+                >
+                  {!count && (
+                    <>
+                      <InlineStatus tone="warning">
+                        Your app can’t connect to {labels[type]} yet. Give it the connection
+                        variables.
+                      </InlineStatus>
+                      <Cluster className="app-resource-actions">
+                        <Button
+                          size="sm"
+                          loading={applying === resource.resourceId}
+                          aria-label={`Use default ${labels[type]} variables`}
+                          onClick={() => applyDefaults(resource)}
+                        >
+                          Use default variables
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Choose ${labels[type]} variable names`}
+                          onClick={() => setEditing(resource.resourceId)}
+                        >
+                          Choose names
+                        </Button>
+                      </Cluster>
+                    </>
                   )}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-label={`Verify ${labels[type]}`}
-                    disabled={disabled}
-                    onClick={() => request({ resource: resource.resourceId, action: 'verify' })}
-                  >
-                    Verify
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-label={`Rotate ${labels[type]} credentials`}
-                    disabled={disabled}
-                    onClick={() => request({ resource: resource.resourceId, action: 'rotate' })}
-                  >
-                    Rotate credentials
-                  </Button>
-                </Cluster>
-              </ListItem>
-            );
-          })}
-        </List>
+                </ListItem>
+              );
+            })}
+          </List>
+        </div>
       )}
       {invalid && (
         <div className="app-block">
@@ -513,6 +536,12 @@ export function StorageSection({
           </>
         }
       >
+        {confirming?.type && (
+          <p>
+            This adds {confirmingLabel} to this app. Only an admin can delete it later, so add it
+            only if your app needs it.
+          </p>
+        )}
         {confirming?.action === 'rotate' && (
           <p>
             {confirmingLabel} gets new credentials. Your app picks them up on its next deploy, so

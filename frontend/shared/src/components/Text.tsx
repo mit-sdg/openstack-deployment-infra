@@ -41,16 +41,19 @@ export function CopyId({
   value,
   label,
   length = 8,
+  display,
 }: {
   value: string;
   label: string;
   /** Characters shown. Commits use 9 to match the rest of the portal. */
   length?: number;
+  /** Text shown instead of the first `length` characters; the copy is still `value`. */
+  display?: string;
 }) {
   const [copied, setCopied] = useState(false);
   return (
     <span className="ui-copy-id">
-      <code title={value}>{value.slice(0, length)}</code>
+      <code title={value}>{display ?? value.slice(0, length)}</code>
       <button
         type="button"
         className="ui-copy-id__button"

@@ -26,6 +26,7 @@ import {
   type StaffOperation,
 } from '../../staffApi';
 import { activityTitle, short } from '../../utils/presentation';
+import { Repository } from '../../components/Repository';
 
 export const StaffContext = createContext({ userId: '', active: true });
 
@@ -334,20 +335,7 @@ export function appColumns(showOwner: boolean): Column<StaffAppRow>[] {
   ];
 }
 
-function repositoryName(url: string) {
-  const { hostname, pathname } = new URL(url);
-  const path = pathname.replace(/^\/|\.git$|\/$/g, '');
-  return hostname === 'github.com' && path ? path : hostname + (path ? `/${path}` : '');
-}
-
-export function Repository({ url }: { url: string | null }) {
-  if (!url) return <span className="ui-text-subtle">Not set</span>;
-  return (
-    <a className="ui-link ui-break" href={url} target="_blank" rel="noopener noreferrer">
-      {repositoryName(url)}
-    </a>
-  );
-}
+export { Repository };
 
 export function deploymentColumns(app: string, live?: string | null): Column<StaffDeployment>[] {
   return [

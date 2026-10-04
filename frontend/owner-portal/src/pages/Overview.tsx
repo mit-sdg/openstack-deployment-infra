@@ -136,7 +136,9 @@ export function Overview({ id }: { id: string }) {
               </div>
             )}
             {history.error && <QueryError query={history} what="deployments" />}
-            {latest && (
+            {/* The current deployment is already shown above; list the latest
+                only when a newer attempt is in progress or failed. */}
+            {latest && latest.deploymentId !== app.data.acceptedDeployment?.deploymentId && (
               <Section
                 title="Latest deployment"
                 flush

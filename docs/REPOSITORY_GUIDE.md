@@ -375,6 +375,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/Mark.tsx` — shared owner Mark component and presentation behavior.
 - `frontend/owner-portal/src/components/Operation.tsx` — shared owner Operation component and presentation behavior.
 - `frontend/owner-portal/src/components/Status.tsx` — shared owner Status component and presentation behavior.
+- `frontend/owner-portal/src/components/Repository.tsx` — repository links labelled with their short owner/repo name.
 - `frontend/owner-portal/src/components/StorageSection.tsx` — owner storage provisioning, bindings, verification and rotation controls.
 - `frontend/owner-portal/src/components/ThemeButton.tsx` — shared owner ThemeButton component and presentation behavior.
 - `frontend/owner-portal/src/components/presentation.test.tsx` — shared owner presentation.test component and presentation behavior.

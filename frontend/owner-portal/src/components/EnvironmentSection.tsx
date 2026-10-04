@@ -199,7 +199,7 @@ export function EnvironmentSection({
             <Input type="password" ref={valueField} autoComplete="new-password" />
           </Field>
           <Button type="submit" disabled={edit.isPending || !!busy} loading={edit.isPending}>
-            Add or replace variable
+            Save variable
           </Button>
         </div>
         <Hint>

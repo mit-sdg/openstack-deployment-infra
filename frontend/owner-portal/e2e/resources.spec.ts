@@ -54,7 +54,7 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
       new URL(response.url()).pathname.endsWith('/environment/API_TOKEN') &&
       response.ok(),
   );
-  await page.getByRole('button', { name: 'Add or replace variable' }).click();
+  await page.getByRole('button', { name: 'Save variable', exact: true }).click();
   const writeIntent = (await (await written).json()).data;
   await expect(page.getByLabel('New value')).toHaveValue('');
   await expect(
@@ -101,6 +101,10 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
           response.ok(),
       );
       await add.click();
+      // Owners confirm adding storage, since only an admin can delete it.
+      const confirmAdd = page.getByRole('dialog', { name: 'Add PostgreSQL?' });
+      await expect(confirmAdd).toContainText('Only an admin can delete it later');
+      await confirmAdd.getByRole('button', { name: 'Add PostgreSQL', exact: true }).click();
       createIntent = (await (await created).json()).data;
       await expect(postgresStatus).toHaveText('Setting up', { timeout: operationTimeout });
       await expect(add).toHaveCount(0);

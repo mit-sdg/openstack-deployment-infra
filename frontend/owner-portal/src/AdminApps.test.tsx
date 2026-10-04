@@ -324,7 +324,7 @@ describe('admin application management', () => {
     fireEvent.change(screen.getByLabelText('New value'), {
       target: { value: 'ADMIN_SECRET_SENTINEL' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Add or replace variable' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save variable' }));
     await waitFor(() => expect(service.setEnvironment).toHaveBeenCalledOnce());
     expect(screen.getByLabelText('New value')).toHaveValue('');
     expect(

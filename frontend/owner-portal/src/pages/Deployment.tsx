@@ -3,23 +3,26 @@ import {
   CodeBlock,
   CopyId,
   Hint,
-  Icon,
   KeyValueList,
   PageSkeleton,
   RelativeTime,
   Section,
   SectionSkeleton,
-  backLinkClass,
 } from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link } from 'wouter';
 import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
-import { BoundaryText } from '../components/BoundaryText';
 import { QueryError } from '../components/Feedback';
+import { Repository } from '../components/Repository';
 import { Status } from '../components/Status';
 import { short } from '../utils/presentation';
+
+/** "sha256:0123456789ab" from an image reference; the full value is copied. */
+function imageLabel(reference: string) {
+  const digest = reference.slice(reference.lastIndexOf('@') + 1);
+  return digest.startsWith('sha256:') ? digest.slice(0, 19) : reference;
+}
 
 function Details({ deployment }: { deployment: Deployment }) {
   return (
@@ -32,7 +35,7 @@ function Details({ deployment }: { deployment: Deployment }) {
         },
         {
           label: 'Repository',
-          value: <BoundaryText text={deployment.sourceRepository} />,
+          value: <Repository url={deployment.sourceRepository} />,
         },
         { label: 'Started', value: <RelativeTime value={deployment.requestedAt} /> },
         { label: 'Went live', value: <RelativeTime value={deployment.acceptedAt} /> },
@@ -43,9 +46,11 @@ function Details({ deployment }: { deployment: Deployment }) {
         {
           label: 'Image',
           value: deployment.imageDigest ? (
-            <span className="ui-mono ui-truncate" title={deployment.imageDigest}>
-              {deployment.imageDigest}
-            </span>
+            <CopyId
+              value={deployment.imageDigest}
+              label="image digest"
+              display={imageLabel(deployment.imageDigest)}
+            />
           ) : (
             <span className="ui-text-subtle">Not built yet</span>
           ),
@@ -71,12 +76,6 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
   const running = attempt.data?.status === 'running';
   return (
     <AppFrame id={id} active="Deployments">
-      <div>
-        <Link href={`/apps/${id}/deployments`} className={backLinkClass}>
-          <Icon name="arrow-left" />
-          All deployments
-        </Link>
-      </div>
       {attempt.isPending ? (
         <PageSkeleton label="Loading deployment…">
           <SectionSkeleton title rows={3} />

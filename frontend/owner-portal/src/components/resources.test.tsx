@@ -73,7 +73,7 @@ describe('owner resources', () => {
     const { client } = wrap(<EnvironmentSection id="app" bindings={[]} />);
     fireEvent.change(screen.getByLabelText('Variable name'), { target: { value: 'NEW_TOKEN' } });
     fireEvent.change(screen.getByLabelText('New value'), { target: { value: 'SECRET_SENTINEL' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add or replace variable' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save variable' }));
     await waitFor(() => expect(set).toHaveBeenCalledOnce());
     expect(set.mock.calls[0].slice(0, 3)).toEqual(['app', 'NEW_TOKEN', 'SECRET_SENTINEL']);
     expect(screen.getByLabelText('New value')).toHaveValue('');
@@ -111,7 +111,7 @@ describe('owner resources', () => {
     fireEvent.change(screen.getByLabelText('New value'), {
       target: { value: 'resubmitted-secret' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Add or replace variable' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save variable' }));
     await waitFor(() =>
       expect(write).toHaveBeenCalledWith('app', 'TOKEN', 'resubmitted-secret', 'original-key'),
     );
