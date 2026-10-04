@@ -29,6 +29,7 @@ RESOURCE_OUTPUTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "mongo": ("uri",),
         "s3": (
             "endpoint",
+            "public_endpoint",
             "region",
             "access_key_id",
             "secret_access_key",
@@ -36,6 +37,15 @@ RESOURCE_OUTPUTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         ),
     }
 )
+# Outputs that come from platform configuration rather than a provider. The job
+# renders them directly, so they are never stored with the credentials.
+DERIVED_OUTPUTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {"postgres": (), "mongo": (), "s3": ("public_endpoint",)}
+)
+# The public S3 API answers at this label of the platform domain, which no app
+# may use as its slug. Browsers reach it through public ingress, so presigned
+# URLs signed for it work from an app's pages.
+PUBLIC_S3_LABEL = "s3"
 # Outputs earlier releases published. Existing app variables can still hold
 # their keys until the resource's credentials are next written, which removes
 # them; they never reach an app's environment. S3 clients need neither: the
@@ -77,6 +87,7 @@ OUTPUT_ENVIRONMENT_KEYS: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "s3": MappingProxyType(
             {
                 "endpoint": "AWS_ENDPOINT_URL_S3",
+                "public_endpoint": "S3_PUBLIC_ENDPOINT",
                 "region": "AWS_REGION",
                 "access_key_id": "AWS_ACCESS_KEY_ID",
                 "secret_access_key": "AWS_SECRET_ACCESS_KEY",
@@ -106,11 +117,27 @@ def _secret_key(resource_type: str, checked_name: str, output: str) -> str:
     return f"STORAGE__{resource_type.upper()}__{checked_name.replace('-', '_').upper()}__{output.upper()}"
 
 
+def stored_outputs(resource_type: str) -> tuple[str, ...]:
+    """Outputs a provider writes into the app Variable."""
+    derived = DERIVED_OUTPUTS[resource_type]
+    return tuple(output for output in RESOURCE_OUTPUTS[resource_type] if output not in derived)
+
+
 def canonical_secret_keys(resource_type: str, name: str) -> tuple[str, ...]:
     return tuple(
         canonical_secret_key(resource_type, name, output)
-        for output in RESOURCE_OUTPUTS[resource_type]
+        for output in stored_outputs(resource_type)
     )
+
+
+def public_s3_endpoint(domain: str) -> str:
+    return f"https://{PUBLIC_S3_LABEL}.{domain}"
+
+
+def derived_output(resource_type: str, output: str, *, domain: str) -> str:
+    if output not in DERIVED_OUTPUTS.get(resource_type, ()):
+        raise ValidationError("managed-storage output is not derived")
+    return public_s3_endpoint(domain)
 
 
 def retired_secret_keys(resource_type: str, name: str) -> tuple[str, ...]:
@@ -124,10 +151,19 @@ def retired_secret_keys(resource_type: str, name: str) -> tuple[str, ...]:
     )
 
 
+def _stored_mapping(resource_type: str) -> dict[str, str]:
+    outputs = stored_outputs(resource_type)
+    return {
+        output: key
+        for output, key in OUTPUT_ENVIRONMENT_KEYS[resource_type].items()
+        if output in outputs
+    }
+
+
 def canonicalize_environment(
     resource_type: str, name: str, values: Mapping[str, str]
 ) -> dict[str, str]:
-    mapping = OUTPUT_ENVIRONMENT_KEYS[resource_type]
+    mapping = _stored_mapping(resource_type)
     if values.keys() != set(ENVIRONMENT_KEYS[resource_type]):
         raise ValidationError("provider environment outputs are incomplete")
     if resource_type == "s3" and values["AWS_ENDPOINT_URL_S3"] != values["S3_ENDPOINT"]:
@@ -142,7 +178,7 @@ def provider_environment(
     resource_type: str, name: str, values: Mapping[str, str]
 ) -> dict[str, str]:
     """Convert canonical app-variable items back at the provider boundary."""
-    mapping = OUTPUT_ENVIRONMENT_KEYS[resource_type]
+    mapping = _stored_mapping(resource_type)
     expected = set(canonical_secret_keys(resource_type, name))
     if values.keys() != expected:
         raise ValidationError("managed-storage secret outputs are incomplete")

@@ -1426,6 +1426,28 @@ keep two retired keys (`ca_bundle`, `force_path_style`) in their app variable
 until the next credential rotation removes them; they never reach an app that
 binds the resource.
 
+S3 also offers `public_endpoint` (default `S3_PUBLIC_ENDPOINT`), the public S3
+API at `https://s3.<domain>`. Public ingress routes it to Garage with the
+browser's `Host` unchanged, so presigned URLs signed for it work from browsers.
+Traefik answers CORS for app origins (`https://<app>.<domain>`, including
+previews) for `GET`, `HEAD`, `PUT` and `POST` and exposes `ETag`; buckets need no
+CORS configuration, and Garage still requires a valid signature for every
+request. Keep server-side calls on `endpoint` and sign browser links with a
+second client:
+
+```js
+// Bun
+const url = Bun.s3.presign(key, { method: "PUT", expiresIn: 600, endpoint: process.env.S3_PUBLIC_ENDPOINT });
+// AWS SDK: a hostname endpoint needs path-style addressing
+const signer = new S3Client({ endpoint: process.env.S3_PUBLIC_ENDPOINT, forcePathStyle: true });
+```
+
+The public hostname sits behind the same Cloudflare limits as apps, including
+the 100 MB request body limit on the free plan; send larger uploads as presigned
+multipart parts. Responses carry `Cloudflare-CDN-Cache-Control: no-store`, so
+Cloudflare never caches a signed download. App slugs have at least three
+characters, so no app can claim `s3`.
+
 The repository root must contain `package.json`, and each selected package
 directory must contain its runtime lockfile. Build and start scripts come from
 the root `package.json`. Use a small health endpoint such as `/health` that returns

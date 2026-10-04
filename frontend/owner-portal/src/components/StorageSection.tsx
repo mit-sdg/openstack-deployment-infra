@@ -167,6 +167,12 @@ function BindingsDialog({
           connects.
         </Hint>
       )}
+      {'public_endpoint' in resource.defaultBindings && (
+        <Hint>
+          Use the private endpoint from your server. Sign browser upload and download links with the
+          public endpoint; browsers on your app’s pages can use them directly.
+        </Hint>
+      )}
       <ErrorAlert error={error} />
     </Dialog>
   );

@@ -182,6 +182,10 @@ def ensure_security_groups(conn: Any, apply: bool) -> dict[str, Any]:
     expanded[storage].append(
         Rule("ingress", "tcp", REGISTRY_PORT, REGISTRY_PORT, remote_group=groups[builder].id)
     )
+    # Public ingress proxies s3.<domain> to Garage for presigned URLs.
+    expanded[storage].append(
+        Rule("ingress", "tcp", GARAGE_S3_PORT, GARAGE_S3_PORT, remote_group=groups[ingress].id)
+    )
 
     for name, rules in expanded.items():
         group = groups[name]

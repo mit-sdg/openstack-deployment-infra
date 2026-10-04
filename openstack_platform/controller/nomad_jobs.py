@@ -28,10 +28,12 @@ from ..validation import (
 )
 from .application_models import Manifest
 from .storage_contract import (
+    DERIVED_OUTPUTS,
     JOB_ENVIRONMENT,
     RESERVED_ENVIRONMENT_KEYS,
     canonical_secret_key,
     canonical_secret_keys,
+    derived_output,
     platform_environment_values,
     retired_secret_keys,
 )
@@ -93,7 +95,15 @@ def render_nomad_job(
         f'{{{{ $value := index . "{canonical_secret_key(binding.resource_type, binding.name, output)}" }}}}\n{target}={{{{ $value | toJSON }}}}'
         for binding in manifest.storage_bindings
         for output, target in binding.environment
+        if output not in DERIVED_OUTPUTS[binding.resource_type]
     )
+    # Derived outputs are platform facts, not secrets: the job sets them.
+    derived_environment = {
+        target: derived_output(binding.resource_type, output, domain=platform.domain)
+        for binding in manifest.storage_bindings
+        for output, target in binding.environment
+        if output in DERIVED_OUTPUTS[binding.resource_type]
+    }
     excluded_keys = sorted(
         RESERVED_ENVIRONMENT_KEYS
         | {
@@ -115,6 +125,7 @@ def render_nomad_job(
         f"        {key} = {json.dumps(value)}"
         for key, value in sorted(
             {
+                **derived_environment,
                 **platform_environment_values(identifier, app_slug, manifest.port),
                 **JOB_ENVIRONMENT,
             }.items()

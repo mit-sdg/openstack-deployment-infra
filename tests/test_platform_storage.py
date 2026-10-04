@@ -32,6 +32,7 @@ from openstack_platform.controller.storage_contract import (
     RESOURCE_OUTPUTS,
     canonical_secret_keys,
     canonicalize_environment,
+    derived_output,
     platform_environment_values,
     retired_secret_keys,
     storage_owner,
@@ -128,9 +129,26 @@ class ControllerStorageTests(unittest.TestCase):
     def test_s3_binds_only_what_clients_need(self) -> None:
         self.assertEqual(
             RESOURCE_OUTPUTS["s3"],
-            ("endpoint", "region", "access_key_id", "secret_access_key", "bucket"),
+            (
+                "endpoint",
+                "public_endpoint",
+                "region",
+                "access_key_id",
+                "secret_access_key",
+                "bucket",
+            ),
         )
         self.assertEqual(set(OUTPUT_ENVIRONMENT_KEYS["s3"]), set(RESOURCE_OUTPUTS["s3"]))
+        # The public endpoint is configuration, never stored with credentials.
+        self.assertNotIn(
+            "STORAGE__S3__DEFAULT__PUBLIC_ENDPOINT", canonical_secret_keys("s3", "default")
+        )
+        self.assertEqual(
+            derived_output("s3", "public_endpoint", domain="apps.example"),
+            "https://s3.apps.example",
+        )
+        with self.assertRaises(ValidationError):
+            derived_output("s3", "endpoint", domain="apps.example")
         environment = s3_environment("https://10.0.0.5:9000", "demo-bucket", "key", "secret")
         self.assertEqual(set(environment), set(ENVIRONMENT_KEYS["s3"]))
         self.assertEqual(

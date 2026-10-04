@@ -932,7 +932,13 @@ class DeploymentTests(unittest.TestCase):
             "start",
             3000,
             "/health",
-            (StorageBinding("default", "s3", (("bucket", "S3_BUCKET"),)),),
+            (
+                StorageBinding(
+                    "default",
+                    "s3",
+                    (("bucket", "S3_BUCKET"), ("public_endpoint", "S3_PUBLIC_ENDPOINT")),
+                ),
+            ),
         )
         job = render_nomad_job(
             application_id=APP_ID,
@@ -948,6 +954,10 @@ class DeploymentTests(unittest.TestCase):
         for output in ("CA_BUNDLE", "FORCE_PATH_STYLE", "ENDPOINT", "SECRET_ACCESS_KEY"):
             self.assertIn(f'(ne $key "STORAGE__S3__DEFAULT__{output}")', job)
         self.assertIn('NODE_EXTRA_CA_CERTS = "/platform-ca/internal-ca.crt"', job)
+        # The public endpoint is set by the job, not read from the Variable.
+        domain = self.platform().domain
+        self.assertIn(f'S3_PUBLIC_ENDPOINT = "https://s3.{domain}"', job)
+        self.assertNotIn("STORAGE__S3__DEFAULT__PUBLIC_ENDPOINT", job)
         self.assertIn('destination = "/platform-ca"', job)
 
     def test_job_has_only_application_placement_and_explicit_standard_resources(self) -> None:

@@ -387,7 +387,9 @@ in
           proxyPass = "http://127.0.0.1:19000";
           extraConfig = ''
             proxy_http_version 1.1;
-            proxy_set_header Host $host:$server_port;
+            # SigV4 signs Host exactly as the client sent it: <ip>:port from
+            # apps, s3.<domain> through public ingress for presigned URLs.
+            proxy_set_header Host $http_host;
             proxy_set_header X-Forwarded-Proto https;
             proxy_request_buffering off;
             proxy_buffering off;

@@ -1774,8 +1774,8 @@ def _quota_deltas(
         "ports": len(IMAGE_ROLES),
         "security_groups": len(IMAGE_ROLES),
         # Neutron creates two default egress rules per group in addition to
-        # the 21 explicit contract rules.
-        "security_group_rules": 31,
+        # the 22 explicit contract rules.
+        "security_group_rules": 32,
         "key_pairs": 1,
     }
     aliases = {"ram": ("ram",), "key_pairs": ("key_pairs", "keypairs")}
