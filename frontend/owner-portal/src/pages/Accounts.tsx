@@ -95,7 +95,7 @@ export function AccountsPage() {
       key: 'role',
       header: 'Role',
       mobile: 'meta',
-      cell: (account) => roleNames[account.role],
+      cell: (account) => <span className="ui-text-muted">{roleNames[account.role]}</span>,
     },
     {
       key: 'method',
@@ -607,12 +607,6 @@ export function AdminAuditPage() {
   );
   const columns: Column<AdminAudit>[] = [
     { key: 'action', header: 'Action', mobile: 'title', cell: (row) => auditLabel(row) },
-    {
-      key: 'when',
-      header: 'When',
-      mobile: 'trailing',
-      cell: (row) => <When value={row.createdAt} />,
-    },
     { key: 'target', header: 'Account', mobile: 'secondary', cell: target },
     {
       key: 'actor',
@@ -640,6 +634,12 @@ export function AdminAuditPage() {
           <span className="ui-text-subtle">—</span>
         );
       },
+    },
+    {
+      key: 'when',
+      header: 'When',
+      mobile: 'trailing',
+      cell: (row) => <When value={row.createdAt} />,
     },
   ];
   if (audit.isPending)

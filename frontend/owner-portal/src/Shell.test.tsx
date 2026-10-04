@@ -69,9 +69,12 @@ describe('portal shell', () => {
     show('/apps');
     expect(await screen.findByRole('heading', { name: 'Apps', level: 1 })).toBeVisible();
     expect(screen.getByRole('link', { name: 'Example Platform home' })).toBeVisible();
-    await waitFor(() => expect(document.title).toBe('Apps · Example Platform'));
+    // The apps section is titled by the brand alone; other sections lead with their name.
+    await waitFor(() => expect(document.title).toBe('Example Platform'));
     expect(document.body.textContent).not.toMatch(/Owner portal|My applications/);
     expect(pageTitle('/staff/owners')).toBe('Staff');
+    expect(pageTitle('/admin/accounts', 'Example Platform')).toBe('Admin · Example Platform');
+    expect(pageTitle('/apps/abc/configuration', 'Example Platform')).toBe('Example Platform');
   });
   it('shows section links by role and signs out from the account menu', async () => {
     vi.spyOn(api, 'session').mockResolvedValue(session('admin'));

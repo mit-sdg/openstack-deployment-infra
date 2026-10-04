@@ -128,13 +128,22 @@
     grid-template-columns: minmax(0, 1fr);
     gap: var(--ui-field-gap);
   }
-  /* Storage rows carry up to three actions: put them on their own line. */
+  /* Storage rows carry up to three actions: put them in a row on their own
+     line, under the text, instead of the default stacked trailing column. */
   .app-resources .ui-list__item {
     flex-wrap: wrap;
   }
   .app-resources .ui-list__trailing {
     flex-basis: 100%;
+    flex-direction: row;
     flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+  }
+  /* Ghost buttons have no border: shift the row so their text lines up with
+     the row's text. */
+  .app-resources .ui-list__trailing:has(> .ui-button--ghost:first-child) {
+    margin-left: calc(-1 * var(--ui-control-padding-x-sm));
   }
   .app-binding {
     grid-template-columns: minmax(0, 1fr) auto;

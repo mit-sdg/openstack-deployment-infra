@@ -77,7 +77,8 @@ export function pageTitle(path: string, platformName?: string) {
           : path.startsWith('/admin')
             ? 'Admin'
             : 'Apps';
-  return platformName ? `${section} · ${platformName}` : section;
+  if (!platformName) return section;
+  return section === 'Apps' ? platformName : `${section} · ${platformName}`;
 }
 
 export function PortalShell({
