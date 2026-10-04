@@ -320,6 +320,82 @@ class ApplicationSizingTests(unittest.TestCase):
         _, retry = self.resize(plan)
         self.assertEqual(retry.status, "succeeded", retry.safe_error)
 
+    def test_health_deadline_keeps_startup_record_and_preserves_uncertain_cleanup(self):
+        self.config = replace(
+            self.config,
+            policy=replace(
+                self.config.policy,
+                limits=replace(self.config.policy.limits, process_seconds=90, helper_seconds=20),
+            ),
+        )
+        self.api.config = self.config
+        original = self.api.helper_caller
+        clock = [100.0]
+        fail_removal = [False]
+        deadlines = []
+
+        def slow(config, action, values, **bounds):
+            deadlines.append((action, clock[0], bounds["deadline"]))
+            if action == "app.health":
+                clock[0] += min(8, bounds["deadline"] - clock[0])
+                result = original(config, action, values, **bounds)
+                return {**result, "healthy": False, "terminal": False}
+            if action == "app.startup":
+                clock[0] += 6
+                return {
+                    "found": True,
+                    "clientStatus": "running",
+                    "taskState": "running",
+                    "failed": False,
+                    "restarts": 0,
+                    "events": [],
+                    "stdout": "waiting for readiness",
+                    "stderr": "",
+                }
+            if action == "app.remove":
+                clock[0] += 8
+                if fail_removal[0]:
+                    raise app.ApplicationError("candidate removal unconfirmed")
+            if action == "app.worker.delete":
+                clock[0] += 12
+            if action == "app.manifest.delete":
+                clock[0] += 3
+            return original(config, action, values, **bounds)
+
+        self.api.helper_caller = slow
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with (
+            mock.patch(
+                "openstack_platform.controller.deployment_service.time.monotonic",
+                side_effect=lambda: clock[0],
+            ),
+            mock.patch(
+                "openstack_platform.controller.deployment_service.time.sleep", side_effect=sleep
+            ),
+        ):
+            key, operation = self.deploy()
+            self.assertEqual(operation.status, "failed", operation.safe_error)
+            self.assertEqual(operation.cleanup_state, "confirmed")
+            self.assertLess(clock[0], 190)
+            self.assertEqual(self.workers, {})
+            record = self.router.dispatch(
+                "GET", f"/v1/deployments/{key}/startup-log", {}, None
+            ).body
+            self.assertTrue(record["captured"])
+            self.assertEqual(record["startup"]["stdout"], "waiting for readiness")
+            clock[0] = 200
+            fail_removal[0] = True
+            _, operation = self.deploy()
+            self.assertEqual(operation.status, "recovery_required")
+            self.assertTrue(self.workers)
+            self.assertTrue(self.jobs)
+        self.assertTrue(
+            any(action == "app.health" and deadline < 190 for action, _, deadline in deadlines)
+        )
+
     def test_failed_deploy_keeps_the_candidates_startup_record_for_its_owner(self):
         _, first = self.deploy()
         self.assertEqual(first.status, "succeeded", first.safe_error)

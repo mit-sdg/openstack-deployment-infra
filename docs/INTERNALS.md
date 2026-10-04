@@ -487,7 +487,11 @@ read-only helper action `app.startup` for that exact job slot: the newest
 allocation's status, restart count, last 12 task events and 200-line output and
 error tails (64 KiB each). It spends at most 30 s or a third of the remaining
 deadline, so removal keeps its time, and a failed read never blocks removal. The
-record is written 0600 to `startup-logs/<application>/<deployment>.json` under
+health poll now has an absolute cutoff that reserves time for the startup read,
+job removal, worker and artifact cleanup. Helper calls and sleeps count against
+that cutoff; slow reads cannot spend the reserved tail. If cleanup still cannot
+be confirmed within the operation deadline, the existing recovery-required path
+retains the candidate identity. The record is written 0600 to `startup-logs/<application>/<deployment>.json` under
 the controller state directory and served to the app's owner on the failed
 deployment's page.
 

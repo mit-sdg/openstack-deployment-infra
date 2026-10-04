@@ -830,6 +830,12 @@ def _deploy_and_accept_application(
     def deployment_helper(
         action: str, values: Mapping[str, Any], **_bounds: object
     ) -> Mapping[str, Any]:
+        if action == "app.health":
+            timeout = _bounds.get("timeout_seconds")
+            if isinstance(timeout, (int, float)):
+                return helper_caller(
+                    config, action, values, deadline=min(deadline, time.monotonic() + timeout)
+                )
         if action == "app.startup":
             # Removing the candidate needs the time more than its record does:
             # spend at most a third of what is left, and nothing when it's short.
@@ -848,6 +854,15 @@ def _deploy_and_accept_application(
         return helper_caller(config, action, values, deadline=deadline)
 
     def observe(deployment_job: str, *, preview: bool) -> app.DeploymentResult:
+        remaining = _remaining(deadline, config.policy.limits.process_seconds)
+        # Job removal, optional quiescence, worker deletion and manifest cleanup
+        # still need bounded calls after health polling. Reserve a proportion
+        # when the remaining operation budget cannot fit all nominal bounds.
+        cleanup_calls = 4 if worker.refs.get("reuse_worker") is True else 3
+        reserve = min(
+            remaining * 2 / 3, 30 + cleanup_calls * min(120, config.policy.limits.helper_seconds)
+        )
+        health_deadline = deadline - reserve
         return app.deploy_and_cleanup(
             spec.application_slug,
             deployment_job,
@@ -862,15 +877,18 @@ def _deploy_and_accept_application(
             poll_interval_seconds=config.policy.limits.poll_interval_seconds,
             helper_timeout_seconds=config.policy.limits.helper_seconds,
             helper_caller=deployment_helper,
+            deadline=deadline,
+            cleanup_reserve_seconds=reserve,
+            clock=time.monotonic,
             public_health_check=lambda: app.check_public_health(
                 spec.application_slug,
                 config.platform,
                 build.manifest.health_path,
-                timeout_seconds=_remaining(deadline, config.policy.limits.http_seconds),
+                timeout_seconds=_remaining(health_deadline, config.policy.limits.http_seconds),
                 preview=preview,
                 expected_marker=operation_id,
             ),
-            sleep=lambda seconds: time.sleep(_remaining(deadline, seconds)),
+            sleep=time.sleep,
         )
 
     try:

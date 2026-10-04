@@ -1309,6 +1309,73 @@ class DeploymentTests(unittest.TestCase):
             self.assertIsNone(raised.exception.startup)
             self.assertTrue(raised.exception.cleanup_succeeded)
 
+    def test_poll_reserves_startup_and_removal_time_even_with_slow_helpers(self) -> None:
+        job, candidate = self.candidate_job()
+        for removal, cost in ((True, 17), (False, 17), (True, 13)):
+            with self.subTest(removal=removal, cost=cost):
+                clock = [0.0]
+                calls = []
+                sleeps = []
+
+                def helper(
+                    action, values, clock=clock, calls=calls, removal=removal, cost=cost, **bounds
+                ):
+                    calls.append((action, clock[0], bounds["timeout_seconds"]))
+                    if action == "app.deploy":
+                        return {
+                            "jobId": "demo-app",
+                            "nomadVersion": 4,
+                            "candidateJobSha256": candidate[0],
+                            "candidateImage": candidate[1],
+                        }
+                    if action == "app.health":
+                        clock[0] += min(cost, bounds["timeout_seconds"])
+                        return self.health(4, candidate, healthy=False, terminal=False)
+                    if action == "app.startup":
+                        clock[0] += 5
+                        return {
+                            "found": True,
+                            "clientStatus": "running",
+                            "taskState": "running",
+                            "failed": False,
+                            "restarts": 3,
+                            "events": [],
+                            "stdout": "waiting for health",
+                            "stderr": "",
+                        }
+                    if action == "app.remove":
+                        clock[0] += 10
+                        return {"jobAbsent": removal}
+                    raise AssertionError(action)
+
+                def sleep(seconds, clock=clock, sleeps=sleeps):
+                    sleeps.append(seconds)
+                    clock[0] += seconds
+
+                with self.assertRaises(DeploymentFailed) as error:
+                    deploy_and_cleanup(
+                        "demo-app",
+                        job,
+                        attempts=300,
+                        poll_interval_seconds=10,
+                        helper_caller=helper,
+                        sleep=sleep,
+                        deadline=100,
+                        cleanup_reserve_seconds=40,
+                        clock=lambda clock=clock: clock[0],
+                    )
+                self.assertEqual(
+                    [action for action, _, _ in calls][-2:], ["app.startup", "app.remove"]
+                )
+                self.assertLessEqual(clock[0], 100)
+                self.assertEqual(error.exception.cleanup_succeeded, removal)
+                self.assertEqual(error.exception.startup["stdout"], "waiting for health")
+                self.assertEqual(calls[-2][1], 60)
+                if cost == 17:
+                    self.assertEqual(calls[-3][2], 6)
+                else:
+                    self.assertEqual(sleeps[-1], 1)
+
     def test_shared_acceptance_reobserves_exact_job_and_public_route_before_database_write(
         self,
     ) -> None:

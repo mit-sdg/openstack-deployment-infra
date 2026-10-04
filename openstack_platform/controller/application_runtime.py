@@ -1937,12 +1937,18 @@ def deploy_and_cleanup(
     helper_caller: Callable[..., Mapping[str, Any]] = call_helper,
     public_health_check: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    deadline: float | None = None,
+    cleanup_reserve_seconds: float = 0,
+    clock: Callable[[], float] = time.monotonic,
 ) -> DeploymentResult:
     """Deploy, observe bounded health, and remove an unhealthy candidate."""
     app_slug = slug(application_slug)
     job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
     if not 1 <= attempts <= 300 or not 0 < poll_interval_seconds <= 30:
         raise ValueError("health observation bounds are invalid")
+    if cleanup_reserve_seconds < 0:
+        raise ValueError("cleanup reserve must not be negative")
+    health_deadline = None if deadline is None else deadline - cleanup_reserve_seconds
     candidate = nomad_candidate_identity(job)
     job_id = nomad_job_id(job, app_slug)
     deployed = _call_helper(
@@ -1998,12 +2004,18 @@ def deploy_and_cleanup(
 
     failure: BaseException | None = None
     for observation_number in range(1, attempts + 1):
+        # The count cannot account for time spent in helper or route reads.
+        # Keep the reserved tail available for the record and exact removal.
+        if health_deadline is not None and clock() >= health_deadline:
+            break
         try:
             observation = _call_helper(
                 helper_caller,
                 "app.health",
                 health_args(version, candidate),
-                timeout_seconds=helper_timeout_seconds,
+                timeout_seconds=helper_timeout_seconds
+                if health_deadline is None
+                else min(helper_timeout_seconds, health_deadline - clock()),
             )
         except Exception as error:
             failure = error
@@ -2028,7 +2040,14 @@ def deploy_and_cleanup(
         if terminal:
             break
         if observation_number < attempts:
-            sleep(poll_interval_seconds)
+            delay = (
+                poll_interval_seconds
+                if health_deadline is None
+                else min(poll_interval_seconds, health_deadline - clock())
+            )
+            if delay <= 0:
+                break
+            sleep(delay)
 
     # The candidate's output and task events disappear with it; read them
     # first. Best effort: an unreadable record never blocks the cleanup.
