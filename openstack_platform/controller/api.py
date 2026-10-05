@@ -52,6 +52,10 @@ _FAILURE_CODES = {"platform_busy": "PLATFORM_BUSY"}
 # accepted state. It matches the broker's owner-page cache, and the
 # projection's checkedAt still says when the probe ran.
 _LIVE_REUSE_SECONDS = 2.0
+# Readers sharing another reader's probe wait at most this long, then answer
+# 504: the broker gives up sooner, so longer waits would only pile up
+# connections behind a hung probe.
+_LIVE_FOLLOWER_WAIT_SECONDS = 20.0
 HelperCaller = Callable[..., Mapping[str, object]]
 
 
@@ -596,7 +600,9 @@ class ControllerAPI:
         model["live"] = self._live.run(
             (application, deployment),
             lambda: status.app_live(application.application_id, observe=observe),
-            wait_seconds=limits.helper_seconds + limits.http_seconds,
+            wait_seconds=min(
+                _LIVE_FOLLOWER_WAIT_SECONDS, limits.helper_seconds + limits.http_seconds
+            ),
         )
         return Response(200, model)
 
