@@ -131,7 +131,9 @@ For a first deployment or intentional configuration change, create a reviewed
 ```
 
 Use `node` instead of `bun` for Node, and `null` for `buildScript` when no build
-script is needed. Set a non-negative `CONFIGURATION_REVISION` (for example, `1`
+script is needed. The Node.js or Bun version comes from the repository, not this
+configuration (see [owner portal operations](OPERATIONS.md#owner-portal-operations));
+deployment reads report the release a build used as `runtime`. Set a non-negative `CONFIGURATION_REVISION` (for example, `1`
 for a new configuration). Increment it for an intentional configuration change.
 
 Provision required storage before deployment using
