@@ -1566,8 +1566,13 @@ key directory; an app without a key gets the same `present: false` answer.
 Builds of a private repository then fail with `SOURCE_REJECTED` until someone
 creates a new key, so also delete the old key from the repository's Deploy keys
 on GitHub. The broker audits `source_key_remove`; an admin removal also records
-`app_source_key` with `removed: true`. Install matching controller and helper
-releases; an older controller answers removal with `SOURCE_KEYS_UNAVAILABLE`.
+`app_source_key` with `removed: true`. Cascade application deletion removes the
+app's deploy key once its job and Variable are absent, and hosted-controller
+backups no longer archive keys of deleted apps. Install matching controller and
+helper releases: an older helper refuses the `delete` mode, which leaves an app
+deletion `recovery_required` at phase `variable_absent` until the helper is
+updated and the deletion is retried. An older controller answers removal with
+`SOURCE_KEYS_UNAVAILABLE`.
 
 Install matched broker/web releases using protocol 3 and schema 3 together with
 the approved replacement admin image. The image carries protocol-3 activation,

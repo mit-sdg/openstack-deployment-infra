@@ -149,6 +149,30 @@ class HostedControllerBackupTests(HostedBackupFixture):
         self.assertEqual(public.stat().st_uid, os.geteuid())
         self.assertFalse(list((self.state / "backup-work").iterdir()))
 
+    def test_key_archive_leaves_out_deleted_apps(self) -> None:
+        root = self._keys()
+        deleted = "22222222-2222-4222-8222-222222222222"
+        db.put_application(
+            self.connection,
+            application_id=deleted,
+            application_slug="deleted-app",
+            worker_flavor="example.1c2g",
+            scheduler_cpu_mhz=1000,
+            scheduler_memory_mib=2048,
+        )
+        shutil.copytree(root / "hosted-app", root / "deleted-app")
+        # Deletion keeps the row and retires the slug with a tombstone.
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
+                ("deleted-app", deleted, "2026-01-02T03:04:05Z"),
+            )
+        keys.write_source_key_archive(self.connection, root, self.root / "keys.tar")
+        with tarfile.open(self.root / "keys.tar") as archive:
+            self.assertEqual(
+                set(archive.getnames()), {"hosted-app/id_ed25519", "hosted-app/id_ed25519.pub"}
+            )
+
     def test_key_backup_retries_a_directory_replacement_and_refuses_links(self) -> None:
         root = self._keys()
         original = keys._read_key

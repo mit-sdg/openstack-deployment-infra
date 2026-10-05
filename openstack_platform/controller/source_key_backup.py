@@ -62,13 +62,20 @@ def _read_key(directory: int, name: str) -> tuple[bytes, os.stat_result]:
 
 
 def write_source_key_archive(connection: sqlite3.Connection, root: Path, destination: Path) -> None:
-    """Include only paired direct files for slugs in this SQLite snapshot.
+    """Include only paired direct files for live apps in this SQLite snapshot.
 
     Hold one directory handle for both files. Reopen after replacement races;
-    .new/.old directories are never enumerated or included.
+    .new/.old directories are never enumerated or included. A deleted app keeps
+    its row beside a slug tombstone, and its key is never archived again.
     """
     slugs = [
-        slug(row[0]) for row in connection.execute("SELECT slug FROM applications ORDER BY slug")
+        slug(row[0])
+        for row in connection.execute(
+            "SELECT application.slug FROM applications AS application "
+            "WHERE NOT EXISTS (SELECT 1 FROM application_slug_tombstones AS tombstone "
+            "WHERE tombstone.application_id = application.application_id) "
+            "ORDER BY application.slug"
+        )
     ]
     if root.exists() or root.is_symlink():
         _directory(root)

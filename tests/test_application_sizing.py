@@ -183,6 +183,8 @@ class ApplicationSizingTests(unittest.TestCase):
         if action == "app.worker.delete":
             self.workers.pop(values["applicationId"], None)
             return {"absent": True}
+        if action == "app.source.key" and values["mode"] == "delete":
+            return {"slug": values["slug"], "present": False}
         if action in {"app.manifest.delete", "app.builder.delete"}:
             return {"absent": True}
         if action == "app.manifest.retain":

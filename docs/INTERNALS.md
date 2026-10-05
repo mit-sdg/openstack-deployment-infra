@@ -479,11 +479,13 @@ runs `git ls-remote` with the key and names the problem (`key-refused`,
 Removing a key (`app.source.key` mode `delete`) renames the app's whole key
 directory to a `.old-*` name before deleting it, so builds and backups see the
 full pair or none; builds of a private repository then fail with
-`SOURCE_REJECTED` until a new key exists.
+`SOURCE_REJECTED` until a new key exists. Cascade app deletion removes the key
+right after the job and its Variable are absent; a retried deletion finds none.
 Keys are backed up separately alongside the hosted-controller SQLite snapshot,
 encrypted to the off-platform escrow recipient. The database manifest binds the
-paired key archive. Only direct private/public files for snapshot slugs are read;
-helper replacement directories are excluded. Offline restore validates slugs and
+paired key archive. Only direct private/public files for snapshot slugs of apps
+that are not deleted (no slug tombstone) are read; helper replacement
+directories are excluded. Offline restore validates slugs and
 pairs, installs controller-owned 0700 directories/0600 files, and preserves public
 key mtimes for the portal's createdAt display.
 

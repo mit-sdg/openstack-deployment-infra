@@ -72,6 +72,8 @@ class ControllerRecoveryTests(TestCase):
             return {"confirmedAbsent": True, "environmentRemoved": True}
         if action == "app.remove":
             return {"jobAbsent": True, "variableAbsent": True}
+        if action == "app.source.key" and values["mode"] == "delete":
+            return {"slug": values["slug"], "present": False}
         if action == "app.worker.delete":
             return {"absent": True}
         raise AssertionError(action)
