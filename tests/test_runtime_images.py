@@ -155,6 +155,15 @@ class ResolutionTests(unittest.TestCase):
             ],
         )
 
+    def test_an_open_node_range_prefers_the_newest_lts_release(self) -> None:
+        registry = FakeRegistry(node=NODE_INDEX)
+        resolved = resolve_runtime("node", node_request(">=20"), DEFAULTS.node, http=registry)
+        # 26.1.0 is newer but a Current release; 24.9.0 is the newest LTS.
+        self.assertEqual(resolved.evidence()["version"], "24.9.0")
+        current = resolve_runtime("node", node_request("26"), DEFAULTS.node, http=registry)
+        # A range that admits only Current releases still gets the newest one.
+        self.assertEqual(current.evidence()["version"], "26.1.0")
+
     def test_lts_asks_for_the_newest_long_term_support_release(self) -> None:
         registry = FakeRegistry(node=NODE_INDEX)
         request = runtime_request("node", {}, {".nvmrc": "lts/*"}.get)

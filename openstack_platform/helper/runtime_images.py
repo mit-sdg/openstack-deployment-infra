@@ -3,7 +3,8 @@
 app.build calls this after validating the exact checkout. Node.js releases come
 from nodejs.org's release index and Bun releases from the oven/bun tags on
 Docker Hub. The newest release that satisfies the request and is no older than
-the oldest supported line wins; its -slim tag is then resolved to the digest of
+the oldest supported line wins, preferring Node.js LTS releases when a range
+admits one; its -slim tag is then resolved to the digest of
 its multi-platform index, falling back to the next release while a new tag is
 not published yet. Every lookup is anonymous, HTTPS-only, bounded in time and
 size, and never follows a redirect. Docker Hub's pull token is short-lived,
@@ -268,12 +269,17 @@ def resolve_runtime(
         raise ValidationError("runtime version request is malformed")
     lookup = _Lookup(runtime, http, clock)
     oldest = OLDEST_LINES[runtime]
-    matches = [
-        version
+    candidates = [
+        (version, lts)
         for version, lts in lookup.releases()
         if version[:2] >= oldest
         and (lts if request.versions is None else request.versions.admits(version))
     ]
+    # A range prefers the newest LTS release it admits: "engines.node >=20"
+    # builds on the current LTS line, not the newest Current one. The sort is
+    # stable, so each group stays newest first. Bun publishes no LTS lines.
+    candidates.sort(key=lambda candidate: not candidate[1])
+    matches = [version for version, _lts in candidates]
     if not matches:
         raise unmatched(request)
     for version in matches[:MAXIMUM_IMAGE_ATTEMPTS]:

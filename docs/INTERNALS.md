@@ -182,7 +182,9 @@ The helper's `app.build` then resolves a request
 releases, with their LTS markers for `lts/*`, come from
 `https://nodejs.org/dist/index.json`. Bun releases come from the `oven/bun` tag
 list on Docker Hub (anonymous pull token, `Link` pages followed, `X.Y.Z-slim` tags
-only). The newest release that satisfies the request and floor is resolved to its
+only). The newest release that satisfies the request and floor, preferring a
+Node.js LTS release when the range admits one (`>=20` builds on the newest LTS,
+not a Current line), is resolved to its
 `-slim` index digest by a `HEAD` manifest request accepting OCI index and Docker
 manifest-list types; while that tag is unpublished (404), the next two releases
 are tried. Each exchange is HTTPS without redirects or credentials, trusts the OS
