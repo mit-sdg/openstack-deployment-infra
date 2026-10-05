@@ -255,7 +255,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_helper_worker_capacity.py` — production capacity dispatch, pinned Nomad field/worker identity contract, deadlines, and sanitized failures.
 - `tests/test_ci_publication.py` — guards the CI path set that triggers role-image publication.
 - `tests/test_build_failure_cleanup.py` — deterministic build-rejection classification and exact builder/registry absence checks.
-- `tests/test_controller_api.py` — controller route composition, capability split, responses, idempotency, and service integration tests.
+- `tests/test_controller_api.py` — controller route composition, capability split, responses, idempotency, lock-free snapshot reads, and service integration tests.
 - `tests/test_controller_database.py` — schema, migration, identity, journal, state transition, and database recovery tests.
 - `tests/test_legacy_controller_migration.py` — legacy marker rejection and complete application/storage/deployment import tests.
 - `tests/test_controller_hosting.py` — static Nix/controller account, socket, backup, and service-hosting boundary checks.

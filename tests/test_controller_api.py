@@ -758,7 +758,18 @@ class ControllerAPITests(unittest.TestCase):
 
         self.api.helper_caller = helper
         self.api.logs.helper_caller = helper
+        resource = db.put_managed_resource(
+            self.connection,
+            application_id=application,
+            resource_type="postgres",
+            provider_name="app_demo",
+            lifecycle_state="active",
+        ).resource_id
         reads = [
+            # The app page's settings reads: database only, from a snapshot.
+            ("GET", f"/v1/applications/{application}/environment", None),
+            ("GET", f"/v1/applications/{application}/storage", None),
+            ("GET", f"/v1/storage/{resource}", None),
             ("GET", f"/v1/applications/{application}/runtime-log", None),
             ("GET", f"/v1/applications/{application}/source-key", None),
             (
@@ -788,6 +799,57 @@ class ControllerAPITests(unittest.TestCase):
         with self.assertRaises(HttpError) as missing:
             self.dispatch("GET", f"/v1/applications/{uuid.uuid4()}/runtime-log")
         self.assertEqual(missing.exception.code, "APPLICATION_NOT_FOUND")
+        for path, code in (
+            (f"/v1/applications/{uuid.uuid4()}/environment", "APPLICATION_NOT_FOUND"),
+            (f"/v1/applications/{uuid.uuid4()}/storage", "APPLICATION_NOT_FOUND"),
+            (f"/v1/storage/{uuid.uuid4()}", "STORAGE_NOT_FOUND"),
+        ):
+            with self.assertRaises(HttpError) as missing:
+                self.dispatch("GET", path)
+            self.assertEqual(missing.exception.code, code)
+
+    def test_app_settings_reads_use_a_private_query_only_snapshot(self) -> None:
+        application = self.create_application().body["applicationId"]
+        resource = db.put_managed_resource(
+            self.connection,
+            application_id=application,
+            resource_type="s3",
+            provider_name="app_demo",
+            lifecycle_state="active",
+        ).resource_id
+        snapshots = []
+
+        def private(read):
+            def observe(connection, *args, **kwargs):
+                self.assertIsNot(connection, self.connection)
+                self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
+                self.assertTrue(connection.in_transaction)
+                snapshots.append(read.__name__)
+                return read(connection, *args, **kwargs)
+
+            return mock.patch.object(db, read.__name__, side_effect=observe)
+
+        with (
+            private(db.get_environment_revision),
+            private(db.list_environment_keys),
+            private(db.list_managed_resources),
+            private(db.get_managed_resource),
+        ):
+            environment = self.dispatch("GET", f"/v1/applications/{application}/environment")
+            listed = self.dispatch("GET", f"/v1/applications/{application}/storage")
+            single = self.dispatch("GET", f"/v1/storage/{resource}")
+        self.assertEqual(environment.body["keys"], [])
+        self.assertEqual([item["resourceId"] for item in listed.body["items"]], [resource])
+        self.assertEqual(single.body["type"], "s3")
+        self.assertEqual(
+            snapshots,
+            [
+                "get_environment_revision",
+                "list_environment_keys",
+                "list_managed_resources",
+                "get_managed_resource",
+            ],
+        )
 
     def test_deploy_key_removal_asks_the_helper_and_reports_no_key(self) -> None:
         application = self.create_application().body["applicationId"]

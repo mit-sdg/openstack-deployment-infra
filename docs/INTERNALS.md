@@ -339,9 +339,11 @@ validator covers both API admission and DeploymentService's repeated fingerprint
 Database-only application creation returns `201`. External mutations durably
 reserve application scope and return `202` with an operation resource before
 external work. Four workers execute at most 32 admitted running/queued
-operations, serialized per application. Operation polling uses an independent,
-query-only SQLite read snapshot and does not wait for the API handler lock held
-by slow live observations. Other synchronous handlers still share that lock.
+operations, serialized per application. Operation polling, environment-name
+reads and storage reads each use an independent, query-only SQLite read snapshot
+and do not wait for the API handler lock held by slow live observations, such
+as an application read's helper and route probes. Runtime logs and deploy-key
+reads skip the lock the same way. Other synchronous handlers still share it.
 
 Started work with recorded domain intent interrupted by controller restart becomes
 `recovery_required`, preserving its domain checkpoint. A dispatch interrupted
