@@ -1,4 +1,8 @@
-"""Local-admin app authority over the existing project peer and resource handlers."""
+"""Staff and admin app authority over the existing project peer and resource handlers.
+
+Staff manage every app as admins do. Ownership changes (creating an app for an
+owner, adoption, reassignment) and permanent storage deletion stay admin-only.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import ExitStack
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from urllib.parse import urlsplit
 
 from ...controller.deployment_config import branch_name, parse_configuration
@@ -29,17 +33,37 @@ if TYPE_CHECKING:
 IDENTITY_WARNING = "Portal sign-in depends on this app"
 
 
+class Authority(NamedTuple):
+    """The session behind an app-administration request and what its route needs."""
+
+    sid: str
+    # "staff" admits staff and admin sessions; "admin" admits only admins.
+    kind: str
+    step_up: bool
+
+
+def admin_only(request: Request) -> tuple[bool, bool]:
+    """Whether a route is admin-only, and whether it also needs a recent step-up."""
+    step_up = (
+        request.method == "DELETE"
+        and "/storage/" in request.path
+        or request.path.endswith("/owner")
+        or request.path == "/v1/admin-apps/adopt"
+    )
+    # Creating an app for an owner sets its ownership, but needs no step-up.
+    return step_up or (request.method == "POST" and request.path == "/v1/admin-apps"), step_up
+
+
 class AdminApps:
     def __init__(self, broker: Broker) -> None:
         self.broker = broker
         # Authority is request-local, including concurrent Unix-server threads.
-        # An admin app page reads about eight things per view (details,
-        # settings, variables, storage, logs, deploy key, team), so admins get
-        # a larger budget than staff browsing; reads still run two at a time.
+        # An app administration page reads about eight things per view
+        # (details, settings, variables, storage, logs, deploy key, team), so
+        # it gets a larger budget than the staff metadata views; reads still
+        # run two at a time.
         self.read_limits = ReadLimits(burst=40, rate=4)
-        self.context: ContextVar[tuple[str, bool] | None] = ContextVar(
-            "admin_app_actor", default=None
-        )
+        self.context: ContextVar[Authority | None] = ContextVar("admin_app_actor", default=None)
 
     def routes(self) -> list[tuple[str, str, Any]]:
         b = self.broker
@@ -71,13 +95,9 @@ class AdminApps:
         ]
 
     def handle(self, request: Request, handler: Callable[[Request], Response]) -> Response:
-        sensitive = (
-            request.method == "DELETE"
-            and "/storage/" in request.path
-            or request.path.endswith("/owner")
-            or request.path == "/v1/admin-apps/adopt"
-        )
-        user, sid = self.broker.accounts.admin(request, step_up=sensitive)
+        restricted, sensitive = admin_only(request)
+        kind = "admin" if restricted else "staff"
+        user, sid = self.broker.accounts.admin(request, step_up=sensitive, kind=kind)
         allowed = (
             {"limit", "cursor"}
             if request.path == "/v1/admin-apps" or request.path.endswith("/deployments")
@@ -94,7 +114,7 @@ class AdminApps:
             and request.body is not None
         ):
             raise HttpError(400, "INVALID_REQUEST", "Unexpected request fields.")
-        token = self.context.set((sid, sensitive))
+        token = self.context.set(Authority(sid, kind, sensitive))
         stack = ExitStack()
         try:
             if request.method == "GET":
@@ -131,7 +151,14 @@ class AdminApps:
     def check(self, db: sqlite3.Connection) -> None:
         context = self.context.get()
         if context is not None:
-            self.broker.accounts.checked_actor(db, context[0], step_up=context[1])
+            self.broker.accounts.checked_actor(
+                db, context.sid, step_up=context.step_up, kind=context.kind
+            )
+
+    def kind(self) -> str:
+        """The session kind this request's route needs; admin when unknown."""
+        context = self.context.get()
+        return "admin" if context is None else context.kind
 
     def record_audit(
         self, db: sqlite3.Connection, actor: str, app: str, kind: str, intent: str, now: float
@@ -256,7 +283,9 @@ class AdminApps:
                 "Supply the exact current reviewed sizing plan; no extra configuration fields are accepted.",
             ) from None
 
-    def deployment_body(self, request: Request, app: dict[str, Any]) -> dict[str, Any]:
+    def deployment_body(
+        self, request: Request, app: dict[str, Any], *, admin: bool
+    ) -> dict[str, Any]:
         if (
             not isinstance(request.body, dict)
             or not {"configurationRevision", "commit"} <= set(request.body)
@@ -279,11 +308,24 @@ class AdminApps:
             raise HttpError(
                 400, "INVALID_FIELD", "Maintenance must be boolean and plan must be an object."
             )
+        # Cutover downtime and worker sizing are platform capacity decisions.
+        if not admin and (body.get("maintenance") is True or "plan" in body):
+            raise HttpError(
+                403,
+                "ADMIN_REQUIRED",
+                "Only an admin can allow a maintenance outage or change an app's size.",
+            )
         model = self.observed(app["id"])
         self.identity_consent(app["id"], body, model)
         if "plan" in body:
             self.sizing_plan(body["plan"], app["id"], model)
         if model.get("requiresMaintenance") is True and body.get("maintenance") is not True:
+            if not admin:
+                raise HttpError(
+                    403,
+                    "ADMIN_REQUIRED",
+                    "This app keeps a fixed IP address, so only an admin can deploy it.",
+                )
             raise HttpError(
                 409,
                 "MAINTENANCE_REQUIRED",

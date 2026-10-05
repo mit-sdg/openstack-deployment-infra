@@ -14,6 +14,7 @@ from ..common import canonical, digest, object_body, opaque, text, utc
 from . import bootstrap, known_device, local_security
 from .anonymous import client_address_bucket
 from .local_auth import authenticate as local_authenticate
+from .resources import UNLIMITED_ROLES
 
 if TYPE_CHECKING:
     from .api import Broker
@@ -48,11 +49,14 @@ class Accounts:
     def __init__(self, broker: Broker) -> None:
         self.broker = broker
 
-    def admin(self, request: Request, *, step_up: bool = False) -> tuple[dict[str, Any], str]:
+    def admin(
+        self, request: Request, *, step_up: bool = False, kind: str = "admin"
+    ) -> tuple[dict[str, Any], str]:
+        """An admin session, or with kind="staff" a staff or admin one (app administration)."""
         if request.method == "GET":
             self.broker.auth.read_origin(request)
         user, sid = self.broker.auth.authenticate(
-            request, kind="admin", mutation=request.method != "GET", csrf=request.method == "GET"
+            request, kind=kind, mutation=request.method != "GET", csrf=request.method == "GET"
         )
         if step_up and user["reauthenticated_at"] + 300 <= self.broker.auth.clock():
             raise HttpError(
@@ -61,9 +65,9 @@ class Accounts:
         return user, sid
 
     def checked_actor(
-        self, db: sqlite3.Connection, sid: str, *, step_up: bool = False
+        self, db: sqlite3.Connection, sid: str, *, step_up: bool = False, kind: str = "admin"
     ) -> dict[str, Any]:
-        actor = self.broker.auth.session_row(db, sid, self.broker.auth.clock(), "admin")
+        actor = self.broker.auth.session_row(db, sid, self.broker.auth.clock(), kind)
         if step_up and actor["reauthenticated_at"] + 300 <= self.broker.auth.clock():
             raise HttpError(
                 403, "STEP_UP_REQUIRED", "Re-enter your password and a fresh authentication code."
@@ -604,8 +608,8 @@ class Accounts:
         with self.broker.database.connect(write=True) as db:
             self.checked_actor(db, sid)
             user = self.target(db, request.path_parameters["user"])
-            if user["role"] == "admin":
-                raise HttpError(409, "ADMIN_UNLIMITED", "Admin accounts have no limits.")
+            if user["role"] in UNLIMITED_ROLES:
+                raise HttpError(409, "ADMIN_UNLIMITED", "Staff and admin accounts have no limits.")
             db.execute(
                 "INSERT INTO quotas VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET apps=excluded.apps,concurrent=excluded.concurrent",
                 (user["id"], body["apps"], body["concurrentOperations"]),
@@ -657,9 +661,11 @@ class Accounts:
                 "method": "local" if row["issuer"] == "local" else "commons",
                 "lastSignIn": utc(row["last_login"]) if row["last_login"] else None,
                 "appCount": row["app_count"],
-                # Admin accounts have no limits.
-                "appLimit": None if row["role"] == "admin" else row["app_limit"],
-                "concurrencyLimit": None if row["role"] == "admin" else row["concurrent_limit"],
+                # Staff and admin accounts have no limits.
+                "appLimit": None if row["role"] in UNLIMITED_ROLES else row["app_limit"],
+                "concurrencyLimit": None
+                if row["role"] in UNLIMITED_ROLES
+                else row["concurrent_limit"],
                 "totpEnabled": bool(row["totp_enabled"]),
             }
             for row in rows[:limit]

@@ -72,9 +72,13 @@ class StaffTests(ManagementCase):
         self.staff()
         with self.broker.database.connect(write=True) as db:
             db.execute("INSERT INTO quotas VALUES(?,7,3)", (self.alice,))
+            db.execute("INSERT INTO quotas VALUES(?,5,2)", (self.bob,))
         calls = len(self.fixture.calls)
         owner = self.call("GET", f"/v1/staff/owners/{self.alice}", owner="alice").body["data"]
-        self.assertEqual(owner["quota"]["apps"], {"limit": 7, "used": 1, "reserved": 0})
+        # Staff have no limits; a quota stored for them applies only if they become owners.
+        self.assertEqual(owner["quota"]["apps"], {"limit": None, "used": 1, "reserved": 0})
+        owner = self.call("GET", f"/v1/staff/owners/{self.bob}", owner="alice").body["data"]
+        self.assertEqual(owner["quota"]["apps"], {"limit": 5, "used": 0, "reserved": 0})
         apps = self.call("GET", "/v1/staff/apps", owner="alice").body["data"]["items"]
         self.assertEqual(apps[0]["repository"], "https://github.com/example/student-app")
         self.call("GET", "/v1/staff/operations", owner="alice")
@@ -82,7 +86,7 @@ class StaffTests(ManagementCase):
             self.fixture.calls[calls:], [("GET", f"/v1/applications/{app}/environment", None)]
         )
         with self.broker.database.connect() as db:
-            self.assertEqual(db.execute("SELECT row_count FROM staff_read_state").fetchone()[0], 3)
+            self.assertEqual(db.execute("SELECT row_count FROM staff_read_state").fetchone()[0], 4)
 
     def test_operations_project_every_intent_kind(self) -> None:
         import re

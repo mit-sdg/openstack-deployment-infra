@@ -1,4 +1,4 @@
-"""Deploy keys for private repositories: owners and admins see the public half.
+"""Deploy keys for private repositories: owners, staff and admins see the public half.
 
 The helper creates and keeps each app's private key; it never leaves the
 admin host. An access check runs `git ls-remote` with the key, so checks are

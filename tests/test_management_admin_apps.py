@@ -39,10 +39,33 @@ class AdminApplicationTests(ManagementCase):
         self.fixture.delay = 0
         self.prefix = f"/v1/admin-apps/{self.app_id}"
 
-    def complete(self, response: Any) -> Any:
+    def complete(self, response: Any, actor: str = "admin") -> Any:
         result = response.body["data"]
         self.broker.journal.dispatch(result["intentId"])
-        return self.call("GET", f"/v1/intents/{result['intentId']}", owner="admin").body["data"]
+        return self.call("GET", f"/v1/intents/{result['intentId']}", owner=actor).body["data"]
+
+    def staff(self, name: str = "taylor") -> str:
+        user = self.login(name)
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE users SET role='staff' WHERE id=?", (user,))
+            security_change(db, user)
+        self.login(name)
+        return user
+
+    def routes(self) -> list[tuple[str, str, str]]:
+        """Every app-administration route as (method, route, a concrete path)."""
+        return [
+            (
+                method,
+                route,
+                route.replace("{app}", self.app_id)
+                .replace("{resource}", str(uuid.uuid4()))
+                .replace("{deployment}", str(uuid.uuid4()))
+                .replace("{user}", str(uuid.uuid4()))
+                .replace("{key}", "TOKEN"),
+            )
+            for method, route, _handler in self.broker.admin_apps.routes()
+        ]
 
     def adopted(self, *, identity: bool = True, bindings: bool = False) -> str:
         identifier = str(uuid.uuid4())
@@ -75,27 +98,229 @@ class AdminApplicationTests(ManagementCase):
         )
         return identifier
 
-    def test_owner_and_staff_denied_every_admin_action_before_lookup(self) -> None:
-        staff_id = self.login("taylor")
-        with self.broker.database.connect(write=True) as db:
-            db.execute("UPDATE users SET role='staff' WHERE id=?", (staff_id,))
-            security_change(db, staff_id)
-        self.login("taylor")
-        for owner in ("alice", "taylor"):
-            for method, route, _handler in self.broker.admin_apps.routes():
-                path = (
-                    route.replace("{app}", self.app_id)
-                    .replace("{resource}", str(uuid.uuid4()))
-                    .replace("{deployment}", str(uuid.uuid4()))
-                    .replace("{key}", "TOKEN")
+    def test_owners_denied_every_app_administration_action_before_lookup(self) -> None:
+        calls = len(self.fixture.calls)
+        for method, _route, path in self.routes():
+            with self.subTest(path=path, method=method):
+                self.assert_error(
+                    "ACCESS_DENIED",
+                    lambda method=method, path=path: self.call(
+                        method, path, {} if method != "GET" else None, "alice"
+                    ),
                 )
-                with self.subTest(owner=owner, path=path, method=method):
+        self.assertEqual(len(self.fixture.calls), calls)
+
+    def test_staff_pass_every_app_action_except_ownership_and_storage_deletion(self) -> None:
+        self.staff()
+        admin_only = {
+            ("POST", "/v1/admin-apps"),
+            ("POST", "/v1/admin-apps/adopt"),
+            ("PUT", "/v1/admin-apps/{app}/owner"),
+            ("DELETE", "/v1/admin-apps/{app}/storage/{resource}"),
+        }
+        self.assertLess(admin_only, {(m, r) for m, r, _path in self.routes()})
+        for method, route, path in self.routes():
+            body = {} if method != "GET" else None
+            with self.subTest(path=path, method=method):
+                if (method, route) in admin_only:
+                    calls = len(self.fixture.calls)
                     self.assert_error(
                         "ACCESS_DENIED",
-                        lambda method=method, path=path, owner=owner: self.call(
-                            method, path, {} if method != "GET" else None, owner
+                        lambda method=method, path=path, body=body: self.call(
+                            method, path, body, "taylor"
                         ),
                     )
+                    self.assertEqual(len(self.fixture.calls), calls)
+                    continue
+                # Empty bodies fail validation; any answer but a role denial
+                # shows the request got past the staff-or-admin gate.
+                try:
+                    self.call(method, path, body, "taylor")
+                except HttpError as error:
+                    self.assertNotIn(
+                        error.code, {"ACCESS_DENIED", "SESSION_EXPIRED", "STEP_UP_REQUIRED"}
+                    )
+
+    def test_staff_manage_any_app_and_admins_see_it_in_the_audit(self) -> None:
+        staff = self.staff()
+        self.login("bob")
+        items = self.call("GET", "/v1/admin-apps", owner="taylor").body["data"]["items"]
+        self.assertEqual([item["applicationId"] for item in items], [self.app_id])
+        detail = self.call("GET", self.prefix, owner="taylor").body["data"]
+        self.assertEqual(detail["ownerId"], self.owner)
+        saved = self.call("GET", self.prefix + "/configuration", owner="taylor").body["data"]
+        self.call(
+            "PUT",
+            self.prefix + "/configuration",
+            {
+                "expectedRevision": 1,
+                "repository": saved["repository"],
+                "branch": "other",
+                "configuration": saved["configuration"],
+            },
+            "taylor",
+        )
+        value = "STAFF_SECRET_SENTINEL_51734"
+        changed = self.call("PUT", self.prefix + "/environment/TOKEN", {"value": value}, "taylor")
+        self.assertEqual(self.complete(changed, "taylor")["state"], "succeeded")
+        names = self.call("GET", self.prefix + "/environment", owner="taylor").body["data"]
+        self.assertEqual([item["name"] for item in names["items"]], ["TOKEN"])
+        created = self.call("POST", self.prefix + "/storage", {"type": "s3"}, "taylor")
+        self.assertEqual(self.complete(created, "taylor")["state"], "succeeded")
+        resource = self.call("GET", self.prefix + "/storage", owner="taylor").body["data"]["items"][
+            0
+        ]["resourceId"]
+        verified = self.call("POST", self.prefix + f"/storage/{resource}/verify", {}, "taylor")
+        self.assertEqual(self.complete(verified, "taylor")["state"], "succeeded")
+        deployed = self.call(
+            "POST",
+            self.prefix + "/deployments",
+            {"configurationRevision": 2, "commit": "a" * 40, "maintenance": False},
+            "taylor",
+        )
+        self.assertNotIn(self.complete(deployed, "taylor")["state"], {"blocked", "failed"})
+        self.call("GET", self.prefix + "/deployments", owner="taylor")
+        self.call("POST", self.prefix + "/source-key", {}, "taylor")
+        team = self.call("POST", self.prefix + "/members", {"username": "bob"}, "taylor")
+        self.assertEqual(len(team.body["data"]["items"]), 2)
+        # A member is no admin: bob still can't use app administration.
+        self.assert_error("ACCESS_DENIED", lambda: self.call("GET", self.prefix, owner="bob"))
+        # Staff act without the owner's quota or their own: nothing held them back.
+        with self.broker.database.connect() as db:
+            intents = db.execute(
+                "SELECT kind,state,body FROM intents WHERE user_id=?", (staff,)
+            ).fetchall()
+            audited = db.execute(
+                "SELECT target_id,action,details FROM admin_audit WHERE actor_id=?", (staff,)
+            ).fetchall()
+            contents = "\n".join(db.iterdump())
+        self.assertTrue(intents)
+        for row in intents:
+            self.assertIs(strict_json(row["body"].encode())["_portalAdmin"], True)
+            self.assertNotEqual(row["state"], "blocked")
+        self.assertEqual({row["target_id"] for row in audited}, {self.owner})
+        self.assertLessEqual(
+            {
+                "app_save_configuration",
+                "app_env_set",
+                "app_storage_create",
+                "app_storage_verify",
+                "app_deploy",
+                "app_source_key",
+                "app_member_add",
+            },
+            {row["action"] for row in audited},
+        )
+        self.assertNotIn(value, contents)
+        # Admins read the staff member's changes in the global audit.
+        log = self.call("GET", "/v1/account-audit", owner="admin").body["data"]["items"]
+        self.assertIn(
+            ("taylor", "app_deploy"), {(row["actorUsername"], row["action"]) for row in log}
+        )
+        # Staff still can't read that audit or manage accounts.
+        self.assert_error(
+            "ACCESS_DENIED", lambda: self.call("GET", "/v1/account-audit", owner="taylor")
+        )
+
+    def test_staff_cannot_allow_maintenance_or_resize_a_deployment(self) -> None:
+        self.staff()
+        imported = self.adopted()
+        for extra in ({"maintenance": True}, {"plan": {}}):
+            with self.subTest(extra=extra):
+                self.assert_error(
+                    "ADMIN_REQUIRED",
+                    lambda extra=extra: self.call(
+                        "POST",
+                        self.prefix + "/deployments",
+                        {"configurationRevision": 1, "commit": "a" * 40, **extra},
+                        "taylor",
+                    ),
+                )
+        # An app keeping a fixed IP address needs the maintenance outage, so
+        # only an admin can deploy it.
+        self.assert_error(
+            "ADMIN_REQUIRED",
+            lambda: self.call(
+                "POST",
+                f"/v1/admin-apps/{imported}/deployments",
+                {"configurationRevision": 7, "commit": "a" * 40, "identityProviderConfirmed": True},
+                "taylor",
+            ),
+        )
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM intents WHERE kind='deploy'").fetchone()[0], 0
+            )
+        self.assertFalse(
+            [
+                path
+                for method, path, _body in self.fixture.calls
+                if method == "POST" and path.endswith("/deployments")
+            ]
+        )
+
+    def test_journal_runs_staff_app_administration_but_not_owners_or_admin_only_kinds(
+        self,
+    ) -> None:
+        staff = self.staff()
+
+        def intent(user: str, kind: str, state: str = "prepared") -> str:
+            identifier = str(uuid.uuid4())
+            with self.broker.database.connect(write=True) as db:
+                db.execute(
+                    "INSERT INTO intents(id,user_id,app_id,kind,client_key,controller_key,fingerprint,method,path,body,state,created,updated) VALUES(?,?,?,?,?,?,'f','POST',?,'{\"_portalAdmin\":true}',?,?,?)",
+                    (
+                        identifier,
+                        user,
+                        self.app_id,
+                        kind,
+                        str(uuid.uuid4()),
+                        str(uuid.uuid4()),
+                        f"/v1/applications/{self.app_id}/restart",
+                        state,
+                        self.now,
+                        self.now,
+                    ),
+                )
+            return identifier
+
+        def state(identifier: str) -> tuple[str, str | None]:
+            with self.broker.database.connect() as db:
+                row = db.execute(
+                    "SELECT state,safe_error FROM intents WHERE id=?", (identifier,)
+                ).fetchone()
+            return row["state"], row["safe_error"]
+
+        review = ("blocked", "Admin review required.")
+        for user, kind, blocked in (
+            (self.owner, "app_restart", True),
+            (staff, "storage_delete", True),
+            (staff, "create_app", True),
+            (staff, "app_restart", False),
+        ):
+            with self.subTest(user=user, kind=kind):
+                identifier = intent(user, kind)
+                self.broker.journal.dispatch(identifier)
+                if blocked:
+                    self.assertEqual(state(identifier), review)
+                else:
+                    self.assertNotEqual(state(identifier)[0], "blocked")
+        # Staff resume their own blocked app changes, never admin-only kinds.
+        self.assertEqual(
+            self.call(
+                "POST",
+                f"/v1/intents/{intent(staff, 'app_restart', 'blocked')}/resume",
+                {},
+                "taylor",
+            ).status,
+            202,
+        )
+        deletion = intent(staff, "storage_delete", "blocked")
+        self.assert_error(
+            "ACCESS_DENIED",
+            lambda: self.call("POST", f"/v1/intents/{deletion}/resume", {}, "taylor"),
+        )
+        self.assertEqual(state(deletion)[0], "blocked")
 
     def test_adoption_unknown_already_owned_idempotency_import_round_trip(self) -> None:
         self.assert_error(
@@ -257,41 +482,59 @@ class AdminApplicationTests(ManagementCase):
             ),
         )
 
-    def test_admin_accounts_have_no_app_or_operation_limits(self) -> None:
+    def test_staff_and_admin_accounts_have_no_app_or_operation_limits(self) -> None:
         from openstack_platform.management.broker import resources
 
+        staff = self.staff()
+        # A stored quota from when the account was an owner no longer applies.
+        with self.broker.database.connect(write=True) as db:
+            db.execute("INSERT INTO quotas VALUES(?,1,1)", (staff,))
         limit = self.config.app_limit
         own = [self.create("admin", f"admin-own-{index}") for index in range(limit + 2)]
-        session = self.call("GET", "/v1/session", owner="admin").body["data"]
-        self.assertEqual(
-            (session["quota"]["apps"]["limit"], session["quota"]["concurrentOperations"]["limit"]),
-            (None, None),
-        )
+        staff_own = [self.create("taylor", f"staff-own-{index}") for index in range(limit + 2)]
+        for account in ("admin", "taylor"):
+            session = self.call("GET", "/v1/session", owner=account).body["data"]
+            self.assertEqual(
+                (
+                    session["quota"]["apps"]["limit"],
+                    session["quota"]["concurrentOperations"]["limit"],
+                ),
+                (None, None),
+            )
         listing = self.call("GET", "/v1/accounts", owner="admin").body["data"]["items"]
         accounts = {item["userId"]: item for item in listing}
-        admin = accounts[self.admin_user]
-        self.assertEqual((admin["appLimit"], admin["concurrencyLimit"]), (None, None))
+        for user in (self.admin_user, staff):
+            self.assertEqual(
+                (accounts[user]["appLimit"], accounts[user]["concurrencyLimit"]), (None, None)
+            )
         self.assertEqual(accounts[self.owner]["appLimit"], limit)
-        staff_view = self.call("GET", f"/v1/staff/owners/{self.admin_user}", owner="admin")
-        quota = staff_view.body["data"]["quota"]
-        self.assertEqual(
-            (quota["apps"]["limit"], quota["concurrentOperations"]["limit"]), (None, None)
-        )
-        self.assertEqual(quota["apps"]["used"], limit + 2)
-        self.assert_error(
-            "ADMIN_UNLIMITED",
-            lambda: self.call(
-                "PUT",
-                f"/v1/accounts/{self.admin_user}/quotas",
-                {"apps": 1, "concurrentOperations": 1},
-                "admin",
-            ),
-        )
-        # Held operations beyond the concurrency limit don't block an admin,
-        # but they still block an owner; one change per app still applies.
+        for user in (self.admin_user, staff):
+            staff_view = self.call("GET", f"/v1/staff/owners/{user}", owner="admin")
+            quota = staff_view.body["data"]["quota"]
+            self.assertEqual(
+                (quota["apps"]["limit"], quota["concurrentOperations"]["limit"]), (None, None)
+            )
+            self.assertEqual(quota["apps"]["used"], limit + 2)
+            self.assert_error(
+                "ADMIN_UNLIMITED",
+                lambda user=user: self.call(
+                    "PUT",
+                    f"/v1/accounts/{user}/quotas",
+                    {"apps": 1, "concurrentOperations": 1},
+                    "admin",
+                ),
+            )
+        # Held operations beyond the concurrency limit don't block staff or
+        # an admin, but they still block an owner; one change per app still
+        # applies.
         held = own[: self.config.concurrency_limit + 1]
+        staff_held = staff_own[: self.config.concurrency_limit + 1]
         with self.broker.database.connect(write=True) as db:
-            for user, app in [(self.admin_user, app) for app in held] + [(self.owner, self.app_id)]:
+            for user, app in (
+                [(self.admin_user, app) for app in held]
+                + [(staff, app) for app in staff_held]
+                + [(self.owner, self.app_id)]
+            ):
                 db.execute(
                     "INSERT INTO intents(id,user_id,app_id,kind,client_key,controller_key,fingerprint,method,path,body,state,created,updated) VALUES(?,?,?,'deploy',?,?,'f','POST','/v1/x','{}','running',?,?)",
                     (
@@ -305,6 +548,7 @@ class AdminApplicationTests(ManagementCase):
                     ),
                 )
             resources.operation_quota(self.broker, db, self.admin_user, own[-1])
+            resources.operation_quota(self.broker, db, staff, staff_own[-1])
             self.assert_error(
                 "APP_BUSY",
                 lambda: resources.operation_quota(self.broker, db, self.admin_user, held[0]),
@@ -596,10 +840,21 @@ class AdminApplicationTests(ManagementCase):
         )
 
     def test_admin_app_pages_have_room_for_their_reads_but_stay_bounded(self) -> None:
-        # One admin app page reads about eight things; staff keep the smaller budget.
-        for _ in range(40):
-            self.assertEqual(self.call("GET", self.prefix, owner="admin").status, 200)
-        self.assert_error("RATE_LIMITED", lambda: self.call("GET", self.prefix, owner="admin"))
+        # One app administration page reads about eight things, for staff as
+        # for admins; the staff metadata views keep the smaller budget.
+        self.staff()
+        for account, address in (("admin", "127.0.0.1"), ("taylor", "127.0.0.2")):
+            headers = {"x-portal-client-address": address}
+            for _ in range(40):
+                self.assertEqual(
+                    self.call("GET", self.prefix, owner=account, headers=headers).status, 200
+                )
+            self.assert_error(
+                "RATE_LIMITED",
+                lambda account=account, headers=headers: self.call(
+                    "GET", self.prefix, owner=account, headers=headers
+                ),
+            )
         staff = ReadLimits()
         for _ in range(10):
             with staff.reserve("staff", "address", self.now):

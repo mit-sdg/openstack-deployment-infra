@@ -591,11 +591,14 @@ class DeletedApplicationContractTests(RealProjectContractTests):
         self.assertEqual(
             self.call("GET", "/v1/staff/apps", owner="alice").body["data"]["items"], []
         )
-        for observer in ("staff", "admin"):
-            pending = self.create(slug="lazy-delete-" + observer)
-            self.delete_remote(pending, "lazy-delete-" + observer)
-            route = "/v1/staff/apps" if observer == "staff" else "/v1/admin-apps"
-            actor = "alice" if observer == "staff" else "admin"
+        # Staff observe through their metadata view and app administration.
+        for name, route, actor in (
+            ("staff", "/v1/staff/apps", "alice"),
+            ("staff-admin", "/v1/admin-apps", "alice"),
+            ("admin", "/v1/admin-apps", "admin"),
+        ):
+            pending = self.create(slug="lazy-delete-" + name)
+            self.delete_remote(pending, "lazy-delete-" + name)
             self.assertEqual(self.call("GET", route, owner=actor).body["data"]["items"], [])
             with self.broker.database.connect() as db:
                 self.assertEqual(
