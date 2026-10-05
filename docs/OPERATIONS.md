@@ -1065,7 +1065,9 @@ That record supplies `sourceRepository`, `repositoryRef`, `repositoryCommit`,
 resolve it from the retained deployment request before proceeding.
 
 For each app, set `APP_ID`, save that accepted record as
-`previous-deployment.json`, and construct a fresh deployment request:
+`previous-deployment.json`, and construct a fresh deployment request. The rebuild
+resolves the commit's Node.js or Bun version request again: a range can select a
+newer release than the saved record's `runtime`.
 
 ```bash
 jq -e '{repository: .sourceRepository, ref: .repositoryRef,
@@ -1489,6 +1491,33 @@ directory must contain its runtime lockfile. Build and start scripts come from
 the root `package.json`. Use a small health endpoint such as `/health` that returns
 HTTP 2xx with a body of at most 4096 bytes; a full HTML page at `/` can fail health
 verification. PostgreSQL's `DATABASE_URL` already includes the password.
+
+Owners choose the Node.js or Bun version in the repository. For Node.js, set
+`engines.node` in the root `package.json` (a range such as `">=22 <23"`, `"22.x"`
+or `"^22.11"`), or commit a root `.nvmrc` or `.node-version` containing a version
+or range (`22`, `v22.11.0`, `>=20`) or `lts/*`. For Bun, set
+`"packageManager": "bun@1.3.4"` (an exact version), `engines.bun`, or a root
+`.bun-version`. The first of these that is present wins, in that order;
+`packageManager` naming npm, pnpm or Yarn is ignored. Each build uses the newest
+official release that matches, as its `-slim` image pinned by digest, and records
+it: the deployment page shows, for example,
+`Node.js 22.11.0 · from engines.node >=22 <23`. A range can pick a newer release
+on a later build; an exact version pins it. Without a request, builds keep the platform's pinned default image.
+Requests for Node.js before 20 or Bun before 1.1, ranges that match no version,
+`.nvmrc` aliases other than `lts/*`, and a Bun range in `packageManager` are
+refused before any builder starts, with the reason in the build output; the deploy
+page's commit check shows the same message first. If release information can't
+be read, the deploy fails cleanly and asks the owner to try again in a few minutes.
+Rollback and resize reuse the retained image and keep its recorded runtime.
+
+Version lookups run in the helper's `app.build` on admin, inside the controller
+unit, over HTTPS to `nodejs.org`, `auth.docker.io` and `registry-1.docker.io`.
+That unit has no IP allowlist and admin keeps Neutron's default egress, so this
+needs no Nix or security group change. Install the controller (admin image)
+before, or together with, the matching helper release. An older helper resolves
+nothing, so builds keep the default image; an older controller can't verify a
+resolved image and leaves such a deployment `recovery_required` after its build.
+
 Known build and health failures show release-owned guidance in intent/operation
 views. Staff and admins also see a bounded internal code; owners do not. Unknown
 failures retain a generic message, and controller free text is not used as

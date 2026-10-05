@@ -12,7 +12,8 @@ from urllib.parse import urlencode, urlsplit
 
 from ...controller.deployment_config import branch_name, parse_configuration
 from ...controller.http import HttpError, Request, Response, Router
-from ...validation import ValidationError, commit, repository_url, slug
+from ...runtime_versions import RUNTIME_NAMES, parse_version
+from ...validation import ValidationError, commit, oci_digest_pin, repository_url, slug
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body, strict_json, utc
 from ..config import Config
@@ -37,6 +38,29 @@ DEFAULT_CONFIGURATION: dict[str, Any] = {
     "runtime": {"port": 3000, "healthPath": "/health"},
     "storageBindings": [],
 }
+
+
+def runtime_model(value: object) -> dict[str, str | None] | None:
+    """The runtime a deployment's build used, or None if absent or malformed.
+
+    Older controllers send none; anything sent is relayed only as bounded text.
+    """
+    if not isinstance(value, dict) or set(value) != {"runtime", "version", "image", "source"}:
+        return None
+    runtime, version, source = value["runtime"], value["version"], value["source"]
+    try:
+        oci_digest_pin(value["image"], field="runtime image")
+    except ValidationError:
+        return None
+    if (
+        not isinstance(runtime, str)
+        or runtime not in RUNTIME_NAMES
+        or (version is not None and (not isinstance(version, str) or not parse_version(version)))
+        or not isinstance(source, str)
+        or not 0 < len(source) <= 512
+    ):
+        return None
+    return {name: value[name] for name in ("runtime", "version", "image", "source")}
 
 
 class Broker:
@@ -932,6 +956,7 @@ class Broker:
             for name in ("requestedAt", "updatedAt", "acceptedAt", "lastHealthyAt"):
                 if name in model:
                     model[name] = utc(model[name])
+            model["runtime"] = runtime_model(item.get("runtime"))
             models.append(model)
         return (
             {

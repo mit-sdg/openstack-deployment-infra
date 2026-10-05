@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { Configuration, SourceReadOptions } from '../api';
 import { GitHubError } from '../utils/github';
 import { checkCommit, type CommitCheck } from '../utils/preflight';
+import { runtimeNames } from '../utils/runtimeVersions';
 import '../pages/app-pages.css';
 
 /** A full SHA in a repository the browser can ask GitHub about. */
@@ -62,6 +63,31 @@ export function CommitProblems({ checks }: { checks: CommitCheck[] | undefined }
   );
 }
 
+/** What the commit asks for, when it was checked: the build picks the exact release. */
+function RuntimeVersion({
+  checks,
+  configuration,
+}: {
+  checks: CommitCheck[];
+  configuration: Configuration;
+}) {
+  const check = checks.find(
+    (item) =>
+      (item.id === 'runtime-version' || item.id === 'runtime-default') && item.state === 'ok',
+  );
+  if (!check) return null;
+  return (
+    <p className="app-check ui-text-sm ui-text-muted" role="status">
+      <Icon name="info" />
+      <span>
+        {check.id === 'runtime-version'
+          ? `This commit asks for ${check.label}. The build picks the exact release.`
+          : `This commit doesn’t ask for a ${runtimeNames[configuration.build.runtime]} version, so the build uses the platform’s default.`}
+      </span>
+    </p>
+  );
+}
+
 /** One line under the commit field: checking, passed, or what to fix. */
 export function CommitChecks({
   repository,
@@ -93,13 +119,16 @@ export function CommitChecks({
   if (problems(checks.data).length) return <CommitProblems checks={checks.data} />;
   const unchecked = checks.data.some((check) => check.state === 'unknown');
   return (
-    <p className="app-check ui-text-sm" role="status">
-      <Icon name={unchecked ? 'info' : 'success'} />
-      <span className={unchecked ? 'ui-text-muted' : undefined}>
-        {unchecked
-          ? 'Some files couldn’t be checked. The build checks them when you deploy.'
-          : 'This commit has the package.json, scripts and lockfile the build needs.'}
-      </span>
-    </p>
+    <>
+      <p className="app-check ui-text-sm" role="status">
+        <Icon name={unchecked ? 'info' : 'success'} />
+        <span className={unchecked ? 'ui-text-muted' : undefined}>
+          {unchecked
+            ? 'Some files couldn’t be checked. The build checks them when you deploy.'
+            : 'This commit has the package.json, scripts and lockfile the build needs.'}
+        </span>
+      </p>
+      <RuntimeVersion checks={checks.data} configuration={configuration} />
+    </>
   );
 }

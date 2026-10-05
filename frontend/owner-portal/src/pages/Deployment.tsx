@@ -19,7 +19,7 @@ import { QueryError } from '../components/Feedback';
 import { Repository } from '../components/Repository';
 import { StartupRecordSection } from '../components/StartupRecord';
 import { Status } from '../components/Status';
-import { short } from '../utils/presentation';
+import { deploymentRuntime, short } from '../utils/presentation';
 
 /** "sha256:0123456789ab" from an image reference; the full value is copied. */
 function imageLabel(reference: string) {
@@ -42,10 +42,7 @@ function Details({ deployment }: { deployment: Deployment }) {
         },
         { label: 'Started', value: <RelativeTime value={deployment.requestedAt} /> },
         { label: 'Went live', value: <RelativeTime value={deployment.acceptedAt} /> },
-        {
-          label: 'Runtime',
-          value: deployment.configuration.build.runtime === 'node' ? 'Node.js' : 'Bun',
-        },
+        { label: 'Runtime', value: deploymentRuntime(deployment) },
         {
           label: 'Image',
           value: deployment.imageDigest ? (

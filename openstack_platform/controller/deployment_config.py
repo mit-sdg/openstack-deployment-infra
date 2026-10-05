@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..runtime_versions import (
+    RUNTIME_NAMES,
+    VERSION_FILE_BYTES,
+    RuntimeRequest,
+    RuntimeVersionError,
+    runtime_request,
+)
 from ..validation import (
     ValidationError,
     env_key,
@@ -221,35 +228,59 @@ def _checkout_lockfile(
         raise ValidationError(f"package {package!r} is missing its supported lockfile")
 
 
-def _checkout_scripts(root: Path, maximum_package_bytes: int) -> dict[str, Any]:
-    package_json = root / "package.json"
-    if not _direct_file(package_json, maximum_package_bytes):
-        raise ValidationError("source root is missing a bounded direct package.json")
+def _read_direct(path: Path, maximum_bytes: int) -> bytes:
+    name = path.name
     try:
         descriptor = os.open(
-            package_json,
+            path,
             os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
         )
     except OSError as error:
-        raise ValidationError("package.json could not be opened safely") from error
+        raise ValidationError(f"{name} could not be opened safely") from error
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum_package_bytes:
-            raise ValidationError("package.json exceeds its size limit")
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum_bytes:
+            raise ValidationError(f"{name} exceeds its size limit")
         chunks: list[bytes] = []
-        remaining = maximum_package_bytes + 1
+        remaining = maximum_bytes + 1
         while remaining and (chunk := os.read(descriptor, remaining)):
             chunks.append(chunk)
             remaining -= len(chunk)
         raw = b"".join(chunks)
     finally:
         os.close(descriptor)
-    if len(raw) > maximum_package_bytes:
-        raise ValidationError("package.json exceeds its size limit")
-    value = _load_json(raw)
+    if len(raw) > maximum_bytes:
+        raise ValidationError(f"{name} exceeds its size limit")
+    return raw
+
+
+def _checkout_package(root: Path, maximum_package_bytes: int) -> dict[str, Any]:
+    package_json = root / "package.json"
+    if not _direct_file(package_json, maximum_package_bytes):
+        raise ValidationError("source root is missing a bounded direct package.json")
+    value = _load_json(_read_direct(package_json, maximum_package_bytes))
     if not isinstance(value, dict) or not isinstance(value.get("scripts"), dict):
         raise ValidationError("package.json scripts must be an object")
-    return dict(value["scripts"])
+    return value
+
+
+def _version_file(root: Path, name: str) -> str | None:
+    """A root version file's text; None when the checkout has none."""
+    path = root / name
+    if not path.exists() and not path.is_symlink():
+        return None
+    if not _direct_file(path, VERSION_FILE_BYTES):
+        raise RuntimeVersionError(f"{name} must be a file of at most 1 KB.")
+    try:
+        return _read_direct(path, VERSION_FILE_BYTES).decode("utf-8", errors="replace")
+    except ValidationError:
+        raise RuntimeVersionError(f"{name} must be a file of at most 1 KB.") from None
+
+
+def _checkout_runtime(
+    configuration: DeploymentConfiguration, root: Path, package: dict[str, Any]
+) -> RuntimeRequest | None:
+    return runtime_request(configuration.runtime, package, lambda name: _version_file(root, name))
 
 
 def validate_checkout(
@@ -258,8 +289,12 @@ def validate_checkout(
     *,
     maximum_package_bytes: int = 65_536,
     maximum_lockfile_bytes: int = 1_048_576,
-) -> None:
-    """Validate UI-selected package inputs in an acquired exact checkout."""
+) -> RuntimeRequest | None:
+    """Validate UI-selected package inputs in an acquired exact checkout.
+
+    Return the runtime version the checkout asks for, if any. A request that
+    can never be built raises RuntimeVersionError, whose message is the owner's.
+    """
     if not isinstance(configuration, DeploymentConfiguration):
         raise ValidationError("deployment configuration snapshot is malformed")
     root = Path(source_root).resolve(strict=True)
@@ -267,13 +302,15 @@ def validate_checkout(
         raise ValidationError("source checkout is not a directory")
     for package in configuration.packages:
         _checkout_lockfile(configuration, root, package, maximum_lockfile_bytes)
-    scripts = _checkout_scripts(root, maximum_package_bytes)
+    manifest = _checkout_package(root, maximum_package_bytes)
+    scripts = manifest["scripts"]
     for name in dict.fromkeys((configuration.start_script, configuration.build_script)):
         if name is None:
             continue
         command = scripts.get(name)
         if not isinstance(command, str) or not command:
             raise ValidationError(f"package.json is missing configured script {name!r}")
+    return _checkout_runtime(configuration, root, manifest)
 
 
 def checkout_checks(
@@ -286,14 +323,15 @@ def checkout_checks(
     root = source_root.resolve(strict=True)
     manifest = {"id": "package-json", "label": "package.json in the repository root", "state": "ok"}
     checks = [manifest]
-    scripts: dict[str, Any] | None = None
+    package: dict[str, Any] | None = None
     try:
-        scripts = _checkout_scripts(root, 65_536)
+        package = _checkout_package(root, 65_536)
     except (ValidationError, OSError):
         manifest.update(
             state="problem",
             problem='Add a valid package.json with a "scripts" section to the repository root. It must be a direct file at most 64 KB.',
         )
+    scripts = None if package is None else package["scripts"]
     for name in dict.fromkeys((configuration.start_script, configuration.build_script)):
         if name is None:
             continue
@@ -310,11 +348,12 @@ def checkout_checks(
         if check["state"] == "problem":
             check["problem"] = f'package.json has no "{name}" script.'
         checks.append(check)
-    for package in configuration.packages:
-        where = "the repository root" if package == "." else package
-        check = {"id": f"lockfile:{package}", "label": f"Lockfile in {where}", "state": "ok"}
+    checks.append(_runtime_check(configuration, root, package))
+    for directory in configuration.packages:
+        where = "the repository root" if directory == "." else directory
+        check = {"id": f"lockfile:{directory}", "label": f"Lockfile in {where}", "state": "ok"}
         try:
-            _checkout_lockfile(configuration, root, package, 1_048_576)
+            _checkout_lockfile(configuration, root, directory, 1_048_576)
         except (ValidationError, OSError):
             lock_name = (
                 "bun.lock or bun.lockb" if configuration.runtime == "bun" else "package-lock.json"
@@ -325,6 +364,33 @@ def checkout_checks(
             )
         checks.append(check)
     return checks
+
+
+def _runtime_check(
+    configuration: DeploymentConfiguration, root: Path, package: dict[str, Any] | None
+) -> dict[str, str]:
+    """What runtime version the checkout asks for, or why it can't be built.
+
+    A request is checked by id runtime-version; a checkout that asks for no
+    version gets runtime-default, so the portal can say the build uses the
+    platform's image.
+    """
+    name = RUNTIME_NAMES[configuration.runtime]
+    check = {"id": "runtime-version", "label": f"{name} version", "state": "unknown"}
+    if package is None:
+        return check
+    try:
+        request = _checkout_runtime(configuration, root, package)
+    except RuntimeVersionError as error:
+        check.update(state="problem", problem=str(error))
+    except (ValidationError, OSError):
+        pass
+    else:
+        if request is None:
+            check.update(id="runtime-default", label=f"{name} (platform default)", state="ok")
+        else:
+            check.update(label=request.describe(), state="ok")
+    return check
 
 
 def _direct_file(path: Path, maximum_bytes: int) -> bool:

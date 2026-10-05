@@ -51,6 +51,10 @@ class ApplicationSizingTests(unittest.TestCase):
         self.fail_action = None
         self.capacity_override = None
         self.startup = {"found": False}
+        # The runtime app.build reports: None for the policy default; an older
+        # helper (omit_runtime) reports none at all.
+        self.build_runtime = None
+        self.omit_runtime = False
         self.api = ControllerAPI(self.connection, self.config, self.root, helper_caller=self.helper)
         self.fixture.api = self.api
         self.router = self.api.router()
@@ -111,9 +115,17 @@ class ApplicationSizingTests(unittest.TestCase):
             raise app.ApplicationError("injected helper outage")
         if action == "app.build":
             manifest = parse_configuration(values["configuration"]).manifest({})
+            runtime = self.build_runtime or {
+                "runtime": manifest.runtime,
+                "version": None,
+                "image": values["runtimeImages"][manifest.runtime],
+                "source": "default",
+            }
+            images = replace(config.policy.runtime_images, **{manifest.runtime: runtime["image"]})
             return {
                 "image": "storage.internal:5000/projects/commons/app@sha256:" + "c" * 64,
-                "recipeHash": app.generate_recipe(manifest, config.policy.runtime_images).sha256,
+                "recipeHash": app.generate_recipe(manifest, images).sha256,
+                **({} if self.omit_runtime else {"runtime": runtime}),
                 "builderAbsent": True,
                 "log": "built\n",
             }

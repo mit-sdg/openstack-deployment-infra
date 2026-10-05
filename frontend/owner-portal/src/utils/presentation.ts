@@ -1,4 +1,4 @@
-import type { AppRecord } from '../api';
+import type { AppRecord, Deployment } from '../api';
 
 export function time(value: string | null | undefined) {
   return value
@@ -8,6 +8,18 @@ export function time(value: string | null | undefined) {
 
 export function short(value: string | null | undefined) {
   return value ? value.slice(0, 9) : 'No deployment';
+}
+
+/** "Node.js 22.11.0 · from engines.node >=22 <23", or "Bun (platform default)". */
+export function deploymentRuntime(deployment: Pick<Deployment, 'configuration' | 'runtime'>) {
+  const runtime = deployment.runtime;
+  const name =
+    (runtime?.runtime ?? deployment.configuration.build.runtime) === 'bun' ? 'Bun' : 'Node.js';
+  if (!runtime) return name;
+  if (runtime.version === null) return `${name} (platform default)`;
+  // "packageManager bun@1.3.4" would repeat the version.
+  const source = runtime.source.startsWith('packageManager ') ? 'packageManager' : runtime.source;
+  return `${name} ${runtime.version} · from ${source}`;
 }
 
 /**

@@ -1913,6 +1913,29 @@ def get_deployment_attempt(
     )
 
 
+def deployment_runtime(
+    connection: sqlite3.Connection, deployment_id: str
+) -> dict[str, str | None] | None:
+    """The runtime a deployment's image was built on, if it has been built.
+
+    It is evidence in the deploy operation's refs, under the deployment's ID;
+    deployments built before it was recorded have none.
+    """
+    row = connection.execute(
+        "SELECT json_extract(refs_json, '$.runtime') AS runtime FROM operations "
+        "WHERE operation_id = ?",
+        (uuid(deployment_id, field="deployment_id"),),
+    ).fetchone()
+    value = None if row is None or row["runtime"] is None else json.loads(row["runtime"])
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"runtime", "version", "image", "source"}
+        or any(item is not None and not isinstance(item, str) for item in value.values())
+    ):
+        return None
+    return value
+
+
 def get_active_deployment(
     connection: sqlite3.Connection, application_id: str
 ) -> ActiveDeployment | None:

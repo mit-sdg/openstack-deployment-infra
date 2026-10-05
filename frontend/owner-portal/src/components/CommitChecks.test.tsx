@@ -45,6 +45,49 @@ describe('commit checks', () => {
     expect(screen.getByText('Commit package-lock.json in the repository root.')).toBeVisible();
   });
 
+  it('says which runtime version a passing commit asks for', async () => {
+    const tree = {
+      tree: [
+        { path: 'package.json', type: 'blob', mode: '100644', size: 90 },
+        { path: 'package-lock.json', type: 'blob', mode: '100644', size: 2 },
+      ],
+    };
+    github(tree, '{"scripts":{"start":"node .","build":"tsc"},"engines":{"node":">=22 <23"}}');
+    const { unmount } = show();
+    expect(
+      await screen.findByText(
+        'This commit asks for Node.js >=22 <23 from engines.node. The build picks the exact release.',
+      ),
+    ).toBeVisible();
+    unmount();
+    github(tree, '{"scripts":{"start":"node .","build":"tsc"}}');
+    show('d'.repeat(40));
+    expect(
+      await screen.findByText(
+        'This commit doesn’t ask for a Node.js version, so the build uses the platform’s default.',
+      ),
+    ).toBeVisible();
+  });
+
+  it('flags a version request the build would refuse', async () => {
+    github(
+      {
+        tree: [
+          { path: 'package.json', type: 'blob', mode: '100644', size: 90 },
+          { path: 'package-lock.json', type: 'blob', mode: '100644', size: 2 },
+        ],
+      },
+      '{"scripts":{"start":"node .","build":"tsc"},"engines":{"node":"16.x"}}',
+    );
+    show();
+    expect(await screen.findByText('This commit will fail to build')).toBeVisible();
+    expect(
+      screen.getByText(
+        'engines.node "16.x" asks for Node.js 16, older than the oldest supported version (20).',
+      ),
+    ).toBeVisible();
+  });
+
   it('uses private checkout checks with the saved revision after a browser failure', async () => {
     github({}, '', 404);
     const source = {

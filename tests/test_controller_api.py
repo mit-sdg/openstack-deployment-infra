@@ -233,6 +233,27 @@ class ControllerAPITests(unittest.TestCase):
             {"repository": repository, "commit": "a" * 40, "configuration": configuration},
         )
         self.assertEqual(len(response.body["items"]), 4)
+        runtime = {
+            "id": "runtime-version",
+            "label": "Node.js >=22 <23 from engines.node",
+            "state": "ok",
+        }
+        self.api.helper_caller.return_value["items"].append(runtime)
+        response = self.dispatch(
+            "POST",
+            source + "check",
+            {"repository": repository, "commit": "a" * 40, "configuration": configuration},
+        )
+        self.assertEqual(response.body["items"][-1], runtime)
+        self.api.helper_caller.return_value["items"].append(
+            {"id": "runtime-default", "label": "Node.js (platform default)", "state": "ok"}
+        )
+        with self.assertRaises(HttpError):
+            self.dispatch(
+                "POST",
+                source + "check",
+                {"repository": repository, "commit": "a" * 40, "configuration": configuration},
+            )
         with self.assertRaises(HttpError):
             self.dispatch(
                 "POST",

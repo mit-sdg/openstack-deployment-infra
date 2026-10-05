@@ -372,7 +372,7 @@ class BuildSourceFallbackTests(unittest.TestCase):
         with (
             mock.patch.object(production, "helper_runtime", return_value=self.runtime),
             mock.patch.object(app, "acquire_github_commit", side_effect=fetches) as acquire,
-            mock.patch.object(production, "validate_checkout"),
+            mock.patch.object(production, "validate_checkout", return_value=None),
             mock.patch.object(
                 app,
                 "build_with_disposable_builder",

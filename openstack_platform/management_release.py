@@ -24,7 +24,14 @@ COMPATIBILITY = {
     "brokerSchemaVersion": 3,
     "controllerApiVersion": 1,
 }
-BASE = ("__init__.py", "config.py", "contracts.py", "validation.py", "owner_portal_config.py")
+BASE = (
+    "__init__.py",
+    "config.py",
+    "contracts.py",
+    "validation.py",
+    "owner_portal_config.py",
+    "runtime_versions.py",
+)
 CONTROLLER = (
     "__init__.py",
     "http.py",

@@ -1,5 +1,12 @@
 import type { Configuration } from '../api';
 import { GitHubError, githubGet, githubJson, githubRepository } from './github';
+import {
+  describeRequest,
+  runtimeNames,
+  runtimeRequest,
+  RuntimeVersionError,
+  VERSION_FILE_BYTES,
+} from './runtimeVersions';
 
 /**
  * Checks a commit against the rules the build enforces (deployment_config.py
@@ -9,7 +16,11 @@ import { GitHubError, githubGet, githubJson, githubRepository } from './github';
  */
 export type CheckState = 'ok' | 'problem' | 'unknown';
 export type CommitCheck = {
-  /** Stable identifier: package-json, script:<name>, lockfile:<package>. */
+  /**
+   * Stable identifier: package-json, script:<name>, lockfile:<package>, and
+   * runtime-version for the Node.js or Bun version a commit asks for, or
+   * runtime-default when it asks for none.
+   */
   id: string;
   label: string;
   state: CheckState;
@@ -21,12 +32,13 @@ export const PACKAGE_JSON_BYTES = 65_536;
 export const LOCKFILE_BYTES = 1_048_576;
 
 type Entry = { type: string; mode: string; size?: number };
-/** A commit's files: the recursive tree, plus how to read root package.json. */
+/** A commit's files: the recursive tree, plus how to read a root file. */
 export type Snapshot = {
   entries: Map<string, Entry>;
   /** GitHub truncates very large trees; a missing path then proves nothing. */
   complete: boolean;
-  readPackageJson: () => Promise<string>;
+  /** package.json, or a version file such as .nvmrc. */
+  readFile: (name: string) => Promise<string>;
 };
 
 const SYMLINK = '120000';
@@ -47,6 +59,42 @@ function rejectDuplicateKeys(text: string) {
       top.keys.add(key);
       top.expectKey = false;
     }
+  }
+}
+
+class Unchecked extends Error {}
+
+/** What runtime version the commit asks for, or why it can't be built. */
+async function checkRuntime(
+  check: CommitCheck,
+  snapshot: Snapshot,
+  configuration: Configuration,
+  pkg: Record<string, unknown>,
+) {
+  const runtime = configuration.build.runtime;
+  const read = async (name: string) => {
+    const file = snapshot.entries.get(name);
+    if (!file) {
+      if (snapshot.complete) return null;
+      throw new Unchecked();
+    }
+    if (file.type !== 'blob' || file.mode === SYMLINK || (file.size ?? 0) > VERSION_FILE_BYTES)
+      throw new RuntimeVersionError(`${name} must be a file of at most 1 KB.`);
+    return snapshot.readFile(name);
+  };
+  try {
+    const request = await runtimeRequest(runtime, pkg, read);
+    if (request) Object.assign(check, { label: describeRequest(request), state: 'ok' });
+    else
+      Object.assign(check, {
+        id: 'runtime-default',
+        label: `${runtimeNames[runtime]} (platform default)`,
+        state: 'ok',
+      });
+  } catch (error) {
+    // An unread or unlisted file leaves the check unknown.
+    if (error instanceof RuntimeVersionError)
+      Object.assign(check, { state: 'problem', problem: error.message });
   }
 }
 
@@ -119,7 +167,12 @@ export async function checkSnapshot(
     label: `Script "${name}"`,
     state: 'unknown',
   }));
-  checks.splice(1, 0, ...scripts);
+  const runtime: CommitCheck = {
+    id: 'runtime-version',
+    label: `${runtimeNames[configuration.build.runtime]} version`,
+    state: 'unknown',
+  };
+  checks.splice(1, 0, ...scripts, runtime);
   const file = entries.get('package.json');
   if (!file || file.type !== 'blob') {
     manifest.state = file ? 'problem' : missing();
@@ -138,7 +191,7 @@ export async function checkSnapshot(
   }
   let value: unknown;
   try {
-    const text = await snapshot.readPackageJson();
+    const text = await snapshot.readFile('package.json');
     value = JSON.parse(text);
     rejectDuplicateKeys(text);
   } catch (error) {
@@ -165,6 +218,7 @@ export async function checkSnapshot(
     check.state = typeof command === 'string' && command ? 'ok' : 'problem';
     if (check.state === 'problem') check.problem = `package.json has no "${name}" script.`;
   }
+  await checkRuntime(runtime, snapshot, configuration, value as Record<string, unknown>);
   return checks;
 }
 
@@ -192,10 +246,8 @@ export async function githubSnapshot(
   return {
     entries,
     complete: (data as Record<string, unknown>).truncated !== true,
-    readPackageJson: async () =>
-      (
-        await githubGet(`https://raw.githubusercontent.com/${name}/${sha}/package.json`, signal)
-      ).text(),
+    readFile: async (file) =>
+      (await githubGet(`https://raw.githubusercontent.com/${name}/${sha}/${file}`, signal)).text(),
   };
 }
 

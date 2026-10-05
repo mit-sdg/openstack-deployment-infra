@@ -10,6 +10,7 @@ from openstack_platform.controller.deployment_config import (
     parse_configuration,
     validate_checkout,
 )
+from openstack_platform.runtime_versions import RuntimeVersionError
 from openstack_platform.validation import ValidationError
 
 RESOURCE_ID = "11111111-1111-4111-8111-111111111111"
@@ -120,6 +121,30 @@ class DeploymentConfigurationTests(unittest.TestCase):
             (root / "package-lock.json").write_text("{}")
             (root / "package.json").write_text(json.dumps({"scripts": {"start": "run"}}))
             with self.assertRaisesRegex(ValidationError, "script 'build'"):
+                validate_checkout(parsed, root)
+
+    def test_exact_checkout_returns_the_runtime_version_it_asks_for(self) -> None:
+        parsed = parse_configuration(configuration() | {"storageBindings": []})
+        scripts = {"build": "safe build", "start": "safe start"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "package-lock.json").write_text("{}")
+            (root / "package.json").write_text(json.dumps({"scripts": scripts}))
+            self.assertIsNone(validate_checkout(parsed, root))
+            (root / ".node-version").write_text("v22.11.0\n")
+            request = validate_checkout(parsed, root)
+            assert request is not None
+            self.assertEqual(request.source, ".node-version v22.11.0")
+            (root / "package.json").write_text(
+                json.dumps({"scripts": scripts, "engines": {"node": ">=22 <23"}})
+            )
+            request = validate_checkout(parsed, root)
+            assert request is not None
+            self.assertEqual(request.source, "engines.node >=22 <23")
+            (root / "package.json").write_text(
+                json.dumps({"scripts": scripts, "engines": {"node": "16.x"}})
+            )
+            with self.assertRaisesRegex(RuntimeVersionError, "older than the oldest"):
                 validate_checkout(parsed, root)
 
     def test_realistic_lockfile_limit_does_not_expand_package_json_limit(self) -> None:

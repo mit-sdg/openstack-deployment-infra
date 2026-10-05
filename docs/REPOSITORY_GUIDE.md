@@ -161,6 +161,7 @@ cross-cutting boundaries.
 - `openstack_platform/remote.py` — protocol-v1 request/response validation and pinned local or SSH helper invocation.
 - `openstack_platform/restore.py` — offline integrity/schema/identity checks and atomic SQLite database replacement.
 - `openstack_platform/runtime.py` — private-directory, lock, bounded process/HTTP, redaction, and diagnostic primitives.
+- `openstack_platform/runtime_versions.py` — Node.js/Bun version requests from package.json and version files, the npm semver subset, oldest supported lines, and checks of a build's reported runtime.
 - `openstack_platform/setup.py` — resumable greenfield preflight and apply orchestration across release, Nix, OpenStack, and hosted services.
 - `openstack_platform/validation.py` — shared strict validators for names, UUIDs, commits, URLs, paths, digests, and bounded text.
 
@@ -208,6 +209,7 @@ cross-cutting boundaries.
 - `openstack_platform/helper/worker_capacity.py` — exact owned Nomad node readiness and allocatable CPU/RAM observations.
 - `openstack_platform/helper/production.py` — lazily constructs concrete production handlers and trusted local service clients.
 - `openstack_platform/helper/registry_artifact.py` — bounded read-only manifest and blob availability checks within one application registry repository.
+- `openstack_platform/helper/runtime_images.py` — resolves a runtime version request to the newest matching official `-slim` image pinned by index digest, through bounded anonymous nodejs.org and Docker Hub lookups.
 - `openstack_platform/helper/storage.py` — trusted provider operations for PostgreSQL, MongoDB, and Garage/S3 resources and credentials.
 
 ### Read-only operator dashboard
@@ -329,6 +331,9 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_private_repositories.py` — pinned GitHub host key, deploy-key fetch and access check, helper key creation, replacement and removal, and build fallback.
 - `openstack_platform/management/broker/runtime_logs.py` — owner/admin runtime log reads, shared briefly and one at a time so they can't crowd the controller.
 - `tests/test_checkout_preflight_parity.py` — runs the shared preflight cases through the build's `validate_checkout`.
+- `tests/test_runtime_versions.py` — shared range and version-request cases, and acceptance or refusal of a build's reported runtime.
+- `tests/test_runtime_images.py` — version resolution against a fake nodejs.org and Docker Hub: newest match, oldest lines, LTS, tag paging, unpublished tags, retryable lookup failures, and `app.build` building on the resolved image.
+- `tests/test_deployment_runtime.py` — controller checks of a build's reported runtime, its recording and deployment reads, retained-image reuse, and retryable lookup failures.
 - `tests/test_management_runtime_logs.py` — runtime log ownership, streams, sharing, not-running and older-controller answers, and bounded tails.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
@@ -393,8 +398,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/StartupRecord.tsx` — why a failed deployment's new version stopped: summary, events and output.
 - `frontend/owner-portal/src/components/StartupRecord.test.tsx` — startup summary wording and errors-first display tests.
 - `frontend/owner-portal/src/components/RecentCommits.tsx` — recent-commit picker for deploys, read from GitHub by the browser.
-- `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy commit check line and review-dialog problem list.
-- `frontend/owner-portal/src/components/CommitChecks.test.tsx` — commit check problem, unreadable-commit and rate-limit UI tests.
+- `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy commit check line, the runtime version a commit asks for, and review-dialog problem list.
+- `frontend/owner-portal/src/components/CommitChecks.test.tsx` — commit check problem, runtime version, unreadable-commit and rate-limit UI tests.
 - `frontend/owner-portal/src/components/Status.tsx` — shared owner Status component and presentation behavior.
 - `frontend/owner-portal/src/components/Repository.tsx` — repository links labelled with their short owner/repo name.
 - `frontend/owner-portal/src/components/StorageSection.tsx` — owner storage provisioning, bindings, verification and rotation controls.
@@ -407,6 +412,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/Dashboard.tsx` — owner dashboard page module.
 - `frontend/owner-portal/src/pages/Deploy.tsx` — owner deploy page module.
 - `frontend/owner-portal/src/pages/Deployment.tsx` — owner deployment page module.
+- `frontend/owner-portal/src/pages/Deployment.test.tsx` — deployment detail tests for the runtime release a build used and its source.
 - `frontend/owner-portal/src/pages/Logs.tsx` — owner app logs page module.
 - `frontend/owner-portal/src/pages/Team.tsx` — owner app team page module.
 - `frontend/owner-portal/src/pages/History.tsx` — owner history page module.
@@ -420,6 +426,9 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/utils/preflight.ts` — browser check of a public commit against the build's checkout rules.
 - `frontend/owner-portal/src/utils/preflight.test.ts` — shared-case parity, truncated-tree and request tests for the commit check.
 - `frontend/owner-portal/src/utils/preflight-cases.json` — checkout cases shared by the browser check and `validate_checkout` tests.
+- `frontend/owner-portal/src/utils/runtimeVersions.ts` — browser parser for the Node.js or Bun version a commit asks for, mirroring `runtime_versions.py`.
+- `frontend/owner-portal/src/utils/runtimeVersions.test.ts` — shared range and version-request cases through the browser parser.
+- `frontend/owner-portal/src/utils/runtime-version-cases.json` — version range and request cases shared by the portal's parser and `runtime_versions.py` tests.
 - `openstack_platform/management/broker/anonymous.py` — private HMAC key, stateless expiring anonymous challenges, and bounded per-client-address limits.
 - `openstack_platform/management/broker/resources.py` — owner environment and storage routes, validation, and secret-free projections.
 - `tests/test_management_contract.py` — real project-socket broker contract and fake/real wire-shape, errors, cleanup, and read evidence.

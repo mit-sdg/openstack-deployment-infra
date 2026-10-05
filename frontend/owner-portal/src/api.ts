@@ -13,6 +13,8 @@ export type SourceReadOptions = {
 
 export const configurationGuidance = {
   root: 'The repository root must contain package.json.',
+  versions:
+    'Choose the version in package.json: engines.node or engines.bun, or "packageManager": "bun@1.3.4". Without one, builds use the platform default.',
   locks:
     'Each package directory must contain its runtime lockfile: package-lock.json for Node.js, bun.lock or bun.lockb for Bun.',
   scripts: 'Build and start scripts come from the root package.json.',
@@ -112,6 +114,15 @@ const teamData = (v: unknown) => {
   );
   return data as { items: TeamMember[]; you?: string; access?: string; left?: boolean };
 };
+/** The runtime a deployment's build used: an exact release, or the platform default. */
+export type DeploymentRuntime = {
+  runtime: 'node' | 'bun';
+  /** null for the platform default image, whose release isn't recorded. */
+  version: string | null;
+  image: string;
+  /** Where the request was: "engines.node >=22 <23", "packageManager bun@1.3.4" or "default". */
+  source: string;
+};
 export type Deployment = {
   deploymentId: string;
   applicationId: string;
@@ -122,6 +133,8 @@ export type Deployment = {
   configuration: Configuration;
   configurationSha256: string;
   imageDigest: string | null;
+  /** Absent from older platforms, and null until the build finishes. */
+  runtime?: DeploymentRuntime | null;
   cleanupState: string;
   requestedAt: string;
   acceptedAt: string | null;

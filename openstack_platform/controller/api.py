@@ -56,7 +56,21 @@ _LIVE_REUSE_SECONDS = 2.0
 # 504: the broker gives up sooner, so longer waits would only pile up
 # connections behind a hung probe.
 _LIVE_FOLLOWER_WAIT_SECONDS = 20.0
+
+# A checkout check names the runtime version it asks for, or the default.
+_RUNTIME_CHECKS = frozenset({"runtime-version", "runtime-default"})
 HelperCaller = Callable[..., Mapping[str, object]]
+
+
+def _failure_code(operation: db.Operation) -> str | None:
+    # A build that couldn't look up runtime versions ends like a rejected one,
+    # but the owner should simply try again.
+    if (
+        operation.phase == "build_rejected"
+        and operation.refs.get("rejection") == "runtime_unavailable"
+    ):
+        return "RUNTIME_UNAVAILABLE"
+    return _FAILURE_CODES.get(operation.phase)
 
 
 class LocalHelperTransport:
@@ -1006,6 +1020,7 @@ class ControllerAPI:
             expected = {
                 "package-json",
                 "script:" + configuration.start_script,
+                *_RUNTIME_CHECKS,
                 *("lockfile:" + package for package in configuration.packages),
             }
             if configuration.build_script is not None:
@@ -1047,7 +1062,11 @@ class ControllerAPI:
                         "date": bounded_text(item.get("date"), field="commit date", maximum=40),
                     }
                 )
-        if preflight and {item["id"] for item in projected} != expected:
+        # An older helper reports no runtime check; a newer one reports one.
+        if preflight and (
+            {item["id"] for item in projected} | _RUNTIME_CHECKS != expected
+            or sum(item["id"] in _RUNTIME_CHECKS for item in projected) > 1
+        ):
             raise app.ApplicationError("helper checkout checks are incomplete")
         return Response(
             200,
@@ -1645,6 +1664,7 @@ class ControllerAPI:
             "environmentRevision": attempt.environment_revision,
             "recipeHash": attempt.recipe_hash,
             "imageDigest": attempt.image_digest,
+            "runtime": db.deployment_runtime(self.connection, attempt.deployment_id),
             "nomadVersion": attempt.nomad_version,
             "safeError": attempt.safe_error,
             "cleanupState": attempt.cleanup_state,
@@ -1703,9 +1723,7 @@ class ControllerAPI:
             "updatedAt": operation.updated_at,
             "deadlineAt": operation.deadline_at,
             "safeError": None if retry_active else operation.safe_error,
-            "errorCode": _FAILURE_CODES.get(operation.phase)
-            if operation.status == "failed"
-            else None,
+            "errorCode": _failure_code(operation) if operation.status == "failed" else None,
             "cleanupState": operation.cleanup_state,
         }
 

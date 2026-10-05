@@ -176,6 +176,11 @@ for (const [mode, viewport, colorScheme] of [
       await expect(
         page.getByText('This commit has the package.json, scripts and lockfile the build needs.'),
       ).toBeVisible();
+      await expect(
+        page.getByText(
+          'This commit doesn’t ask for a Bun version, so the build uses the platform’s default.',
+        ),
+      ).toBeVisible();
       expect(github.map((request) => request.url())).toEqual([
         'https://api.github.com/repos/example/student-app/commits?sha=main&per_page=5',
         `https://api.github.com/repos/example/student-app/git/trees/${commits[0].sha}?recursive=1`,
@@ -222,6 +227,7 @@ for (const [mode, viewport, colorScheme] of [
       expect(history.filter((deployment) => deployment.repositoryCommit === sha)).toHaveLength(1);
       await page.goto(`/apps/${appId}/deployments/${attempt.deploymentId}`);
       await expect(page.getByRole('heading', { name: 'Build output' })).toBeVisible();
+      await expect(page.getByText('Bun (platform default)')).toBeVisible();
       await expect(page.getByLabel('Build log')).toContainText('Preparing exact source snapshot');
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();

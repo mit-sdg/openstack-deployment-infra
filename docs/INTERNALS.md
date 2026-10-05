@@ -143,7 +143,8 @@ browser product is not deployed yet. For a deployment request the controller:
 2. records an immutable deployment attempt and accepts the external operation
    under an idempotency key;
 3. asks the helper to create a single-use builder;
-4. acquires the exact source snapshot and transfers a generated recipe;
+4. acquires the exact source snapshot, resolves the Node.js or Bun version it
+   asks for, and transfers a generated recipe;
 5. runs rootless BuildKit and records the pushed immutable OCI digest;
 6. deletes and verifies the builder and its fixed port;
 7. creates the application's dedicated worker, or verifies the exact accepted
@@ -162,6 +163,59 @@ storage.
 Environment values and managed-service credentials live in owner-scoped Nomad
 Variables. Controller SQLite records key names, owners, revisions, and
 timestamps, never values. API reads never return values.
+
+### Runtime versions
+
+`validate_checkout` also returns the runtime version a checkout asks for
+([`runtime_versions.py`](../openstack_platform/runtime_versions.py)):
+`engines.node`, then a root `.nvmrc` or `.node-version`, for Node.js;
+`"packageManager": "bun@x.y.z"`, then `engines.bun`, then `.bun-version`, for Bun.
+A `packageManager` naming another manager is ignored. Ranges use a subset of npm
+semver: exact and partial versions, x-ranges, `^`, `~`, comparators, hyphen ranges,
+a space for AND and `||` for OR. Pre-release tags only move a bound, parts have at
+most nine digits, and spaces are the only whitespace. Each comparator set is an
+interval, so a request that matches no version, or only lines older than the
+built-in floors (Node.js 20, Bun 1.1), is refused without any lookup.
+
+The helper's `app.build` then resolves a request
+([`runtime_images.py`](../openstack_platform/helper/runtime_images.py)). Node.js
+releases, with their LTS markers for `lts/*`, come from
+`https://nodejs.org/dist/index.json`. Bun releases come from the `oven/bun` tag
+list on Docker Hub (anonymous pull token, `Link` pages followed, `X.Y.Z-slim` tags
+only). The newest release that satisfies the request and floor, preferring a
+Node.js LTS release when the range admits one (`>=20` builds on the newest LTS,
+not a Current line), is resolved to its
+`-slim` index digest by a `HEAD` manifest request accepting OCI index and Docker
+manifest-list types; while that tag is unpublished (404), the next two releases
+are tried. Each exchange is HTTPS without redirects or credentials, trusts the OS
+CA bundle, and has a 10-second timeout within a 60-second lookup and a small
+response limit. A checkout without a request keeps the policy's `runtimeImages`
+pin, so its recipe and recipe hash are unchanged. The official repositories
+(`docker.io/library/node`, `docker.io/oven/bun`), the `-slim` variant and the
+floors are constants; policy is unchanged.
+
+The helper writes its choice to the build log and returns
+`runtime: {runtime, version, image, source}`; the policy pin has a null `version`
+and the `source` `default`. The controller accepts exactly the policy pin for
+`default`; otherwise it requires a supported release, digest-pinned in the
+official repository, that satisfies the request named by `source`. It regenerates
+the recipe with that image and still requires `recipeHash` equality. A helper that
+reports no runtime is treated as the default. The evidence is the deploy
+operation's `runtime` ref, whose operation ID is the deployment ID, so there is no
+schema migration and backups already carry it. Retained-image rollback and resize
+copy the reused deployment's value. Deployment reads expose `runtime`, null until
+a build finishes and for deployments built before it was recorded; the broker
+relays only a bounded projection.
+
+A refused request is `BUILD_REJECTED`, with the owner's message in the build log.
+A failed lookup is `RUNTIME_UNAVAILABLE`: no builder exists yet, so the controller
+finishes it like a rejected build, records `rejection: runtime_unavailable` in the
+operation refs and reports that `errorCode`; the broker maps it to try-again
+guidance. Lookups run in the controller unit, which launches the helper. The unit
+restricts address families but sets no `IPAddressAllow`/`IPAddressDeny`, and the
+admin security group keeps Neutron's default egress, so `nodejs.org`,
+`auth.docker.io` and `registry-1.docker.io` are reachable without a Nix change.
+Builders pull the pinned image from Docker Hub as before.
 
 ### Authoritative deployment reads and retained rollback
 
@@ -718,7 +772,12 @@ CSP; admin runs Python only. The deploy page lists the branch's five newest
 commits straight from `api.github.com`, without cookies or a referrer, and checks
 the chosen commit before deploying: one recursive tree read plus `package.json`
 from `raw.githubusercontent.com` (the two non-self `connect-src` origins) against
-the build's `validate_checkout` rules, kept in step by shared cases. Private
+the build's `validate_checkout` rules, kept in step by shared cases. When
+`package.json` names no runtime version, a listed root version file is read from
+the same origin. The `runtime-version` check names the request (or why the build
+would refuse it) and `runtime-default` says there is none; a separate shared case
+file keeps the TypeScript parser in step with `runtime_versions.py`. The exact
+release is chosen only at build time. Private
 repositories and GitHub's hourly limit fall back to bounded platform reads when
 the app has a deploy key: five shallow commits and named exact-checkout checks
 using the build validators. Broker owner/admin routes share reads for ten seconds,
@@ -774,7 +833,8 @@ Known failed-deploy codes map to fixed release-owned guidance for root
 small HTTP-2xx health endpoint with a body of at most 4096 bytes. The
 `build_rejected` phase also identifies build guidance. A controller operation's
 `errorCode` is kept the same way; `PLATFORM_BUSY`, or the `platform_busy` phase,
-selects guidance to try again in a few minutes. Deadline codes get health
+selects guidance to try again in a few minutes, and `RUNTIME_UNAVAILABLE` selects
+guidance to retry a deploy whose runtime versions couldn't be looked up. Deadline codes get health
 guidance only when their recorded phase identifies health verification; unknown
 failures keep the generic message. Owner projections omit internal codes while
 showing the same guidance; staff/admin views retain the bounded code separately.

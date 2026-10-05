@@ -17,6 +17,7 @@ from typing import Any, Literal, Protocol
 from .. import durable, openstack, remote, runtime
 from ..config import Config
 from ..contracts import REGISTRY_PORT
+from ..runtime_versions import default_runtime, resolved_runtime
 from ..validation import (
     ValidationError,
     bounded_text,
@@ -49,6 +50,10 @@ _PLATFORM_ENVIRONMENT = PLATFORM_ENVIRONMENT_KEYS
 # deadline, rather than failing the moment it meets the lock.
 INFRASTRUCTURE_WAIT_SECONDS = 600.0
 PLATFORM_BUSY = "The platform is busy with maintenance. Try again in a few minutes."
+RUNTIME_UNAVAILABLE = (
+    "The build couldn't look up the Node.js or Bun version this commit asks for. "
+    "Try deploying again in a few minutes."
+)
 
 
 class DeploymentDeadlineError(RuntimeError):
@@ -285,7 +290,11 @@ def _finish_rejected_build(
         or result.get("artifactAbsent") is not True
     ):
         raise app.ApplicationError("exact rejected-build absence was not confirmed")
-    message = "application build was rejected; exact builder and build artifact absence confirmed"
+    message = (
+        RUNTIME_UNAVAILABLE
+        if operation.refs.get("rejection") == "runtime_unavailable"
+        else "application build was rejected; exact builder and build artifact absence confirmed"
+    )
     # Mark the attempt first. A crash before finishing the operation will repeat
     # the same absence checks rather than strand a nonterminal deployment row.
     db.checkpoint_deployment_attempt(
@@ -376,9 +385,20 @@ def _call_build(
     except remote.HelperError as error:
         # SOURCE_REJECTED: GitHub wouldn't give this commit, with or without the
         # app's deploy key. Like a rejected build, retrying the same input can't help.
-        if error.code not in {"BUILD_REJECTED", "SOURCE_REJECTED"}:
+        # RUNTIME_UNAVAILABLE: the runtime versions couldn't be looked up, before
+        # any builder existed. It ends the same clean way, but a later retry may work.
+        if error.code not in {"BUILD_REJECTED", "SOURCE_REJECTED", "RUNTIME_UNAVAILABLE"}:
             raise
-        db.checkpoint_operation(connection, operation_id, phase="build_rejected")
+        if error.code == "RUNTIME_UNAVAILABLE":
+            db.checkpoint_operation(
+                connection,
+                operation_id,
+                phase="build_rejected",
+                refs={"rejection": "runtime_unavailable"},
+                merge_refs=True,
+            )
+        else:
+            db.checkpoint_operation(connection, operation_id, phase="build_rejected")
         _finish_rejected_build(
             connection,
             config,
@@ -455,7 +475,17 @@ def _prepare_deployment_build(
             raise app.ApplicationError(
                 "build helper returned an image outside the application repository"
             )
-        recipe = app.generate_recipe(manifest, config.policy.runtime_images)
+        defaults = config.policy.runtime_images
+        try:
+            # An older helper resolves no version and builds on the policy image.
+            resolved = (
+                resolved_runtime(built["runtime"], runtime=manifest.runtime, defaults=defaults)
+                if "runtime" in built
+                else default_runtime(manifest.runtime, defaults)
+            )
+        except ValidationError:
+            raise app.ApplicationError("build helper returned invalid runtime evidence") from None
+        recipe = app.generate_recipe(manifest, resolved.runtime_images(defaults))
         recipe_hash = sha256_hex(built.get("recipeHash"), field="recipe hash")
         if recipe_hash != recipe.sha256:
             raise app.ApplicationError(
@@ -475,6 +505,7 @@ def _prepare_deployment_build(
             **refs,
             "recipe_hash": recipe_hash,
             "build_log_path": build_log_path,
+            "runtime": resolved.evidence(),
         }
         db.checkpoint_operation(
             connection,
@@ -1898,10 +1929,13 @@ class DeploymentService:
                     raise ValidationError(
                         "retained deployment artifact is unavailable or inconsistent"
                     )
+                prior_runtime = db.deployment_runtime(self.connection, prior.deployment_id)
                 refs = {
                     **operation.refs,
                     "recipe_hash": prior.recipe_hash,
                     "build_log_path": prior.build_log_path,
+                    # The retained image keeps the runtime its build used.
+                    **({} if prior_runtime is None else {"runtime": prior_runtime}),
                 }
                 db.checkpoint_operation(
                     self.connection,

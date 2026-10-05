@@ -69,6 +69,7 @@ describe('owner configuration', () => {
     expect(screen.getByText(configurationGuidance.root, { exact: false })).toBeVisible();
     expect(screen.getByText(/Each needs its lockfile/)).toBeVisible();
     expect(screen.getByText(configurationGuidance.health)).toBeVisible();
+    expect(screen.getByText(configurationGuidance.versions)).toBeVisible();
     fireEvent.click(screen.getByLabelText(/Bun/));
     fireEvent.change(screen.getByLabelText('Port'), { target: { value: '8080' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
