@@ -48,6 +48,7 @@ from ..runtime import (
     ensure_private_directory,
     run,
 )
+from ..runtime_versions import RuntimeVersionError
 from ..validation import (
     ValidationError,
     bounded_text,
@@ -60,6 +61,7 @@ from . import application_actions as app_actions
 from . import storage as storage_actions
 from .main import Handler, HelperActionError, backup_handler
 from .nomad import NomadClient
+from .runtime_images import RuntimeLookupError, resolve_runtime
 
 APP_ACTIONS = (
     "app.build",
@@ -560,7 +562,23 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                             "SOURCE_REJECTED", "repository or commit could not be fetched"
                         ) from None
                     streamed_log_limit = max(0, build_log_limit - build_log.tell())
-                validate_checkout(configuration, source)
+                try:
+                    request = validate_checkout(configuration, source)
+                    resolved = resolve_runtime(
+                        configuration.runtime,
+                        request,
+                        getattr(images, configuration.runtime),
+                    )
+                except RuntimeVersionError as error:
+                    note(f"{error}\n")
+                    raise
+                except RuntimeLookupError as error:
+                    note(f"{error}\n")
+                    raise HelperActionError(
+                        "RUNTIME_UNAVAILABLE", "runtime versions could not be looked up"
+                    ) from None
+                note(f"{resolved.describe()}\n")
+                streamed_log_limit = max(0, build_log_limit - build_log.tell())
                 manifest = Manifest(
                     configuration.runtime,
                     configuration.packages,
@@ -569,7 +587,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                     configuration.port,
                     configuration.health_path,
                 )
-                recipe = application.generate_recipe(manifest, images)
+                recipe = application.generate_recipe(manifest, resolved.runtime_images(images))
                 result = application.build_with_disposable_builder(
                     builder_command=application.provider_command(platform, "builder"),
                     pin_command=application.provider_command(platform, "pin-builder-host-key"),
@@ -608,6 +626,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
         "buildId": result.build_id,
         "image": result.image,
         "recipeHash": recipe.sha256,
+        "runtime": resolved.evidence(),
         "log": log.decode("utf-8", errors="replace"),
         "logTruncated": result.build_log_truncated or len(log) != len(result.build_log),
         "builderAbsent": result.cleanup_confirmed,

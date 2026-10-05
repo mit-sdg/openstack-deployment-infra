@@ -22,8 +22,21 @@ from ...controller.http import (
     Router,
 )
 from ...controller.storage_contract import RESOURCE_OUTPUTS
+from ...runtime_versions import RUNTIME_NAMES
 from ...validation import ValidationError, env_key, slug, uuid
 from ..common import canonical, digest, strict_json, utc
+
+
+def fake_runtime(configuration: dict[str, Any]) -> dict[str, str | None]:
+    """A build's runtime: the fake reads no package.json, so the default."""
+    runtime = configuration["build"]["runtime"]
+    repository = "library/node" if runtime == "node" else "oven/bun"
+    return {
+        "runtime": runtime,
+        "version": None,
+        "image": f"docker.io/{repository}@sha256:" + "c" * 64,
+        "source": "default",
+    }
 
 
 class FakeController:
@@ -87,6 +100,7 @@ class FakeController:
                 item["snapshotKind"] = "strict"
                 item.setdefault("environmentRevision", 0)
                 item.setdefault("recipeHash", None)
+                item.setdefault("runtime", None)
                 item.setdefault("nomadVersion", None)
                 if item.get("cleanupState") == "complete":
                     item["cleanupState"] = "confirmed"
@@ -324,6 +338,7 @@ class FakeController:
             "configurationSha256": digest(configuration.canonical_json()),
             "environmentRevision": 0,
             "recipeHash": None,
+            "runtime": None,
             "nomadVersion": None,
             "imageDigest": None,
             "safeError": None,
@@ -406,6 +421,7 @@ class FakeController:
                         acceptedAt=utc(time.time()),
                         lastHealthyAt=utc(time.time()),
                         recipeHash="b" * 64,
+                        runtime=fake_runtime(attempt["configuration"]),
                         nomadVersion=1,
                         imageDigest="registry.example.com/app@sha256:" + "a" * 64,
                     )
@@ -510,13 +526,16 @@ class FakeController:
         if configuration.build_script:
             ids.append("script:" + configuration.build_script)
         ids.extend("lockfile:" + package for package in configuration.packages)
+        name = RUNTIME_NAMES[configuration.runtime]
         return Response(
             200,
             {
                 "applicationId": app,
                 "keyPresent": True,
                 "items": [
-                    {"id": identifier, "label": identifier, "state": "ok"} for identifier in ids
+                    *({"id": identifier, "label": identifier, "state": "ok"} for identifier in ids),
+                    # Like a checkout that asks for no runtime version.
+                    {"id": "runtime-default", "label": f"{name} (platform default)", "state": "ok"},
                 ],
             },
         )
@@ -873,6 +892,7 @@ class FakeController:
             "configurationRevision": 7,
             "configuration": configuration,
             "configurationSha256": digest(canonical(configuration)),
+            "runtime": fake_runtime(configuration),
             "requestedAt": utc(time.time()),
             "acceptedAt": utc(time.time()),
             "updatedAt": utc(time.time()),

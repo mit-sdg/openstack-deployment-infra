@@ -56,9 +56,21 @@ _LIVE_REUSE_SECONDS = 2.0
 # 504: the broker gives up sooner, so longer waits would only pile up
 # connections behind a hung probe.
 _LIVE_FOLLOWER_WAIT_SECONDS = 20.0
+
 # A checkout check names the runtime version it asks for, or the default.
 _RUNTIME_CHECKS = frozenset({"runtime-version", "runtime-default"})
 HelperCaller = Callable[..., Mapping[str, object]]
+
+
+def _failure_code(operation: db.Operation) -> str | None:
+    # A build that couldn't look up runtime versions ends like a rejected one,
+    # but the owner should simply try again.
+    if (
+        operation.phase == "build_rejected"
+        and operation.refs.get("rejection") == "runtime_unavailable"
+    ):
+        return "RUNTIME_UNAVAILABLE"
+    return _FAILURE_CODES.get(operation.phase)
 
 
 class LocalHelperTransport:
@@ -1652,6 +1664,7 @@ class ControllerAPI:
             "environmentRevision": attempt.environment_revision,
             "recipeHash": attempt.recipe_hash,
             "imageDigest": attempt.image_digest,
+            "runtime": db.deployment_runtime(self.connection, attempt.deployment_id),
             "nomadVersion": attempt.nomad_version,
             "safeError": attempt.safe_error,
             "cleanupState": attempt.cleanup_state,
@@ -1710,9 +1723,7 @@ class ControllerAPI:
             "updatedAt": operation.updated_at,
             "deadlineAt": operation.deadline_at,
             "safeError": None if retry_active else operation.safe_error,
-            "errorCode": _FAILURE_CODES.get(operation.phase)
-            if operation.status == "failed"
-            else None,
+            "errorCode": _failure_code(operation) if operation.status == "failed" else None,
             "cleanupState": operation.cleanup_state,
         }
 

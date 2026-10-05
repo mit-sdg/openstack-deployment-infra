@@ -332,7 +332,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/runtime_logs.py` — owner/admin runtime log reads, shared briefly and one at a time so they can't crowd the controller.
 - `tests/test_checkout_preflight_parity.py` — runs the shared preflight cases through the build's `validate_checkout`.
 - `tests/test_runtime_versions.py` — shared range and version-request cases, and acceptance or refusal of a build's reported runtime.
-- `tests/test_runtime_images.py` — version resolution against a fake nodejs.org and Docker Hub: newest match, oldest lines, LTS, tag paging, unpublished tags, and retryable lookup failures.
+- `tests/test_runtime_images.py` — version resolution against a fake nodejs.org and Docker Hub: newest match, oldest lines, LTS, tag paging, unpublished tags, retryable lookup failures, and `app.build` building on the resolved image.
+- `tests/test_deployment_runtime.py` — controller checks of a build's reported runtime, its recording and deployment reads, retained-image reuse, and retryable lookup failures.
 - `tests/test_management_runtime_logs.py` — runtime log ownership, streams, sharing, not-running and older-controller answers, and bounded tails.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.

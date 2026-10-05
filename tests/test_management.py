@@ -396,6 +396,7 @@ class OwnerIntentTests(ManagementCase):
             BUILD_GUIDANCE,
             BUSY_GUIDANCE,
             HEALTH_GUIDANCE,
+            RUNTIME_GUIDANCE,
             deploy_failure_guidance,
             intent_model,
         )
@@ -412,6 +413,7 @@ class OwnerIntentTests(ManagementCase):
             (None, "build_rejected", BUILD_GUIDANCE),
             ("PLATFORM_BUSY", "platform_busy", BUSY_GUIDANCE),
             (None, "platform_busy", BUSY_GUIDANCE),
+            ("RUNTIME_UNAVAILABLE", "build_rejected", RUNTIME_GUIDANCE),
             ("INVALID_REQUEST", None, None),
         ):
             with self.subTest(code=code, phase=phase):

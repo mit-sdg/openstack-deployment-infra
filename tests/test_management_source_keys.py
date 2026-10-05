@@ -116,7 +116,7 @@ class SourceKeyTests(ManagementCase):
         checked = self.call("POST", route + "check", body, "alice").body["data"]
         self.assertEqual(
             {item["id"] for item in checked["items"]},
-            {"package-json", "script:start", "lockfile:."},
+            {"package-json", "script:start", "runtime-default", "lockfile:."},
         )
         self.assert_error(
             "REVISION_CONFLICT",

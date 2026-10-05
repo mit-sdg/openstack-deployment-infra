@@ -402,10 +402,8 @@ class OperatorIntegrationTests(unittest.TestCase):
         self._select_deployment_images()
         deploy_args = operator.build_parser().parse_args(self.argv("status"))
         manifest = app.Manifest("node", (".",), None, "serve", 8080, "/ready")
-        recipe = app.generate_recipe(
-            manifest,
-            operator._load_config(deploy_args).policy.runtime_images,
-        )
+        images = operator._load_config(deploy_args).policy.runtime_images
+        recipe = app.generate_recipe(manifest, images)
         image = "storage.internal:5000/projects/demo-app/app@sha256:" + "d" * 64
         actions: list[str] = []
         call_values: dict[str, list[object]] = {}
@@ -437,6 +435,12 @@ class OperatorIntegrationTests(unittest.TestCase):
                 return {
                     "image": image,
                     "recipeHash": recipe.sha256,
+                    "runtime": {
+                        "runtime": "node",
+                        "version": None,
+                        "image": images.node,
+                        "source": "default",
+                    },
                     "manifest": {
                         "runtime": "node",
                         "packages": ["."],
@@ -793,7 +797,8 @@ class OperatorIntegrationTests(unittest.TestCase):
         self._select_deployment_images()
         args = operator.build_parser().parse_args(self.argv("status"))
         manifest = app.Manifest("node", (".",), None, "serve", 8080, "/ready")
-        recipe = app.generate_recipe(manifest, operator._load_config(args).policy.runtime_images)
+        images = operator._load_config(args).policy.runtime_images
+        recipe = app.generate_recipe(manifest, images)
         image = "storage.internal:5000/projects/failed-app/app@sha256:" + "e" * 64
         actions: list[str] = []
         fail_candidate_cleanup = [True]
@@ -806,6 +811,12 @@ class OperatorIntegrationTests(unittest.TestCase):
                 return {
                     "image": image,
                     "recipeHash": recipe.sha256,
+                    "runtime": {
+                        "runtime": "node",
+                        "version": None,
+                        "image": images.node,
+                        "source": "default",
+                    },
                     "manifest": {
                         "runtime": "node",
                         "packages": ["."],

@@ -72,6 +72,12 @@ class RetainedRollbackTests(unittest.TestCase):
                 "image": "storage.internal:5000/projects/commons/app@sha256:"
                 + hashlib.sha256(values["commit"].encode()).hexdigest(),
                 "recipeHash": app.generate_recipe(manifest, config.policy.runtime_images).sha256,
+                "runtime": {
+                    "runtime": manifest.runtime,
+                    "version": None,
+                    "image": getattr(config.policy.runtime_images, manifest.runtime),
+                    "source": "default",
+                },
                 "builderAbsent": True,
                 "log": "built\n",
             }

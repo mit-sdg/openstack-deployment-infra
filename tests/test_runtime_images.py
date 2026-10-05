@@ -5,12 +5,21 @@ network."""
 
 from __future__ import annotations
 
+import functools
 import json
+import tempfile
 import unittest
 from collections.abc import Callable, Mapping
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest import mock
 
-from openstack_platform.config import RuntimeImages
-from openstack_platform.helper import runtime_images
+from openstack_platform.config import RuntimeImages, load_platform
+from openstack_platform.controller import application_runtime as app
+from openstack_platform.controller.application_models import Manifest
+from openstack_platform.helper import production, runtime_images
+from openstack_platform.helper.main import HelperActionError
 from openstack_platform.helper.runtime_images import (
     HttpResponse,
     RuntimeLookupError,
@@ -24,6 +33,8 @@ from openstack_platform.runtime_versions import (
 )
 from openstack_platform.validation import ValidationError
 
+ROOT = Path(__file__).resolve().parents[1]
+BUILD = "11111111-1111-4111-8111-111111111111"
 DEFAULTS = RuntimeImages(
     bun="registry.example/bun@sha256:" + "b" * 64,
     node="registry.example/node@sha256:" + "a" * 64,
@@ -289,6 +300,132 @@ class ResolutionTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.resolve(registry, "node", bun)
         self.assertEqual(registry.calls, [])
+
+
+class HelperBuildTests(unittest.TestCase):
+    """app.build resolves the checkout's request before any builder exists."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.runtime = SimpleNamespace(
+            platform=load_platform(ROOT / "config/platform.example.json"),
+            root=self.root,
+            admin_state=self.root,
+        )
+        self.arguments = {
+            "buildId": BUILD,
+            "slug": "notes",
+            "repository": "https://github.com/ada/notes",
+            "requestedRef": "main",
+            "commit": "a" * 40,
+            "configurationRevision": 1,
+            "configuration": {
+                "schemaVersion": 1,
+                "build": {
+                    "runtime": "node",
+                    "packages": ["."],
+                    "buildScript": None,
+                    "startScript": "start",
+                },
+                "runtime": {"port": 8080, "healthPath": "/"},
+                "storageBindings": [],
+            },
+            "builderImageId": "22222222-2222-4222-8222-222222222222",
+            "runtimeImages": {"bun": DEFAULTS.bun, "node": DEFAULTS.node},
+            "sourceLimit": 1_048_576,
+            "buildLogLimit": 65_536,
+            "connectSeconds": 5,
+            "deadlineAt": "2030-01-01T00:00:00Z",
+        }
+        self.recipes: list[app.Recipe] = []
+
+    def build(self, registry: FakeRegistry, package: dict[str, Any]) -> Mapping[str, Any]:
+        def acquire(_repository: str, _commit: str, destination: Path, **_bounds: Any) -> Path:
+            destination.mkdir()
+            (destination / "package.json").write_text(json.dumps(package))
+            (destination / "package-lock.json").write_text("{}")
+            return destination
+
+        def builder(**values: Any) -> app.BuildResult:
+            self.recipes.append(values["recipe"])
+            return app.BuildResult(
+                BUILD, values["image_name"] + "@sha256:" + "d" * 64, "sha256:" + "d" * 64, True
+            )
+
+        with (
+            mock.patch.object(production, "helper_runtime", return_value=self.runtime),
+            mock.patch.object(app, "acquire_github_commit", side_effect=acquire),
+            mock.patch.object(
+                production, "resolve_runtime", functools.partial(resolve_runtime, http=registry)
+            ),
+            mock.patch.object(app, "build_with_disposable_builder", side_effect=builder),
+        ):
+            return production._build_application(self.arguments)
+
+    def log(self) -> str:
+        return (self.root / f"controller/build-logs/notes/{BUILD}.log").read_text()
+
+    def package(self, **fields: Any) -> dict[str, Any]:
+        return {"scripts": {"start": "node ."}, **fields}
+
+    def test_the_build_uses_and_reports_the_resolved_runtime(self) -> None:
+        result = self.build(
+            FakeRegistry(node=NODE_INDEX), self.package(engines={"node": ">=22 <23"})
+        )
+        image = f"docker.io/library/node@{NODE_DIGEST}"
+        self.assertEqual(
+            result["runtime"],
+            {
+                "runtime": "node",
+                "version": "22.12.0",
+                "image": image,
+                "source": "engines.node >=22 <23",
+            },
+        )
+        (recipe,) = self.recipes
+        self.assertTrue(recipe.dockerfile.startswith(f"FROM {image}\n".encode()))
+        self.assertEqual(result["recipeHash"], recipe.sha256)
+        self.assertIn(f"Using Node.js 22.12.0 ({image}) from engines.node >=22 <23.", self.log())
+
+    def test_no_request_builds_the_policy_image_exactly_as_before(self) -> None:
+        registry = FakeRegistry(node=NODE_INDEX)
+        result = self.build(registry, self.package(packageManager="bun@1.3.4"))
+        self.assertEqual(registry.calls, [])
+        before = app.generate_recipe(Manifest("node", (".",), None, "start", 8080, "/"), DEFAULTS)
+        self.assertEqual(self.recipes, [before])
+        self.assertEqual(
+            result["runtime"],
+            {"runtime": "node", "version": None, "image": DEFAULTS.node, "source": "default"},
+        )
+
+    def test_requests_that_cannot_be_built_are_rejected_before_any_builder(self) -> None:
+        for engines, message in (
+            ("16", 'engines.node "16" asks for Node.js 16, older than the oldest'),
+            (">=99", 'No Node.js release matches engines.node ">=99".'),
+        ):
+            with self.subTest(engines):
+                with self.assertRaises(HelperActionError) as caught:
+                    self.build(
+                        FakeRegistry(node=NODE_INDEX), self.package(engines={"node": engines})
+                    )
+                self.assertEqual(caught.exception.code, "BUILD_REJECTED")
+                self.assertIn(message, self.log())
+        self.assertEqual(self.recipes, [])
+
+    def test_a_failed_lookup_is_reported_as_retryable(self) -> None:
+        registry = FakeRegistry(node=NODE_INDEX)
+        registry.failures[runtime_images.NODE_RELEASES] = lambda: HttpResponse(503, {}, b"")
+        with self.assertRaises(HelperActionError) as caught:
+            self.build(registry, self.package(engines={"node": "22"}))
+        self.assertEqual(caught.exception.code, "RUNTIME_UNAVAILABLE")
+        self.assertIn(
+            "Couldn't look up Node.js versions. Try deploying again in a few minutes.", self.log()
+        )
+        state = self.root / f"controller/build-logs/notes/{BUILD}.state"
+        self.assertEqual(state.read_text().strip(), "failed")
+        self.assertEqual(self.recipes, [])
 
 
 if __name__ == "__main__":
