@@ -55,9 +55,11 @@ print(totp_code(sys.argv[1], int(time.time()//30)))
 }
 async function commons(page: Page, name: string) {
   await page.goto('/sign-in');
+  // The fake class site asks who is signing in, then sends the browser back.
+  await page.getByRole('link', { name: 'Sign in with your class account', exact: true }).click();
   await page.getByLabel('Username', { exact: true }).fill(name);
   await page.getByLabel('Password', { exact: true }).fill(`local-${name}-password`);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
   await expect(page).toHaveURL(/\/apps$/);
 }
 async function createApp(page: Page, slug: string) {

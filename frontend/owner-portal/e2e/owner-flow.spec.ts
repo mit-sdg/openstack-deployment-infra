@@ -3,11 +3,17 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const screenshots = path.resolve('../../.tmp/owner-portal-playwright/screenshots');
+// The fake class site asks who is signing in, as the real one does when signed out.
+async function approve(page: Page, name: string) {
+  await page.getByRole('link', { name: 'Sign in with your class account', exact: true }).click();
+  await expect(page).toHaveURL(/^https:\/\/localhost:\d+\/connect\?/);
+  await page.getByLabel('Username', { exact: true }).fill(name);
+  await page.getByLabel('Password', { exact: true }).fill(`local-${name}-password`);
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
+}
 async function signIn(page: Page, owner: 'Alice' | 'Bob') {
   await page.goto('/sign-in');
-  await page.getByLabel('Username', { exact: true }).fill(owner.toLowerCase());
-  await page.getByLabel('Password', { exact: true }).fill(`local-${owner.toLowerCase()}-password`);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await approve(page, owner.toLowerCase());
   await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/apps$/);
   await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible();
 }
@@ -100,14 +106,17 @@ for (const [mode, viewport, colorScheme] of [
         return route.fulfill({ body: '{"scripts":{"start":"node server.js"}}', headers: cors });
       });
       await page.goto('/sign-in');
-      await page.getByLabel('Username', { exact: true }).fill('alice');
-      await page.getByLabel('Password', { exact: true }).fill('incorrect-fixture');
-      await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-      await expect(page.getByRole('alert')).toContainText('Username or password is incorrect.');
-      await page.getByLabel('Username', { exact: true }).fill('carol');
-      await page.getByLabel('Password', { exact: true }).fill('local-carol-password');
-      await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-      await expect(page.getByRole('alert')).toContainText('disabled or archived');
+      // Cancelling on the class site comes back with a reason and a clean address.
+      await page
+        .getByRole('link', { name: 'Sign in with your class account', exact: true })
+        .click();
+      await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await expect(page.getByRole('alert')).toContainText('Sign-in was cancelled.');
+      await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/sign-in$/);
+      // An archived class account is approved there, but its code is refused.
+      await approve(page, 'carol');
+      await expect(page.getByRole('alert')).toContainText('That sign-in expired. Try again.');
+      await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/sign-in$/);
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       });
@@ -441,11 +450,15 @@ for (const [mode, viewport, colorScheme] of [
       expect((await bobPage.request.get(`/api/v1/apps/${appId}`)).status()).toBe(404);
       await bobPage.getByRole('button', { name: /^Account: / }).click();
       await bobPage.getByRole('button', { name: 'Sign out' }).click();
-      await expect(bobPage.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+      await expect(
+        bobPage.getByRole('link', { name: 'Sign in with your class account', exact: true }),
+      ).toBeVisible();
       await bob.close();
       await page.getByRole('button', { name: /^Account: / }).click();
       await page.getByRole('button', { name: 'Sign out' }).click();
-      await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+      await expect(
+        page.getByRole('link', { name: 'Sign in with your class account', exact: true }),
+      ).toBeVisible();
       expect((await page.request.get('/api/v1/apps')).status()).toBe(401);
       expect(cspViolations).toHaveLength(0);
       expect(unexpectedNetwork).toHaveLength(0);

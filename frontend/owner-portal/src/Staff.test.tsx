@@ -410,7 +410,7 @@ describe('admin-only account pages', () => {
     ).toBeVisible();
     expect(listing).not.toHaveBeenCalled();
   });
-  it('offers two identity methods without a role selector or staff sign-in upgrade', async () => {
+  it('offers class sign-in and local accounts without a role selector or staff sign-in upgrade', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -426,11 +426,12 @@ describe('admin-only account pages', () => {
     );
     show('/sign-in');
     // The method and brand come from server configuration, never hardcoded names.
-    expect(await screen.findByRole('radio', { name: 'Example university account' })).toBeChecked();
+    expect(
+      await screen.findByRole('link', { name: 'Sign in with your example university account' }),
+    ).toHaveAttribute('href', '/auth/commons/start');
     expect(await screen.findByText('Example Platform')).toBeVisible();
-    expect(screen.getByRole('radio', { name: 'Local account' })).toBeVisible();
     expect(screen.queryByRole('link', { name: 'Staff sign-in' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('radio', { name: 'Local account' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use a local account' }));
     expect(screen.getByLabelText('Authentication code')).toBeVisible();
     expect(screen.queryByRole('combobox', { name: /role/i })).not.toBeInTheDocument();
   });

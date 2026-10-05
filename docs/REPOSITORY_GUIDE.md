@@ -418,7 +418,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/History.tsx` — owner history page module.
 - `frontend/owner-portal/src/pages/NewApp.tsx` — owner newapp page module.
 - `frontend/owner-portal/src/pages/Overview.tsx` — owner overview page module.
-- `frontend/owner-portal/src/pages/SignIn.tsx` — owner signin page module.
+- `frontend/owner-portal/src/pages/SignIn.tsx` — sign-in page: Sign in with Commons link, local account form and returned sign-in errors.
+- `frontend/owner-portal/src/pages/SignIn.test.tsx` — sign-in page tests for the Commons link, local-only form and returned error messages.
 - `frontend/owner-portal/src/shell/PortalShell.tsx` — responsive portal shell, navigation, theme, and session controls.
 - `frontend/owner-portal/src/utils/presentation.ts` — owner date, commit, health, and operation phase presentation helpers.
 - `frontend/owner-portal/src/utils/github.ts` — cookie-free, referrer-free GitHub API read of a branch's newest commits.
