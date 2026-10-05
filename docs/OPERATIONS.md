@@ -1513,7 +1513,7 @@ and request key; their durable fingerprints retain the keyed HMAC from the
 owner resource implementation. Other unknown operations reuse their original
 controller key.
 
-Staff open the same pages from **Admin → All apps** and can do all of the above
+Staff open the same pages from **Manage apps** and can do all of the above
 for any app except create an app for another owner, adopt an app, reassign its
 owner, delete storage, allow a maintenance outage or paste a sizing plan. The
 portal hides those actions for staff and the broker refuses them with 403. An
@@ -1662,7 +1662,7 @@ Create local owner/staff/admin accounts through 72 h single-use invitations;
 copy and privately share the returned fragment URL. The portal sends no email.
 Local owner/staff recipients may enable TOTP; admins must enroll it. A staff
 account manages its own apps, reads the catalog and manages every app from
-**Admin → All apps** in the same session, without the admin-only actions.
+**Manage apps** in the same session, without the admin-only actions.
 There is no sign-in mode selector, impersonation or role upgrade in a session.
 
 Changing role, enabling/disabling, revoking sessions, or issuing/resetting local

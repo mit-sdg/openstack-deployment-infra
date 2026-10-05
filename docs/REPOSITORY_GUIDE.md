@@ -348,7 +348,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/public/favicon.svg` — code-native portal mark.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory TanStack Query setup.
 - `frontend/owner-portal/src/staffApi.ts` — strict staff metadata types/decoders and CSRF-bearing, cancellable GET reads.
-- `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff route table and session-activity provider.
+- `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff route table (owners, operations, deployments; old app links redirect to Manage apps) and session-activity provider.
 - `frontend/owner-portal/src/pages/staff/common.tsx` — staff polling and chained reads, paging, load and not-found states, table columns and activity rows.
 - `frontend/owner-portal/src/pages/staff/Owners.tsx` — staff owner list and owner page with quotas, apps and recent activity.
 - `frontend/owner-portal/src/pages/staff/Apps.tsx` — staff app list (owner filter) and app page with health, deployments and activity.

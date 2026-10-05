@@ -1012,10 +1012,11 @@ currently materializes all attempts before paging; staff history refresh is
 manual and controller behavior/privileges are unchanged.
 
 Staff pages use the same React app/shell, themes, feedback and presentation
-components. Staff navigation covers owners, applications and operations; mutation
-components do not mount on these read-only pages. Staff manage apps from
-**Admin → All apps**, the app administration pages, which hide the admin-only
-actions and the Accounts and Audit log tabs. Directory pages
+components. The Staff section covers owners and operations; mutation components
+do not mount on these read-only pages. Staff manage apps from one list,
+**Manage apps** (the app administration pages at `/admin/apps`), which hides the
+admin-only actions and the Accounts and Audit log tabs; old `/staff/apps` links
+redirect there. The `/api/v1/staff/apps*` reads remain for deployment pages. Directory pages
 refresh manually; detail/operation polling runs every 15 seconds while visible,
 pauses in hidden tabs, and stops after repeated failures. Idle/absolute expiry,
 logout and access loss cancel queries and clear private in-memory data/CSRF;

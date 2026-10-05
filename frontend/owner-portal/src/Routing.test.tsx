@@ -46,7 +46,6 @@ afterEach(() => {
 describe('nested routes', () => {
   it.each([
     ['owner detail', `/staff/owners/${owner}`, 'owner', [owner]],
-    ['app detail', `/staff/apps/${app}`, 'app', [app]],
     ['deployment history', `/staff/apps/${app}/deployments`, 'deployments', [app]],
     [
       'deployment detail',
@@ -60,6 +59,12 @@ describe('nested routes', () => {
     await waitFor(() => expect(read).toHaveBeenCalled());
     expect(read.mock.calls[0].slice(0, ids.length)).toEqual(ids);
     expect(screen.queryByRole('heading', { name: 'Page not found' })).toBeNull();
+  });
+  it('sends an old staff app link to the managed app page', async () => {
+    const detail = vi.spyOn(adminAppsApi, 'detail').mockImplementation(pending);
+    show(`/staff/apps/${app}`, 'staff');
+    await waitFor(() => expect(detail).toHaveBeenCalledWith(app));
+    expect(window.location.pathname).toBe(`/admin/apps/${app}`);
   });
   it.each(['admin', 'staff'] as const)('opens a managed app for %s', async (role) => {
     const detail = vi.spyOn(adminAppsApi, 'detail').mockImplementation(pending);

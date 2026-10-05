@@ -241,8 +241,9 @@ for (const [layout, viewport, colorScheme] of [
       await expect(dialog).toContainText('This app provides sign-in for the portal');
       // Staff manage every app like admins, without ownership changes,
       // storage deletion, outages or resizing.
-      await staffPage.getByRole('link', { name: 'Admin', exact: true }).click();
+      await staffPage.getByRole('link', { name: 'Manage apps', exact: true }).click();
       await expect(staffPage.getByRole('heading', { name: 'All apps', exact: true })).toBeVisible();
+      await expect(staffPage.getByRole('link', { name: 'Admin', exact: true })).toHaveCount(0);
       await expect(staffPage.getByRole('link', { name: 'Accounts', exact: true })).toHaveCount(0);
       await expect(staffPage.getByRole('button', { name: 'Adopt app', exact: true })).toHaveCount(
         0,

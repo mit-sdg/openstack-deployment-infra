@@ -147,7 +147,7 @@ export function AppsSection({
             columns={appColumns(showOwner)}
             rows={page.items}
             rowKey={(app) => app.applicationId}
-            onRowClick={(app) => navigate(`/staff/apps/${app.applicationId}`)}
+            onRowClick={(app) => navigate(`/admin/apps/${app.applicationId}`)}
             empty={
               <EmptyState title="No apps yet">
                 {filtered
