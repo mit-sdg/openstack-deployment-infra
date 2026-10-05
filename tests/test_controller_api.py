@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import threading
 import time
@@ -18,9 +19,12 @@ from openstack_platform.config import (
     RuntimeImages,
     StandardProfile,
 )
+from openstack_platform.contracts import NOMAD_ROUTE_MARKER_KEY
+from openstack_platform.controller import application_runtime as app_runtime
 from openstack_platform.controller import database as db
-from openstack_platform.controller.api import ControllerAPI
+from openstack_platform.controller.api import ControllerAPI, _SingleFlight
 from openstack_platform.controller.http import HttpError, Response
+from tests.product_fixtures import accept_deployment
 
 
 class ControllerAPITests(unittest.TestCase):
@@ -766,6 +770,8 @@ class ControllerAPITests(unittest.TestCase):
             lifecycle_state="active",
         ).resource_id
         reads = [
+            # The app status read: no deployment yet, so nothing to probe.
+            ("GET", f"/v1/applications/{application}", None),
             # The app page's settings reads: database only, from a snapshot.
             ("GET", f"/v1/applications/{application}/environment", None),
             ("GET", f"/v1/applications/{application}/storage", None),
@@ -800,6 +806,7 @@ class ControllerAPITests(unittest.TestCase):
             self.dispatch("GET", f"/v1/applications/{uuid.uuid4()}/runtime-log")
         self.assertEqual(missing.exception.code, "APPLICATION_NOT_FOUND")
         for path, code in (
+            (f"/v1/applications/{uuid.uuid4()}", "APPLICATION_NOT_FOUND"),
             (f"/v1/applications/{uuid.uuid4()}/environment", "APPLICATION_NOT_FOUND"),
             (f"/v1/applications/{uuid.uuid4()}/storage", "APPLICATION_NOT_FOUND"),
             (f"/v1/storage/{uuid.uuid4()}", "STORAGE_NOT_FOUND"),
@@ -850,6 +857,157 @@ class ControllerAPITests(unittest.TestCase):
                 "get_managed_resource",
             ],
         )
+
+    def test_app_status_probe_holds_no_lock_or_snapshot_and_is_shared(self) -> None:
+        application = self.create_application().body["applicationId"]
+        job = f'job "demo-app" {{\n    {NOMAD_ROUTE_MARKER_KEY} = "{uuid.uuid4()}"\n}}\n'
+        accept_deployment(
+            self.connection,
+            application_id=application,
+            source_commit="a" * 40,
+            recipe_hash="b" * 64,
+            image_digest="registry.example/app@sha256:" + "c" * 64,
+            nomad_job=job,
+            nomad_version=4,
+            build_log_path="logs/build.log",
+        )
+        snapshots: list[sqlite3.Connection] = []
+        connect = db.connect
+
+        def opened(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            snapshots.append(connection)
+            return connection
+
+        entered = threading.Event()
+        release = threading.Event()
+        probes = []
+
+        def observer(action, values, **_bounds):
+            still_open = 0
+            for connection in snapshots:
+                try:
+                    connection.execute("SELECT 1")
+                    still_open += 1
+                except sqlite3.ProgrammingError:
+                    pass
+            probes.append((action, values["version"], len(snapshots), still_open))
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("test probe was not released")
+            return {"healthy": True, "terminal": False}
+
+        self.api.observer_helper = observer
+        # A long reuse window, so a loaded machine cannot turn reuse into a
+        # second probe; the window itself is tested with a fake clock.
+        self.api._live = _SingleFlight(60.0)
+        path = f"/v1/applications/{application}"
+        pool = ThreadPoolExecutor(max_workers=2)
+        # A locked request (a deploy admission, say) is in progress.
+        self.api._lock.acquire()
+        locked = True
+        try:
+            with (
+                mock.patch.object(db, "connect", side_effect=opened),
+                mock.patch.object(app_runtime, "check_public_health", return_value=True),
+            ):
+                first = pool.submit(self.dispatch, "GET", path)
+                self.assertTrue(entered.wait(5))
+                # A burst of page polls waits for the running probe.
+                second = pool.submit(self.dispatch, "GET", path)
+                self.api._lock.release()
+                locked = False
+                # Locked work does not queue behind the slow probe. It uses the
+                # writer, which belongs to this thread; a regression holding the
+                # lock would delay it until the probe's own wait expires.
+                created = self.dispatch(
+                    "POST",
+                    "/v1/applications",
+                    {"slug": "other-app"},
+                    self.headers("00000000-0000-4000-8000-000000000002"),
+                )
+                self.assertEqual(created.status, 201)
+                self.assertFalse(first.done())
+                release.set()
+                responses = [first.result(timeout=5), second.result(timeout=5)]
+                # Straight after, the same accepted state reuses that probe.
+                responses.append(self.dispatch("GET", path))
+        finally:
+            if locked:
+                self.api._lock.release()
+            release.set()
+            pool.shutdown(wait=True)
+        self.assertEqual(probes, [("app.health", 4, 1, 0)])
+        for response in responses:
+            live = response.body["live"]
+            self.assertEqual(
+                (live["schedulerState"], live["allocationHealthy"], live["routeHealthy"]),
+                ("running", True, True),
+            )
+            self.assertFalse(response.body["requiresMaintenance"])
+        # Disabling changes the accepted state, so the next read does not reuse
+        # the running observation.
+        db.set_application_runtime(self.connection, application, running=False)
+        stopped = self.dispatch("GET", path).body["live"]
+        self.assertEqual(stopped["schedulerState"], "stopped")
+        self.assertEqual(len(probes), 1)
+
+    def test_single_flight_shares_a_running_probe_and_reuses_it_briefly(self) -> None:
+        now = [100.0]
+        reads = []
+        looked_up = threading.Event()
+
+        def clock():
+            reads.append(now[0])
+            if len(reads) == 2:
+                looked_up.set()
+            return now[0]
+
+        flights = _SingleFlight(2.0, clock=clock)
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def probe(value, *, wait=False):
+            def run():
+                calls.append(value)
+                if wait:
+                    entered.set()
+                    if not release.wait(10):
+                        raise AssertionError("test probe was not released")
+                return {"value": value}
+
+            return run
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                leader = pool.submit(flights.run, "app", probe(1, wait=True), wait_seconds=5)
+                self.assertTrue(entered.wait(5))
+                joiner = pool.submit(flights.run, "app", probe(2), wait_seconds=5)
+                self.assertTrue(looked_up.wait(5))
+                with self.assertRaises(TimeoutError):
+                    flights.run("app", probe(3), wait_seconds=0.05)
+            finally:
+                release.set()
+            self.assertEqual(leader.result(timeout=5), {"value": 1})
+            self.assertEqual(joiner.result(timeout=5), {"value": 1})
+        reused = flights.run("app", probe(4), wait_seconds=0)
+        reused["value"] = "changed by a caller"
+        now[0] = 101.9
+        self.assertEqual(flights.run("app", probe(5), wait_seconds=0), {"value": 1})
+        self.assertEqual(flights.run("other", probe(6), wait_seconds=0), {"value": 6})
+        now[0] = 102.0
+        self.assertEqual(flights.run("app", probe(7), wait_seconds=0), {"value": 7})
+
+        def failing():
+            calls.append("failed")
+            raise RuntimeError("probe failed")
+
+        now[0] = 200.0
+        with self.assertRaises(RuntimeError):
+            flights.run("app", failing, wait_seconds=0)
+        self.assertEqual(flights.run("app", probe(8), wait_seconds=0), {"value": 8})
+        self.assertEqual(calls, [1, 6, 7, "failed", 8])
 
     def test_deploy_key_removal_asks_the_helper_and_reports_no_key(self) -> None:
         application = self.create_application().body["applicationId"]
