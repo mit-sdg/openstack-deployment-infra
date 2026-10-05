@@ -5,8 +5,9 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -47,6 +48,10 @@ _MAX_LOG_LINES = 1_000
 # Public codes for failures a caller can act on, keyed by the final phase that
 # records them durably.
 _FAILURE_CODES = {"platform_busy": "PLATFORM_BUSY"}
+# How long a finished live app probe answers further reads of the same
+# accepted state. It matches the broker's owner-page cache, and the
+# projection's checkedAt still says when the probe ran.
+_LIVE_REUSE_SECONDS = 2.0
 HelperCaller = Callable[..., Mapping[str, object]]
 
 
@@ -112,6 +117,63 @@ def _integer_bound(values: Mapping[str, object], key: str, default: int) -> int:
     return value
 
 
+@dataclass(slots=True)
+class _Flight:
+    done: threading.Event = field(default_factory=threading.Event)
+    result: dict[str, object] | None = None
+    finished_at: float | None = None
+
+
+class _SingleFlight:
+    """Run at most one probe per key, and share its result briefly.
+
+    Callers with a key that is already being probed wait for that probe rather
+    than start their own, so a burst of page polls costs one helper process.
+    """
+
+    def __init__(self, reuse_seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self._reuse_seconds = reuse_seconds
+        self._clock = clock
+        self._guard = threading.Lock()
+        self._flights: dict[Hashable, _Flight] = {}
+
+    def run(
+        self,
+        key: Hashable,
+        probe: Callable[[], dict[str, object]],
+        *,
+        wait_seconds: float,
+    ) -> dict[str, object]:
+        with self._guard:
+            now = self._clock()
+            for expired in [
+                item
+                for item, flight in self._flights.items()
+                if flight.finished_at is not None
+                and now - flight.finished_at >= self._reuse_seconds
+            ]:
+                del self._flights[expired]
+            flight = self._flights.get(key)
+            leader = flight is None
+            if flight is None:
+                flight = self._flights[key] = _Flight()
+        if leader:
+            try:
+                flight.result = probe()
+            finally:
+                with self._guard:
+                    flight.finished_at = self._clock()
+                    # A probe that raised is not shared; the next caller retries.
+                    if flight.result is None and self._flights.get(key) is flight:
+                        del self._flights[key]
+                flight.done.set()
+        elif not flight.done.wait(wait_seconds):
+            raise TimeoutError("shared live observation did not finish")
+        if flight.result is None:
+            raise TimeoutError("shared live observation failed")
+        return dict(flight.result)
+
+
 class ControllerAPI:
     """Strict route handlers backed by typed product services."""
 
@@ -150,6 +212,7 @@ class ControllerAPI:
             observer_helper = observe
         self.helper_caller = helper_caller
         self.observer_helper = observer_helper
+        self._live = _SingleFlight(_LIVE_REUSE_SECONDS)
         self.applications = ApplicationService(
             connection, config, state_directory, helper_caller=helper_caller
         )
@@ -251,9 +314,12 @@ class ControllerAPI:
             # snapshot and must not stall deploys and status reads behind them.
             # So do the app page's database-only reads (environment names,
             # storage): queued behind slow locked work, they would time out.
+            # The app status read probes the helper and public route for up to
+            # helperSeconds, so it holds neither the lock nor its snapshot then.
             independent = handler in (
                 self._get_operation,
                 self._health,
+                self._get_application,
                 self._runtime_log,
                 self._get_source_key,
                 self._check_source_key,
@@ -508,21 +574,29 @@ class ControllerAPI:
         self._no_query(request)
         if request.body is not None:
             raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
-        application = self._application(self._path_uuid(request))
-        observe = status.application_observer(
-            self.connection,
-            self.config,
-            helper_caller=self.observer_helper,
-        )
-        model = status.app_show(
-            self.connection,
-            application.application_id,
-            observe=observe,
-        )
-        if model is None:
-            raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
-        model["requiresMaintenance"] = (
-            fixed_ip_service.get(self.connection, application.application_id) is not None
+        # Accepted state and the probe's inputs come from one snapshot, closed
+        # before the probe so it never pins a read transaction for minutes.
+        with self._snapshot() as connection:
+            application = self._application(self._path_uuid(request), connection)
+            model = status.app_show(connection, application.application_id)
+            if model is None:
+                raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
+            deployment = db.get_deployment(connection, application.application_id)
+            observe = status.application_observer(
+                connection,
+                self.config,
+                helper_caller=self.observer_helper,
+            )
+            model["requiresMaintenance"] = (
+                fixed_ip_service.get(connection, application.application_id) is not None
+            )
+        # Reads that saw the same app and deployment rows share one probe. A
+        # deploy, enable or disable changes those rows, so the next read probes.
+        limits = self.config.policy.limits
+        model["live"] = self._live.run(
+            (application, deployment),
+            lambda: status.app_live(application.application_id, observe=observe),
+            wait_seconds=limits.helper_seconds + limits.http_seconds,
         )
         return Response(200, model)
 

@@ -341,9 +341,14 @@ reserve application scope and return `202` with an operation resource before
 external work. Four workers execute at most 32 admitted running/queued
 operations, serialized per application. Operation polling, environment-name
 reads and storage reads each use an independent, query-only SQLite read snapshot
-and do not wait for the API handler lock held by slow live observations, such
-as an application read's helper and route probes. Runtime logs and deploy-key
-reads skip the lock the same way. Other synchronous handlers still share it.
+and do not wait for the API handler lock, which slow locked work such as the
+operator status read's live observations can hold. Runtime logs and deploy-key
+reads skip the lock the same way. The application read takes its accepted state
+from such a snapshot and closes it before its helper and route probes, so they
+hold neither the lock nor a read transaction. Concurrent reads that saw the same
+application and deployment rows share one probe, and a finished probe answers
+them for two more seconds; its `checkedAt` still records when it ran. Other
+synchronous handlers still share the lock.
 
 Started work with recorded domain intent interrupted by controller restart becomes
 `recovery_required`, preserving its domain checkpoint. A dispatch interrupted

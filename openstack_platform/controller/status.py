@@ -9,6 +9,9 @@ observe_application=None, observe_storage=None)``
     Return accepted role-image selections plus a small live health projection.
 ``app_list`` / ``app_show``
     Return accepted application state plus a small scheduler/route projection.
+``app_live``
+    Return only one application's scheduler/route projection, so a caller can
+    read accepted state first and probe after releasing its database view.
 ``storage_list`` / ``storage_show``
     Return accepted resource quotas plus a small non-mutating health projection.
 Live dependencies are deliberately injected as one-item callables.  They must
@@ -607,6 +610,15 @@ def app_show(
     if application is None:
         return None
     return _application_model(connection, application, observe)
+
+
+def app_live(
+    application_id: str,
+    *,
+    observe: ApplicationObserver | None = None,
+) -> dict[str, object]:
+    """Project one application's live health; observer failure is ``available: false``."""
+    return _application_observation(application_id, observe)
 
 
 def _storage_model(
