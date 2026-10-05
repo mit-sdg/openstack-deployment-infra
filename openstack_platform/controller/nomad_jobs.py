@@ -38,6 +38,13 @@ from .storage_contract import (
     retired_secret_keys,
 )
 
+# Nomad counts the healthy deadline from placement, so it includes the image
+# download: a new worker can spend minutes pulling a large image before the app
+# starts. Crash loops still fail fast through the restart policy.
+HEALTHY_DEADLINE_SECONDS = 600
+# Nomad requires the progress deadline to be longer than the healthy deadline.
+PROGRESS_DEADLINE_SECONDS = 720
+
 
 def render_nomad_job(
     *,
@@ -145,8 +152,8 @@ def render_nomad_job(
   update {{
     max_parallel      = 1
     min_healthy_time  = "10s"
-    healthy_deadline  = "3m"
-    progress_deadline = "5m"
+    healthy_deadline  = "{HEALTHY_DEADLINE_SECONDS // 60}m"
+    progress_deadline = "{PROGRESS_DEADLINE_SECONDS // 60}m"
     auto_revert       = false
     canary            = 0
   }}

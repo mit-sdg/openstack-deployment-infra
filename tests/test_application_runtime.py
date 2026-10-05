@@ -1413,6 +1413,72 @@ class DeploymentTests(unittest.TestCase):
                 else:
                     self.assertEqual(sleeps[-1], 1)
 
+    def test_health_window_covers_a_slow_image_download_but_not_crash_loops(self) -> None:
+        job, candidate = self.candidate_job()
+        # Nomad's healthy deadline runs from placement, so it includes the pull.
+        self.assertIn('min_healthy_time  = "10s"', job)
+        self.assertIn('healthy_deadline  = "10m"', job)
+        self.assertIn('progress_deadline = "12m"', job)
+        # A crash loop still fails the allocation through the restart policy.
+        self.assertIn(
+            'attempts = 3\n      interval = "5m"\n      delay    = "10s"\n      mode     = "fail"',
+            job,
+        )
+        self.assertEqual(app_module.HEALTH_OBSERVATION_SECONDS, 720)
+        # Healthy after ten minutes of pulling and starting: accepted.
+        result, observed = self.observe_slow_start(job, candidate, healthy_at=610)
+        assert isinstance(result, app_module.DeploymentResult)
+        self.assertEqual(result.observations, len(observed))
+        self.assertGreaterEqual(observed[-1], 610)
+        # Never healthy, never crashing: removed at the window, not the deadline.
+        result, observed = self.observe_slow_start(job, candidate, healthy_at=None)
+        self.assertIsInstance(result, DeploymentFailed)
+        self.assertGreater(observed[-1], 700)
+        self.assertLess(observed[-1], 720)
+
+    def observe_slow_start(
+        self, job: str, candidate: tuple[str, str], *, healthy_at: float | None
+    ) -> tuple[object, list[float]]:
+        clock = [0.0]
+        observed: list[float] = []
+
+        def helper(action: str, _values: object, **_bounds: object) -> dict[str, object]:
+            if action == "app.deploy":
+                return {
+                    "jobId": "demo-app",
+                    "nomadVersion": 4,
+                    "candidateJobSha256": candidate[0],
+                    "candidateImage": candidate[1],
+                }
+            if action == "app.health":
+                observed.append(clock[0])
+                healthy = healthy_at is not None and clock[0] >= healthy_at
+                return self.health(4, candidate, healthy=healthy, terminal=False)
+            if action == "app.startup":
+                return {"found": False}
+            return {"jobAbsent": True}
+
+        def sleep(seconds: float) -> None:
+            clock[0] += seconds
+
+        try:
+            result: object = deploy_and_cleanup(
+                "demo-app",
+                job,
+                attempts=app_module.health_observation_attempts(2),
+                poll_interval_seconds=2,
+                helper_caller=helper,
+                sleep=sleep,
+                # An hour-long operation: the window, not the deadline, ends polling.
+                deadline=3_600,
+                cleanup_reserve_seconds=210,
+                clock=lambda: clock[0],
+                observe_seconds=app_module.HEALTH_OBSERVATION_SECONDS,
+            )
+        except DeploymentFailed as error:
+            result = error
+        return result, observed
+
     def test_shared_acceptance_reobserves_exact_job_and_public_route_before_database_write(
         self,
     ) -> None:

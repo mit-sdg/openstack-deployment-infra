@@ -5,8 +5,8 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import closing, nullcontext
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,6 +44,9 @@ from .storage_service import StorageMutationRequest, StorageService
 API_VERSION = 1
 _MAX_PAGE = 100
 _MAX_LOG_LINES = 1_000
+# Public codes for failures a caller can act on, keyed by the final phase that
+# records them durably.
+_FAILURE_CODES = {"platform_busy": "PLATFORM_BUSY"}
 HelperCaller = Callable[..., Mapping[str, object]]
 
 
@@ -246,6 +249,8 @@ class ControllerAPI:
             # Slow external reads of one app (Nomad logs, deploy-key git reads)
             # also skip the lock: they read the database through their own
             # snapshot and must not stall deploys and status reads behind them.
+            # So do the app page's database-only reads (environment names,
+            # storage): queued behind slow locked work, they would time out.
             independent = handler in (
                 self._get_operation,
                 self._health,
@@ -254,6 +259,9 @@ class ControllerAPI:
                 self._check_source_key,
                 self._source_commits,
                 self._source_preflight,
+                self._get_environment,
+                self._list_storage,
+                self._get_storage,
             )
             with nullcontext() if independent else self._lock:
                 try:
@@ -343,24 +351,40 @@ class ControllerAPI:
     def _path_uuid(request: Request, name: str = "id") -> str:
         return uuid(request.path_parameters[name], field=f"{name} path parameter")
 
-    def _application(self, identifier: str) -> db.Application:
-        application = db.get_application(self.connection, uuid(identifier, field="application ID"))
+    @contextmanager
+    def _snapshot(self) -> Iterator[sqlite3.Connection]:
+        """One read transaction on a private query-only connection, never the writer.
+
+        Handlers outside the API lock read through this, so a coherent view
+        never waits for, or interleaves with, locked work on the shared writer.
+        """
+        with closing(db.connect(self._database_path, create=False)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            with db.transaction(connection, immediate=False):
+                yield connection
+
+    def _application(
+        self, identifier: str, connection: sqlite3.Connection | None = None
+    ) -> db.Application:
+        application = db.get_application(
+            self.connection if connection is None else connection,
+            uuid(identifier, field="application ID"),
+        )
         if application is None:
             raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
         return application
 
     def _application_snapshot(self, identifier: str) -> db.Application:
         """The app from a private read-only connection, for handlers outside the lock."""
-        with closing(db.connect(self._database_path, create=False)) as connection:
-            connection.execute("PRAGMA query_only = ON")
-            application = db.get_application(connection, uuid(identifier, field="application ID"))
-        if application is None:
-            raise HttpError(404, "APPLICATION_NOT_FOUND", "application does not exist")
-        return application
+        with self._snapshot() as connection:
+            return self._application(identifier, connection)
 
-    def _resource(self, identifier: str) -> db.ManagedResource:
+    def _resource(
+        self, identifier: str, connection: sqlite3.Connection | None = None
+    ) -> db.ManagedResource:
         resource = db.get_managed_resource(
-            self.connection, uuid(identifier, field="storage resource ID")
+            self.connection if connection is None else connection,
+            uuid(identifier, field="storage resource ID"),
         )
         if resource is None:
             raise HttpError(404, "STORAGE_NOT_FOUND", "managed storage does not exist")
@@ -1020,11 +1044,12 @@ class ControllerAPI:
 
     def _get_environment(self, request: Request) -> Response:
         self._no_query(request)
-        application = self._application(self._path_uuid(request))
-        revision = db.get_environment_revision(self.connection, application.application_id)
-        if revision is None:
-            raise db.DatabaseError("application environment revision is missing")
-        keys = db.list_environment_keys(self.connection, application_id=application.application_id)
+        with self._snapshot() as connection:
+            application = self._application(self._path_uuid(request), connection)
+            revision = db.get_environment_revision(connection, application.application_id)
+            if revision is None:
+                raise db.DatabaseError("application environment revision is missing")
+            keys = db.list_environment_keys(connection, application_id=application.application_id)
         return Response(
             200,
             {
@@ -1130,18 +1155,19 @@ class ControllerAPI:
         )
 
     def _list_storage(self, request: Request) -> Response:
-        application = self._application(self._path_uuid(request))
-        items = [
-            self._storage_model(item)
-            for item in db.list_managed_resources(
-                self.connection, application_id=application.application_id
+        with self._snapshot() as connection:
+            application = self._application(self._path_uuid(request), connection)
+            resources = db.list_managed_resources(
+                connection, application_id=application.application_id
             )
-        ]
+        items = [self._storage_model(item) for item in resources]
         return Response(200, self._page(request, items, "resourceId"))
 
     def _get_storage(self, request: Request) -> Response:
         self._no_query(request)
-        return Response(200, self._storage_model(self._resource(self._path_uuid(request))))
+        with self._snapshot() as connection:
+            resource = self._resource(self._path_uuid(request), connection)
+        return Response(200, self._storage_model(resource))
 
     def _label_storage(self, request: Request) -> Response:
         self._no_query(request)
@@ -1227,18 +1253,16 @@ class ControllerAPI:
     def _get_operation(self, request: Request) -> Response:
         self._no_query(request)
         identifier = self._path_uuid(request)
-        with closing(db.connect(self._database_path, create=False)) as connection:
-            connection.execute("PRAGMA query_only = ON")
-            # One short read snapshot keeps the domain/dispatch fallback coherent
-            # without holding the API lock throughout unrelated external reads.
-            with db.transaction(connection, immediate=False):
-                operation = db.get_operation(connection, identifier)
-                dispatch = db.get_operation_dispatch(connection, identifier)
-                if operation is not None:
-                    return Response(200, self._operation_model(operation, dispatch))
-                if dispatch is None:
-                    raise HttpError(404, "OPERATION_NOT_FOUND", "operation does not exist")
-                return Response(200, self._dispatch_model(dispatch))
+        # One short read snapshot keeps the domain/dispatch fallback coherent
+        # without holding the API lock throughout unrelated external reads.
+        with self._snapshot() as connection:
+            operation = db.get_operation(connection, identifier)
+            dispatch = db.get_operation_dispatch(connection, identifier)
+        if operation is not None:
+            return Response(200, self._operation_model(operation, dispatch))
+        if dispatch is None:
+            raise HttpError(404, "OPERATION_NOT_FOUND", "operation does not exist")
+        return Response(200, self._dispatch_model(dispatch))
 
     def _get_fixed_ip(self, request: Request) -> Response:
         from .fixed_ip_service import FixedIPService
@@ -1599,6 +1623,9 @@ class ControllerAPI:
             "updatedAt": operation.updated_at,
             "deadlineAt": operation.deadline_at,
             "safeError": None if retry_active else operation.safe_error,
+            "errorCode": _FAILURE_CODES.get(operation.phase)
+            if operation.status == "failed"
+            else None,
             "cleanupState": operation.cleanup_state,
         }
 
@@ -1621,6 +1648,7 @@ class ControllerAPI:
             "updatedAt": dispatch.updated_at,
             "deadlineAt": None,
             "safeError": dispatch.safe_error,
+            "errorCode": None,
             "cleanupState": "pending",
         }
 

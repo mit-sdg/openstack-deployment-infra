@@ -394,6 +394,7 @@ class OwnerIntentTests(ManagementCase):
     def test_deploy_guidance_uses_only_release_text_and_hides_codes_from_owners(self) -> None:
         from openstack_platform.management.broker.journal import (
             BUILD_GUIDANCE,
+            BUSY_GUIDANCE,
             HEALTH_GUIDANCE,
             deploy_failure_guidance,
             intent_model,
@@ -409,6 +410,8 @@ class OwnerIntentTests(ManagementCase):
             ("DEADLINE_EXCEEDED", "worker_ready", HEALTH_GUIDANCE),
             ("DEADLINE_EXCEEDED", "building", None),
             (None, "build_rejected", BUILD_GUIDANCE),
+            ("PLATFORM_BUSY", "platform_busy", BUSY_GUIDANCE),
+            (None, "platform_busy", BUSY_GUIDANCE),
             ("INVALID_REQUEST", None, None),
         ):
             with self.subTest(code=code, phase=phase):
@@ -444,6 +447,50 @@ class OwnerIntentTests(ManagementCase):
         self.assertIsNone(deploy_failure_guidance("env_set", "failed", "BUILD_REJECTED", None))
         self.assertIsNone(deploy_failure_guidance("deploy", "succeeded", "HEALTH_TIMEOUT", None))
         self.assertIsNone(deploy_failure_guidance("deploy", "failed", {}, {}))
+        # A blocked deploy needs Resume, not another attempt.
+        self.assertIsNone(deploy_failure_guidance("deploy", "blocked", None, "platform_busy"))
+
+    def test_platform_busy_deploy_settles_with_retry_guidance_and_a_staff_code(self) -> None:
+        from openstack_platform.management.broker.journal import BUSY_GUIDANCE
+
+        self.login()
+        app = self.create()
+        self.save(app)
+        intent = self.call(
+            "POST",
+            f"/v1/apps/{app}/deployments",
+            {"commit": "1" * 40, "configurationRevision": 1},
+            "alice",
+        ).body["data"]
+        # The controller failed it before creating anything (operation evidence
+        # as the controller reports it, including the public code).
+        self.fixture.operations[intent["operationId"]].update(
+            status="failed",
+            phase="platform_busy",
+            cleanupState="confirmed",
+            errorCode="PLATFORM_BUSY",
+            safeError="controller text is never shown",
+        )
+        self.broker.journal.dispatch(intent["intentId"])
+        owner = self.call("GET", f"/v1/intents/{intent['intentId']}", owner="alice").body["data"]
+        self.assertEqual((owner["state"], owner["safeError"]), ("failed", BUSY_GUIDANCE))
+        self.assertNotIn("controllerErrorCode", owner)
+        with self.broker.database.connect() as db:
+            row = dict(
+                db.execute("SELECT * FROM intents WHERE id=?", (intent["intentId"],)).fetchone()
+            )
+        staff = self.broker.staff.operation_model(row)
+        self.assertEqual(
+            (staff["state"], staff["controllerErrorCode"], staff["guidance"]),
+            ("failed", "PLATFORM_BUSY", BUSY_GUIDANCE),
+        )
+        # Nothing holds the app: the owner can deploy again straight away.
+        self.call(
+            "POST",
+            f"/v1/apps/{app}/deployments",
+            {"commit": "1" * 40, "configurationRevision": 1},
+            "alice",
+        )
 
     def test_controller_rejection_codes_are_durable_bounded_and_role_scoped(self) -> None:
         from openstack_platform.management.broker.accounts import security_change

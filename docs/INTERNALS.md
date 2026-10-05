@@ -339,9 +339,11 @@ validator covers both API admission and DeploymentService's repeated fingerprint
 Database-only application creation returns `201`. External mutations durably
 reserve application scope and return `202` with an operation resource before
 external work. Four workers execute at most 32 admitted running/queued
-operations, serialized per application. Operation polling uses an independent,
-query-only SQLite read snapshot and does not wait for the API handler lock held
-by slow live observations. Other synchronous handlers still share that lock.
+operations, serialized per application. Operation polling, environment-name
+reads and storage reads each use an independent, query-only SQLite read snapshot
+and do not wait for the API handler lock held by slow live observations, such
+as an application read's helper and route probes. Runtime logs and deploy-key
+reads skip the lock the same way. Other synchronous handlers still share it.
 
 Started work with recorded domain intent interrupted by controller restart becomes
 `recovery_required`, preserving its domain checkpoint. A dispatch interrupted
@@ -493,8 +495,15 @@ Before removing a candidate that never became healthy, the controller calls the
 read-only helper action `app.startup` for that exact job slot: the newest
 allocation's status, restart count, last 12 task events and 200-line output and
 error tails (64 KiB each). It spends at most 30 s or a third of the remaining
-deadline, so removal keeps its time, and a failed read never blocks removal. The
-health poll now has an absolute cutoff that reserves time for the startup read,
+deadline, so removal keeps its time, and a failed read never blocks removal.
+Nomad's healthy deadline is 10 minutes and its progress deadline 12 minutes. The
+healthy deadline counts from placement, so it includes the image download on a
+new worker; a crash loop still fails sooner through the job's restart policy.
+The controller polls a submitted version's health for up to 12 minutes, so it
+waits for Nomad's verdict whenever the operation deadline leaves room. Enable
+resubmits the accepted job unchanged, so a job accepted with the earlier
+3-minute healthy deadline keeps it until the app is deployed again. The
+health poll also has an absolute cutoff that reserves time for the startup read,
 job removal, worker and artifact cleanup. Helper calls and sleeps count against
 that cutoff; slow reads cannot spend the reserved tail. If cleanup still cannot
 be confirmed within the operation deadline, the existing recovery-required path
@@ -758,7 +767,9 @@ was discarded by an earlier broker version.
 Known failed-deploy codes map to fixed release-owned guidance for root
 `package.json`, per-package runtime lockfiles and root build/start scripts, or a
 small HTTP-2xx health endpoint with a body of at most 4096 bytes. The
-`build_rejected` phase also identifies build guidance. Deadline codes get health
+`build_rejected` phase also identifies build guidance. A controller operation's
+`errorCode` is kept the same way; `PLATFORM_BUSY`, or the `platform_busy` phase,
+selects guidance to try again in a few minutes. Deadline codes get health
 guidance only when their recorded phase identifies health verification; unknown
 failures keep the generic message. Owner projections omit internal codes while
 showing the same guidance; staff/admin views retain the bounded code separately.
