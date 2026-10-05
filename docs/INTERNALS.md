@@ -386,6 +386,7 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}/runtime-log` | Read bounded current runtime output; `stream=stdout` (default) or `stderr` |
 | `GET /v1/applications/{id}/source-key` | Read the app's deploy key: public half and fingerprint only |
 | `POST /v1/applications/{id}/source-key` | Create the deploy key if absent, or replace it with `{"replace": true}` |
+| `DELETE /v1/applications/{id}/source-key` | Remove the deploy key; an app without one gets the same `present: false` answer |
 | `POST /v1/applications/{id}/source-key/check` | Check `{repository, branch}` with the deploy key; returns the branch head or a named problem |
 | `POST /v1/applications/{id}/source/commits` | Read five recent saved-branch commits through the app deploy key |
 | `POST /v1/applications/{id}/source/check` | Check an exact fetched commit against the build checkout validators |
@@ -475,6 +476,10 @@ adds the public key on GitHub as a read-only deploy key; only a repository admin
 can, which ties the app to a repository its owner controls. `app.source.check`
 runs `git ls-remote` with the key and names the problem (`key-refused`,
 `not-found`, `branch-missing`, `unavailable`) without echoing GitHub's output.
+Removing a key (`app.source.key` mode `delete`) renames the app's whole key
+directory to a `.old-*` name before deleting it, so builds and backups see the
+full pair or none; builds of a private repository then fail with
+`SOURCE_REJECTED` until a new key exists.
 Keys are backed up separately alongside the hosted-controller SQLite snapshot,
 encrypted to the off-platform escrow recipient. The database manifest binds the
 paired key archive. Only direct private/public files for snapshot slugs are read;

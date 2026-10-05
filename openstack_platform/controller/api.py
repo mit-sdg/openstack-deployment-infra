@@ -188,6 +188,7 @@ class ControllerAPI:
             ("GET", "/v1/applications/{id}/runtime-log", self._runtime_log),
             ("GET", "/v1/applications/{id}/source-key", self._get_source_key),
             ("POST", "/v1/applications/{id}/source-key", self._create_source_key),
+            ("DELETE", "/v1/applications/{id}/source-key", self._delete_source_key),
             ("POST", "/v1/applications/{id}/source-key/check", self._check_source_key),
             ("POST", "/v1/applications/{id}/source/commits", self._source_commits),
             ("POST", "/v1/applications/{id}/source/check", self._source_preflight),
@@ -844,6 +845,12 @@ class ControllerAPI:
             raise HttpError(400, "INVALID_BODY", "replace must be boolean")
         mode = "replace" if body.get("replace") else "create"
         return self._source_key(self._application(self._path_uuid(request)), mode)
+
+    def _delete_source_key(self, request: Request) -> Response:
+        """Remove the app's deploy key; an app without one already has the result."""
+        self._no_query(request)
+        self._body(request, allowed=set(), allow_absent=True)
+        return self._source_key(self._application(self._path_uuid(request)), "delete")
 
     def _source_commits(self, request: Request) -> Response:
         return self._source_read(request, preflight=False)

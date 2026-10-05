@@ -17,11 +17,16 @@ function wrap(children: ReactNode) {
   return render(<QueryClientProvider client={client}>{children}</QueryClientProvider>);
 }
 function service(initial: SourceKey, access: SourceAccess | Error) {
+  let current = initial;
   return {
-    sourceKey: vi.fn(() => Promise.resolve(initial)),
+    sourceKey: vi.fn(() => Promise.resolve(current)),
     createSourceKey: vi.fn((_id: string, replace = false) =>
       Promise.resolve({ ...key, publicKey: key.publicKey + (replace ? '2' : '') }),
     ),
+    removeSourceKey: vi.fn(() => {
+      current = { present: false };
+      return Promise.resolve(current);
+    }),
     checkSourceKey: vi.fn(() =>
       access instanceof Error ? Promise.reject(access) : Promise.resolve(access),
     ),
@@ -60,6 +65,25 @@ describe('private repository access', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Replace key' }));
     await waitFor(() => expect(api.createSourceKey).toHaveBeenCalledWith('app', true));
     expect(await screen.findByLabelText('Deploy key')).toHaveValue(key.publicKey + '2');
+  });
+
+  it('removes a key only after confirming, then offers a new one', async () => {
+    const api = service(key, new Error('unused'));
+    wrap(<RepositoryAccess id="app" service={api as never} saved />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove key' }));
+    const dialog = screen.getByRole('dialog', { name: 'Remove this deploy key?' });
+    expect(
+      within(dialog).getByText(
+        'Builds of a private repository will fail until you add a new key. Also delete the key from the repository’s Deploy keys on GitHub.',
+      ),
+    ).toBeVisible();
+    expect(api.removeSourceKey).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove key' }));
+    expect(await screen.findByRole('button', { name: 'Create deploy key' })).toBeVisible();
+    expect(api.removeSourceKey).toHaveBeenCalledWith('app');
+    expect(api.sourceKey).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove key' })).toBeNull();
   });
 
   it('waits for saved settings and hides where deploy keys are unavailable', async () => {

@@ -787,6 +787,33 @@ class ControllerAPITests(unittest.TestCase):
             self.dispatch("GET", f"/v1/applications/{uuid.uuid4()}/runtime-log")
         self.assertEqual(missing.exception.code, "APPLICATION_NOT_FOUND")
 
+    def test_deploy_key_removal_asks_the_helper_and_reports_no_key(self) -> None:
+        application = self.create_application().body["applicationId"]
+        calls = []
+
+        def helper(_config, action, values, *, deadline=None):
+            # Removal changes state, so it runs under the API lock like creation.
+            self.assertTrue(self.api._lock.locked())
+            calls.append((action, values))
+            return {"slug": values["slug"], "present": False}
+
+        self.api.helper_caller = helper
+        path = f"/v1/applications/{application}/source-key"
+        for _attempt in range(2):
+            response = self.dispatch("DELETE", path)
+            self.assertEqual(
+                (response.status, response.body),
+                (200, {"applicationId": application, "present": False}),
+            )
+        self.assertEqual(calls, [("app.source.key", {"slug": "demo-app", "mode": "delete"})] * 2)
+        with self.assertRaises(HttpError) as invalid:
+            self.dispatch("DELETE", path, {"replace": True})
+        self.assertEqual(invalid.exception.code, "INVALID_BODY")
+        with self.assertRaises(HttpError) as missing:
+            self.dispatch("DELETE", f"/v1/applications/{uuid.uuid4()}/source-key")
+        self.assertEqual(missing.exception.code, "APPLICATION_NOT_FOUND")
+        self.assertEqual(len(calls), 2)
+
     def test_both_operation_routes_use_an_independent_query_only_snapshot(self) -> None:
         identifier = "00000000-0000-4000-8000-000000000071"
         db.begin_operation(

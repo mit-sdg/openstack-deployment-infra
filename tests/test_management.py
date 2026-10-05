@@ -997,25 +997,27 @@ class WebTransportTests(ManagementCase):
     def test_only_repository_reads_wait_longer_for_the_broker(self) -> None:
         app = str(uuid.uuid4())
         waits = {}
-        for path in (
-            f"/api/v1/apps/{app}/source/commits",
-            f"/api/v1/apps/{app}/source/check",
-            f"/api/v1/admin-apps/{app}/source/check",
-            f"/api/v1/apps/{app}/logs",
-            f"/api/v1/apps/{app}/source-key/check",
+        for method, path in (
+            ("POST", f"/api/v1/apps/{app}/source/commits"),
+            ("POST", f"/api/v1/apps/{app}/source/check"),
+            ("POST", f"/api/v1/admin-apps/{app}/source/check"),
+            ("GET", f"/api/v1/apps/{app}/logs"),
+            ("POST", f"/api/v1/apps/{app}/source-key/check"),
+            ("DELETE", f"/api/v1/apps/{app}/source-key"),
         ):
             with patch.object(
                 self.web.broker, "request", return_value=(200, {"data": {}})
             ) as request:
-                self.web.forward("POST" if "source" in path else "GET", path, "", {}, b"")
-            waits[path.split(app)[1]] = request.call_args.kwargs["timeout_seconds"]
+                self.web.forward(method, path, "", {}, b"")
+            waits[method + " " + path.split(app)[1]] = request.call_args.kwargs["timeout_seconds"]
         self.assertEqual(
             waits,
             {
-                "/source/commits": 35,
-                "/source/check": 35,
-                "/logs": None,
-                "/source-key/check": None,
+                "POST /source/commits": 35,
+                "POST /source/check": 35,
+                "GET /logs": None,
+                "POST /source-key/check": None,
+                "DELETE /source-key": None,
             },
         )
 

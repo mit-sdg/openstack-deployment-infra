@@ -223,7 +223,42 @@ class HelperDeployKeyTests(unittest.TestCase):
             ["notes"],
         )
         with self.assertRaises(ValidationError):
+            self.key("remove")
+
+    def test_removing_a_key_takes_the_whole_pair_at_once_and_repeats_quietly(self) -> None:
+        self.key("create")
+        keys = self.root / "controller/source-keys"
+        seen: list[list[str]] = []
+        original = production.shutil.rmtree
+
+        def rmtree(path, *args, **kwargs):
+            # By now the pair has left the app's name in one rename.
+            seen.append(sorted(item.name for item in keys.iterdir()))
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(production.shutil, "rmtree", rmtree):
+            self.assertEqual(self.key("delete"), {"slug": "notes", "present": False})
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn("notes", seen[0])
+        self.assertTrue(seen[0][0].startswith(".old-"))
+        self.assertEqual(list(keys.iterdir()), [])
+        self.assertEqual(self.key("delete"), {"slug": "notes", "present": False})
+        self.assertEqual(self.key("read"), {"slug": "notes", "present": False})
+        self.assertTrue(self.key("create")["present"])
+
+    def test_removing_a_key_refuses_a_link_in_place_of_the_key_directory(self) -> None:
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "id_ed25519").write_text("not a deploy key")
+        keys = self.root / "controller/source-keys"
+        keys.mkdir(parents=True, mode=0o700)
+        (self.root / "controller").chmod(0o700)
+        (keys / "notes").symlink_to(elsewhere)
+        with self.assertRaises(HelperActionError) as error:
             self.key("delete")
+        self.assertEqual(error.exception.code, "INVALID_STATE")
+        self.assertEqual((elsewhere / "id_ed25519").read_text(), "not a deploy key")
+        self.assertTrue((keys / "notes").is_symlink())
 
     def test_generated_key_archive_preserves_public_creation_time(self) -> None:
         from openstack_platform.controller import database as controller_db

@@ -324,9 +324,9 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_management_staff.py` — staff read-only authority, disclosure, quota/paging/audit and migration/restore evidence.
 - `openstack_platform/management/broker/members.py` — team members of an app (owner, staff or admin managed, members can leave) and the app activity feed.
 - `tests/test_management_teams.py` — member access and quota, owner-only team changes, leaving, limits, write re-checks, retry keys and admin reassignment.
-- `openstack_platform/management/broker/source_keys.py` — owner/staff/admin deploy key routes: public half only, audited changes, shared one-at-a-time access checks.
-- `tests/test_management_source_keys.py` — deploy key ownership, audit, shared access checks and older-controller answers.
-- `tests/test_private_repositories.py` — pinned GitHub host key, deploy-key fetch and access check, helper key lifecycle and build fallback.
+- `openstack_platform/management/broker/source_keys.py` — owner/staff/admin deploy key routes: public half only, audited changes and removal, shared one-at-a-time access checks.
+- `tests/test_management_source_keys.py` — deploy key ownership, removal, audit, shared access checks and older-controller answers.
+- `tests/test_private_repositories.py` — pinned GitHub host key, deploy-key fetch and access check, helper key creation, replacement and removal, and build fallback.
 - `openstack_platform/management/broker/runtime_logs.py` — owner/admin runtime log reads, shared briefly and one at a time so they can't crowd the controller.
 - `tests/test_checkout_preflight_parity.py` — runs the shared preflight cases through the build's `validate_checkout`.
 - `tests/test_management_runtime_logs.py` — runtime log ownership, streams, sharing, not-running and older-controller answers, and bounded tails.
@@ -388,8 +388,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/LogViewer.test.tsx` — log stream switching, refresh, not-running and unavailable-stream tests.
 - `frontend/owner-portal/src/components/TeamSection.tsx` — app team table with add, remove and leave, for owner and admin pages.
 - `frontend/owner-portal/src/components/TeamSection.test.tsx` — owner team management and member leave tests.
-- `frontend/owner-portal/src/components/RepositoryAccess.tsx` — Settings section for a private repository's deploy key and access check.
-- `frontend/owner-portal/src/components/RepositoryAccess.test.tsx` — deploy key creation, access results, replacement and private-repo latest-commit tests.
+- `frontend/owner-portal/src/components/RepositoryAccess.tsx` — Settings section to create, replace, remove and check a private repository's deploy key.
+- `frontend/owner-portal/src/components/RepositoryAccess.test.tsx` — deploy key creation, access results, replacement, removal and private-repo latest-commit tests.
 - `frontend/owner-portal/src/components/StartupRecord.tsx` — why a failed deployment's new version stopped: summary, events and output.
 - `frontend/owner-portal/src/components/StartupRecord.test.tsx` — startup summary wording and errors-first display tests.
 - `frontend/owner-portal/src/components/RecentCommits.tsx` — recent-commit picker for deploys, read from GitHub by the browser.

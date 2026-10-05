@@ -50,6 +50,28 @@ class SourceKeyTests(ManagementCase):
         self.assert_error("NOT_FOUND", lambda: self.key(owner="bob"))
         self.assert_error("NOT_FOUND", lambda: self.key("POST", {}, owner="bob"))
 
+    def test_owner_removes_a_deploy_key_and_the_access_check_forgets_it(self) -> None:
+        self.assertEqual(self.key("DELETE"), {"present": False})
+        self.save(self.app)
+        self.key("POST", {})
+        self.assertTrue(self.check()["keyPresent"])
+        self.assertEqual(self.key("DELETE"), {"present": False})
+        self.assertEqual(self.key(), {"present": False})
+        # The shared check result went with the key; this one asks again.
+        self.assertEqual(self.check(), {"keyPresent": False})
+        with self.broker.database.connect() as db:
+            actions = [
+                row[0]
+                for row in db.execute(
+                    "SELECT action FROM audit WHERE app_id=? AND intent_id IS NULL ORDER BY sequence",
+                    (self.app,),
+                )
+            ]
+        self.assertEqual(actions, ["source_key_remove", "source_key", "source_key_remove"])
+        self.assert_error("INVALID_REQUEST", lambda: self.key("DELETE", {"replace": True}))
+        self.login("bob")
+        self.assert_error("NOT_FOUND", lambda: self.key("DELETE", owner="bob"))
+
     def test_access_check_uses_saved_settings_and_is_shared_briefly(self) -> None:
         self.assert_error("SETTINGS_REQUIRED", self.check)
         self.save(self.app)
@@ -129,3 +151,4 @@ class SourceKeyTests(ManagementCase):
 
         with patch.object(self.broker.client, "request", older):
             self.assert_error("SOURCE_KEYS_UNAVAILABLE", self.key)
+            self.assert_error("SOURCE_KEYS_UNAVAILABLE", lambda: self.key("DELETE"))

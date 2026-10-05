@@ -1559,6 +1559,16 @@ Cascade application deletion and every `/v1/admin/*` endpoint remain restricted
 to the privileged socket; the broker receives neither of those capabilities.
 No credential values belong in deletion tickets.
 
+Owners, team members and admins remove an app's deploy key with **Remove key**
+in the app's Settings. The project socket's
+`DELETE /v1/applications/{id}/source-key` has the helper retire the app's whole
+key directory; an app without a key gets the same `present: false` answer.
+Builds of a private repository then fail with `SOURCE_REJECTED` until someone
+creates a new key, so also delete the old key from the repository's Deploy keys
+on GitHub. The broker audits `source_key_remove`; an admin removal also records
+`app_source_key` with `removed: true`. Install matching controller and helper
+releases; an older controller answers removal with `SOURCE_KEYS_UNAVAILABLE`.
+
 Install matched broker/web releases using protocol 3 and schema 3 together with
 the approved replacement admin image. The image carries protocol-3 activation,
 the unprivileged bootstrap entry point and the controller route changes above.

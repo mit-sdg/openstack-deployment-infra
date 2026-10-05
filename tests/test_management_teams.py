@@ -81,6 +81,9 @@ class TeamTests(ManagementCase):
             [("deploy", "Bob Student", False), ("save_configuration", "Bob Student", False)],
         )
         self.assertEqual(self.call("GET", f"/v1/apps/{self.app}/logs", owner="bob").status, 200)
+        key = f"/v1/apps/{self.app}/source-key"
+        self.assertTrue(self.call("POST", key, {}, "bob").body["data"]["present"])
+        self.assertEqual(self.call("DELETE", key, None, "bob").body["data"], {"present": False})
         self.assert_error(
             "INVALID_REQUEST",
             lambda: self.call("GET", f"/v1/apps/{self.app}/activity?limit=500", owner="alice"),
@@ -132,12 +135,19 @@ class TeamTests(ManagementCase):
         for user in (self.taylor, str(uuid.uuid4()), "not-a-uuid"):
             with self.subTest(user=user):
                 self.assert_error("NOT_FOUND", lambda user=user: self.remove(user))
-        for path in ("", "/members", "/activity", "/logs", "/source-key"):
-            with self.subTest(path=path):
+        for method, path in (
+            ("GET", ""),
+            ("GET", "/members"),
+            ("GET", "/activity"),
+            ("GET", "/logs"),
+            ("GET", "/source-key"),
+            ("DELETE", "/source-key"),
+        ):
+            with self.subTest(method=method, path=path):
                 self.assert_error(
                     "NOT_FOUND",
-                    lambda path=path: self.call(
-                        "GET", f"/v1/apps/{self.app}{path}", owner="taylor"
+                    lambda method=method, path=path: self.call(
+                        method, f"/v1/apps/{self.app}{path}", owner="taylor"
                     ),
                 )
         self.assertEqual(self.remove(self.bob, owner="bob"), {"items": [], "left": True})
