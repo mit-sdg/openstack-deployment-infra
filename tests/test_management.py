@@ -13,10 +13,10 @@ import threading
 import time
 import unittest
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from urllib.parse import urlencode, urlsplit
 
 from openstack_platform.controller.http import (
     ControllerServer,
@@ -30,7 +30,7 @@ from openstack_platform.management.broker.database import Database
 from openstack_platform.management.common import canonical, opaque
 from openstack_platform.management.config import Config
 from openstack_platform.management.dev.controller import FakeController
-from openstack_platform.management.web.server import WebHandler, WebServer
+from openstack_platform.management.web.server import NAVIGATIONS, Reply, WebHandler, WebServer
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -123,20 +123,34 @@ class ManagementCase(unittest.TestCase):
             supplied.setdefault("idempotency-key", key or str(uuid.uuid4()))
         return self.router.dispatch(method, path, supplied, body)
 
+    def start(self, headers: dict[str, str] | None = None) -> dict[str, Any]:
+        """Begin Commons sign-in; returns the broker's redirect directive."""
+        return dict(self.call("GET", "/v1/auth/commons/start", headers=headers).body["browser"])
+
+    def approve(self, location: str) -> str:
+        """Follow the redirect to Commons as a browser would; returns the callback target."""
+        parsed = urlsplit(location)
+        reply = self.commons.handle("GET", parsed.path + "?" + parsed.query, {}, b"")
+        callback = urlsplit(dict(reply.headers)["Location"])
+        self.assertEqual(
+            (f"{callback.scheme}://{callback.netloc}", callback.path),
+            (self.config.portal_origin, "/auth/commons/callback"),
+        )
+        return "/v1/auth/commons/callback?" + callback.query
+
+    def callback(self, target: str, binder: str, cookie: str = "") -> dict[str, Any]:
+        """Return to the portal with Commons' answer; returns the broker's redirect."""
+        cookies = (self.config.commons_cookie + "=" + binder if binder else "") + cookie
+        return dict(self.call("GET", target, headers={"cookie": cookies}).body["browser"])
+
     def login(self, owner: str = "alice") -> str:
-        options = self.call("GET", "/v1/auth/options").body
-        binder = options["browser"]["cookies"][0]["value"]
-        completed = self.call(
-            "POST",
-            "/v1/auth/login",
-            {
-                "csrfToken": options["data"]["csrfToken"],
-                "username": owner,
-                "password": self.commons.passwords[owner],
-            },
-            headers={"cookie": self.config.login_cookie + "=" + binder},
-        ).body
-        self.tokens[owner] = completed["browser"]["cookies"][1]["value"]
+        started = self.start()
+        self.commons.approve = owner
+        completed = self.callback(self.approve(started["location"]), started["cookies"][0]["value"])
+        self.assertEqual(completed["location"], "/apps")
+        self.tokens[owner] = next(
+            cookie["value"] for cookie in completed["cookies"] if cookie["name"] == "session"
+        )
         bootstrap = self.call("GET", "/v1/session", owner=owner).body["data"]
         self.csrf[owner] = bootstrap["csrfToken"]
         return str(bootstrap["user"]["id"])
@@ -166,13 +180,13 @@ class ManagementCase(unittest.TestCase):
 
 class CeremonyTests(ManagementCase):
     def attempt(
-        self, username: str, password: str, *, headers: dict[str, str] | None = None
+        self, body: dict[str, Any] | None = None, *, headers: dict[str, str] | None = None
     ) -> Any:
         options = self.call("GET", "/v1/auth/options").body
         return self.call(
             "POST",
             "/v1/auth/login",
-            {"csrfToken": options["data"]["csrfToken"], "username": username, "password": password},
+            {"csrfToken": options["data"]["csrfToken"], **(body or {})},
             headers={
                 "cookie": self.config.login_cookie
                 + "="
@@ -181,23 +195,220 @@ class CeremonyTests(ManagementCase):
             },
         )
 
-    def test_csrf_and_exact_origin_reject_before_credentials_leave_broker(self) -> None:
+    def flow(self, owner: str = "alice") -> tuple[str, str]:
+        """Start sign-in and have Commons approve; returns the callback and binder."""
+        started = self.start()
+        self.commons.approve = owner
+        return self.approve(started["location"]), started["cookies"][0]["value"]
+
+    def assert_sign_in_error(self, browser: dict[str, Any], code: str) -> None:
+        self.assertEqual(browser["location"], "/sign-in?error=" + code)
+        self.assertIn({"name": "commons", "value": "", "maxAge": 0}, browser["cookies"])
+        self.assertNotIn("session", [cookie["name"] for cookie in browser["cookies"]])
+
+    def test_start_binds_state_to_the_browser_and_sends_it_to_commons(self) -> None:
+        started = self.start()
+        self.assertEqual(started["status"], 303)
+        [cookie] = started["cookies"]
+        self.assertEqual((cookie["name"], cookie["maxAge"]), ("commons", 600))
+        binder = cookie["value"]
+        anonymous = self.broker.auth.anonymous
+        state = anonymous.mac("commons-state", binder)
+        self.assertRegex(state, r"^[A-Za-z0-9._~-]{16,256}$")
+        self.assertEqual(
+            started["location"],
+            self.config.commons_origin
+            + "/connect?"
+            + urlencode({"app": self.config.portal_origin, "state": state}),
+        )
+        self.assertIn("app=http%3A%2F%2F127.0.0.1%3A18080&", started["location"])
+        # The binder is only good for Commons sign-in, and the reverse.
+        now = time.time()
+        self.assertTrue(anonymous.valid(binder, now, "commons-binder"))
+        self.assertFalse(anonymous.valid(binder, now))
+        self.assertFalse(anonymous.valid(anonymous.issue(now), now, "commons-binder"))
+        self.assertNotEqual(self.start()["cookies"][0]["value"], binder)
+        # Only the portal's own page, or a typed address, starts sign-in.
+        for site in ("same-origin", "none"):
+            self.assertIn("/connect?", self.start({"sec-fetch-site": site})["location"])
+        for site in ("cross-site", "same-site"):
+            self.assertEqual(
+                self.start({"sec-fetch-site": site}),
+                {"status": 303, "location": "/sign-in", "cookies": []},
+            )
+        self.assert_error(
+            "INVALID_REQUEST", lambda: self.call("GET", "/v1/auth/commons/start?app=x")
+        )
+        self.assert_error(
+            "METHOD_NOT_ALLOWED", lambda: self.call("POST", "/v1/auth/commons/start", {})
+        )
+        self.assertEqual(self.commons.calls, 0)
+
+    def test_callback_provisions_the_class_user_and_mints_an_owner_session(self) -> None:
+        target, binder = self.flow()
+        completed = self.callback(target, binder)
+        self.assertEqual((completed["status"], completed["location"]), (303, "/apps"))
+        names = [cookie["name"] for cookie in completed["cookies"]]
+        # The anonymous binder and Commons state are cleared; no device cookie.
+        self.assertEqual(names, ["login", "session", "commons"])
+        self.assertEqual(completed["cookies"][2], {"name": "commons", "value": "", "maxAge": 0})
+        self.assertEqual(self.commons.calls, 1)
+        self.tokens["alice"] = completed["cookies"][1]["value"]
+        session = self.call("GET", "/v1/session", owner="alice").body["data"]
+        self.assertEqual(
+            (session["role"], session["user"]["username"], session["user"]["displayName"]),
+            ("owner", "alice", "Alice Student"),
+        )
+        with self.broker.database.connect() as db:
+            user = dict(db.execute("SELECT * FROM users").fetchone())
+            audit = [
+                row[0]
+                for row in db.execute("SELECT action FROM audit WHERE user_id=?", (user["id"],))
+            ]
+        self.assertEqual(
+            (user["issuer"], user["subject"]),
+            (self.config.commons_origin, "11111111-1111-4111-8111-111111111111"),
+        )
+        self.assertEqual(audit, ["sign_in"])
+        # A later sign-in keeps the account and takes Commons' current profile.
+        from openstack_platform.management.dev.commons import USERS
+
+        with patch.dict(USERS, {"alice": (user["subject"], "Alice Renamed")}):
+            self.assertEqual(self.login(), user["id"])
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT display_name FROM users WHERE id=?", (user["id"],)).fetchone()[
+                    0
+                ],
+                "Alice Renamed",
+            )
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], 1)
+
+    def test_callback_refuses_missing_mismatched_or_expired_state_before_redeeming(self) -> None:
+        target, binder = self.flow()
+        other = self.start()["cookies"][0]["value"]
+        code = urlsplit(target).query.split("code=")[1].split("&")[0]
+        state = self.broker.auth.anonymous.mac("commons-state", binder)
+        login_binder = self.call("GET", "/v1/auth/options").body["browser"]["cookies"][0]["value"]
+        for query, cookie in (
+            (urlsplit(target).query, ""),
+            (urlsplit(target).query, other),
+            (urlsplit(target).query, login_binder),
+            (urlencode({"code": code}), binder),
+            (urlencode({"state": state}), binder),
+            (urlencode({"code": "not a code", "state": state}), binder),
+            (urlencode({"code": "x" * 129, "state": state}), binder),
+            (urlencode({"code": code, "state": "short"}), binder),
+            (urlencode({"code": code, "state": "é" * 43}), binder),
+            (urlencode([("code", code), ("state", state), ("state", state)]), binder),
+            (urlencode({"code": code, "error": "access_denied", "state": state}), binder),
+        ):
+            with self.subTest(query=query, cookie=cookie[:8]):
+                self.assert_sign_in_error(
+                    self.callback("/v1/auth/commons/callback?" + query, cookie),
+                    "SIGN_IN_EXPIRED",
+                )
+        self.assert_error(
+            "INVALID_REQUEST",
+            lambda: self.callback(target + "&next=/apps", binder),
+        )
+        now = time.time() + 601
+        self.broker.auth.clock = lambda: now
+        self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
+        self.assertEqual(self.commons.calls, 0)
+
+    def test_cancel_and_every_refused_code_stop_without_a_session(self) -> None:
+        started = self.start()
+        binder = started["cookies"][0]["value"]
+        self.commons.deny = True
+        cancelled = self.approve(started["location"])
+        self.assertIn("error=access_denied", cancelled)
+        self.assert_sign_in_error(self.callback(cancelled, binder), "COMMONS_CANCELLED")
+        self.commons.deny = False
+        self.assertEqual(self.commons.calls, 0)
+        # A code works once, for this app, within its minute, for active people.
+        target, binder = self.flow()
+        self.assertEqual(self.callback(target, binder)["location"], "/apps")
+        self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
+        target, binder = self.flow()
+        with self.commons.code_lock:
+            for code, (name, app, _expires) in list(self.commons.codes.items()):
+                self.commons.codes[code] = (name, app, time.monotonic() - 1)
+        self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
+        target, binder = self.flow()
+        with self.commons.code_lock:
+            for code, (name, _app, expires) in list(self.commons.codes.items()):
+                self.commons.codes[code] = (name, "https://other.example.com", expires)
+        self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
+        target, binder = self.flow("carol")
+        self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
+        for status, body in (
+            (400, b'{"error":"INVALID_REQUEST"}'),
+            (401, b'{"error":"UNAUTHORIZED"}'),
+            (500, b'{"error":"INTERNAL_ERROR"}'),
+        ):
+            target, binder = self.flow()
+            self.commons.override = (status, body)
+            self.assert_sign_in_error(self.callback(target, binder), "IDENTITY_UNAVAILABLE")
+        self.commons.override = None
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                [row[0] for row in db.execute("SELECT username FROM users")], ["alice"]
+            )
+
+    def test_disabled_portal_accounts_are_refused_after_commons_approves(self) -> None:
+        user = self.login()
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE users SET enabled=0 WHERE id=?", (user,))
+        target, binder = self.flow()
+        self.assert_sign_in_error(self.callback(target, binder), "ACCOUNT_DISABLED")
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE users SET enabled=1,status='pending' WHERE id=?", (user,))
+        target, binder = self.flow()
+        self.assert_sign_in_error(self.callback(target, binder), "ACCOUNT_DISABLED")
+
+    def test_staff_sign_in_keeps_the_portal_role(self) -> None:
+        from openstack_platform.management.dev.commons import USERS
+
+        with self.broker.database.connect(write=True) as db:
+            db.execute(
+                "INSERT INTO users(id,issuer,subject,username,display_name,role,created,last_login) VALUES(?,?,?,'taylor','Taylor','staff',0,0)",
+                (str(uuid.uuid4()), self.config.issuer, USERS["taylor"][0]),
+            )
+        self.login("taylor")
+        self.assertEqual(
+            self.call("GET", "/v1/session", owner="taylor").body["data"]["role"], "staff"
+        )
+
+    def test_password_sign_in_for_class_accounts_is_gone(self) -> None:
+        with self.assertRaises(HttpError) as caught:
+            self.attempt(
+                {"method": "commons", "username": "alice", "password": "local-alice-password"}
+            )
+        self.assertEqual((caught.exception.status, caught.exception.code), (400, "INVALID_REQUEST"))
+        self.assertIn("Sign in with your class account", caught.exception.summary)
+        # Without a method the form is the local one; class passwords never leave.
+        self.assert_error(
+            "INVALID_CREDENTIALS",
+            lambda: self.attempt({"username": "alice", "password": "local-alice-password"}),
+        )
+        self.assert_error(
+            "INVALID_REQUEST",
+            lambda: self.attempt({"method": "other", "username": "alice", "password": "p"}),
+        )
+        self.assertEqual(self.commons.calls, 0)
+
+    def test_csrf_and_exact_origin_reject_before_any_password_check(self) -> None:
+        body = {"method": "local", "username": "alice", "password": "incorrect"}
         for origin in ("null", "", "https://evil.example.com"):
             self.assert_error(
                 "ORIGIN_REJECTED",
-                lambda origin=origin: self.attempt(
-                    "alice", "incorrect", headers={"origin": origin}
-                ),
+                lambda origin=origin: self.attempt(body, headers={"origin": origin}),
             )
         self.assert_error(
             "CSRF_REJECTED",
-            lambda: self.call(
-                "POST",
-                "/v1/auth/login",
-                {"csrfToken": "bad", "username": "alice", "password": "incorrect"},
-            ),
+            lambda: self.call("POST", "/v1/auth/login", {"csrfToken": "bad", **body}),
         )
-        self.assertEqual(self.commons.calls, 0)
         for route in ("start", "assertion", "complete"):
             self.assert_error(
                 "NOT_FOUND", lambda route=route: self.call("POST", "/v1/auth/" + route, {})
@@ -220,15 +431,6 @@ class CeremonyTests(ManagementCase):
             ("Example account", "Example Platform"),
         )
 
-    def test_generic_invalid_disabled_and_unavailable_errors(self) -> None:
-        self.assert_error("INVALID_CREDENTIALS", lambda: self.attempt("missing", "incorrect"))
-        self.assert_error("INVALID_CREDENTIALS", lambda: self.attempt("alice", "incorrect"))
-        self.assert_error("ACCOUNT_DISABLED", lambda: self.attempt("carol", "local-carol-password"))
-        self.commons.override = (500, b'{"error":"INTERNAL_ERROR"}')
-        self.assert_error(
-            "IDENTITY_UNAVAILABLE", lambda: self.attempt("alice", "local-alice-password")
-        )
-
     def test_identity_outage_preserves_existing_sessions_and_only_blocks_new_login(self) -> None:
         user = self.login()
         self.identity.shutdown()
@@ -237,80 +439,29 @@ class CeremonyTests(ManagementCase):
             self.call("GET", "/v1/session", owner="alice").body["data"]["user"]["id"], user
         )
         self.assertEqual(self.call("GET", "/v1/apps", owner="alice").status, 200)
-        with self.assertRaises(HttpError) as caught:
-            self.attempt("bob", "local-bob-password")
-        self.assertEqual(caught.exception.code, "IDENTITY_UNAVAILABLE")
-        self.assertEqual(caught.exception.status, 503)
-        self.assertTrue(caught.exception.retryable)
+        target, binder = self.flow("bob")
+        self.assert_sign_in_error(self.callback(target, binder), "IDENTITY_UNAVAILABLE")
 
-    def test_failed_username_address_window_blocks_before_identity_and_expires(self) -> None:
+    def test_start_and_callback_share_the_per_address_start_limit(self) -> None:
         now = time.time()
         self.broker.auth.clock = lambda: now
-        for _ in range(5):
-            self.assert_error(
-                "INVALID_CREDENTIALS",
-                lambda: self.attempt("alice", "incorrect"),
-            )
-        calls = self.commons.calls
-        self.assert_error("RATE_LIMITED", lambda: self.attempt("alice", "local-alice-password"))
-        self.assert_error("RATE_LIMITED", lambda: self.attempt("alice", "incorrect"))
-        self.assertEqual(self.commons.calls, calls)
-        result = self.attempt(
-            "alice", "local-alice-password", headers={"x-portal-client-address": "192.0.2.1"}
-        )
-        self.assertEqual(result.status, 200)
-        self.assert_error("RATE_LIMITED", lambda: self.attempt("alice", "local-alice-password"))
-        self.assertEqual(self.commons.calls, calls + 1)
-        # Rejections (including a valid password) never extend the fixed window.
-        now += 59.99
-        self.assert_error("RATE_LIMITED", lambda: self.attempt("alice", "local-alice-password"))
-        now += 0.01
-        self.login()
-        self.assertEqual(self.commons.calls, calls + 2)
-
-    def test_concurrent_guesses_reserve_budget_before_identity(self) -> None:
-        self.commons.delay_seconds = 0.15
-        barrier = threading.Barrier(20)
-
-        def attempt() -> str:
-            barrier.wait(timeout=5)
-            try:
-                self.attempt("alice", "incorrect")
-            except HttpError as error:
-                return error.code
-            return "unexpected_success"
-
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            results = list(executor.map(lambda _: attempt(), range(20)))
-        self.assertEqual(results.count("INVALID_CREDENTIALS"), 5)
-        self.assertEqual(results.count("RATE_LIMITED"), 15)
-        self.assertEqual(self.commons.calls, 5)
-        self.assert_error("RATE_LIMITED", lambda: self.attempt("alice", "local-alice-password"))
-        self.assertEqual(self.commons.calls, 5)
-
-    def test_username_throttle_shares_ipv6_prefix_but_not_another_prefix(self) -> None:
-        for _ in range(5):
-            self.assert_error(
-                "INVALID_CREDENTIALS",
-                lambda: self.attempt(
-                    "alice", "incorrect", headers={"x-portal-client-address": "2001:db8::1"}
-                ),
-            )
-        self.assert_error(
-            "RATE_LIMITED",
-            lambda: self.attempt(
-                "alice", "local-alice-password", headers={"x-portal-client-address": "2001:db8::2"}
-            ),
-        )
-        self.assertEqual(self.commons.calls, 5)
+        self.broker.auth.address_limits.limits = {"options": 600, "start": 3}
+        target, binder = self.flow()
+        self.assertEqual(self.callback(target, binder)["location"], "/apps")
+        started = self.start()
         self.assertEqual(
-            self.attempt(
-                "alice",
-                "local-alice-password",
-                headers={"x-portal-client-address": "2001:db8:0:1::1"},
-            ).status,
-            200,
+            self.start(), {"status": 303, "location": "/sign-in?error=RATE_LIMITED", "cookies": []}
         )
+        calls = self.commons.calls
+        self.assert_sign_in_error(
+            self.callback(self.approve(started["location"]), started["cookies"][0]["value"]),
+            "RATE_LIMITED",
+        )
+        self.assertEqual(self.commons.calls, calls)
+        other = {"x-portal-client-address": "192.0.2.1"}
+        self.assertIn("/connect?", self.start(other)["location"])
+        now += 60
+        self.assertIn("/connect?", self.start()["location"])
 
     def test_per_address_admission_shares_ipv6_prefix(self) -> None:
         from openstack_platform.management.broker.anonymous import AddressLimits
@@ -331,37 +482,27 @@ class CeremonyTests(ManagementCase):
             ),
         )
 
-    def test_rotation_archive_password_change_and_local_revoke(self) -> None:
+    def test_rotation_commons_archive_and_local_revoke(self) -> None:
         user = self.login()
         first = self.tokens["alice"]
-        options = self.call("GET", "/v1/auth/options").body
-        completed = self.call(
-            "POST",
-            "/v1/auth/login",
-            {
-                "csrfToken": options["data"]["csrfToken"],
-                "username": "alice",
-                "password": self.commons.passwords["alice"],
-            },
-            headers={
-                "cookie": self.config.login_cookie
-                + "="
-                + options["browser"]["cookies"][0]["value"]
-                + "; "
-                + self.config.session_cookie
-                + "="
-                + first
-            },
-        ).body
-        self.tokens["alice"] = completed["browser"]["cookies"][1]["value"]
+        # Signing in again replaces the session this browser already had.
+        target, binder = self.flow()
+        completed = self.callback(target, binder, "; " + self.config.session_cookie + "=" + first)
+        self.tokens["alice"] = next(
+            cookie["value"] for cookie in completed["cookies"] if cookie["name"] == "session"
+        )
         self.assert_error(
             "SESSION_EXPIRED",
             lambda: self.call(
                 "GET", "/v1/session", headers={"cookie": self.config.session_cookie + "=" + first}
             ),
         )
-        self.commons.passwords["alice"] = "changed-fixture-password"
-        self.commons.override = (403, b'{"error":"FORBIDDEN"}')
+        # Archiving in Commons stops new sign-ins but not this session.
+        from openstack_platform.management.dev import commons
+
+        with patch.object(commons, "ARCHIVED", {"alice"}):
+            target, binder = self.flow()
+            self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
         self.assertEqual(self.call("GET", "/v1/session", owner="alice").status, 200)
         with self.broker.database.connect(write=True) as db:
             db.execute("UPDATE users SET enabled=0 WHERE id=?", (user,))
@@ -369,25 +510,35 @@ class CeremonyTests(ManagementCase):
             "ACCOUNT_DISABLED", lambda: self.call("GET", "/v1/session", owner="alice")
         )
 
-    def test_password_sentinel_is_absent_from_persistent_state_logs_and_responses(self) -> None:
+    def test_codes_and_state_are_absent_from_persistent_state_logs_and_responses(self) -> None:
         import contextlib
         import io
-        import secrets
 
-        sentinel = secrets.token_urlsafe(48)
-        self.commons.passwords["alice"] = sentinel
         output = io.StringIO()
         with contextlib.redirect_stderr(output), contextlib.redirect_stdout(output):
-            response = self.attempt("alice", sentinel)
-        self.assertNotIn(sentinel, canonical(response.body) + output.getvalue())
-        with self.broker.database.connect() as db:
-            for table in ("users", "sessions", "audit", "intents"):
-                self.assertNotIn(
-                    sentinel, canonical([list(row) for row in db.execute("SELECT * FROM " + table)])
-                )
-        for path in self.config.state_directory.iterdir():
-            if path.is_file():
-                self.assertNotIn(sentinel.encode(), path.read_bytes())
+            target, binder = self.flow()
+            completed = self.callback(target, binder)
+            failed, failed_binder = self.flow()
+            self.commons.override = (500, b'{"error":"INTERNAL_ERROR"}')
+            refused = self.callback(failed, failed_binder)
+        self.assertIn("identity-check=unavailable", output.getvalue())
+        secrets = [
+            value.split("=", 1)[1]
+            for query in (urlsplit(target).query, urlsplit(failed).query)
+            for value in query.split("&")
+        ]
+        self.assertEqual(len(secrets), 4)
+        for secret in secrets:
+            self.assertNotIn(secret, canonical([completed, refused]) + output.getvalue())
+            with self.broker.database.connect() as db:
+                for table in ("users", "sessions", "audit", "intents"):
+                    self.assertNotIn(
+                        secret,
+                        canonical([list(row) for row in db.execute("SELECT * FROM " + table)]),
+                    )
+            for path in self.config.state_directory.iterdir():
+                if path.is_file():
+                    self.assertNotIn(secret.encode(), path.read_bytes())
 
 
 class OwnerIntentTests(ManagementCase):
@@ -1081,7 +1232,175 @@ class WebTransportTests(ManagementCase):
             with self.subTest(method=route.method, path=path):
                 self.assertTrue(hasattr(WebHandler, "do_" + route.method))
                 reply = self.web.forward(route.method, browser, "", {}, b"")
+                if browser in NAVIGATIONS:
+                    # Navigations redirect even when the broker can't answer.
+                    self.assertEqual(
+                        reply.headers[0], ("Location", "/sign-in?error=SIGN_IN_UNAVAILABLE")
+                    )
+                    continue
                 self.assertNotIn(reply.status, {404, 405}, json.loads(reply.body))
+
+    def test_commons_navigations_answer_only_with_checked_redirects(self) -> None:
+        state = "s" * 43
+        approval = (
+            self.config.commons_origin
+            + "/connect?"
+            + urlencode({"app": self.config.portal_origin, "state": state})
+        )
+        directive = {"name": "commons", "value": opaque(), "maxAge": 600}
+
+        def navigate(path: str, location: str, status: int = 303, **extra: Any) -> Reply:
+            value = {"browser": {"status": status, "location": location, "cookies": [directive]}}
+            with patch.object(self.web.broker, "request", return_value=(200, {**value, **extra})):
+                return self.web.forward("GET", path, "", {}, b"")
+
+        for path, location in (
+            ("/auth/commons/start", approval),
+            ("/auth/commons/start", "/sign-in"),
+            ("/auth/commons/start", "/sign-in?error=RATE_LIMITED"),
+            ("/auth/commons/callback", "/apps"),
+            ("/auth/commons/callback", "/sign-in?error=ACCOUNT_DISABLED"),
+        ):
+            with self.subTest(path=path, location=location):
+                reply = navigate(path, location)
+                self.assertEqual((reply.status, reply.body, reply.content_type), (303, b"", ""))
+                self.assertEqual(
+                    reply.headers,
+                    (("Location", location), ("Set-Cookie", self.web.cookie(directive))),
+                )
+        refused = [
+            ("/auth/commons/start", "https://evil.example.com/connect?" + approval.split("?")[1]),
+            ("/auth/commons/start", approval.replace("/connect?", "/login?")),
+            ("/auth/commons/start", approval.replace("127.0.0.1", "127.0.0.2")),
+            ("/auth/commons/start", approval + "&next=/apps"),
+            ("/auth/commons/start", approval.replace(state, "short")),
+            ("/auth/commons/start", "/apps\r\nSet-Cookie: injected=1"),
+            # Only start may leave the portal, and only for Commons' approval page.
+            ("/auth/commons/callback", approval),
+            ("/auth/commons/callback", "//evil.example.com/apps"),
+            ("/auth/commons/callback", "https://evil.example.com/apps"),
+            ("/auth/commons/callback", "/apps?next=https://evil.example.com"),
+            ("/auth/commons/callback", "/sign-in?error=lowercase"),
+        ]
+        for path, location in refused:
+            with self.subTest(path=path, location=location):
+                reply = navigate(path, location)
+                self.assertEqual(reply.status, 303)
+                self.assertEqual(dict(reply.headers)["Location"], "/sign-in?error=SIGN_IN_FAILED")
+                self.assertNotIn(("Set-Cookie", self.web.cookie(directive)), reply.headers)
+        for status, extra in ((302, {}), (303, {"data": {"returnPath": "/apps"}})):
+            reply = navigate("/auth/commons/callback", "/apps", status, **extra)
+            self.assertEqual(dict(reply.headers)["Location"], "/sign-in?error=SIGN_IN_FAILED")
+        # Other routes never redirect.
+        reply = navigate("/auth/options", "/apps")
+        self.assertEqual(
+            (reply.status, json.loads(reply.body)["error"]["code"]), (400, "INVALID_REQUEST")
+        )
+        cleared = ("Set-Cookie", self.web.cookie({"name": "commons", "value": "", "maxAge": 0}))
+        for status, code in (
+            (400, "SIGN_IN_FAILED"),
+            (401, "SIGN_IN_EXPIRED"),
+            (429, "RATE_LIMITED"),
+            (503, "SIGN_IN_UNAVAILABLE"),
+        ):
+            failure = {"error": {"code": "X", "summary": "x", "retryable": False}}
+            with patch.object(self.web.broker, "request", return_value=(status, failure)):
+                reply = self.web.forward("GET", "/auth/commons/callback", "", {}, b"")
+            self.assertEqual((reply.status, reply.body), (303, b""))
+            self.assertEqual(reply.headers[0], ("Location", "/sign-in?error=" + code))
+            self.assertEqual(reply.headers[-1], cleared)
+            if status == 401:
+                self.assertIn(
+                    ("Set-Cookie", self.web.cookie({"name": "session", "value": "", "maxAge": 0})),
+                    reply.headers,
+                )
+        self.assertEqual(self.web.forward("POST", "/auth/commons/start", "", {}, b"").status, 405)
+
+    def test_commons_redirects_carry_no_body_type_or_referrer_and_are_never_cached(
+        self,
+    ) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
+        connection.request(
+            "GET",
+            "/auth/commons/callback?code=x&state=y",
+            headers={"Host": "127.0.0.1:18080", "Sec-Fetch-Mode": "navigate"},
+        )
+        response = connection.getresponse()
+        body = response.read()
+        connection.close()
+        # No broker listens here, so the browser lands on the sign-in page.
+        self.assertEqual((response.status, body), (303, b""))
+        self.assertEqual(response.getheader("Location"), "/sign-in?error=SIGN_IN_UNAVAILABLE")
+        self.assertIsNone(response.getheader("Content-Type"))
+        self.assertEqual(response.getheader("Content-Length"), "0")
+        self.assertEqual(response.getheader("Cache-Control"), "no-store")
+        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+        self.assertEqual(response.getheader("Content-Security-Policy"), self.web.csp())
+        self.assertEqual(
+            response.msg.get_all("Set-Cookie"),
+            ["portal-dev-commons=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"],
+        )
+
+    def test_commons_sign_in_round_trip_through_web_broker_and_identity(self) -> None:
+        from openstack_platform.management.broker.main import serve as broker_serve
+
+        self.broker.journal.close()
+        self.broker, broker_server = broker_serve(self.config)
+        thread = threading.Thread(
+            target=broker_server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+
+        def get(target: str, headers: dict[str, str]) -> http.client.HTTPResponse:
+            connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=5)
+            connection.request("GET", target, headers={"Host": "127.0.0.1:18080", **headers})
+            response = connection.getresponse()
+            self.assertEqual(response.read(), b"")
+            connection.close()
+            return response
+
+        try:
+            started = get("/auth/commons/start", {"Sec-Fetch-Site": "same-origin"})
+            self.assertEqual(started.status, 303)
+            [cookie] = started.msg.get_all("Set-Cookie")
+            binder = cookie.split(";")[0].removeprefix("portal-dev-commons=")
+            self.assertEqual(
+                cookie.split("; ")[1:], ["Path=/", "Max-Age=600", "HttpOnly", "SameSite=Lax"]
+            )
+            target = self.approve(started.getheader("Location")).removeprefix("/v1")
+            completed = get(target, {"Cookie": "portal-dev-commons=" + binder})
+            self.assertEqual((completed.status, completed.getheader("Location")), (303, "/apps"))
+            cookies = completed.msg.get_all("Set-Cookie")
+            self.assertEqual(
+                [value.split("=")[0] for value in cookies],
+                [
+                    "portal-dev-anonymous",
+                    "portal-dev-session",
+                    "portal-dev-commons",
+                ],
+            )
+            self.assertTrue(cookies[2].startswith("portal-dev-commons=; Path=/; Max-Age=0;"))
+            session = cookies[1].split(";")[0]
+            status, value = ProjectClient(self.config.broker_socket).request(
+                "GET",
+                "/v1/session",
+                headers={"cookie": session, "x-portal-client-address": "127.0.0.1"},
+            )
+            self.assertEqual((status, value["data"]["user"]["username"]), (200, "alice"))
+            # A replayed callback finds its code spent.
+            replayed = get(target, {"Cookie": "portal-dev-commons=" + binder})
+            self.assertEqual(replayed.getheader("Location"), "/sign-in?error=SIGN_IN_EXPIRED")
+            # A malformed session cookie still ends on the sign-in page, cleared.
+            broken = get(target, {"Cookie": "portal-dev-session=bad"})
+            self.assertEqual(broken.getheader("Location"), "/sign-in?error=SIGN_IN_EXPIRED")
+            self.assertEqual(
+                [value.split("=")[0] for value in broken.msg.get_all("Set-Cookie")],
+                ["portal-dev-session", "portal-dev-commons"],
+            )
+        finally:
+            broker_server.shutdown()
+            broker_server.server_close()
+            thread.join(timeout=5)
 
     def test_only_repository_reads_wait_longer_for_the_broker(self) -> None:
         app = str(uuid.uuid4())
@@ -1210,6 +1529,13 @@ class WebTransportTests(ManagementCase):
         self.assertEqual(
             cleared,
             "__Host-portal-anonymous=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+        )
+        # Commons' callback is a navigation from another site, so its state is Lax.
+        state = self.web.cookie({"name": "commons", "value": opaque(), "maxAge": 600})
+        self.assertTrue(state.startswith("__Host-portal-commons="))
+        self.assertEqual(
+            state.split("; ")[1:],
+            ["Path=/", "Max-Age=600", "Secure", "HttpOnly", "SameSite=Lax"],
         )
         self.assertFalse("Domain=" in cookie)
         with self.assertRaises(ValueError):

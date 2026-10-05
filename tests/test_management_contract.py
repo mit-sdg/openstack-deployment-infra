@@ -423,23 +423,7 @@ class RealProjectContractTests(ManagementCase):
         with self.broker.database.connect(write=True) as connection:
             connection.execute("UPDATE users SET role='staff' WHERE id=?", (user,))
             security_change(connection, user)
-        options = self.call("GET", "/v1/auth/options").body
-        signed = self.call(
-            "POST",
-            "/v1/auth/login",
-            {
-                "csrfToken": options["data"]["csrfToken"],
-                "username": "alice",
-                "password": self.commons.passwords["alice"],
-            },
-            headers={
-                "cookie": self.config.login_cookie + "=" + options["browser"]["cookies"][0]["value"]
-            },
-        ).body
-        self.tokens["alice"] = signed["browser"]["cookies"][1]["value"]
-        self.csrf["alice"] = self.call("GET", "/v1/session", owner="alice").body["data"][
-            "csrfToken"
-        ]
+        self.login()
         # Exercise a substantial per-app history without changing project privilege.
         connection = self.real.fixture.connection
         columns = [row[1] for row in connection.execute("PRAGMA table_info(deployment_attempts)")]

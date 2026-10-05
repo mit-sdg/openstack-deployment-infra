@@ -7,6 +7,11 @@ let
   state = platform.paths.adminState;
   backups = platform.paths.backups;
   packages = import ../pkgs { inherit pkgs platform; };
+  # The one Commons Connect code the fake redeems, issued to the portal's origin.
+  managementRedeemRequest = builtins.toJSON {
+    code = "11111111-1111-4111-8111-111111111111.vm-fixture";
+    app = "https://${platform.domain}";
+  };
   managementIdentityBootstrap = pkgs.writeText "management-identity-bootstrap.py" ''
     import faulthandler
     import signal
@@ -22,9 +27,9 @@ let
     set -u
     unit=${namespace}-management-identity.service
     sock=/run/${namespace}-management-identity/identity.sock
-    body='{"username":"alice","password":"vm-fixture"}'
+    body=${lib.escapeShellArg managementRedeemRequest}
     echo "== dns"; getent hosts class.example.com
-    echo "== commons"; ${pkgs.curl}/bin/curl -sS --max-time 5 -o /dev/null -w 'commons-http=%{http_code}\n' -H 'Content-Type: application/json' --data "$body" https://class.example.com:9444/api/auth/authenticate
+    echo "== commons"; ${pkgs.curl}/bin/curl -sS --max-time 5 -o /dev/null -w 'commons-http=%{http_code}\n' -H 'Content-Type: application/json' --data "$body" https://class.example.com:9444/api/connect/redeem
     echo "== socket"; ls -ln /run/${namespace}-management-identity; id management-broker
     pid=$(systemctl show -p MainPID --value "$unit"); echo "identity-pid=$pid"
     grep -E '^(State|Threads):' "/proc/$pid/status"
@@ -35,7 +40,7 @@ let
     echo "== connect-errno"; runuser -u management-broker -- ${packages.platformPython}/bin/python -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print('broker connect ok')" "$sock" 2>&1 | tail -n 1
     echo "== root-health"; ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nroot-health-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
     echo "== health"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nhealth-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
-    echo "== authenticate"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\nidentity-http=%{http_code}\n' --unix-socket "$sock" -H 'Content-Type: application/json' --data "$body" http://localhost/v1/authenticate
+    echo "== redeem"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\nidentity-http=%{http_code}\n' --unix-socket "$sock" -H 'Content-Type: application/json' --data "$body" http://localhost/v1/redeem
     echo "== tcp-from-identity"; ${pkgs.iproute2}/bin/ss -tanp | grep -F "pid=$pid," || echo "no identity tcp sockets"
     echo "== stacks"; kill -USR1 "$pid"; sleep 1; cat /run/${namespace}-management-identity/stacks.txt
     echo "== journal"; journalctl --no-pager -o short-monotonic -u "$unit" | tail -n 40
@@ -56,7 +61,7 @@ let
         last = "no attempt"
         while True:
             try:
-                status, result = client.request("POST", "/v1/authenticate", {"username":"alice","password":"vm-fixture"})
+                status, result = client.request("POST", "/v1/redeem", ${managementRedeemRequest})
                 last = f"status={status} error={result.get('error', {}).get('code') if isinstance(result, dict) else None}"
                 if status != 503:
                     break
@@ -118,10 +123,10 @@ let
             print("fake-commons "+(format % args),file=sys.stderr,flush=True)
         def do_POST(self):
             body=json.loads(self.rfile.read(min(4096,int(self.headers.get("Content-Length","0")))))
-            accepted=self.path=="/api/auth/authenticate" and body=={"username":"alice","password":"vm-fixture"}
-            value={"user":"11111111-1111-4111-8111-111111111111","username":"alice","displayName":"Alice","email":"alice@example.com"} if accepted else {"error":"UNAUTHORIZED"}
+            accepted=self.path=="/api/connect/redeem" and body==${managementRedeemRequest}
+            value={"user":"11111111-1111-4111-8111-111111111111","username":"alice","displayName":"Alice","email":"alice@example.com"} if accepted else {"error":"CONNECT_CODE_INVALID"}
             raw=json.dumps(value).encode()
-            self.send_response(200 if accepted else 401)
+            self.send_response(200 if accepted else 400)
             self.send_header("Content-Type","application/json")
             self.send_header("Cache-Control","no-store")
             self.send_header("Content-Length",str(len(raw)))

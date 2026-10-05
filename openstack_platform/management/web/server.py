@@ -16,11 +16,16 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from ..broker.client import ControllerUnavailable, ProjectClient
 from ..common import MANAGEMENT_REQUESTS, canonical, strict_json
 from ..config import Config
+
+# Pages a completed sign-in may land on.
+RETURN_PATH = r"/(?:apps(?:/[a-z0-9/-]+)?|activity|staff/owners|admin/accounts|sign-in)"
+# Commons sign-in is two top-level navigations, so they answer only with redirects.
+NAVIGATIONS = {"/auth/commons/start", "/auth/commons/callback"}
 
 
 @dataclass(frozen=True)
@@ -162,6 +167,49 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def forward(
         self, method: str, path: str, query: str, headers: dict[str, str], raw: bytes
     ) -> Reply:
+        if path not in NAVIGATIONS:
+            return self.relay(method, path, query, headers, raw)
+        if method != "GET":
+            return error_reply(405, "METHOD_NOT_ALLOWED")
+        reply = self.relay(method, path, query, headers, raw)
+        if reply.status == 303:
+            return reply
+        # A browser mid-sign-in sees the sign-in page with a reason, never JSON.
+        # Cookie changes still apply, and a failed callback drops its state.
+        code = {401: "SIGN_IN_EXPIRED", 429: "RATE_LIMITED", 503: "SIGN_IN_UNAVAILABLE"}.get(
+            reply.status, "SIGN_IN_FAILED"
+        )
+        cookies = [header for header in reply.headers if header[0] == "Set-Cookie"]
+        if path == "/auth/commons/callback":
+            cookies.append(
+                ("Set-Cookie", self.cookie({"name": "commons", "value": "", "maxAge": 0}))
+            )
+        return Reply(303, b"", "", (("Location", "/sign-in?error=" + code), *cookies))
+
+    def redirect_allowed(self, path: str, location: object) -> bool:
+        """Start may leave only for Commons' approval page; callback stays on this origin."""
+        if not isinstance(location, str):
+            return False
+        approval = (
+            self.config.commons_origin
+            + "/connect?"
+            + urlencode({"app": self.config.portal_origin})
+            + "&state="
+        )
+        if (
+            path == "/auth/commons/start"
+            and location.startswith(approval)
+            and re.fullmatch(r"[A-Za-z0-9._~-]{16,256}", location.removeprefix(approval))
+        ):
+            return True
+        return path in NAVIGATIONS and bool(
+            re.fullmatch(RETURN_PATH, location)
+            or re.fullmatch(r"/sign-in\?error=[A-Z_]{1,40}", location)
+        )
+
+    def relay(
+        self, method: str, path: str, query: str, headers: dict[str, str], raw: bytes
+    ) -> Reply:
         if path.startswith("/auth/"):
             if path not in {
                 "/auth/options",
@@ -169,6 +217,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 "/auth/token-info",
                 "/auth/enroll",
                 "/auth/enroll/finish",
+                *NAVIGATIONS,
             }:
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
@@ -248,18 +297,24 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                     ),
                 )
             browser = value.pop("browser", {})
-            if not isinstance(browser, dict) or set(browser) - {"cookies", "status"}:
+            if not isinstance(browser, dict) or set(browser) - {"cookies", "status", "location"}:
                 raise ValueError("invalid broker directive")
             extra: list[tuple[str, str]] = [
                 ("Set-Cookie", self.cookie(cookie)) for cookie in browser.get("cookies", [])
             ]
             if path in {"/auth/login", "/auth/enroll/finish"} and status == 200:
                 returned = value.get("data", {}).get("returnPath")
-                if not isinstance(returned, str) or not re.fullmatch(
-                    r"/(?:apps(?:/[a-z0-9/-]+)?|activity|staff/owners|admin/accounts|sign-in)",
-                    returned,
-                ):
+                if not isinstance(returned, str) or not re.fullmatch(RETURN_PATH, returned):
                     raise ValueError("invalid sign-in return path")
+            if "location" in browser:
+                if (
+                    status != 200
+                    or value
+                    or browser.get("status") != 303
+                    or not self.redirect_allowed(path, browser["location"])
+                ):
+                    raise ValueError("invalid broker redirect")
+                return Reply(303, b"", "", (("Location", browser["location"]), *extra))
             if browser.get("status") == 204:
                 return Reply(204, b"", headers=tuple(extra))
             return Reply(status, canonical(value).encode(), headers=tuple(extra))
@@ -275,6 +330,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             "login": self.config.login_cookie,
             "session": self.config.session_cookie,
             "device": self.config.device_cookie,
+            "commons": self.config.commons_cookie,
         }
         value, age = directive["value"], directive["maxAge"]
         if (
@@ -294,6 +350,8 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         ):
             raise ValueError("invalid cookie directive")
         secure = "; Secure" if self.config.portal_origin.startswith("https:") else ""
+        # Commons' state must survive the callback's cross-site navigation in
+        # development (another loopback host); production is same-site.
         same_site = "Strict" if directive["name"] in {"login", "device"} else "Lax"
         return f"{names[directive['name']]}={value}; Path=/; Max-Age={age}{secure}; HttpOnly; SameSite={same_site}"
 
@@ -435,7 +493,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
         self.arm(self.web.deadline)
         self.connection.settimeout(self.web.deadline)
         self.send_response(reply.status)
-        self.send_header("Content-Type", reply.content_type)
+        if reply.content_type:
+            self.send_header("Content-Type", reply.content_type)
         self.send_header("Content-Length", str(len(reply.body)))
         self.send_header("Content-Security-Policy", self.web.csp())
         self.send_header("X-Content-Type-Options", "nosniff")

@@ -1,4 +1,4 @@
-"""Commons bb78c5e contract, TLS/peer boundaries, bounded failures and schema upgrade."""
+"""Commons Connect redeem contract, TLS/peer boundaries, bounded failures and schema upgrade."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
+from urllib.parse import urlencode, urlsplit
 
 from openstack_platform.controller.http import (
     ControllerServer,
@@ -42,10 +43,17 @@ class IdentityTests(ManagementCase):
             )
         )
 
-    def test_bb78c5e_exact_request_and_typed_status_contract(self) -> None:
+    def code(self, name: str = "alice") -> dict[str, str]:
+        """A fresh redeem request for a code Commons issued to the portal."""
+        app = self.config.portal_origin
+        return {"code": self.commons.issue(name, app), "app": app}
+
+    def test_redeem_exact_request_and_typed_status_contract(self) -> None:
         client = self.client()
-        error, user = client.authenticate({"username": "alice", "password": "local-alice-password"})
+        request = self.code()
+        error, user = client.redeem(request)
         self.assertIsNone(error)
+        # Email is part of Commons' answer but never leaves the identity service.
         self.assertEqual(
             user,
             {
@@ -54,90 +62,118 @@ class IdentityTests(ManagementCase):
                 "displayName": "Alice Student",
             },
         )
-        for value in (
-            {"username": "ALICE", "password": "local-alice-password"},
-            {"username": " alice", "password": "local-alice-password"},
-            {"username": "alice", "password": " local-alice-password"},
-        ):
-            self.assertEqual(client.authenticate(value)[0], "invalid_credentials")
+        self.assertEqual(client.redeem(request)[0], "invalid_code")
+        other = self.commons.issue("alice", "https://other.example.com")
         self.assertEqual(
-            client.authenticate({"username": "carol", "password": "local-carol-password"})[0],
-            "account_disabled",
+            client.redeem({"code": other, "app": self.config.portal_origin})[0], "invalid_code"
         )
+        self.assertEqual(client.redeem(self.code("carol"))[0], "invalid_code")
+        code = self.commons.issue("alice", self.config.portal_origin)
         for value in (
-            {"username": "alice", "password": "local-alice-password", "origin": "ignored"},
-            {"username": "x" * 33, "password": "p"},
-            {"username": "alice", "password": "x" * 129},
-            {"username": "😀" * 17, "password": "p"},
+            {"code": code, "app": self.config.portal_origin, "extra": True},
+            {"code": code},
+            {"code": code, "app": None},
+            {"code": None, "app": self.config.portal_origin},
+            {"code": "", "app": self.config.portal_origin},
+            {"code": "x" * 129, "app": self.config.portal_origin},
+            {"code": "a b", "app": self.config.portal_origin},
+            {"code": "a/b", "app": self.config.portal_origin},
+            {"code": "é", "app": self.config.portal_origin},
+            {"code": code, "app": self.config.portal_origin + "/"},
+            {"code": code, "app": self.config.portal_origin + "/auth"},
+            {"code": code, "app": self.config.portal_origin + "?x=1"},
+            {"code": code, "app": "HTTP://127.0.0.1:18080"},
+            {"code": code, "app": "https://user@127.0.0.1:18080"},
+            # Development admits loopback apps only.
+            {"code": code, "app": "https://class.example.com"},
+            [code, self.config.portal_origin],
         ):
             before = self.commons.calls
-            self.assertEqual(client.authenticate(value)[0], "invalid_request")
+            self.assertEqual(client.redeem(value)[0], "invalid_request")
             self.assertEqual(self.commons.calls, before)
-        for status, code, expected in (
-            (400, "INVALID_REQUEST", "invalid_request"),
-            (401, "UNAUTHORIZED", "invalid_credentials"),
-            (403, "FORBIDDEN", "account_disabled"),
-            (500, "INTERNAL_ERROR", "unavailable"),
+        for status, body, expected in (
+            (400, {"error": "CONNECT_CODE_INVALID"}, "invalid_code"),
+            (400, {"error": "INVALID_REQUEST"}, "invalid_request"),
+            (400, {"error": "UNAUTHORIZED"}, "unavailable"),
+            (400, {"error": "CONNECT_CODE_INVALID", "reason": "used"}, "unavailable"),
+            (401, {"error": "UNAUTHORIZED"}, "unavailable"),
+            (403, {"error": "FORBIDDEN"}, "unavailable"),
+            (404, {"error": "NOT_FOUND"}, "unavailable"),
+            (500, {"error": "INTERNAL_ERROR"}, "unavailable"),
         ):
-            self.commons.override = (status, json.dumps({"error": code}).encode())
-            self.assertEqual(
-                client.authenticate({"username": "alice", "password": "p"})[0], expected
-            )
+            self.commons.override = (status, json.dumps(body).encode())
+            self.assertEqual(client.redeem(self.code())[0], expected)
+
+    def test_production_identity_accepts_only_https_app_origins(self) -> None:
+        from openstack_platform.management.identity.client import redemption
+
+        code = "11111111-1111-4111-8111-111111111111.credential_-"
+        self.assertEqual(
+            redemption({"code": code, "app": "https://platform.example.com"}, development=False),
+            {"code": code, "app": "https://platform.example.com"},
+        )
+        for app in (
+            "http://platform.example.com",
+            "https://localhost:9443",
+            "https://127.0.0.1",
+            "https://Platform.example.com",
+            "https://platform.example.com/",
+        ):
+            with self.subTest(app=app), self.assertRaises(ValueError):
+                redemption({"code": code, "app": app}, development=False)
 
     def test_response_duplicate_extra_invalid_uuid_and_size_refuse_without_echo(self) -> None:
+        import contextlib
+        import io
+
         client = self.client()
+        profile = {
+            "user": "11111111-1111-4111-8111-111111111111",
+            "username": "alice",
+            "displayName": "Alice",
+            "email": "alice@example.com",
+        }
         bodies = [
             b"not-json",
             b'{"user":"x","user":"y"}',
             b'{"error":NaN}',
-            json.dumps(
-                {
-                    "user": "invalid",
-                    "username": "alice",
-                    "displayName": "Alice",
-                    "email": "alice@example.com",
-                }
-            ).encode(),
-            json.dumps(
-                {
-                    "user": "11111111-1111-4111-8111-111111111111",
-                    "username": "alice",
-                    "displayName": "Alice",
-                    "email": "alice@example.com",
-                    "extra": True,
-                }
-            ).encode(),
+            json.dumps({**profile, "user": "invalid"}).encode(),
+            json.dumps({**profile, "user": "ABCDEF01-1111-4111-8111-111111111111"}).encode(),
+            json.dumps({**profile, "user": profile["user"].replace("-", "")}).encode(),
+            json.dumps({**profile, "user": "{" + profile["user"] + "}"}).encode(),
+            json.dumps({**profile, "username": ""}).encode(),
+            json.dumps({**profile, "username": "x" * 33}).encode(),
+            json.dumps({**profile, "displayName": "x" * 257}).encode(),
+            json.dumps({**profile, "email": None}).encode(),
+            json.dumps({**profile, "extra": True}).encode(),
+            json.dumps({key: profile[key] for key in ("user", "username", "displayName")}).encode(),
             b"x" * 9000,
         ]
-        for body in bodies:
-            self.commons.override = (200, body)
-            self.assertEqual(
-                client.authenticate({"username": "alice", "password": "private-sentinel"}),
-                ("unavailable", None),
-            )
-        self.commons.override = (401, b'{"error":"UNAUTHORIZED","extra":1}')
-        self.assertEqual(
-            client.authenticate({"username": "alice", "password": "p"})[0], "unavailable"
-        )
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            for body in bodies:
+                self.commons.override = (200, body)
+                request = self.code()
+                self.assertEqual(client.redeem(request), ("unavailable", None))
+                # Operators get a reason; never the code or what Commons sent.
+                self.assertNotIn(request["code"], output.getvalue())
+        self.assertNotIn("alice", output.getvalue())
+        self.assertIn("identity-check=unavailable reason=", output.getvalue())
+        self.commons.override = (200, json.dumps({**profile, "displayName": ""}).encode())
+        self.assertEqual(client.redeem(self.code())[1]["displayName"], "alice")
 
     def test_redirect_refused_proxy_ignored_and_read_timeout_bounded(self) -> None:
         client = self.client()
         self.commons.override = (302, b"{}")
-        self.assertEqual(
-            client.authenticate({"username": "alice", "password": "p"})[0], "unavailable"
-        )
+        self.assertEqual(client.redeem(self.code())[0], "unavailable")
         self.commons.override = None
         with patch.dict(
             os.environ, {"HTTPS_PROXY": "http://192.0.2.1:9", "HTTP_PROXY": "http://192.0.2.1:9"}
         ):
-            self.assertIsNone(
-                client.authenticate({"username": "alice", "password": "local-alice-password"})[0]
-            )
+            self.assertIsNone(client.redeem(self.code())[0])
         self.commons.delay_seconds = 0.4
         started = time.monotonic()
-        self.assertEqual(
-            client.authenticate({"username": "alice", "password": "p"})[0], "unavailable"
-        )
+        self.assertEqual(client.redeem(self.code())[0], "unavailable")
         self.assertLess(time.monotonic() - started, 0.8)
 
     def test_system_ca_rejects_self_signed_and_production_dev_trust_is_rejected(self) -> None:
@@ -148,17 +184,11 @@ class IdentityTests(ManagementCase):
             read_seconds=0.2,
         )
         client = CommonsClient(config)
-        self.assertEqual(
-            client.authenticate({"username": "alice", "password": "local-alice-password"})[0],
-            "unavailable",
-        )
+        # Production refuses loopback apps, so this request names a public one.
+        request = {"code": self.code()["code"], "app": "https://platform.example.com"}
+        self.assertEqual(client.redeem(request)[0], "unavailable")
         with patch.dict(os.environ, {"SSL_CERT_FILE": str(self.root / "ca.pem")}):
-            self.assertEqual(
-                CommonsClient(config).authenticate(
-                    {"username": "alice", "password": "local-alice-password"}
-                )[0],
-                "unavailable",
-            )
+            self.assertEqual(CommonsClient(config).redeem(request)[0], "unavailable")
         with self.assertRaises(ValueError):
             CommonsClient(dataclasses.replace(config, development_ca=self.root / "ca.pem"))
         path = self.root / "identity-config.json"
@@ -175,7 +205,7 @@ class IdentityTests(ManagementCase):
         with self.assertRaisesRegex(ValueError, "system CAs"):
             IdentityConfig.load(path)
 
-    def test_connect_deadline_includes_slow_dns_and_readiness_never_checks_credentials(
+    def test_connect_deadline_includes_slow_dns_and_readiness_never_contacts_commons(
         self,
     ) -> None:
         client = self.client()
@@ -188,9 +218,7 @@ class IdentityTests(ManagementCase):
 
         with patch.object(socket, "getaddrinfo", side_effect=slow_resolve):
             started = time.monotonic()
-            self.assertEqual(
-                client.authenticate({"username": "alice", "password": "p"})[0], "unavailable"
-            )
+            self.assertEqual(client.redeem(self.code())[0], "unavailable")
             self.assertLess(time.monotonic() - started, 0.4)
         self.assertEqual(self.commons.calls, before)
         self.assertEqual(
@@ -223,9 +251,7 @@ class IdentityTests(ManagementCase):
             client = self.client(connect_seconds=1.0)
             with patch.object(socket, "getaddrinfo", side_effect=candidates):
                 started = time.monotonic()
-                error, user = client.authenticate(
-                    {"username": "alice", "password": "local-alice-password"}
-                )
+                error, user = client.redeem(self.code())
             self.assertIsNone(error)
             self.assertEqual(user["username"], "alice")
             self.assertLess(time.monotonic() - started, 1.5)
@@ -241,9 +267,7 @@ class IdentityTests(ManagementCase):
         release = threading.Timer(0.05, client.connect_capacity.release)
         release.start()
         try:
-            self.assertIsNone(
-                client.authenticate({"username": "alice", "password": "local-alice-password"})[0]
-            )
+            self.assertIsNone(client.redeem(self.code())[0])
         finally:
             release.join()
         # Queue time and DNS/TLS time share the same deadline, rather than each
@@ -252,9 +276,7 @@ class IdentityTests(ManagementCase):
         started = time.monotonic()
         before = self.commons.calls
         try:
-            self.assertEqual(
-                client.authenticate({"username": "alice", "password": "p"})[0], "unavailable"
-            )
+            self.assertEqual(client.redeem(self.code())[0], "unavailable")
             self.assertLess(time.monotonic() - started, 0.4)
             self.assertEqual(self.commons.calls, before)
         finally:
@@ -273,27 +295,23 @@ class IdentityTests(ManagementCase):
         fixtures = {
             f"student-{index}": (str(uuid.uuid4()), f"Student {index}") for index in range(50)
         }
-        self.commons.passwords.update({name: "fixture-password" for name in fixtures})
         barrier = threading.Barrier(50)
-        headers = {"origin": self.config.portal_origin, "x-portal-client-address": "192.0.2.1"}
+        headers = {"x-portal-client-address": "192.0.2.1"}
 
         def login(name: str) -> int:
-            status, options = client.request("GET", "/v1/auth/options", headers=headers)
+            status, started = client.request("GET", "/v1/auth/commons/start", headers=headers)
             if status != 200:
                 return status
-            binder = options["browser"]["cookies"][0]["value"]
+            binder = started["browser"]["cookies"][0]["value"]
+            state = urlsplit(started["browser"]["location"]).query.split("state=")[1]
+            code = self.commons.issue(name, self.config.portal_origin)
             barrier.wait(timeout=5)
-            status, _ = client.request(
-                "POST",
-                "/v1/auth/login",
-                {
-                    "csrfToken": options["data"]["csrfToken"],
-                    "username": name,
-                    "password": "fixture-password",
-                },
-                headers={**headers, "cookie": self.config.login_cookie + "=" + binder},
+            status, completed = client.request(
+                "GET",
+                "/v1/auth/commons/callback?" + urlencode({"code": code, "state": state}),
+                headers={**headers, "cookie": self.config.commons_cookie + "=" + binder},
             )
-            return status
+            return status if completed["browser"]["location"] == "/apps" else 0
 
         started = time.monotonic()
         try:
@@ -306,13 +324,11 @@ class IdentityTests(ManagementCase):
             broker_server.shutdown()
             broker_server.server_close()
 
-    def test_identity_socket_peer_rejected_before_parsing_password(self) -> None:
+    def test_identity_socket_peer_rejected_before_parsing_a_code(self) -> None:
         path = self.sockets / "denied.sock"
         calls = []
         router = Router()
-        router.add(
-            "POST", "/v1/authenticate", lambda req: (calls.append(req), Response(200, {}))[1]
-        )
+        router.add("POST", "/v1/redeem", lambda req: (calls.append(req), Response(200, {}))[1])
         server = ControllerServer(
             str(path), router, peer_policy=PeerPolicy(frozenset({(os.geteuid() + 1, os.getegid())}))
         )
@@ -325,7 +341,7 @@ class IdentityTests(ManagementCase):
         try:
             # Rejection happens at accept, before HTTP parsing. Reading it
             # without sending request bytes proves that boundary and avoids
-            # racing the server's close with a client's credential-body send.
+            # racing the server's close with a client's code-body send.
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(2)
                 connection.connect(str(path))

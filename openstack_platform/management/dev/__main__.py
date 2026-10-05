@@ -223,6 +223,8 @@ def run(
     )
     resources.callback(web.server_close)
     provider = Commons(("127.0.0.1", args.provider_port), config, assets, tls=commons_tls)
+    # Ask who is signing in each time, so people and browser tests can choose.
+    provider.approve = None
     resources.callback(provider.server_close)
     servers = [controller, identity, broker_server, web, provider]
     threads = [

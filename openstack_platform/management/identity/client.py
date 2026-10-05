@@ -1,4 +1,4 @@
-"""Bounded fixed-origin HTTPS implementation of Commons bb78c5e authentication."""
+"""Bounded fixed-origin HTTPS redemption of Commons Connect sign-in codes."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import errno
 import http.client
 import json
 import queue
+import re
 import socket
 import ssl
 import sys
@@ -23,10 +24,12 @@ from ..config import development_socket_path, management_peer, origin, socket_pa
 # 64 outbound exchanges leave headroom for bursts; 128 local requests allow a
 # bounded waiting queue and stay within the Unix transport's peer-policy ceiling.
 IDENTITY_CONNECTIONS = 64
+# Commons issues "<voucher id>.<credential>"; clients treat it as opaque.
+CONNECT_CODE = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
 
 def describe(error: BaseException) -> str:
-    """Name a failure for operators without echoing credentials or response bodies."""
+    """Name a failure for operators without echoing codes or response bodies."""
     if isinstance(error, ssl.SSLCertVerificationError):
         return f"tls-verify:{error.verify_message}"
     if isinstance(error, ssl.SSLError):
@@ -43,16 +46,18 @@ def unavailable(reason: str) -> tuple[str, None]:
     return "unavailable", None
 
 
-def credentials(value: object) -> dict[str, str]:
-    if not isinstance(value, dict) or set(value) != {"username", "password"}:
-        raise ValueError("invalid credential fields")
-    for name, maximum in (("username", 32), ("password", 128)):
-        if (
-            not isinstance(value[name], str)
-            or len(value[name].encode("utf-16-le", errors="surrogatepass")) // 2 > maximum
-        ):
-            raise ValueError("invalid credential lengths")
-    return value
+def redemption(value: object, *, development: bool) -> dict[str, str]:
+    """Accept one opaque code and the app origin it was issued to, nothing else."""
+    if not isinstance(value, dict) or set(value) != {"code", "app"}:
+        raise ValueError("invalid redeem fields")
+    code, app = value["code"], value["app"]
+    if not isinstance(code, str) or not CONNECT_CODE.fullmatch(code):
+        raise ValueError("invalid connect code")
+    # Commons compares the exact origin text, so only its canonical form is sent.
+    if not isinstance(app, str) or app != app.lower():
+        raise ValueError("invalid app origin")
+    origin(app, development=development)
+    return {"code": code, "app": app}
 
 
 @dataclass(frozen=True)
@@ -254,9 +259,9 @@ class CommonsClient:
             return None
         return connection
 
-    def authenticate(self, value: object) -> tuple[str | None, dict[str, str] | None]:
+    def redeem(self, value: object) -> tuple[str | None, dict[str, str] | None]:
         try:
-            checked = credentials(value)
+            checked = redemption(value, development=self.config.development)
         except ValueError:
             return "invalid_request", None
         deadline = time.monotonic() + self.config.connect_seconds
@@ -291,7 +296,7 @@ class CommonsClient:
             sock.settimeout(self.config.read_seconds)
             connection.request(
                 "POST",
-                "/api/auth/authenticate",
+                "/api/connect/redeem",
                 json.dumps(checked, ensure_ascii=True).encode(),
                 headers={
                     "Content-Type": "application/json",
@@ -315,35 +320,34 @@ class CommonsClient:
             if len(raw) > self.config.response_bytes:
                 return unavailable(f"oversize status={response.status}")
             body = strict_json(raw)
-            if response.status in {400, 401, 403}:
-                expected = {400: "INVALID_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN"}[
-                    response.status
-                ]
-                if body != {"error": expected}:
-                    return unavailable(f"error-body status={response.status}")
-                return {
-                    400: "invalid_request",
-                    401: "invalid_credentials",
-                    403: "account_disabled",
-                }[response.status], None
+            if response.status == 400:
+                # Every refusal is one uniform code; Commons never says why.
+                if body == {"error": "CONNECT_CODE_INVALID"}:
+                    return "invalid_code", None
+                if body == {"error": "INVALID_REQUEST"}:
+                    return "invalid_request", None
+                return unavailable("error-body status=400")
             if (
                 response.status != 200
                 or not isinstance(body, dict)
                 or set(body) != {"user", "username", "displayName", "email"}
             ):
                 return unavailable(f"response-shape status={response.status}")
-            if any(
-                not isinstance(body[name], str) or len(body[name]) > limit
-                for name, limit in (
-                    ("user", 36),
-                    ("username", 32),
-                    ("displayName", 256),
-                    ("email", 320),
+            if (
+                any(
+                    not isinstance(body[name], str) or len(body[name]) > limit
+                    for name, limit in (
+                        ("user", 36),
+                        ("username", 32),
+                        ("displayName", 256),
+                        ("email", 320),
+                    )
                 )
+                or not body["username"]
             ):
                 return unavailable("response-bounds")
             subject = str(uuid.UUID(body["user"]))
-            if subject != body["user"] or body["username"] != checked["username"]:
+            if subject != body["user"]:
                 return unavailable("identity-mismatch")
             return None, {
                 "subject": subject,

@@ -93,6 +93,8 @@ class Broker:
         common = {
             ("GET", "/v1/auth/options"),
             ("POST", "/v1/auth/login"),
+            ("GET", "/v1/auth/commons/start"),
+            ("GET", "/v1/auth/commons/callback"),
             ("GET", "/v1/session"),
             ("POST", "/v1/logout"),
             ("POST", "/v1/auth/token-info"),
@@ -103,6 +105,8 @@ class Broker:
         routes = [
             ("GET", "/v1/auth/options", self.auth.options),
             ("POST", "/v1/auth/login", self.auth.login),
+            ("GET", "/v1/auth/commons/start", self.auth.commons_start),
+            ("GET", "/v1/auth/commons/callback", self.auth.commons_callback),
             ("GET", "/v1/session", self.session),
             ("POST", "/v1/logout", self.auth.logout),
             ("GET", "/v1/apps", self.apps),
@@ -190,6 +194,8 @@ class Broker:
                         if request.path.endswith("/logs")
                         else {"limit"}
                         if request.path.endswith("/activity")
+                        else {"code", "state", "error"}
+                        if request.path == "/v1/auth/commons/callback"
                         else set()
                     )
                     if set(request.query) - allowed_query:

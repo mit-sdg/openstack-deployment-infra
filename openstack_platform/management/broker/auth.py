@@ -1,4 +1,4 @@
-"""Same-origin credential login, opaque sessions and session-bound CSRF."""
+"""Commons Connect and local sign-in, opaque sessions and session-bound CSRF."""
 
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlencode
 
 from ...controller.http import HttpError, Request, Response
 from ..common import MANAGEMENT_REQUESTS, digest, object_body, opaque, utc
 from ..config import Config
-from ..identity.client import credentials
+from ..identity.client import CONNECT_CODE
 from . import known_device
 from .anonymous import AddressLimits, AnonymousChallenge, client_address_bucket
 from .client import ControllerUnavailable, ProjectClient
@@ -33,7 +34,7 @@ class FailureWindow:
 
 
 class FailureLimits:
-    """Reserve possible failures before contacting identity, in fixed 60s windows."""
+    """Reserve possible failures before checking a password, in fixed 60s windows."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -113,7 +114,11 @@ class Auth:
         result: dict[str, str] = {}
         for pair in request.headers.get("cookie", "").split(";"):
             name, sep, value = pair.strip().partition("=")
-            if name not in {self.config.login_cookie, self.config.session_cookie}:
+            if name not in {
+                self.config.login_cookie,
+                self.config.session_cookie,
+                self.config.commons_cookie,
+            }:
                 continue
             pattern = (
                 r"[A-Za-z0-9_-]{43}"
@@ -128,6 +133,11 @@ class Auth:
     @staticmethod
     def directive(name: str, value: str = "", lifetime: int = 0) -> dict[str, object]:
         return {"name": name, "value": value, "maxAge": lifetime}
+
+    @staticmethod
+    def redirect(location: str, cookies: list[dict[str, object]]) -> Response:
+        """Ask web for a 303; it checks the location against what each route may send."""
+        return Response(200, {"browser": {"status": 303, "location": location, "cookies": cookies}})
 
     def portal_origin(self, request: Request) -> None:
         if request.headers.get("origin") != self.config.portal_origin:
@@ -197,7 +207,7 @@ class Auth:
         *,
         reauthenticated: bool = False,
         proof_at: float | None = None,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         now, session = self.clock(), opaque()
         lifetime = (
             self.config.absolute_seconds
@@ -253,7 +263,6 @@ class Auth:
 
     def login(self, request: Request) -> Response:
         self.anonymous_post(request)
-        now = self.clock()
         body = request.body
         required = {"csrfToken", "username", "password"}
         if (
@@ -262,135 +271,158 @@ class Auth:
             or set(body) - required - {"method", "totp", "role"}
         ):
             raise HttpError(400, "INVALID_REQUEST", "Invalid sign-in fields.")
-        method = body.get("method", "commons")
-        if method not in ("commons", "local"):
-            raise HttpError(400, "INVALID_REQUEST", "Invalid sign-in method.")
-        verified = None
-        if method == "local":
-            from .local_auth import authenticate as local_authenticate
-            from .local_security import username as local_username
-
-            try:
-                name = local_username(body["username"])
-                supplied = body["password"]
-                if not isinstance(supplied, str) or len(supplied.encode("utf-8")) > 1024:
-                    raise ValueError("invalid credentials")
-            except (ValueError, UnicodeError):
-                raise HttpError(
-                    401,
-                    "INVALID_CREDENTIALS",
-                    "Username, password or authentication code is incorrect.",
-                ) from None
-            verified = local_authenticate(
-                self,
-                name,
-                supplied,
-                body.get("totp"),
-                client_address_bucket(request),
-                device=known_device.read(request, self.config.device_cookie),
+        method = body.get("method", "local")
+        if method == "commons":
+            # Class accounts sign in on Commons itself; the portal never takes
+            # their passwords. Pages from before that change still send this.
+            raise HttpError(
+                400,
+                "INVALID_REQUEST",
+                f"Use “Sign in with your {self.config.class_label}” instead. Reload this page.",
             )
-            issuer, subject = "local", verified["subject"]
-            profile = {"username": name, "displayName": verified["display_name"]}
-        else:
-            self.address_limits.check(request, "start", now)
-            try:
-                checked = credentials({"username": body["username"], "password": body["password"]})
-            except ValueError:
-                raise HttpError(
-                    400, "INVALID_REQUEST", "Username or password exceeds the allowed bounds."
-                ) from None
-            profile = self.check_identity(checked, client_address_bucket(request), now)
-            issuer, subject = self.config.issuer, profile["subject"]
+        if method != "local":
+            raise HttpError(400, "INVALID_REQUEST", "Invalid sign-in method.")
+        from .local_auth import authenticate as local_authenticate
+        from .local_security import username as local_username
+
+        try:
+            name = local_username(body["username"])
+            supplied = body["password"]
+            if not isinstance(supplied, str) or len(supplied.encode("utf-8")) > 1024:
+                raise ValueError("invalid credentials")
+        except (ValueError, UnicodeError):
+            raise HttpError(
+                401,
+                "INVALID_CREDENTIALS",
+                "Username, password or authentication code is incorrect.",
+            ) from None
+        verified = local_authenticate(
+            self,
+            name,
+            supplied,
+            body.get("totp"),
+            client_address_bucket(request),
+            device=known_device.read(request, self.config.device_cookie),
+        )
         with self.database.connect(write=True) as db:
-            existing = db.execute(
-                "SELECT * FROM users WHERE issuer=? AND subject=?", (issuer, subject)
+            row = db.execute(
+                "SELECT * FROM users WHERE issuer='local' AND subject=?", (verified["subject"],)
             ).fetchone()
-            if existing is not None and (not existing["enabled"] or existing["status"] != "active"):
+            if row is not None and (not row["enabled"] or row["status"] != "active"):
                 raise HttpError(
                     403,
                     "ACCOUNT_DISABLED",
                     "Your portal account is disabled. Contact course staff.",
                 )
-            if verified is not None and (
-                existing is None or existing["generation"] != verified["generation"]
-            ):
+            if row is None or row["generation"] != verified["generation"]:
                 raise HttpError(
                     401,
                     "INVALID_CREDENTIALS",
                     "Username, password or authentication code is incorrect.",
                 )
-            identifier = existing["id"] if existing is not None else str(uuid.uuid4())
-            if issuer != "local":
-                db.execute(
-                    "INSERT INTO users(id,issuer,subject,username,display_name,created,last_login) VALUES(?,?,?,?,?,?,?) ON CONFLICT(issuer,subject) DO UPDATE SET username=excluded.username,display_name=excluded.display_name",
-                    (
-                        identifier,
-                        issuer,
-                        subject,
-                        profile["username"],
-                        profile["displayName"],
-                        self.clock(),
-                        self.clock(),
-                    ),
-                )
-            row = db.execute("SELECT * FROM users WHERE id=?", (identifier,)).fetchone()
-            if row is None:
-                raise HttpError(401, "INVALID_CREDENTIALS", "Sign-in could not complete.")
-            response = self.mint(
-                db, dict(row), request, reauthenticated=issuer == "local" and row["role"] == "admin"
-            )
+            response = self.mint(db, dict(row), request, reauthenticated=row["role"] == "admin")
         return Response(200, response)
 
-    def check_identity(self, checked: dict[str, str], address: str, now: float) -> dict[str, Any]:
-        reservation = self.failures.reserve(checked["username"], address, now)
-        failed = succeeded = False
+    def commons_start(self, request: Request) -> Response:
+        """Bind a fresh state to this browser, then send it to Commons to approve."""
+        # Only the portal's own button (or a typed URL) starts sign-in; another
+        # site can link to the sign-in page instead.
+        if request.headers.get("sec-fetch-site", "none") not in ("same-origin", "none"):
+            return self.redirect("/sign-in", [])
+        now = self.clock()
         try:
-            try:
-                status, result = self.identity.request("POST", "/v1/authenticate", checked)
-            except ControllerUnavailable:
-                raise HttpError(
-                    503,
-                    "IDENTITY_UNAVAILABLE",
-                    "Class sign-in is temporarily unavailable. Please try again.",
-                    retryable=True,
-                ) from None
-            if status != 200:
-                code = result.get("error", {}).get("code")
-                if status == 401 and code == "invalid_credentials":
-                    failed = True
-                    raise HttpError(
-                        401, "INVALID_CREDENTIALS", "Username or password is incorrect."
-                    )
-                if status == 403 and code == "account_disabled":
-                    raise HttpError(
-                        403,
-                        "ACCOUNT_DISABLED",
-                        "Your class account is archived. Contact course staff.",
-                    )
-                if status == 400 and code == "invalid_request":
-                    raise HttpError(400, "INVALID_REQUEST", "The sign-in request is invalid.")
-                raise HttpError(
-                    503,
-                    "IDENTITY_UNAVAILABLE",
-                    "Class sign-in is temporarily unavailable. Please try again.",
-                    retryable=True,
-                )
-            user = result.get("data")
-            if (
-                not isinstance(user, dict)
-                or set(user) != {"subject", "username", "displayName"}
-                or user["username"] != checked["username"]
-            ):
-                raise HttpError(
-                    503,
-                    "IDENTITY_UNAVAILABLE",
-                    "Class sign-in is temporarily unavailable.",
-                    retryable=True,
-                )
-            succeeded = True
-            return user
-        finally:
-            self.failures.finish(reservation, failed=failed, succeeded=succeeded)
+            self.address_limits.check(request, "start", now)
+        except HttpError as error:
+            if error.status != 429:
+                raise
+            return self.redirect("/sign-in?error=RATE_LIMITED", [])
+        binder = self.anonymous.issue(now, "commons-binder")
+        query = urlencode(
+            {
+                "app": self.config.portal_origin,
+                "state": self.anonymous.mac("commons-state", binder),
+            }
+        )
+        return self.redirect(
+            f"{self.config.commons_origin}/connect?{query}",
+            [self.directive("commons", binder, 600)],
+        )
+
+    def commons_callback(self, request: Request) -> Response:
+        """Redeem the code Commons approved, only in the browser that asked for it."""
+        now, cleared = self.clock(), [self.directive("commons")]
+        try:
+            self.address_limits.check(request, "start", now)
+        except HttpError as error:
+            if error.status != 429:
+                raise
+            return self.redirect("/sign-in?error=RATE_LIMITED", cleared)
+        query = {name: values[0] for name, values in request.query.items() if len(values) == 1}
+        if len(query) != len(request.query):
+            return self.redirect("/sign-in?error=SIGN_IN_EXPIRED", cleared)
+        if set(query) == {"error", "state"}:
+            # Cancel at Commons. There is no code, so nothing is redeemed.
+            return self.redirect("/sign-in?error=COMMONS_CANCELLED", cleared)
+        binder = self.cookies(request).get(self.config.commons_cookie, "")
+        state = query.get("state", "")
+        if (
+            set(query) != {"code", "state"}
+            or not CONNECT_CODE.fullmatch(query["code"])
+            or not re.fullmatch(r"[A-Za-z0-9._~-]{16,256}", state)
+            or not self.anonymous.valid(binder, now, "commons-binder")
+            or not hmac.compare_digest(self.anonymous.mac("commons-state", binder), state)
+        ):
+            return self.redirect("/sign-in?error=SIGN_IN_EXPIRED", cleared)
+        profile = self.redeem(query["code"])
+        if isinstance(profile, str):
+            return self.redirect("/sign-in?error=" + profile, cleared)
+        issuer, subject = self.config.issuer, profile["subject"]
+        with self.database.connect(write=True) as db:
+            existing = db.execute(
+                "SELECT * FROM users WHERE issuer=? AND subject=?", (issuer, subject)
+            ).fetchone()
+            if existing is not None and (not existing["enabled"] or existing["status"] != "active"):
+                return self.redirect("/sign-in?error=ACCOUNT_DISABLED", cleared)
+            identifier = existing["id"] if existing is not None else str(uuid.uuid4())
+            db.execute(
+                "INSERT INTO users(id,issuer,subject,username,display_name,created,last_login) VALUES(?,?,?,?,?,?,?) ON CONFLICT(issuer,subject) DO UPDATE SET username=excluded.username,display_name=excluded.display_name",
+                (
+                    identifier,
+                    issuer,
+                    subject,
+                    profile["username"],
+                    profile["displayName"],
+                    self.clock(),
+                    self.clock(),
+                ),
+            )
+            row = db.execute("SELECT * FROM users WHERE id=?", (identifier,)).fetchone()
+            if row is None:
+                return self.redirect("/sign-in?error=SIGN_IN_EXPIRED", cleared)
+            minted = self.mint(db, dict(row), request)
+        return self.redirect(minted["data"]["returnPath"], minted["browser"]["cookies"] + cleared)
+
+    def redeem(self, code: str) -> dict[str, str] | str:
+        """Exchange a code through identity; a string is the sign-in page's error."""
+        try:
+            status, result = self.identity.request(
+                "POST", "/v1/redeem", {"code": code, "app": self.config.portal_origin}
+            )
+        except ControllerUnavailable:
+            return "IDENTITY_UNAVAILABLE"
+        error = result.get("error")
+        if status == 400 and isinstance(error, dict) and error.get("code") == "invalid_code":
+            # Used, expired, withdrawn or for another app: Commons doesn't say.
+            return "SIGN_IN_EXPIRED"
+        user = result.get("data")
+        if (
+            status != 200
+            or not isinstance(user, dict)
+            or set(user) != {"subject", "username", "displayName"}
+            or not all(isinstance(value, str) for value in user.values())
+        ):
+            return "IDENTITY_UNAVAILABLE"
+        return user
 
     def session_row(
         self, db: sqlite3.Connection, sid: str, now: float, kind: str | None = None
