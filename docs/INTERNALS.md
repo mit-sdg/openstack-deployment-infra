@@ -386,6 +386,7 @@ capability guarded by the portal admin role.
 | `GET /v1/applications/{id}/runtime-log` | Read bounded current runtime output; `stream=stdout` (default) or `stderr` |
 | `GET /v1/applications/{id}/source-key` | Read the app's deploy key: public half and fingerprint only |
 | `POST /v1/applications/{id}/source-key` | Create the deploy key if absent, or replace it with `{"replace": true}` |
+| `DELETE /v1/applications/{id}/source-key` | Remove the deploy key; an app without one gets the same `present: false` answer |
 | `POST /v1/applications/{id}/source-key/check` | Check `{repository, branch}` with the deploy key; returns the branch head or a named problem |
 | `POST /v1/applications/{id}/source/commits` | Read five recent saved-branch commits through the app deploy key |
 | `POST /v1/applications/{id}/source/check` | Check an exact fetched commit against the build checkout validators |
@@ -475,10 +476,16 @@ adds the public key on GitHub as a read-only deploy key; only a repository admin
 can, which ties the app to a repository its owner controls. `app.source.check`
 runs `git ls-remote` with the key and names the problem (`key-refused`,
 `not-found`, `branch-missing`, `unavailable`) without echoing GitHub's output.
+Removing a key (`app.source.key` mode `delete`) renames the app's whole key
+directory to a `.old-*` name before deleting it, so builds and backups see the
+full pair or none; builds of a private repository then fail with
+`SOURCE_REJECTED` until a new key exists. Cascade app deletion removes the key
+right after the job and its Variable are absent; a retried deletion finds none.
 Keys are backed up separately alongside the hosted-controller SQLite snapshot,
 encrypted to the off-platform escrow recipient. The database manifest binds the
-paired key archive. Only direct private/public files for snapshot slugs are read;
-helper replacement directories are excluded. Offline restore validates slugs and
+paired key archive. Only direct private/public files for snapshot slugs of apps
+that are not deleted (no slug tombstone) are read; helper replacement
+directories are excluded. Offline restore validates slugs and
 pairs, installs controller-owned 0700 directories/0600 files, and preserves public
 key mtimes for the portal's createdAt display.
 
@@ -574,6 +581,16 @@ Each accepted set uses ciphertext/data, checksums, and a final manifest as its
 commit marker. Managed restore verification uses disposable PostgreSQL and
 MongoDB containers and validates Garage archives before writing
 `RESTORE-MANIFEST`.
+
+The hosted-controller and management-broker backup units prune their own roots
+after each commit (`openstack_platform/backup_retention.py`). Committed sets
+named within the last 14 days stay, and the newest three complete sets always
+stay, so off-site export, which takes the newest committed set, always has one.
+Removal works through the root's directory handle on direct files owned by the
+unit, manifest first, so an interrupted removal leaves only uncommitted debris.
+Deploy-key archives go when they are older than 14 days and no remaining SQLite
+manifest names them or shares their timestamp. A pruning failure fails the unit
+but leaves the new backup committed.
 
 Version-3 off-site bundles include the SQLite manifest’s matching deploy-key
 archive; legacy versions 1 and 2 remain accepted without keys.
@@ -995,10 +1012,11 @@ currently materializes all attempts before paging; staff history refresh is
 manual and controller behavior/privileges are unchanged.
 
 Staff pages use the same React app/shell, themes, feedback and presentation
-components. Staff navigation covers owners, applications and operations; mutation
-components do not mount on these read-only pages. Staff manage apps from
-**Admin → All apps**, the app administration pages, which hide the admin-only
-actions and the Accounts and Audit log tabs. Directory pages
+components. The Staff section covers owners and operations; mutation components
+do not mount on these read-only pages. Staff manage apps from one list,
+**Manage apps** (the app administration pages at `/admin/apps`), which hides the
+admin-only actions and the Accounts and Audit log tabs; old `/staff/apps` links
+redirect there. The `/api/v1/staff/apps*` reads remain for deployment pages. Directory pages
 refresh manually; detail/operation polling runs every 15 seconds while visible,
 pauses in hidden tabs, and stops after repeated failures. Idle/absolute expiry,
 logout and access loss cancel queries and clear private in-memory data/CSRF;

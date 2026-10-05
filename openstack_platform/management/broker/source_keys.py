@@ -38,6 +38,7 @@ class SourceKeys:
         return [
             ("GET", root + "/{app}/source-key", self.read),
             ("POST", root + "/{app}/source-key", self.create),
+            ("DELETE", root + "/{app}/source-key", self.remove),
             ("POST", root + "/{app}/source-key/check", self.check),
             ("POST", root + "/{app}/source/commits", self.commits),
             ("POST", root + "/{app}/source/check", self.preflight),
@@ -117,6 +118,33 @@ class SourceKeys:
         with self.lock:
             self.checked.pop(app["id"], None)
         return Response(200, {"data": self.key_model(result)})
+
+    def remove(self, request: Request) -> Response:
+        """Delete the key; builds of a private repository fail until a new one exists."""
+        user, app = self.broker.own(request, mutation=True)
+        if request.body not in (None, {}):
+            raise HttpError(400, "INVALID_REQUEST", "Unexpected deploy key fields.")
+        result = self.controller("DELETE", f"/v1/applications/{app['id']}/source-key")
+        if result.get("present") is not False:
+            raise ControllerUnavailable("deploy key was not removed")
+        now = self.broker.auth.clock()
+        with self.broker.database.connect(write=True) as db:
+            db.execute(
+                "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
+                (user["id"], app["id"], None, "source_key_remove", now),
+            )
+            if request.path.startswith("/v1/admin-apps/"):
+                audit(
+                    db,
+                    user["id"],
+                    app["user_id"],
+                    "app_source_key",
+                    {"applicationId": app["id"], "removed": True},
+                    now,
+                )
+        with self.lock:
+            self.checked.pop(app["id"], None)
+        return Response(200, {"data": {"present": False}})
 
     def check(self, request: Request) -> Response:
         """Whether GitHub accepts the key for the saved repository and branch."""

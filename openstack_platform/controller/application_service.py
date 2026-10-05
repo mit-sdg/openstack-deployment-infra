@@ -662,6 +662,19 @@ class ApplicationService:
                 db.checkpoint_operation(
                     self.connection, operation.operation_id, phase="variable_absent", refs=refs
                 )
+                # Nothing builds this app any more. Its deploy key goes before
+                # the tombstone; an app without one, or a retry, finds none.
+                key = self.helper_caller(
+                    self.config,
+                    "app.source.key",
+                    {"slug": current.slug, "mode": "delete"},
+                    deadline=deadline,
+                )
+                if key.get("present") is not False:
+                    raise app.ApplicationError("deploy key absence was not confirmed")
+                db.checkpoint_operation(
+                    self.connection, operation.operation_id, phase="source_key_absent", refs=refs
+                )
                 db.checkpoint_operation(
                     self.connection,
                     operation.operation_id,

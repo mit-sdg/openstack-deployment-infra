@@ -378,6 +378,23 @@ def _create_source_key(runtime: HelperRuntime, app_slug: str, *, replace: bool) 
         shutil.rmtree(staged, ignore_errors=True)
 
 
+def _remove_source_key(runtime: HelperRuntime, app_slug: str) -> None:
+    """Retire the whole key directory at once; an app without a key is done.
+
+    Backups skip ``.old-*``, so they see either the full pair or no key.
+    """
+    directory = _source_key_directory(runtime, app_slug)
+    try:
+        metadata = directory.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise HelperActionError("INVALID_STATE", "deploy key directory is not a direct directory")
+    retired = directory.parent / f".old-{uuid_module.uuid4().hex}"
+    os.rename(directory, retired)
+    shutil.rmtree(retired)
+
+
 def _write_build_log_state(path: Path, state: str) -> None:
     if state not in {"running", "complete", "failed"}:
         raise ValueError("build log state is invalid")
@@ -607,9 +624,11 @@ def _provider_app(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
     if action == "app.source.key":
         _exact_args(args, {"slug", "mode"}, action)
         app_slug = slug(args["slug"])
-        if args["mode"] not in {"read", "create", "replace"}:
-            raise ValidationError("deploy key mode must be read, create or replace")
-        if args["mode"] != "read":
+        if args["mode"] not in {"read", "create", "replace", "delete"}:
+            raise ValidationError("deploy key mode must be read, create, replace or delete")
+        if args["mode"] == "delete":
+            _remove_source_key(runtime, app_slug)
+        elif args["mode"] != "read":
             _create_source_key(runtime, app_slug, replace=args["mode"] == "replace")
         public = _source_public_key(runtime, app_slug)
         return {"slug": app_slug, "present": public is not None, **(public or {})}

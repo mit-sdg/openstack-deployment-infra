@@ -143,6 +143,7 @@ cross-cutting boundaries.
 - `openstack_platform/__init__.py` — package description and protocol version.
 - `openstack_platform/acceptance.py` — plan, checkpoint, evidence, and verification engine for disposable live acceptance.
 - `openstack_platform/acceptance_live_driver.py` — reviewed adapter from acceptance protocol actions to supported repository/operator interfaces.
+- `openstack_platform/backup_retention.py` — age-and-count pruning of committed hosted-controller and broker backup sets, manifest first.
 - `openstack_platform/config.py` — typed, strict loading of deployment inventory and private operator policy.
 - `openstack_platform/fixed_ip.py` — exact retained primary Neutron port capability, ownership, and provider UUID validation.
 - `openstack_platform/floating_ip.py` — bounded, project-scoped Neutron capability and floating IPv4 ownership operations.
@@ -179,7 +180,7 @@ cross-cutting boundaries.
 - `openstack_platform/controller/maintenance.py` — journals verified process stop and optional worker removal after build/preflight, under the deployment's application lock.
 - `openstack_platform/controller/worker_reuse.py` — read-only exact accepted-worker identity, image, and capacity validation for same-worker deployments.
 - `openstack_platform/controller/environment_service.py` — write-only environment mutation orchestration.
-- `openstack_platform/controller/source_key_backup.py` — bounded no-follow deploy-key archive creation and offline restore staging with validated database slugs.
+- `openstack_platform/controller/source_key_backup.py` — bounded no-follow deploy-key archive creation for apps that are not deleted, and offline restore staging with validated database slugs.
 - `openstack_platform/controller/hosted_backup.py` — creates encrypted committed backups of the admin-hosted controller database.
 - `openstack_platform/controller/http.py` — bounded HTTP/1.1 JSON server over Unix sockets with peer credential and resource enforcement.
 - `openstack_platform/controller/image_service.py` — validated hosted role-image metadata selection and immutable worker/builder provisioning snapshots.
@@ -274,7 +275,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_helper_application_actions.py` — Nomad helper deployment, ownership, health, promotion, environment, logs, and removal tests.
 - `tests/test_host_user_data.py` — protected-input validation and cloud-init rendering tests for each role.
 - `tests/test_ingress_credentials.py` — per-replacement token validation, rotation, cleanup, non-persistence, and CLI contract tests.
-- `tests/test_hosted_controller_backup.py` — hosted SQLite backup encryption, evidence, permissions, and failure cleanup tests.
+- `tests/test_hosted_controller_backup.py` — hosted SQLite backup encryption, evidence, permissions, failure cleanup, and retention tests.
 - `tests/test_image_pipeline.py` — retained-byte, CI/source-run identity, signed promotion, unsigned rollback, and publication gate tests.
 - `tests/test_infra_http.py` — bounded infrastructure HTTP helper redirect, size, status, and JSON tests.
 - `tests/test_live_acceptance.py` — plan immutability, checkpoint/resume, evidence chain, signature, and failure tests.
@@ -323,9 +324,9 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_management_staff.py` — staff read-only authority, disclosure, quota/paging/audit and migration/restore evidence.
 - `openstack_platform/management/broker/members.py` — team members of an app (owner, staff or admin managed, members can leave) and the app activity feed.
 - `tests/test_management_teams.py` — member access and quota, owner-only team changes, leaving, limits, write re-checks, retry keys and admin reassignment.
-- `openstack_platform/management/broker/source_keys.py` — owner/staff/admin deploy key routes: public half only, audited changes, shared one-at-a-time access checks.
-- `tests/test_management_source_keys.py` — deploy key ownership, audit, shared access checks and older-controller answers.
-- `tests/test_private_repositories.py` — pinned GitHub host key, deploy-key fetch and access check, helper key lifecycle and build fallback.
+- `openstack_platform/management/broker/source_keys.py` — owner/staff/admin deploy key routes: public half only, audited changes and removal, shared one-at-a-time access checks.
+- `tests/test_management_source_keys.py` — deploy key ownership, removal, audit, shared access checks and older-controller answers.
+- `tests/test_private_repositories.py` — pinned GitHub host key, deploy-key fetch and access check, helper key creation, replacement and removal, and build fallback.
 - `openstack_platform/management/broker/runtime_logs.py` — owner/admin runtime log reads, shared briefly and one at a time so they can't crowd the controller.
 - `tests/test_checkout_preflight_parity.py` — runs the shared preflight cases through the build's `validate_checkout`.
 - `tests/test_management_runtime_logs.py` — runtime log ownership, streams, sharing, not-running and older-controller answers, and bounded tails.
@@ -347,7 +348,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/public/favicon.svg` — code-native portal mark.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory TanStack Query setup.
 - `frontend/owner-portal/src/staffApi.ts` — strict staff metadata types/decoders and CSRF-bearing, cancellable GET reads.
-- `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff route table and session-activity provider.
+- `frontend/owner-portal/src/pages/Staff.tsx` — read-only staff route table (owners, operations, deployments; old app links redirect to Manage apps) and session-activity provider.
 - `frontend/owner-portal/src/pages/staff/common.tsx` — staff polling and chained reads, paging, load and not-found states, table columns and activity rows.
 - `frontend/owner-portal/src/pages/staff/Owners.tsx` — staff owner list and owner page with quotas, apps and recent activity.
 - `frontend/owner-portal/src/pages/staff/Apps.tsx` — staff app list (owner filter) and app page with health, deployments and activity.
@@ -387,8 +388,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/LogViewer.test.tsx` — log stream switching, refresh, not-running and unavailable-stream tests.
 - `frontend/owner-portal/src/components/TeamSection.tsx` — app team table with add, remove and leave, for owner and admin pages.
 - `frontend/owner-portal/src/components/TeamSection.test.tsx` — owner team management and member leave tests.
-- `frontend/owner-portal/src/components/RepositoryAccess.tsx` — Settings section for a private repository's deploy key and access check.
-- `frontend/owner-portal/src/components/RepositoryAccess.test.tsx` — deploy key creation, access results, replacement and private-repo latest-commit tests.
+- `frontend/owner-portal/src/components/RepositoryAccess.tsx` — Settings section to create, replace, remove and check a private repository's deploy key.
+- `frontend/owner-portal/src/components/RepositoryAccess.test.tsx` — deploy key creation, access results, replacement, removal and private-repo latest-commit tests.
 - `frontend/owner-portal/src/components/StartupRecord.tsx` — why a failed deployment's new version stopped: summary, events and output.
 - `frontend/owner-portal/src/components/StartupRecord.test.tsx` — startup summary wording and errors-first display tests.
 - `frontend/owner-portal/src/components/RecentCommits.tsx` — recent-commit picker for deploys, read from GitHub by the browser.
@@ -424,7 +425,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_management_contract.py` — real project-socket broker contract and fake/real wire-shape, errors, cleanup, and read evidence.
 - `openstack_platform/management/backup.py` — online SQLite backup, encrypted evidence, verification and offline session-invalidating restore.
 - `tests/test_managed_data_backup.py` — hermetic data-only backup and legacy restore compatibility checks.
-- `tests/test_management_backup.py` — fourth-class backup, off-site compatibility, restore guards and full-loss drill tests.
+- `tests/test_management_backup.py` — fourth-class backup, retention, off-site compatibility, restore guards and full-loss drill tests.
 - `tests/test_management_platform.py` — explicit ingress identity configuration and Nix hosting boundary checks.
 
 - `tests/collect_owner_portal_artifacts.py` — bounded CI upload collector for fixture screenshots and sanitized API failure metadata.

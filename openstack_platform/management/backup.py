@@ -11,7 +11,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .. import durable, runtime
+from .. import backup_retention, durable, runtime
 from ..controller.hosted_backup import _fsync_directory, _sha256, _write_file
 from ..validation import age_recipient as validate_recipient
 from .broker.database import validate_database
@@ -190,7 +190,7 @@ def restore_database(source: Path, destination: Path, *, identity: str | None = 
         _fsync_directory(destination.parent)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Encrypted broker backup and offline session-invalidating restore"
     )
@@ -211,10 +211,20 @@ def main() -> None:
     if args.command == "backup":
         if args.recipient_file.is_symlink() or args.recipient_file.stat().st_size > 256:
             raise ValueError("invalid public recipient file")
+        now = datetime.now(UTC)
         name, checksum = backup_database(
-            args.database, args.destination, args.recipient_file.read_text().strip(), args.age
+            args.database,
+            args.destination,
+            args.recipient_file.read_text().strip(),
+            args.age,
+            created_at=now,
         )
         print(f"management-broker-backup={name} sha256={checksum}")
+        # The new set is committed; a retention failure only fails the unit.
+        if not backup_retention.prune_after_commit(
+            args.destination, series="management-broker", keep=name, now=now
+        ):
+            return 1
     elif args.command == "restore":
         config = Config.load(args.config) if args.config else None
         identity = digest(config.portal_origin + "\n" + config.issuer) if config else None
@@ -227,7 +237,8 @@ def main() -> None:
         finally:
             connection.close()
         print("management-broker-backup=verified integrity=ok")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

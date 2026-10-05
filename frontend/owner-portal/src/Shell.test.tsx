@@ -97,16 +97,13 @@ describe('portal shell', () => {
     show('/admin/apps');
     const nav = (await screen.findAllByRole('navigation', { name: 'Main' }))[0];
     expect(within(nav).getByRole('link', { name: 'Staff' })).toBeVisible();
-    expect(within(nav).getByRole('link', { name: 'Admin' })).toHaveAttribute(
+    // Staff manage apps from one list, with no admin tabs.
+    expect(within(nav).getByRole('link', { name: 'Manage apps' })).toHaveAttribute(
       'aria-current',
       'page',
     );
-    const tabs = screen.getByRole('navigation', { name: 'Admin pages' });
-    expect(
-      within(tabs)
-        .getAllByRole('link')
-        .map((link) => link.textContent),
-    ).toEqual(['All apps']);
+    expect(within(nav).queryByRole('link', { name: 'Admin' })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'Admin pages' })).toBeNull();
     await waitFor(() => expect(list).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: 'Account: Alice Student' }));
     expect(screen.getByText('Staff', { selector: '.ui-badge' })).toBeVisible();

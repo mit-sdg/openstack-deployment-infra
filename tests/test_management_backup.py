@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sqlite3
-from datetime import UTC, datetime
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
-from openstack_platform import durable, recovery_bundle
+from openstack_platform import backup_retention, durable, recovery_bundle
 from openstack_platform.config import load_platform
+from openstack_platform.management import backup
 from openstack_platform.management.backup import (
     backup_database,
     restore_database,
@@ -32,14 +37,90 @@ class ManagementBackupTests(ManagementCase):
         )
         os.chmod(self.age, 0o700)
 
-    def make_backup(self) -> tuple[str, str]:
+    def make_backup(
+        self, created_at: datetime = datetime(2026, 10, 2, 2, 30, tzinfo=UTC)
+    ) -> tuple[str, str]:
         return backup_database(
             self.broker.database.path,
             self.destination,
             "age1" + "q" * 58,
             str(self.age),
-            created_at=datetime(2026, 10, 2, 2, 30, tzinfo=UTC),
+            created_at=created_at,
         )
+
+    def names(self) -> set[str]:
+        return {path.name for path in self.destination.iterdir()}
+
+    @staticmethod
+    def trio(name: str) -> set[str]:
+        return {name, name + ".sha256", name + ".manifest"}
+
+    def test_retention_keeps_two_weeks_and_the_newest_three_sets(self) -> None:
+        now = datetime(2026, 10, 2, 2, 30, tzinfo=UTC)
+        names = [self.make_backup(now - timedelta(days=days))[0] for days in (30, 20, 16, 10, 0)]
+        leftover = "management-broker-20260801T023000Z.sqlite3.age"
+        (self.destination / leftover).write_bytes(b"age-encryption.org/v1\n")
+        (self.destination / "management-broker-20260802T023000Z.sqlite3.age.manifest").symlink_to(
+            self.destination / names[0]
+        )
+        (self.destination / "README").write_text("operator note\n")
+        result = backup_retention.prune(
+            self.destination, series="management-broker", keep=names[-1], now=now
+        )
+        # Ten days and today are inside the window; the floor keeps a third.
+        self.assertEqual(
+            self.names(),
+            {
+                ".staging",
+                "README",
+                "management-broker-20260802T023000Z.sqlite3.age.manifest",
+                *(item for name in names[2:] for item in self.trio(name)),
+            },
+        )
+        self.assertEqual((result.removed, result.kept, len(result.ignored)), (3, 3, 2))
+        selected = recovery_bundle._selected_component_files("management-broker", self.destination)
+        self.assertEqual({path.name for path in selected}, self.trio(names[-1]))
+
+    def run_command(self, now: datetime) -> tuple[int, str, str]:
+        recipient = self.root / "recipient.txt"
+        recipient.write_text("age1" + "q" * 58 + "\n")
+        argv = [
+            "openstack-platform-management-broker-backup",
+            "backup",
+            f"--database={self.broker.database.path}",
+            f"--destination={self.destination}",
+            f"--recipient-file={recipient}",
+            f"--age={self.age}",
+        ]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(backup, "datetime", mock.Mock(now=lambda _zone: now)),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            status = backup.main()
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_backup_command_prunes_after_commit_and_fails_on_retention_failure(self) -> None:
+        now = datetime(2026, 10, 2, 2, 30, tzinfo=UTC)
+        for days in (90, 80, 70):
+            self.make_backup(now - timedelta(days=days))
+        status, stdout, _stderr = self.run_command(now)
+        self.assertEqual(status, 0)
+        self.assertIn("management-broker-backup=management-broker-20261002T023000Z", stdout)
+        self.assertIn("retention=ok removed=1 kept=3", stdout)
+
+        self.make_backup(now - timedelta(days=60))
+        later = now + timedelta(hours=1)
+        with mock.patch.object(
+            backup_retention, "_remove", side_effect=PermissionError(13, "denied")
+        ):
+            status, stdout, stderr = self.run_command(later)
+        self.assertEqual(status, 1)
+        self.assertIn("management-broker-backup=management-broker-20261002T033000Z", stdout)
+        self.assertIn("retention=failed reason=filesystem-EACCES", stderr)
+        self.assertTrue(self.trio("management-broker-20261002T033000Z.sqlite3.age") <= self.names())
 
     def test_online_backup_has_committed_encrypted_evidence_and_no_plaintext(self) -> None:
         with self.broker.database.connect(write=True) as db:

@@ -48,13 +48,16 @@ export function RepositoryAccess({
   saved,
 }: {
   id: string;
-  service?: Pick<typeof api, 'sourceKey' | 'createSourceKey' | 'checkSourceKey'>;
+  service?: Pick<
+    typeof api,
+    'sourceKey' | 'createSourceKey' | 'removeSourceKey' | 'checkSourceKey'
+  >;
   /** Whether a repository is saved, so access can be checked. */
   saved: boolean;
 }) {
   const scope = service === api ? [] : ['admin'];
   const client = useQueryClient();
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<'replace' | 'remove' | null>(null);
   const key = useQuery({
     queryKey: [...scope, 'source-key', id],
     queryFn: () => service.sourceKey(id),
@@ -65,7 +68,16 @@ export function RepositoryAccess({
     onSuccess: (data) => {
       client.setQueryData([...scope, 'source-key', id], data);
       check.reset();
-      setConfirming(false);
+      setConfirming(null);
+    },
+  });
+  const remove = useMutation({
+    mutationFn: () => service.removeSourceKey(id),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: [...scope, 'source-key', id] });
+      check.reset();
+      create.reset();
+      setConfirming(null);
     },
   });
   const check = useMutation({ mutationFn: () => service.checkSourceKey(id) });
@@ -76,9 +88,14 @@ export function RepositoryAccess({
       aria-label="Private repository"
       actions={
         key.data?.present && (
-          <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
-            Replace key
-          </Button>
+          <>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming('replace')}>
+              Replace key
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming('remove')}>
+              Remove key
+            </Button>
+          </>
         )
       }
     >
@@ -124,13 +141,13 @@ export function RepositoryAccess({
         </>
       )}
       <Dialog
-        open={confirming}
-        onClose={() => setConfirming(false)}
+        open={confirming === 'replace'}
+        onClose={() => setConfirming(null)}
         title="Replace the deploy key?"
         size="sm"
         footer={
           <>
-            <Button onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button onClick={() => setConfirming(null)}>Cancel</Button>
             <Button variant="danger" loading={create.isPending} onClick={() => create.mutate(true)}>
               Replace key
             </Button>
@@ -142,6 +159,26 @@ export function RepositoryAccess({
           remove the old one there.
         </p>
         <ErrorAlert error={create.error} />
+      </Dialog>
+      <Dialog
+        open={confirming === 'remove'}
+        onClose={() => setConfirming(null)}
+        title="Remove this deploy key?"
+        size="sm"
+        footer={
+          <>
+            <Button onClick={() => setConfirming(null)}>Cancel</Button>
+            <Button variant="danger" loading={remove.isPending} onClick={() => remove.mutate()}>
+              Remove key
+            </Button>
+          </>
+        }
+      >
+        <p>
+          Builds of a private repository will fail until you add a new key. Also delete the key from
+          the repository’s Deploy keys on GitHub.
+        </p>
+        <ErrorAlert error={remove.error} />
       </Dialog>
     </Section>
   );

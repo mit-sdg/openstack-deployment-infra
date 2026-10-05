@@ -1,7 +1,6 @@
 import { EmptyState, buttonClass } from '@openstack-platform/ui';
-import { Link, Route, Switch } from 'wouter';
+import { Link, Redirect, Route, Switch } from 'wouter';
 import { StaffOperations } from './staff/Activity';
-import { StaffAppPage, StaffApps } from './staff/Apps';
 import { StaffContext, useActive } from './staff/common';
 import { StaffDeploymentPage, StaffHistory } from './staff/Deployments';
 import { StaffOwnerPage, StaffOwners } from './staff/Owners';
@@ -21,9 +20,12 @@ export function StaffPages({ userId }: { userId: string }) {
         <Route path="/staff/apps/:id/deployments">
           {(p) => <StaffHistory key={p.id} id={p.id} />}
         </Route>
-        <Route path="/staff/apps/:id">{(p) => <StaffAppPage key={p.id} id={p.id} />}</Route>
+        {/* Apps are managed from one list; old staff app links land there. */}
+        <Route path="/staff/apps/:id">
+          {(p) => <Redirect to={`/admin/apps/${p.id}`} replace />}
+        </Route>
         <Route path="/staff/apps">
-          <StaffApps />
+          <Redirect to="/admin/apps" replace />
         </Route>
         <Route path="/staff/operations">
           <StaffOperations />

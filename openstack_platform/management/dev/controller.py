@@ -144,6 +144,7 @@ class FakeController:
             ("GET", "/v1/applications/{app}/runtime-log", self.runtime_log),
             ("GET", "/v1/applications/{app}/source-key", self.source_key),
             ("POST", "/v1/applications/{app}/source-key", self.source_key),
+            ("DELETE", "/v1/applications/{app}/source-key", self.source_key),
             ("POST", "/v1/applications/{app}/source-key/check", self.source_check),
             ("POST", "/v1/applications/{app}/source/commits", self.source_commits),
             ("POST", "/v1/applications/{app}/source/check", self.source_preflight),
@@ -460,6 +461,8 @@ class FakeController:
         if app not in self.apps:
             raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
         keys = self.source_keys
+        if request.method == "DELETE":
+            keys.pop(app, None)
         if request.method == "POST" and (
             app not in keys or (isinstance(request.body, dict) and request.body.get("replace"))
         ):

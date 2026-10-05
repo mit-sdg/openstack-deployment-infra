@@ -624,6 +624,11 @@ export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
         (v) => fields(v, { present: 'boolean', publicKey: 'string' }) as SourceKey,
         { method: 'POST', body: replace ? { replace: true } : {} },
       ),
+    removeSourceKey: (id: string) =>
+      request(`${prefix}/${id}/source-key`, (v) => fields(v, { present: 'boolean' }) as SourceKey, {
+        method: 'DELETE',
+        body: {},
+      }),
     checkSourceKey: (id: string) =>
       request(
         `${prefix}/${id}/source-key/check`,

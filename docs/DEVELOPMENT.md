@@ -307,7 +307,7 @@ safe audit. Playwright bootstraps an admin, enrolls TOTP, invites local staff,
 checks Commons owner isolation, denies account pages to staff and admin pages to
 owners, adopts an operator class-app fixture, saves its imported configuration
 and opens its maintenance deploy dialog. Staff then open another owner's app from
-**Admin → All apps**, set an environment variable without seeing admin-only
+**Manage apps**, set an environment variable without seeing admin-only
 actions, are refused adoption, and the admin audit log names them. Tokens
 are removed from address bars and never enter request URLs. Traces/video remain
 disabled. Use the root npm workspace/lockfile and `frontend/shared` from PR #62;

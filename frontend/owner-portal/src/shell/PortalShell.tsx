@@ -47,13 +47,18 @@ const adminItem: Item = {
 // link so every link on a page has a unique name.
 const staffTabs: Item[] = [
   { label: 'Owners', href: '/staff/owners', active: (path) => path.startsWith('/staff/owners') },
-  { label: 'All apps', href: '/staff/apps', active: (path) => path.startsWith('/staff/apps') },
   {
     label: 'Activity',
     href: '/staff/operations',
     active: (path) => path.startsWith('/staff/operations'),
   },
 ];
+// Staff manage every app from one list; admins also get accounts and audit.
+const manageItem: Item = {
+  label: 'Manage apps',
+  href: '/admin/apps',
+  active: (path) => path.startsWith('/admin/apps'),
+};
 const allAppsTab: Item = {
   label: 'All apps',
   href: '/admin/apps',
@@ -98,15 +103,21 @@ export function PortalShell({
   const [location] = useLocation();
   const signedIn = !!user && !signIn;
   const elevated = role === 'staff' || role === 'admin';
-  const items = signedIn ? [appsItem, ...(elevated ? [staffItem, adminItem] : [])] : [];
+  const items = signedIn
+    ? [
+        appsItem,
+        ...(role === 'admin' ? [staffItem, adminItem] : []),
+        ...(role === 'staff' ? [staffItem, manageItem] : []),
+      ]
+    : [];
   // Staff manage every app from the admin section; accounts and the audit
   // log stay admin-only.
   const tabs = !signedIn
     ? null
     : location.startsWith('/staff') && elevated
       ? { label: 'Staff', items: staffTabs }
-      : location.startsWith('/admin') && elevated
-        ? { label: 'Admin', items: role === 'admin' ? adminTabs : [allAppsTab] }
+      : location.startsWith('/admin') && role === 'admin'
+        ? { label: 'Admin', items: adminTabs }
         : null;
   useEffect(() => {
     document.title = pageTitle(location, platformName);

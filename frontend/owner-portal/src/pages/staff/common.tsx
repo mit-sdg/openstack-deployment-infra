@@ -252,7 +252,7 @@ export function OwnerLink({ id, name }: { id: string; name: string }) {
 
 export function AppLink({ id, name }: { id: string; name: string }) {
   return (
-    <Link href={`/staff/apps/${id}`} className="ui-link">
+    <Link href={`/admin/apps/${id}`} className="ui-link">
       {name}
     </Link>
   );
@@ -304,7 +304,7 @@ export function appColumns(showOwner: boolean): Column<StaffAppRow>[] {
       mobile: 'title',
       cell: (app) => (
         <Cluster gap={2}>
-          <Link href={`/staff/apps/${app.applicationId}`} className="ui-link ui-link--plain">
+          <Link href={`/admin/apps/${app.applicationId}`} className="ui-link ui-link--plain">
             {app.slug}
           </Link>
           {app.lifecycleState !== 'ready' && <Status state={app.lifecycleState} />}

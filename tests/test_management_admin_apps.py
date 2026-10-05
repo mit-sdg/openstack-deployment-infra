@@ -802,6 +802,31 @@ class AdminApplicationTests(ManagementCase):
             self.call("POST", f"/v1/intents/{deletion}/resume", {}, "admin").status, 202
         )
 
+    def test_admin_deploy_key_changes_are_in_the_admin_audit(self) -> None:
+        self.call("POST", self.prefix + "/source-key", {}, "admin")
+        removed = self.call("DELETE", self.prefix + "/source-key", None, "admin")
+        self.assertEqual(removed.body["data"], {"present": False})
+        with self.broker.database.connect() as db:
+            rows = db.execute(
+                "SELECT actor_id,target_id,details FROM admin_audit"
+                " WHERE action='app_source_key' ORDER BY rowid"
+            ).fetchall()
+        self.assertEqual(
+            [tuple(row) for row in rows],
+            [
+                (
+                    self.admin_user,
+                    self.owner,
+                    canonical({"applicationId": self.app_id, "replace": False}),
+                ),
+                (
+                    self.admin_user,
+                    self.owner,
+                    canonical({"applicationId": self.app_id, "removed": True}),
+                ),
+            ],
+        )
+
     def test_revocation_during_controller_read_suppresses_results_and_mutation(self) -> None:
         original = self.broker.client.request
 

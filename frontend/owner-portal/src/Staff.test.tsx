@@ -178,85 +178,9 @@ function staffPage(path: string) {
 }
 
 describe('staff detail pages', () => {
-  it('shows an app read-only, with names instead of IDs and chained reads', async () => {
-    let active = 0;
-    let peak = 0;
-    const track =
-      <T,>(value: T) =>
-      async () => {
-        peak = Math.max(peak, ++active);
-        await new Promise((done) => setTimeout(done, 5));
-        active--;
-        return value;
-      };
-    const app = vi.spyOn(staffApi, 'app').mockImplementation(
-      track({
-        ...catalogApp,
-        ownerUsername: 'alice',
-        ownerDisplayName: 'Alice Student',
-        members: [{ username: 'bob', displayName: 'Bob Student' }],
-        url: 'https://weather-dashboard.apps.example.com',
-        desiredRunning: true,
-        activeDeploymentId: deploymentId,
-        acceptedDeployment: { deploymentId, sourceCommit: commit, acceptedAt: null },
-        health: { process: 'healthy', route: 'unhealthy' },
-        observedAt: new Date().toISOString(),
-        stale: false,
-      }),
-    );
-    const deployments = vi.spyOn(staffApi, 'deployments').mockImplementation(
-      track({
-        items: [
-          {
-            deploymentId,
-            applicationId: appId,
-            status: 'succeeded',
-            repositoryCommit: commit,
-            configurationRevision: 2,
-            cleanupState: 'confirmed',
-            requestedAt: null,
-            updatedAt: null,
-            acceptedAt: null,
-            lastHealthyAt: null,
-          },
-        ],
-        nextCursor: null,
-        truncated: false,
-      }),
-    );
-    vi.spyOn(staffApi, 'operations').mockImplementation(track(empty));
-    vi.spyOn(staffApi, 'owner').mockImplementation(
-      track({
-        ...owner,
-        displayName: 'Alice Student',
-        quota: {
-          apps: { limit: 2, used: 1, reserved: 0 },
-          concurrentOperations: { limit: 1, used: 0, reserved: 0 },
-        },
-      }),
-    );
+  it('sends old staff app links to the managed app page', async () => {
     staffPage(`/staff/apps/${appId}`);
-    expect(await screen.findByRole('heading', { name: 'weather-dashboard' })).toBeVisible();
-    expect(await screen.findByRole('link', { name: 'Alice Student' })).toHaveAttribute(
-      'href',
-      `/staff/owners/${ownerId}`,
-    );
-    expect(app).toHaveBeenCalledTimes(1);
-    expect(deployments).toHaveBeenCalledTimes(1);
-    // Two active reads per account at most; never two controller reads at once.
-    expect(peak).toBe(1);
-    expect(screen.getByText('Live')).toBeVisible();
-    // Health badges only where it needs a look: the title and the failing check.
-    expect(screen.getAllByText('Unhealthy')).toHaveLength(2);
-    expect(screen.getByText('Healthy').closest('.ui-badge')).toBeNull();
-    expect(screen.queryByText(appId)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Copy app ID' })).toBeVisible();
-    // Read-only and polled quietly: copying the ID is the only button.
-    expect(
-      screen
-        .getAllByRole('button')
-        .map((button) => button.textContent || button.getAttribute('aria-label')),
-    ).toEqual(['Copy app ID']);
+    await waitFor(() => expect(window.location.pathname).toBe(`/admin/apps/${appId}`));
   });
   it('shows activity in plain words without resume actions', async () => {
     vi.spyOn(staffApi, 'operations').mockResolvedValue({
@@ -327,19 +251,9 @@ describe('staff detail pages', () => {
     expect(owners).toHaveBeenCalledWith(undefined, expect.anything(), 'owner');
     expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
   });
-  it('lists every app with its owner name from the row', async () => {
-    vi.spyOn(staffApi, 'apps').mockResolvedValue({
-      items: [appRow],
-      nextCursor: null,
-      truncated: false,
-    });
-    const owners = vi.spyOn(staffApi, 'owners');
+  it('sends the old app list to the managed list', async () => {
     staffPage('/staff/apps');
-    expect(await screen.findByRole('link', { name: 'Alice Student' })).toHaveAttribute(
-      'href',
-      `/staff/owners/${ownerId}`,
-    );
-    expect(owners).not.toHaveBeenCalled();
+    await waitFor(() => expect(window.location.pathname).toBe('/admin/apps'));
   });
   it('shows an unknown owner like an unknown page, without an alert', async () => {
     vi.spyOn(staffApi, 'owner').mockRejectedValue(
@@ -354,19 +268,19 @@ describe('staff detail pages', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
   it('says what to do when a page fails to load and retries on request', async () => {
-    const apps = vi
-      .spyOn(staffApi, 'apps')
+    const owners = vi
+      .spyOn(staffApi, 'owners')
       .mockRejectedValueOnce(new ApiError(503, 'STATE_UNAVAILABLE', 'Unavailable.', 30))
-      .mockResolvedValueOnce({ items: [appRow], nextCursor: null, truncated: false });
-    staffPage('/staff/apps');
-    expect(await screen.findByRole('heading', { name: 'All apps' })).toBeVisible();
-    expect(await screen.findByText("Couldn't load apps. Try again in a minute.")).toBeVisible();
+      .mockResolvedValueOnce({ items: [owner], nextCursor: null, truncated: false });
+    staffPage('/staff/owners');
+    expect(await screen.findByRole('heading', { name: 'Owners' })).toBeVisible();
+    expect(await screen.findByText("Couldn't load owners. Try again in a minute.")).toBeVisible();
     const retry = screen.getByRole('button', { name: 'Retry' });
     expect(retry).toBeEnabled();
     expect(document.activeElement).not.toBe(screen.getByRole('alert'));
     fireEvent.click(retry);
-    expect(await screen.findByRole('link', { name: 'weather-dashboard' })).toBeVisible();
-    expect(apps).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText(owner.displayName)).toBeVisible();
+    expect(owners).toHaveBeenCalledTimes(2);
   });
   it('names every activity kind as an event', async () => {
     const base = {

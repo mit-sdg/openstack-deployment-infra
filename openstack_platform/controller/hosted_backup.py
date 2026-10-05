@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
-from .. import durable, runtime
+from .. import backup_retention, durable, runtime
 from ..config import load
 from ..validation import ValidationError
 from . import database as db
@@ -262,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--age-command", required=True)
     parser.add_argument("--source-keys-root", type=Path, required=True)
     args = parser.parse_args(argv)
+    now = datetime.now(UTC)
     try:
         configuration = load(args.platform_config, args.policy)
         identity = db.deployment_identity(configuration.platform)
@@ -276,10 +277,20 @@ def main(argv: list[str] | None = None) -> int:
                     args.backup_root,
                     age_recipient=configuration.policy.backup_age_recipient,
                     age_command=args.age_command,
+                    created_at=now,
                     source_keys_root=args.source_keys_root,
                 )
             finally:
                 connection.close()
+            print(f"hosted-controller-backup={name} sha256={digest}")
+            # The new set is committed; a retention failure only fails the unit.
+            retained = backup_retention.prune_after_commit(
+                args.backup_root,
+                series="hosted-controller",
+                keep=name,
+                now=now,
+                key_series="hosted-controller-source-keys",
+            )
     except (
         HostedBackupError,
         SourceKeyBackupError,
@@ -291,8 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     ) as error:
         print(f"hosted controller backup failed: {error}", file=sys.stderr)
         return 1
-    print(f"hosted-controller-backup={name} sha256={digest}")
-    return 0
+    return 0 if retained else 1
 
 
 if __name__ == "__main__":
