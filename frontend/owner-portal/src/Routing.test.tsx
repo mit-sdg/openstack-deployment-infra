@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { adminApi } from './adminApi';
 import { adminAppsApi } from './adminAppsApi';
 import { api, clearCredentials, type Session } from './api';
 import { staffApi } from './staffApi';
@@ -60,18 +61,28 @@ describe('nested routes', () => {
     expect(read.mock.calls[0].slice(0, ids.length)).toEqual(ids);
     expect(screen.queryByRole('heading', { name: 'Page not found' })).toBeNull();
   });
-  it('opens a managed app for admins', async () => {
+  it.each(['admin', 'staff'] as const)('opens a managed app for %s', async (role) => {
     const detail = vi.spyOn(adminAppsApi, 'detail').mockImplementation(pending);
-    show(`/admin/apps/${app}`, 'admin');
+    show(`/admin/apps/${app}`, role);
     await waitFor(() => expect(detail).toHaveBeenCalledWith(app));
     expect(screen.queryByRole('heading', { name: 'Page not found' })).toBeNull();
   });
-  it('keeps nested admin pages closed to staff', async () => {
+  it('keeps nested managed apps closed to owners', async () => {
     const detail = vi.spyOn(adminAppsApi, 'detail').mockImplementation(pending);
-    show(`/admin/apps/${app}`, 'staff');
+    show(`/admin/apps/${app}`, 'owner');
     expect(
       await screen.findByRole('heading', { name: "You don't have access to this page" }),
     ).toBeVisible();
     expect(detail).not.toHaveBeenCalled();
+  });
+  it.each(['/admin/accounts', '/admin/audit'])('keeps %s closed to staff', async (path) => {
+    const accounts = vi.spyOn(adminApi, 'accounts').mockImplementation(pending);
+    const audit = vi.spyOn(adminApi, 'audit').mockImplementation(pending);
+    show(path, 'staff');
+    expect(
+      await screen.findByRole('heading', { name: "You don't have access to this page" }),
+    ).toBeVisible();
+    expect(accounts).not.toHaveBeenCalled();
+    expect(audit).not.toHaveBeenCalled();
   });
 });

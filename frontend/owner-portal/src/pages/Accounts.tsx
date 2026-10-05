@@ -41,7 +41,7 @@ function When({ value }: { value: string | null }) {
 }
 
 /** Active is the expected state; the portal Status keeps it quiet. */
-/** "1 of 2" for accounts with a limit; just the count for admins. */
+/** "1 of 2" for accounts with a limit; just the count for staff and admins. */
 function appUsage(account: Account) {
   return account.appLimit === null
     ? String(account.appCount)
@@ -442,7 +442,7 @@ function ManageDialog({
             Change role
           </Button>
         </form>
-        {/* Admin accounts have no limits. */}
+        {/* Staff and admin accounts have no limits. */}
         {account.appLimit !== null && (
           <Group title="Limits">
             <form

@@ -58,11 +58,14 @@ export function App() {
         ) : (
           <Switch>
             {/* Wildcards: in wouter 3 ":rest*" matches one segment only, which
-                sent nested staff and admin pages to "Page not found". */}
+                sent nested staff and admin pages to "Page not found". Staff
+                manage every app too; ownership changes stay admin-only. */}
             <Route path="/admin/apps/*">
-              {role === 'admin' ? <AdminAppsPages /> : <NoAccess />}
+              {elevated ? <AdminAppsPages admin={role === 'admin'} /> : <NoAccess />}
             </Route>
-            <Route path="/admin/apps">{role === 'admin' ? <AdminAppsPages /> : <NoAccess />}</Route>
+            <Route path="/admin/apps">
+              {elevated ? <AdminAppsPages admin={role === 'admin'} /> : <NoAccess />}
+            </Route>
             <Route path="/admin/accounts">
               {role === 'admin' ? <AccountsPage /> : <NoAccess />}
             </Route>

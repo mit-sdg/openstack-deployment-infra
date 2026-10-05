@@ -51,9 +51,9 @@ const detail: ManagedApp = {
   sizing: { workerFlavor: 'worker-large', cpuMHz: 4000, memoryMiB: 8192 },
 };
 let session: Session | undefined;
-function mockSession(stepUpExpiresAt: string | null) {
+function mockSession(stepUpExpiresAt: string | null, role: Session['role'] = 'admin') {
   session = {
-    role: 'admin',
+    role,
     csrfToken: 'csrf',
     user: { id, username: 'admin', displayName: 'Admin' },
     expiresAt: new Date(Date.now() + 3600000).toISOString(),
@@ -79,30 +79,151 @@ function show(node: ReactNode, path = '/admin/apps') {
   );
   return client;
 }
-describe('admin application management', () => {
-  it.each(['owner', 'staff'] as const)(
-    'denies admin pages for %s without fetching any managed app',
-    async (role) => {
-      vi.spyOn(api, 'session').mockResolvedValue({
-        role,
-        csrfToken: 'csrf',
-        user: { id, username: 'student', displayName: 'Student' },
-        expiresAt: new Date(Date.now() + 3600000).toISOString(),
-        quota: {
-          apps: { used: 0, reserved: 0, limit: 2 },
-          concurrentOperations: { used: 0, reserved: 0, limit: 1 },
-        },
-        stepUpExpiresAt: null,
-      } as Session);
-      const list = vi.spyOn(adminAppsApi, 'list');
-      show(<App />);
-      expect(
-        await screen.findByRole('heading', { name: "You don't have access to this page" }),
-      ).toBeVisible();
-      expect(list).not.toHaveBeenCalled();
-      expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument();
-    },
+/** Unmocked requests fail at once: none leaves the test or holds an admin read slot. */
+function offline() {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: { code: 'NOT_FOUND', summary: 'Not found.' } }), {
+          status: 404,
+        }),
+    ),
   );
+}
+/** A managed app's resources, all read from mocks. */
+function mockResources(items: unknown[] = []) {
+  const service = {
+    ...api,
+    settings: vi.fn().mockResolvedValue(settings),
+    environment: vi
+      .fn()
+      .mockResolvedValue({ revision: 0, items: [], intents: [], updatedAt: null }),
+    storage: vi.fn().mockResolvedValue({ items, intents: [] }),
+  };
+  vi.spyOn(adminAppsApi, 'resources').mockReturnValue(service);
+  return service;
+}
+describe('admin application management', () => {
+  it('denies admin pages for owners without fetching any managed app', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue({
+      role: 'owner',
+      csrfToken: 'csrf',
+      user: { id, username: 'student', displayName: 'Student' },
+      expiresAt: new Date(Date.now() + 3600000).toISOString(),
+      quota: {
+        apps: { used: 0, reserved: 0, limit: 2 },
+        concurrentOperations: { used: 0, reserved: 0, limit: 1 },
+      },
+      stepUpExpiresAt: null,
+    } as Session);
+    const list = vi.spyOn(adminAppsApi, 'list');
+    show(<App />);
+    expect(
+      await screen.findByRole('heading', { name: "You don't have access to this page" }),
+    ).toBeVisible();
+    expect(list).not.toHaveBeenCalled();
+    expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument();
+  });
+  it('lists every app for staff without the create and adopt actions', async () => {
+    mockSession(null, 'staff');
+    vi.spyOn(api, 'session').mockResolvedValue(session!);
+    const list = vi.spyOn(adminAppsApi, 'list').mockResolvedValue({
+      items: [
+        {
+          applicationId: id,
+          slug: 'class-fixture',
+          ownerId: id,
+          ownerUsername: 'student',
+          ownerDisplayName: 'Student',
+          savedRevision: 7,
+          lifecycleState: 'ready',
+          url: null,
+          lastDeployedAt: null,
+        },
+      ],
+      nextCursor: null,
+      truncated: false,
+    });
+    show(<App />);
+    expect(await screen.findByRole('link', { name: 'class-fixture' })).toHaveAttribute(
+      'href',
+      `/admin/apps/${id}`,
+    );
+    expect(list).toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: 'All apps' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Create app' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Adopt app' })).not.toBeInTheDocument();
+  });
+  it('lets staff manage an app but hides ownership, deletion, outage and sizing', async () => {
+    offline();
+    mockSession(null, 'staff');
+    vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({
+      ...detail,
+      identityProvider: false,
+      requiresMaintenance: false,
+    });
+    mockResources([
+      {
+        resourceId: '00000000-0000-4000-8000-0000000000aa',
+        type: 'postgres' as const,
+        label: 'main',
+        status: 'ready',
+        createdAt: new Date().toISOString(),
+        verifiedAt: null,
+        defaultBindings: {},
+      },
+    ]);
+    const deploy = vi
+      .spyOn(adminAppsApi, 'deploy')
+      .mockResolvedValue({ intentId: id, state: 'accepted' } as never);
+    vi.spyOn(api, 'intent').mockResolvedValue({ intentId: id, state: 'accepted' } as never);
+    try {
+      show(<AdminAppsPages admin={false} />, `/admin/apps/${id}`);
+      expect(await screen.findByRole('button', { name: 'Stop app' })).toBeVisible();
+      expect(screen.queryByText('Danger zone')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Change owner' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Deploy' }));
+      const dialog = screen.getByRole('dialog', { name: 'Deploy class-fixture' });
+      expect(
+        within(dialog).queryByLabelText('Allow a brief outage', { exact: false }),
+      ).not.toBeInTheDocument();
+      expect(within(dialog).queryByLabelText('Sizing plan', { exact: false })).toBeNull();
+      fireEvent.change(within(dialog).getByLabelText('Commit'), {
+        target: { value: 'a'.repeat(40) },
+      });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Deploy' }));
+      await waitFor(() =>
+        expect(deploy).toHaveBeenCalledWith(
+          id,
+          settings.revision,
+          'a'.repeat(40),
+          false,
+          undefined,
+          false,
+          expect.any(String),
+        ),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+  it('tells staff an app with a fixed IP address needs an admin to deploy', async () => {
+    offline();
+    mockSession(null, 'staff');
+    vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({ ...detail, identityProvider: false });
+    mockResources();
+    try {
+      show(<AdminAppsPages admin={false} />, `/admin/apps/${id}`);
+      fireEvent.click(await screen.findByRole('button', { name: 'Deploy' }));
+      const dialog = screen.getByRole('dialog', { name: 'Deploy class-fixture' });
+      expect(dialog).toHaveTextContent('Only an admin can deploy this app');
+      expect(within(dialog).getByRole('button', { name: 'Deploy' })).toBeDisabled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('queues parallel metadata panels within the two-active-read bound', async () => {
     const completions: (() => void)[] = [];
     let active = 0,
@@ -145,7 +266,7 @@ describe('admin application management', () => {
       storage: vi.fn().mockResolvedValue({ items: [], intents: [] }),
     };
     vi.spyOn(adminAppsApi, 'resources').mockReturnValue(service);
-    show(<AdminAppsPages />, `/admin/apps/${id}`);
+    show(<AdminAppsPages admin />, `/admin/apps/${id}`);
     fireEvent.click(await screen.findByRole('button', { name: 'Deploy' }));
     expect(screen.getByText(configurationGuidance.scripts)).toBeVisible();
     expect(screen.getByText(configurationGuidance.root, { exact: false })).toBeVisible();
@@ -236,7 +357,7 @@ describe('admin application management', () => {
         new ApiError(409, 'IDENTITY_CONFIRMATION_REQUIRED', 'Portal sign-in depends on this app'),
       )
       .mockResolvedValueOnce({ applicationId: id });
-    show(<AdminAppsPages />, '/admin/apps');
+    show(<AdminAppsPages admin />, '/admin/apps');
     fireEvent.click(await screen.findByRole('button', { name: 'Adopt app' }));
     const dialog = screen.getByRole('dialog', { name: 'Adopt app' });
     fireEvent.change(within(dialog).getByLabelText('App ID'), { target: { value: id } });
@@ -275,7 +396,7 @@ describe('admin application management', () => {
       .spyOn(adminAppsApi, 'deleteStorage')
       .mockResolvedValue({ intentId: id, state: 'accepted' } as never);
     vi.spyOn(api, 'intent').mockResolvedValue({ intentId: id, state: 'accepted' } as never);
-    show(<AdminAppsPages />, `/admin/apps/${id}`);
+    show(<AdminAppsPages admin />, `/admin/apps/${id}`);
     const open = await screen.findByRole('button', { name: 'Delete' });
     await waitFor(() => expect(open).toBeEnabled());
     fireEvent.click(open);
