@@ -321,9 +321,9 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/staff.py` — closed metadata projections, catalog paging, read budgets and transactional staff audit.
 - `openstack_platform/management/broker/staff_policy.py` — fixed metadata bounds and URL sanitization.
 - `tests/test_management_staff.py` — staff read-only authority, disclosure, quota/paging/audit and migration/restore evidence.
-- `openstack_platform/management/broker/members.py` — team members of an app (owner/admin managed, members can leave) and the app activity feed.
+- `openstack_platform/management/broker/members.py` — team members of an app (owner, staff or admin managed, members can leave) and the app activity feed.
 - `tests/test_management_teams.py` — member access and quota, owner-only team changes, leaving, limits, write re-checks, retry keys and admin reassignment.
-- `openstack_platform/management/broker/source_keys.py` — owner/admin deploy key routes: public half only, audited changes, shared one-at-a-time access checks.
+- `openstack_platform/management/broker/source_keys.py` — owner/staff/admin deploy key routes: public half only, audited changes, shared one-at-a-time access checks.
 - `tests/test_management_source_keys.py` — deploy key ownership, audit, shared access checks and older-controller answers.
 - `tests/test_private_repositories.py` — pinned GitHub host key, deploy-key fetch and access check, helper key lifecycle and build fallback.
 - `openstack_platform/management/broker/runtime_logs.py` — owner/admin runtime log reads, shared briefly and one at a time so they can't crowd the controller.
@@ -354,7 +354,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/staff/Deployments.tsx` — staff deployment history and deployment pages.
 - `frontend/owner-portal/src/pages/staff/Activity.tsx` — staff activity feed with owner and app filters.
 - `frontend/owner-portal/src/Staff.test.tsx` — mode navigation, credential entry, decoder, CSRF, cache clearing and inactivity tests.
-- `frontend/owner-portal/e2e/staff-flow.spec.ts` — loopback staff/owner coexistence, denied writes, joint revocation, expiry and CSP/browser evidence.
+- `frontend/owner-portal/e2e/staff-flow.spec.ts` — loopback staff/owner coexistence, staff app administration with admin-only denials, joint revocation, expiry and CSP/browser evidence.
 - `frontend/owner-portal/src/api.ts` — typed API/response validation, same-key CSRF retry, and typed settings validation.
 - `frontend/owner-portal/src/App.tsx` — accessible owner routes, configuration, exact-commit review, status/history, and build logs.
 - `frontend/owner-portal/src/styles/app.css` — portal stylesheet entry: shared fonts, tokens and design system.
@@ -456,11 +456,11 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/Accounts.tsx` — admin account list/actions, invitations, quotas and audit view.
 - `frontend/owner-portal/src/pages/Enrollment.tsx` — fragment-token setup/reset, local password and TOTP enrollment.
 
-- `openstack_platform/management/broker/admin_apps.py` — request-local admin app authority, adoption, ownership, maintenance consent and stepped-up storage deletion.
-- `tests/test_management_admin_apps.py` — admin app authorization, adoption, resource secrecy, shared busy scopes and replay contracts.
+- `openstack_platform/management/broker/admin_apps.py` — request-local staff/admin app authority with admin-only ownership changes, adoption, maintenance consent and stepped-up storage deletion.
+- `tests/test_management_admin_apps.py` — staff/admin app authorization, admin-only actions, staff journaling and audit, adoption, resource secrecy, shared busy scopes and replay contracts.
 - `frontend/owner-portal/src/adminAppsApi.ts` — typed admin app requests using the common resource API.
-- `frontend/owner-portal/src/pages/AdminApps.tsx` — managed catalog, adoption, shared configuration/resources, deploy review and sensitive actions.
-- `frontend/owner-portal/src/AdminApps.test.tsx` — role navigation, maintenance confirmations and admin write-only cache tests.
+- `frontend/owner-portal/src/pages/AdminApps.tsx` — managed catalog for staff and admins, adoption, shared configuration/resources, deploy review and admin-only sensitive actions.
+- `frontend/owner-portal/src/AdminApps.test.tsx` — role navigation, staff-hidden admin actions, maintenance confirmations and admin write-only cache tests.
 
 - `tests/test_management_login_admission.py` — distributed password/TOTP budgets, generation-bound device cookies, generic failures and reserved hashing regressions.
 

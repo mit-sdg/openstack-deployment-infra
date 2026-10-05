@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { adminAppsApi } from './adminAppsApi';
 import { ApiError, api, clearCredentials, type AppRecord, type Session } from './api';
 import { pageTitle } from './shell/PortalShell';
 
@@ -89,6 +90,26 @@ describe('portal shell', () => {
     expect(screen.getByText('Admin', { selector: '.ui-badge' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await waitFor(() => expect(logout).toHaveBeenCalledOnce());
+  });
+  it('gives staff the managed app list but not accounts or the audit log', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue(session('staff'));
+    const list = vi.spyOn(adminAppsApi, 'list').mockReturnValue(new Promise(() => {}));
+    show('/admin/apps');
+    const nav = (await screen.findAllByRole('navigation', { name: 'Main' }))[0];
+    expect(within(nav).getByRole('link', { name: 'Staff' })).toBeVisible();
+    expect(within(nav).getByRole('link', { name: 'Admin' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    const tabs = screen.getByRole('navigation', { name: 'Admin pages' });
+    expect(
+      within(tabs)
+        .getAllByRole('link')
+        .map((link) => link.textContent),
+    ).toEqual(['All apps']);
+    await waitFor(() => expect(list).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Account: Alice Student' }));
+    expect(screen.getByText('Staff', { selector: '.ui-badge' })).toBeVisible();
   });
   it('hides staff and admin links from owners', async () => {
     vi.spyOn(api, 'session').mockResolvedValue(session('owner'));

@@ -22,7 +22,7 @@ from .admin_apps import AdminApps
 from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
-from .journal import Journal, intent_model
+from .journal import ADMIN_ONLY_INTENTS, Journal, intent_model
 from .members import Members, activity
 from .runtime_logs import RuntimeLogs
 from .source_keys import SourceKeys
@@ -204,7 +204,7 @@ class Broker:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         admin = request.path.startswith("/v1/admin-apps/")
         user, _sid = self.auth.authenticate(
-            request, kind="admin" if admin else None, mutation=mutation
+            request, kind=self.admin_apps.kind() if admin else None, mutation=mutation
         )
         identifier = checked_uuid(request.path_parameters["app"])
         self.request_actor.set((_sid, identifier))
@@ -243,7 +243,7 @@ class Broker:
 
     def quota(self, user_id: str) -> dict[str, Any]:
         with self.database.connect() as db:
-            unlimited = resources.is_admin(db, user_id)
+            unlimited = resources.unlimited(db, user_id)
             policy = db.execute("SELECT * FROM quotas WHERE user_id=?", (user_id,)).fetchone()
             apps = db.execute(
                 "SELECT lifecycle,COUNT(*) n FROM apps WHERE user_id=? AND lifecycle NOT IN ('rejected','deleted') GROUP BY lifecycle",
@@ -596,9 +596,9 @@ class Broker:
             if existing is not None:
                 identifier, app_id = existing["id"], existing["app_id"]
             else:
-                # Admin accounts have no app limit; an admin creating an app
-                # for an owner still uses that owner's quota.
-                if not resources.is_admin(db, owner):
+                # Staff and admin accounts have no app limit; an admin
+                # creating an app for an owner still uses that owner's quota.
+                if not resources.unlimited(db, owner):
                     policy = db.execute(
                         "SELECT apps FROM quotas WHERE user_id=?", (owner,)
                     ).fetchone()
@@ -739,7 +739,7 @@ class Broker:
     def deploy(self, request: Request) -> Response:
         user, app = self.own(request, mutation=True)
         body = (
-            self.admin_apps.deployment_body(request, app)
+            self.admin_apps.deployment_body(request, app, admin=user["role"] == "admin")
             if request.path.startswith("/v1/admin-apps/")
             else self.identity_mutation_body(request, app, {"configurationRevision", "commit"})
         )
@@ -862,8 +862,16 @@ class Broker:
                     410, "APPLICATION_DELETED", "This application was deleted by an administrator."
                 )
             if strict_json(row["body"].encode()).get("_portalAdmin") is True:
-                self.accounts.admin(request, step_up=row["kind"] == "storage_delete")
-                self.accounts.checked_actor(db, _sid, step_up=row["kind"] == "storage_delete")
+                # App administration: staff may resume all but admin-only kinds.
+                # Origin and CSRF were checked above; the role and step-up are
+                # checked in this transaction (a second connection would wait
+                # on its lock).
+                self.accounts.checked_actor(
+                    db,
+                    _sid,
+                    step_up=row["kind"] == "storage_delete",
+                    kind="admin" if row["kind"] in ADMIN_ONLY_INTENTS else "staff",
+                )
             elif (
                 row["kind"] != "create_app"
                 and db.execute(

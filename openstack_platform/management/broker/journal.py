@@ -13,6 +13,10 @@ from ..common import canonical, strict_json, utc
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
 
+# App-administration intents only an admin may start or run: ownership changes
+# and permanent deletion. Staff may start the others, like admins.
+ADMIN_ONLY_INTENTS = frozenset({"create_app", "adopt_app", "storage_delete"})
+
 
 def controller_error_code(value: object) -> str | None:
     """Only a bounded public machine code, never upstream free text."""
@@ -211,7 +215,8 @@ class Journal:
                 ).fetchone()
                 if (
                     actor is None
-                    or actor["role"] != "admin"
+                    or actor["role"]
+                    not in ({"admin"} if row["kind"] in ADMIN_ONLY_INTENTS else {"staff", "admin"})
                     or not actor["enabled"]
                     or actor["status"] != "active"
                 ):

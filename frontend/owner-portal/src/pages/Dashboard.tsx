@@ -104,7 +104,7 @@ export function Dashboard() {
     );
   const { items, quota } = apps.data;
   const used = quota.apps.used + quota.apps.reserved;
-  // Accounts without limits (admins) see no count and are never full.
+  // Accounts without limits (staff and admins) see no count and are never full.
   const limit = quota.apps.limit;
   const full = limit !== null && used >= limit;
   const create = (

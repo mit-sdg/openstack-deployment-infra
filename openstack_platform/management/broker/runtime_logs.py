@@ -1,4 +1,4 @@
-"""Recent output of a running app, for its owner and for admins.
+"""Recent output of a running app, for its team and for staff and admins.
 
 The controller answers each read by asking Nomad while it holds its shared
 lock, so the broker shares one read per app and stream for a few seconds and

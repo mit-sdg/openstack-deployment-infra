@@ -54,8 +54,13 @@ const staffTabs: Item[] = [
     active: (path) => path.startsWith('/staff/operations'),
   },
 ];
+const allAppsTab: Item = {
+  label: 'All apps',
+  href: '/admin/apps',
+  active: (path) => path.startsWith('/admin/apps'),
+};
 const adminTabs: Item[] = [
-  { label: 'All apps', href: '/admin/apps', active: (path) => path.startsWith('/admin/apps') },
+  allAppsTab,
   {
     label: 'Accounts',
     href: '/admin/accounts',
@@ -92,19 +97,16 @@ export function PortalShell({
 }: Props) {
   const [location] = useLocation();
   const signedIn = !!user && !signIn;
-  const items = signedIn
-    ? [
-        appsItem,
-        ...(role === 'staff' || role === 'admin' ? [staffItem] : []),
-        ...(role === 'admin' ? [adminItem] : []),
-      ]
-    : [];
+  const elevated = role === 'staff' || role === 'admin';
+  const items = signedIn ? [appsItem, ...(elevated ? [staffItem, adminItem] : [])] : [];
+  // Staff manage every app from the admin section; accounts and the audit
+  // log stay admin-only.
   const tabs = !signedIn
     ? null
-    : location.startsWith('/staff') && role !== 'owner'
+    : location.startsWith('/staff') && elevated
       ? { label: 'Staff', items: staffTabs }
-      : location.startsWith('/admin') && role === 'admin'
-        ? { label: 'Admin', items: adminTabs }
+      : location.startsWith('/admin') && elevated
+        ? { label: 'Admin', items: role === 'admin' ? adminTabs : [allAppsTab] }
         : null;
   useEffect(() => {
     document.title = pageTitle(location, platformName);

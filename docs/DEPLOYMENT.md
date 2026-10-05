@@ -32,16 +32,19 @@ commit and shows status, health, history and build logs. A private repository
 needs the app's deploy key, which the portal creates and the owner adds to the
 repository on GitHub as a read-only deploy key. It grants no SSH,
 OpenStack, Nomad, registry or storage-administrator credentials. Owner environment variables are write-only, and managed storage supports provisioning,
-verification, rotation and saved bindings. Local admins can change running state
-and delete storage with step-up and typed confirmation. An owner can add
+verification, rotation and saved bindings. Staff and local admins can change any
+app's running state; only admins delete storage, with step-up and typed
+confirmation. An owner can add
 teammates who change settings, deploy and read logs; the app counts against the
 owner's limit only. Dockerfiles, arbitrary build commands, custom domains,
 scaling, shell access and credential export remain outside this slice.
 
 The same portal supports local accounts and DB-assigned owner/staff/admin roles.
-Staff inherit own-app rights and read the broker-known course catalog. Admins
-must be local accounts with TOTP and manage accounts, quotas and any app through
-the UI, including adoption of an operator app by UUID.
+Staff inherit own-app rights, read the broker-known course catalog and manage any
+app through the same UI as admins, with no app or concurrency limits. Admins
+must be local accounts with TOTP. Only admins manage accounts, quotas and the
+audit log, create apps for other owners, adopt an operator app by UUID, reassign
+owners, delete storage, and allow maintenance outages or sizing plans.
 Commons identities can never be admin. The operator issues a 24-hour single-use
 fragment setup URL without putting any password in inventory or environment.
 See [bootstrap and recovery](OPERATIONS.md#bootstrap-or-recover-a-local-admin).

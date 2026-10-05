@@ -1,9 +1,9 @@
 """Team apps: an app keeps one owner and can have members who work on it.
 
 Members pass the same app gate as the owner (api.ACCESS), so they can change
-settings, deploy, manage variables and storage and read logs. Only the owner or
-an admin adds or removes people; a member can leave. The app counts against
-the owner's quota only.
+settings, deploy, manage variables and storage and read logs. Only the owner,
+or staff and admins through app administration, add or remove people; a member
+can leave. The app counts against the owner's quota only.
 """
 
 from __future__ import annotations

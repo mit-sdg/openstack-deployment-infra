@@ -51,18 +51,23 @@ const storageNames: Record<StorageResource['type'], string> = {
   s3: 'S3 storage',
 };
 
-export function AdminAppsPages() {
+/**
+ * Every app, for staff and admins. Only admins create apps for others, adopt
+ * apps, change owners, delete storage, allow an outage or resize an app; staff
+ * don't see those actions.
+ */
+export function AdminAppsPages({ admin }: { admin: boolean }) {
   return (
     <Switch>
-      <Route path="/admin/apps/:id">{(p) => <ManagedApplication id={p.id} />}</Route>
+      <Route path="/admin/apps/:id">{(p) => <ManagedApplication id={p.id} admin={admin} />}</Route>
       <Route>
-        <ManagedCatalog />
+        <ManagedCatalog admin={admin} />
       </Route>
     </Switch>
   );
 }
 
-function ManagedCatalog() {
+function ManagedCatalog({ admin }: { admin: boolean }) {
   const [, navigate] = useLocation();
   const [cursor, setCursor] = useState<string | undefined>();
   const [dialog, setDialog] = useState<'create' | 'adopt' | null>(null);
@@ -142,19 +147,21 @@ function ManagedCatalog() {
     <PageHeader
       title="All apps"
       actions={
-        <>
-          <Button onClick={() => setDialog('adopt')}>Adopt app</Button>
-          <Button variant="primary" icon="plus" onClick={() => setDialog('create')}>
-            Create app
-          </Button>
-        </>
+        admin && (
+          <>
+            <Button onClick={() => setDialog('adopt')}>Adopt app</Button>
+            <Button variant="primary" icon="plus" onClick={() => setDialog('create')}>
+              Create app
+            </Button>
+          </>
+        )
       }
     />
   );
   if (catalog.isPending)
     return (
       <PageSkeleton label="Loading apps…">
-        <PageHeaderSkeleton actions={2} />
+        <PageHeaderSkeleton actions={admin ? 2 : 0} />
         <SectionSkeleton variant="table" columns={6} rows={3} />
       </PageSkeleton>
     );
@@ -195,13 +202,19 @@ function ManagedCatalog() {
         ) : (
           <div className="ui-card">
             <EmptyState title="No apps yet">
-              Apps appear here when owners create them, or when you create or adopt one.
+              {admin
+                ? 'Apps appear here when owners create them, or when you create or adopt one.'
+                : 'Apps appear here when owners create them.'}
             </EmptyState>
           </div>
         ))}
-      <CreateDialog open={dialog === 'create'} onClose={() => setDialog(null)} />
-      <AdoptDialog open={dialog === 'adopt'} onClose={() => setDialog(null)} run={stepUp.run} />
-      {stepUp.dialog}
+      {admin && (
+        <>
+          <CreateDialog open={dialog === 'create'} onClose={() => setDialog(null)} />
+          <AdoptDialog open={dialog === 'adopt'} onClose={() => setDialog(null)} run={stepUp.run} />
+          {stepUp.dialog}
+        </>
+      )}
     </Page>
   );
 }
@@ -377,7 +390,7 @@ function size(app: ManagedApp) {
 
 type Action = 'deploy' | 'state' | 'owner' | 'storage' | null;
 
-function ManagedApplication({ id }: { id: string }) {
+function ManagedApplication({ id, admin }: { id: string; admin: boolean }) {
   const client = useQueryClient();
   const toast = useToast();
   const app = useQuery({ queryKey: ['admin', 'app', id], queryFn: () => adminAppsApi.detail(id) });
@@ -433,7 +446,9 @@ function ManagedApplication({ id }: { id: string }) {
         {missing ? (
           <div className="ui-card">
             <EmptyState title="This app isn’t managed here" icon="search">
-              Check the address, or adopt the app from All apps.
+              {admin
+                ? 'Check the address, or adopt the app from All apps.'
+                : 'Check the address, or go back to All apps.'}
             </EmptyState>
           </div>
         ) : (
@@ -528,37 +543,39 @@ function ManagedApplication({ id }: { id: string }) {
         identityProvider={identity}
       />
       <TeamSection id={id} service={service} />
-      <Section title="Danger zone" flush>
-        <List label="Danger zone">
-          <ListItem
-            title="Change owner"
-            meta="Move this app to another account."
-            trailing={
-              <Button size="sm" onClick={() => setAction('owner')}>
-                Change owner
-              </Button>
-            }
-          />
-          <ListItem
-            title="Delete a database or storage"
-            meta={
-              resources.length
-                ? 'Permanently delete it and all of its data.'
-                : 'This app has no databases or storage.'
-            }
-            trailing={
-              <Button
-                size="sm"
-                variant="danger"
-                disabled={!resources.length}
-                onClick={() => setAction('storage')}
-              >
-                Delete
-              </Button>
-            }
-          />
-        </List>
-      </Section>
+      {admin && (
+        <Section title="Danger zone" flush>
+          <List label="Danger zone">
+            <ListItem
+              title="Change owner"
+              meta="Move this app to another account."
+              trailing={
+                <Button size="sm" onClick={() => setAction('owner')}>
+                  Change owner
+                </Button>
+              }
+            />
+            <ListItem
+              title="Delete a database or storage"
+              meta={
+                resources.length
+                  ? 'Permanently delete it and all of its data.'
+                  : 'This app has no databases or storage.'
+              }
+              trailing={
+                <Button
+                  size="sm"
+                  variant="danger"
+                  disabled={!resources.length}
+                  onClick={() => setAction('storage')}
+                >
+                  Delete
+                </Button>
+              }
+            />
+          </List>
+        </Section>
+      )}
       <DeployDialog
         open={action === 'deploy'}
         onClose={() => setAction(null)}
@@ -567,6 +584,7 @@ function ManagedApplication({ id }: { id: string }) {
         repository={settings.data.repository}
         branch={settings.data.branch}
         configuration={settings.data.configuration}
+        admin={admin}
         onStarted={started}
       />
       <StateDialog
@@ -575,26 +593,30 @@ function ManagedApplication({ id }: { id: string }) {
         app={data}
         onStarted={started}
       />
-      <OwnerDialog
-        open={action === 'owner'}
-        onClose={() => setAction(null)}
-        app={data}
-        run={stepUp.run}
-        onDone={() => {
-          setAction(null);
-          refresh();
-          toast('Owner changed');
-        }}
-      />
-      <StorageDialog
-        open={action === 'storage'}
-        onClose={() => setAction(null)}
-        app={data}
-        resources={resources}
-        run={stepUp.run}
-        onStarted={started}
-      />
-      {stepUp.dialog}
+      {admin && (
+        <>
+          <OwnerDialog
+            open={action === 'owner'}
+            onClose={() => setAction(null)}
+            app={data}
+            run={stepUp.run}
+            onDone={() => {
+              setAction(null);
+              refresh();
+              toast('Owner changed');
+            }}
+          />
+          <StorageDialog
+            open={action === 'storage'}
+            onClose={() => setAction(null)}
+            app={data}
+            resources={resources}
+            run={stepUp.run}
+            onStarted={started}
+          />
+          {stepUp.dialog}
+        </>
+      )}
     </Page>
   );
 }
@@ -653,6 +675,7 @@ function DeployDialog({
   repository,
   branch,
   configuration,
+  admin,
   onStarted,
 }: {
   open: boolean;
@@ -662,9 +685,13 @@ function DeployDialog({
   repository: string;
   branch: string;
   configuration: Configuration;
+  admin: boolean;
   onStarted: (result: { intentId: string }) => void;
 }) {
   const identity = app.identityProvider;
+  // An app keeping a fixed IP address deploys only with an outage, which
+  // only admins can allow.
+  const blocked = !admin && app.requiresMaintenance;
   const [sha, setSha] = useState('');
   const [maintenance, setMaintenance] = useState(false);
   const [plan, setPlan] = useState('');
@@ -705,9 +732,15 @@ function DeployDialog({
       form="admin-deploy"
       submit="Deploy"
       pending={deploy.isPending}
-      disabled={(app.requiresMaintenance && !maintenance) || (identity && !consent)}
+      disabled={blocked || (app.requiresMaintenance && !maintenance) || (identity && !consent)}
     >
       <form id="admin-deploy" className="ui-stack ui-gap-4" onSubmit={submit}>
+        {blocked && (
+          <Alert tone="info" title="Only an admin can deploy this app">
+            It keeps a fixed IP address, so it goes offline briefly while the new version starts.
+            Ask an admin to deploy it.
+          </Alert>
+        )}
         <ErrorAlert error={deploy.error} />
         {open && repository && (
           <RecentCommits
@@ -752,34 +785,38 @@ function DeployDialog({
             }}
           />
         )}
-        <Checkbox
-          label="Allow a brief outage"
-          description={
-            app.requiresMaintenance
-              ? 'Required: this app keeps a fixed IP address, so it goes offline briefly while the new version starts.'
-              : 'Replace the running app in one step. It goes offline briefly while the new version starts.'
-          }
-          checked={maintenance}
-          onChange={(event) => setMaintenance(event.target.checked)}
-        />
-        <Field
-          label="Sizing plan"
-          id="sizing-plan"
-          optional
-          error={planError}
-          hint="Paste a reviewed plan as JSON. Leave empty to keep the current size."
-        >
-          <Textarea
-            rows={3}
-            spellCheck={false}
-            className="ui-mono"
-            value={plan}
-            onChange={(event) => {
-              setPlan(event.target.value);
-              setPlanError(null);
-            }}
-          />
-        </Field>
+        {admin && (
+          <>
+            <Checkbox
+              label="Allow a brief outage"
+              description={
+                app.requiresMaintenance
+                  ? 'Required: this app keeps a fixed IP address, so it goes offline briefly while the new version starts.'
+                  : 'Replace the running app in one step. It goes offline briefly while the new version starts.'
+              }
+              checked={maintenance}
+              onChange={(event) => setMaintenance(event.target.checked)}
+            />
+            <Field
+              label="Sizing plan"
+              id="sizing-plan"
+              optional
+              error={planError}
+              hint="Paste a reviewed plan as JSON. Leave empty to keep the current size."
+            >
+              <Textarea
+                rows={3}
+                spellCheck={false}
+                className="ui-mono"
+                value={plan}
+                onChange={(event) => {
+                  setPlan(event.target.value);
+                  setPlanError(null);
+                }}
+              />
+            </Field>
+          </>
+        )}
         {identity && (
           <SignInConsent checked={consent} onChange={setConsent} label="Deploy the sign-in app" />
         )}

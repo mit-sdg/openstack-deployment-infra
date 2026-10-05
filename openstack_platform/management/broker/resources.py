@@ -312,10 +312,14 @@ def validate_bindings(
                 )
 
 
-def is_admin(db: sqlite3.Connection, user_id: str) -> bool:
-    """Admin accounts have no app or concurrency limits."""
+# Staff and admins administer every app, so neither has app or concurrency limits.
+UNLIMITED_ROLES = frozenset({"staff", "admin"})
+
+
+def unlimited(db: sqlite3.Connection, user_id: str) -> bool:
+    """Staff and admin accounts have no app or concurrency limits."""
     row = db.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
-    return row is not None and row[0] == "admin"
+    return row is not None and row[0] in UNLIMITED_ROLES
 
 
 def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: str) -> None:
@@ -330,7 +334,7 @@ def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: 
         raise HttpError(
             409, "APP_BUSY", "Wait for or recover this application's current operation first."
         )
-    if is_admin(db, user_id):
+    if unlimited(db, user_id):
         return
     policy = db.execute("SELECT concurrent FROM quotas WHERE user_id=?", (user_id,)).fetchone()
     if len(held) >= (self.config.concurrency_limit if policy is None else policy[0]):

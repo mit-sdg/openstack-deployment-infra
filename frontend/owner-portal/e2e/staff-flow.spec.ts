@@ -176,8 +176,9 @@ for (const [layout, viewport, colorScheme] of [
           ? '00000000-0000-4000-8000-000000000081'
           : '00000000-0000-4000-8000-000000000083';
       const liveSession = (await (await page.request.get('/api/v1/session')).json()).data;
+      const csrfHeaders = { 'X-CSRF-Token': liveSession.csrfToken };
       const known = await page.request.get(`/api/v1/admin-apps/${operatorId}`, {
-        headers: { 'X-CSRF-Token': liveSession.csrfToken },
+        headers: csrfHeaders,
       });
       if (known.status() === 200) {
         await page.goto(`/admin/apps/${operatorId}`);
@@ -238,20 +239,62 @@ for (const [layout, viewport, colorScheme] of [
       await expect(deploy).toBeDisabled();
       await expect(dialog).toContainText('Leave empty to keep the current size');
       await expect(dialog).toContainText('This app provides sign-in for the portal');
-      await staffPage.goto('/admin/apps');
+      // Staff manage every app like admins, without ownership changes,
+      // storage deletion, outages or resizing.
+      await staffPage.getByRole('link', { name: 'Admin', exact: true }).click();
+      await expect(staffPage.getByRole('heading', { name: 'All apps', exact: true })).toBeVisible();
+      await expect(staffPage.getByRole('link', { name: 'Accounts', exact: true })).toHaveCount(0);
+      await expect(staffPage.getByRole('button', { name: 'Adopt app', exact: true })).toHaveCount(
+        0,
+      );
+      await expect(staffPage.getByRole('button', { name: 'Create app', exact: true })).toHaveCount(
+        0,
+      );
+      // Earlier specs give Alice more apps, so open hers by ID, not by name.
+      const foreignSlug = (await (await ownerPage.request.get(`/api/v1/apps/${foreign}`)).json())
+        .data.slug as string;
+      await staffPage.goto(`/admin/apps/${foreign}`);
       await expect(
-        staffPage.getByRole('heading', { name: "You don't have access to this page" }),
+        staffPage.getByRole('heading', { name: foreignSlug, exact: true }),
       ).toBeVisible();
-      expect((await staffPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
+      await expect(staffPage.getByText('Danger zone', { exact: true })).toHaveCount(0);
+      const variable = `STAFF_NOTE_${suffix.toUpperCase()}`;
+      await staffPage.getByLabel('Variable name').fill(variable);
+      await staffPage.getByLabel('New value').fill('set by staff');
+      await staffPage.getByRole('button', { name: 'Save variable', exact: true }).click();
+      await expect(staffPage.getByRole('button', { name: `Replace ${variable}` })).toBeVisible();
+      const staffCsrf = {
+        'X-CSRF-Token': (await (await staffPage.request.get('/api/v1/session')).json()).data
+          .csrfToken,
+      };
+      expect(
+        (await staffPage.request.get('/api/v1/admin-apps', { headers: staffCsrf })).status(),
+      ).toBe(200);
+      const adopt = await staffPage.request.post('/api/v1/admin-apps/adopt', {
+        headers: {
+          ...staffCsrf,
+          Origin: new URL(staffPage.url()).origin,
+          'Idempotency-Key': crypto.randomUUID(),
+        },
+        data: { applicationId: operatorId },
+      });
+      expect(adopt.status()).toBe(403);
+      expect((await adopt.json()).error.code).toBe('ACCESS_DENIED');
       expect((await ownerPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
+      // Admins see the staff change in their audit log.
+      const audit = (
+        await (await page.request.get('/api/v1/account-audit', { headers: csrfHeaders })).json()
+      ).data.items as { action: string; actorUsername: string }[];
+      expect(audit).toContainEqual(
+        expect.objectContaining({ action: 'app_env_set', actorUsername: 'staff' + suffix }),
+      );
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
       // A class account's role changes through the Accounts page (a PATCH).
       await commons(otherPage, 'bob');
-      const csrf = { 'X-CSRF-Token': liveSession.csrfToken };
       const role = async () =>
-        (await (await page.request.get('/api/v1/accounts?q=bob', { headers: csrf })).json()).data
-          .items[0].role as string;
+        (await (await page.request.get('/api/v1/accounts?q=bob', { headers: csrfHeaders })).json())
+          .data.items[0].role as string;
       const next = (await role()) === 'staff' ? 'owner' : 'staff';
       await page.getByRole('link', { name: 'Accounts', exact: true }).click();
       await page.getByRole('button', { name: 'Bob Student', exact: true }).click();

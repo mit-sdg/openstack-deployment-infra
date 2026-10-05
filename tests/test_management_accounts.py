@@ -309,15 +309,27 @@ class AccountsTests(ManagementCase):
         self.assertEqual(
             self.call("GET", "/v1/session", owner="alice").body["data"]["role"], "staff"
         )
+        # Staff, like admins, have no limits to edit.
+        self.assert_error(
+            "ADMIN_UNLIMITED",
+            lambda: self.call(
+                "PUT",
+                f"/v1/accounts/{alice}/quotas",
+                {"apps": 7, "concurrentOperations": 3},
+                "admin",
+            ),
+        )
+        bob = self.login("bob")
         self.call(
-            "PUT", f"/v1/accounts/{alice}/quotas", {"apps": 7, "concurrentOperations": 3}, "admin"
+            "PUT", f"/v1/accounts/{bob}/quotas", {"apps": 7, "concurrentOperations": 3}, "admin"
         )
-        self.assertEqual(
-            self.call("GET", f"/v1/staff/owners/{alice}", owner="alice").body["data"]["quota"][
-                "apps"
-            ]["limit"],
-            7,
-        )
+        for owner, limit in ((alice, None), (bob, 7)):
+            self.assertEqual(
+                self.call("GET", f"/v1/staff/owners/{owner}", owner="alice").body["data"]["quota"][
+                    "apps"
+                ]["limit"],
+                limit,
+            )
         self.call("PATCH", f"/v1/accounts/{alice}", {"action": "enabled", "value": False}, "admin")
         self.assert_error("SESSION_EXPIRED", lambda: self.call("GET", "/v1/session", owner="alice"))
         self.call("PATCH", f"/v1/accounts/{alice}", {"action": "enabled", "value": True}, "admin")
