@@ -761,36 +761,49 @@ Owner resources originally shipped as protocol-2 release additions. The current
 account model uses a matched protocol-3/schema-3 pair and approved admin image
 replacement; the resource projections and keyed fingerprints remain unchanged.
 
-### Local-admin application authority
+### Staff and admin application authority
 
 The closed `/api/v1/admin-apps` namespace maps to broker `/v1/admin-apps` routes,
-never controller `/v1/admin/*`. Owner and staff roles are denied before looking
-up an app or contacting the controller. Admin GETs require Origin checks and a
-session CSRF token; writes require the exact portal Origin and CSRF. The role,
-generation and enabled state are rechecked in the mutation transaction and after
-controller reads. Request-local context variables prevent concurrent threads
-from sharing elevated authority. The normal `/v1/apps` namespace still enforces
-ownership for every role. Adoption always requires step-up. Reassignment is an
-optimistic owner transition and requires step-up; all app mutations share a busy scope across actors.
+never controller `/v1/admin/*`. Staff and admin sessions pass its gate; owners
+are denied with `ACCESS_DENIED` before looking up an app or contacting the
+controller. Four routes need an admin session and deny staff the same way:
+creating an app for an owner (`POST /v1/admin-apps`), adoption, reassignment
+(`PUT .../owner`) and storage deletion (`DELETE .../storage/{resource}`).
+Adoption, reassignment and storage deletion also require step-up. Staff never
+pass these checks: admin sessions and step-up exist only for local admin
+accounts with TOTP. GETs require Origin checks
+and a session CSRF token; writes require the exact portal Origin and CSRF. The
+session kind each route needs, generation and enabled state are rechecked in the
+mutation transaction and after controller reads. Request-local context variables
+prevent concurrent threads from sharing elevated authority. The normal
+`/v1/apps` namespace still enforces ownership for every role; staff reach other
+owners' apps only through `/v1/admin-apps`. All app mutations share a busy scope
+across actors, and reassignment is an optimistic owner transition.
 
 `GET /v1/admin-apps` pages the broker DB, default 25 and maximum 50, without
-controller fanout. Detail reads use project GET by known UUID. Administrative
-reads use bounded per-account/address buckets (one read/s, burst ten per account;
-two/s, burst twenty per address; two active per account, eight total; browser admin reads queue at two requests) and the
-existing 30-day/2M-row read audit. Mutation intent bodies carry a server-only `_portalAdmin` marker, stripped before
-controller dispatch and omitted from public intent serializers,
-with safe entries in the admin action audit; credentials, values and controller
-refs are excluded. A downgraded account cannot resume an admin intent. Accepted
-operations continue to reconcile; unaccepted admin intents stop for review if
-the actor loses admin authority.
+controller fanout. Detail reads use project GET by known UUID. App
+administration reads use bounded per-account/address buckets, the same for
+staff and admins (four reads/s, burst 40 per account; eight/s, burst 80 per
+address; two active per account, eight total; browser reads queue at two
+requests), and the existing 30-day/2M-row read audit. Mutation intent bodies
+carry a server-only `_portalAdmin` marker, stripped before controller dispatch
+and omitted from public intent serializers, with safe entries in the admin
+action audit whichever role acted, so admins see staff changes in the audit
+log; credentials, values and controller refs are excluded. The journal runs and
+`resume` accepts a marked intent only while its actor is staff or admin; app
+creation for an owner, adoption and storage deletion (`ADMIN_ONLY_INTENTS`)
+need an admin, and resuming a deletion needs step-up. Accepted operations
+continue to reconcile; unaccepted marked intents stop for review if the actor
+loses the role they need.
 
 Configuration/environment/storage handlers are the owner implementations from
 `broker/api.py` and `broker/resources.py` reused behind admin authorization. The
 environment fingerprint remains a domain-separated keyed HMAC. Intents store
 names and the server-only admin marker, and controller metadata projections discard values and provider
-credentials. Cross-owner build/runtime logs are not exposed through the admin app
-namespace because they can contain values. Concurrent-operation and environment
-rate limits charge the acting account, with an app-wide busy scope. App creation
+credentials. Build and startup logs are not exposed through the admin app
+namespace; runtime logs are, as a bounded recent tail. Concurrent-operation and
+environment rate limits charge the acting account, with an app-wide busy scope;
+staff and admin accounts have no app or concurrency limits. App creation
 uses a selected owner's quota; adoption and
 reassignment retain existing apps even if their owner is over quota. Storage
 deletion requires a five-minute password/TOTP proof, typed `slug type`, no saved
@@ -802,8 +815,11 @@ strict repository/ref/configuration evidence. The broker checks IDs, revision,
 configuration digest and active-ID stability, validates bindings and imports the
 accepted revision. Missing/legacy snapshots require operator deployment first.
 Controller GET exposes only a retained-IP maintenance boolean; provider IP and
-reservation records stay privileged. Admin deploy accepts maintenance/plan,
-while owner/staff deploy bodies reject those fields. Plan fields, types, known
+reservation records stay privileged. Admin deploy accepts maintenance/plan.
+Staff deploys through `/v1/admin-apps` get 403 `ADMIN_REQUIRED` for
+`maintenance: true`, any plan, or an app that requires maintenance;
+`maintenance: false` is the default and accepted. Owner-route deploy bodies
+reject both fields. Plan fields, types, known
 current sizing and fingerprint are checked before the broker journals a request;
 the controller validates against fresh cloud evidence at admission. Omitting a plan preserves
 accepted sizing. Class-app consent matches public URL host with Commons origin and is enforced
@@ -824,8 +840,9 @@ optional TOTP; client role claims are ignored. The broker assigns the current
 DB role to an immutable session snapshot. Roles are `owner`, `staff`, `admin`;
 SQL and broker checks allow admin only when issuer is local. Every session joins
 current enabled/status/role/generation; security changes increment generation and
-delete all sessions. Staff/admin inherit own-app owner rights, while staff
-catalog endpoints remain metadata-only.
+delete all sessions. Staff/admin inherit own-app owner rights without app or
+concurrency limits. Staff catalog endpoints remain metadata-only; staff manage
+other owners' apps through app administration.
 
 Local hashing uses `hashlib.scrypt`, `N=32768,r=8,p=3,dklen=64`, random 16-byte
 salts, constant-time hash comparison and automatic upgrade after valid login.
@@ -978,8 +995,10 @@ currently materializes all attempts before paging; staff history refresh is
 manual and controller behavior/privileges are unchanged.
 
 Staff pages use the same React app/shell, themes, feedback and presentation
-components. Staff navigation covers owners, applications and operations; owner
-navigation and mutation components do not mount in staff mode. Directory pages
+components. Staff navigation covers owners, applications and operations; mutation
+components do not mount on these read-only pages. Staff manage apps from
+**Admin → All apps**, the app administration pages, which hide the admin-only
+actions and the Accounts and Audit log tabs. Directory pages
 refresh manually; detail/operation polling runs every 15 seconds while visible,
 pauses in hidden tabs, and stops after repeated failures. Idle/absolute expiry,
 logout and access loss cancel queries and clear private in-memory data/CSRF;
@@ -993,9 +1012,10 @@ limits are 60/minute per user (burst 10), 120/minute per validated address bucke
 share /64 buckets. Limiter state is bounded (100 users/4096 addresses) and
 process-local; restart resets it. 429/503 responses carry a 30-second retry
 delay. These bound cost/response volume, not eventual disclosure: a compromised
-staff credential can enumerate the entire approved course metadata catalog and
-also manage its own apps. It cannot widen owner
-write scope. Commons password/archival changes still affect new logins only.
+staff credential can enumerate the entire approved course metadata catalog and,
+until revoked, change, deploy, stop and read runtime logs of any broker app
+through app administration. It cannot manage accounts, change ownership or
+delete storage. Commons password/archival changes still affect new logins only.
 
 Successful staff reads recheck authorization and commit a private read audit
 before sending data. Audit/dependency failure returns 503 without metadata;

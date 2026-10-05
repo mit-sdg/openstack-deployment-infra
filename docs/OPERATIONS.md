@@ -1466,7 +1466,7 @@ views. Staff and admins also see a bounded internal code; owners do not. Unknown
 failures retain a generic message, and controller free text is not used as
 guidance.
 
-### Manage applications as a local admin
+### Manage applications as staff or a local admin
 
 Sign in with a local admin account and open **Manage applications**. The list
 contains every broker-known application; the controller project socket cannot
@@ -1495,6 +1495,16 @@ and request key; their durable fingerprints retain the keyed HMAC from the
 owner resource implementation. Other unknown operations reuse their original
 controller key.
 
+Staff open the same pages from **Admin → All apps** and can do all of the above
+for any app except create an app for another owner, adopt an app, reassign its
+owner, delete storage, allow a maintenance outage or paste a sizing plan. The
+portal hides those actions for staff and the broker refuses them with 403. An
+app with a retained primary IPv4 deploys only with maintenance, so only an admin
+can deploy it. Staff need no step-up, have no app or concurrency limits, and
+cannot open Accounts or the Audit log. Their changes appear in the Audit log
+with the staff member as the actor. A staff member who signs in with Commons
+loses portal access if they stop the Commons app; recover with a local admin.
+
 The deploy dialog accepts maintenance consent and an optional reviewed sizing
 plan. Without a plan the controller preserves the app's accepted worker flavor,
 CPU and memory, including an adopted class app's larger allocation. Plan
@@ -1520,7 +1530,8 @@ platform backups exist; operator-assisted recovery can lose newer data. Poll the
 intent to terminal success and verify the resource disappears. The broker also
 refuses deletion while saved bindings reference the resource, serializes app
 operations across owner/admin actors, and records a safe admin audit entry.
-Owners and staff have no storage-delete or cross-owner write route.
+Owners and staff have no storage-delete route. Owners have no cross-owner write
+route; staff change other owners' apps only through app administration.
 
 The project controller socket now permits `DELETE /v1/storage/{id}` with its
 existing machine-name confirmation and optional S3 `purge` consent. The broker
@@ -1557,7 +1568,9 @@ CA updates belong to the admin image, not a per-account key rotation.
 Defaults are two apps and one held external mutation per owner. Local admins
 edit per-owner quotas in **Accounts**; lower limits stop new admission without
 cancelling existing operations or deleting apps. Disabled apps still count.
-Admin accounts have no app or concurrency limits, so their limits read as null.
+Staff and admin accounts have no app or concurrency limits, so their limits read
+as null and Accounts offers none to edit; the API refuses with
+`ADMIN_UNLIMITED`. A stored quota applies again if the account becomes an owner.
 Apps an admin creates for an owner still count against that owner's quota, and
 every app still accepts one change at a time.
 Staff/admin catalog reads enumerate only broker-known resources; global
@@ -1615,7 +1628,8 @@ active/pending/disabled status, last sign-in, app count and effective quotas.
 Create local owner/staff/admin accounts through 72 h single-use invitations;
 copy and privately share the returned fragment URL. The portal sends no email.
 Local owner/staff recipients may enable TOTP; admins must enroll it. A staff
-account can manage its own apps and read the catalog in the same session.
+account manages its own apps, reads the catalog and manages every app from
+**Admin → All apps** in the same session, without the admin-only actions.
 There is no sign-in mode selector, impersonation or role upgrade in a session.
 
 Changing role, enabling/disabling, revoking sessions, or issuing/resetting local
@@ -1692,9 +1706,11 @@ time; issue enrollment URLs after the broker has completed migration.
 Staff reads record actor ID, correlation UUID, fixed route, validated resource/
 filter IDs, page bound/cursor presence, row count, outcome/status, stale flag and
 time in `staff_read_audit`. They never record passwords, cookies, CSRF, raw
-queries, response bodies, logs or controller operation references. Account
-changes have separate `admin_audit` evidence. Read audits are private to
-recovery access; the staff portal exposes no audit endpoint.
+queries, response bodies, logs or controller operation references. App
+administration reads by staff and admins are recorded the same way. Account
+changes and app administration changes have separate `admin_audit` evidence,
+shown to admins in the Audit log. Read audits are private to recovery access;
+staff have no audit endpoint.
 
 Read-audit retention is 30 days. Read traffic triggers bounded pruning batches
 of at most 1000 expired rows after the daily interval; if a batch is full, later

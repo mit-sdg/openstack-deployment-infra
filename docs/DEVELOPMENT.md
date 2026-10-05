@@ -304,9 +304,11 @@ Tests verify scrypt salts/cost upgrades, RFC TOTP vectors/window/replay, hash-on
 24-hour operator files, 72-hour invites/resets, one-time ID consumption, five-minute
 step-up, role/generation transitions, session invalidation, field projections and
 safe audit. Playwright bootstraps an admin, enrolls TOTP, invites local staff,
-checks Commons owner isolation, denies admin pages to non-admin roles, adopts an
-operator class-app fixture, saves its imported configuration and opens its
-maintenance deploy dialog. Tokens
+checks Commons owner isolation, denies account pages to staff and admin pages to
+owners, adopts an operator class-app fixture, saves its imported configuration
+and opens its maintenance deploy dialog. Staff then open another owner's app from
+**Admin → All apps**, set an environment variable without seeing admin-only
+actions, are refused adoption, and the admin audit log names them. Tokens
 are removed from address bars and never enter request URLs. Traces/video remain
 disabled. Use the root npm workspace/lockfile and `frontend/shared` from PR #62;
 do not install or regenerate an owner-portal-only lockfile.
