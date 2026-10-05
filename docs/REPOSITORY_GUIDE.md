@@ -398,8 +398,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/components/StartupRecord.tsx` — why a failed deployment's new version stopped: summary, events and output.
 - `frontend/owner-portal/src/components/StartupRecord.test.tsx` — startup summary wording and errors-first display tests.
 - `frontend/owner-portal/src/components/RecentCommits.tsx` — recent-commit picker for deploys, read from GitHub by the browser.
-- `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy commit check line and review-dialog problem list.
-- `frontend/owner-portal/src/components/CommitChecks.test.tsx` — commit check problem, unreadable-commit and rate-limit UI tests.
+- `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy commit check line, the runtime version a commit asks for, and review-dialog problem list.
+- `frontend/owner-portal/src/components/CommitChecks.test.tsx` — commit check problem, runtime version, unreadable-commit and rate-limit UI tests.
 - `frontend/owner-portal/src/components/Status.tsx` — shared owner Status component and presentation behavior.
 - `frontend/owner-portal/src/components/Repository.tsx` — repository links labelled with their short owner/repo name.
 - `frontend/owner-portal/src/components/StorageSection.tsx` — owner storage provisioning, bindings, verification and rotation controls.
@@ -412,6 +412,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/pages/Dashboard.tsx` — owner dashboard page module.
 - `frontend/owner-portal/src/pages/Deploy.tsx` — owner deploy page module.
 - `frontend/owner-portal/src/pages/Deployment.tsx` — owner deployment page module.
+- `frontend/owner-portal/src/pages/Deployment.test.tsx` — deployment detail tests for the runtime release a build used and its source.
 - `frontend/owner-portal/src/pages/Logs.tsx` — owner app logs page module.
 - `frontend/owner-portal/src/pages/Team.tsx` — owner app team page module.
 - `frontend/owner-portal/src/pages/History.tsx` — owner history page module.
@@ -425,6 +426,8 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/utils/preflight.ts` — browser check of a public commit against the build's checkout rules.
 - `frontend/owner-portal/src/utils/preflight.test.ts` — shared-case parity, truncated-tree and request tests for the commit check.
 - `frontend/owner-portal/src/utils/preflight-cases.json` — checkout cases shared by the browser check and `validate_checkout` tests.
+- `frontend/owner-portal/src/utils/runtimeVersions.ts` — browser parser for the Node.js or Bun version a commit asks for, mirroring `runtime_versions.py`.
+- `frontend/owner-portal/src/utils/runtimeVersions.test.ts` — shared range and version-request cases through the browser parser.
 - `frontend/owner-portal/src/utils/runtime-version-cases.json` — version range and request cases shared by the portal's parser and `runtime_versions.py` tests.
 - `openstack_platform/management/broker/anonymous.py` — private HMAC key, stateless expiring anonymous challenges, and bounded per-client-address limits.
 - `openstack_platform/management/broker/resources.py` — owner environment and storage routes, validation, and secret-free projections.

@@ -240,6 +240,7 @@ export function ConfigurationForm({
                 />
               ))}
             </Fieldset>
+            <Hint>{configurationGuidance.versions}</Hint>
             <Field
               label="Package directories"
               id="packages"

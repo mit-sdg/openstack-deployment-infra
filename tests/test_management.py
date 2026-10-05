@@ -616,6 +616,46 @@ class OwnerIntentTests(ManagementCase):
             read = self.call("GET", f"/v1/intents/{result['intentId']}", owner="alice").body["data"]
             self.assertEqual(read["state"], state)
 
+    def test_deployment_reads_relay_only_a_well_formed_build_runtime(self) -> None:
+        self.login()
+        app = self.create()
+        self.save(app)
+        intent = self.call(
+            "POST",
+            f"/v1/apps/{app}/deployments",
+            {"commit": "2" * 40, "configurationRevision": 1},
+            "alice",
+        ).body["data"]
+        deployment = self.fixture.deployments[intent["operationId"]]
+        detail = f"/v1/apps/{app}/deployments/{intent['operationId']}"
+        resolved = {
+            "runtime": "node",
+            "version": "22.11.0",
+            "image": "docker.io/library/node@sha256:" + "1" * 64,
+            "source": "engines.node >=22 <23",
+        }
+        default = {**resolved, "version": None, "source": "default"}
+        for runtime, relayed in (
+            (resolved, resolved),
+            (default, default),
+            (None, None),
+            ({**resolved, "extra": "private"}, None),
+            ({**resolved, "image": "node:22-slim"}, None),
+            ({**resolved, "version": 22}, None),
+            ({**resolved, "runtime": "deno"}, None),
+            ({**resolved, "runtime": ["node"]}, None),
+            ({**resolved, "source": "x" * 513}, None),
+        ):
+            with self.subTest(runtime=runtime):
+                deployment["runtime"] = runtime
+                read = self.call("GET", detail, owner="alice").body["data"]
+                self.assertEqual(read["runtime"], relayed)
+        deployment["runtime"] = resolved
+        history = self.call("GET", f"/v1/apps/{app}/deployments", owner="alice").body["data"]
+        self.assertEqual(history["items"][0]["runtime"], resolved)
+        del deployment["runtime"]  # As an older controller reports it.
+        self.assertIsNone(self.call("GET", detail, owner="alice").body["data"]["runtime"])
+
     def test_history_and_log_invalid_queries_are_rejected_before_controller_calls(self) -> None:
         self.login()
         app = self.create()
