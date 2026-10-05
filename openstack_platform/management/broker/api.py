@@ -862,7 +862,9 @@ class Broker:
                     410, "APPLICATION_DELETED", "This application was deleted by an administrator."
                 )
             if strict_json(row["body"].encode()).get("_portalAdmin") is True:
-                self.accounts.admin(request, step_up=row["kind"] == "storage_delete")
+                # Origin and CSRF were checked above; the role and step-up are
+                # checked in this transaction (a second connection would wait
+                # on its lock).
                 self.accounts.checked_actor(db, _sid, step_up=row["kind"] == "storage_delete")
             elif (
                 row["kind"] != "create_app"

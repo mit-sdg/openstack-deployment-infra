@@ -529,6 +529,35 @@ class AdminApplicationTests(ManagementCase):
             self.call("GET", self.prefix + "/storage", owner="admin").body["data"]["items"], []
         )
 
+    def test_admins_resume_their_app_administration_changes(self) -> None:
+        result = self.call("POST", self.prefix + "/storage", {"type": "s3"}, "admin")
+        self.assertEqual(self.complete(result)["state"], "succeeded")
+        storage = self.call("GET", self.prefix + "/storage", owner="admin").body["data"]["items"][0]
+        restart = self.call("POST", self.prefix + "/restart", {}, "admin").body["data"]["intentId"]
+        deletion = self.call(
+            "DELETE",
+            self.prefix + "/storage/" + storage["resourceId"],
+            {"confirmation": "student-app s3"},
+            "admin",
+            headers={"idempotency-key": str(uuid.uuid4())},
+        ).body["data"]["intentId"]
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE intents SET state='blocked' WHERE id IN (?,?)", (restart, deletion))
+        self.assertEqual(
+            self.call("POST", f"/v1/intents/{restart}/resume", {}, "admin").status, 202
+        )
+        # Resuming a deletion still needs a recent password and code.
+        self.now += 301
+        self.assert_error(
+            "STEP_UP_REQUIRED",
+            lambda: self.call("POST", f"/v1/intents/{deletion}/resume", {}, "admin"),
+        )
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE sessions SET reauthenticated_at=? WHERE kind='admin'", (self.now,))
+        self.assertEqual(
+            self.call("POST", f"/v1/intents/{deletion}/resume", {}, "admin").status, 202
+        )
+
     def test_revocation_during_controller_read_suppresses_results_and_mutation(self) -> None:
         original = self.broker.client.request
 
