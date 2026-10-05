@@ -493,8 +493,15 @@ Before removing a candidate that never became healthy, the controller calls the
 read-only helper action `app.startup` for that exact job slot: the newest
 allocation's status, restart count, last 12 task events and 200-line output and
 error tails (64 KiB each). It spends at most 30 s or a third of the remaining
-deadline, so removal keeps its time, and a failed read never blocks removal. The
-health poll now has an absolute cutoff that reserves time for the startup read,
+deadline, so removal keeps its time, and a failed read never blocks removal.
+Nomad's healthy deadline is 10 minutes and its progress deadline 12 minutes. The
+healthy deadline counts from placement, so it includes the image download on a
+new worker; a crash loop still fails sooner through the job's restart policy.
+The controller polls a submitted version's health for up to 12 minutes, so it
+waits for Nomad's verdict whenever the operation deadline leaves room. Enable
+resubmits the accepted job unchanged, so a job accepted with the earlier
+3-minute healthy deadline keeps it until the app is deployed again. The
+health poll also has an absolute cutoff that reserves time for the startup read,
 job removal, worker and artifact cleanup. Helper calls and sleeps count against
 that cutoff; slow reads cannot spend the reserved tail. If cleanup still cannot
 be confirmed within the operation deadline, the existing recovery-required path

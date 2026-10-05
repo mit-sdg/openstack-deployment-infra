@@ -948,23 +948,19 @@ def _deploy_and_accept_application(
             remaining * 2 / 3, 30 + cleanup_calls * min(60, config.policy.limits.helper_seconds)
         )
         health_deadline = deadline - reserve
+        # Nomad's healthy deadline includes the image download, so observe at
+        # least until its verdict when the operation deadline leaves room.
         return app.deploy_and_cleanup(
             spec.application_slug,
             deployment_job,
-            attempts=max(
-                1,
-                min(
-                    300,
-                    int(_remaining(deadline, config.policy.limits.process_seconds))
-                    // config.policy.limits.poll_interval_seconds,
-                ),
-            ),
+            attempts=app.health_observation_attempts(config.policy.limits.poll_interval_seconds),
             poll_interval_seconds=config.policy.limits.poll_interval_seconds,
             helper_timeout_seconds=config.policy.limits.helper_seconds,
             helper_caller=deployment_helper,
             deadline=deadline,
             cleanup_reserve_seconds=reserve,
             clock=time.monotonic,
+            observe_seconds=app.HEALTH_OBSERVATION_SECONDS,
             public_health_check=lambda: app.check_public_health(
                 spec.application_slug,
                 config.platform,

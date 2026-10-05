@@ -12,6 +12,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import shlex
@@ -55,6 +56,7 @@ from . import database as db
 from .application_models import Manifest as Manifest
 from .application_models import Recipe as Recipe
 from .application_models import StorageBinding as StorageBinding
+from .nomad_jobs import PROGRESS_DEADLINE_SECONDS
 from .nomad_jobs import deployment_worker_ids as deployment_worker_ids
 from .nomad_jobs import nomad_candidate_identity as nomad_candidate_identity
 from .nomad_jobs import nomad_job_id as nomad_job_id
@@ -1887,6 +1889,15 @@ def deployment_recovery_action(phase: str, *, candidate_digest: str | None) -> s
 
 # Scheduler deployment and promotion
 
+# A new version is observed until Nomad's own verdict on it: by its progress
+# deadline, Nomad has marked the allocation healthy or given up on it.
+HEALTH_OBSERVATION_SECONDS = PROGRESS_DEADLINE_SECONDS
+
+
+def health_observation_attempts(poll_interval_seconds: float) -> int:
+    """Polls that outlast the observation window; time bounds still end it."""
+    return math.ceil(HEALTH_OBSERVATION_SECONDS / poll_interval_seconds) + 1
+
 
 def _call_helper(
     helper_caller: Callable[..., Mapping[str, Any]],
@@ -1940,14 +1951,21 @@ def deploy_and_cleanup(
     deadline: float | None = None,
     cleanup_reserve_seconds: float = 0,
     clock: Callable[[], float] = time.monotonic,
+    observe_seconds: float | None = None,
 ) -> DeploymentResult:
-    """Deploy, observe bounded health, and remove an unhealthy candidate."""
+    """Deploy, observe bounded health, and remove an unhealthy candidate.
+
+    ``observe_seconds`` ends health polling that long after submission, and
+    ``deadline`` minus the cleanup reserve ends it in any case.
+    """
     app_slug = slug(application_slug)
     job = bounded_text(nomad_job, field="Nomad job", maximum=262_144)
-    if not 1 <= attempts <= 300 or not 0 < poll_interval_seconds <= 30:
+    if not 1 <= attempts <= 1_000 or not 0 < poll_interval_seconds <= 30:
         raise ValueError("health observation bounds are invalid")
     if cleanup_reserve_seconds < 0:
         raise ValueError("cleanup reserve must not be negative")
+    if observe_seconds is not None and observe_seconds <= 0:
+        raise ValueError("health observation window must be positive")
     health_deadline = None if deadline is None else deadline - cleanup_reserve_seconds
     candidate = nomad_candidate_identity(job)
     job_id = nomad_job_id(job, app_slug)
@@ -1967,6 +1985,11 @@ def deploy_and_cleanup(
         or deployed.get("candidateImage") != candidate[1]
     ):
         raise ApplicationError("helper did not observe the exact deployment candidate")
+    if observe_seconds is not None:
+        window_end = clock() + observe_seconds
+        health_deadline = (
+            window_end if health_deadline is None else min(health_deadline, window_end)
+        )
 
     def health_args(
         observed_version: int,

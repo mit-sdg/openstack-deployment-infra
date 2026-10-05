@@ -276,6 +276,24 @@ class ApplicationSizingTests(unittest.TestCase):
         )
         self.assertFalse(any(action == "app.promote" for action, _ in self.calls))
 
+    def test_deploy_and_enable_observe_health_through_nomads_window(self):
+        # Both submit a job whose health window includes the image download.
+        with mock.patch.object(app, "deploy_and_cleanup", wraps=app.deploy_and_cleanup) as observed:
+            _, deployed = self.deploy()
+            self.assertEqual(deployed.status, "succeeded", deployed.safe_error)
+            self.post(f"/v1/applications/{self.app_id}/disable", {})
+            _, enabled = self.post(f"/v1/applications/{self.app_id}/enable", {})
+            self.assertEqual(enabled.status, "succeeded", enabled.safe_error)
+        self.assertEqual(observed.call_count, 2)
+        for call in observed.call_args_list:
+            bounds = call.kwargs
+            self.assertEqual(bounds["observe_seconds"], app.HEALTH_OBSERVATION_SECONDS)
+            self.assertGreaterEqual(
+                bounds["attempts"] * bounds["poll_interval_seconds"],
+                app.HEALTH_OBSERVATION_SECONDS,
+            )
+        self.assertIn('healthy_deadline  = "10m"', observed.call_args_list[0].args[1])
+
     def test_custom_flavor_first_deployment_and_student_plan_is_not_public(self):
         plan = self.plan()
         self.assertIsNone(plan["deploymentId"])

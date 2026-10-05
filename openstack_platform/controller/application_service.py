@@ -448,18 +448,11 @@ class ApplicationService:
                 result = app.deploy_and_cleanup(
                     current.slug,
                     deployment.nomad_job,
-                    attempts=max(
-                        1,
-                        min(
-                            300,
-                            int(
-                                remaining_seconds(
-                                    deadline, self.config.policy.limits.process_seconds
-                                )
-                            )
-                            // self.config.policy.limits.poll_interval_seconds,
-                        ),
+                    # A new worker downloads the image inside Nomad's health window.
+                    attempts=app.health_observation_attempts(
+                        self.config.policy.limits.poll_interval_seconds
                     ),
+                    observe_seconds=app.HEALTH_OBSERVATION_SECONDS,
                     poll_interval_seconds=self.config.policy.limits.poll_interval_seconds,
                     helper_timeout_seconds=self.config.policy.limits.helper_seconds,
                     helper_caller=lambda action, values, **_bounds: self.helper_caller(
