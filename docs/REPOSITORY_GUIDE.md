@@ -161,6 +161,7 @@ cross-cutting boundaries.
 - `openstack_platform/remote.py` — protocol-v1 request/response validation and pinned local or SSH helper invocation.
 - `openstack_platform/restore.py` — offline integrity/schema/identity checks and atomic SQLite database replacement.
 - `openstack_platform/runtime.py` — private-directory, lock, bounded process/HTTP, redaction, and diagnostic primitives.
+- `openstack_platform/runtime_versions.py` — Node.js/Bun version requests from package.json and version files, the npm semver subset, oldest supported lines, and checks of a build's reported runtime.
 - `openstack_platform/setup.py` — resumable greenfield preflight and apply orchestration across release, Nix, OpenStack, and hosted services.
 - `openstack_platform/validation.py` — shared strict validators for names, UUIDs, commits, URLs, paths, digests, and bounded text.
 
@@ -329,6 +330,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_private_repositories.py` — pinned GitHub host key, deploy-key fetch and access check, helper key creation, replacement and removal, and build fallback.
 - `openstack_platform/management/broker/runtime_logs.py` — owner/admin runtime log reads, shared briefly and one at a time so they can't crowd the controller.
 - `tests/test_checkout_preflight_parity.py` — runs the shared preflight cases through the build's `validate_checkout`.
+- `tests/test_runtime_versions.py` — shared range and version-request cases, and acceptance or refusal of a build's reported runtime.
 - `tests/test_management_runtime_logs.py` — runtime log ownership, streams, sharing, not-running and older-controller answers, and bounded tails.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
@@ -420,6 +422,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `frontend/owner-portal/src/utils/preflight.ts` — browser check of a public commit against the build's checkout rules.
 - `frontend/owner-portal/src/utils/preflight.test.ts` — shared-case parity, truncated-tree and request tests for the commit check.
 - `frontend/owner-portal/src/utils/preflight-cases.json` — checkout cases shared by the browser check and `validate_checkout` tests.
+- `frontend/owner-portal/src/utils/runtime-version-cases.json` — version range and request cases shared by the portal's parser and `runtime_versions.py` tests.
 - `openstack_platform/management/broker/anonymous.py` — private HMAC key, stateless expiring anonymous challenges, and bounded per-client-address limits.
 - `openstack_platform/management/broker/resources.py` — owner environment and storage routes, validation, and secret-free projections.
 - `tests/test_management_contract.py` — real project-socket broker contract and fake/real wire-shape, errors, cleanup, and read evidence.

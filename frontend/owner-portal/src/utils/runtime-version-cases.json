@@ -1,0 +1,859 @@
+{
+  "ranges": [
+    {
+      "range": "22.11.0",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["22.11.1", "22.10.9"]
+    },
+    {
+      "range": "v22.11.0",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["22.11.1"]
+    },
+    {
+      "range": "=22.11.0",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["22.11.1"]
+    },
+    {
+      "range": "22",
+      "valid": true,
+      "admits": ["22.0.0", "22.99.9"],
+      "rejects": ["21.9.9", "23.0.0"]
+    },
+    {
+      "range": "v22",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["23.0.0"]
+    },
+    {
+      "range": "22.x",
+      "valid": true,
+      "admits": ["22.0.0", "22.11.0"],
+      "rejects": ["23.0.0"]
+    },
+    {
+      "range": "22.11",
+      "valid": true,
+      "admits": ["22.11.0", "22.11.9"],
+      "rejects": ["22.12.0", "22.10.0"]
+    },
+    {
+      "range": "22.11.x",
+      "valid": true,
+      "admits": ["22.11.3"],
+      "rejects": ["22.12.0"]
+    },
+    {
+      "range": "1.3",
+      "valid": true,
+      "admits": ["1.3.0", "1.3.4"],
+      "rejects": ["1.4.0", "1.2.9"]
+    },
+    {
+      "range": "*",
+      "valid": true,
+      "admits": ["0.0.0", "26.10.0"],
+      "rejects": []
+    },
+    {
+      "range": "x",
+      "valid": true,
+      "admits": ["20.0.0"],
+      "rejects": []
+    },
+    {
+      "range": "",
+      "valid": true,
+      "admits": ["20.0.0"],
+      "rejects": []
+    },
+    {
+      "range": "^22.11.0",
+      "valid": true,
+      "admits": ["22.11.0", "22.99.0"],
+      "rejects": ["22.10.9", "23.0.0"]
+    },
+    {
+      "range": "^1.3",
+      "valid": true,
+      "admits": ["1.3.0", "1.9.9"],
+      "rejects": ["1.2.9", "2.0.0"]
+    },
+    {
+      "range": "^0.2.3",
+      "valid": true,
+      "admits": ["0.2.3", "0.2.9"],
+      "rejects": ["0.3.0", "0.2.2"]
+    },
+    {
+      "range": "^0.0.3",
+      "valid": true,
+      "admits": ["0.0.3"],
+      "rejects": ["0.0.4", "0.0.2"]
+    },
+    {
+      "range": "^0.0",
+      "valid": true,
+      "admits": ["0.0.9"],
+      "rejects": ["0.1.0"]
+    },
+    {
+      "range": "^0",
+      "valid": true,
+      "admits": ["0.9.9"],
+      "rejects": ["1.0.0"]
+    },
+    {
+      "range": "^1.x",
+      "valid": true,
+      "admits": ["1.0.0", "1.9.0"],
+      "rejects": ["2.0.0"]
+    },
+    {
+      "range": "~22.11.1",
+      "valid": true,
+      "admits": ["22.11.1", "22.11.9"],
+      "rejects": ["22.12.0", "22.11.0"]
+    },
+    {
+      "range": "~22.11",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["22.12.0"]
+    },
+    {
+      "range": "~22",
+      "valid": true,
+      "admits": ["22.0.0", "22.12.0"],
+      "rejects": ["23.0.0"]
+    },
+    {
+      "range": "~>1.2",
+      "valid": true,
+      "admits": ["1.2.5"],
+      "rejects": ["1.3.0"]
+    },
+    {
+      "range": ">=22",
+      "valid": true,
+      "admits": ["22.0.0", "26.0.0"],
+      "rejects": ["21.9.9"]
+    },
+    {
+      "range": ">22",
+      "valid": true,
+      "admits": ["23.0.0"],
+      "rejects": ["22.99.9"]
+    },
+    {
+      "range": ">22.11",
+      "valid": true,
+      "admits": ["22.12.0"],
+      "rejects": ["22.11.9"]
+    },
+    {
+      "range": ">22.11.0",
+      "valid": true,
+      "admits": ["22.11.1"],
+      "rejects": ["22.11.0"]
+    },
+    {
+      "range": "<22",
+      "valid": true,
+      "admits": ["21.99.9"],
+      "rejects": ["22.0.0"]
+    },
+    {
+      "range": "<22.11.0",
+      "valid": true,
+      "admits": ["22.10.9"],
+      "rejects": ["22.11.0"]
+    },
+    {
+      "range": "<=22",
+      "valid": true,
+      "admits": ["22.99.9"],
+      "rejects": ["23.0.0"]
+    },
+    {
+      "range": "<=22.11",
+      "valid": true,
+      "admits": ["22.11.9"],
+      "rejects": ["22.12.0"]
+    },
+    {
+      "range": "<=22.11.0",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["22.11.1"]
+    },
+    {
+      "range": ">=22 <23",
+      "valid": true,
+      "admits": ["22.0.0", "22.11.0"],
+      "rejects": ["23.0.0", "21.9.9"]
+    },
+    {
+      "range": ">= 20.11 < 23",
+      "valid": true,
+      "admits": ["20.11.0", "22.1.0"],
+      "rejects": ["20.10.9", "23.0.0"]
+    },
+    {
+      "range": "^20.11 || ^22",
+      "valid": true,
+      "admits": ["20.11.0", "22.5.0"],
+      "rejects": ["21.0.0", "23.0.0"]
+    },
+    {
+      "range": "20 || 22 || >=24",
+      "valid": true,
+      "admits": ["20.1.0", "22.1.0", "26.0.0"],
+      "rejects": ["21.1.0", "23.1.0"]
+    },
+    {
+      "range": "1.2.3 - 1.4",
+      "valid": true,
+      "admits": ["1.2.3", "1.4.9"],
+      "rejects": ["1.2.2", "1.5.0"]
+    },
+    {
+      "range": "20 - 22",
+      "valid": true,
+      "admits": ["20.0.0", "22.99.0"],
+      "rejects": ["23.0.0", "19.9.9"]
+    },
+    {
+      "range": "20.11.0 - 22.11.0",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["22.11.1", "20.10.0"]
+    },
+    {
+      "range": ">=22.0.0-0",
+      "valid": true,
+      "admits": ["22.0.0"],
+      "rejects": ["21.99.0"]
+    },
+    {
+      "range": "<23.0.0-0",
+      "valid": true,
+      "admits": ["22.99.9"],
+      "rejects": ["23.0.0"]
+    },
+    {
+      "range": ">22.11.0-rc.1",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["22.10.0"]
+    },
+    {
+      "range": "<=22.11.0-rc.1",
+      "valid": true,
+      "admits": ["22.10.9"],
+      "rejects": ["22.11.0"]
+    },
+    {
+      "range": "=22.11.0-rc.1",
+      "valid": true,
+      "admits": [],
+      "rejects": ["22.11.0"]
+    },
+    {
+      "range": "22.11.0+build.5",
+      "valid": true,
+      "admits": ["22.11.0"],
+      "rejects": ["22.11.1"]
+    },
+    {
+      "range": ">*",
+      "valid": true,
+      "admits": [],
+      "rejects": ["0.0.0", "22.0.0"]
+    },
+    {
+      "range": "<*",
+      "valid": true,
+      "admits": [],
+      "rejects": ["0.0.0"]
+    },
+    {
+      "range": "foo",
+      "valid": false
+    },
+    {
+      "range": "lts/*",
+      "valid": false
+    },
+    {
+      "range": "latest",
+      "valid": false
+    },
+    {
+      "range": "node >= 18",
+      "valid": false
+    },
+    {
+      "range": "1.x.3",
+      "valid": false
+    },
+    {
+      "range": "01.2.3",
+      "valid": false
+    },
+    {
+      "range": "1.2.3-",
+      "valid": false
+    },
+    {
+      "range": "V1",
+      "valid": false
+    },
+    {
+      "range": "1.2.3 -2",
+      "valid": false
+    },
+    {
+      "range": ">=1.2.3 - 2",
+      "valid": false
+    },
+    {
+      "range": "1 | 2",
+      "valid": false
+    },
+    {
+      "range": "1234567890",
+      "valid": false
+    },
+    {
+      "range": ">=22\t<23",
+      "valid": false
+    },
+    {
+      "range": "^v1.2",
+      "valid": true,
+      "admits": ["1.9.0"],
+      "rejects": ["2.0.0"]
+    }
+  ],
+  "requests": [
+    {
+      "name": "node engines range",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": ">=22 <23"
+        }
+      },
+      "files": {},
+      "request": {
+        "source": "engines.node >=22 <23",
+        "label": "Node.js >=22 <23 from engines.node"
+      }
+    },
+    {
+      "name": "node engines x-range",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": "22.x"
+        }
+      },
+      "files": {},
+      "request": {
+        "source": "engines.node 22.x",
+        "label": "Node.js 22.x from engines.node"
+      }
+    },
+    {
+      "name": "node engines with spaced operator",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": ">= 20.11"
+        }
+      },
+      "files": {},
+      "request": {
+        "source": "engines.node >= 20.11",
+        "label": "Node.js >= 20.11 from engines.node"
+      }
+    },
+    {
+      "name": "node engines wins over .nvmrc",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": "^22"
+        }
+      },
+      "files": {
+        ".nvmrc": "24\n"
+      },
+      "request": {
+        "source": "engines.node ^22",
+        "label": "Node.js ^22 from engines.node"
+      }
+    },
+    {
+      "name": "node engines too old",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": ">=18 <19"
+        }
+      },
+      "files": {},
+      "error": "engines.node \">=18 <19\" asks for Node.js 18, older than the oldest supported version (20)."
+    },
+    {
+      "name": "node engines spanning old lines",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": "^14 || ^16 || ^18"
+        }
+      },
+      "files": {},
+      "error": "engines.node \"^14 || ^16 || ^18\" asks for Node.js 18 or earlier, older than the oldest supported version (20)."
+    },
+    {
+      "name": "node engines below 20",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": "<20"
+        }
+      },
+      "files": {},
+      "error": "engines.node \"<20\" asks for Node.js 19 or earlier, older than the oldest supported version (20)."
+    },
+    {
+      "name": "node engines old or new",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": "^18 || ^22"
+        }
+      },
+      "files": {},
+      "request": {
+        "source": "engines.node ^18 || ^22",
+        "label": "Node.js ^18 || ^22 from engines.node"
+      }
+    },
+    {
+      "name": "node engines unsatisfiable",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": ">23 <22"
+        }
+      },
+      "files": {},
+      "error": "engines.node \">23 <22\" doesn't match any Node.js version."
+    },
+    {
+      "name": "node engines invalid",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": "node >= 18"
+        }
+      },
+      "files": {},
+      "error": "engines.node \"node >= 18\" isn't a valid version range."
+    },
+    {
+      "name": "node engines not a string",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": 22
+        }
+      },
+      "files": {},
+      "error": "engines.node must be a version range in quotes, like \">=22\"."
+    },
+    {
+      "name": "node engines too long",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": ">=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 >=22 "
+        }
+      },
+      "files": {},
+      "error": "engines.node is longer than 256 characters."
+    },
+    {
+      "name": "node engines with an unquotable value",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": "“22”"
+        }
+      },
+      "files": {},
+      "error": "engines.node isn't a valid version range."
+    },
+    {
+      "name": "node engines any version",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "node": "*"
+        }
+      },
+      "files": {},
+      "request": {
+        "source": "engines.node *",
+        "label": "Node.js * from engines.node"
+      }
+    },
+    {
+      "name": "node engines not an object",
+      "runtime": "node",
+      "packageJson": {
+        "engines": ["node"]
+      },
+      "files": {},
+      "request": null
+    },
+    {
+      "name": "node ignores engines.bun",
+      "runtime": "node",
+      "packageJson": {
+        "engines": {
+          "bun": "1.0.0"
+        }
+      },
+      "files": {},
+      "request": null
+    },
+    {
+      "name": "node ignores packageManager",
+      "runtime": "node",
+      "packageJson": {
+        "packageManager": "bun@0.1.0"
+      },
+      "files": {},
+      "request": null
+    },
+    {
+      "name": "node .nvmrc version",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "22.11.0\n"
+      },
+      "request": {
+        "source": ".nvmrc 22.11.0",
+        "label": "Node.js 22.11.0 from .nvmrc"
+      }
+    },
+    {
+      "name": "node .nvmrc with v prefix and comment",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "﻿# pinned\nv22 # current LTS\n"
+      },
+      "request": {
+        "source": ".nvmrc v22",
+        "label": "Node.js v22 from .nvmrc"
+      }
+    },
+    {
+      "name": "node .nvmrc lts/*",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "lts/*\n"
+      },
+      "request": {
+        "source": ".nvmrc lts/*",
+        "label": "Node.js lts/* from .nvmrc"
+      }
+    },
+    {
+      "name": "node .nvmrc named LTS alias",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "lts/iron\n"
+      },
+      "error": ".nvmrc asks for \"lts/iron\". Use a version number or range, or lts/*."
+    },
+    {
+      "name": "node .nvmrc alias",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "node"
+      },
+      "error": ".nvmrc asks for \"node\". Use a version number or range, or lts/*."
+    },
+    {
+      "name": "node .nvmrc range",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": ">=20"
+      },
+      "request": {
+        "source": ".nvmrc >=20",
+        "label": "Node.js >=20 from .nvmrc"
+      }
+    },
+    {
+      "name": "node .nvmrc too old",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "16"
+      },
+      "error": ".nvmrc \"16\" asks for Node.js 16, older than the oldest supported version (20)."
+    },
+    {
+      "name": "node .nvmrc wins over .node-version",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "24",
+        ".node-version": "22"
+      },
+      "request": {
+        "source": ".nvmrc 24",
+        "label": "Node.js 24 from .nvmrc"
+      }
+    },
+    {
+      "name": "node empty .nvmrc falls through",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "\n  \n",
+        ".node-version": "22.11.0"
+      },
+      "request": {
+        "source": ".node-version 22.11.0",
+        "label": "Node.js 22.11.0 from .node-version"
+      }
+    },
+    {
+      "name": "node .node-version",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".node-version": "20.18.1\r\n"
+      },
+      "request": {
+        "source": ".node-version 20.18.1",
+        "label": "Node.js 20.18.1 from .node-version"
+      }
+    },
+    {
+      "name": "node .node-version lts/*",
+      "runtime": "node",
+      "packageJson": {},
+      "files": {
+        ".node-version": "lts/*"
+      },
+      "request": {
+        "source": ".node-version lts/*",
+        "label": "Node.js lts/* from .node-version"
+      }
+    },
+    {
+      "name": "node no request",
+      "runtime": "node",
+      "packageJson": {
+        "name": "app"
+      },
+      "files": {},
+      "request": null
+    },
+    {
+      "name": "bun packageManager",
+      "runtime": "bun",
+      "packageJson": {
+        "packageManager": "bun@1.3.4"
+      },
+      "files": {},
+      "request": {
+        "source": "packageManager bun@1.3.4",
+        "label": "Bun 1.3.4 from packageManager"
+      }
+    },
+    {
+      "name": "bun packageManager with hash",
+      "runtime": "bun",
+      "packageJson": {
+        "packageManager": "bun@1.3.4+sha512.0123abcd"
+      },
+      "files": {},
+      "request": {
+        "source": "packageManager bun@1.3.4",
+        "label": "Bun 1.3.4 from packageManager"
+      }
+    },
+    {
+      "name": "bun packageManager wins over engines.bun",
+      "runtime": "bun",
+      "packageJson": {
+        "packageManager": "bun@1.3.4",
+        "engines": {
+          "bun": "^1.2"
+        }
+      },
+      "files": {},
+      "request": {
+        "source": "packageManager bun@1.3.4",
+        "label": "Bun 1.3.4 from packageManager"
+      }
+    },
+    {
+      "name": "bun packageManager range",
+      "runtime": "bun",
+      "packageJson": {
+        "packageManager": "bun@^1.3"
+      },
+      "files": {},
+      "error": "packageManager \"bun@^1.3\" must name an exact Bun version, like bun@1.3.4."
+    },
+    {
+      "name": "bun packageManager too old",
+      "runtime": "bun",
+      "packageJson": {
+        "packageManager": "bun@1.0.36"
+      },
+      "files": {},
+      "error": "packageManager \"bun@1.0.36\" asks for Bun 1.0, older than the oldest supported version (1.1)."
+    },
+    {
+      "name": "bun packageManager pre-release",
+      "runtime": "bun",
+      "packageJson": {
+        "packageManager": "bun@1.3.0-canary.1"
+      },
+      "files": {},
+      "error": "packageManager \"bun@1.3.0-canary.1\" must name an exact Bun version, like bun@1.3.4."
+    },
+    {
+      "name": "bun ignores another package manager",
+      "runtime": "bun",
+      "packageJson": {
+        "packageManager": "pnpm@9.0.0",
+        "engines": {
+          "bun": ">=1.2"
+        }
+      },
+      "files": {},
+      "request": {
+        "source": "engines.bun >=1.2",
+        "label": "Bun >=1.2 from engines.bun"
+      }
+    },
+    {
+      "name": "bun engines.bun",
+      "runtime": "bun",
+      "packageJson": {
+        "engines": {
+          "bun": "^1.3"
+        }
+      },
+      "files": {},
+      "request": {
+        "source": "engines.bun ^1.3",
+        "label": "Bun ^1.3 from engines.bun"
+      }
+    },
+    {
+      "name": "bun engines.bun too old",
+      "runtime": "bun",
+      "packageJson": {
+        "engines": {
+          "bun": "1.0.x"
+        }
+      },
+      "files": {},
+      "error": "engines.bun \"1.0.x\" asks for Bun 1.0, older than the oldest supported version (1.1)."
+    },
+    {
+      "name": "bun engines.bun below 1.1",
+      "runtime": "bun",
+      "packageJson": {
+        "engines": {
+          "bun": "<1.1"
+        }
+      },
+      "files": {},
+      "error": "engines.bun \"<1.1\" asks for Bun 1.0 or earlier, older than the oldest supported version (1.1)."
+    },
+    {
+      "name": "bun engines.bun below 1",
+      "runtime": "bun",
+      "packageJson": {
+        "engines": {
+          "bun": "<1"
+        }
+      },
+      "files": {},
+      "error": "engines.bun \"<1\" asks for Bun 0.x or earlier, older than the oldest supported version (1.1)."
+    },
+    {
+      "name": "bun ignores engines.node",
+      "runtime": "bun",
+      "packageJson": {
+        "engines": {
+          "node": ">=18 <19"
+        }
+      },
+      "files": {},
+      "request": null
+    },
+    {
+      "name": "bun .bun-version",
+      "runtime": "bun",
+      "packageJson": {},
+      "files": {
+        ".bun-version": "1.2.23\n"
+      },
+      "request": {
+        "source": ".bun-version 1.2.23",
+        "label": "Bun 1.2.23 from .bun-version"
+      }
+    },
+    {
+      "name": "bun .bun-version alias",
+      "runtime": "bun",
+      "packageJson": {},
+      "files": {
+        ".bun-version": "latest"
+      },
+      "error": ".bun-version \"latest\" isn't a valid version range."
+    },
+    {
+      "name": "bun ignores .nvmrc",
+      "runtime": "bun",
+      "packageJson": {},
+      "files": {
+        ".nvmrc": "16"
+      },
+      "request": null
+    },
+    {
+      "name": "bun no request",
+      "runtime": "bun",
+      "packageJson": {},
+      "files": {},
+      "request": null
+    }
+  ]
+}
