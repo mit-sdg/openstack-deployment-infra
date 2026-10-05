@@ -44,6 +44,9 @@ from .storage_service import StorageMutationRequest, StorageService
 API_VERSION = 1
 _MAX_PAGE = 100
 _MAX_LOG_LINES = 1_000
+# Public codes for failures a caller can act on, keyed by the final phase that
+# records them durably.
+_FAILURE_CODES = {"platform_busy": "PLATFORM_BUSY"}
 HelperCaller = Callable[..., Mapping[str, object]]
 
 
@@ -1599,6 +1602,9 @@ class ControllerAPI:
             "updatedAt": operation.updated_at,
             "deadlineAt": operation.deadline_at,
             "safeError": None if retry_active else operation.safe_error,
+            "errorCode": _FAILURE_CODES.get(operation.phase)
+            if operation.status == "failed"
+            else None,
             "cleanupState": operation.cleanup_state,
         }
 
@@ -1621,6 +1627,7 @@ class ControllerAPI:
             "updatedAt": dispatch.updated_at,
             "deadlineAt": None,
             "safeError": dispatch.safe_error,
+            "errorCode": None,
             "cleanupState": "pending",
         }
 

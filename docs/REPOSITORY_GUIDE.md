@@ -261,7 +261,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_controller_hosting.py` — static Nix/controller account, socket, backup, and service-hosting boundary checks.
 - `tests/test_controller_http.py` — Unix HTTP parsing, deadlines, keep-alive, peer policy, overload, shutdown, and socket security tests.
 - `tests/test_controller_images.py` — hosted image selection CAS, provider validation, recovery, capability, and pinned provisioning tests.
-- `tests/test_controller_recovery.py` — storage-kind recovery, rejected-build terminalization, crash/retry, and privileged polling tests.
+- `tests/test_controller_recovery.py` — storage-kind recovery, rejected-build terminalization, crash/retry, privileged polling, and infrastructure-lock wait and platform-busy failure tests.
 - `tests/test_controller_seed_images.py` — hosted image-seed identity, selection, and idempotence tests.
 - `tests/test_dashboard.py` — dashboard admin reader, parser, probe, status projection, refresh, HTTP security, command, static asset, and release-identity tests.
 - `tests/test_deployment_config.py` — typed deployment configuration and Git branch/ref resolution tests.

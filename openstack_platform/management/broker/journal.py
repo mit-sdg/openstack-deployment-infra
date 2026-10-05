@@ -27,6 +27,7 @@ def controller_error_code(value: object) -> str | None:
 
 BUILD_GUIDANCE = "The build couldn't use this commit; its build output says why. Check that the commit is pushed to GitHub (a private repository needs the app's deploy key), that the repository root contains package.json, each package directory contains its runtime lockfile, and build/start scripts are defined in the root package.json."
 HEALTH_GUIDANCE = "Check that the health path returns HTTP 2xx with a body of at most 4 KB; use a small endpoint such as /health rather than a full HTML page."
+BUSY_GUIDANCE = "The platform is busy with maintenance. Try again in a few minutes."
 
 
 def deploy_failure_guidance(kind: str, state: str, code: object, phase: object) -> str | None:
@@ -35,6 +36,9 @@ def deploy_failure_guidance(kind: str, state: str, code: object, phase: object) 
         return None
     code = controller_error_code(code)
     phase = phase if isinstance(phase, str) else None
+    if state == "failed" and (code == "PLATFORM_BUSY" or phase == "platform_busy"):
+        # The deploy stopped before creating anything; the same commit can be retried.
+        return BUSY_GUIDANCE
     if (
         code in {"BUILD_REJECTED", "BUILD_FAILED", "SOURCE_REJECTED", "INVALID_BUILD_CONFIGURATION"}
         or phase == "build_rejected"
@@ -254,6 +258,9 @@ class Journal:
                     key: result.get(key)
                     for key in ("operationId", "status", "phase", "cleanupState", "updatedAt")
                 }
+                code = controller_error_code(result.get("errorCode"))
+                if code is not None:
+                    operation["controllerErrorCode"] = code
                 state = (
                     "accepted"
                     if result["status"] == "running"

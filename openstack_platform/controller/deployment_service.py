@@ -7,7 +7,8 @@ import json
 import sqlite3
 import time
 import uuid as uuid_module
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -43,9 +44,19 @@ from .storage_contract import (
 
 _PLATFORM_ENVIRONMENT = PLATFORM_ENVIRONMENT_KEYS
 
+# An operator's image selection holds the infrastructure lock while it checks
+# the provider, which can take minutes. A deploy waits that out, within its own
+# deadline, rather than failing the moment it meets the lock.
+INFRASTRUCTURE_WAIT_SECONDS = 600.0
+PLATFORM_BUSY = "The platform is busy with maintenance. Try again in a few minutes."
+
 
 class DeploymentDeadlineError(RuntimeError):
     """A deployment exhausted its whole-operation deadline."""
+
+
+class PlatformBusyError(runtime.LockBusy):
+    """Maintenance outlasted the wait before the deploy had changed anything."""
 
 
 class HelperCaller(Protocol):
@@ -75,7 +86,9 @@ class DeploymentRequest:
     reuse_worker: bool = False
 
 
-RecoveryKind = Literal["candidate-removed", "build-rejected", "accepted", "deployment-healthy"]
+RecoveryKind = Literal[
+    "candidate-removed", "build-rejected", "platform-busy", "accepted", "deployment-healthy"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +294,73 @@ def _finish_rejected_build(
     db.mark_failed(connection, operation_id, message, cleanup_state="confirmed")
 
 
+def _finish_platform_busy(connection: sqlite3.Connection, operation_id: str) -> None:
+    operation = db.get_operation(connection, operation_id)
+    if (
+        operation is None
+        or operation.phase != "platform_busy"
+        or operation.candidate_digest is not None
+    ):
+        raise app.ApplicationError("platform-busy intent is invalid")
+    # As for a rejected build, the attempt goes first: a crash before the
+    # operation finishes repeats this rather than strand a nonterminal row.
+    db.checkpoint_deployment_attempt(
+        connection, operation_id, status="failed", error=PLATFORM_BUSY, cleanup_state="confirmed"
+    )
+    db.mark_failed(connection, operation_id, PLATFORM_BUSY, cleanup_state="confirmed")
+
+
+def _fail_untouched_deploy(connection: sqlite3.Connection, operation_id: str) -> None:
+    """Fail a deploy that maintenance kept from starting; otherwise return.
+
+    Only a running operation still in its validated phase, without a candidate,
+    has created and changed nothing: no builder, image, worker, Nomad job or
+    variable. It fails cleanly, and the owner can simply try again. Any later
+    phase keeps the recovery path, since something may exist to reconcile.
+    """
+    operation = db.get_operation(connection, operation_id)
+    if (
+        operation is None
+        or operation.status != "running"
+        or operation.phase != "validated"
+        or operation.candidate_digest is not None
+    ):
+        return
+    db.checkpoint_operation(connection, operation_id, phase="platform_busy")
+    _finish_platform_busy(connection, operation_id)
+    raise PlatformBusyError(PLATFORM_BUSY)
+
+
+def _infrastructure_wait(deadline: float) -> float:
+    return min(deadline, time.monotonic() + INFRASTRUCTURE_WAIT_SECONDS)
+
+
+@contextmanager
+def _infrastructure_lock(
+    connection: sqlite3.Connection, state_directory: Path, operation_id: str, deadline: float
+) -> Iterator[None]:
+    """Hold the infrastructure lock, waiting a bounded time for maintenance.
+
+    Deploys run on an operation worker thread. While waiting they hold that
+    worker and this app's lock, never the controller API lock, so other
+    requests are still served.
+    """
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(
+                runtime.lock(
+                    state_directory,
+                    "infrastructure",
+                    wait=True,
+                    deadline=_infrastructure_wait(deadline),
+                )
+            )
+        except runtime.LockBusy:
+            _fail_untouched_deploy(connection, operation_id)
+            raise
+        yield
+
+
 def _call_build(
     connection: sqlite3.Connection,
     config: Config,
@@ -331,7 +411,7 @@ def _prepare_deployment_build(
     candidate = operation.candidate_digest
     if candidate is None:
         db.checkpoint_deployment_attempt(connection, operation.operation_id, status="building")
-        with runtime.lock(state_directory, "infrastructure", deadline=deadline):
+        with _infrastructure_lock(connection, state_directory, operation.operation_id, deadline):
             builder_image_id = uuid(
                 refs.get("builder_image_id"), field="recorded builder image UUID"
             )
@@ -611,7 +691,7 @@ def _prepare_deployment_worker(
         deadline=deadline,
     )
     if worker.get("absent") is True:
-        with runtime.lock(state_directory, "infrastructure", deadline=deadline):
+        with _infrastructure_lock(connection, state_directory, operation_id, deadline):
             worker_image_id = uuid(refs.get("worker_image_id"), field="recorded worker image UUID")
             db.checkpoint_operation(
                 connection,
@@ -1098,6 +1178,9 @@ def _recover_app_deployment(
             deadline=deadline,
         )
         return DeploymentRecovery(None, "build-rejected")
+    if operation.phase == "platform_busy":
+        _finish_platform_busy(connection, operation_id)
+        return DeploymentRecovery(None, "platform-busy")
     if operation.phase in {"platform_environment_mutating", "platform_environment_ready"}:
         if operation.refs.get("platform_key_names") != sorted(_PLATFORM_ENVIRONMENT):
             raise app.ApplicationError("platform environment recovery intent is malformed")
@@ -1792,14 +1875,18 @@ class DeploymentService:
                     refs={"reused_worker": selected, "worker_image_id": selected["image_id"]},
                     merge_refs=True,
                 )
-            operation = image_service.pin_deployment_images(
-                self.connection,
-                self.state_directory,
-                operation,
-                (() if request.reuse_deployment_id is not None else ("builder",))
-                + (() if request.reuse_worker else ("worker",)),
-                deadline=selected_deadline,
-            )
+            try:
+                operation = image_service.pin_deployment_images(
+                    self.connection,
+                    self.state_directory,
+                    operation,
+                    (() if request.reuse_deployment_id is not None else ("builder",))
+                    + (() if request.reuse_worker else ("worker",)),
+                    deadline=_infrastructure_wait(selected_deadline),
+                )
+            except runtime.LockBusy:
+                _fail_untouched_deploy(self.connection, operation.operation_id)
+                raise
             if request.reuse_deployment_id is not None:
                 prior = db.get_deployment_attempt(self.connection, request.reuse_deployment_id)
                 if (

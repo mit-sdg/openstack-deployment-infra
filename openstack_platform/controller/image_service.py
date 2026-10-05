@@ -31,8 +31,12 @@ def pin_deployment_images(
     *,
     deadline: float,
 ) -> db.Operation:
-    """Record first-use selections together; recovery never replaces recorded IDs."""
-    with runtime.lock(state_directory, "infrastructure", deadline=deadline):
+    """Record first-use selections together; recovery never replaces recorded IDs.
+
+    Waits for the infrastructure lock until ``deadline``: a selection in
+    progress holds it while the provider is checked.
+    """
+    with runtime.lock(state_directory, "infrastructure", wait=True, deadline=deadline):
         current = db.get_operation(connection, operation.operation_id)
         if current is None:
             raise db.DatabaseError("deployment operation is missing")

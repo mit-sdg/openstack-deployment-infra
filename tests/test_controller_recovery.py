@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import time
+import uuid
+from contextlib import ExitStack
 from unittest import TestCase, mock
 
-from openstack_platform import remote
+from openstack_platform import remote, runtime
 from openstack_platform.controller import database as db
-from openstack_platform.controller import storage
+from openstack_platform.controller import deployment_service, storage
 from openstack_platform.controller.api import ControllerAPI
 from openstack_platform.controller.http import HttpError
+from tests import test_application_sizing as sizing_fixtures
 from tests import test_controller_api as fixtures
 
 
@@ -297,3 +301,129 @@ class ControllerRecoveryTests(TestCase):
             self.assertEqual(db.get_operation(self.connection, key).status, "failed")
             self.assertEqual(db.get_operation_dispatch(self.connection, key).status, "finished")
         self.assertEqual(self.calls, [])
+
+
+class InfrastructureLockTests(TestCase):
+    """Deploys wait out maintenance, and fail cleanly when it outlasts the wait."""
+
+    def setUp(self):
+        self.fixture = sizing_fixtures.ApplicationSizingTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.root = self.fixture.root
+        self.connection = self.fixture.connection
+        self.application = self.fixture.app_id
+
+    def submit(self, key=None):
+        key = key or str(uuid.uuid4())
+        response = self.fixture.router.dispatch(
+            "POST",
+            f"/v1/applications/{self.application}/deployments",
+            {"Idempotency-Key": key},
+            self.fixture.body,
+        )
+        self.assertEqual(response.status, 202)
+        return key
+
+    def finish(self, key):
+        self.fixture.api.wait_for_operations()
+        return db.get_operation(self.connection, key)
+
+    def test_deploy_waits_for_maintenance_without_holding_the_api_lock(self):
+        with runtime.lock(self.root, "infrastructure"):
+            key = self.submit()
+            # It waits on its worker thread before pinning images.
+            for _ in range(100):
+                waiting = db.get_operation(self.connection, key)
+                if waiting is not None and waiting.phase == "validated":
+                    break
+                time.sleep(0.05)
+            time.sleep(0.2)
+            waiting = db.get_operation(self.connection, key)
+            self.assertEqual((waiting.status, waiting.phase), ("running", "validated"))
+            self.assertEqual(self.fixture.calls, [])
+            # Requests that take the API lock are still served meanwhile.
+            self.assertTrue(self.fixture.api._lock.acquire(timeout=2))
+            self.fixture.api._lock.release()
+            self.assertEqual(
+                self.fixture.router.dispatch(
+                    "GET", f"/v1/applications/{self.application}/deployments", {}, None
+                ).status,
+                200,
+            )
+        operation = self.finish(key)
+        self.assertEqual(operation.status, "succeeded", operation.safe_error)
+
+    def test_maintenance_outlasting_the_wait_fails_cleanly_before_any_change(self):
+        with (
+            mock.patch.object(deployment_service, "INFRASTRUCTURE_WAIT_SECONDS", 0.2),
+            runtime.lock(self.root, "infrastructure"),
+        ):
+            key = self.submit()
+            operation = self.finish(key)
+        busy = deployment_service.PLATFORM_BUSY
+        self.assertEqual(
+            (operation.status, operation.phase, operation.cleanup_state, operation.safe_error),
+            ("failed", "platform_busy", "confirmed", busy),
+        )
+        attempt = db.get_deployment_attempt(self.connection, key)
+        self.assertEqual(
+            (attempt.status, attempt.cleanup_state, attempt.safe_error),
+            ("failed", "confirmed", busy),
+        )
+        # Nothing was built, created or submitted, and nothing awaits recovery.
+        self.assertEqual(self.fixture.calls, [])
+        self.assertEqual(db.get_operation_dispatch(self.connection, key).status, "finished")
+        self.assertIsNone(db.get_unfinished_operation(self.connection, f"app-{self.application}"))
+        polled = self.fixture.router.dispatch("GET", f"/v1/operations/{key}", {}, None).body
+        self.assertEqual(
+            (polled["status"], polled["errorCode"], polled["cleanupState"]),
+            ("failed", "PLATFORM_BUSY", "confirmed"),
+        )
+        # Once maintenance is over, the owner simply deploys again.
+        retried = self.finish(self.submit())
+        self.assertEqual(retried.status, "succeeded", retried.safe_error)
+
+    def test_interrupted_busy_failure_finishes_on_resume_without_building(self):
+        with (
+            mock.patch.object(deployment_service, "INFRASTRUCTURE_WAIT_SECONDS", 0.2),
+            mock.patch.object(db, "mark_failed", side_effect=OSError("simulated crash")),
+            runtime.lock(self.root, "infrastructure"),
+        ):
+            key = self.submit()
+            operation = self.finish(key)
+        self.assertEqual(
+            (operation.status, operation.phase), ("recovery_required", "platform_busy")
+        )
+        operation = self.finish(self.submit(key))
+        self.assertEqual(
+            (operation.status, operation.cleanup_state, operation.safe_error),
+            ("failed", "confirmed", deployment_service.PLATFORM_BUSY),
+        )
+        self.assertEqual(self.fixture.calls, [])
+
+    def test_lock_busy_after_resources_exist_keeps_recovery(self):
+        held = ExitStack()
+        self.addCleanup(held.close)
+        original = self.fixture.helper
+
+        def helper(config, action, values, **kwargs):
+            result = original(config, action, values, **kwargs)
+            if action == "app.build":
+                # Maintenance starts once the candidate image exists.
+                held.enter_context(runtime.lock(self.root, "infrastructure"))
+            return result
+
+        self.fixture.api.helper_caller = helper
+        with mock.patch.object(deployment_service, "INFRASTRUCTURE_WAIT_SECONDS", 0.2):
+            key = self.submit()
+            operation = self.finish(key)
+        self.assertEqual(
+            (operation.status, operation.phase, operation.safe_error),
+            ("recovery_required", "worker_creating", "LockBusy: details redacted"),
+        )
+        self.assertIsNotNone(operation.candidate_digest)
+        self.assertNotIn("app.worker.create", [action for action, _ in self.fixture.calls])
+        held.close()
+        operation = self.finish(self.submit(key))
+        self.assertEqual(operation.status, "succeeded", operation.safe_error)

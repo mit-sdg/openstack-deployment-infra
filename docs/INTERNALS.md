@@ -758,7 +758,9 @@ was discarded by an earlier broker version.
 Known failed-deploy codes map to fixed release-owned guidance for root
 `package.json`, per-package runtime lockfiles and root build/start scripts, or a
 small HTTP-2xx health endpoint with a body of at most 4096 bytes. The
-`build_rejected` phase also identifies build guidance. Deadline codes get health
+`build_rejected` phase also identifies build guidance. A controller operation's
+`errorCode` is kept the same way; `PLATFORM_BUSY`, or the `platform_busy` phase,
+selects guidance to try again in a few minutes. Deadline codes get health
 guidance only when their recorded phase identifies health verification; unknown
 failures keep the generic message. Owner projections omit internal codes while
 showing the same guidance; staff/admin views retain the bounded code separately.

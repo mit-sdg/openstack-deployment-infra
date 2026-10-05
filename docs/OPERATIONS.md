@@ -293,6 +293,16 @@ worker image for retry. Keep old images available while recorded operations or
 accepted workers still reference them. This API only selects images; it does not
 publish, prune, or migrate existing workers.
 
+A selection holds the hosted infrastructure lock while it checks the provider,
+which can take minutes. A deploy that needs the lock meanwhile waits for it, for
+at most 10 minutes and within its own deadline, on its controller operation
+worker; other API requests are still served. If the lock is still held and the
+deploy has created nothing yet, the deploy ends `failed` in phase `platform_busy`
+with `errorCode` `PLATFORM_BUSY` and confirmed cleanup, so it needs no recovery.
+The portal tells the owner that the platform is busy and to try again in a few
+minutes. A deploy that meets the lock after its image exists keeps the ordinary
+recovery path.
+
 ## Size an application
 
 Use the controller's privileged Unix API to select one application's worker
