@@ -725,6 +725,24 @@ and bind that exact archive in the SQLite manifest's `sourceKeys` field. Verify
 both trios. Version-3 off-site bundles copy the paired archive automatically;
 versions 1/2 remain readable but cannot restore keys that were never backed up.
 
+After each commit the unit prunes `<paths.backups>/hosted-controller`. It keeps
+every committed set whose name is from the last 14 days, and always keeps the
+newest three complete sets, whatever their age, including the set it just
+wrote. Ages come from the timestamp in the name, not from file times. It
+removes a set's manifest first, then its checksum, then its ciphertext. A
+deploy-key archive goes once it is older than 14 days and no remaining SQLite
+manifest names it or shares its timestamp; this also clears an archive orphaned
+by a crash between the two commits. Uncommitted leftovers (no manifest) older
+than 14 days go too. Retention never enters `.staging` and leaves alone, logging
+`retention ignored ...`, any link, file owned by another account, unexpected
+name, or committed set missing a file. Success adds
+`retention=ok removed=<n> kept=<n>`, counting sets; each backup with its
+deploy-key archive is two sets. If pruning fails, the new backup stays
+committed, the journal shows `retention=failed reason=<reason>` and the unit
+fails; fix the cause and start the service again. Export to off-site storage
+anything that must outlive two weeks; off-site export always takes the newest
+committed set.
+
 ### External operator-state backup
 
 ```bash
@@ -1734,7 +1752,12 @@ automated staff requests. Staff throttling returns 429, dependency/audit failure
 The fourth backup class is `management-broker`: consistent SQLite online backup,
 age encryption with the hosted-controller escrow recipient, committed checksum/
 manifest last, and four-class off-site v2 evidence. Legacy v1 bundles remain
-readable. An active or staged broker selection requires this class for healthy
+readable. After each commit the broker backup unit prunes
+`<paths.backups>/management-broker` with the
+[hosted-controller retention rule](#hosted-controller-backup): committed sets
+from the last 14 days and the newest three always stay, and a failure reports
+`retention=failed reason=<reason>` and fails the unit without touching the new
+set. An active or staged broker selection requires this class for healthy
 export/status, including a broken selector whose release files disappeared.
 Checking both keeps recovery evidence mandatory before first activation and
 while staging changes independently of an active pair. The

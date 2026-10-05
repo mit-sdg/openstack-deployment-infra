@@ -143,6 +143,7 @@ cross-cutting boundaries.
 - `openstack_platform/__init__.py` — package description and protocol version.
 - `openstack_platform/acceptance.py` — plan, checkpoint, evidence, and verification engine for disposable live acceptance.
 - `openstack_platform/acceptance_live_driver.py` — reviewed adapter from acceptance protocol actions to supported repository/operator interfaces.
+- `openstack_platform/backup_retention.py` — age-and-count pruning of committed hosted-controller and broker backup sets, manifest first.
 - `openstack_platform/config.py` — typed, strict loading of deployment inventory and private operator policy.
 - `openstack_platform/fixed_ip.py` — exact retained primary Neutron port capability, ownership, and provider UUID validation.
 - `openstack_platform/floating_ip.py` — bounded, project-scoped Neutron capability and floating IPv4 ownership operations.
@@ -274,7 +275,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_helper_application_actions.py` — Nomad helper deployment, ownership, health, promotion, environment, logs, and removal tests.
 - `tests/test_host_user_data.py` — protected-input validation and cloud-init rendering tests for each role.
 - `tests/test_ingress_credentials.py` — per-replacement token validation, rotation, cleanup, non-persistence, and CLI contract tests.
-- `tests/test_hosted_controller_backup.py` — hosted SQLite backup encryption, evidence, permissions, and failure cleanup tests.
+- `tests/test_hosted_controller_backup.py` — hosted SQLite backup encryption, evidence, permissions, failure cleanup, and retention tests.
 - `tests/test_image_pipeline.py` — retained-byte, CI/source-run identity, signed promotion, unsigned rollback, and publication gate tests.
 - `tests/test_infra_http.py` — bounded infrastructure HTTP helper redirect, size, status, and JSON tests.
 - `tests/test_live_acceptance.py` — plan immutability, checkpoint/resume, evidence chain, signature, and failure tests.
@@ -424,7 +425,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_management_contract.py` — real project-socket broker contract and fake/real wire-shape, errors, cleanup, and read evidence.
 - `openstack_platform/management/backup.py` — online SQLite backup, encrypted evidence, verification and offline session-invalidating restore.
 - `tests/test_managed_data_backup.py` — hermetic data-only backup and legacy restore compatibility checks.
-- `tests/test_management_backup.py` — fourth-class backup, off-site compatibility, restore guards and full-loss drill tests.
+- `tests/test_management_backup.py` — fourth-class backup, retention, off-site compatibility, restore guards and full-loss drill tests.
 - `tests/test_management_platform.py` — explicit ingress identity configuration and Nix hosting boundary checks.
 
 - `tests/collect_owner_portal_artifacts.py` — bounded CI upload collector for fixture screenshots and sanitized API failure metadata.

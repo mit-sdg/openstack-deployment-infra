@@ -575,6 +575,16 @@ commit marker. Managed restore verification uses disposable PostgreSQL and
 MongoDB containers and validates Garage archives before writing
 `RESTORE-MANIFEST`.
 
+The hosted-controller and management-broker backup units prune their own roots
+after each commit (`openstack_platform/backup_retention.py`). Committed sets
+named within the last 14 days stay, and the newest three complete sets always
+stay, so off-site export, which takes the newest committed set, always has one.
+Removal works through the root's directory handle on direct files owned by the
+unit, manifest first, so an interrupted removal leaves only uncommitted debris.
+Deploy-key archives go when they are older than 14 days and no remaining SQLite
+manifest names them or shares their timestamp. A pruning failure fails the unit
+but leaves the new backup committed.
+
 Version-3 off-site bundles include the SQLite manifest’s matching deploy-key
 archive; legacy versions 1 and 2 remain accepted without keys.
 Off-site export chooses only committed sets, verifies every copy, writes an
