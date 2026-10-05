@@ -209,6 +209,7 @@ cross-cutting boundaries.
 - `openstack_platform/helper/worker_capacity.py` — exact owned Nomad node readiness and allocatable CPU/RAM observations.
 - `openstack_platform/helper/production.py` — lazily constructs concrete production handlers and trusted local service clients.
 - `openstack_platform/helper/registry_artifact.py` — bounded read-only manifest and blob availability checks within one application registry repository.
+- `openstack_platform/helper/runtime_images.py` — resolves a runtime version request to the newest matching official `-slim` image pinned by index digest, through bounded anonymous nodejs.org and Docker Hub lookups.
 - `openstack_platform/helper/storage.py` — trusted provider operations for PostgreSQL, MongoDB, and Garage/S3 resources and credentials.
 
 ### Read-only operator dashboard
@@ -331,6 +332,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/broker/runtime_logs.py` — owner/admin runtime log reads, shared briefly and one at a time so they can't crowd the controller.
 - `tests/test_checkout_preflight_parity.py` — runs the shared preflight cases through the build's `validate_checkout`.
 - `tests/test_runtime_versions.py` — shared range and version-request cases, and acceptance or refusal of a build's reported runtime.
+- `tests/test_runtime_images.py` — version resolution against a fake nodejs.org and Docker Hub: newest match, oldest lines, LTS, tag paging, unpublished tags, and retryable lookup failures.
 - `tests/test_management_runtime_logs.py` — runtime log ownership, streams, sharing, not-running and older-controller answers, and bounded tails.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
