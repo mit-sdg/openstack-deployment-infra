@@ -716,26 +716,55 @@ identity service admits only broker and checks one configured Commons HTTPS
 origin. Its network sandbox allows configured/default Cloudflare CIDRs and the
 local resolver; broker/operator/controller state and PKI/secrets are inaccessible.
 
-Commons bb78c5e accepts an exact username/password JSON credential check. Identity
-uses verified system TLS, bounded connect/read/size limits, no redirects/proxies,
-strict duplicate-free JSON, canonical UUID and exact fields. It drops email and
-returns only stable subject, username and display name, or a typed opaque error.
-Passwords remain transient in browser/web/broker/identity request memory and are
-never stored, audited, logged or echoed. Only development can trust a loopback CA. Identity queues within a shared
+Class sign-in is "Sign in with Commons", the Commons Connect authorization-code
+flow; the portal never asks for or receives a Commons password. Its app origin
+is the portal origin, and Commons always returns to `/auth/commons/callback`.
+
+1. `GET /auth/commons/start` passes per-address admission and accepts only a
+   same-origin, typed (`Sec-Fetch-Site: none`) or header-less navigation; others
+   go to `/sign-in`. It issues a stateless HMAC binder with its own purpose in
+   `__Host-portal-commons` (HttpOnly, Secure, Path=/, SameSite=Lax, 10 minutes)
+   and redirects to `<commonsOrigin>/connect?app=<portal origin>&state=<state>`.
+   The state is a separate HMAC of the binder, so only that browser can finish.
+2. Commons asks the person, then redirects to the callback with `code` and
+   `state`, or `error=access_denied` and `state` after Cancel.
+3. The callback accepts exactly those query names, always clears the state
+   cookie and checks admission, the binder and a constant-time state match. Only
+   then does identity redeem the code with `app` set to the portal origin. The
+   person is mapped exactly as before (Commons origin issuer, stable UUID
+   subject, auto-provisioned owner, disabled/pending refused), and a session is
+   minted.
+
+Identity posts `{code, app}` to `/api/connect/redeem` with verified system TLS,
+bounded connect/read/size limits, no redirects/proxies, strict duplicate-free
+JSON, canonical UUID and exact fields. It drops email and returns only stable
+subject, username and display name. Commons' uniform `CONNECT_CODE_INVALID`
+refusal (used, expired, another app's, withdrawn approval or archived person)
+becomes an expired sign-in; anything else is unavailable and logged by reason
+only. Codes and states are never stored, audited, logged or echoed. Only
+development can trust a loopback CA. Identity queues within a shared
 three-second admission/connect deadline, with 64 outbound exchanges and 128
 local request slots. Broker wants identity without requiring it; identity startup
 failure leaves existing portal sessions available.
+
+Both navigations answer only with 303 redirects, never JSON. Web lets start
+leave only for the exact Commons approval URL; the callback may only land on an
+allowlisted portal page or `/sign-in?error=CODE`. Broker errors, malformed
+cookies and outages also become sign-in redirects. The sign-in page explains
+`COMMONS_CANCELLED`, `SIGN_IN_EXPIRED`, `IDENTITY_UNAVAILABLE`, `ACCOUNT_DISABLED`
+and `RATE_LIMITED` once, then drops the code from the address.
 No class-app cookies/session or browser-relayed identity result is accepted.
 
-Sign-in is same-origin JSON with an anonymous HMAC CSRF token and Strict binder
-cookie. Sessions are opaque server-side records: __Host-/Secure/HttpOnly/Lax,
+Local sign-in is same-origin JSON with an anonymous HMAC CSRF token and Strict
+binder cookie. Sessions are opaque server-side records: __Host-/Secure/HttpOnly/Lax,
 Path=/, no Domain, 8 h absolute and 30 min idle for owners. Mutations check exact Origin and
-session CSRF. Password changes and Commons archiving do not end already issued
-portal sessions; logout, local revocation, expiry and restore do. Per-address
-admission and fixed 60-second failure budgets per exact username and address
-bucket reduce abuse. Five failures block further checks from that bucket before
-identity is contacted, including correct passwords, until the window expires.
-Outstanding checks reserve budget so concurrency cannot bypass it. Other
+session CSRF. Password changes, archiving and removed approvals in Commons do not
+end already issued portal sessions; logout, local revocation, expiry and restore
+do. Per-address admission covers sign-in options and both Commons navigations
+(start and callback each use the start budget). Local logins add fixed 60-second
+failure budgets per exact username and address bucket. Five failures block
+further checks from that bucket, including correct passwords, until the window
+expires. Outstanding checks reserve budget so concurrency cannot bypass it. Other
 addresses remain unaffected and rejections never extend the window. Users are individual invited class accounts,
 identified by Commons origin and stable UUID rather than mutable username.
 
@@ -923,13 +952,15 @@ requires step-up, including owner/staff accounts.
 
 ### Local identities, roles and admin enrollment
 
-Commons credential checking remains the fixed HTTPS identity integration, with
-stable `(issuer, subject)` identity and no persisted Commons passwords. Local
+Commons Connect code redemption remains the fixed HTTPS identity integration,
+with stable `(issuer, subject)` identity; the portal never handles Commons
+passwords. Local
 accounts have issuer `local`, immutable UUID subject, and a unique canonical
 lowercase username. They store only salted password hashes and private TOTP
 state in broker SQLite. Local and Commons names occupy separate namespaces.
-`POST /auth/login` accepts `method=commons` (default) or `local`, password and
-optional TOTP; client role claims are ignored. The broker assigns the current
+`POST /auth/login` is local-only: `method=local` (also the default), password and
+optional TOTP. `method=commons` is refused with a pointer to Sign in with
+Commons; client role claims are ignored. The broker assigns the current
 DB role to an immutable session snapshot. Roles are `owner`, `staff`, `admin`;
 SQL and broker checks allow admin only when issuer is local. Every session joins
 current enabled/status/role/generation; security changes increment generation and
@@ -1109,7 +1140,8 @@ delay. These bound cost/response volume, not eventual disclosure: a compromised
 staff credential can enumerate the entire approved course metadata catalog and,
 until revoked, change, deploy, stop and read runtime logs of any broker app
 through app administration. It cannot manage accounts, change ownership or
-delete storage. Commons password/archival changes still affect new logins only.
+delete storage. Commons password, archive and approval changes still affect new
+sign-ins only.
 
 Successful staff reads recheck authorization and commit a private read audit
 before sending data. Audit/dependency failure returns 503 without metadata;

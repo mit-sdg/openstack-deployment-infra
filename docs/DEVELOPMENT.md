@@ -162,10 +162,11 @@ setup commands still enforce their own clean-checkout requirements.
 
 ## Run the local owner portal
 
-The portal is implemented locally and is not deployed. Sign-in follows Commons
-commit `bb78c5e`: the portal sends the student's exact username and password
-through a broker-only Unix identity service to Commons over HTTPS. No password
-is stored, audited or logged. The harness replaces Commons and the controller
+The portal is implemented locally and is not deployed. Class sign-in follows the
+Commons Connect contract: the browser approves the portal on Commons, and the
+broker redeems the returned single-use code through a broker-only Unix identity
+service over HTTPS. The portal never sees a Commons password, and codes are never
+stored, audited or logged. The harness replaces Commons and the controller
 with loopback doubles; it does not call any live platform or class application.
 
 Use Python 3.14, Node 24.19.0 and npm 11.17.0. The source-only UI package and
@@ -188,12 +189,16 @@ npm --prefix frontend/owner-portal run build
 uv run python -m openstack_platform.management.dev
 ```
 
-Open `https://127.0.0.1:9443/sign-in` and accept the disposable loopback
-certificate. Fixture credentials are `alice` / `local-alice-password`, `bob` /
-`local-bob-password`, archived `carol` / `local-carol-password`, and instructor
-`taylor` / `local-taylor-password`. They are
-public test data, never real class credentials. The fake Commons authenticate
-server always uses HTTPS, including when the portal uses HTTP/Vite. The identity
+Open `https://127.0.0.1:9443/sign-in`, accept the disposable loopback
+certificate and choose **Sign in with your class account**. The fake Commons on
+`https://localhost:9444` uses the same certificate, so accept it there too. It
+asks who is signing in, like Commons for a signed-out person. Fixture accounts
+are `alice` / `local-alice-password`, `bob` / `local-bob-password`, archived
+`carol` / `local-carol-password` (approved, then refused at redemption), and
+instructor `taylor` / `local-taylor-password`. **Cancel** returns with the
+cancelled message. They are public test data, never real class credentials. The
+fake Commons always uses HTTPS, including when the portal uses HTTP/Vite. Its
+codes are single-use, last 60 seconds and are bound to the portal origin. The identity
 client trusts only the harness's public development CA in development mode.
 Private TLS keys remain in memory via Linux memfd. Only development uses
 cryptography; production identity uses stdlib TLS and system CAs, with no PyJWT.
@@ -249,18 +254,24 @@ mode or custom trust. The HTTPS smoke serves built assets under the production
 CSP: scripts/styles/form-action are self-only and connect is self plus
 `https://api.github.com` and `https://raw.githubusercontent.com` (the deploy
 page's recent commits and commit check), with no inline scripts or styles. Passwords never enter URLs, application browser storage or screenshots.
+Commons' code and state appear only in the callback URL, which answers with a
+no-referrer, uncached redirect.
 
 The anonymous HMAC binder cookie is HttpOnly, Path=/, SameSite=Strict, Secure
-and __Host-prefixed on HTTPS. Login requires the exact portal Origin plus its
-HMAC CSRF token. Session cookies stay Secure/HttpOnly/Lax and expire after 8 h
-absolute or 30 min idle. Commons password changes or archiving do not end an
-existing Commons portal session. Local security changes, revocation or logout do. Per-address
-limits default to 600 options and 400 login attempts/minute, with IPv6 /64
-buckets. Five failed credentials exhaust a fixed 60-second budget for the exact
-username and address bucket. Pending identity checks reserve budget to prevent
-parallel bypass. Further attempts, including correct passwords, return 429
-without contacting identity until that window ends; another address is unaffected
-and rejected attempts never extend the window. Identity queues within its
+and __Host-prefixed on HTTPS. Local login requires the exact portal Origin plus
+its HMAC CSRF token. Commons sign-in's state cookie (`__Host-portal-commons`, or
+`portal-dev-commons` over HTTP) is HttpOnly, Path=/ and SameSite=Lax, because the
+callback arrives from the fake Commons on another loopback host (same-site in
+production). It lasts 10 minutes and every callback clears it. Session cookies
+stay Secure/HttpOnly/Lax and expire after 8 h absolute or 30 min idle. Commons
+password changes, archiving or removed approvals do not end an existing Commons
+portal session. Local security changes, revocation or logout do. Per-address
+limits default to 600 options and 400 sign-in starts/minute (a Commons start and
+its callback each count), with IPv6 /64 buckets. Five failed local passwords
+exhaust a fixed 60-second budget for the exact username and address bucket.
+Pending checks reserve budget to prevent parallel bypass. Further attempts,
+including correct passwords, return 429 until that window ends; another address
+is unaffected and rejected attempts never extend the window. Identity queues within its
 three-second connect deadline, with 64 outbound exchanges and 128 local request
 slots. An identity outage blocks new sign-ins but preserves existing sessions.
 
@@ -296,9 +307,10 @@ TOTP key. The development config permits current-user file ownership; production
 requires the operator UID and broker setgid directory. All credentials remain
 public fixture data or locally entered test values; no live Commons or OpenStack
 service is contacted. Use Accounts to create a local staff invitation, redeem it
-in another browser context, then compare owner/staff/admin navigation. Commons
-remains the default sign-in method; local login has a separate method selector,
-never a role selector. Admin roles are prohibited for Commons accounts.
+in another browser context, then compare owner/staff/admin navigation. **Sign in
+with your class account** is the main action; local accounts sign in behind
+**Use a local account**, never with a role selector. Admin roles are prohibited
+for Commons accounts.
 
 Tests verify scrypt salts/cost upgrades, RFC TOTP vectors/window/replay, hash-only
 24-hour operator files, 72-hour invites/resets, one-time ID consumption, five-minute
@@ -340,14 +352,18 @@ OWNER_PORTAL_SMOKE_MODE=http npm --prefix frontend/owner-portal run smoke
 OWNER_PORTAL_SMOKE_MODE=vite npm --prefix frontend/owner-portal run smoke
 ```
 
-The identity tests pin Commons' exact two-field request, status/result mapping,
-TLS, redirects, duplicate/extra fields, bounds, timeouts and peer enforcement.
-Broker tests cover CSRF/Origin, password leakage, generic/archived failures,
-throttles, session rotation, ownership/quota races and journal recovery. Contract
+The identity tests pin the exact `{code, app}` redeem request, the
+`CONNECT_CODE_INVALID`/`INVALID_REQUEST` mapping, TLS, redirects,
+duplicate/extra fields, bounds, timeouts and peer enforcement. Broker tests cover
+the state binding, cancelled, expired, replayed and refused codes, code and state
+leakage, refused Commons passwords, CSRF/Origin, throttles, session rotation,
+ownership/quota races and journal recovery. Web tests pin the redirect
+allowlists and the state cookie. Contract
 tests exercise the real controller project router. SQLite WAL/SHM disappearance
 at final close is handled narrowly; other errors remain visible without bodies.
 
-Playwright covers username/password login, invalid and archived accounts,
+Playwright follows the real redirects through the fake Commons approval page,
+including Cancel and a refused archived account, and covers
 two-owner isolation, exact deployment/recovery, logout and CSP at desktop/mobile
 widths in light/dark. It uses cached Chromium headless shell revision 1200 for
 Playwright 1.57.0; no other browsers are needed. CI installs Node 24 and the plain

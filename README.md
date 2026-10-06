@@ -10,10 +10,12 @@ application controller.
 
 Infrastructure deployment and operation are implemented. The owner portal is
 implemented but not deployed, so there is not yet a supported workflow for
-application owners on a live platform. Students will sign in with their class
-username/password, checked server-side with Commons; the merged authenticate
-endpoint must be configured and pass live acceptance before availability is
-claimed. Commons remains the external class-account sign-in method. Local portal
+application owners on a live platform. Students will use "Sign in with
+Commons": they approve the portal on Commons, and the portal redeems the
+single-use code Commons returns server-side, so it never sees their Commons
+password. Commons' connect endpoints must be deployed and pass live acceptance
+before availability is claimed. Commons remains the external class-account
+sign-in method. Local portal
 accounts store salted scrypt password hashes in the broker DB; admins are local
 accounts and must enroll TOTP. Owners manage their own apps. Staff also read the
 course catalog and manage any broker app like admins, with no app limits. Only
@@ -24,7 +26,8 @@ class-app changes require an extra confirmation and retained-IP deploys require
 maintenance, so only admins can deploy those apps. Roles are assigned in the
 broker DB and captured at sign-in; security changes revoke all of an account's
 sessions. Owner sessions default to 8 h/30 min idle, staff 1 h/10 min, admin
-1 h/15 min. Commons password changes/archiving do not revoke issued sessions.
+1 h/15 min. Commons password changes, archiving and removed app approvals do
+not revoke issued sessions.
 The operator issues a hash-only, single-use setup URL for initial admin enrollment
 or recovery; no password goes in inventory or environment variables. The operator
 dashboard remains separate. See [portal operations](docs/OPERATIONS.md#owner-portal-operations).

@@ -317,7 +317,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/management/config.py` — validates closed management configuration and loopback development constraints.
 - `openstack_platform/management/broker/__init__.py` — marks the authoritative owner broker package.
 - `openstack_platform/management/broker/api.py` — closed owner routes, ownership, quota admission, configuration snapshots, and authorized controller reads.
-- `openstack_platform/management/broker/auth.py` — login flows, replay prevention, browser-bound completion, opaque sessions, CSRF, and logout.
+- `openstack_platform/management/broker/auth.py` — Sign in with Commons start/callback, local login, opaque sessions, CSRF, and logout.
 - `openstack_platform/management/broker/client.py` — fixed bounded Unix HTTP client with no TCP fallback.
 - `openstack_platform/management/broker/database.py` — private broker SQLite schema, migration evidence/locking, and short transactions.
 - `openstack_platform/management/broker/journal.py` — durable intent leases, same-key retries, operation polling, and recovery states.
@@ -337,7 +337,7 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `tests/test_management_runtime_logs.py` — runtime log ownership, streams, sharing, not-running and older-controller answers, and bounded tails.
 - `openstack_platform/management/broker/main.py` — broker entry point using the existing controller transport unchanged.
 - `openstack_platform/management/web/__init__.py` — marks the disposable browser web package.
-- `openstack_platform/management/web/server.py` — bounded HTTP, static serving, closed broker forwarding, typed cookie directives, and CSP/security headers.
+- `openstack_platform/management/web/server.py` — bounded HTTP, static serving, closed broker forwarding, typed cookie and checked sign-in redirect directives, and CSP/security headers.
 - `openstack_platform/management/web/main.py` — static web entry point without development-provider imports.
 - `openstack_platform/management/dev/__init__.py` — marks explicitly local development doubles.
 - `openstack_platform/management/dev/__main__.py` — loopback HTTPS/Vite harness with in-memory signing/TLS keys and controlled lifecycle.
@@ -444,10 +444,10 @@ fixtures preserve exact formatter/identity variants. Test modules use
 - `openstack_platform/owner_portal_config.py` — dependency-free public Commons inventory validation.
 - `openstack_platform/management/settings.py` — operator rendering of production broker/web/identity configs.
 - `openstack_platform/management/identity/__init__.py` — identity integration package boundary.
-- `openstack_platform/management/identity/client.py` — bounded system-CA HTTPS Commons client and typed contract.
+- `openstack_platform/management/identity/client.py` — bounded system-CA HTTPS Commons Connect redeem client and typed contract.
 - `openstack_platform/management/identity/main.py` — broker-only Unix identity process and configuration-only readiness.
-- `openstack_platform/management/dev/commons.py` — loopback HTTPS Commons bb78c5e contract double.
-- `tests/test_management_identity.py` — Commons contract, TLS/peer limits and schema-1/2-to-3 migration evidence.
+- `openstack_platform/management/dev/commons.py` — loopback HTTPS Commons Connect double: approval page and single-use code redemption.
+- `tests/test_management_identity.py` — Commons Connect redeem contract, TLS/peer limits and schema-1/2-to-3 migration evidence.
 - `tests/test_management_dev.py` — long-checkout socket binding, private development directories, path limits and partial-startup cleanup.
 
 - `openstack_platform/management_release.py` — commit-bound broker/web archives and authenticated asset compatibility evidence.
