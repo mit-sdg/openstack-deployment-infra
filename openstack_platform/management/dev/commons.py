@@ -1,11 +1,18 @@
-"""Loopback HTTPS double pinned to Commons authenticate contract bb78c5e."""
+"""Loopback HTTPS double pinned to the Commons Connect contract: approve, then redeem."""
 
 from __future__ import annotations
 
+import html
+import re
+import secrets
+import threading
+import time
+import uuid
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..common import canonical, strict_json
-from ..identity.client import credentials
+from ..config import origin
 from ..web.server import Reply, WebServer
 
 USERS = {
@@ -14,11 +21,20 @@ USERS = {
     "carol": ("33333333-3333-4333-8333-333333333333", "Carol Student"),
     "taylor": ("44444444-4444-4444-8444-444444444444", "Taylor Instructor"),
 }
+# Carol's class account is archived: Commons still signs her in to approve,
+# but refuses to redeem her codes, like any other refusal.
+ARCHIVED = {"carol"}
 
 
 class Commons(WebServer):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.passwords = {name: f"local-{name}-password" for name in USERS}
+        # Who /connect approves at once, as if they approved this app before.
+        # None shows a sign-in and approval page, as for a first sign-in.
+        self.approve: str | None = "alice"
+        self.deny = False
+        self.codes: dict[str, tuple[str, str, float]] = {}
+        self.code_lock = threading.Lock()
         self.override: tuple[int, bytes] | None = None
         self.delay_seconds = 0.0
         self.calls = 0
@@ -27,13 +43,97 @@ class Commons(WebServer):
     def csp(self) -> str:
         return "default-src 'none'; frame-ancestors 'none'"
 
-    def handle(self, method: str, target: str, headers: dict[str, str], raw: bytes) -> Reply:
-        import time
+    def issue(self, name: str, app: str) -> str:
+        """Issue a single-use code for one person and app, valid for 60 s."""
+        code = f"{uuid.uuid4()}.{secrets.token_urlsafe(32)}"
+        with self.code_lock:
+            self.codes[code] = (name, app, time.monotonic() + 60)
+        return code
 
+    def handle(self, method: str, target: str, headers: dict[str, str], raw: bytes) -> Reply:
+        parsed = urlsplit(target)
         if target == "/healthz" and method == "GET":
             return Reply(200, b'{"ready":true}')
-        if target != "/api/auth/authenticate" or method != "POST":
+        if parsed.path == "/connect" and method in {"GET", "POST"}:
+            return self.connect(method, parsed.query, headers, raw)
+        if target != "/api/connect/redeem" or method != "POST":
             return Reply(404, b'{"error":"INTERNAL_ERROR"}')
+        return self.redeem(headers, raw)
+
+    def connect(self, method: str, query: str, headers: dict[str, str], raw: bytes) -> Reply:
+        try:
+            if method == "POST" and headers.get("content-type") != (
+                "application/x-www-form-urlencoded"
+            ):
+                raise ValueError("invalid media type")
+            fields = parse_qs(
+                raw.decode() if method == "POST" else query,
+                keep_blank_values=True,
+                strict_parsing=bool(raw or query),
+            )
+            values = {name: items[0] for name, items in fields.items() if len(items) == 1}
+            app, state = values["app"], values["state"]
+            if (
+                len(values) != len(fields)
+                or app != app.lower()
+                or origin(app, development=True) != app
+                or not re.fullmatch(r"[A-Za-z0-9._~-]{16,256}", state)
+            ):
+                raise ValueError("invalid app or state")
+        except (KeyError, ValueError, UnicodeError):
+            return Reply(
+                400,
+                b"<!doctype html><title>Commons</title><p>This app can't use Commons sign-in.",
+                "text/html; charset=utf-8",
+            )
+        callback = app + "/auth/commons/callback?"
+        if self.deny or values.get("decision") == "cancel":
+            return self.send(callback + urlencode({"error": "access_denied", "state": state}))
+        if method == "GET" and self.approve is not None:
+            code = self.issue(self.approve, app)
+            return self.send(callback + urlencode({"code": code, "state": state}))
+        name = values.get("username", "")
+        if (
+            method == "POST"
+            and name in self.passwords
+            and values.get("password") == self.passwords[name]
+        ):
+            code = self.issue(name, app)
+            return self.send(callback + urlencode({"code": code, "state": state}))
+        return Reply(
+            401 if method == "POST" else 200,
+            self.page(app, state, failed=method == "POST").encode(),
+            "text/html; charset=utf-8",
+        )
+
+    @staticmethod
+    def send(location: str) -> Reply:
+        return Reply(303, b"", "", (("Location", location),))
+
+    @staticmethod
+    def page(app: str, state: str, *, failed: bool) -> str:
+        host = html.escape(urlsplit(app).netloc)
+        hidden = "".join(
+            f'<input type="hidden" name="{name}" value="{html.escape(value)}">'
+            for name, value in (("app", app), ("state", state))
+        )
+        return (
+            "<!doctype html><html lang=en><title>Commons (development)</title>"
+            f"<h1>Sign in to {host} with Commons</h1>"
+            + ("<p role=alert>Username or password is incorrect.</p>" if failed else "")
+            + f"<p>{host} will learn your name, username and email.</p>"
+            '<form method="post" action="/connect">'
+            + hidden
+            + '<p><label for="username">Username</label> '
+            '<input id="username" name="username" autocomplete="off"></p>'
+            '<p><label for="password">Password</label> '
+            '<input id="password" name="password" type="password"></p>'
+            '<button name="decision" value="allow">Allow</button> '
+            '<button name="decision" value="cancel">Cancel</button>'
+            "</form></html>"
+        )
+
+    def redeem(self, headers: dict[str, str], raw: bytes) -> Reply:
         self.calls += 1
         if self.delay_seconds:
             time.sleep(self.delay_seconds)
@@ -43,23 +143,37 @@ class Commons(WebServer):
         try:
             if headers.get("content-type") != "application/json":
                 raise ValueError("invalid media type")
-            value = credentials(strict_json(raw))
-        except ValueError:
-            return Reply(400, b'{"error":"INVALID_REQUEST"}')
-        name = value["username"]
-        if name not in self.passwords or value["password"] != self.passwords[name]:
-            return Reply(401, b'{"error":"UNAUTHORIZED"}')
-        if name == "carol":
-            return Reply(403, b'{"error":"FORBIDDEN"}')
-        subject, display = USERS[name]
+            value = strict_json(raw)
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"code", "app"}
+                or not all(isinstance(item, str) for item in value.values())
+            ):
+                raise ValueError("invalid redeem fields")
+        except (ValueError, UnicodeError):
+            return Reply(
+                400, b'{"error":"INVALID_REQUEST"}', headers=(("Cache-Control", "no-store"),)
+            )
+        with self.code_lock:
+            issued = self.codes.pop(value["code"], None)
+        if (
+            issued is None
+            or issued[1] != value["app"]
+            or issued[2] <= time.monotonic()
+            or issued[0] in ARCHIVED
+        ):
+            return Reply(
+                400, b'{"error":"CONNECT_CODE_INVALID"}', headers=(("Cache-Control", "no-store"),)
+            )
+        subject, display = USERS[issued[0]]
         return Reply(
             200,
             canonical(
                 {
                     "user": subject,
-                    "username": name,
+                    "username": issued[0],
                     "displayName": display,
-                    "email": name + "@example.com",
+                    "email": issued[0] + "@example.com",
                 }
             ).encode(),
             headers=(("Cache-Control", "no-store"),),

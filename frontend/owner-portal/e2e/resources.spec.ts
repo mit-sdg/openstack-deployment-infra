@@ -5,9 +5,10 @@ const operationTimeout = 30_000;
 test('owner environment, PostgreSQL bindings, deploy names and rotation', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/sign-in');
+  await page.getByRole('link', { name: 'Sign in with your class account', exact: true }).click();
   await page.getByLabel('Username', { exact: true }).fill('alice');
   await page.getByLabel('Password', { exact: true }).fill('local-alice-password');
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
   await expect(page).toHaveURL(/\/apps$/);
   const apps = (await (await page.request.get('/api/v1/apps')).json()).data.items;
   const existing = apps.find((app: { slug: string }) => app.slug === 'resource-project');

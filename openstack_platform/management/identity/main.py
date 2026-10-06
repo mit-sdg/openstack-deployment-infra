@@ -1,4 +1,4 @@
-"""The broker is the sole admitted peer; readiness never authenticates remotely."""
+"""The broker is the sole admitted peer; readiness never contacts Commons."""
 
 from __future__ import annotations
 
@@ -22,25 +22,20 @@ def serve(config: IdentityConfig) -> ControllerServer:
     client = CommonsClient(config)
     router = Router()
 
-    def authenticate(request: Request) -> Response:
+    def redeem(request: Request) -> Response:
         if request.query:
-            raise HttpError(400, "invalid_request", "The credential request is invalid.")
-        error, result = client.authenticate(request.body)
+            raise HttpError(400, "invalid_request", "The redeem request is invalid.")
+        error, result = client.redeem(request.body)
         if error:
             raise HttpError(
-                {
-                    "invalid_request": 400,
-                    "invalid_credentials": 401,
-                    "account_disabled": 403,
-                    "unavailable": 503,
-                }[error],
+                {"invalid_request": 400, "invalid_code": 400, "unavailable": 503}[error],
                 error,
-                "The identity check could not complete.",
+                "The sign-in code could not be redeemed.",
                 retryable=error == "unavailable",
             )
         return Response(200, {"data": result})
 
-    router.add("POST", "/v1/authenticate", authenticate)
+    router.add("POST", "/v1/redeem", redeem)
     router.add("GET", "/v1/health", lambda _request: Response(200, {"ready": True}))
     return ControllerServer(
         str(config.socket),
@@ -56,7 +51,7 @@ def serve(config: IdentityConfig) -> ControllerServer:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Broker-only Commons HTTPS credential checker")
+    parser = argparse.ArgumentParser(description="Broker-only Commons sign-in code redeemer")
     parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args()
     config = IdentityConfig.load(args.config)

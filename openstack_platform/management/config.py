@@ -134,6 +134,14 @@ class Config:
             else "__Host-portal-device"
         )
 
+    @property
+    def commons_cookie(self) -> str:
+        return (
+            "portal-dev-commons"
+            if self.portal_origin.startswith("http:")
+            else "__Host-portal-commons"
+        )
+
     @classmethod
     def load(cls, path: Path) -> Config:
         if path.is_symlink() or path.stat().st_size > 65536:

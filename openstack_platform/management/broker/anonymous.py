@@ -70,11 +70,11 @@ class AnonymousChallenge:
             .rstrip("=")
         )
 
-    def issue(self, now: float) -> str:
+    def issue(self, now: float, purpose: str = "login-binder") -> str:
         message = opaque() + "." + str(int(now) + 600)
-        return message + "." + self.mac("login-binder", message)
+        return message + "." + self.mac(purpose, message)
 
-    def valid(self, binder: str, now: float) -> bool:
+    def valid(self, binder: str, now: float, purpose: str = "login-binder") -> bool:
         if not re.fullmatch(r"[A-Za-z0-9_-]{43}\.[0-9]{1,12}\.[A-Za-z0-9_-]{43}", binder):
             return False
         nonce, expires, signature = binder.split(".")
@@ -84,7 +84,7 @@ class AnonymousChallenge:
         except ValueError:
             return False
         return now < int(expires) <= now + 600 and hmac.compare_digest(
-            signature, self.mac("login-binder", nonce + "." + expires)
+            signature, self.mac(purpose, nonce + "." + expires)
         )
 
     def csrf(self, binder: str) -> str:

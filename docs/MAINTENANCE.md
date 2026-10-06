@@ -822,9 +822,9 @@ The remaining metadata requirements have these purposes:
 ## Owner portal artifacts and installation
 
 The owner portal is implemented but not deployed. No publication or live Commons
-acceptance is implied by its build/tests. Commons authentication is checked by a
-separate broker-only Unix identity process; credential archive/signing-key logic
-is not part of the login contract. Admin needs Python 3.14 with stdlib system-CA
+acceptance is implied by its build/tests. Commons sign-in codes are redeemed by a
+separate broker-only Unix identity process; no signing keys or client secrets are
+part of the Commons Connect contract. Admin needs Python 3.14 with stdlib system-CA
 TLS, fixed identity account/network/DNS sandbox, setgid roots, core/umask/mount
 hardening, activation and broker backup units. PyJWT/cryptography are not runtime
 dependencies; cryptography is dev-only for loopback certificates. Node stays on

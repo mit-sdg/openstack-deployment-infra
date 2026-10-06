@@ -1633,8 +1633,10 @@ installer resolves the NixOS inventory symlink and creates release-local mode-04
 config and inventory snapshots for the target component. Each service reads its
 own group-readable files without development trust. Apply inventory changes by
 installing both components and activating the resulting pair. Enable only after
-the Commons origin is confirmed. Production
-uses system CAs; no provider signing keys are used by this credential protocol.
+the Commons origin is confirmed and Commons accepts the portal origin for Sign in
+with Commons (its `CONNECT_APP_DOMAIN` must cover the platform domain). Production
+uses system CAs; no provider signing keys or client secrets are used by this
+code-redemption protocol.
 CA updates belong to the admin image, not a per-account key rotation.
 
 Defaults are two apps and one held external mutation per owner. Local admins
@@ -1689,8 +1691,8 @@ five incorrect code confirmations.
 
 Recovery uses the same command to create a **new** local admin. That admin can
 disable the old account or issue password/TOTP reset links from Accounts.
-Commons identities cannot become admin; their credentials are checked externally
-and are never reset by this UI. No additional sudo or controller capability is
+Commons identities cannot become admin; they sign in on Commons, and the portal
+never sees or resets their passwords. No additional sudo or controller capability is
 needed for the operator command.
 
 ### Manage accounts, roles and quotas

@@ -16,15 +16,19 @@ supported live application-owner workflow today. Infrastructure setup remains
 an operator-managed foundation. Portal release installation and live acceptance
 must be reviewed separately before students can use it.
 
-Students sign in with their class username/password, checked server-side against
-the configured Commons HTTPS authenticate endpoint. Commons bb78c5e is the
-implemented contract; this model needs no signed identity assertion or registered
-signing key. Configure the Commons origin and identity egress before rollout.
-Password changes and Commons archiving do not revoke existing portal sessions,
-which expire after 8 h absolute or 30 min idle for owners. Staff credential entry
-creates a separate read-only session capped at 1 h absolute and 10 min idle.
-Passwords are not saved or logged
-by the portal. No Commons code is maintained in this repository.
+Students sign in with "Sign in with Commons", the Commons Connect
+authorization-code flow. The portal sends the browser to Commons' `/connect`
+approval page with a browser-bound state, and redeems the single-use code
+Commons returns server-side through the identity service. The portal never asks
+for or receives a Commons password, and needs no signed identity assertion,
+registered signing key or client secret. Configure the Commons origin and
+identity egress before rollout, and make sure Commons accepts the portal's origin
+(the platform domain, `https://<domain>`, through its `CONNECT_APP_DOMAIN`).
+Password changes, Commons archiving and removed app approvals do not revoke
+existing portal sessions, which expire after 8 h absolute or 30 min idle for
+owners. Staff credential entry creates a separate read-only session capped at
+1 h absolute and 10 min idle. Sign-in codes are not saved or logged by the
+portal. No Commons code is maintained in this repository.
 
 The locally tested owner slice creates individual apps within staff quotas,
 configures a GitHub repository and Node/Bun settings, deploys an exact
