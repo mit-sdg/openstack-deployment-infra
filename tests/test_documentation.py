@@ -156,7 +156,13 @@ class DocumentationTests(unittest.TestCase):
 
     def test_trust_boundaries_are_documented(self) -> None:
         internals = " ".join(read("reference/internals.md").split())
-        for phrase in ("platform-controller", "0660", "SO_PEERCRED", "Idempotency-Key", "--age-identity"):
+        for phrase in (
+            "platform-controller",
+            "0660",
+            "SO_PEERCRED",
+            "Idempotency-Key",
+            "--age-identity",
+        ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, internals)
 
