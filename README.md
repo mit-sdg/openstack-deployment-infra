@@ -1,8 +1,19 @@
 # OpenStack app platform for classes
 
-This repository turns one OpenStack project into a small hosting platform for student web apps. Students sign in to a website, connect a GitHub repository, and deploy any commit. The platform builds the app, runs it on its own virtual machine with its own address, and gives it managed PostgreSQL, MongoDB, and S3 storage. Course staff operate the hosting infrastructure and control its data and credentials.
+A self-hosted place for students to put their web apps online. Think of a small Heroku or Render that your course runs itself, inside an OpenStack project your school or lab already provides.
 
-It was built for MIT's 6.1040 (Software Design) and runs that class's student apps. Nothing in it is specific to one class or domain.
+Students sign in, connect a GitHub repository, and deploy any commit. The platform builds each app, runs it on its own virtual machine at its own address, and can give it a PostgreSQL or MongoDB database and S3 file storage. Course staff run the platform, so the code, data, and credentials stay with the course instead of a hosting company.
+
+It was built for MIT's 6.1040 (Software Design), where it runs the class's student apps, but nothing in it is tied to one class or domain.
+
+## Who it's for
+
+- **Course staff** in project-based classes who want every student or team to deploy a real web app, without handing out cloud accounts or paying a hosting company.
+- **Schools and labs that already run OpenStack** and want a managed way to host many small apps on it.
+- **Students** in a class that uses it: start with [Deploy an app](docs/guides/for-app-owners.md).
+- **Anyone curious about building a small platform-as-a-service**: immutable NixOS machines, typed deployments instead of arbitrary build scripts, and strict separation between the website, the controller, and the cloud.
+
+It's probably not a fit if you don't have an OpenStack project, or if your apps need Dockerfiles, custom build commands, custom domains, or more than one instance.
 
 ![How the platform fits together](docs/images/architecture.svg)
 
