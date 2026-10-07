@@ -5,4 +5,4 @@
 /flake.lock @BarishNamazov
 /nix/ @BarishNamazov
 /infra/ @BarishNamazov
-/docs/MAINTENANCE.md @BarishNamazov
+/docs/guides/releases-and-upgrades.md @BarishNamazov

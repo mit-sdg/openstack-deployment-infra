@@ -1,84 +1,62 @@
-# A small application platform for OpenStack
+# OpenStack app platform for classes
 
-This repository builds a NixOS-based platform for hosting small HTTP
-applications inside one OpenStack project. It creates the cloud foundation,
-five machine roles, PostgreSQL/MongoDB/S3 services, private image registry,
-public ingress, backups, recovery tooling, an operator CLI, and a local
-application controller.
+This repository turns one OpenStack project into a small hosting platform for student web apps. Students sign in to a website, connect a GitHub repository, and deploy any commit. The platform builds the app, runs it on its own virtual machine with its own address, and gives it managed PostgreSQL, MongoDB, and S3 storage. Course staff operate the hosting infrastructure and control its data and credentials.
 
-## Current status
+It was built for MIT's 6.1040 (Software Design) and runs that class's student apps. Nothing in it is specific to one class or domain.
 
-Infrastructure deployment and operation are implemented. The owner portal is
-implemented but not deployed, so there is not yet a supported workflow for
-application owners on a live platform. Students will use "Sign in with
-Commons": they approve the portal on Commons, and the portal redeems the
-single-use code Commons returns server-side, so it never sees their Commons
-password. Commons' connect endpoints must be deployed and pass live acceptance
-before availability is claimed. Commons remains the external class-account
-sign-in method. Local portal
-accounts store salted scrypt password hashes in the broker DB; admins are local
-accounts and must enroll TOTP. Owners manage their own apps. Staff also read the
-course catalog and manage any broker app like admins, with no app limits. Only
-local admins manage accounts, quotas and the audit log, create apps for other
-owners, adopt or reassign apps, delete storage, and allow maintenance outages or
-resizing. Admins can adopt existing controller apps by UUID, including Commons;
-class-app changes require an extra confirmation and retained-IP deploys require
-maintenance, so only admins can deploy those apps. Roles are assigned in the
-broker DB and captured at sign-in; security changes revoke all of an account's
-sessions. Owner sessions default to 8 h/30 min idle, staff 1 h/10 min, admin
-1 h/15 min. Commons password changes, archiving and removed app approvals do
-not revoke issued sessions.
-The operator issues a hash-only, single-use setup URL for initial admin enrollment
-or recovery; no password goes in inventory or environment variables. The operator
-dashboard remains separate. See [portal operations](docs/OPERATIONS.md#owner-portal-operations).
+![How the platform fits together](docs/images/architecture.svg)
 
-Today, an operator can create and recover a platform with:
+## What it does
 
-- persistent admin, ingress, and storage hosts;
-- replaceable application workers and single-use builders;
-- exact-image and persistent-host lifecycle controls;
-- a read-only operator dashboard for role, application, operation, and
-  platform-health status;
-- separate encrypted backups for controller, operator, broker identity/ownership
-  state, deploy keys, and managed data; and
-- a local controller and locally tested owner portal with isolated identity checks.
+For **students** (app owners), the owner portal lets them:
 
-The operator dashboard and owner portal use shared React presentation components
-and theme tokens in the `frontend/` workspace. They remain separate apps with
-separate API clients and servers: operator evidence stays behind its private Unix
-socket. The dashboard's generated browser assets are committed with the CLI, so
-operator installation requires no Node tooling. See the
-[dashboard preview and frontend checks](docs/DEVELOPMENT.md#preview-the-operator-dashboard).
+- deploy an exact commit from a public or private GitHub repository, with Node.js or Bun at the version requested by their repository;
+- see build output, logs, deployment history, and health, and roll back to an earlier commit;
+- add a database (PostgreSQL or MongoDB) or S3 file storage, and set environment variables that are never shown again;
+- share an app with teammates.
 
-The implemented local application workflow supports GitHub repositories (public
-ones credential-free, private ones through a per-app read-only deploy key) and
-typed Node or Bun configuration. Users will not receive SSH, OpenStack, Nomad,
-registry, or database-administrator credentials. Arbitrary build commands and
-Dockerfiles are outside the current contract. Owners can set write-only environment variables and provision one
-PostgreSQL database, MongoDB database, and S3 bucket per app. They choose which
-storage outputs bind to which environment names; credentials never appear in
-portal responses. Storage deletion requires an administrator. PostgreSQL connections currently
-use the URL binding, which includes the password; individual PostgreSQL password
-and S3 secret key bindings need a platform update. See
-[owner portal operations](docs/OPERATIONS.md#owner-portal-operations).
+For **course staff**, the platform provides:
 
-## Documentation
+- a setup tool that builds and boot-tests every machine image from one Git commit, then creates the whole deployment in your OpenStack project;
+- roles for students, staff, and portal admins, with app quotas, an audit log, and sign-in through Commons (the class site) or local accounts;
+- separate encrypted backups for platform state, portal state, and app data, with off-site export and tested restore procedures;
+- an operator command-line tool for health, host replacement, upgrades, and recovery, plus a read-only health dashboard.
 
-- [Deploy an application with curl](docs/APPLICATION_DEPLOYMENTS.md) — operator
-  deployment, maintenance cutover, recovery, and rollback without the management UI.
+## Start here
 
-- [Deploy the platform](docs/DEPLOYMENT.md) — what the platform creates, what it
-  supports, its security model, setup, ingress, and verification.
-- [Operate and recover it](docs/OPERATIONS.md) — health, the read-only
-  dashboard, backups, off-site export, restore, host replacement, pruning, and
-  troubleshooting.
-- [Platform internals](docs/INTERNALS.md) — component ownership, state,
-  controller/helper boundaries, internal API, and the owner portal.
-- [Release and platform maintenance](docs/MAINTENANCE.md) — signed releases,
-  role images, publication, installation, and live acceptance.
-- [Development workflow](docs/DEVELOPMENT.md) — local environment and checks.
-- [Tracked-file guide](docs/REPOSITORY_GUIDE.md) — the purpose of every file in
-  Git.
+| If you want to… | Read |
+| --- | --- |
+| Understand what this is and how it works | [How it works](docs/how-it-works.md) |
+| Decide whether you can run it for your class | [Plan a deployment](docs/guides/plan-a-deployment.md) |
+| Set it up | [Deploy the platform](docs/guides/deploy-the-platform.md), then [Open the owner portal](docs/guides/open-the-portal.md) |
+| Run it day to day | [Run the platform](docs/guides/run-the-platform.md) |
+| Deploy an app as a student | [Deploy an app](docs/guides/for-app-owners.md) |
+| Change the code | [Development](docs/development.md) |
+
+The [documentation home](docs/README.md) lists every guide and reference page, and has a glossary.
+
+## What you need
+
+- An OpenStack project with room for three small persistent servers, one server per app, short-lived build servers, and three volumes (by default 32 GiB, 500 GiB, and 600 GiB).
+- A domain, with HTTPS in front of the platform from a provider such as Cloudflare.
+- An x86_64 Linux machine where an unprivileged account runs the setup and operator tools, with Nix, uv, and Python 3.14.
+
+[Plan a deployment](docs/guides/plan-a-deployment.md) covers the details.
+
+## Repository layout
+
+| Directory | What's in it |
+| --- | --- |
+| `openstack_platform/` | The Python code: setup, the operator CLI, the application controller and its helper, and the owner portal services |
+| `frontend/` | The owner portal and operator dashboard (React and TypeScript) |
+| `nix/` | NixOS configurations for the five machine roles, and image builds |
+| `infra/` | Scripts that setup and the machines run (OpenStack calls, backups, certificates, registry, monitoring) and the shared platform contract |
+| `deploy/` | Scripts that install operator and helper releases |
+| `config/` | Example configuration |
+| `tests/` | The test suite |
+| `docs/` | This documentation |
+
+The [repository map](docs/reference/repository-map.md) describes every file.
 
 ## License
 

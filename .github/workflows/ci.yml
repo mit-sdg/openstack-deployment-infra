@@ -68,8 +68,8 @@ jobs:
           for path in Path("config").rglob("*.example.json"):
               json.loads(path.read_text())
               print(f"valid JSON: {path}")
-          ET.parse("docs/architecture-overview.svg")
-          print("valid SVG: docs/architecture-overview.svg")
+          ET.parse("docs/images/architecture.svg")
+          print("valid SVG: docs/images/architecture.svg")
           PY
           uv run python infra/lib/platform_contract.py
           PLATFORM_CONFIG=config/platform.example.json \
