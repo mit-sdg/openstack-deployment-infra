@@ -50,6 +50,79 @@ class ControllerDatabaseTests(unittest.TestCase):
             now="2026-01-01T00:00:00Z",
         )
 
+    def test_v5_migration_only_releases_proven_accepted_finishing(self) -> None:
+        db.migrate(self.connection, target_version=4)
+        self.add_application()
+        accepted = accept_deployment(
+            self.connection,
+            application_id=APP_ID,
+            source_commit="a" * 40,
+            recipe_hash="b" * 64,
+            image_digest=DIGEST,
+            nomad_job="job",
+            nomad_version=1,
+            build_log_path="build.log",
+        )
+        key = accepted.deployment_id
+        self.connection.execute(
+            "INSERT INTO operations VALUES (?, 'app.deploy', ?, 'recovery_required', 'deployment_healthy', ?, ?, ?, '{}', ?, 'HelperError: details redacted', 'confirmed')",
+            (
+                key,
+                f"app-{APP_ID}",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                DIGEST,
+            ),
+        )
+        db.claim_idempotency_request(self.connection, request_id=key, request_fingerprint="a" * 64)
+        self.connection.execute(
+            "INSERT INTO operation_dispatches VALUES (?, 'app.deploy', ?, 'recovery_required', ?, ?, NULL)",
+            (key, f"app-{APP_ID}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        self.connection.execute(
+            "INSERT INTO operations VALUES (?, 'app.deploy', ?, 'recovery_required', 'deployment_healthy', ?, ?, ?, '{}', ?, 'HelperError: details redacted', 'confirmed')",
+            (
+                REQUEST_ID,
+                f"app-{SECOND_REQUEST_ID}",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                DIGEST,
+            ),
+        )
+        db.migrate(self.connection)
+        self.assertEqual(db.schema_version(self.connection), 5)
+        self.assertTrue(db.get_operation(self.connection, key).finishing)
+        self.assertTrue(db.get_operation_dispatch(self.connection, key).finishing)
+        self.assertFalse(db.get_operation(self.connection, REQUEST_ID).finishing)
+        self.assertIsNone(db.get_unfinished_operation(self.connection, f"app-{APP_ID}"))
+        self.assertEqual(
+            db.get_finishing_operation(self.connection, f"app-{APP_ID}").operation_id, key
+        )
+        with self.assertRaises(db.FinishingOperationConflictError):
+            db.begin_operation(
+                self.connection,
+                operation_id=SECOND_REQUEST_ID,
+                kind="app.deploy",
+                scope=f"app-{APP_ID}",
+                phase="validated",
+                deadline_at="2030-01-01T00:00:00Z",
+            )
+        db.begin_operation(
+            self.connection,
+            operation_id=SECOND_REQUEST_ID,
+            kind="app.env.set",
+            scope=f"app-{APP_ID}",
+            phase="validated",
+            deadline_at="2030-01-01T00:00:00Z",
+        )
+        self.assertEqual(
+            db.get_unfinished_operation(self.connection, f"app-{APP_ID}").operation_id,
+            SECOND_REQUEST_ID,
+        )
+        self.assertEqual(self.connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
     def test_fresh_migration_creates_exact_product_schema(self) -> None:
         db.migrate(self.connection)
         self.assertEqual(db.schema_version(self.connection), db.MIGRATIONS[-1].version)

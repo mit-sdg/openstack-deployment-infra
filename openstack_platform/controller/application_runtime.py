@@ -2225,7 +2225,7 @@ def execute_deployment_workflow(
             spec.configuration_sha256, field="configuration SHA-256"
         ),
     }
-    with lock(state_directory, scope, deadline=lock_deadline):
+    with lock(state_directory, scope, wait=True, deadline=lock_deadline):
         verify_project()
         if db.get_application(connection, identifier) is None:
             db.put_application(
@@ -2240,6 +2240,9 @@ def execute_deployment_workflow(
                 scheduler_memory_mib=spec.memory_mib,
             )
         unfinished = db.get_unfinished_operation(connection, scope)
+        finishing = db.get_finishing_operation(connection, scope)
+        if finishing is not None and finishing.operation_id == operation_id:
+            unfinished = finishing
         if unfinished is not None:
             if unfinished.kind != "app.deploy" or any(
                 unfinished.refs.get(key) != value for key, value in base_refs.items()
@@ -2285,7 +2288,10 @@ def execute_deployment_workflow(
         except Exception as error:
             current = db.get_operation(connection, operation_id)
             if current is not None and current.status == "running":
-                db.mark_recovery_required(connection, operation_id, error)
+                if current.finishing:
+                    db.record_finishing_failure(connection, operation_id, error)
+                else:
+                    db.mark_recovery_required(connection, operation_id, error)
                 checkpoint_attempt(operation_id, error)
             raise
     return build.image, result
@@ -2385,6 +2391,9 @@ def accept_healthy_deployment(
             cleanup_state="not_required",
             _within_transaction=True,
         )
+        operation = db.get_operation(connection, acceptance.deployment_id)
+        if operation is not None and operation.kind == "app.deploy":
+            db.mark_operation_finishing(connection, operation.operation_id, within_transaction=True)
     return DeploymentResult(nomad_version=version, observations=1)
 
 

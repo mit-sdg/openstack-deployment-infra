@@ -198,7 +198,8 @@ For project and operator deployment requests, the controller:
 7. Creates the app's worker, or, for an operator worker-reuse deployment, verifies the exact accepted worker.
 8. Submits the generated Nomad job and a candidate route.
 9. Accepts the candidate only after Nomad, the app's health path, and the public route all pass.
-10. On failure, records startup evidence when available and attempts bounded candidate cleanup. Ordinary replacement keeps the accepted route; maintenance can leave the app stopped. Unconfirmed cleanup requires recovery.
+10. After durable acceptance, verifies any address handover, removes the exact predecessor job and worker, and applies registry retention. Finishing failures use the durable retry schedule described below.
+11. On candidate failure, records startup evidence when available and attempts bounded candidate cleanup. Ordinary replacement keeps the accepted route; maintenance can leave the app stopped. Unconfirmed cleanup requires recovery.
 
 Repositories supply source and supported lockfiles. Package paths and script names are data, never shell commands. Storage bindings map outputs to environment names without creating or deleting storage. Secret values live in app-scoped Nomad Variables; SQLite keeps environment names, owners, revisions, and timestamps, and API reads omit values.
 
@@ -251,7 +252,7 @@ Key removal renames the directory before deletion, exposing the whole pair or no
 
 ## SQLite and operation state
 
-SQLite stores controller decisions and operation checkpoints. After restart, callers resume interrupted work with the same request and key; uncertain provider outcomes remain unresolved until checked.
+SQLite stores controller decisions and operation checkpoints. After restart, callers resume interrupted foreground work with the same request and key. Accepted finishing work resumes automatically from its recorded intent; uncertain provider outcomes remain unresolved until checked.
 
 [`openstack_platform/controller/database.py`](../../openstack_platform/controller/database.py) owns schema creation, forward migrations, the deployment binding, and the tables for apps, immutable deployment attempts, active deployment pointers, environment metadata, managed resources, image selections, slug tombstones, idempotency requests, operations, operation dispatches, and the optional floating-IP and fixed-port reservations. Unsupported prior schemas fail before any migration or provider call.
 
@@ -259,9 +260,17 @@ Transactions do not span provider calls. Domain-service checkpoints coordinate e
 
 Requests that create records or operations require `Idempotency-Key`; synchronous deploy-key changes are repeatable without one. The SHA-256 fingerprint covers method, path, and parsed body. Identical requests replay their result; different input yields `409 IDEMPOTENCY_CONFLICT`. The key becomes the operation ID, or the application ID for creation. Strict deployment configurations count as public metadata, so output names such as `password` and `secret_access_key` remain valid binding names in fingerprints.
 
-App creation is database-only (`201`). Background operations reserve `app-<id>` or `infrastructure` before external work (`202`), with one unfinished operation per scope. Four threads handle at most 32 admitted operations. Deploy-key and storage-label changes are synchronous exceptions; see [route contracts](controller-api.md#routes).
+App creation is database-only (`201`). Background operations reserve `app-<id>` or `infrastructure` before external work (`202`), with one unfinished foreground operation per scope. A separate accepted finishing reservation can coexist with compatible foreground work; both use the same app lock. Four threads handle at most 32 admitted operations. Deploy-key and storage-label changes are synchronous exceptions; see [route contracts](controller-api.md#routes).
 
-The dispatch journal omits request bodies. Before sockets open after restart, operations with domain intent become `recovery_required`, retaining checkpoints; dispatches without domain intent fail terminally with nothing to clean up. Repeat the identical request and key to resume, supplying environment values again. New keys cannot bypass unfinished work. A renewed deadline sets `running` and clears the safe error. Build rejection becomes terminal only after builder and build-tag absence is proven; uncertain cleanup retries without rebuilding.
+The dispatch journal omits request bodies. Before sockets open after restart, interrupted foreground operations with domain intent become `recovery_required`, retaining checkpoints; dispatches without domain intent fail terminally with nothing to clean up. Repeat the identical request and key to resume, supplying environment values again. New keys cannot bypass unfinished work. A renewed deadline sets `running` and clears the safe error. Build rejection becomes terminal only after builder and build-tag absence is proven; uncertain cleanup retries without rebuilding.
+
+Schema migration 5 adds a `finishing` flag to operations and dispatches and separate uniqueness constraints for foreground and finishing admission. Deployment acceptance commits the flag with the active deployment pointer and successful attempt. Enable commits it with accepted runtime presence. The migration recognizes older post-acceptance deployment checkpoints only when the successful attempt, active pointer, operation ID, and candidate image agree; it does not treat an unaccepted `deployment_healthy` checkpoint as finishing.
+
+The controller journals automatic retry count and next retry time in `refs.finishing_retry`, without storing a request body. Five retries wait 60, 120, 240, 480, and 600 seconds; each attempt renews its deadline for at most 120 seconds. The operation stays `running` between attempts and becomes `recovery_required` only after exhaustion. Restart preserves waiting schedules and counts interrupted attempts. Automatic and manual replay use the same dispatch claim, so they cannot execute the same operation twice concurrently. Manual replay keeps the original intent and key and does not reset the automatic budget.
+
+The finishing path reobserves the accepted job and public route before handover or predecessor removal. It never rewrites acceptance, environment values, or desired-running state. Handover reobserves exact provider associations; unknown outcomes do not authorize a repeated mutation. Worker deletion requires exact predecessor job absence first. The journaled `predecessor_cleanup` phase means handover is confirmed; `accepted` means only registry retention remains. Compatible environment changes, storage verify/rotate, and restart retain foreground admission. Enable can be a no-op after handover. Disable also requires journaled predecessor job absence and a separate cleanup placement; worker creation for a stopped app, another deploy, resize, rollback, deletion, storage create/remove, and address changes remain blocked with `POST_ACCEPTANCE_CONFLICT`.
+
+Helper failures write a bounded controller journal line with the fixed action, error class, and an allowlisted error code. Unknown codes are redacted. Exception messages, request arguments, environment values, credentials, stderr, response bodies, and tracebacks are omitted; `safeError` remains a separate user-safe summary.
 
 Most synchronous handlers share the API lock. Polling, health, app reads, environment-name and storage reads, runtime logs, deploy-key reads, and GitHub checks skip it and use private snapshots. Slow locked requests such as `GET /v1/admin/status` do not block them. App reads close their snapshot before helper/public probes; identical app and deployment rows share a probe and reuse it for two seconds.
 
@@ -369,7 +378,7 @@ Staff and portal admins manage other people's apps only through a separate names
 | Adopt an operator-created app, reassign an owner, delete storage | No | No | Yes, with step-up |
 | Maintenance outage or sizing plan on deploy | No | No (`403 ADMIN_REQUIRED`) | Yes |
 
-Each staff or admin mutation is journaled with a server-only marker and written to the admin action audit, so admins see staff changes. All app mutations share one busy scope per app (`409 APP_BUSY`). Teams keep one owner plus members in an `app_members` table; members pass the same app checks as the owner, and only the owner or an admin adds or removes people. An app counts only against its owner's quota.
+Each staff or admin mutation is journaled with a server-only marker and written to the admin action audit, so admins see staff changes. Foreground app mutations share one busy scope per app (`409 APP_BUSY`). Once the broker observes a controller operation with confirmed `finishing: true`, that intent stops holding the app and concurrency quota; the controller enforces finishing conflicts. Without that evidence, the broker keeps the busy scope. Teams keep one owner plus members in an `app_members` table; members pass the same app checks as the owner, and only the owner or an admin adds or removes people. An app counts only against its owner's quota.
 
 When the operator deletes an app through the privileged socket, the broker learns of it only from a definitive `404 APPLICATION_NOT_FOUND` on the project read. It then marks its record deleted, stops counting it toward quota, writes one `app_deleted_by_administrator` audit event, and answers further mutations with `410 APPLICATION_DELETED`. Outages never trigger this.
 

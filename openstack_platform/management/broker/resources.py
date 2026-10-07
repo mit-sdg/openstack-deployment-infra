@@ -324,11 +324,11 @@ def unlimited(db: sqlite3.Connection, user_id: str) -> bool:
 
 def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: str) -> None:
     held = db.execute(
-        "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed')",
+        "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
         (user_id,),
     ).fetchall()
     if db.execute(
-        "SELECT 1 FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed')",
+        "SELECT 1 FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
         (app_id,),
     ).fetchone():
         raise HttpError(

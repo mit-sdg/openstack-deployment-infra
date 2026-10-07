@@ -75,6 +75,7 @@ class StorageService:
         with runtime.lock(
             self.state_directory,
             f"app-{application.application_id}",
+            wait=True,
             deadline=deadline,
         ):
             openstack.verify_project(

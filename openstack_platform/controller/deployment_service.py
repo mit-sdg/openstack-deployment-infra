@@ -7,7 +7,7 @@ import json
 import sqlite3
 import time
 import uuid as uuid_module
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -36,6 +36,7 @@ from . import image_service, rollback, sizing, worker_reuse
 from .deployment_config import DeploymentConfiguration, branch_name
 from .deployment_reads import source_repository
 from .log_service import STARTUP_LOG_BYTES, startup_log_path
+from .service_support import logged_helper
 from .storage_contract import (
     DERIVED_OUTPUTS,
     PLATFORM_ENVIRONMENT_KEYS,
@@ -841,6 +842,7 @@ def _cleanup_deployment(
     *,
     helper_caller: HelperCaller,
     deadline: float,
+    job_absent: Callable[[], None] | None = None,
 ) -> None:
     cleaned = helper_caller(
         config,
@@ -853,6 +855,10 @@ def _cleanup_deployment(
         },
         deadline=deadline,
     )
+    if cleaned.get("jobAbsent") is not True:
+        raise app.ApplicationError("exact predecessor job absence was not confirmed")
+    if job_absent is not None:
+        job_absent()
     worker = helper_caller(
         config,
         "app.worker.delete",
@@ -865,6 +871,149 @@ def _cleanup_deployment(
     )
     if cleaned.get("jobAbsent") is not True or worker.get("absent") is not True:
         raise app.ApplicationError("deployment job or worker cleanup was not confirmed")
+
+
+def finish_accepted_operation(
+    connection: sqlite3.Connection,
+    config: Config,
+    operation: db.Operation,
+    *,
+    helper_caller: HelperCaller,
+    deadline: float,
+) -> None:
+    """Finish the recorded accepted intent without resubmitting its active job.
+
+    Exact acceptance was committed with the finishing reservation. Helpers
+    reobserve the journaled predecessor identity before any destructive action.
+    No environment snapshot or desired-running state is written on this path.
+    """
+    application_id = uuid(operation.refs.get("application_id"), field="application ID")
+    application = db.get_application(connection, application_id)
+    active = db.get_active_deployment(connection, application_id)
+    expected_id = (
+        operation.operation_id
+        if operation.kind == "app.deploy"
+        else operation.refs.get("deployment_id")
+    )
+    if application is None or active is None or active.deployment_id != expected_id:
+        raise app.ApplicationError("accepted finishing deployment identity drifted")
+    accepted = db.get_deployment_attempt(connection, active.deployment_id)
+    if accepted is None or accepted.status != "succeeded" or not operation.finishing:
+        raise app.ApplicationError("accepted finishing snapshot is missing")
+    if operation.kind == "app.deploy" and accepted.image_digest != operation.candidate_digest:
+        raise app.ApplicationError("accepted finishing image identity drifted")
+    if (
+        operation.phase in {"deployment_healthy", "predecessor_cleanup"}
+        and application.desired_running
+    ):
+        if (
+            accepted.nomad_job is None
+            or accepted.nomad_version is None
+            or accepted.health_path is None
+        ):
+            raise app.ApplicationError("accepted finishing job evidence is incomplete")
+        observation = helper_caller(
+            config,
+            "app.health",
+            {
+                "slug": application.slug,
+                "jobId": app.nomad_job_id(accepted.nomad_job, application.slug),
+                "version": accepted.nomad_version,
+                "candidateJobSha256": accepted.nomad_job_sha256,
+                "candidateImage": accepted.image_digest,
+            },
+            deadline=deadline,
+        )
+        if (
+            observation.get("healthy") is not True
+            or observation.get("terminal") is not False
+            or type(observation.get("version")) is not int
+            or observation.get("version") != accepted.nomad_version
+            or type(observation.get("currentVersion")) is not int
+            or observation.get("currentVersion") != accepted.nomad_version
+            or type(observation.get("allocations")) is not int
+            or observation.get("allocations") != 1
+            or observation.get("candidateJobSha256") != accepted.nomad_job_sha256
+            or observation.get("candidateImage") != accepted.image_digest
+        ):
+            raise app.ApplicationError(
+                "exact accepted deployment health could not be reobserved for finishing"
+            )
+        if not app.check_public_health(
+            application.slug,
+            config.platform,
+            accepted.health_path,
+            timeout_seconds=_remaining(deadline, config.policy.limits.http_seconds),
+            expected_marker=app.nomad_route_marker(accepted.nomad_job),
+        ):
+            raise app.ApplicationError(
+                "accepted public route could not be reobserved for finishing"
+            )
+    if operation.phase == "deployment_healthy":
+        # Handover reobserves exact old and pending provider associations. Only
+        # positive evidence permits an assignment; unknown results stay pending.
+        from .public_ip_service import reconcile_accepted
+
+        reconcile_accepted(connection, config, application_id, deadline=deadline)
+        db.checkpoint_operation(connection, operation.operation_id, phase="predecessor_cleanup")
+    elif operation.phase == "predecessor_cleanup" and application.desired_running:
+        from .public_ip_service import reconcile_accepted
+
+        reconcile_accepted(connection, config, application_id, deadline=deadline)
+    elif operation.phase not in {"predecessor_cleanup", "accepted"}:
+        raise app.ApplicationError("accepted finishing phase is invalid")
+    if operation.kind == "app.enable":
+        db.mark_succeeded(connection, operation.operation_id)
+        return
+    if operation.phase != "accepted":
+        refs = operation.refs
+        if refs.get("predecessor_job_id") is not None and refs.get("reuse_worker") is not True:
+            predecessor_job = bounded_text(
+                refs.get("predecessor_job_id"), field="predecessor job ID", maximum=128
+            )
+            predecessor_worker = uuid(
+                refs.get("predecessor_worker_application_id"), field="predecessor placement ID"
+            )
+            accepted_job = app.nomad_job_id(accepted.nomad_job or "", application.slug)
+            if predecessor_job == accepted_job or predecessor_worker == app.nomad_placement_id(
+                accepted.nomad_job or ""
+            ):
+                raise app.ApplicationError("predecessor cleanup targets the accepted deployment")
+
+            def predecessor_absent() -> None:
+                db.checkpoint_operation(
+                    connection,
+                    operation.operation_id,
+                    phase="predecessor_cleanup",
+                    refs={"predecessor_job_absent": True},
+                    merge_refs=True,
+                )
+
+            _cleanup_deployment(
+                config,
+                application.slug,
+                predecessor_job,
+                predecessor_worker,
+                (
+                    sha256_hex(refs.get("predecessor_job_sha256"), field="predecessor job SHA-256"),
+                    oci_digest_pin(refs.get("predecessor_image"), field="predecessor image"),
+                ),
+                helper_caller=helper_caller,
+                deadline=deadline,
+                job_absent=predecessor_absent,
+            )
+        db.checkpoint_operation(connection, operation.operation_id, phase="accepted")
+    assert accepted.image_digest is not None
+    _apply_registry_retention(
+        connection,
+        config,
+        helper_caller=helper_caller,
+        application_id=application_id,
+        application_slug=application.slug,
+        current_image=accepted.image_digest,
+        deadline=deadline,
+    )
+    db.mark_succeeded(connection, operation.operation_id)
 
 
 def _deploy_and_accept_application(
@@ -1146,39 +1295,11 @@ def _deploy_and_accept_application(
             expected_marker=operation_id,
         ),
     )
-    # Stable outbound IPv4 is a post-acceptance, forward-only handover. Never
-    # destroy the predecessor until its address is verified on the accepted port.
-    from .public_ip_service import reconcile_accepted
-
-    reconcile_accepted(connection, config, spec.application_id, deadline=deadline)
-    if updating and worker.refs.get("reuse_worker") is not True:
-        assert previous is not None and previous_job_id is not None
-        _cleanup_deployment(
-            config,
-            spec.application_slug,
-            previous_job_id,
-            app.nomad_placement_id(previous.nomad_job),
-            (previous.nomad_job_sha256, previous.image_digest),
-            helper_caller=helper_caller,
-            deadline=deadline,
-        )
-    db.checkpoint_operation(
-        connection,
-        operation_id,
-        phase="accepted",
-        refs=accepted_refs,
-        candidate_digest=build.image,
+    operation = db.get_operation(connection, operation_id)
+    assert operation is not None
+    finish_accepted_operation(
+        connection, config, operation, helper_caller=helper_caller, deadline=deadline
     )
-    _apply_registry_retention(
-        connection,
-        config,
-        helper_caller=helper_caller,
-        application_id=spec.application_id,
-        application_slug=spec.application_slug,
-        current_image=build.image,
-        deadline=deadline,
-    )
-    db.mark_succeeded(connection, operation_id)
     return result
 
 
@@ -1306,23 +1427,10 @@ def _recover_app_deployment(
         )
         return DeploymentRecovery(None, "candidate-removed")
 
-    if operation.phase == "accepted":
-        accepted = db.get_deployment(connection, application_id)
-        if accepted is None or accepted.image_digest != operation.candidate_digest:
-            raise app.ApplicationError(
-                "accepted deployment recovery evidence does not match SQLite"
-            )
-        assert operation.candidate_digest is not None
-        _apply_registry_retention(
-            connection,
-            config,
-            helper_caller=helper_caller,
-            application_id=application_id,
-            application_slug=application_slug,
-            current_image=operation.candidate_digest,
-            deadline=deadline,
+    if operation.finishing:
+        finish_accepted_operation(
+            connection, config, operation, helper_caller=helper_caller, deadline=deadline
         )
-        db.mark_succeeded(connection, operation_id)
         return DeploymentRecovery(None, "accepted")
 
     recovery_action = app.deployment_recovery_action(
@@ -1438,54 +1546,11 @@ def _recover_app_deployment(
                 expected_marker=operation_id,
             ),
         )
-        from .public_ip_service import reconcile_accepted
-
-        reconcile_accepted(connection, config, application_id, deadline=deadline)
-        if has_predecessor and operation.refs.get("reuse_worker") is not True:
-            predecessor_job_id = operation.refs.get("predecessor_job_id")
-            predecessor_worker_id = operation.refs.get("predecessor_worker_application_id")
-            predecessor_hash = operation.refs.get("predecessor_job_sha256")
-            predecessor_image = operation.refs.get("predecessor_image")
-            if not all(
-                isinstance(value, str)
-                for value in (
-                    predecessor_job_id,
-                    predecessor_worker_id,
-                    predecessor_hash,
-                    predecessor_image,
-                )
-            ):
-                raise app.ApplicationError("predecessor cleanup recovery evidence was incomplete")
-            assert isinstance(predecessor_job_id, str)
-            assert isinstance(predecessor_worker_id, str)
-            assert isinstance(predecessor_hash, str)
-            assert isinstance(predecessor_image, str)
-            _cleanup_deployment(
-                config,
-                application_slug,
-                predecessor_job_id,
-                predecessor_worker_id,
-                (predecessor_hash, predecessor_image),
-                helper_caller=helper_caller,
-                deadline=deadline,
-            )
-        db.checkpoint_operation(
-            connection,
-            operation_id,
-            phase="accepted",
-            refs=operation.refs,
-            candidate_digest=candidate,
+        current = db.get_operation(connection, operation_id)
+        assert current is not None
+        finish_accepted_operation(
+            connection, config, current, helper_caller=helper_caller, deadline=deadline
         )
-        _apply_registry_retention(
-            connection,
-            config,
-            helper_caller=helper_caller,
-            application_id=application_id,
-            application_slug=application_slug,
-            current_image=candidate,
-            deadline=deadline,
-        )
-        db.mark_succeeded(connection, operation_id)
         return DeploymentRecovery(None, "deployment-healthy")
 
     if recovery_action.startswith("cleanup_builder"):
@@ -1528,7 +1593,7 @@ class DeploymentService:
         self.state_directory = state_directory
         from .fixed_ip_service import worker_helper
 
-        self.helper_caller = worker_helper(connection, helper_caller)
+        self.helper_caller = worker_helper(connection, logged_helper(helper_caller))
 
     def recover_operation(
         self,
@@ -2138,6 +2203,9 @@ class DeploymentService:
             from .fixed_ip_service import require_maintenance
 
             unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
+            finishing = db.get_finishing_operation(self.connection, f"app-{application_id}")
+            if finishing is not None and finishing.operation_id == selected_request_id:
+                unfinished = finishing
             if unfinished is not None and (
                 unfinished.refs.get("reuse_worker", False) is not request.reuse_worker
                 or unfinished.refs.get("maintenance", False) is not request.maintenance
@@ -2148,7 +2216,7 @@ class DeploymentService:
             # Accepted-but-interrupted cleanup is forward recovery, not a new
             # overlapping replacement. Every new attempt checks under app lock.
             active = db.get_active_deployment(self.connection, application_id)
-            if request.reuse_worker:
+            if request.reuse_worker and (unfinished is None or not unfinished.finishing):
                 worker_reuse.identity(self.connection, application_id)
             if not request.maintenance and (
                 active is None or active.deployment_id != selected_request_id
@@ -2161,20 +2229,21 @@ class DeploymentService:
                     != request.rollback_plan.get("targetDeploymentId")
                 ):
                     raise ValidationError("rollback must reuse exactly the reviewed deployment")
-                unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
                 if unfinished is None:
                     rollback.validate_plan(self.connection, application_id, request.rollback_plan)
                 elif unfinished.refs.get("rollback_plan") != request.rollback_plan:
                     raise db.UnfinishedOperationError(
                         unfinished.scope, unfinished.operation_id, unfinished.kind
                     )
-                self._rollback_preflight(
-                    application_id,
-                    rollback.target(self.connection, application_id, request.reuse_deployment_id),
-                    deadline=selected_deadline,
-                )
+                if unfinished is None or not unfinished.finishing:
+                    self._rollback_preflight(
+                        application_id,
+                        rollback.target(
+                            self.connection, application_id, request.reuse_deployment_id
+                        ),
+                        deadline=selected_deadline,
+                    )
             if request.sizing_plan is not None:
-                unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
                 if unfinished is None:
                     sizing.validate_plan(
                         self.connection,

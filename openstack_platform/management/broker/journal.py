@@ -262,6 +262,13 @@ class Journal:
                     key: result.get(key)
                     for key in ("operationId", "status", "phase", "cleanupState", "updatedAt")
                 }
+                if (
+                    intent["kind"] in {"deploy", "app_enable"}
+                    and result.get("finishing") is True
+                    and result.get("phase")
+                    in {"deployment_healthy", "predecessor_cleanup", "accepted"}
+                ):
+                    operation["finishing"] = True
                 code = controller_error_code(result.get("errorCode"))
                 if code is not None:
                     operation["controllerErrorCode"] = code

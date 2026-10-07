@@ -69,7 +69,7 @@ The controller records each key with a fingerprint of the request’s method, pa
 - **Same key, different request:** `409 IDEMPOTENCY_CONFLICT`.
 - **The key becomes the ID.** For `POST /v1/applications` the key is the new application ID. For every route that starts an operation, the key is the operation ID. For a deployment, the deployment ID is the same as its operation ID.
 
-Save each key until its operation finishes. If an operation ends in `recovery_required`, repeat the identical request with the same key to resume it. The dispatch journal does not store request bodies, so a request that carried an environment value must be sent again with that value. A new key does not get around an unfinished operation: the controller answers `409 OPERATION_CONFLICT` with the blocking `operationId`.
+Save each key until its operation finishes. If an operation ends in `recovery_required`, repeat the identical request with the same key to resume it. The dispatch journal does not store request bodies, so a request that carried an environment value must be sent again with that value. A new key does not get around unfinished foreground work: the controller answers `409 OPERATION_CONFLICT` with the blocking `operationId`. Accepted finishing work uses the narrower admission rules below.
 
 ## Results and operations
 
@@ -97,15 +97,24 @@ Poll the `statusUrl` until `status` is no longer `running`. Operations started o
 | --- | --- |
 | `operationId` | The operation ID (the request's idempotency key) |
 | `kind` | For example `app.deploy`, `app.enable`, `app.env.set`, `storage.create`, `infra.image.set` |
-| `scope` | `app-<application ID>` or `infrastructure`; only one operation per scope can be unfinished |
+| `scope` | `app-<application ID>` or `infrastructure`; one foreground operation and one accepted finishing operation can be unfinished per app |
 | `status` | `running`, `succeeded`, `failed`, or `recovery_required` |
 | `phase` | The last recorded step; `queued`, `executing`, `startup_interrupted`, or `finishing` before the domain service records its own |
 | `startedAt`, `updatedAt`, `deadlineAt` | Timestamps |
 | `safeError` | A bounded, secret-free summary, or `null` |
 | `errorCode` | `PLATFORM_BUSY` or `RUNTIME_UNAVAILABLE` for failures a caller can act on, otherwise `null` |
-| `cleanupState` | Whether cleanup of temporary resources is confirmed |
+| `cleanupState` | Latest recorded cleanup evidence; a migrated checkpoint can still describe builder cleanup. Read it with `status`, `finishing`, and `nextRetryAt` |
+| `finishing` | `true` when the operation has durable acceptance and only finishing work remains; retained on completed records |
+| `finishingRetryAttempts` | Number of automatic finishing attempts started, from 0 to 5; manual replay does not reset this count |
+| `nextRetryAt` | UTC timestamp for the next automatic attempt, or `null` while executing, after success, or after exhaustion |
 
 Four worker threads run accepted operations, and at most 32 can be admitted (queued or running) at once. When that capacity is full the controller answers `503 OPERATION_QUEUE_FULL`, which is safe to retry later with the same key.
+
+After deployment acceptance, address handover, exact predecessor job/worker removal, and registry retention run as finishing work. An enabled app's address handover also uses this path. Failures keep the operation `running` while the controller retries, with waits of 1, 2, 4, 8, and 10 minutes (25 minutes of backoff, plus execution time). Each automatic attempt has at most 120 seconds, bounded further by the configured operation deadline. After five automatic attempts fail, the operation becomes `recovery_required` and `nextRetryAt` is `null`. The journal preserves the schedule and attempt count across restarts; an interrupted automatic attempt consumes its attempt. Replay the original method, path, body, and key to try again manually.
+
+Finishing retries and manual replay claim the same dispatch and take the same app lock as foreground mutations. They reuse the recorded intent; they do not rebuild, resubmit the accepted job, overwrite environment values, or accept the deployment again. Before handover or predecessor cleanup, a running app's exact accepted job and public route are reobserved. A missing or ambiguous observation prevents destructive work. A stopped app stays stopped when cleanup completes.
+
+While finishing is pending, including after automatic retries are exhausted, environment set/delete/import, storage verify/rotate, and restart are admitted. Enable is admitted as a no-op after address handover. Disable requires confirmed handover and predecessor job absence, so stopping the accepted job cannot expose the old route; remaining worker cleanup must target a separate placement. Enable can return an already-running app unchanged; creating a worker for a stopped app waits until finishing completes. Deploy, resize, rollback, app deletion, storage create/remove, and address reservation changes return `409 POST_ACCEPTANCE_CONFLICT` with the blocking operation ID. Accepted foreground work still serializes through the app lock; admission does not authorize concurrent helper mutations.
 
 Most synchronous handlers share one lock. Operation polling, health, application reads, environment-name reads, storage reads, runtime logs, deploy-key reads, and the GitHub source checks skip it and read from their own snapshot instead, so a slow locked request (such as `GET /v1/admin/status`) does not block them. Concurrent `GET /v1/applications/{id}` requests that see the same accepted state share one live probe, and its result is reused for two seconds.
 
@@ -136,7 +145,8 @@ Errors carry a code, summary, correlation ID, and retryability flag:
 | `METHOD_NOT_ALLOWED` | 405 | The path exists, but not with this method |
 | `REQUEST_TIMEOUT` | 408 | The body did not arrive within its deadline |
 | `IDEMPOTENCY_CONFLICT` | 409 | The key was already used for a different request |
-| `OPERATION_CONFLICT` | 409 | Another operation is unfinished for the same scope |
+| `OPERATION_CONFLICT` | 409 | Another foreground operation is unfinished for the same scope |
+| `POST_ACCEPTANCE_CONFLICT` | 409 | The requested change can interfere with an accepted operation's pending finishing work |
 | `STATE_CONFLICT` | 409 | Current controller state prevents the request |
 | `REQUEST_TOO_LARGE` | 413 | The body exceeds 1 MiB |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | The body is not `application/json` |

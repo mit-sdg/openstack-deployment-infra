@@ -642,8 +642,8 @@ class ApplicationSizingTests(unittest.TestCase):
         plan = self.plan()
         self.fail_action = "app.worker.delete"
         key, interrupted = self.resize(plan)
-        self.assertEqual(interrupted.status, "recovery_required", interrupted.safe_error)
-        self.assertEqual(interrupted.phase, "deployment_healthy")
+        self.assertEqual(interrupted.status, "running", interrupted.safe_error)
+        self.assertEqual(interrupted.phase, "predecessor_cleanup")
         accepted = db.get_application(self.connection, self.app_id)
         self.assertEqual(accepted.worker_flavor, XL.name)
         _, recovered = self.resize(plan, key)
@@ -656,7 +656,7 @@ class ApplicationSizingTests(unittest.TestCase):
         plan = self.plan()
         self.fail_action = "app.worker.delete"
         key, interrupted = self.resize(plan)
-        self.assertEqual(interrupted.phase, "deployment_healthy")
+        self.assertEqual(interrupted.phase, "predecessor_cleanup")
         self.api.close()
         # Model process loss before the executor's finally block records the
         # interruption: retain the real domain checkpoint, mark dispatch started.
@@ -666,8 +666,8 @@ class ApplicationSizingTests(unittest.TestCase):
         self.fixture.api = self.api
         self.router = self.api.router()
         operation = db.get_operation(self.connection, key)
-        self.assertEqual(operation.status, "recovery_required")
-        self.assertEqual(operation.phase, "deployment_healthy")
+        self.assertEqual(operation.status, "running")
+        self.assertEqual(operation.phase, "predecessor_cleanup")
         _, recovered = self.resize(plan, key)
         self.assertEqual(recovered.status, "succeeded", recovered.safe_error)
         self.assertEqual(db.get_application(self.connection, self.app_id).scheduler_cpu_mhz, 9000)
