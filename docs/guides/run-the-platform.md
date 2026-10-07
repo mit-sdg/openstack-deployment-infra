@@ -161,6 +161,63 @@ If anything isn't healthy, go to [Troubleshooting](troubleshooting.md). An obser
 
 The CLI's exit codes help in scripts: `0` success, `1` a safe failure, `2` a usage or validation error, `3` a conflict (a busy lock, an unfinished operation, or a required recovery), `4` an unavailable dependency, and `130` interrupted. The [operator CLI reference](../reference/operator-cli.md#exit-codes) has details.
 
+## Get alerts when health fails
+
+Health alerts are optional and disabled by default. An admin image containing the alert sender is required; adopt monitoring changes through the [admin image upgrade procedure](hosts-and-images.md#replace-the-admin-host). Update the operator release before installing inventory containing `healthAlerts`; older releases reject this new key. See [Releases and upgrades](releases-and-upgrades.md) for the operator update. Alerts follow the five-minute platform health timer described above. They cover checks that ran and failed; a stopped timer or a checker that crashes before writing its snapshot needs separate host monitoring.
+
+1. Save the incoming webhook URL in a private local file, for example `/private/health-alert-webhook`, using an editor. The file contains one HTTPS URL, optionally followed by one newline. Keep tokens out of shell commands and inventory. Copy it to the existing persistent secrets directory on admin:
+
+   ```bash
+   chmod 600 /private/health-alert-webhook
+   scp -p -F "$SSH_CONFIG" /private/health-alert-webhook \
+     "platform-admin:$PLATFORM_ADMIN_STATE/operator/secrets/health-alert-webhook"
+   ssh -F "$SSH_CONFIG" platform-admin -- \
+     stat -c '%U:%G:%a' "$PLATFORM_ADMIN_STATE/operator/secrets/health-alert-webhook"
+   ```
+
+   Expect `agentops:agentops:600`. The file must be a direct regular file owned by `agentops`, with no symlinks or hardlinks. Keep the private local copy for disaster recovery. The admin state volume retains the remote file across reboot and admin replacement.
+
+2. Add `healthAlerts` to the deployment inventory used to build the admin image, then adopt that image using the upgrade procedure linked above. Keep the operator inventory consistent with the image inventory:
+
+   ```json
+   "healthAlerts": {
+     "enabled": true,
+     "format": "slack",
+     "failureThreshold": 2,
+     "repeatSeconds": 14400
+   }
+   ```
+
+   `slack` posts `{"text": "..."}` to a Slack-compatible incoming webhook. Use `json` for a receiver that accepts the generic payload described in the [configuration reference](../reference/configuration.md#health-alerts). Do not add the URL to this object: inventory is copied into image builds and the Nix store. Editing only the operator inventory does not change the admin image's `/etc/<namespace>/platform.json`.
+
+3. Send a test alert through the one-shot unit, using the recovery function defined above:
+
+   ```bash
+   recovery sudo systemctl start "$PLATFORM_NAMESPACE-platform-health-alert-test.service"
+   recovery sudo journalctl -u "$PLATFORM_NAMESPACE-platform-health-alert-test.service" \
+     -n 10 --no-pager
+   ```
+
+   Confirm the test message arrived at the receiver and the journal says `health-alert=sent`. The test does not change the consecutive-failure count or incident state. `health-alert=delivery-failed` means the protected file, URL, HTTPS connection, or receiver response failed validation; check the file permissions, outbound HTTPS access, and receiver configuration without printing the URL. `health-alert=disabled` means the admin inventory still has alerts disabled.
+
+With these defaults, the second consecutive failed run sends a message like:
+
+```text
+Platform health failing: app-platform; 2026-10-07T12:10:00+00:00; failed check: nomad
+```
+
+The next passing run sends:
+
+```text
+Platform health recovered: app-platform; 2026-10-07T12:15:00+00:00; all checks passed
+```
+
+Ongoing failures repeat at most every four hours. A passing run resets the consecutive-failure count. Alert counts, incident state, and attempt times persist at `$PLATFORM_ADMIN_STATE/operator/status/health-alerts.json`. Delivery errors do not change the health check's exit status. Failed failure-alert attempts also wait for the repeat interval; failed recovery attempts retry on passing runs after five minutes. Delivery is best effort: a receiver can accept a message before the sender times out, so a later retry can duplicate it.
+
+The current checker stops at the first failed check and does not inspect app-operation states. Messages identify that check; raw errors, app-operation references, credentials, and provider output are excluded. Use the snapshot and troubleshooting tools to investigate the cause.
+
+To disable alerts, omit `healthAlerts` or set `enabled` to `false` in the inventory for the next admin image. To stop delivery immediately, remove the remote webhook file; the timer continues checking health. Keep or rotate the local copy according to your secret-handling policy.
+
 ## Open the operator dashboard
 
 The operator dashboard is a browser view of the whole platform, served by `openstack-platform dashboard`. It is read-only: it shows status but can't change anything.

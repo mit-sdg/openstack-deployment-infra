@@ -123,6 +123,10 @@ def write_tar(path: Path, files: dict[str, bytes]) -> None:
 
 def runtime_files(source: dict[str, bytes], mode: str) -> dict[str, bytes]:
     names = {f"openstack_platform/{name}" for name in BASE}
+    # Older authenticated snapshots predate this optional inventory policy.
+    # Include its validator when present without changing legacy runtime sets.
+    if "openstack_platform/health_alert_config.py" in source:
+        names.add("openstack_platform/health_alert_config.py")
     if mode == "broker":
         names.add("openstack_platform/durable.py")
     names |= {f"openstack_platform/controller/{name}" for name in CONTROLLER}

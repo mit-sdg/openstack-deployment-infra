@@ -136,7 +136,8 @@
       "checksums",
       "containers",
       "paths",
-      "ownerPortal"
+      "ownerPortal",
+      "healthAlerts"
     ],
     "requiredTopLevel": [
       "project",

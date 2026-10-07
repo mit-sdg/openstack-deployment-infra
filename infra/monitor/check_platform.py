@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.health_alerts import notify  # noqa: E402
 from lib.http import bounded_request  # noqa: E402
 from lib.platform_config import load  # noqa: E402
 
@@ -143,6 +144,7 @@ def main() -> int:
         temp = Path(handle.name)
     temp.chmod(0o640)
     temp.replace(STATUS)
+    notify(CONFIG, document)
     print("platform-health=healthy" if error is None else "platform-health=failed")
     return 0 if error is None else 1
 

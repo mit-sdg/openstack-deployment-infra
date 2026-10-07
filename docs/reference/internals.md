@@ -420,3 +420,15 @@ Preserve these invariants when changing the code:
 - [Operator CLI reference](operator-cli.md)
 - [Configuration](configuration.md)
 - [Development](../development.md)
+
+## Platform health alerts
+
+The admin health timer runs `infra/monitor/check_platform.py` every five minutes. After writing its snapshot, the checker calls `infra/lib/health_alerts.py`. With `healthAlerts.enabled` false or absent, that call performs no secret reads, state writes, or network requests. With alerts enabled, it locks the persistent operator status file, updates the consecutive-failure count, and records any notification attempt before network I/O. The nonblocking lock prevents overlapping runs from waiting on a sender. State changes use an atomic replacement of a mode-`0600` file; attempts survive reboot on the admin state volume.
+
+The URL is a protected runtime input under the existing operator secrets directory, rather than a first-boot image input. This matches how admin OpenStack and storage-bootstrap credentials are delivered to persistent operator secrets and keeps token-bearing URLs out of non-secret inventory and Nix derivations. Operators copy the file through the existing pinned SSH alias. The health service runs as the operator and reads only a direct, owner-owned mode-`0600` URL file; the persistent parent directory is mode `0700`.
+
+`infra/monitor/send_health_alert.py` receives the URL and payload through stdin in a child process. The parent discards child output and kills the child after ten seconds. The child uses verified HTTPS with an eight-second socket timeout, no redirects, and no environment proxies; it neither reads nor logs response bodies. Delivery and state errors are contained by the notification call, preserving the checker's original health exit status. No exactly-once delivery guarantee is possible when the receiver accepts a request but the reply is lost. The persisted attempt suppresses immediate duplicate failure alerts; recovery retries can duplicate a message after such an uncertain result.
+
+No health-unit network restriction is relaxed. The existing unit already calls OpenStack and public HTTPS health endpoints and has no `IPAddressDeny` or address-family sandbox. The foundation preserves Neutron's default egress rules, and the common NixOS firewall restricts inbound traffic. Additional operator/provider egress restrictions must permit the configured webhook destination. Both health and the test unit depend on the admin state mount so persistent files cannot silently be written under an unmounted volume. The test unit adds read-only filesystem protection and runs as the same unprivileged operator.
+
+The checker stops after its first failed check. Alerts therefore describe the first missing check from the ordered check list and do not send exception details. It does not query app-operation states. A process killed before notification or a timer that stops running produces no webhook alert; independent host monitoring is required for those failures.

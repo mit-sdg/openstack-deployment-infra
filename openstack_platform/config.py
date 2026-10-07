@@ -278,6 +278,12 @@ def load_platform(path: str | Path) -> PlatformConfig:
         validate_owner_portal(document.get("ownerPortal", {"enabled": False}))
     except ValueError as error:
         raise ValidationError(str(error)) from error
+    from .health_alert_config import validate as validate_health_alerts
+
+    try:
+        validate_health_alerts(document.get("healthAlerts", {}))
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
     project_name = _text(document["project"], field="project")
     project_id = uuid(document["projectId"], field="projectId")
     prefix = _text(document["prefix"], field="prefix", pattern=_PREFIX)

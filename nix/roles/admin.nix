@@ -1286,6 +1286,8 @@ in
 
   systemd.services."${namespace}-platform-health" = {
     description = "Check ${platform.displayName} platform health";
+    requires = [ stateMountUnit ];
+    after = [ stateMountUnit ];
     unitConfig.ConditionPathExists = "${root}/secrets/openstack.env";
     serviceConfig = {
       Type = "oneshot";
@@ -1308,6 +1310,24 @@ in
       ];
       LimitCORE = 0;
       ExecStart = "${packages.python}/bin/python ${infra}/monitor/check_platform.py";
+    };
+  };
+  systemd.services."${namespace}-platform-health-alert-test" = {
+    description = "Send a ${platform.displayName} health test alert";
+    requires = [ stateMountUnit ];
+    after = [ stateMountUnit ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = operatorAccount.name;
+      Group = operatorAccount.name;
+      Environment = "PLATFORM_CONFIG=/etc/${namespace}/platform.json";
+      ExecStart = "${packages.python}/bin/python ${infra}/monitor/test_health_alert.py";
+      TimeoutStartSec = "15s";
+      LimitCORE = 0;
+      NoNewPrivileges = true;
+      PrivateTmp = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
     };
   };
   systemd.timers."${namespace}-platform-health" = {

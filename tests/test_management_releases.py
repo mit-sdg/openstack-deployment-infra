@@ -149,6 +149,10 @@ class ManagementReleaseTests(unittest.TestCase):
             files = releases.verify_archive(
                 self.output / self.document["archives"][mode]["file"], self.document, mode
             )
+            self.assertEqual(
+                files["runtime/openstack_platform/health_alert_config.py"],
+                (self.repository / "openstack_platform/health_alert_config.py").read_bytes(),
+            )
             self.assertFalse(
                 any(
                     "node_modules" in path or "/dev/" in path
