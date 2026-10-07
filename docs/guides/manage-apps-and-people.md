@@ -13,14 +13,14 @@ Every account has one role. Sessions keep the role assigned at sign-in.
 | Add and remove teammates | On apps you own | On any app | On any app |
 | Read the course catalog (**Staff** pages) | No | Yes | Yes |
 | Manage any app: settings, variables, storage, deploy, stop, start, logs, team | No | Yes | Yes |
-| Create an app for someone else | No | No | Yes |
-| Adopt an app the operator deployed, or change an app's owner | No | No | Yes, after confirming |
-| Delete a database or storage | No | No | Yes, after confirming |
-| Allow a brief outage or set an app's size when deploying | No | No | Yes |
+| Create an app for someone else | No | Yes | Yes |
+| Adopt an app the operator deployed, or change an app's owner | No | Yes | Yes |
+| Delete a database or storage | No | Yes, with typed confirmation | Yes, with typed confirmation |
+| Allow a brief outage or set an app's size when deploying | No | Yes | Yes |
 | Manage accounts, roles, and limits; read the audit log | No | No | Yes |
 | Sign in with | Commons or a local account | Commons or a local account | A local account with an authenticator app |
 
-"After confirming" means entering your password and a fresh authenticator code in **Confirm it’s you**, unless you confirmed them in the last five minutes. Staff actions don't require this.
+App actions need no password or authenticator confirmation for staff or portal admins. Account changes still ask for both in **Confirm it’s you**, unless you confirmed them in the last five minutes.
 
 Where to find things:
 
@@ -30,7 +30,7 @@ Where to find things:
 
 ## Manage any app
 
-Staff open **Manage apps**; portal admins open **Admin** > **All apps**. The list shows every app the portal knows about, 25 to a page, with its status, owner, URL, last deployment, and app ID. Apps that the operator created outside the portal don't appear until a portal admin adopts them ([Adopt an app](#adopt-an-app-the-operator-deployed)).
+Staff open **Manage apps**; portal admins open **Admin** > **All apps**. The list shows every app the portal knows about, 25 to a page, with its status, owner, URL, last deployment, and app ID. Apps that the operator created outside the portal don't appear until staff or a portal admin adopts them ([Adopt an app](#adopt-an-app-the-operator-deployed)).
 
 Select an app for its management tools:
 
@@ -43,9 +43,9 @@ Select an app for its management tools:
 
 Changes appear in the **Audit log** under your username. Staff and portal admins have no concurrency limit, and your changes don't use the owner's limit. Each app still accepts only one change at a time.
 
-## Portal admin actions
+## Create, adopt, and move apps
 
-Only portal admins can create apps for others, transfer ownership, delete storage, or change app sizing.
+Staff and portal admins can create apps for others, transfer ownership, delete storage, and change app sizing.
 
 ### Create an app for someone
 
@@ -57,7 +57,7 @@ Adopt an app the operator [deployed from the command line](deploy-apps-from-the-
 
 1. Get the app's ID (a UUID) from the operator.
 2. On **All apps**, select **Adopt app**. Enter the **App ID**. Leave **Owner** empty to own it yourself, or choose an account.
-3. Select **Adopt app** and confirm with your password and code.
+3. Select **Adopt app**.
 
 Adoption imports the app's current accepted repository, branch, commit, and settings, including its storage connections. It doesn't restart, resize, or redeploy the app. The owner keeps the app even if it puts them over their limit; only new apps are limited.
 
@@ -69,7 +69,7 @@ Adoption is refused when:
 
 ### Change an app's owner
 
-On the app's page, under **Danger zone**, select **Change owner**, choose the new owner, and confirm with your password and code. The portal refuses while the app has a change in progress (`APP_BUSY`), or if someone else changed the owner since you loaded the page (`OWNER_CONFLICT`; reload). If the new owner was a teammate, they're removed from the team list; other teammates stay. The new owner keeps the app even if it puts them over their limit.
+On the app's page, under **Danger zone**, select **Change owner**, choose the new owner, and select **Change owner**. The portal refuses while the app has a change in progress (`APP_BUSY`), or if someone else changed the owner since you loaded the page (`OWNER_CONFLICT`; reload). If the new owner was a teammate, they're removed from the team list; other teammates stay. The new owner keeps the app even if it puts them over their limit.
 
 ### Delete a database or storage
 
@@ -79,19 +79,19 @@ On the app's page, under **Danger zone**, select **Change owner**, choose the ne
 1. Under **Databases and storage** in the app's settings, open **Edit variables** for the resource. Remove every variable, select **Save variables**, and deploy so the running app stops using it. Saved settings that still connect to the resource block deletion (`STORAGE_BOUND`).
 2. Make sure a recent managed-data backup exists ([Backups and recovery](backups-and-recovery.md)).
 3. Under **Danger zone**, select **Delete a database or storage**. Choose it under **Database or storage**.
-4. Type the app's name, a space, and the storage type, for example `my-app postgres` (the types are `postgres`, `mongo`, and `s3`). Select **Delete permanently** and confirm with your password and code.
+4. Type the app's name, a space, and the storage type, for example `my-app postgres` (the types are `postgres`, `mongo`, and `s3`). Select **Delete permanently**.
 5. Watch **Latest change** until it shows success, then check that the storage is gone from **Databases and storage**.
 
 ### Allow an outage or change an app's size
 
-Portal admins have two extra deploy options:
+Staff and portal admins have these deploy options:
 
-- **Allow a brief outage** replaces the running app in one step instead of starting the new version alongside it. The app goes offline briefly while the new version starts. An app that keeps a fixed IP address can only deploy this way, so only a portal admin can deploy it; staff see **Only an admin can deploy this app**.
+- **Deployment method** > **Replace the running app in one step** chooses a maintenance cutover instead of starting the new version alongside it. The app goes offline briefly while the new version starts. For an app that keeps a fixed IP address, the portal applies this automatically and shows an information message about the brief outage.
 - **Sizing plan** takes a reviewed plan, as JSON, from the operator. Leave it empty to keep the app's current size. The operator creates plans with the controller API ([Deploy apps from the command line](deploy-apps-from-the-command-line.md)).
 
 ## The Commons app
 
-The portal recognizes Commons when an app's public URL matches `commonsOrigin` and shows **This app provides sign-in for the portal**. Adopting it, changing its owner, deploying, stopping, starting, restarting, and storage actions need an extra confirmation checkbox on every page.
+The portal recognizes Commons when an app's public URL matches `commonsOrigin`. App controls show **Signing in to this portal depends on this app.** as information. Deploying, stopping, starting, restarting, changing its owner, and storage actions proceed without a confirmation checkbox. Adoption also explains the sign-in dependency.
 
 If Commons goes down, new Commons sign-ins fail. Existing portal sessions and local sign-in keep working. Keep a local portal admin available for repairs.
 

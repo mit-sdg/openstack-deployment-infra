@@ -102,9 +102,9 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
           response.ok(),
       );
       await add.click();
-      // Owners confirm adding storage, since only an admin can delete it.
+      // Owners confirm adding storage, since deletion needs staff or an admin.
       const confirmAdd = page.getByRole('dialog', { name: 'Add PostgreSQL?' });
-      await expect(confirmAdd).toContainText('Only an admin can delete it later');
+      await expect(confirmAdd).toContainText('Staff or an admin can delete it later');
       await confirmAdd.getByRole('button', { name: 'Add PostgreSQL', exact: true }).click();
       createIntent = (await (await created).json()).data;
       await expect(postgresStatus).toHaveText('Setting up', { timeout: operationTimeout });
@@ -151,7 +151,7 @@ test('owner environment, PostgreSQL bindings, deploy names and rotation', async 
     )
     .toContain('"url":"APP_DATABASE"');
   await expect(storageSection.getByRole('button', { name: /delete/i })).toHaveCount(0);
-  await expect(page.getByText(/Only an admin can delete/)).toBeVisible();
+  await expect(page.getByText(/Staff or an admin can delete/)).toBeVisible();
   await page.goto(`/apps/${id}/deploy`);
   await expect(page.getByText('APP_DATABASE', { exact: true })).toBeVisible();
   await expect(page.getByText('API_TOKEN', { exact: true })).toBeVisible();

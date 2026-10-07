@@ -29,7 +29,7 @@ For **students** (app owners), the owner portal lets them:
 For **course staff**, the platform provides:
 
 - a setup tool that builds and boot-tests every machine image from one Git commit, then creates the whole deployment in your OpenStack project;
-- roles for students, staff, and portal admins, with app quotas, an audit log, and sign-in through Commons (the class site) or local accounts;
+- roles for students, staff with full app management, and portal admins who also manage accounts, quotas, and the audit log, with sign-in through Commons (the class site) or local accounts;
 - separate encrypted backups for platform state, portal state, and app data, with off-site export and tested restore procedures;
 - an operator command-line tool for health, host replacement, upgrades, and recovery, plus a read-only health dashboard.
 

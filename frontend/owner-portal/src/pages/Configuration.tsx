@@ -84,7 +84,7 @@ export function ConfigurationForm({
   initial: Settings;
   resources?: boolean;
   service?: ReturnType<typeof resourceApi>;
-  /** Admin view of the sign-in app: storage changes need explicit consent. */
+  /** Managed sign-in app: show information with storage changes. */
   identityProvider?: boolean;
 }) {
   const scope = service === api ? [] : ['admin'];

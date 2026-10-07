@@ -375,31 +375,24 @@ export const api = {
       (v) => ({ app: appData(record(v).app), intent: intentData(record(v).intent) }),
       { method: 'POST', body: { slug }, key },
     ),
-  state: (id: string, desiredRunning: boolean, key: string, identityProviderConfirmed = false) =>
+  state: (id: string, desiredRunning: boolean, key: string) =>
     request(`/apps/${id}/state`, intentData, {
       method: 'POST',
-      body: { desiredRunning, ...(identityProviderConfirmed ? { identityProviderConfirmed } : {}) },
+      body: { desiredRunning },
       key,
     }),
-  restart: (id: string, key: string, identityProviderConfirmed = false) =>
+  restart: (id: string, key: string) =>
     request(`/apps/${id}/restart`, intentData, {
       method: 'POST',
-      body: identityProviderConfirmed ? { identityProviderConfirmed } : {},
+      body: {},
       key,
     }),
-  deploy: (
-    id: string,
-    revision: number,
-    commit: string,
-    key: string,
-    identityProviderConfirmed = false,
-  ) =>
+  deploy: (id: string, revision: number, commit: string, key: string) =>
     request(`/apps/${id}/deployments`, intentData, {
       method: 'POST',
       body: {
         configurationRevision: revision,
         commit,
-        ...(identityProviderConfirmed ? { identityProviderConfirmed: true } : {}),
       },
       key,
     }),
@@ -506,35 +499,8 @@ export function validateBindings(bindings: StorageBinding[], names: string[]): s
   return null;
 }
 
-/** Thrown when someone declines a storage confirmation; never shown as an error. */
-export class ActionCanceled extends Error {
-  constructor() {
-    super('Action canceled.');
-  }
-}
-
-/**
- * Asks to confirm a storage change on the app that runs portal sign-in, for
- * example in a Dialog. Resolve true to continue.
- */
-export type ConfirmStorage = () => boolean | Promise<boolean>;
-
 // Both workspaces use the same resource requests and write-only controls.
-// Owner requests confirm only for the sign-in app; admin requests let the
-// callback decide. There is no native confirm fallback: owner storage changes
-// on the sign-in app need a ConfirmStorage callback.
-export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
-  async function consentFields(id: string) {
-    if (prefix === '/apps') {
-      if (!(await api.app(id)).identityProvider) return {};
-      if (!confirmStorage)
-        throw new Error(
-          'Portal sign-in depends on this app. Confirm storage changes from its settings page.',
-        );
-    } else if (!confirmStorage) return {};
-    if (!(await confirmStorage())) throw new ActionCanceled();
-    return { identityProviderConfirmed: true };
-  }
+export function resourceApi(prefix = '/apps') {
   return {
     settings: (id: string) =>
       request(
@@ -576,13 +542,13 @@ export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
     createStorage: async (id: string, type: StorageResource['type'], key: string) =>
       request(`${prefix}/${id}/storage`, intentData, {
         method: 'POST',
-        body: { type, ...(await consentFields(id)) },
+        body: { type },
         key,
       }),
     storageAction: async (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
       request(`${prefix}/${id}/storage/${resource}/${action}`, intentData, {
         method: 'POST',
-        body: await consentFields(id),
+        body: {},
         key,
       }),
     members: (id: string) => request(`${prefix}/${id}/members`, teamData),

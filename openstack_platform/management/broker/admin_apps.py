@@ -1,7 +1,6 @@
 """Staff and admin app authority over the existing project peer and resource handlers.
 
-Staff manage every app as admins do. Ownership changes (creating an app for an
-owner, adoption, reassignment) and permanent storage deletion stay admin-only.
+Staff and admins have the same app authority, without account-management step-up.
 """
 
 from __future__ import annotations
@@ -30,28 +29,11 @@ from .staff_policy import public_url
 if TYPE_CHECKING:
     from .api import Broker
 
-IDENTITY_WARNING = "Portal sign-in depends on this app"
-
 
 class Authority(NamedTuple):
-    """The session behind an app-administration request and what its route needs."""
+    """The session behind an app-administration request."""
 
     sid: str
-    # "staff" admits staff and admin sessions; "admin" admits only admins.
-    kind: str
-    step_up: bool
-
-
-def admin_only(request: Request) -> tuple[bool, bool]:
-    """Whether a route is admin-only, and whether it also needs a recent step-up."""
-    step_up = (
-        request.method == "DELETE"
-        and "/storage/" in request.path
-        or request.path.endswith("/owner")
-        or request.path == "/v1/admin-apps/adopt"
-    )
-    # Creating an app for an owner sets its ownership, but needs no step-up.
-    return step_up or (request.method == "POST" and request.path == "/v1/admin-apps"), step_up
 
 
 class AdminApps:
@@ -72,6 +54,7 @@ class AdminApps:
             ("GET", root, self.listing),
             ("POST", root, b.create),
             ("POST", root + "/adopt", self.adopt),
+            ("GET", root + "/owners", self.owners),
             ("GET", root + "/{app}", self.detail),
             ("GET", root + "/{app}/configuration", b.configuration),
             ("PUT", root + "/{app}/configuration", b.save),
@@ -95,11 +78,11 @@ class AdminApps:
         ]
 
     def handle(self, request: Request, handler: Callable[[Request], Response]) -> Response:
-        restricted, sensitive = admin_only(request)
-        kind = "admin" if restricted else "staff"
-        user, sid = self.broker.accounts.admin(request, step_up=sensitive, kind=kind)
+        user, sid = self.broker.accounts.admin(request, kind="staff")
         allowed = (
-            {"limit", "cursor"}
+            {"q", "limit", "cursor"}
+            if request.path == "/v1/admin-apps/owners"
+            else {"limit", "cursor"}
             if request.path == "/v1/admin-apps" or request.path.endswith("/deployments")
             else {"lines", "offset"}
             if request.path.endswith("/build-log")
@@ -114,7 +97,7 @@ class AdminApps:
             and request.body is not None
         ):
             raise HttpError(400, "INVALID_REQUEST", "Unexpected request fields.")
-        token = self.context.set(Authority(sid, kind, sensitive))
+        token = self.context.set(Authority(sid))
         stack = ExitStack()
         try:
             if request.method == "GET":
@@ -151,14 +134,7 @@ class AdminApps:
     def check(self, db: sqlite3.Connection) -> None:
         context = self.context.get()
         if context is not None:
-            self.broker.accounts.checked_actor(
-                db, context.sid, step_up=context.step_up, kind=context.kind
-            )
-
-    def kind(self) -> str:
-        """The session kind this request's route needs; admin when unknown."""
-        context = self.context.get()
-        return "admin" if context is None else context.kind
+            self.broker.accounts.checked_actor(db, context.sid, kind="staff")
 
     def record_audit(
         self, db: sqlite3.Connection, actor: str, app: str, kind: str, intent: str, now: float
@@ -195,19 +171,15 @@ class AdminApps:
             and urlsplit(value).hostname == urlsplit(self.broker.config.commons_origin).hostname
         )
 
-    def identity_consent(
-        self, app: str, body: dict[str, Any], model: dict[str, Any] | None = None
-    ) -> None:
+    @staticmethod
+    def validate_identity_field(body: dict[str, Any]) -> None:
+        """Accept the retired boolean confirmation field during mixed-version rollouts."""
         if (
             "identityProviderConfirmed" in body
             and type(body["identityProviderConfirmed"]) is not bool
         ):
             raise HttpError(400, "INVALID_FIELD", "Identity-provider confirmation must be boolean.")
-        if (
-            self.identity(model if model is not None else self.observed(app))
-            and body.get("identityProviderConfirmed") is not True
-        ):
-            raise HttpError(409, "IDENTITY_CONFIRMATION_REQUIRED", IDENTITY_WARNING)
+        body.pop("identityProviderConfirmed", None)
 
     @staticmethod
     def sizing_plan(value: dict[str, Any], app: str, model: dict[str, Any]) -> None:
@@ -283,9 +255,7 @@ class AdminApps:
                 "Supply the exact current reviewed sizing plan; no extra configuration fields are accepted.",
             ) from None
 
-    def deployment_body(
-        self, request: Request, app: dict[str, Any], *, admin: bool
-    ) -> dict[str, Any]:
+    def deployment_body(self, request: Request, app: dict[str, Any]) -> dict[str, Any]:
         if (
             not isinstance(request.body, dict)
             or not {"configurationRevision", "commit"} <= set(request.body)
@@ -308,30 +278,62 @@ class AdminApps:
             raise HttpError(
                 400, "INVALID_FIELD", "Maintenance must be boolean and plan must be an object."
             )
-        # Cutover downtime and worker sizing are platform capacity decisions.
-        if not admin and (body.get("maintenance") is True or "plan" in body):
-            raise HttpError(
-                403,
-                "ADMIN_REQUIRED",
-                "Only an admin can allow a maintenance outage or change an app's size.",
-            )
         model = self.observed(app["id"])
-        self.identity_consent(app["id"], body, model)
+        self.validate_identity_field(body)
         if "plan" in body:
             self.sizing_plan(body["plan"], app["id"], model)
-        if model.get("requiresMaintenance") is True and body.get("maintenance") is not True:
-            if not admin:
-                raise HttpError(
-                    403,
-                    "ADMIN_REQUIRED",
-                    "This app keeps a fixed IP address, so only an admin can deploy it.",
-                )
-            raise HttpError(
-                409,
-                "MAINTENANCE_REQUIRED",
-                "A retained primary IPv4 requires maintenance consent for the brief cutover downtime.",
-            )
+        if model.get("requiresMaintenance") is True:
+            body["maintenance"] = True
         return body
+
+    def owners(self, request: Request) -> Response:
+        if set(request.query) - {"limit", "cursor", "q"} or any(
+            len(v) != 1 or not v[0] for v in request.query.values()
+        ):
+            raise HttpError(400, "INVALID_REQUEST", "Invalid owner page fields.")
+        limit = self.broker.staff.page_limit(request)
+        search = request.query.get("q", ("",))[0]
+        if len(search) > 64 or any(ord(c) < 32 for c in search):
+            raise HttpError(400, "INVALID_FIELD", "Owner search exceeds its bounds.")
+        pattern = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        clause = "(username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')"
+        args: list[object] = [pattern, pattern]
+        with self.broker.database.connect() as db:
+            cursor = request.query.get("cursor", (None,))[0]
+            if cursor:
+                point = db.execute(
+                    f"SELECT created,id FROM users WHERE {clause} AND id=?",
+                    (*args, checked_uuid(cursor)),
+                ).fetchone()
+                if point is None:
+                    raise HttpError(400, "INVALID_REQUEST", "Unknown owner page cursor.")
+                clause += " AND (created<? OR (created=? AND id<?))"
+                args += [point["created"], point["created"], point["id"]]
+            rows = db.execute(
+                f"SELECT id,username,display_name,role,enabled,status FROM users WHERE {clause} ORDER BY created DESC,id DESC LIMIT ?",
+                (*args, limit + 1),
+            ).fetchall()
+        items = [
+            {
+                "userId": row["id"],
+                "username": profile(row["username"], 32),
+                "displayName": profile(row["display_name"], 256),
+                "role": row["role"],
+                "enabled": bool(row["enabled"]),
+                "status": row["status"],
+            }
+            for row in rows[:limit]
+        ]
+        return Response(
+            200,
+            {
+                "data": {
+                    "items": items,
+                    "nextCursor": rows[limit - 1]["id"] if len(rows) > limit else None,
+                    "truncated": len(rows) > limit,
+                }
+            },
+        )
 
     def listing(self, request: Request) -> Response:
         b = self.broker
@@ -426,7 +428,7 @@ class AdminApps:
 
     def adopt(self, request: Request) -> Response:
         b = self.broker
-        actor, _sid = b.auth.authenticate(request, kind="admin", mutation=True)
+        actor, _sid = b.auth.authenticate(request, kind="staff", mutation=True)
         if (
             not isinstance(request.body, dict)
             or "applicationId" not in request.body
@@ -435,6 +437,7 @@ class AdminApps:
             raise HttpError(
                 400, "INVALID_REQUEST", "Supply an application ID and optional owner ID."
             )
+        self.validate_identity_field(request.body)
         identifier = checked_uuid(request.body["applicationId"])
         owner = checked_uuid(request.body.get("ownerId", actor["id"]))
         key, fingerprint = (
@@ -450,7 +453,6 @@ class AdminApps:
                     409, "ALREADY_OWNED", "This application already has a broker owner."
                 )
         model = self.observed(identifier)
-        self.identity_consent(identifier, request.body, model)
         active = model.get("activeDeploymentId")
         if active is None:
             raise HttpError(
@@ -587,7 +589,7 @@ class AdminApps:
             or type(request.body["desiredRunning"]) is not bool
         ):
             raise HttpError(400, "INVALID_REQUEST", "Supply desiredRunning as a boolean.")
-        self.identity_consent(app["id"], request.body)
+        self.validate_identity_field(request.body)
         action = "enable" if request.body["desiredRunning"] else "disable"
         return self.dispatch(
             request,
@@ -624,7 +626,7 @@ class AdminApps:
             raise HttpError(
                 400, "INVALID_REQUEST", "Supply the typed application and storage confirmation."
             )
-        self.identity_consent(app["id"], request.body)
+        self.validate_identity_field(request.body)
         resource_id = checked_uuid(request.path_parameters["resource"])
         # Match single-use journal admission before the resource disappears.
         key, fingerprint = (

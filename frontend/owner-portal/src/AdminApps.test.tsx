@@ -125,7 +125,7 @@ describe('admin application management', () => {
     expect(list).not.toHaveBeenCalled();
     expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument();
   });
-  it('lists every app for staff without the create and adopt actions', async () => {
+  it('lists every app for staff with create and adopt actions', async () => {
     mockSession(null, 'staff');
     vi.spyOn(api, 'session').mockResolvedValue(session!);
     const list = vi.spyOn(adminAppsApi, 'list').mockResolvedValue({
@@ -152,10 +152,10 @@ describe('admin application management', () => {
     );
     expect(list).toHaveBeenCalled();
     expect(screen.getByRole('heading', { name: 'All apps' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Create app' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Adopt app' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create app' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Adopt app' })).toBeVisible();
   });
-  it('lets staff manage an app but hides ownership, deletion, outage and sizing', async () => {
+  it('lets staff manage ownership, deletion, outage and sizing', async () => {
     offline();
     mockSession(null, 'staff');
     vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({
@@ -179,17 +179,15 @@ describe('admin application management', () => {
       .mockResolvedValue({ intentId: id, state: 'accepted' } as never);
     vi.spyOn(api, 'intent').mockResolvedValue({ intentId: id, state: 'accepted' } as never);
     try {
-      show(<AdminAppsPages admin={false} />, `/admin/apps/${id}`);
+      show(<AdminAppsPages />, `/admin/apps/${id}`);
       expect(await screen.findByRole('button', { name: 'Stop app' })).toBeVisible();
-      expect(screen.queryByText('Danger zone')).not.toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Change owner' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+      expect(screen.getByText('Danger zone')).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Change owner' })).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Delete' })).toBeVisible();
       fireEvent.click(screen.getByRole('button', { name: 'Deploy' }));
       const dialog = screen.getByRole('dialog', { name: 'Deploy class-fixture' });
-      expect(
-        within(dialog).queryByLabelText('Allow a brief outage', { exact: false }),
-      ).not.toBeInTheDocument();
-      expect(within(dialog).queryByLabelText('Sizing plan', { exact: false })).toBeNull();
+      expect(within(dialog).getByLabelText('Deployment method')).toBeVisible();
+      expect(within(dialog).getByLabelText('Sizing plan', { exact: false })).toBeVisible();
       fireEvent.change(within(dialog).getByLabelText('Commit'), {
         target: { value: 'a'.repeat(40) },
       });
@@ -201,7 +199,6 @@ describe('admin application management', () => {
           'a'.repeat(40),
           false,
           undefined,
-          false,
           expect.any(String),
         ),
       );
@@ -209,17 +206,18 @@ describe('admin application management', () => {
       vi.unstubAllGlobals();
     }
   });
-  it('tells staff an app with a fixed IP address needs an admin to deploy', async () => {
+  it('lets staff deploy an app with a fixed IP address without a checkbox', async () => {
     offline();
     mockSession(null, 'staff');
     vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({ ...detail, identityProvider: false });
     mockResources();
     try {
-      show(<AdminAppsPages admin={false} />, `/admin/apps/${id}`);
+      show(<AdminAppsPages />, `/admin/apps/${id}`);
       fireEvent.click(await screen.findByRole('button', { name: 'Deploy' }));
       const dialog = screen.getByRole('dialog', { name: 'Deploy class-fixture' });
-      expect(dialog).toHaveTextContent('Only an admin can deploy this app');
-      expect(within(dialog).getByRole('button', { name: 'Deploy' })).toBeDisabled();
+      expect(dialog).toHaveTextContent('This app keeps a fixed IP address');
+      expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument();
+      expect(within(dialog).getByRole('button', { name: 'Deploy' })).toBeEnabled();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -255,7 +253,7 @@ describe('admin application management', () => {
       vi.unstubAllGlobals();
     }
   });
-  it('requires maintenance and class-provider confirmation in the deploy dialog', async () => {
+  it('shows maintenance and sign-in information without consent gates', async () => {
     vi.spyOn(adminAppsApi, 'detail').mockResolvedValue(detail);
     const service = {
       ...api,
@@ -266,7 +264,7 @@ describe('admin application management', () => {
       storage: vi.fn().mockResolvedValue({ items: [], intents: [] }),
     };
     vi.spyOn(adminAppsApi, 'resources').mockReturnValue(service);
-    show(<AdminAppsPages admin />, `/admin/apps/${id}`);
+    show(<AdminAppsPages />, `/admin/apps/${id}`);
     fireEvent.click(await screen.findByRole('button', { name: 'Deploy' }));
     expect(screen.getByText(configurationGuidance.scripts)).toBeVisible();
     expect(screen.getByText(configurationGuidance.root, { exact: false })).toBeVisible();
@@ -274,14 +272,10 @@ describe('admin application management', () => {
     expect(screen.getByText(configurationGuidance.postgres, { exact: false })).toBeVisible();
 
     const dialog = screen.getByRole('dialog', { name: 'Deploy class-fixture' });
-    expect(dialog).toHaveTextContent('this app keeps a fixed IP address');
-    const confirm = within(dialog).getByRole('button', { name: 'Deploy' });
-    expect(confirm).toBeDisabled();
-    fireEvent.click(within(dialog).getByLabelText('Allow a brief outage', { exact: false }));
-    expect(confirm).toBeDisabled();
-    expect(dialog).toHaveTextContent('This app provides sign-in for the portal');
-    fireEvent.click(within(dialog).getByLabelText('Deploy the sign-in app', { exact: false }));
-    expect(confirm).toBeEnabled();
+    expect(dialog).toHaveTextContent('This app keeps a fixed IP address');
+    expect(dialog).toHaveTextContent('Signing in to this portal depends on this app.');
+    expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Deploy' })).toBeEnabled();
     expect(dialog).toHaveTextContent('Leave empty to keep the current size');
   });
   it('asks for the password and code when a sensitive action needs them, then continues', async () => {
@@ -339,90 +333,146 @@ describe('admin application management', () => {
     );
     expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
   });
-  it('requires explicit consent before adopting the app that provides sign-in', async () => {
-    mockSession(new Date(Date.now() + 300000).toISOString());
+  it.each(['staff', 'admin'] as const)(
+    'lets %s search owners and create for them without step-up',
+    async (role) => {
+      mockSession(null, role);
+      vi.spyOn(adminAppsApi, 'list').mockResolvedValue({
+        items: [],
+        nextCursor: null,
+        truncated: false,
+      });
+      const candidate = {
+        userId: '00000000-0000-4000-8000-000000000099',
+        username: 'alice',
+        displayName: 'Alice',
+        role: 'owner' as const,
+        enabled: true,
+        status: 'active' as const,
+      };
+      const lookup = vi.spyOn(adminAppsApi, 'owners').mockResolvedValue({
+        items: [candidate],
+        nextCursor: null,
+        truncated: false,
+      });
+      const accounts = vi.spyOn(adminApi, 'accounts');
+      const reauthenticate = vi.spyOn(adminApi, 'reauthenticate');
+      const create = vi.spyOn(adminAppsApi, 'create').mockResolvedValue(detail);
+      vi.spyOn(adminAppsApi, 'detail').mockResolvedValue(detail);
+      mockResources();
+      show(<AdminAppsPages />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Create app' }));
+      const dialog = screen.getByRole('dialog', { name: 'Create app' });
+      fireEvent.change(within(dialog).getByLabelText('App name'), { target: { value: 'new-app' } });
+      fireEvent.change(within(dialog).getByLabelText('Owner'), { target: { value: 'alice' } });
+      fireEvent.click(await within(dialog).findByRole('radio', { name: /Alice/ }));
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Create app' }));
+      await waitFor(() =>
+        expect(create).toHaveBeenCalledWith('new-app', candidate.userId, expect.any(String)),
+      );
+      expect(lookup).toHaveBeenCalledWith('alice');
+      expect(accounts).not.toHaveBeenCalled();
+      expect(reauthenticate).not.toHaveBeenCalled();
+    },
+  );
+  it('sends app-management requests without the retired identity confirmation field', async () => {
+    const fetcher = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ data: { applicationId: id, intentId: id, state: 'accepted' } }),
+            { status: 202 },
+          ),
+        ),
+      );
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      await adminAppsApi.adopt(id, undefined, 'key');
+      await adminAppsApi.reassign(id, id, id);
+      await adminAppsApi.state(id, false, 'key');
+      await adminAppsApi.deploy(id, 7, 'a'.repeat(40), false, undefined, 'key');
+      await adminAppsApi.deleteStorage(id, id, 'class-fixture postgres', 'key');
+      for (const [, init] of fetcher.mock.calls) {
+        expect(JSON.parse(init.body)).not.toHaveProperty('identityProviderConfirmed');
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+  it.each(['staff', 'admin'] as const)('lets %s adopt without step-up or consent', async (role) => {
+    mockSession(null, role);
     vi.spyOn(adminAppsApi, 'list').mockResolvedValue({
       items: [],
       nextCursor: null,
       truncated: false,
     });
-    vi.spyOn(adminApi, 'accounts').mockResolvedValue({
-      items: [],
-      nextCursor: null,
-      truncated: false,
-    });
-    const adopt = vi
-      .spyOn(adminAppsApi, 'adopt')
-      .mockRejectedValueOnce(
-        new ApiError(409, 'IDENTITY_CONFIRMATION_REQUIRED', 'Portal sign-in depends on this app'),
-      )
-      .mockResolvedValueOnce({ applicationId: id });
-    show(<AdminAppsPages admin />, '/admin/apps');
+    vi.spyOn(adminAppsApi, 'detail').mockResolvedValue(detail);
+    mockResources();
+    const reauthenticate = vi.spyOn(adminApi, 'reauthenticate');
+    const adopt = vi.spyOn(adminAppsApi, 'adopt').mockResolvedValue({ applicationId: id });
+    show(<AdminAppsPages />, '/admin/apps');
     fireEvent.click(await screen.findByRole('button', { name: 'Adopt app' }));
     const dialog = screen.getByRole('dialog', { name: 'Adopt app' });
     fireEvent.change(within(dialog).getByLabelText('App ID'), { target: { value: id } });
+    expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Adopt app' }));
-    await waitFor(() => expect(adopt).toHaveBeenCalledTimes(1));
-    expect(adopt.mock.calls[0][3]).toBe(false);
-    const consent = await within(dialog).findByLabelText('Adopt the sign-in app');
-    expect(within(dialog).getByRole('button', { name: 'Adopt app' })).toBeDisabled();
-    fireEvent.click(consent);
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Adopt app' }));
-    await waitFor(() => expect(adopt).toHaveBeenCalledTimes(2));
-    expect(adopt.mock.calls[1][3]).toBe(true);
-    expect(adopt.mock.calls[1][0]).toBe(id);
+    await waitFor(() => expect(adopt).toHaveBeenCalledWith(id, undefined, expect.any(String)));
+    expect(reauthenticate).not.toHaveBeenCalled();
   });
-  it('deletes storage only after the typed confirmation matches', async () => {
-    mockSession(new Date(Date.now() + 300000).toISOString());
-    vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({ ...detail, identityProvider: false });
-    const resource = {
-      resourceId: '00000000-0000-4000-8000-0000000000aa',
-      type: 'postgres' as const,
-      label: 'main',
-      status: 'ready',
-      createdAt: new Date().toISOString(),
-      verifiedAt: null,
-      defaultBindings: {},
-    };
-    vi.spyOn(adminAppsApi, 'resources').mockReturnValue({
-      ...api,
-      settings: vi.fn().mockResolvedValue(settings),
-      environment: vi
-        .fn()
-        .mockResolvedValue({ revision: 0, items: [], intents: [], updatedAt: null }),
-      storage: vi.fn().mockResolvedValue({ items: [resource], intents: [] }),
-    });
-    const remove = vi
-      .spyOn(adminAppsApi, 'deleteStorage')
-      .mockResolvedValue({ intentId: id, state: 'accepted' } as never);
-    vi.spyOn(api, 'intent').mockResolvedValue({ intentId: id, state: 'accepted' } as never);
-    show(<AdminAppsPages admin />, `/admin/apps/${id}`);
-    const open = await screen.findByRole('button', { name: 'Delete' });
-    await waitFor(() => expect(open).toBeEnabled());
-    fireEvent.click(open);
-    const dialog = screen.getByRole('dialog', { name: 'Delete a database or storage' });
-    fireEvent.change(within(dialog).getByLabelText('Database or storage'), {
-      target: { value: resource.resourceId },
-    });
-    const confirm = within(dialog).getByRole('button', { name: 'Delete permanently' });
-    fireEvent.change(within(dialog).getByLabelText('Type “class-fixture postgres” to confirm'), {
-      target: { value: 'class-fixture' },
-    });
-    expect(confirm).toBeDisabled();
-    fireEvent.change(within(dialog).getByLabelText('Type “class-fixture postgres” to confirm'), {
-      target: { value: 'class-fixture postgres' },
-    });
-    fireEvent.click(confirm);
-    await waitFor(() =>
-      expect(remove).toHaveBeenCalledWith(
-        id,
-        resource.resourceId,
-        'class-fixture postgres',
-        true,
-        expect.any(String),
-      ),
-    );
-  });
+  it.each(['staff', 'admin'] as const)(
+    'lets %s delete storage with typed confirmation and no step-up',
+    async (role) => {
+      mockSession(null, role);
+      vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({ ...detail, identityProvider: false });
+      const resource = {
+        resourceId: '00000000-0000-4000-8000-0000000000aa',
+        type: 'postgres' as const,
+        label: 'main',
+        status: 'ready',
+        createdAt: new Date().toISOString(),
+        verifiedAt: null,
+        defaultBindings: {},
+      };
+      vi.spyOn(adminAppsApi, 'resources').mockReturnValue({
+        ...api,
+        settings: vi.fn().mockResolvedValue(settings),
+        environment: vi
+          .fn()
+          .mockResolvedValue({ revision: 0, items: [], intents: [], updatedAt: null }),
+        storage: vi.fn().mockResolvedValue({ items: [resource], intents: [] }),
+      });
+      const remove = vi
+        .spyOn(adminAppsApi, 'deleteStorage')
+        .mockResolvedValue({ intentId: id, state: 'accepted' } as never);
+      vi.spyOn(api, 'intent').mockResolvedValue({ intentId: id, state: 'accepted' } as never);
+      show(<AdminAppsPages />, `/admin/apps/${id}`);
+      const open = await screen.findByRole('button', { name: 'Delete' });
+      await waitFor(() => expect(open).toBeEnabled());
+      fireEvent.click(open);
+      const dialog = screen.getByRole('dialog', { name: 'Delete a database or storage' });
+      fireEvent.change(within(dialog).getByLabelText('Database or storage'), {
+        target: { value: resource.resourceId },
+      });
+      const confirm = within(dialog).getByRole('button', { name: 'Delete permanently' });
+      fireEvent.change(within(dialog).getByLabelText('Type “class-fixture postgres” to confirm'), {
+        target: { value: 'class-fixture' },
+      });
+      expect(confirm).toBeDisabled();
+      fireEvent.change(within(dialog).getByLabelText('Type “class-fixture postgres” to confirm'), {
+        target: { value: 'class-fixture postgres' },
+      });
+      fireEvent.click(confirm);
+      await waitFor(() =>
+        expect(remove).toHaveBeenCalledWith(
+          id,
+          resource.resourceId,
+          'class-fixture postgres',
+          expect.any(String),
+        ),
+      );
+    },
+  );
   it('reuses the write-only field without storing admin values in mutation or query caches', async () => {
     const service = {
       ...api,

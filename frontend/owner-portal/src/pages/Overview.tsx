@@ -1,7 +1,6 @@
 import {
   Alert,
   Button,
-  Checkbox,
   Cluster,
   Dialog,
   ErrorAlert,
@@ -69,7 +68,6 @@ function Running({ app }: { app: AppRecord }) {
 
 function RuntimeActions({ app }: { app: AppRecord }) {
   const [action, setAction] = useState<'stop' | 'start' | 'restart' | null>(null);
-  const [consent, setConsent] = useState(false);
   const [key, setKey] = useState('');
   const [intentId, setIntentId] = useState<string | null>(null);
   const intent = useIntentPolling(intentId);
@@ -83,8 +81,8 @@ function RuntimeActions({ app }: { app: AppRecord }) {
   const change = useMutation({
     mutationFn: () =>
       action === 'restart'
-        ? api.restart(app.applicationId, key, consent)
-        : api.state(app.applicationId, action === 'start', key, consent),
+        ? api.restart(app.applicationId, key)
+        : api.state(app.applicationId, action === 'start', key),
     onSuccess: (result) => {
       setIntentId(result.intentId);
       setAction(null);
@@ -96,7 +94,6 @@ function RuntimeActions({ app }: { app: AppRecord }) {
     (!!intentId && (!intent.data || !['succeeded', 'failed'].includes(intent.data.state)));
   function open(next: 'stop' | 'start' | 'restart') {
     change.reset();
-    setConsent(false);
     setKey(crypto.randomUUID());
     setAction(next);
   }
@@ -127,7 +124,6 @@ function RuntimeActions({ app }: { app: AppRecord }) {
             <Button
               variant={action === 'stop' ? 'danger' : 'primary'}
               loading={change.isPending}
-              disabled={app.identityProvider && !consent}
               onClick={() => change.mutate()}
             >
               {action === 'stop' ? 'Stop app' : action === 'start' ? 'Start app' : 'Restart app'}
@@ -144,11 +140,7 @@ function RuntimeActions({ app }: { app: AppRecord }) {
               : 'The app restarts with its current version on the same server. There will be a brief interruption.'}
         </p>
         {app.identityProvider && (
-          <Checkbox
-            checked={consent}
-            onChange={(event) => setConsent(event.target.checked)}
-            label="I understand this interrupts portal sign-in"
-          />
+          <Alert tone="info">Signing in to this portal depends on this app.</Alert>
         )}
       </Dialog>
     </>

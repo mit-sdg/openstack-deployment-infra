@@ -270,7 +270,7 @@ describe('owner app controls', () => {
     expect(restart).not.toHaveBeenCalled();
     fireEvent.click(screen.getAllByRole('button', { name: 'Restart app' })[1]);
     await waitFor(() => expect(restart).toHaveBeenCalledOnce());
-    expect(restart.mock.calls[0]).toEqual(['app', expect.stringMatching(/^[a-f0-9-]{36}$/), false]);
+    expect(restart.mock.calls[0]).toEqual(['app', expect.stringMatching(/^[a-f0-9-]{36}$/)]);
   });
 });
 

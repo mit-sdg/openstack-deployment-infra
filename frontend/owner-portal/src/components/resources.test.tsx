@@ -3,7 +3,6 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
 import {
-  ActionCanceled,
   api,
   resourceApi,
   validateBindings,
@@ -173,9 +172,9 @@ describe('owner resources', () => {
     expect(rotate.mock.calls[0].slice(0, 3)).toEqual(['app', 'resource', 'rotate']);
     expect(confirm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/Only an admin can delete/)).toBeVisible();
+    expect(screen.getByText(/Staff or an admin can delete/)).toBeVisible();
   });
-  it('requires Commons confirmation before owner deployment', async () => {
+  it('shows Commons information before owner deployment without a consent gate', async () => {
     Object.defineProperty(HTMLDialogElement.prototype, 'close', {
       configurable: true,
       value: vi.fn(),
@@ -220,12 +219,13 @@ describe('owner resources', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Review deployment' }));
     const submit = screen.getByRole('button', { name: 'Deploy' });
-    expect(submit).toBeDisabled();
+    expect(submit).toBeEnabled();
     expect(deployment).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByLabelText(/Signing in to this portal depends on this app/));
+    expect(screen.getByText('Signing in to this portal depends on this app.')).toBeVisible();
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     fireEvent.click(submit);
     await waitFor(() =>
-      expect(deployment).toHaveBeenCalledWith('app', 7, 'a'.repeat(40), expect.any(String), true),
+      expect(deployment).toHaveBeenCalledWith('app', 7, 'a'.repeat(40), expect.any(String)),
     );
   });
   it('deploys a recent commit picked from GitHub', async () => {
@@ -281,7 +281,7 @@ describe('owner resources', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('Change 2');
     fireEvent.click(screen.getByRole('button', { name: 'Deploy' }));
     await waitFor(() =>
-      expect(deployment).toHaveBeenCalledWith('app', 3, 'c'.repeat(40), expect.any(String), false),
+      expect(deployment).toHaveBeenCalledWith('app', 3, 'c'.repeat(40), expect.any(String)),
     );
     expect(github.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
       '/repos/example/app/commits',
@@ -289,8 +289,7 @@ describe('owner resources', () => {
       '/example/app/' + 'c'.repeat(40) + '/package.json',
     ]);
   });
-  it('confirms sign-in app storage changes through an async callback, never window.confirm', async () => {
-    const app = vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: true } as never);
+  it('sends storage actions without identity confirmation fields or prompts', async () => {
     const native = vi.spyOn(window, 'confirm');
     const fetcher = vi
       .fn()
@@ -299,53 +298,21 @@ describe('owner resources', () => {
       );
     vi.stubGlobal('fetch', fetcher);
     try {
-      // Without a callback, the sign-in app's storage can't change and nothing is sent.
-      await expect(api.createStorage('app', 'postgres', 'key')).rejects.toThrow(
-        'Portal sign-in depends on this app',
-      );
-      let answer = false;
-      const confirm = vi.fn(() => Promise.resolve(answer));
-      const owner = resourceApi('/apps', confirm);
-      await expect(owner.createStorage('app', 'postgres', 'key')).rejects.toBeInstanceOf(
-        ActionCanceled,
-      );
-      expect(fetcher).not.toHaveBeenCalled();
-      answer = true;
-      await owner.createStorage('app', 'postgres', 'key');
-      expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
-        type: 'postgres',
-        identityProviderConfirmed: true,
-      });
-      for (const action of ['verify', 'rotate'] as const) {
-        await owner.storageAction('app', 'resource', action, 'key');
-        expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({
-          identityProviderConfirmed: true,
-        });
+      for (const prefix of ['/apps', '/admin-apps']) {
+        const service = resourceApi(prefix);
+        await service.createStorage('app', 'postgres', 'key');
+        expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({ type: 'postgres' });
+        for (const action of ['verify', 'rotate'] as const) {
+          await service.storageAction('app', 'resource', action, 'key');
+          expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({});
+        }
       }
-      // Other owner apps are not asked and send no confirmation field.
-      app.mockResolvedValue({ identityProvider: false } as never);
-      confirm.mockClear();
-      await owner.storageAction('app', 'resource', 'verify', 'key');
-      expect(confirm).not.toHaveBeenCalled();
-      expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({});
-      // Admin requests let the callback decide, as before.
-      await resourceApi('/admin-apps', () => Promise.resolve(true)).storageAction(
-        'app',
-        'resource',
-        'rotate',
-        'key',
-      );
-      expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({
-        identityProviderConfirmed: true,
-      });
-      await resourceApi('/admin-apps').storageAction('app', 'resource', 'rotate', 'key');
-      expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({});
       expect(native).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }
   });
-  it('confirms owner storage changes for the sign-in app in a dialog, not a native prompt', async () => {
+  it('shows sign-in information for owner storage changes without a checkbox', async () => {
     mocks();
     vi.spyOn(api, 'app').mockResolvedValue({ identityProvider: true } as never);
     const confirm = vi.spyOn(window, 'confirm');
@@ -360,25 +327,24 @@ describe('owner resources', () => {
       await waitFor(() => expect(api.app).toHaveBeenCalled());
       fireEvent.click(await screen.findByRole('button', { name: 'Add MongoDB' }));
       const submit = screen.getAllByRole('button', { name: 'Add MongoDB' }).at(-1)!;
-      expect(submit).toBeDisabled();
-      fireEvent.click(screen.getByLabelText(/Signing in to this portal depends on this app/));
+      expect(submit).toBeEnabled();
+      expect(screen.getByText('Signing in to this portal depends on this app.')).toBeVisible();
+      expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
       fireEvent.click(submit);
       await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
       expect(fetcher.mock.calls[0][0]).toBe('/api/v1/apps/app/storage');
       expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
         type: 'mongo',
-        identityProviderConfirmed: true,
       });
       expect(confirm).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }
   });
-  it('confirms admin storage changes for the sign-in app in the same dialog', async () => {
+  it('shows sign-in information for managed storage changes without a checkbox', async () => {
     vi.spyOn(api, 'intent').mockResolvedValue(intent);
-    // The admin page passes a confirming service only for the sign-in app;
-    // the section's dialog must collect consent before any request.
-    const service = resourceApi('/admin-apps', () => true);
+    // Managed sign-in apps show information without requiring consent.
+    const service = resourceApi('/admin-apps');
     vi.spyOn(service, 'environment').mockResolvedValue({ revision: 1, updatedAt: null, items: [] });
     vi.spyOn(service, 'storage').mockResolvedValue({ items: [], intents: [] });
     const confirm = vi.spyOn(window, 'confirm');
@@ -400,15 +366,15 @@ describe('owner resources', () => {
       );
       fireEvent.click(await screen.findByRole('button', { name: 'Add MongoDB' }));
       const submit = screen.getAllByRole('button', { name: 'Add MongoDB' }).at(-1)!;
-      expect(submit).toBeDisabled();
+      expect(submit).toBeEnabled();
       expect(fetcher).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByLabelText(/Signing in to this portal depends on this app/));
+      expect(screen.getByText('Signing in to this portal depends on this app.')).toBeVisible();
+      expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
       fireEvent.click(submit);
       await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
       expect(fetcher.mock.calls[0][0]).toBe('/api/v1/admin-apps/app/storage');
       expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
         type: 'mongo',
-        identityProviderConfirmed: true,
       });
       expect(confirm).not.toHaveBeenCalled();
     } finally {

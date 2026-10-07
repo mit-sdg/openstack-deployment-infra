@@ -2,7 +2,6 @@ import {
   Alert,
   BoundaryText,
   Button,
-  Checkbox,
   CopyId,
   DataTable,
   Dialog,
@@ -42,7 +41,7 @@ import { Operation, OperationList } from '../components/Operation';
 import { Status } from '../components/Status';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 import { ownerAppState } from '../utils/presentation';
-import { OwnerPicker, friendly, shown, useStepUp } from './admin/common';
+import { OwnerPicker, friendly, shown } from './admin/common';
 
 const signInWarning = 'This app provides sign-in for the portal';
 const storageNames: Record<StorageResource['type'], string> = {
@@ -51,23 +50,19 @@ const storageNames: Record<StorageResource['type'], string> = {
   s3: 'S3 storage',
 };
 
-/**
- * Every app, for staff and admins. Only admins create apps for others, adopt
- * apps, change owners, delete storage, allow an outage or resize an app; staff
- * don't see those actions.
- */
-export function AdminAppsPages({ admin }: { admin: boolean }) {
+/** Every app-management action is available to staff and admins. */
+export function AdminAppsPages() {
   return (
     <Switch>
-      <Route path="/admin/apps/:id">{(p) => <ManagedApplication id={p.id} admin={admin} />}</Route>
+      <Route path="/admin/apps/:id">{(p) => <ManagedApplication id={p.id} />}</Route>
       <Route>
-        <ManagedCatalog admin={admin} />
+        <ManagedCatalog />
       </Route>
     </Switch>
   );
 }
 
-function ManagedCatalog({ admin }: { admin: boolean }) {
+function ManagedCatalog() {
   const [, navigate] = useLocation();
   const [cursor, setCursor] = useState<string | undefined>();
   const [dialog, setDialog] = useState<'create' | 'adopt' | null>(null);
@@ -75,7 +70,6 @@ function ManagedCatalog({ admin }: { admin: boolean }) {
     queryKey: ['admin', 'apps', cursor],
     queryFn: () => adminAppsApi.list(cursor),
   });
-  const stepUp = useStepUp();
   // The catalog knows only an app's lifecycle, not its health. A created app
   // shows no state; the column appears only when some app needs attention.
   const attention = (catalog.data?.items ?? []).some((app) => app.lifecycleState !== 'ready');
@@ -147,21 +141,19 @@ function ManagedCatalog({ admin }: { admin: boolean }) {
     <PageHeader
       title="All apps"
       actions={
-        admin && (
-          <>
-            <Button onClick={() => setDialog('adopt')}>Adopt app</Button>
-            <Button variant="primary" icon="plus" onClick={() => setDialog('create')}>
-              Create app
-            </Button>
-          </>
-        )
+        <>
+          <Button onClick={() => setDialog('adopt')}>Adopt app</Button>
+          <Button variant="primary" icon="plus" onClick={() => setDialog('create')}>
+            Create app
+          </Button>
+        </>
       }
     />
   );
   if (catalog.isPending)
     return (
       <PageSkeleton label="Loading apps…">
-        <PageHeaderSkeleton actions={admin ? 2 : 0} />
+        <PageHeaderSkeleton actions={2} />
         <SectionSkeleton variant="table" columns={6} rows={3} />
       </PageSkeleton>
     );
@@ -202,19 +194,14 @@ function ManagedCatalog({ admin }: { admin: boolean }) {
         ) : (
           <div className="ui-card">
             <EmptyState title="No apps yet">
-              {admin
-                ? 'Apps appear here when owners create them, or when you create or adopt one.'
-                : 'Apps appear here when owners create them.'}
+              Apps appear here when owners create them, or when you create or adopt one.
             </EmptyState>
           </div>
         ))}
-      {admin && (
-        <>
-          <CreateDialog open={dialog === 'create'} onClose={() => setDialog(null)} />
-          <AdoptDialog open={dialog === 'adopt'} onClose={() => setDialog(null)} run={stepUp.run} />
-          {stepUp.dialog}
-        </>
-      )}
+      <>
+        <CreateDialog open={dialog === 'create'} onClose={() => setDialog(null)} />
+        <AdoptDialog open={dialog === 'adopt'} onClose={() => setDialog(null)} />
+      </>
     </Page>
   );
 }
@@ -268,35 +255,16 @@ function CreateDialog({ open, onClose }: { open: boolean; onClose: () => void })
   );
 }
 
-function AdoptDialog({
-  open,
-  onClose,
-  run,
-}: {
-  open: boolean;
-  onClose: () => void;
-  run: ReturnType<typeof useStepUp>['run'];
-}) {
+function AdoptDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [, navigate] = useLocation();
   const [identifier, setIdentifier] = useState('');
   const [owner, setOwner] = useState('');
-  const [needsConsent, setNeedsConsent] = useState(false);
-  const [consent, setConsent] = useState(false);
   const adopt = useMutation({
     mutationFn: () =>
-      run(() =>
-        adminAppsApi.adopt(identifier.trim(), owner || undefined, crypto.randomUUID(), consent),
-      ),
+      adminAppsApi.adopt(identifier.trim(), owner || undefined, crypto.randomUUID()),
     onSuccess: (app) => navigate(`/admin/apps/${app.applicationId}`),
-    onError: (error) => {
-      if (error instanceof ApiError && error.code === 'IDENTITY_CONFIRMATION_REQUIRED')
-        setNeedsConsent(true);
-    },
   });
-  const error =
-    adopt.error instanceof ApiError && adopt.error.code === 'IDENTITY_CONFIRMATION_REQUIRED'
-      ? null
-      : friendly(adopt.error);
+  const error = friendly(adopt.error);
   function submit(event: FormEvent) {
     event.preventDefault();
     adopt.mutate();
@@ -309,13 +277,7 @@ function AdoptDialog({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button
-            type="submit"
-            form="admin-adopt-app"
-            variant="primary"
-            loading={adopt.isPending}
-            disabled={needsConsent && !consent}
-          >
+          <Button type="submit" form="admin-adopt-app" variant="primary" loading={adopt.isPending}>
             Adopt app
           </Button>
         </>
@@ -336,8 +298,6 @@ function AdoptDialog({
             value={identifier}
             onChange={(event) => {
               setIdentifier(event.target.value);
-              setNeedsConsent(false);
-              setConsent(false);
             }}
           />
         </Field>
@@ -347,36 +307,16 @@ function AdoptDialog({
           optional
           hint="Leave empty to make yourself the owner."
         />
-        {needsConsent && (
-          <SignInConsent checked={consent} onChange={setConsent} label="Adopt the sign-in app" />
-        )}
+        <Alert tone="info">
+          If this app provides portal sign-in, signing in to this portal depends on it.
+        </Alert>
       </form>
     </Dialog>
   );
 }
 
-/** Warning and required checkbox before changing the app that provides sign-in. */
-function SignInConsent({
-  checked,
-  onChange,
-  label,
-}: {
-  checked: boolean;
-  onChange: (value: boolean) => void;
-  label: string;
-}) {
-  return (
-    <>
-      <Alert tone="warning" title={signInWarning}>
-        If this change goes wrong, nobody can sign in to the portal.
-      </Alert>
-      <Checkbox
-        label={label}
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-    </>
-  );
+function SignInInfo() {
+  return <Alert tone="info">Signing in to this portal depends on this app.</Alert>;
 }
 
 function size(app: ManagedApp) {
@@ -390,17 +330,12 @@ function size(app: ManagedApp) {
 
 type Action = 'deploy' | 'state' | 'owner' | 'storage' | null;
 
-function ManagedApplication({ id, admin }: { id: string; admin: boolean }) {
+function ManagedApplication({ id }: { id: string }) {
   const client = useQueryClient();
   const toast = useToast();
   const app = useQuery({ queryKey: ['admin', 'app', id], queryFn: () => adminAppsApi.detail(id) });
   const identity = app.data?.identityProvider === true;
-  // The storage section's dialog collects explicit consent for the sign-in
-  // app before any change, so its requests can confirm; others send none.
-  const service = useMemo(
-    () => adminAppsApi.resources(identity ? () => true : undefined),
-    [id, identity],
-  );
+  const service = useMemo(() => adminAppsApi.resources(), []);
   const settings = useQuery({
     queryKey: ['admin', 'settings', id],
     queryFn: () => service.settings(id),
@@ -409,7 +344,6 @@ function ManagedApplication({ id, admin }: { id: string; admin: boolean }) {
     queryKey: ['admin', 'storage', id],
     queryFn: () => service.storage(id),
   });
-  const stepUp = useStepUp();
   const [action, setAction] = useState<Action>(null);
   const [intentId, setIntentId] = useState<string | null>(null);
   const operation = useIntentPolling(intentId);
@@ -446,9 +380,7 @@ function ManagedApplication({ id, admin }: { id: string; admin: boolean }) {
         {missing ? (
           <div className="ui-card">
             <EmptyState title="This app isn’t managed here" icon="search">
-              {admin
-                ? 'Check the address, or adopt the app from All apps.'
-                : 'Check the address, or go back to All apps.'}
+              Check the address, or adopt the app from All apps.
             </EmptyState>
           </div>
         ) : (
@@ -543,39 +475,37 @@ function ManagedApplication({ id, admin }: { id: string; admin: boolean }) {
         identityProvider={identity}
       />
       <TeamSection id={id} service={service} />
-      {admin && (
-        <Section title="Danger zone" flush>
-          <List label="Danger zone">
-            <ListItem
-              title="Change owner"
-              meta="Move this app to another account."
-              trailing={
-                <Button size="sm" onClick={() => setAction('owner')}>
-                  Change owner
-                </Button>
-              }
-            />
-            <ListItem
-              title="Delete a database or storage"
-              meta={
-                resources.length
-                  ? 'Permanently delete it and all of its data.'
-                  : 'This app has no databases or storage.'
-              }
-              trailing={
-                <Button
-                  size="sm"
-                  variant="danger"
-                  disabled={!resources.length}
-                  onClick={() => setAction('storage')}
-                >
-                  Delete
-                </Button>
-              }
-            />
-          </List>
-        </Section>
-      )}
+      <Section title="Danger zone" flush>
+        <List label="Danger zone">
+          <ListItem
+            title="Change owner"
+            meta="Move this app to another account."
+            trailing={
+              <Button size="sm" onClick={() => setAction('owner')}>
+                Change owner
+              </Button>
+            }
+          />
+          <ListItem
+            title="Delete a database or storage"
+            meta={
+              resources.length
+                ? 'Permanently delete it and all of its data.'
+                : 'This app has no databases or storage.'
+            }
+            trailing={
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={!resources.length}
+                onClick={() => setAction('storage')}
+              >
+                Delete
+              </Button>
+            }
+          />
+        </List>
+      </Section>
       <DeployDialog
         open={action === 'deploy'}
         onClose={() => setAction(null)}
@@ -584,7 +514,6 @@ function ManagedApplication({ id, admin }: { id: string; admin: boolean }) {
         repository={settings.data.repository}
         branch={settings.data.branch}
         configuration={settings.data.configuration}
-        admin={admin}
         onStarted={started}
       />
       <StateDialog
@@ -593,30 +522,25 @@ function ManagedApplication({ id, admin }: { id: string; admin: boolean }) {
         app={data}
         onStarted={started}
       />
-      {admin && (
-        <>
-          <OwnerDialog
-            open={action === 'owner'}
-            onClose={() => setAction(null)}
-            app={data}
-            run={stepUp.run}
-            onDone={() => {
-              setAction(null);
-              refresh();
-              toast('Owner changed');
-            }}
-          />
-          <StorageDialog
-            open={action === 'storage'}
-            onClose={() => setAction(null)}
-            app={data}
-            resources={resources}
-            run={stepUp.run}
-            onStarted={started}
-          />
-          {stepUp.dialog}
-        </>
-      )}
+      <>
+        <OwnerDialog
+          open={action === 'owner'}
+          onClose={() => setAction(null)}
+          app={data}
+          onDone={() => {
+            setAction(null);
+            refresh();
+            toast('Owner changed');
+          }}
+        />
+        <StorageDialog
+          open={action === 'storage'}
+          onClose={() => setAction(null)}
+          app={data}
+          resources={resources}
+          onStarted={started}
+        />
+      </>
     </Page>
   );
 }
@@ -675,7 +599,6 @@ function DeployDialog({
   repository,
   branch,
   configuration,
-  admin,
   onStarted,
 }: {
   open: boolean;
@@ -685,27 +608,21 @@ function DeployDialog({
   repository: string;
   branch: string;
   configuration: Configuration;
-  admin: boolean;
   onStarted: (result: { intentId: string }) => void;
 }) {
   const identity = app.identityProvider;
-  // An app keeping a fixed IP address deploys only with an outage, which
-  // only admins can allow.
-  const blocked = !admin && app.requiresMaintenance;
   const [sha, setSha] = useState('');
   const [maintenance, setMaintenance] = useState(false);
   const [plan, setPlan] = useState('');
   const [planError, setPlanError] = useState<string | null>(null);
-  const [consent, setConsent] = useState(false);
   const deploy = useMutation({
     mutationFn: (parsed: unknown) =>
       adminAppsApi.deploy(
         app.applicationId,
         revision,
         sha,
-        maintenance,
+        app.requiresMaintenance || maintenance,
         parsed,
-        consent,
         crypto.randomUUID(),
       ),
     onSuccess: onStarted,
@@ -732,13 +649,11 @@ function DeployDialog({
       form="admin-deploy"
       submit="Deploy"
       pending={deploy.isPending}
-      disabled={blocked || (app.requiresMaintenance && !maintenance) || (identity && !consent)}
     >
       <form id="admin-deploy" className="ui-stack ui-gap-4" onSubmit={submit}>
-        {blocked && (
-          <Alert tone="info" title="Only an admin can deploy this app">
-            It keeps a fixed IP address, so it goes offline briefly while the new version starts.
-            Ask an admin to deploy it.
+        {app.requiresMaintenance && (
+          <Alert tone="info">
+            This app keeps a fixed IP address, so deploying it takes it offline briefly.
           </Alert>
         )}
         <ErrorAlert error={deploy.error} />
@@ -785,41 +700,42 @@ function DeployDialog({
             }}
           />
         )}
-        {admin && (
-          <>
-            <Checkbox
-              label="Allow a brief outage"
-              description={
-                app.requiresMaintenance
-                  ? 'Required: this app keeps a fixed IP address, so it goes offline briefly while the new version starts.'
-                  : 'Replace the running app in one step. It goes offline briefly while the new version starts.'
-              }
-              checked={maintenance}
-              onChange={(event) => setMaintenance(event.target.checked)}
-            />
+        <>
+          {!app.requiresMaintenance && (
             <Field
-              label="Sizing plan"
-              id="sizing-plan"
-              optional
-              error={planError}
-              hint="Paste a reviewed plan as JSON. Leave empty to keep the current size."
+              label="Deployment method"
+              id="deployment-method"
+              hint="Replacing the running app takes it offline briefly."
             >
-              <Textarea
-                rows={3}
-                spellCheck={false}
-                className="ui-mono"
-                value={plan}
-                onChange={(event) => {
-                  setPlan(event.target.value);
-                  setPlanError(null);
-                }}
-              />
+              <Select
+                value={maintenance ? 'replace' : 'alongside'}
+                onChange={(event) => setMaintenance(event.target.value === 'replace')}
+              >
+                <option value="alongside">Start alongside the running app</option>
+                <option value="replace">Replace the running app in one step</option>
+              </Select>
             </Field>
-          </>
-        )}
-        {identity && (
-          <SignInConsent checked={consent} onChange={setConsent} label="Deploy the sign-in app" />
-        )}
+          )}
+          <Field
+            label="Sizing plan"
+            id="sizing-plan"
+            optional
+            error={planError}
+            hint="Paste a reviewed plan as JSON. Leave empty to keep the current size."
+          >
+            <Textarea
+              rows={3}
+              spellCheck={false}
+              className="ui-mono"
+              value={plan}
+              onChange={(event) => {
+                setPlan(event.target.value);
+                setPlanError(null);
+              }}
+            />
+          </Field>
+        </>
+        {identity && <SignInInfo />}
       </form>
     </ActionDialog>
   );
@@ -838,10 +754,8 @@ function StateDialog({
 }) {
   const identity = app.identityProvider;
   const stopping = app.desiredRunning;
-  const [consent, setConsent] = useState(false);
   const state = useMutation({
-    mutationFn: () =>
-      adminAppsApi.state(app.applicationId, !stopping, !identity || consent, crypto.randomUUID()),
+    mutationFn: () => adminAppsApi.state(app.applicationId, !stopping, crypto.randomUUID()),
     onSuccess: onStarted,
   });
   function submit(event: FormEvent) {
@@ -857,7 +771,6 @@ function StateDialog({
       submit={stopping ? 'Stop app' : 'Start app'}
       danger={stopping}
       pending={state.isPending}
-      disabled={identity && !consent}
     >
       <form id="admin-state" className="ui-stack ui-gap-4" onSubmit={submit}>
         <ErrorAlert error={state.error} />
@@ -866,13 +779,7 @@ function StateDialog({
             ? 'The app goes offline until someone starts it again. Its settings and data are kept.'
             : 'The app starts with its last deployed version.'}
         </p>
-        {identity && (
-          <SignInConsent
-            checked={consent}
-            onChange={setConsent}
-            label={stopping ? 'Stop the sign-in app' : 'Start the sign-in app'}
-          />
-        )}
+        {identity && <SignInInfo />}
       </form>
     </ActionDialog>
   );
@@ -882,21 +789,17 @@ function OwnerDialog({
   open,
   onClose,
   app,
-  run,
   onDone,
 }: {
   open: boolean;
   onClose: () => void;
   app: ManagedApp;
-  run: ReturnType<typeof useStepUp>['run'];
   onDone: () => void;
 }) {
   const identity = app.identityProvider;
   const [owner, setOwner] = useState('');
-  const [consent, setConsent] = useState(false);
   const reassign = useMutation({
-    mutationFn: () =>
-      run(() => adminAppsApi.reassign(app.applicationId, app.ownerId, owner, identity && consent)),
+    mutationFn: () => adminAppsApi.reassign(app.applicationId, app.ownerId, owner),
     onSuccess: onDone,
   });
   function submit(event: FormEvent) {
@@ -911,18 +814,12 @@ function OwnerDialog({
       form="admin-owner"
       submit="Change owner"
       pending={reassign.isPending}
-      disabled={!owner || owner === app.ownerId || (identity && !consent)}
+      disabled={!owner || owner === app.ownerId}
     >
       <form id="admin-owner" className="ui-stack ui-gap-4" onSubmit={submit}>
         <ErrorAlert error={friendly(reassign.error)} />
         <OwnerPicker value={owner} onChange={setOwner} />
-        {identity && (
-          <SignInConsent
-            checked={consent}
-            onChange={setConsent}
-            label="Change the sign-in app’s owner"
-          />
-        )}
+        {identity && <SignInInfo />}
       </form>
     </ActionDialog>
   );
@@ -933,33 +830,22 @@ function StorageDialog({
   onClose,
   app,
   resources,
-  run,
   onStarted,
 }: {
   open: boolean;
   onClose: () => void;
   app: ManagedApp;
   resources: StorageResource[];
-  run: ReturnType<typeof useStepUp>['run'];
   onStarted: (result: { intentId: string }) => void;
 }) {
   const identity = app.identityProvider;
   const [resource, setResource] = useState('');
   const [confirmation, setConfirmation] = useState('');
-  const [consent, setConsent] = useState(false);
   const chosen = resources.find((r) => r.resourceId === resource);
   const phrase = chosen ? `${app.slug} ${chosen.type}` : '';
   const remove = useMutation({
     mutationFn: () =>
-      run(() =>
-        adminAppsApi.deleteStorage(
-          app.applicationId,
-          resource,
-          confirmation,
-          !identity || consent,
-          crypto.randomUUID(),
-        ),
-      ),
+      adminAppsApi.deleteStorage(app.applicationId, resource, confirmation, crypto.randomUUID()),
     onSuccess: (result) => {
       setResource('');
       setConfirmation('');
@@ -979,7 +865,7 @@ function StorageDialog({
       submit="Delete permanently"
       danger
       pending={remove.isPending}
-      disabled={!chosen || confirmation !== phrase || (identity && !consent)}
+      disabled={!chosen || confirmation !== phrase}
     >
       <form id="admin-storage" className="ui-stack ui-gap-4" onSubmit={submit}>
         <ErrorAlert error={shown(remove.error)} />
@@ -1015,13 +901,7 @@ function StorageDialog({
             />
           </Field>
         )}
-        {identity && (
-          <SignInConsent
-            checked={consent}
-            onChange={setConsent}
-            label="Delete storage from the sign-in app"
-          />
-        )}
+        {identity && <SignInInfo />}
       </form>
     </ActionDialog>
   );
