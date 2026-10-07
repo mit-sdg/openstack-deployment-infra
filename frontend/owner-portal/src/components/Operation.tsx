@@ -10,7 +10,17 @@ import { Status } from './Status';
 const finished = ['succeeded', 'failed', 'blocked'];
 
 /** One activity row. Put rows inside <OperationList>. */
-export function Operation({ intent, showApp = true }: { intent: Intent; showApp?: boolean }) {
+export function Operation({
+  intent,
+  showApp = true,
+  managed = false,
+  showActor = false,
+}: {
+  intent: Intent;
+  showApp?: boolean;
+  managed?: boolean;
+  showActor?: boolean;
+}) {
   const client = useQueryClient();
   const resume = useMutation({
     mutationFn: () => api.resume(intent.intentId),
@@ -18,6 +28,11 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
       client.invalidateQueries({ queryKey: ['intents'] });
       client.invalidateQueries({ queryKey: ['activity', intent.appId] });
       client.invalidateQueries({ queryKey: ['intent', intent.intentId] });
+      client.invalidateQueries({ queryKey: ['attention', intent.appId] });
+      client.invalidateQueries({ queryKey: ['app', intent.appId] });
+      client.invalidateQueries({ queryKey: ['history', intent.appId] });
+      client.invalidateQueries({ queryKey: ['admin', 'app', intent.appId] });
+      client.invalidateQueries({ queryKey: ['staff'] });
     },
   });
   const title = activityTitle(intent.kind, intent.state);
@@ -32,7 +47,7 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
   return (
     <ListItem
       title={
-        intent.operationId && intent.kind === 'deploy' ? (
+        !managed && intent.operationId && intent.kind === 'deploy' ? (
           <Link
             href={`/apps/${intent.appId}/deployments/${intent.operationId}`}
             className="ui-link ui-link--plain"
@@ -53,7 +68,7 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
           {intent.names?.[0] && <code>{intent.names[0]}</code>}
           {intent.commit && <code>{short(intent.commit)}</code>}
           {progress && <span>{progress}</span>}
-          {intent.actor && !intent.actor.you && intent.actor.displayName && (
+          {intent.actor && (showActor || !intent.actor.you) && intent.actor.displayName && (
             <span>{intent.actor.displayName}</span>
           )}
           <RelativeTime value={intent.createdAt} />
@@ -61,7 +76,7 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
       }
       trailing={
         <>
-          {intent.state === 'blocked' && !intent.requiresResubmit && (
+          {intent.state === 'blocked' && intent.canResume !== false && !intent.requiresResubmit && (
             <Button size="sm" onClick={() => resume.mutate()} loading={resume.isPending}>
               Resume
             </Button>
@@ -80,17 +95,26 @@ export function Operation({ intent, showApp = true }: { intent: Intent; showApp?
               Error code <code>{intent.controllerErrorCode}</code>
             </span>
           )}
-          {intent.kind === 'deploy' && intent.state === 'failed' && intent.operationId && (
-            <>
-              {' '}
-              <Link
-                href={`/apps/${intent.appId}/deployments/${intent.operationId}`}
-                className="ui-link"
-              >
-                See why it stopped
-              </Link>
-            </>
-          )}
+          {!managed &&
+            intent.kind === 'deploy' &&
+            intent.state === 'failed' &&
+            intent.operationId && (
+              <>
+                {' '}
+                <Link
+                  href={`/apps/${intent.appId}/deployments/${intent.operationId}`}
+                  className="ui-link"
+                >
+                  See why it stopped
+                </Link>
+              </>
+            )}
+        </p>
+      )}
+      {intent.state === 'blocked' && ['env_set', 'env_delete'].includes(intent.kind) && (
+        <p className="ui-text-sm">
+          The person who started this environment edit must enter the value again in Environment
+          variables.
         </p>
       )}
       <ErrorNotice error={resume.error} />

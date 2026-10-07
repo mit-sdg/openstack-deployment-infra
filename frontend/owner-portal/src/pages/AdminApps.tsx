@@ -33,6 +33,7 @@ import { ApiError, type Configuration, type StorageResource } from '../api';
 import { adminAppsApi, type CatalogApp, type ManagedApp } from '../adminAppsApi';
 import { ConfigurationForm } from './Configuration';
 import { QueryError } from '../components/Feedback';
+import { AttentionActivity } from '../components/AttentionActivity';
 import { LogViewer } from '../components/LogViewer';
 import { CommitChecks } from '../components/CommitChecks';
 import { RecentCommits } from '../components/RecentCommits';
@@ -351,6 +352,7 @@ function ManagedApplication({ id }: { id: string }) {
     client.invalidateQueries({ queryKey: ['admin', 'app', id] });
     client.invalidateQueries({ queryKey: ['admin', 'storage', id] });
     client.invalidateQueries({ queryKey: ['intents'] });
+    client.invalidateQueries({ queryKey: ['attention', id] });
   };
   const started = (result: { intentId: string }) => {
     setIntentId(result.intentId);
@@ -414,6 +416,7 @@ function ManagedApplication({ id }: { id: string }) {
           Changes here can stop everyone from signing in. You’ll be asked to confirm each one.
         </Alert>
       )}
+      <AttentionActivity id={id} managed />
       <Section title="Details">
         <KeyValueList
           columns={2}
@@ -451,10 +454,10 @@ function ManagedApplication({ id }: { id: string }) {
         />
       </Section>
       {operation.error && <QueryError query={operation} what="the latest change" />}
-      {operation.data && (
+      {operation.data && !['blocked', 'unknown'].includes(operation.data.state) && (
         <Section title="Latest change" flush>
           <OperationList label="Latest change">
-            <Operation intent={operation.data} showApp={false} />
+            <Operation intent={operation.data} showApp={false} managed />
           </OperationList>
         </Section>
       )}

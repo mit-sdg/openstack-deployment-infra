@@ -22,6 +22,7 @@ from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, strict_json
 from .accounts import audit
 from .client import ControllerUnavailable
+from .members import activity
 from .resources import operation_quota
 from .staff import ReadLimits, profile
 from .staff_policy import public_url
@@ -70,6 +71,7 @@ class AdminApps:
             ("GET", root + "/{app}/deployments", b.history),
             ("GET", root + "/{app}/deployments/{deployment}", b.deployment),
             ("GET", root + "/{app}/logs", b.runtime_logs.handle),
+            ("GET", root + "/{app}/activity", lambda request: activity(b, request)),
             *b.source_keys.routes(root),
             *b.members.routes(root),
             ("PUT", root + "/{app}/owner", self.reassign),
@@ -84,6 +86,8 @@ class AdminApps:
             if request.path == "/v1/admin-apps/owners"
             else {"limit", "cursor"}
             if request.path == "/v1/admin-apps" or request.path.endswith("/deployments")
+            else {"limit", "attention"}
+            if request.path.endswith("/activity")
             else {"lines", "offset"}
             if request.path.endswith("/build-log")
             else {"stream"}
@@ -564,7 +568,7 @@ class AdminApps:
                 raise HttpError(
                     409,
                     "APP_BUSY",
-                    "Resolve this application's current operations before reassigning it.",
+                    "A previous change hasn't finished. Open Activity to finish it before changing the owner.",
                 )
             db.execute("UPDATE apps SET user_id=? WHERE id=?", (owner, app["id"]))
             # The new owner isn't also a member; other teammates stay.

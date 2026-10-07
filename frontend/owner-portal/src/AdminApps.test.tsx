@@ -105,6 +105,95 @@ function mockResources(items: unknown[] = []) {
   return service;
 }
 describe('admin application management', () => {
+  it.each(['staff', 'admin'] as const)(
+    'shows and resumes another actor’s blocked deploy for %s',
+    async (role) => {
+      offline();
+      mockSession(null, role);
+      vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({ ...detail, identityProvider: false });
+      mockResources();
+      const blocked = {
+        intentId: 'blocked-deploy',
+        appId: id,
+        appSlug: 'class-fixture',
+        kind: 'deploy',
+        state: 'blocked',
+        commit: 'a'.repeat(40),
+        createdAt: new Date().toISOString(),
+        operationId: 'deployment',
+        operation: {
+          status: 'recovery_required',
+          phase: 'startup_interrupted',
+          cleanupState: 'pending',
+        },
+        safeError: 'This deploy hasn’t finished. Resume it from Activity.',
+        actor: { displayName: 'Alice Student', you: false },
+        canResume: true,
+      };
+      const attention = vi.spyOn(adminAppsApi, 'attention').mockResolvedValue([blocked]);
+      const ownerAttention = vi.spyOn(api, 'attention');
+      const resume = vi.spyOn(api, 'resume').mockImplementation(async () => {
+        attention.mockResolvedValue([]);
+        return { ...blocked, state: 'accepted' };
+      });
+      show(<AdminAppsPages />, `/admin/apps/${id}`);
+      expect(await screen.findByText('Alice Student', { exact: true })).toBeVisible();
+      expect(screen.getByText('Needs attention', { exact: true })).toBeVisible();
+      expect(screen.getByText(blocked.safeError)).toBeVisible();
+      // Managed views must not link staff into the owner-only deployment route.
+      expect(screen.queryByRole('link', { name: 'Deployment' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+      await waitFor(() => expect(resume).toHaveBeenCalledWith('blocked-deploy'));
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull());
+      expect(ownerAttention).not.toHaveBeenCalled();
+    },
+  );
+  it('shows a blocked change started here once in Activity', async () => {
+    offline();
+    mockSession(null, 'staff');
+    vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({ ...detail, identityProvider: false });
+    mockResources();
+    const blocked = {
+      intentId: 'blocked-stop',
+      appId: id,
+      appSlug: 'class-fixture',
+      kind: 'app_disable',
+      state: 'blocked',
+      commit: null,
+      createdAt: new Date().toISOString(),
+      operationId: 'stop',
+      operation: null,
+      safeError: 'This change hasn’t finished. Resume it from Activity.',
+      actor: { displayName: 'Admin', you: true },
+      canResume: true,
+    };
+    const attention = vi.spyOn(adminAppsApi, 'attention').mockResolvedValue([]);
+    vi.spyOn(api, 'intent').mockResolvedValue(blocked);
+    vi.spyOn(adminAppsApi, 'state').mockImplementation(async () => {
+      attention.mockResolvedValue([blocked]);
+      return blocked;
+    });
+    show(<AdminAppsPages />, `/admin/apps/${id}`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop app' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Stop app' }));
+    expect(await screen.findByRole('button', { name: 'Resume' })).toBeVisible();
+    expect(screen.getAllByRole('button', { name: 'Resume' })).toHaveLength(1);
+    expect(screen.queryByText('Latest change', { exact: true })).toBeNull();
+  });
+  it('shows the recovery instruction when a managed environment edit is refused', async () => {
+    offline();
+    mockSession(null, 'admin');
+    vi.spyOn(adminAppsApi, 'detail').mockResolvedValue({ ...detail, identityProvider: false });
+    vi.spyOn(adminAppsApi, 'attention').mockResolvedValue([]);
+    const service = mockResources();
+    const copy = "A previous deploy hasn't finished. Resume it from Activity.";
+    service.setEnvironment = vi.fn().mockRejectedValue(new ApiError(409, 'APP_BUSY', copy));
+    show(<AdminAppsPages />, `/admin/apps/${id}`);
+    fireEvent.change(await screen.findByLabelText('Variable name'), { target: { value: 'TOKEN' } });
+    fireEvent.change(screen.getByLabelText('New value'), { target: { value: 'private' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save variable' }));
+    expect(await screen.findByText(copy)).toBeVisible();
+  });
   it('denies admin pages for owners without fetching any managed app', async () => {
     vi.spyOn(api, 'session').mockResolvedValue({
       role: 'owner',

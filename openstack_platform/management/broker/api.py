@@ -18,7 +18,7 @@ from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body, strict_json, utc
 from ..config import Config
 from . import resources
-from .accounts import Accounts
+from .accounts import Accounts, audit
 from .admin_apps import AdminApps
 from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
@@ -192,7 +192,7 @@ class Broker:
                         if request.path.endswith("/build-log")
                         else {"stream"}
                         if request.path.endswith("/logs")
-                        else {"limit"}
+                        else {"limit", "attention"}
                         if request.path.endswith("/activity")
                         else {"code", "state", "error"}
                         if request.path == "/v1/auth/commons/callback"
@@ -825,23 +825,29 @@ class Broker:
         return self.intent_response(identifier, user["id"], 202)
 
     def intent_response(self, identifier: str, user: str, status: int = 200) -> Response:
-        """An intent its actor started, or one on an app the user works on."""
+        """An actor/team intent, or any intent for staff and portal admins."""
         with self.database.connect() as db:
+            actor = db.execute("SELECT role FROM users WHERE id=?", (user,)).fetchone()
+            privileged = actor is not None and actor[0] in {"staff", "admin"}
             row = db.execute(
-                "SELECT * FROM intents WHERE id=? AND (user_id=? OR app_id IN"
-                " (SELECT id FROM apps WHERE " + ACCESS + "))",
-                (identifier, user, user, user),
+                "SELECT * FROM intents WHERE id=?"
+                + (
+                    ""
+                    if privileged
+                    else " AND (user_id=? OR app_id IN (SELECT id FROM apps WHERE " + ACCESS + "))"
+                ),
+                (identifier,) if privileged else (identifier, user, user, user),
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
-            actor = db.execute("SELECT role FROM users WHERE id=?", (user,)).fetchone()
             model = intent_model(
                 row,
                 diagnostic=actor is not None and actor[0] in {"staff", "admin"},
                 viewer=user,
             )
             app = db.execute(
-                "SELECT slug FROM apps WHERE id=? AND " + ACCESS, (row["app_id"], user, user)
+                "SELECT slug FROM apps WHERE id=?" + ("" if privileged else " AND " + ACCESS),
+                (row["app_id"],) if privileged else (row["app_id"], user, user),
             ).fetchone()
             model["appSlug"] = None if app is None else app["slug"]
             return Response(status, {"data": model})
@@ -869,18 +875,36 @@ class Broker:
 
     def intent(self, request: Request) -> Response:
         user, _sid = self.auth.authenticate(request)
-        return self.intent_response(checked_uuid(request.path_parameters["intent"]), user["id"])
+        response = self.intent_response(checked_uuid(request.path_parameters["intent"]), user["id"])
+        if user["role"] in {"staff", "admin"}:
+            self.staff.audit(
+                request,
+                "/v1/intents/{intent}",
+                user["id"],
+                _sid,
+                str(uuid.uuid4()),
+                response.status,
+                "allowed",
+                cast(dict[str, Any], response.body).get("data"),
+            )
+        return response
 
     def resume(self, request: Request) -> Response:
         user, _sid = self.auth.authenticate(request, mutation=True)
         object_body(request.body, set())
         identifier = checked_uuid(request.path_parameters["intent"])
         with self.database.connect(write=True) as db:
-            # The actor, or anyone on the app's team, can resume a stuck change.
+            # Recheck the live session and role inside the write transaction.
+            actor = self.auth.session_row(db, _sid, self.auth.clock(), None)
+            privileged = actor["role"] in {"staff", "admin"}
             row = db.execute(
-                "SELECT * FROM intents WHERE id=? AND (user_id=? OR app_id IN"
-                " (SELECT id FROM apps WHERE " + ACCESS + "))",
-                (identifier, user["id"], user["id"], user["id"]),
+                "SELECT * FROM intents WHERE id=?"
+                + (
+                    ""
+                    if privileged
+                    else " AND (user_id=? OR app_id IN (SELECT id FROM apps WHERE " + ACCESS + "))"
+                ),
+                (identifier,) if privileged else (identifier, user["id"], user["id"], user["id"]),
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
@@ -895,7 +919,8 @@ class Broker:
                 # Recheck app authority in the transaction; app actions need no step-up.
                 self.accounts.checked_actor(db, _sid, kind="staff")
             elif (
-                row["kind"] != "create_app"
+                not privileged
+                and row["kind"] != "create_app"
                 and db.execute(
                     "SELECT 1 FROM apps WHERE id=? AND " + ACCESS,
                     (row["app_id"], user["id"], user["id"]),
@@ -907,12 +932,26 @@ class Broker:
                 raise HttpError(
                     409,
                     "ENV_RESUBMIT_REQUIRED",
-                    "Resubmit the environment edit with its original request key and value to recover it.",
+                    "The person who started this environment edit must enter the same value again in Environment variables.",
                 )
             if row["state"] in {"blocked", "unknown"}:
                 db.execute(
                     "UPDATE intents SET state='prepared',next_retry=0 WHERE id=?", (identifier,)
                 )
+                now = time.time()
+                db.execute(
+                    "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
+                    (actor["id"], row["app_id"], identifier, "resume", now),
+                )
+                if privileged:
+                    audit(
+                        db,
+                        actor["id"],
+                        row["user_id"],
+                        "app_resume",
+                        {"applicationId": row["app_id"], "intentId": identifier},
+                        now,
+                    )
         self.journal.dispatch(identifier)
         self.journal.wake.set()
         return self.intent_response(identifier, user["id"], 202)

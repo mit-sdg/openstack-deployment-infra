@@ -358,11 +358,12 @@ Local accounts use issuer `local`, an immutable UUID subject, and a unique lower
 
 ### Staff and admin authority
 
-Staff and portal admins manage other people's apps only through a separate namespace, `/api/v1/admin-apps` (broker `/v1/admin-apps`). It never maps to the controller's `/v1/admin/*` routes. Owners are denied there before any app lookup or controller call. The normal `/api/v1/apps` namespace enforces ownership for every role.
+Staff and portal admins manage other people's apps through a separate namespace, `/api/v1/admin-apps` (broker `/v1/admin-apps`). It never maps to the controller's `/v1/admin/*` routes. Owners are denied there before any app lookup or controller call. The normal `/api/v1/apps` namespace enforces ownership for every role. The intent read and resume routes (`/api/v1/intents/{intent}` and `POST /api/v1/intents/{intent}/resume`) also admit staff and portal admins for any app; the intent list remains personal. Staff intent reads enter the private read log.
 
 | Action | Owner (own and team apps) | Staff | Portal admin |
 | --- | --- | --- | --- |
 | Settings, deploys, environment, storage create, verify, rotate, logs, deploy keys, stop, start, restart | Yes | Any app | Any app |
+| Resume blocked changes | Own and team apps; admin-created changes require staff authority | Any app | Any app |
 | App and concurrency limits | Quota (default 2 apps, 1 concurrent change) | None | None |
 | Accounts, roles, quotas, account audit | No | No | Yes |
 | Create an app for another owner | No | Yes | Yes |
@@ -371,11 +372,15 @@ Staff and portal admins manage other people's apps only through a separate names
 
 The app-owner picker reads only IDs, names, roles, enabled flags, and account status from `/api/v1/admin-apps/owners`, with bounded name search and pagination. It grants no account-management access.
 
-App actions and intent resumption require a staff or admin session, with no step-up. Account-management step-up is unchanged. Storage deletion still requires typed confirmation and refuses saved bindings. For apps with `requiresMaintenance: true`, the broker sets `maintenance: true` on app-administration deploys. Sign-in dependency messages are informational; the broker accepts and ignores an optional boolean `identityProviderConfirmed` for rollout compatibility.
+App-administration actions and staff/admin intent resumption require a staff or admin session, with no step-up. Account-management step-up is unchanged. Storage deletion still requires typed confirmation and refuses saved bindings. For apps with `requiresMaintenance: true`, the broker sets `maintenance: true` on app-administration deploys. Sign-in dependency messages are informational; the broker accepts and ignores an optional boolean `identityProviderConfirmed` for rollout compatibility.
 
-Each staff or admin mutation is journaled with a server-only marker and written to the admin action audit, so admins see staff changes. All app mutations share one busy scope per app (`409 APP_BUSY`). Teams keep one owner plus members in an `app_members` table; members pass the same app checks as the owner, and only the owner, staff, or an admin adds or removes people. An app counts only against its owner's quota.
+Each app-administration mutation is journaled with a server-only marker and written to the admin action audit, so admins see staff changes. All app mutations share one busy scope per app (`409 APP_BUSY`). Teams keep one owner plus members in an `app_members` table; members pass the same app checks as the owner, and only the owner, staff, or an admin adds or removes people. An app counts only against its owner's quota.
 
 When the operator deletes an app through the privileged socket, the broker learns of it only from a definitive `404 APPLICATION_NOT_FOUND` on the project read. It then marks its record deleted, stops counting it toward quota, writes one `app_deleted_by_administrator` audit event, and answers further mutations with `410 APPLICATION_DELETED`. Outages never trigger this.
+
+`GET /api/v1/apps/{app}/activity` and its `/api/v1/admin-apps/{app}/activity` counterpart include the original actor. `attention=1` selects blocked or unknown intents and cached recovery-required operations without a recent-activity limit, so an older blocked deploy remains visible.
+
+Resume rechecks the caller's live session and role inside the journal update transaction. It preserves the original actor, body, fingerprint, method, path, client key, and controller key. The `audit` table records `resume` under the caller; staff and admin resumes also record `app_resume` in `admin_audit`, with the app and intent IDs. For admin-created requests, dispatch checks the latest resumer's active staff/admin authority, or the original actor's authority when no resume has been recorded. Environment edits still require resubmission by their original actor with the original key and value; generic resume cannot replay them because the journal stores no values.
 
 ### Read-only course catalog
 
