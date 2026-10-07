@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ApplicationDeploymentDocumentationTests(unittest.TestCase):
     def test_bash_examples_parse(self):
-        document = (ROOT / "docs/APPLICATION_DEPLOYMENTS.md").read_text()
+        document = (ROOT / "docs/guides/deploy-apps-from-the-command-line.md").read_text()
         blocks = re.findall(r"```bash\n(.*?)\n```", document, re.S)
         self.assertGreaterEqual(len(blocks), 6)
         for index, block in enumerate(blocks):
@@ -25,7 +25,7 @@ class ApplicationDeploymentDocumentationTests(unittest.TestCase):
                 )
 
     def test_example_configuration_uses_the_real_parser(self):
-        document = (ROOT / "docs/APPLICATION_DEPLOYMENTS.md").read_text()
+        document = (ROOT / "docs/guides/deploy-apps-from-the-command-line.md").read_text()
         blocks = re.findall(r"```json\n(.*?)\n```", document, re.S)
         self.assertEqual(len(blocks), 1)
         configuration = parse_configuration(json.loads(blocks[0]))

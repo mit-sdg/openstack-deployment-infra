@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" width="1000" height="640" role="img" aria-labelledby="title desc">
+  <title id="title">How the platform fits together</title>
+  <desc id="desc">Students and visitors reach the platform through an HTTPS provider, which forwards to the ingress host inside your OpenStack project. Ingress routes to the owner portal on the admin host, to each app's worker, and to public S3 on the storage host. The admin host runs the controller, Nomad, the owner portal and backups; it starts builders and workers. Builders push images to the registry on the storage host, and workers use the databases and S3 there. The operator manages the admin host over SSH, and the admin host reaches GitHub, Commons and runtime image registries.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+    </marker>
+    <style>
+      .box { fill: #ffffff; stroke: #c9ced6; stroke-width: 1.5; }
+      .person { fill: #f4f6f9; stroke: #c9ced6; stroke-width: 1.5; }
+      .role { fill: #eef2ff; stroke: #6d7cf0; stroke-width: 1.5; }
+      .temp { fill: #f7f8ff; stroke: #6d7cf0; stroke-width: 1.5; stroke-dasharray: 6 4; }
+      .project { fill: #fbfbfc; stroke: #9aa3af; stroke-width: 1.5; stroke-dasharray: 8 5; }
+      .title { font: 600 15px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #1f2430; }
+      .item { font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #3a4150; }
+      .label { font: 12px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #5b6472; }
+      .caption { font: 600 13px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #5b6472; }
+      .line { stroke: #5b6472; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+      .dashed { stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+
+  <!-- People and outside services -->
+  <rect class="person" x="40" y="20" width="170" height="60" rx="10"/>
+  <text class="title" x="125" y="46" text-anchor="middle">Students</text>
+  <text class="item" x="125" y="66" text-anchor="middle">use the owner portal</text>
+
+  <rect class="person" x="240" y="20" width="170" height="60" rx="10"/>
+  <text class="title" x="325" y="46" text-anchor="middle">App visitors</text>
+  <text class="item" x="325" y="66" text-anchor="middle">open student apps</text>
+
+  <rect class="person" x="560" y="20" width="200" height="60" rx="10"/>
+  <text class="title" x="660" y="46" text-anchor="middle">Operator host</text>
+  <text class="item" x="660" y="66" text-anchor="middle">setup, CLI, dashboard</text>
+
+  <rect class="box" x="775" y="20" width="205" height="60" rx="10"/>
+  <text class="title" x="877" y="46" text-anchor="middle">Outside services</text>
+  <text class="label" x="877" y="66" text-anchor="middle">GitHub, Commons, Docker Hub</text>
+
+  <rect class="box" x="80" y="118" width="300" height="52" rx="10"/>
+  <text class="title" x="230" y="141" text-anchor="middle">HTTPS provider</text>
+  <text class="item" x="230" y="160" text-anchor="middle">for example Cloudflare: DNS, certificates</text>
+
+  <!-- OpenStack project -->
+  <rect class="project" x="20" y="205" width="960" height="420" rx="14"/>
+  <text class="caption" x="40" y="227">Your OpenStack project</text>
+
+  <rect class="role" x="90" y="240" width="280" height="60" rx="10"/>
+  <text class="title" x="230" y="265" text-anchor="middle">Ingress host</text>
+  <text class="item" x="230" y="285" text-anchor="middle">Traefik routes each hostname</text>
+
+  <rect class="role" x="40" y="350" width="250" height="250" rx="10"/>
+  <text class="title" x="165" y="376" text-anchor="middle">Storage host</text>
+  <text class="item" x="62" y="408">PostgreSQL</text>
+  <text class="item" x="62" y="432">MongoDB</text>
+  <text class="item" x="62" y="456">Garage (S3 files)</text>
+  <text class="item" x="62" y="480">Private image registry</text>
+  <text class="label" x="62" y="580">Volume: app data</text>
+
+  <rect class="role" x="330" y="380" width="250" height="140" rx="10"/>
+  <text class="title" x="455" y="406" text-anchor="middle">Workers</text>
+  <text class="item" x="455" y="426" text-anchor="middle">one VM per app</text>
+  <rect class="box" x="352" y="440" width="206" height="28" rx="6"/>
+  <text class="item" x="455" y="459" text-anchor="middle">app-one.example.edu</text>
+  <rect class="box" x="352" y="476" width="206" height="28" rx="6"/>
+  <text class="item" x="455" y="495" text-anchor="middle">app-two.example.edu</text>
+
+  <rect class="temp" x="330" y="545" width="250" height="55" rx="10"/>
+  <text class="title" x="455" y="568" text-anchor="middle">Builders</text>
+  <text class="item" x="455" y="588" text-anchor="middle">one VM per build, then deleted</text>
+
+  <rect class="role" x="620" y="330" width="340" height="270" rx="10"/>
+  <text class="title" x="790" y="356" text-anchor="middle">Admin host</text>
+  <text class="item" x="642" y="388">Owner portal: web, broker, identity</text>
+  <text class="item" x="642" y="412">Application controller and helper</text>
+  <text class="item" x="642" y="436">Nomad scheduler</text>
+  <text class="item" x="642" y="460">Monitoring</text>
+  <text class="item" x="642" y="484">Encrypted backups</text>
+  <text class="label" x="642" y="580">Volumes: platform state, backups</text>
+
+  <!-- Traffic -->
+  <path class="line" d="M125,80 L178,116"/>
+  <path class="line" d="M325,80 L282,116"/>
+  <path class="line" d="M230,170 L230,238"/>
+  <path class="line" d="M300,300 L430,378"/>
+  <text class="label" x="372" y="330">apps</text>
+  <path class="line" d="M160,300 L160,348"/>
+  <text class="label" x="168" y="330">public S3</text>
+  <path class="line" d="M370,265 L618,372"/>
+  <text class="label" x="500" y="303">owner portal</text>
+
+  <!-- Platform internals -->
+  <path class="line" d="M620,450 L582,450"/>
+  <text class="label" x="601" y="440" text-anchor="middle">runs</text>
+  <path class="line" d="M620,572 L582,572"/>
+  <text class="label" x="601" y="562" text-anchor="middle">builds</text>
+  <path class="line" d="M330,450 L292,450"/>
+  <text class="label" x="311" y="440" text-anchor="middle">data</text>
+  <path class="line" d="M330,572 L292,572"/>
+  <text class="label" x="311" y="535" text-anchor="middle">images</text>
+
+  <!-- Operator and outside services -->
+  <path class="line dashed" d="M660,80 L690,328"/>
+  <text class="label" x="684" y="200">SSH</text>
+  <path class="line dashed" d="M885,328 L885,82"/>
+  <text class="label" x="877" y="200" text-anchor="end">source code,</text>
+  <text class="label" x="877" y="216" text-anchor="end">sign-in, runtimes</text>
+</svg>
