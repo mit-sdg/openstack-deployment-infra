@@ -297,6 +297,8 @@ Internal scripts and payloads called by setup, operators, helpers, systemd, and 
 
 ### Shared libraries
 
+- `infra/lib/health_alert_config.py` — reads and validates the non-secret health alert settings in the inventory (shell-side copy).
+- `infra/lib/health_alerts.py` — health alert state machine: consecutive-failure threshold, repeat interval, recovery message, and state kept on the admin volume.
 - `infra/lib/http.py` — bounded monitoring and backup HTTP/JSON helpers.
 - `infra/lib/owner_portal_config.py` — copied portal validator for infrastructure scripts.
 - `infra/lib/platform-config.sh` — allowlisted shell projection of inventory.
@@ -309,6 +311,8 @@ Internal scripts and payloads called by setup, operators, helpers, systemd, and 
 
 - `infra/monitor/check_platform.py` — secret-free control-plane health snapshot.
 - `infra/monitor/check_services.py` — authenticated admin service checks without printing credentials.
+- `infra/monitor/send_health_alert.py` — private webhook sender: takes the URL on stdin, posts over verified HTTPS with no redirects, and never logs the URL.
+- `infra/monitor/test_health_alert.py` — sends an operator test alert without changing alert state.
 - `infra/nomad/bootstrap_acl.sh` — Nomad ACL bootstrap and protected scoped token files.
 
 ### OpenStack lifecycle
@@ -387,6 +391,7 @@ Installed commands (`pyproject.toml`) and shared code. The controller owns produ
 - `openstack_platform/__init__.py` — package description and helper protocol version.
 - `openstack_platform/contracts.py` — typed shared contract access.
 - `openstack_platform/durable.py` — file replacement with `fsync` and no link following.
+- `openstack_platform/health_alert_config.py` — reads and validates the non-secret health alert settings in the inventory (packaged copy).
 - `openstack_platform/runtime.py` — private directories, locks, bounded I/O, redaction, and diagnostics.
 - `openstack_platform/runtime_versions.py` — repository runtime requests, supported semver, and build runtime validation.
 - `openstack_platform/validation.py` — name, UUID, commit, URL, path, digest, and text validators.
@@ -641,3 +646,4 @@ Python `unittest` modules grouped by boundary. See [test layout](../development.
 
 - `tests/test_documentation.py` — documentation checks: the set of pages, links and section anchors, images, required facts, no production domain or retired names, and this map against `git ls-files`.
 - `tests/test_hardening_properties.py` — generated cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
+- `tests/test_health_alerts.py` — health alert thresholds, repeats, recovery, message formatting without secrets, HTTPS-only URLs, timeouts, and delivery failures not affecting health.
