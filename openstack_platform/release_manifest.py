@@ -112,7 +112,7 @@ def _tree_hash(root: Path, paths: list[Path], *, domain: str) -> str:
 # Every packaged operator source or browser asset is part of the signed wheel
 # identity. ``deploy/releases/install_release.py`` repeats this exact tuple
 # because it verifies candidates before any candidate code can be imported.
-OPERATOR_WHEEL_SUFFIXES = (".py", ".txt", ".html", ".css", ".js", ".svg")
+OPERATOR_WHEEL_SUFFIXES = (".py", ".txt", ".html", ".css", ".js", ".cjs", ".svg")
 
 
 def _files(root: Path, directory: str, suffixes: tuple[str, ...]) -> list[Path]:
@@ -162,7 +162,7 @@ def component_set(
 
     package_files = _files(repository, "openstack_platform", OPERATOR_WHEEL_SUFFIXES)
     wheel_inputs = [repository / "pyproject.toml", contract, *package_files]
-    controller_files = _files(repository, "openstack_platform/controller", (".py",))
+    controller_files = _files(repository, "openstack_platform/controller", (".py", ".cjs"))
     database_text = (repository / "openstack_platform/controller/database.py").read_text()
     versions = [int(value) for value in re.findall(r"Migration\(\s*(\d+),", database_text)]
     if not versions:

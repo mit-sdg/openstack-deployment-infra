@@ -245,7 +245,7 @@ export function CodeBlock({
   label: string;
   variant?: "block" | "log";
   end?: boolean;
-  children: string;
+  children: ReactNode;
 }) {
   const ref = useRef<HTMLPreElement>(null);
   useLayoutEffect(() => {

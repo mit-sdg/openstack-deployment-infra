@@ -60,11 +60,15 @@ describe('why a deployment stopped', () => {
       <StartupRecordSection
         record={record({
           stdout: '> start\n',
-          stderr: "\x1b[31mError:\x1b[0m Cannot find module 'express'\n",
+          stderr: "2026-10-07T18:36:05.123Z \x1b[31mError:\x1b[0m Cannot find module 'express'\n",
           events: [event('Terminated', 'Exit Code: 1', 1), event('Restarting', '')],
         })}
         configuration={configuration}
       />,
+    );
+    expect(screen.getByTitle('2026-10-07T18:36:05.123Z')).toHaveAttribute(
+      'datetime',
+      '2026-10-07T18:36:05.123Z',
     );
     expect(screen.getByText('Your app exited with code 1.')).toBeVisible();
     expect(screen.getByLabelText('Startup errors')).toHaveTextContent(

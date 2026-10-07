@@ -1,6 +1,6 @@
+import { TimestampedLog } from '../components/TimestampedLog';
 import {
   Button,
-  CodeBlock,
   CopyId,
   Hint,
   KeyValueList,
@@ -133,10 +133,11 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
             }
           >
             {log.error && <QueryError query={log} what="the build output" />}
-            <CodeBlock label="Build log" variant="log">
-              {log.data?.text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') ||
-                'Build output will appear here.'}
-            </CodeBlock>
+            <TimestampedLog
+              label="Build log"
+              text={log.data?.text ?? ''}
+              empty="Build output will appear here."
+            />
             <Hint>
               {log.data?.truncated ? 'Showing the last 200 lines. ' : ''}
               Build output can include anything your build prints, so share it with care.

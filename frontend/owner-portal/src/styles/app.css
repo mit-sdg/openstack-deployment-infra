@@ -1,3 +1,31 @@
 @import '@openstack-platform/ui/fonts.css';
 @import '@openstack-platform/ui/tokens.css';
 @import '@openstack-platform/ui/ui.css';
+
+@layer ui {
+  .ui-code:has(.app-log-line) {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    column-gap: var(--ui-space-4);
+  }
+  .ui-code:has(.app-log-line):not(:has(.app-log-time)) {
+    grid-template-columns: minmax(0, 1fr);
+    column-gap: 0;
+  }
+  .app-log-line {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    min-height: var(--ui-leading-sm);
+  }
+  .app-log-time {
+    flex: none;
+    white-space: pre;
+  }
+  .app-log-message {
+    grid-column: -2 / -1;
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}

@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, cast
 
 from .. import durable
 from ..config import PlatformConfig, RuntimeImages, load_platform
@@ -41,6 +41,7 @@ from ..controller import application_runtime as application
 from ..controller.application_models import Manifest
 from ..controller.deployment_config import branch_name, parse_configuration, validate_checkout
 from ..controller.nomad_jobs import deployment_worker_ids
+from ..log_timestamps import TimestampedBuildLog
 from ..runtime import (
     CommandFailure,
     bounded_http,
@@ -510,7 +511,10 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
             raise HelperActionError("INVALID_STATE", "build log path is not a private direct file")
     _write_build_log_state(state_path, "running")
     try:
-        with log_path.open("wb") as build_log:
+        with (
+            log_path.open("wb") as raw_log,
+            TimestampedBuildLog(raw_log, build_log_limit) as build_log,
+        ):
             os.chmod(log_path, 0o600)
             marker = f"--- build {build_id} started ---\n".encode()
             build_log.write(marker[:build_log_limit])
@@ -608,7 +612,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                     connect_timeout_seconds=connect_seconds,
                     project_name=platform.project_name,
                     project_id=platform.project_id,
-                    build_log_sink=build_log,
+                    build_log_sink=cast(BinaryIO, build_log),
                 )
     except (ValidationError, application.BuildRejected):
         _write_build_log_state(state_path, "failed")
@@ -621,14 +625,18 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
     _write_build_log_state(state_path, "complete")
     # Protocol v1 is bounded to 1 MiB. Preserve a useful staff-only tail while
     # keeping source/build output out of errors and operation records.
-    log = result.build_log[-524_288:]
+    with log_path.open("rb") as recorded:
+        recorded.seek(max(0, log_path.stat().st_size - 524_288))
+        log = recorded.read(524_288)
     return {
         "buildId": result.build_id,
         "image": result.image,
         "recipeHash": recipe.sha256,
         "runtime": resolved.evidence(),
         "log": log.decode("utf-8", errors="replace"),
-        "logTruncated": result.build_log_truncated or len(log) != len(result.build_log),
+        "logTruncated": result.build_log_truncated
+        or log_path.stat().st_size >= build_log_limit
+        or log_path.stat().st_size > len(log),
         "builderAbsent": result.cleanup_confirmed,
     }
 

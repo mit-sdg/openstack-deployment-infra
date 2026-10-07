@@ -10,3 +10,10 @@ http
     response.end(healthy ? "ready\n" : "not found\n");
   })
   .listen(port, "0.0.0.0", () => console.log(`listening on ${port}`));
+
+process.on("SIGTERM", () => {
+  setTimeout(() => {
+    console.error("stopped after SIGTERM");
+    process.exit(0);
+  }, 100);
+});

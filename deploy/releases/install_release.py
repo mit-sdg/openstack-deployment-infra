@@ -780,7 +780,7 @@ def _install_user_units(
 
 # Keep identical to openstack_platform.release_manifest.OPERATOR_WHEEL_SUFFIXES;
 # this verifier cannot import candidate code before trust is established.
-_OPERATOR_WHEEL_SUFFIXES = (".py", ".txt", ".html", ".css", ".js", ".svg")
+_OPERATOR_WHEEL_SUFFIXES = (".py", ".txt", ".html", ".css", ".js", ".cjs", ".svg")
 
 
 def _candidate_wheel_inputs_sha256(source: Path) -> str:

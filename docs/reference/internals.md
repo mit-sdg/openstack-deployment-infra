@@ -210,6 +210,16 @@ With `maintenance: true`, the old version serves during build and artifact/stora
 
 Operator-only `reuseWorker: true` requires `maintenance: true`. The controller pins the accepted worker and its size, rechecking `ACTIVE` state, ownership, attachment, Nomad and Docker health, and capacity. It stops the old job and starts the new image on that worker; no server or IP changes. Failed cutover keeps the accepted pointer but leaves the app stopped with its worker retained. OS or flavor changes require replacement.
 
+### Log timestamps
+
+Generated images use [`log_timestamps.cjs`](../../openstack_platform/controller/log_timestamps.cjs) as their entrypoint, executed by the image's own Node.js or Bun runtime. The generated Dockerfile embeds the wrapper in a root-owned, mode-`0444` file at `/platform-log-timestamps.cjs`; its `CMD` still invokes `npm run <startScript>` or `bun run <startScript>`. The app inherits the environment, `/app` working directory, and user `65532:65532`.
+
+The wrapper timestamps each stdout and stderr record independently with RFC 3339 UTC milliseconds (`2026-10-07T18:36:05.123Z `), using the time the segment's first bytes arrive. Pending partial lines flush after 100 ms of idle time or stream closure. Lines longer than 8 KiB split into timestamped records, preserving UTF-8 boundaries when possible. Bytes pass through without decoding, including invalid UTF-8; API readers replace invalid bytes for display. Stream backpressure bounds queued output. SIGTERM and SIGINT go to the package command's process group, including its shell and app. The wrapper drains output and preserves the command's exit code or terminating signal; Nomad's kill timeout remains unchanged.
+
+The admin helper records build lines through [`TimestampedBuildLog`](../../openstack_platform/log_timestamps.py) as builder output arrives over SSH. Platform build notes use the same UTC prefix. Partial build lines are visible when flushed, long lines split at 8 KiB, and the existing file byte limit includes timestamp prefixes. These times describe reception on the admin, rather than execution on the builder. Process output collection reads available chunks instead of waiting for a full buffer.
+
+The wrapper's SHA-256 digest is part of recipe identity, alongside generator version 3 and the selected runtime image pin. Controller regeneration therefore checks the exact wrapper used by the helper. New builds acquire timestamps; existing images, restarts, and retained rollback images keep their previous entrypoints. No runtime pins or Nomad job timeouts change. Portal runtime, build, and startup viewers parse valid leading UTC millisecond timestamps into a muted local-time column with UTC tooltips; legacy lines remain readable. Hiding the column does not remove timestamps from copy or download exports.
+
 ### Runtime versions
 
 The build resolves the requested Node.js or Bun version to an official `-slim` image pinned by SHA-256 digest. [`runtime_versions.py`](../../openstack_platform/runtime_versions.py) reads:

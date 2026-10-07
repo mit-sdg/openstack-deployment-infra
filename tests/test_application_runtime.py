@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import tarfile
 import tempfile
@@ -65,6 +66,7 @@ class ManifestAndRecipeTests(unittest.TestCase):
         self.assertIn(f"FROM {BUN_IMAGE}", text)
         self.assertIn('RUN ["bun","run","build"]', text)
         self.assertIn('CMD ["bun","run","start"]', text)
+        self.assertIn('ENTRYPOINT ["bun","/platform-log-timestamps.cjs"]', text)
         self.assertNotIn("sh -c", text)
         self.assertEqual(
             [line for line in text.splitlines() if line.startswith(("ARG ", "ENV "))],
@@ -83,11 +85,23 @@ class ManifestAndRecipeTests(unittest.TestCase):
         self.assertIn('RUN ["npm","ci"]', recipe)
         self.assertIn('CMD ["npm","run","serve"]', recipe)
         self.assertNotIn('RUN ["npm","run"', recipe)
+        self.assertIn('ENTRYPOINT ["node","/platform-log-timestamps.cjs"]', recipe)
         self.assertNotIn("bun", recipe.lower())
         self.assertEqual(
             [line for line in recipe.splitlines() if line.startswith(("ARG ", "ENV "))],
             ["ENV NODE_ENV=production"],
         )
+
+    def test_wrapper_is_embedded_and_participates_in_recipe_identity(self) -> None:
+        manifest = Manifest("node", (".",), None, "start", 3000, "/health")
+        images = RuntimeImages(bun=BUN_IMAGE, node=NODE_IMAGE)
+        recipe = generate_recipe(manifest, images)
+        wrapper = (ROOT / "openstack_platform/controller/log_timestamps.cjs").read_bytes()
+        self.assertIn(base64.b64encode(wrapper), recipe.dockerfile)
+        with mock.patch.object(Path, "read_bytes", return_value=wrapper + b"\n// changed"):
+            changed = generate_recipe(manifest, images)
+        self.assertNotEqual(recipe.sha256, changed.sha256)
+        self.assertNotEqual(recipe.dockerfile, changed.dockerfile)
 
     def test_dotenv_is_strict_and_non_executable(self) -> None:
         self.assertEqual(

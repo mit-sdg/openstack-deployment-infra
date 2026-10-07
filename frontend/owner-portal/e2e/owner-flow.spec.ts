@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const screenshots = path.resolve('../../.tmp/owner-portal-playwright/screenshots');
@@ -322,8 +322,30 @@ for (const [mode, viewport, colorScheme] of [
           }),
         ).toBeEnabled();
       }
+      const logTimestamp = '2026-10-07T18:36:05.123Z';
+      await page.route(`**/api/v1/apps/${appId}/logs?**`, async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        const log = body.data;
+        log.text = log.text.replace(/[^\n]+/g, (line: string) => `${logTimestamp} ${line}`);
+        await route.fulfill({ response, json: body });
+      });
       await page.goto(`/apps/${appId}/logs`);
       await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
+      await expect(page.getByLabel('App output').locator('time').first()).toHaveAttribute(
+        'title',
+        logTimestamp,
+      );
+      const download = page.waitForEvent('download');
+      await page.getByRole('button', { name: 'Download logs' }).click();
+      const downloaded = await download;
+      expect(await readFile((await downloaded.path())!, 'utf8')).toContain(
+        `${logTimestamp} Listening on port 3000`,
+      );
+      await page.getByRole('switch', { name: 'Show timestamps' }).uncheck();
+      await expect(page.getByLabel('App output').locator('time')).toHaveCount(0);
+      await page.getByRole('switch', { name: 'Show timestamps' }).check();
+      await expect(page.getByLabel('App output').locator('time').first()).toBeVisible();
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         window.scrollTo(0, 0);
@@ -343,12 +365,26 @@ for (const [mode, viewport, colorScheme] of [
       await page.getByRole('radio', { name: 'Fixture change 3' }).check();
       await page.getByRole('button', { name: 'Review deployment' }).click();
       await page.getByRole('dialog').getByRole('button', { name: 'Deploy', exact: true }).click();
+      await page.route(`**/api/v1/apps/${appId}/deployments/*/startup-log`, async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        const record = body.data;
+        record.stderr = record.stderr.replace(
+          /[^\n]+/g,
+          (line: string) => `${logTimestamp} ${line}`,
+        );
+        await route.fulfill({ response, json: body });
+      });
       await page.getByRole('link', { name: 'See why it stopped' }).click({ timeout: 30000 });
       await expect(page.getByRole('heading', { name: 'Why it stopped' })).toBeVisible();
       await expect(
         page.getByText('Your app exited with code 1. It was restarted 3 times first.'),
       ).toBeVisible();
       await expect(page.getByLabel('Startup errors')).toContainText("Cannot find module 'express'");
+      await expect(page.getByLabel('Startup errors').locator('time').first()).toHaveAttribute(
+        'title',
+        logTimestamp,
+      );
       await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         window.scrollTo(0, 0);

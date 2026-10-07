@@ -143,6 +143,7 @@ class ReleaseManifestTests(unittest.TestCase):
             "uv.lock",
             "openstack_platform/helper/actions-v1.txt",
             "openstack_platform/controller/api.py",
+            "openstack_platform/controller/log_timestamps.cjs",
             "openstack_platform/operator.py",
             "nix/roles/admin.nix",
         )

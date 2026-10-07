@@ -189,6 +189,8 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/components/EnvironmentSection.tsx` — write-only environment editor and progress.
 - `frontend/owner-portal/src/components/Feedback.tsx` — portal feedback, load errors, and retryable `QueryError`.
 - `frontend/owner-portal/src/components/LogViewer.tsx` — runtime output and error logs for owner/admin pages.
+- `frontend/owner-portal/src/components/TimestampedLog.tsx` — local-time log columns, timestamp toggles, and UTC copy/download exports.
+- `frontend/owner-portal/src/components/TimestampedLog.test.tsx` — timestamp parsing, legacy rendering, toggles, and log exports.
 - `frontend/owner-portal/src/components/Mark.tsx` — re-exports the shared `Mark`.
 - `frontend/owner-portal/src/components/Operation.tsx` — activity rows and lists.
 - `frontend/owner-portal/src/components/RecentCommits.tsx` — browser-side GitHub commit picker.
@@ -388,6 +390,7 @@ Installed commands (`pyproject.toml`) and shared code. The controller owns produ
 - `openstack_platform/contracts.py` — typed shared contract access.
 - `openstack_platform/durable.py` — file replacement with `fsync` and no link following.
 - `openstack_platform/runtime.py` — private directories, locks, bounded I/O, redaction, and diagnostics.
+- `openstack_platform/log_timestamps.py` — bounded timestamped build-log byte sink for admin recording.
 - `openstack_platform/runtime_versions.py` — repository runtime requests, supported semver, and build runtime validation.
 - `openstack_platform/validation.py` — name, UUID, commit, URL, path, digest, and text validators.
 - `openstack_platform/owner_portal_config.py` — dependency-free portal inventory validation.
@@ -407,6 +410,7 @@ The admin-host controller owns app state in SQLite. See the [controller API](con
 - `openstack_platform/controller/application_models.py` — immutable storage, configuration, and recipe value objects.
 - `openstack_platform/controller/application_service.py` — app creation, start, stop, and deletion.
 - `openstack_platform/controller/application_runtime.py` — source, recipes, builds, workers, health, cleanup, and retention.
+- `openstack_platform/controller/log_timestamps.cjs` — runtime-native container entrypoint with byte-safe timestamps and process-group signal forwarding.
 - `openstack_platform/controller/deployment_config.py` — typed configuration parsing and checkout validation.
 - `openstack_platform/controller/deployment_reads.py` — allowlisted deployment configuration and source reads.
 - `openstack_platform/controller/deployment_service.py` — deployment build, cutover, acceptance, and recovery.
@@ -564,6 +568,7 @@ Python `unittest` modules grouped by boundary. See [test layout](../development.
 ### Builds and deployments
 
 - `tests/test_application_runtime.py` — source fetch, recipes, BuildKit, workers, deployment, cleanup, and retention.
+- `tests/test_log_timestamps.py` — Node.js and Bun wrapper streams, partial and long lines, binary bytes, exit and signal behavior, and build recording.
 - `tests/test_application_health_observation.py` — health path and route checks, and stopped apps.
 - `tests/test_application_sizing.py` — worker sizes, per-app plans, resizing, retries, and rollback.
 - `tests/test_application_deployment_docs.py` — checks that the command-line deploy guide's examples are valid Bash and valid configuration.

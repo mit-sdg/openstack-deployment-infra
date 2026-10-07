@@ -5,6 +5,12 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
+# These checks deliberately use only the local OCI runner.
+[[ -z ${CONTAINER_HOST:-} && -z ${CONTAINER_CONNECTION:-} ]] || {
+  echo "generated recipe smoke tests require local Podman" >&2
+  exit 1
+}
+
 [[ $(podman info --format '{{.Host.Security.Rootless}}') == true ]] || {
   echo "generated recipe smoke tests require rootless Podman" >&2
   exit 1
@@ -34,8 +40,8 @@ resolve_pin() {
 
 export BUN_RUNTIME_IMAGE
 export NODE_RUNTIME_IMAGE
-BUN_RUNTIME_IMAGE=$(resolve_pin docker.io/oven/bun:1-alpine)
-NODE_RUNTIME_IMAGE=$(resolve_pin docker.io/library/node:22-alpine)
+BUN_RUNTIME_IMAGE=$(resolve_pin docker.io/oven/bun:1-slim)
+NODE_RUNTIME_IMAGE=$(resolve_pin docker.io/library/node:22-slim)
 
 rm -rf "$recipe_root"
 mkdir -m 0700 "$recipe_root"
@@ -109,6 +115,17 @@ for runtime in bun node; do
     exit 1
   fi
   podman container exists "$container"
+  logs=$(podman logs "$container")
+  if ! grep --quiet --extended-regexp '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z listening on ' <<<"$logs"; then
+    echo "generated $runtime recipe did not timestamp app output" >&2
+    exit 1
+  fi
+  podman stop --time 10 "$container" >/dev/null
+  logs=$(podman logs "$container" 2>&1)
+  if ! grep --quiet --extended-regexp '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z stopped after SIGTERM' <<<"$logs"; then
+    echo "generated $runtime recipe did not forward SIGTERM or drain shutdown output" >&2
+    exit 1
+  fi
   printf 'generated-recipe runtime=%s build=passed environment=production start=passed health=passed url=%s\n' \
     "$runtime" "$url"
 done
