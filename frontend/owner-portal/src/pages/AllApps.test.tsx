@@ -33,6 +33,19 @@ describe('catalog status', () => {
     expect(screen.queryByText('—')).toBeNull();
     expect(screen.queryByRole('button')).toBeNull();
   });
+  it('says Checking, not Unknown, while a stale row is being re-read', () => {
+    show(
+      <CatalogStatus app={{ ...app, appState: 'unknown', refreshing: true, observedAt: null }} />,
+    );
+    expect(screen.getByText('Checking')).toBeVisible();
+    expect(screen.queryByText('Unknown')).toBeNull();
+  });
+  it('still says Unknown when nothing is re-reading the row', () => {
+    show(
+      <CatalogStatus app={{ ...app, appState: 'unknown', refreshing: false, observedAt: null }} />,
+    );
+    expect(screen.getByText('Unknown')).toBeVisible();
+  });
   it('shows compact activity statuses and their available actions below the state', () => {
     show(
       <CatalogStatus
