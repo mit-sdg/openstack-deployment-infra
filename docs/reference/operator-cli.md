@@ -231,14 +231,14 @@ Change the power state of one persistent host and wait for the result: `stop` wa
 openstack-platform infra replace ROLE [--yes] [--cloudflare-tunnel-token-file PATH]
 ```
 
-Replaces a persistent host with a new server built from the role's selected image (set it first with `infra image set`). The old server is stopped but kept, the fixed port and data volumes move to the new server, and the old server is deleted only after the new one passes its identity and readiness checks. If the new server fails, the old one is restored. This interrupts the role; it is not zero-downtime.
+Replaces a persistent host with a new server built from the role's selected image (set it first with `infra image set`) and the inventory's `flavors.<role>`. The target flavor is resolved and checked before the old host is stopped; edit it in the operator inventory to resize the host on its next replacement. The old server is stopped but kept, the fixed port and data volumes move to the new server, and the old server is deleted only after the new one passes its identity and readiness checks. If the new server fails, the old one is restored with its original flavor. A quota refusal also restores the old host without deleting resources when the provider confirms no candidate exists. This interrupts the role; it is not zero-downtime.
 
 | Option | Meaning |
 | --- | --- |
 | `--yes` | Skip the confirmation prompt |
 | `--cloudflare-tunnel-token-file PATH` | Ingress only: the tunnel token for a fresh ingress replacement. Ignored, with a notice, when resuming a recorded replacement. |
 
-On success it prints a JSON observation with the operation ID, the old and new server IDs, and the selected image. If the command stops partway, run it again: an attempt that had not been accepted rolls back to the old host (start a fresh replacement afterwards), and an accepted one finishes its cleanup. See [Replace a persistent host](../guides/hosts-and-images.md#replace-a-persistent-host).
+On success it prints a JSON observation with the operation ID, the old and new server IDs, and the selected image. When flavors differ, the confirmation prompt names the change and the observation includes `"flavor": {"from": "<old flavor>", "to": "<new flavor>"}`. Recovery uses the recorded target flavor ID. If the command stops partway, run it again: an attempt that had not been accepted rolls back to the old host (start a fresh replacement afterwards), and an accepted one finishes its cleanup. See [Replace a persistent host](../guides/hosts-and-images.md#replace-a-persistent-host).
 
 ## Confirmation and safety
 

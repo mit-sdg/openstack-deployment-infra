@@ -34,7 +34,7 @@ from .controller import status, storage
 from .dashboard import server as dashboard_server
 from .dashboard import sources as dashboard_sources
 from .installation import DEFAULT_OPERATOR_INVENTORY, OPERATOR_ROOT, OPERATOR_STATE
-from .validation import ValidationError, bounded_text, commit, sha256_hex, uuid
+from .validation import ValidationError, bounded_text, commit, flavor_reference, sha256_hex, uuid
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -853,6 +853,29 @@ def _infra_power(
     print(f"role={result.role} server={result.server_id} status={result.status}", file=output)
 
 
+def _replacement_flavor_change(refs: Mapping[str, Any]) -> dict[str, str] | None:
+    old_flavor_id = flavor_reference(refs.get("old_flavor_id"))
+    target_flavor_id = flavor_reference(refs.get("target_flavor_id"))
+    if old_flavor_id == target_flavor_id:
+        return None
+    return {
+        "from": flavor_reference(refs.get("old_flavor_name") or old_flavor_id),
+        "to": flavor_reference(refs.get("target_flavor_name")),
+    }
+
+
+def _confirm_replacement(
+    args: argparse.Namespace, refs: Mapping[str, Any], *, input_stream: Any, output: Any
+) -> None:
+    message = (
+        f"Replace {args.host}; its old server is stopped but retained until role readiness passes."
+    )
+    change = _replacement_flavor_change(refs)
+    if change is not None:
+        message += f" Flavor changes from {change['from']} to {change['to']}."
+    _confirm(message, yes=args.yes, input_stream=input_stream, output=output)
+
+
 def _replacement_observation(operation: db.Operation, role: str) -> dict[str, object]:
     """Project only durable typed lifecycle facts from the completed operation."""
     observations = operation.refs.get("lifecycle_observations")
@@ -879,7 +902,7 @@ def _replacement_observation(operation: db.Operation, role: str) -> dict[str, ob
             "completed replacement lacks checkpointed typed lifecycle evidence",
             refs={"operation_id": operation.operation_id, "role": role},
         )
-    return {
+    observation: dict[str, object] = {
         "schemaVersion": 1,
         "kind": "persistent-host-replacement-observation",
         "operationId": operation.operation_id,
@@ -892,6 +915,10 @@ def _replacement_observation(operation: db.Operation, role: str) -> dict[str, ob
             "exactIdentityVerified": observations["exact_identity_verified"],
         },
     }
+    change = _replacement_flavor_change(operation.refs)
+    if change is not None:
+        observation["flavor"] = change
+    return observation
 
 
 def _infra_replace(
@@ -902,12 +929,6 @@ def _infra_replace(
     input_stream: Any,
     output: Any,
 ) -> None:
-    _confirm(
-        f"Replace {args.host}; its old server is stopped but retained until role readiness passes.",
-        yes=args.yes,
-        input_stream=input_stream,
-        output=output,
-    )
     if args.host != "ingress" and args.cloudflare_tunnel_token_file is not None:
         raise ValidationError(
             "--cloudflare-tunnel-token-file is only valid for ingress replacement"
@@ -965,6 +986,9 @@ def _infra_replace(
                         merge_refs=True,
                     )
 
+                _confirm_replacement(
+                    args, unfinished.refs, input_stream=input_stream, output=output
+                )
                 if args.cloudflare_tunnel_token_file is not None:
                     print("Recovering recorded replacement; token file is not read.", file=output)
                 recovered = openstack.recover_host_replacement(
@@ -1012,6 +1036,8 @@ def _infra_replace(
             )
 
         def checkpoint(phase: str, refs: Mapping[str, Any]) -> None:
+            if phase == "observed":
+                _confirm_replacement(args, refs, input_stream=input_stream, output=output)
             db.checkpoint_operation(
                 connection,
                 operation_id,

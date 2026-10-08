@@ -1491,14 +1491,29 @@ def observe_flavor(
     ).name
 
 
-def _resource_id(value: Any, *, field: str) -> str | None:
+def _resource_reference(value: Any) -> Any:
     if isinstance(value, Mapping):
         value = _field(value, "id")
     if value in (None, "", "N/A"):
         return None
     if isinstance(value, str) and " (" in value:
         value = value.rsplit(" (", 1)[-1].rstrip(")")
-    return _provider_uuid(value, field=field)
+    return value
+
+
+def _resource_id(value: Any, *, field: str) -> str | None:
+    reference = _resource_reference(value)
+    return None if reference is None else _provider_uuid(reference, field=field)
+
+
+def _flavor_id(value: Any) -> str | None:
+    reference = _resource_reference(value)
+    if reference is None:
+        return None
+    try:
+        return flavor_reference(reference)
+    except ValidationError as error:
+        raise OpenStackError("OpenStack returned a malformed flavor ID") from error
 
 
 def _addresses(value: Any) -> tuple[str, ...]:
@@ -1580,7 +1595,7 @@ def _show_host(
     if observed_id != server_id or observed_name != name:
         raise OpenStackError("OpenStack server identity changed during observation")
     flavor_value = _field(shown, "flavor")
-    flavor_id = _resource_id(flavor_value, field="flavor UUID")
+    flavor_id = _flavor_id(flavor_value)
     flavor_name = (
         _field(flavor_value, "original_name", "name") if isinstance(flavor_value, Mapping) else None
     )
@@ -2867,6 +2882,15 @@ def _replace_host(
     if matching[0].compatibility_hash != selected_compatibility_hash:
         raise DriftError("selected image compatibility hash drifted")
 
+    target_flavor = observe_flavor_capacity(
+        platform,
+        _inventory_text(platform, f"flavors.{role}"),
+        timeout_seconds=timeout_seconds,
+        command_runner=command_runner,
+        executable=executable,
+    )
+    target_flavor_id = target_flavor.flavor_id
+
     resources = _observe_host_resources_verified(
         platform,
         role,
@@ -2881,6 +2905,9 @@ def _replace_host(
     old_operation_name = f"{old.configured_name}--old-{operation_id[:8]}"
     base_refs = {
         **resources.operation_refs(),
+        "old_flavor_name": old.flavor_name,
+        "target_flavor_id": target_flavor_id,
+        "target_flavor_name": target_flavor.name,
         "selected_image_id": selected_image_id,
         "operation_id": operation_id,
         "old_operation_name": old_operation_name,
@@ -3006,7 +3033,7 @@ def _replace_host(
         "--image",
         selected_image_id,
         "--flavor",
-        old.flavor_id,
+        target_flavor_id,
         "--port",
         resources.port_id,
         "--key-name",
@@ -3038,16 +3065,54 @@ def _replace_host(
                 timeout_seconds=timeout_seconds,
                 command_runner=command_runner,
                 executable=executable,
+                check=False,
             )
-            document = json.loads(result.stdout)
-            if not isinstance(document, Mapping):
-                raise ValueError
-            replacement_id = _provider_uuid(_field(document, "id"), field="replacement server UUID")
+            if result.returncode != 0:
+                # A refusal, including quota, permits rollback only after the
+                # provider confirms that no candidate carries this operation ID.
+                if (
+                    _operation_replacement_id(
+                        platform,
+                        operation_id,
+                        timeout_seconds=timeout_seconds,
+                        command_runner=command_runner,
+                        executable=executable,
+                    )
+                    is not None
+                ):
+                    raise OpenStackError(
+                        "replacement creation failed; provider details were withheld"
+                    )
+            else:
+                document = json.loads(result.stdout)
+                if not isinstance(document, Mapping):
+                    raise ValueError
+                replacement_id = _provider_uuid(
+                    _field(document, "id"), field="replacement server UUID"
+                )
         except (OpenStackError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             raise RecoveryRequired(
                 "replacement create result is ambiguous; inspect by operation UUID before recovery",
                 refs=recovery_refs,
             ) from error
+    if replacement_id is None:
+        return _rollback_replacement(
+            platform,
+            resources,
+            None,
+            old.configured_name,
+            selected_image_id,
+            recovery_refs=recovery_refs,
+            health_check=health_check,
+            deadline=deadline,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_seconds=timeout_seconds,
+            command_runner=command_runner,
+            executable=executable,
+            host_key_runner=host_key_runner,
+            sleep=sleep,
+            checkpoint=checkpoint,
+        )
     checkpoint(
         "replacement_created",
         {**recovery_refs, "replacement_server_id": replacement_id},
@@ -3059,14 +3124,14 @@ def _replace_host(
         replacement_id,
         None,
         selected_image_id,
-        old.flavor_id,
-        old.flavor_name,
+        target_flavor_id,
+        target_flavor.name,
         (),
     )
     try:
         # The create response is only a candidate UUID.  Before readiness can
         # become acceptance evidence, re-read the provider object and require
-        # the exact selected image, retained flavor, operation provenance, and
+        # the exact selected image, target flavor, operation provenance, and
         # configured name.  A healthy server with a different image/flavor is
         # never an acceptable replacement.
         _verify_replacement_identity(
@@ -3075,7 +3140,7 @@ def _replace_host(
             replacement_id,
             operation_id,
             selected_image_id,
-            old.flavor_id,
+            target_flavor_id,
             timeout_seconds=timeout_seconds,
             command_runner=command_runner,
             executable=executable,
@@ -3100,7 +3165,7 @@ def _replace_host(
         if (
             replacement_resources.host.server_id != replacement_id
             or replacement_resources.host.image_id != selected_image_id
-            or replacement_resources.host.flavor_id != old.flavor_id
+            or replacement_resources.host.flavor_id != target_flavor_id
             or replacement_resources.port_id != resources.port_id
             or replacement_resources.volumes != resources.volumes
         ):
@@ -3346,7 +3411,7 @@ def _verify_replacement_identity(
     replacement_id: str,
     operation_id: str,
     selected_image_id: str,
-    old_flavor_id: str,
+    target_flavor_id: str,
     *,
     timeout_seconds: float,
     command_runner: Runner,
@@ -3378,7 +3443,7 @@ def _verify_replacement_identity(
         or _provider_uuid(_field(shown, "id"), field="server UUID") != replacement_id
         or _field(shown, "name") != _inventory_text(platform, f"hosts.{role}")
         or _resource_id(_field(shown, "image"), field="server image UUID") != selected_image_id
-        or _resource_id(_field(shown, "flavor"), field="flavor UUID") != old_flavor_id
+        or _flavor_id(_field(shown, "flavor")) != target_flavor_id
         or _properties(_field(shown, "properties", default={})).get(key) != operation_id
     ):
         raise RecoveryRequired(
@@ -3403,7 +3468,7 @@ def _recovery_resources(
 ) -> HostResources:
     old_id = uuid(refs.get("old_server_id"), field="old server UUID")
     old_image_id = uuid(refs.get("old_image_id"), field="old image UUID")
-    old_flavor_id = uuid(refs.get("old_flavor_id"), field="old flavor UUID")
+    old_flavor_id = flavor_reference(refs.get("old_flavor_id"))
     old_status = refs.get("old_status")
     if old_status not in ("ACTIVE", "SHUTOFF"):
         raise ValidationError("replacement recovery old status is malformed")
@@ -3445,7 +3510,7 @@ def _recovery_resources(
             or _provider_uuid(_field(shown, "id"), field="server UUID") != old_id
             or _field(shown, "name") not in allowed_names
             or _resource_id(_field(shown, "image"), field="server image UUID") != old_image_id
-            or _resource_id(_field(shown, "flavor"), field="flavor UUID") != old_flavor_id
+            or _flavor_id(_field(shown, "flavor")) != old_flavor_id
             or str(_field(shown, "status", default="")).upper() not in ("ACTIVE", "SHUTOFF")
         ):
             raise RecoveryRequired(
@@ -3560,6 +3625,7 @@ def _recover_host_replacement(
     }
     if action not in allowed.get(phase, ()):
         raise ValidationError("replacement recovery action is not safe for the recorded phase")
+    target_flavor_id = flavor_reference(refs.get("target_flavor_id"))
     verify_project(
         platform,
         timeout_seconds=timeout_seconds,
@@ -3616,14 +3682,13 @@ def _recover_host_replacement(
         ):
             replacement_id = None
     if replacement_id is not None:
-        assert resources.host.flavor_id is not None
         _verify_replacement_identity(
             platform,
             role,
             replacement_id,
             operation_id,
             selected_image_id,
-            resources.host.flavor_id,
+            target_flavor_id,
             timeout_seconds=timeout_seconds,
             command_runner=command_runner,
             executable=executable,
@@ -3662,7 +3727,7 @@ def _recover_host_replacement(
     if (
         replacement_resources.host.server_id != replacement_id
         or replacement_resources.host.image_id != selected_image_id
-        or replacement_resources.host.flavor_id != resources.host.flavor_id
+        or replacement_resources.host.flavor_id != target_flavor_id
         or replacement_resources.port_id != resources.port_id
         or replacement_resources.volumes != resources.volumes
     ):

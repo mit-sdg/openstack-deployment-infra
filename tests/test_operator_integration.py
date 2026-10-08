@@ -950,6 +950,10 @@ class OperatorIntegrationTests(unittest.TestCase):
             refs = {
                 "role": "ingress",
                 "old_server_id": "00000000-0000-4000-8000-000000000006",
+                "old_flavor_id": "00000000-0000-4000-8000-000000000010",
+                "old_flavor_name": "example.2c2g",
+                "target_flavor_id": "00000000-0000-4000-8000-000000000010",
+                "target_flavor_name": "example.2c2g",
                 "replacement_server_id": replaced.active_server_id,
                 "selected_image_id": replaced.selected_image_id,
                 "lifecycle_observations": {
@@ -958,6 +962,7 @@ class OperatorIntegrationTests(unittest.TestCase):
                 },
                 "cleanup_state": "confirmed",
             }
+            checkpoint("observed", refs)  # type: ignore[operator]
             checkpoint("accepted", refs)  # type: ignore[operator]
             checkpoint("complete", refs)  # type: ignore[operator]
             return replaced
@@ -974,6 +979,8 @@ class OperatorIntegrationTests(unittest.TestCase):
             {"oldHostRetainedUntilReady": True, "exactIdentityVerified": True},
         )
         self.assertNotIn("dataRetained", evidence["observations"])
+        self.assertNotIn("flavor", evidence)
+        self.assertNotIn("Flavor changes", output.getvalue())
         self.assertTrue(callable(replace_call.call_args.kwargs["health_check"]))
         self.assertGreater(replace_call.call_args.kwargs["timeout_seconds"], 800)
 
@@ -992,6 +999,65 @@ class OperatorIntegrationTests(unittest.TestCase):
             )
         return args
 
+    def test_replacement_confirmation_and_observation_show_inventory_flavor_change(self) -> None:
+        from tests.test_platform_openstack import (
+            FLAVOR,
+            IMAGE_1,
+            TARGET_FLAVOR,
+            FakeCloud,
+            canonical_image,
+            protected_user_data,
+        )
+
+        args = self._ingress_replacement_args()
+        document = json.loads(self.platform.read_text())
+        document["flavors"]["ingress"] = "example.8c16g"
+        self.platform.write_text(json.dumps(document))
+        platform = operator._load_config(args).platform
+        cloud = FakeCloud(platform, [canonical_image(platform, IMAGE_1, role="ingress")])
+        cloud.flavors["example.8c16g"].update(id=TARGET_FLAVOR, vcpus=8, ram=16384)
+        with operator._database(args) as connection:
+            db.put_image_selection(
+                connection,
+                role="ingress",
+                image_id=IMAGE_1,
+                display_name="ingress-image",
+                source_commit="a" * 40,
+                compatibility_hash=openstack.image_compatibility_hash(platform),
+            )
+
+        output = StringIO()
+        with protected_user_data():
+            real_replace = openstack.replace_host
+
+            def replace_host(platform, role, **kwargs):
+                return real_replace(platform, role, command_runner=cloud, **kwargs)
+
+            with (
+                mock.patch.object(openstack, "replace_host", side_effect=replace_host),
+                mock.patch.object(operator, "_role_health_check", return_value=lambda *_: None),
+            ):
+                # Declining confirmation must leave the old host untouched.
+                args.yes = False
+                with self.assertRaisesRegex(operator.ValidationError, "requires --yes"):
+                    operator.dispatch(args, stdout=output)
+                self.assertEqual(cloud.server["status"], "ACTIVE")
+                self.assertFalse(any(call[1:3] == ("server", "stop") for call in cloud.calls))
+                args.yes = True
+                operator.dispatch(args, stdout=output)
+        self.assertIn("Flavor changes from example.2c2g to example.8c16g", output.getvalue())
+        self.assertEqual(
+            json.loads(output.getvalue().splitlines()[-1])["flavor"],
+            {"from": "example.2c2g", "to": "example.8c16g"},
+        )
+        with operator._database(args) as connection:
+            operation = connection.execute(
+                "SELECT operation_id FROM operations WHERE kind = 'infra.replace' AND status = 'succeeded'"
+            ).fetchone()
+            refs = db.get_operation(connection, operation[0]).refs
+        self.assertEqual(refs["old_flavor_id"], FLAVOR)
+        self.assertEqual(refs["target_flavor_id"], TARGET_FLAVOR)
+
     def test_ingress_cli_missing_or_malformed_token_fails_without_mutation_or_secret_refs(
         self,
     ) -> None:
@@ -1007,7 +1073,7 @@ class OperatorIntegrationTests(unittest.TestCase):
                     operator.dispatch(args, stdout=output)
             mutation.assert_not_called()
             self.assertNotIn(sentinel, str(caught.exception) + output.getvalue())
-            self.assertIn("stopped but retained", output.getvalue())
+            self.assertNotIn("Type yes", output.getvalue())
             self.assertNotIn(sentinel.encode(), (self.state / "platform.sqlite3").read_bytes())
             self.assertFalse((self.state / "credentials").exists())
             with operator._database(args) as connection:
@@ -1046,6 +1112,10 @@ class OperatorIntegrationTests(unittest.TestCase):
                 refs = {
                     "role": "ingress",
                     "old_server_id": APP_ID,
+                    "old_flavor_id": "00000000-0000-4000-8000-000000000010",
+                    "old_flavor_name": "example.2c2g",
+                    "target_flavor_id": "00000000-0000-4000-8000-000000000011",
+                    "target_flavor_name": "example.8c16g",
                     "replacement_server_id": "00000000-0000-4000-8000-000000000008",
                     "selected_image_id": IMAGE_ID,
                     "lifecycle_observations": {
@@ -1083,6 +1153,9 @@ class OperatorIntegrationTests(unittest.TestCase):
                 ):
                     operator.dispatch(args, stdout=output)
                 fresh.assert_not_called()
+                self.assertIn(
+                    "Flavor changes from example.2c2g to example.8c16g", output.getvalue()
+                )
                 if options:
                     self.assertIn("token file is not read", output.getvalue())
                 if action == "rollback":
@@ -1090,6 +1163,10 @@ class OperatorIntegrationTests(unittest.TestCase):
                     self.assertNotIn("persistent-host-replacement-observation", output.getvalue())
                 else:
                     self.assertIn("persistent-host-replacement-observation", output.getvalue())
+                    self.assertEqual(
+                        json.loads(output.getvalue().splitlines()[-1])["flavor"],
+                        {"from": "example.2c2g", "to": "example.8c16g"},
+                    )
                 with operator._database(args) as connection:
                     operation = db.get_operation(connection, operation_id)
                     self.assertEqual(
