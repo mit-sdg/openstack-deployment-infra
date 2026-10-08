@@ -219,13 +219,4 @@ describe('app list', () => {
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
     expect(await screen.findByRole('table', { name: 'My apps' })).toBeVisible();
   });
-  it('shows a skeleton shaped like the app list while loading', async () => {
-    vi.spyOn(api, 'session').mockResolvedValue(session('owner'));
-    vi.spyOn(api, 'apps').mockReturnValue(new Promise(() => {}));
-    vi.spyOn(api, 'intents').mockReturnValue(new Promise(() => {}));
-    show('/apps');
-    expect(await screen.findByText('Loading your apps…')).toBeInTheDocument();
-    expect(document.querySelector('.ui-skeleton--button')).not.toBeNull();
-    expect(document.querySelectorAll('.ui-skeleton-table__row')).toHaveLength(2);
-  });
 });

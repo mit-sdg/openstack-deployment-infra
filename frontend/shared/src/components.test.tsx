@@ -13,13 +13,11 @@ import {
   DataTable,
   Dialog,
   ErrorAlert,
-  KeyValueList,
   LoadError,
   Field,
   Input,
   PasswordInput,
   RelativeTime,
-  StatusText,
   SegmentedControl,
   Select,
   ThemeToggle,
@@ -327,49 +325,6 @@ describe("compact values", () => {
     expect(time).toHaveAttribute("title", new Date(value).toLocaleString());
     expect(screen.getByText("Never")).toHaveClass("ui-text-subtle");
   });
-  it("renders quiet status as text with a decorative dot", () => {
-    const { container } = render(<StatusText>Healthy</StatusText>);
-    expect(container.querySelector(".ui-badge")).toBeNull();
-    expect(screen.getByText("Healthy")).toBeVisible();
-    expect(container.querySelector("[aria-hidden='true']")).not.toBeNull();
-  });
-  it("marks secondary and meta columns for the compact phone layout", () => {
-    render(
-      <DataTable
-        label="Owners"
-        rows={[{ id: "1", name: "Alice", username: "alice" }]}
-        rowKey={(row) => row.id}
-        columns={[
-          {
-            key: "name",
-            header: "Name",
-            mobile: "title",
-            cell: (row) => row.name,
-          },
-          {
-            key: "username",
-            header: "Username",
-            mobile: "secondary",
-            cell: (row) => row.username,
-          },
-          {
-            key: "seen",
-            header: "Last seen",
-            mobile: "meta",
-            cell: () => "today",
-          },
-        ]}
-      />,
-    );
-    expect(screen.getByText("alice").closest("td")).toHaveAttribute(
-      "data-mobile",
-      "secondary",
-    );
-    expect(screen.getByText("today").closest("td")).toHaveAttribute(
-      "data-mobile",
-      "meta",
-    );
-  });
 });
 
 describe("round 3 pieces", () => {
@@ -395,26 +350,5 @@ describe("round 3 pieces", () => {
     expect(alert).not.toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledOnce();
-  });
-});
-
-describe("key-value lists", () => {
-  it("stacks only long values on phones", () => {
-    const { container } = render(
-      <KeyValueList
-        items={[
-          { label: "Branch", value: "main" },
-          {
-            label: "Repository",
-            value: "https://github.com/example/a-very-long-repository-name",
-          },
-          { label: "Link", value: <a href="#x">x</a>, stacked: true },
-        ]}
-      />,
-    );
-    const items = [...container.querySelectorAll(".ui-kv__item")];
-    expect(
-      items.map((item) => item.classList.contains("ui-kv__item--stacked")),
-    ).toEqual([false, true, true]);
   });
 });

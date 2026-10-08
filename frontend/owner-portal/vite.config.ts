@@ -36,6 +36,9 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // Reuse the jsdom import; each file still gets its own VM and window.
+    pool: 'vmThreads',
+    maxWorkers: 4,
     setupFiles: ['./src/test-setup.ts'],
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
   },
