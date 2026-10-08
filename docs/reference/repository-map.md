@@ -174,6 +174,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 
 - `frontend/owner-portal/src/pages/Audit.tsx` — admin-only account and app action audit.
 - `frontend/owner-portal/src/pages/People.tsx` — all people, their apps and activity, with admin-only account controls.
+- `frontend/owner-portal/src/pages/AllApps.test.tsx` — catalog status, conditional attention, and adaptive polling tests.
 - `frontend/owner-portal/src/pages/AllApps.tsx` — searchable app catalog with status filters, create-for and adoption.
 - `frontend/owner-portal/src/pages/Activity.tsx` — class activity with independently paged changes needing attention.
 - `frontend/owner-portal/src/pages/admin/common.tsx` — step-up flow, owner picker, and admin error messages.
@@ -191,6 +192,8 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/components/AttentionActivity.tsx` — an app's activity that needs attention (blocked or unknown), with who started each and a Resume button, for owners, staff, and admins.
 - `frontend/owner-portal/src/components/BoundaryText.tsx` — re-exports the shared `BoundaryText`.
 - `frontend/owner-portal/src/components/BuilderSize.tsx` — staff and admin Settings card for per-app build machine selection, reset, and progress.
+- `frontend/owner-portal/src/components/Machines.tsx` — staff/admin Overview worker capacity and effective build machine, with sizing links.
+- `frontend/owner-portal/src/components/Machines.test.tsx` — machine copy, capacity fallback, sizing links, and owner visibility tests.
 - `frontend/owner-portal/src/components/SizeOptions.tsx` — size choices grouped by flavor family, sorted by CPU and RAM, with the current size marked.
 - `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy checks, runtime versions, and review problems.
 - `frontend/owner-portal/src/components/DeploymentRow.tsx` — deployment list row.
@@ -496,7 +499,7 @@ The broker authorizes portal actions and owns accounts, sessions, ownership, quo
 - `openstack_platform/management/broker/__init__.py` — package marker for the broker.
 - `openstack_platform/management/broker/main.py` — production broker entry point without development imports.
 - `openstack_platform/management/broker/app_management.py` — shared app authority, catalog filters, sizing, adoption, ownership and storage deletion.
-- `openstack_platform/management/broker/sizing.py` — closed flavor projections and optional controller sizing reads.
+- `openstack_platform/management/broker/sizing.py` — closed flavor projections, cached capacity enrichment, and controller sizing reads.
 - `openstack_platform/management/broker/builder_settings.py` — admin-only default builder size reads and durable audited changes.
 - `openstack_platform/management/broker/class_reads.py` — bounded audited People and Activity projections.
 - `openstack_platform/management/broker/api.py` — owner routes with ownership and quota checks.

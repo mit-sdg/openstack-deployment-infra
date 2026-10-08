@@ -25,6 +25,28 @@ import { Status } from '../components/Status';
 import { QueryError } from '../components/Feedback';
 import { OwnerPicker, friendly, useDebounced } from './admin/common';
 import { Loaded, pager } from '../components/ClassRecords';
+import './app-pages.css';
+
+export function catalogRefetchInterval(items?: CatalogApp[]) {
+  return items?.some((app) => app.appState === 'unknown' || app.refreshing) ? 3000 : 15000;
+}
+
+export function CatalogStatus({ app }: { app: CatalogApp }) {
+  return (
+    <div className="app-catalog-status ui-stack ui-gap-1">
+      <span
+        title={
+          app.observedAt ? `Last checked ${new Date(app.observedAt).toLocaleString()}` : undefined
+        }
+      >
+        <Status state={app.appState} />
+      </span>
+      {app.attention.map((intent) => (
+        <OperationStatus key={intent.intentId} intent={intent} />
+      ))}
+    </div>
+  );
+}
 
 export function AppCatalog({ ownerId, title }: { ownerId?: string; title?: string }) {
   const [, navigate] = useLocation();
@@ -35,7 +57,7 @@ export function AppCatalog({ ownerId, title }: { ownerId?: string; title?: strin
   const catalog = useQuery({
     queryKey: ['all-apps', ownerId, q, state, cursor],
     queryFn: () => appManagementApi.list(cursor, q, ownerId, state),
-    refetchInterval: 15000,
+    refetchInterval: (query) => catalogRefetchInterval(query.state.data?.items),
   });
   const columns: Column<CatalogApp>[] = [
     {
@@ -52,7 +74,7 @@ export function AppCatalog({ ownerId, title }: { ownerId?: string; title?: strin
       key: 'status',
       header: 'Status',
       mobile: 'trailing',
-      cell: (app) => <Status state={app.appState} />,
+      cell: (app) => <CatalogStatus app={app} />,
     },
     ...(!ownerId
       ? [
@@ -68,21 +90,6 @@ export function AppCatalog({ ownerId, title }: { ownerId?: string; title?: strin
           },
         ]
       : []),
-    {
-      key: 'attention',
-      header: 'Needs attention',
-      mobile: 'field',
-      cell: (app) =>
-        app.attention.length ? (
-          <div className="ui-stack ui-gap-2">
-            {app.attention.map((intent) => (
-              <OperationStatus key={intent.intentId} intent={intent} />
-            ))}
-          </div>
-        ) : (
-          <span className="ui-text-subtle">—</span>
-        ),
-    },
     {
       key: 'deployed',
       header: 'Last deployed',
@@ -134,6 +141,7 @@ export function AppCatalog({ ownerId, title }: { ownerId?: string; title?: strin
         </Field>
       </Grid>
       <Section
+        className="app-catalog"
         title={title}
         flush
         aria-label={title ?? 'All apps'}

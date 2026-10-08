@@ -6,9 +6,12 @@ Staff and admins have the same app authority, without account-management step-up
 from __future__ import annotations
 
 import sqlite3
+import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -19,7 +22,7 @@ from ...controller.http import HttpError, Request, Response
 from ...controller.storage_contract import RESOURCE_OUTPUTS
 from ...validation import flavor_reference, repository_url, slug
 from ...validation import uuid as checked_uuid
-from ..common import canonical, digest, strict_json
+from ..common import canonical, digest, strict_json, utc
 from . import sizing
 from .accounts import audit
 from .class_reads import ReadLimits, profile
@@ -41,6 +44,10 @@ class Authority(NamedTuple):
 class AppManagement:
     def __init__(self, broker: Broker) -> None:
         self.broker = broker
+        self.refresh_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="app-observation")
+        self.refresh_lock = threading.Lock()
+        self.refreshing: set[str] = set()
+        self.refresh_closed = False
         # Authority is request-local, including concurrent Unix-server threads.
         # An app administration page reads about eight things per view
         # (details, settings, variables, storage, logs, deploy key, team), so
@@ -48,6 +55,40 @@ class AppManagement:
         # run two at a time.
         self.read_limits = ReadLimits(burst=40, rate=4)
         self.context: ContextVar[Authority | None] = ContextVar("admin_app_actor", default=None)
+
+    def close(self) -> None:
+        with self.refresh_lock:
+            self.refresh_closed = True
+        self.refresh_pool.shutdown(wait=True, cancel_futures=True)
+
+    def refresh_observations(self, rows: list[dict[str, Any]]) -> set[str]:
+        """Queue only this page's stale observations; bound pending work across requests."""
+        now = time.time()
+        with self.refresh_lock:
+            for row in rows:
+                if (
+                    self.refresh_closed
+                    or row["lifecycle"] != "ready"
+                    or row["observation_updated"] is not None
+                    and now - row["observation_updated"] < 30
+                    or row["id"] in self.refreshing
+                    or len(self.refreshing) >= 100
+                ):
+                    continue
+                self.refreshing.add(row["id"])
+                self.refresh_pool.submit(self.refresh_observation, row)
+            return self.refreshing.intersection(row["id"] for row in rows)
+
+    def refresh_observation(self, row: dict[str, Any]) -> None:
+        try:
+            # Recheck the cache in case a detail read refreshed it while queued.
+            self.broker.app_model(row, cache_seconds=30)
+        except Exception as error:
+            # Never turn a background read failure into a list failure or log app data.
+            print(f"app observation refresh failed: {type(error).__name__}", file=sys.stderr)
+        finally:
+            with self.refresh_lock:
+                self.refreshing.discard(row["id"])
 
     def routes(self) -> list[tuple[str, str, Any]]:
         b = self.broker
@@ -269,7 +310,7 @@ class AppManagement:
 
     def sizes(self, request: Request) -> Response:
         self.broker.own(request)
-        return Response(200, {"data": {"items": sizing.flavors(self.broker.client)}})
+        return Response(200, {"data": {"items": self.broker.flavor_cache.get()}})
 
     def resize_plan(self, request: Request) -> Response:
         _actor, app = self.broker.own(request)
@@ -383,7 +424,7 @@ class AppManagement:
                 where += " AND a.user_id=?"
                 parameters.append(checked_uuid(owner))
             state = request.query.get("status", (None,))[0]
-            status_sql = f"CASE WHEN a.lifecycle!='ready' THEN a.lifecycle WHEN json_extract(o.body,'$.acceptedDeployment') IS NULL THEN 'not_deployed' WHEN o.updated<{time.time() - 30:.6f} THEN 'unknown' WHEN json_extract(o.body,'$.desiredRunning')=0 THEN 'stopped' WHEN json_extract(o.body,'$.health.allocationHealthy')=1 AND json_extract(o.body,'$.health.routeHealthy')=1 THEN 'healthy' WHEN json_extract(o.body,'$.health.allocationHealthy')=0 OR json_extract(o.body,'$.health.routeHealthy')=0 THEN 'unhealthy' ELSE 'unknown' END"
+            status_sql = f"CASE WHEN a.lifecycle!='ready' THEN a.lifecycle WHEN o.updated IS NULL OR o.updated<{time.time() - 600:.6f} THEN 'unknown' WHEN json_extract(o.body,'$.acceptedDeployment') IS NULL THEN 'not_deployed' WHEN json_extract(o.body,'$.desiredRunning')=0 THEN 'stopped' WHEN json_extract(o.body,'$.health.allocationHealthy')=1 AND json_extract(o.body,'$.health.routeHealthy')=1 THEN 'healthy' WHEN json_extract(o.body,'$.health.allocationHealthy')=0 OR json_extract(o.body,'$.health.routeHealthy')=0 THEN 'unhealthy' ELSE 'unknown' END"
             if state:
                 if state not in {
                     "creating",
@@ -417,7 +458,7 @@ class AppManagement:
                 dict(row)
                 for row in db.execute(
                     "SELECT a.*,u.username AS owner_username,u.display_name AS owner_display_name,"
-                    f"o.body AS observation,({status_sql}) AS app_state FROM apps a JOIN users u ON u.id=a.user_id"
+                    f"o.body AS observation,o.updated AS observation_updated,({status_sql}) AS app_state FROM apps a JOIN users u ON u.id=a.user_id"
                     f" LEFT JOIN observations o ON o.app_id=a.id WHERE {where}"
                     " ORDER BY a.created DESC,a.id DESC LIMIT ?",
                     (*parameters, limit + 1),
@@ -435,8 +476,8 @@ class AppManagement:
                         (row["id"],),
                     )
                 ]
-        # Existence checks use bounded SQLite-only project reads, not live health.
-        b.journal.reconcile_page(rows)
+        # Background observations and the journal scan reconcile external deletions.
+        refreshing = self.refresh_observations(rows[:limit])
         return Response(
             200,
             {
@@ -450,6 +491,8 @@ class AppManagement:
                             "lifecycleState": row["lifecycle"],
                             "appState": row["app_state"],
                             "attention": row["attention"],
+                            "observedAt": utc(row["observation_updated"]),
+                            "refreshing": row["id"] in refreshing,
                             **self.catalog_extras(row),
                         }
                         for row in rows[:limit]

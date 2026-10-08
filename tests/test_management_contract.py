@@ -583,6 +583,11 @@ class DeletedApplicationContractTests(RealProjectContractTests):
         ):
             pending = self.create(slug="lazy-delete-" + name)
             self.delete_remote(pending, "lazy-delete-" + name)
+            # The list returns the recent cache without waiting on the controller.
+            listed = self.call("GET", route, owner=actor).body["data"]["items"]
+            self.assertEqual([item["applicationId"] for item in listed], [pending])
+            # Run the existing background scan without its five-second polling delay.
+            self.broker.journal.reconcile_apps()
             self.assertEqual(self.call("GET", route, owner=actor).body["data"]["items"], [])
             with self.broker.database.connect() as db:
                 self.assertEqual(

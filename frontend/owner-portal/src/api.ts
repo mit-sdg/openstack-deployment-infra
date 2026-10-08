@@ -62,7 +62,13 @@ export type AppRecord = {
   ownerId?: string;
   ownerUsername?: string;
   requiresMaintenance?: boolean;
-  sizing?: { workerFlavor: string; cpuMHz: number; memoryMiB: number } | null;
+  sizing?: {
+    workerFlavor: string;
+    cpuMHz: number;
+    memoryMiB: number;
+    vcpus?: number;
+    ram_mib?: number;
+  } | null;
   /** The owner's name, on apps you're a team member of. */
   ownerDisplayName?: string | null;
   slug: string;

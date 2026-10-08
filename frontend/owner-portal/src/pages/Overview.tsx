@@ -18,6 +18,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'wouter';
 import { api, type AppRecord } from '../api';
+import { Machines } from '../components/Machines';
 import { AppFrame } from '../components/AppFrame';
 import { DeploymentRow } from '../components/DeploymentRow';
 import { QueryError } from '../components/Feedback';
@@ -209,18 +210,11 @@ export function Overview({ id }: { id: string }) {
                         </Link>
                       ),
                     },
-                    ...(app.data.sizing
-                      ? [
-                          {
-                            label: 'Size',
-                            value: `${app.data.sizing.cpuMHz / 1000} GHz CPU · ${app.data.sizing.memoryMiB} MB memory`,
-                          },
-                        ]
-                      : []),
                   ]}
                 />
               </Section>
             )}
+            {app.data.access === 'admin' && <Machines app={app.data} />}
             {app.data.stale && !!app.data.savedRevision && (
               <Alert tone="warning">
                 Health information is unavailable right now. It updates again automatically.

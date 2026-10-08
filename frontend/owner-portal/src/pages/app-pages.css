@@ -161,6 +161,18 @@
 }
 
 @media (max-width: 640px) {
+  /* Keep attention actions under the status so app names retain room. */
+  .app-catalog .ui-table tbody tr {
+    align-items: start;
+  }
+  .app-catalog-status,
+  .app-catalog-status > .ui-cluster {
+    align-items: flex-end;
+  }
+  .app-catalog-status > .ui-cluster {
+    flex-direction: column;
+  }
+
   .app-settings-group {
     grid-template-columns: minmax(0, 1fr);
   }

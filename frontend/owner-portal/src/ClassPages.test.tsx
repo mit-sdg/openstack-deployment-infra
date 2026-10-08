@@ -97,6 +97,8 @@ describe('class pages', () => {
           savedRevision: 1,
           lifecycleState: 'ready',
           appState: 'not_deployed',
+          observedAt: null,
+          refreshing: false,
           attention: [intent],
           url: null,
           lastDeployedAt: null,

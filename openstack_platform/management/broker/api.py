@@ -17,7 +17,7 @@ from ...validation import ValidationError, commit, oci_digest_pin, repository_ur
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body, strict_json, utc
 from ..config import Config
-from . import resources
+from . import resources, sizing
 from .accounts import Accounts, audit
 from .app_management import AppManagement
 from .auth import Auth
@@ -78,6 +78,7 @@ class Broker:
         self.database = Database(config)
         self.auth = Auth(config, self.database)
         self.client = ProjectClient(config.controller_socket, config.controller_timeout)
+        self.flavor_cache = sizing.FlavorCache(self.client)
         self.journal = Journal(self.database, self.client)
         self.class_reads = ClassReads(self)
         self.accounts = Accounts(self)
@@ -89,6 +90,10 @@ class Broker:
         self.request_actor: ContextVar[tuple[str, str | None] | None] = ContextVar(
             "app_request_actor", default=None
         )
+
+    def close(self) -> None:
+        self.app_management.close()
+        self.journal.close()
 
     def router(self) -> Router:
         router = Router()
@@ -539,7 +544,7 @@ class Broker:
             model["ownerUsername"] = profile(owner["username"], 32)
             current = self.app_management.observed(app["id"])
             model["requiresMaintenance"] = current.get("requiresMaintenance") is True
-            model["sizing"] = current.get("sizing")
+            model["sizing"] = self.flavor_cache.enrich(current.get("sizing"))
         model["identityProvider"] = self.app_management.identity(model)
         model["configurationChanged"] = False
         if model["activeDeploymentId"]:
