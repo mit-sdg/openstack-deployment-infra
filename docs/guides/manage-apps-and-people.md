@@ -16,11 +16,11 @@ A portal admin lands on **People** after signing in. Other accounts land on **My
 
 ## Open and manage an app
 
-Open **All apps**, search by app name, owner name or username, and select the app. Use **Status** to filter the full catalog, including **Needs attention**. An app appears after it is created in the portal or adopted. Lists contain 25 apps per page.
+Open **All apps**, search by app name, owner name or username, and select the app. Use **Status** to filter the full catalog, including **Needs attention**. An app appears after it is created in the portal or adopted. Lists contain 25 apps per page. **Status** shows blocked or unknown changes directly below the app state only when there is a change to attend to. Hover over the app state to see when it was last checked. The list refreshes automatically; observations older than ten minutes show **Unknown** while a new check runs.
 
 Staff and portal admins open the same app pages as owners without joining the team:
 
-- **Overview** shows the current deployment, activity and start, stop and restart controls.
+- **Overview** shows the current deployment, activity and start, stop and restart controls. Staff and admins also see **Machines**, with the worker and effective build machine.
 - **Settings** holds repository and runtime settings, deploy keys, environment variables, databases and storage. Staff and admins additionally get **Danger zone**, with **Change owner** and storage deletion.
 - **Deploy** lets you choose a commit, review it, and deploy. Staff and admins additionally get the deployment method, worker size, and a read-only build machine summary.
 - **Deployments** lists attempts. Open one to see its details and build output.
@@ -76,6 +76,8 @@ On the app's **Settings** page, under **Danger zone**, select **Change owner**, 
 
 ### Allow an outage or change an app's size
 
+On **Overview** > **Machines**, **Worker** shows the machine's vCPU count and total RAM, followed by the memory available to the app after the system reserve and approximate speed per vCPU. If machine capacity is unavailable, it shows the flavor name, app memory allowance and CPU speed explicitly labelled as a total. Select **Change size** to open **Deploy** at **Worker size**.
+
 Staff and portal admins have these deploy options:
 
 - **Deployment method** > **Replace the running app in one step** chooses a maintenance cutover instead of starting the new version alongside it. The app goes offline briefly while the new version starts. For an app that keeps a fixed IP address, the portal applies this automatically and shows an information message about the brief outage.
@@ -83,7 +85,7 @@ Staff and portal admins have these deploy options:
 
 ### Change the build machine
 
-Staff and portal admins can open the app's **Settings** page and use the **Build machine** card. Choose a size and select **Save**. The state says **Uses the platform default** or **Set for this app**. To reset an app-specific choice, select **Use platform default**, then **Save**. **Build machine saved.** confirms success; pending or failed changes show their activity. The **Deploy** page shows the effective build machine in its read-only **Settings** summary.
+On **Overview** > **Machines**, **Build machine** shows its capacity and flavor, with **platform default** or **set for this app**. Select **Change** to open the app's **Settings** page at the **Build machine** card. Choose a size and select **Save**. The state says **Uses the platform default** or **Set for this app**. To reset an app-specific choice, select **Use platform default**, then **Save**. **Build machine saved.** confirms success; pending or failed changes show their activity. The **Deploy** page shows the effective build machine in its read-only **Settings** summary.
 
 Each deploy builds the app on a temporary machine of this size. A bigger machine builds faster and handles heavy builds such as Next.js; a smaller one lets more builds run at once. If a build runs out of memory, choose a bigger machine. Build machines need at least 1 vCPU and 1 GB RAM.
 

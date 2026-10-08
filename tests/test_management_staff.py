@@ -68,9 +68,7 @@ class StaffTests(ManagementCase):
         apps = self.call("GET", "/v1/all-apps", owner="alice").body["data"]["items"]
         self.assertEqual(apps[0]["slug"], "student-app")
         self.call("GET", "/v1/activity", owner="alice")
-        self.assertEqual(
-            self.fixture.calls[calls:], [("GET", f"/v1/applications/{app}/environment", None)]
-        )
+        self.assertEqual(self.fixture.calls[calls:], [])
         with self.broker.database.connect() as db:
             self.assertEqual(db.execute("SELECT row_count FROM staff_read_state").fetchone()[0], 4)
 

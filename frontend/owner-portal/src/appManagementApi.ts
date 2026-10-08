@@ -16,6 +16,8 @@ export type CatalogApp = {
   lifecycleState: string;
   savedRevision: number;
   appState: string;
+  observedAt: string | null;
+  refreshing: boolean;
   attention: Intent[];
   url: string | null;
   lastDeployedAt: string | null;
@@ -56,6 +58,7 @@ export const appManagementApi = {
             lifecycleState: 'string',
             savedRevision: 'number',
             appState: 'string',
+            refreshing: 'boolean',
           });
           if (!Array.isArray(data.attention)) throw new Error('Invalid app response');
           return { ...data, attention: data.attention.map(intentData) } as CatalogApp;

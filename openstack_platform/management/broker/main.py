@@ -40,7 +40,7 @@ def main() -> None:
         server.serve_forever(poll_interval=0.1)
     finally:
         server.server_close()
-        broker.journal.close()
+        broker.close()
 
 
 if __name__ == "__main__":

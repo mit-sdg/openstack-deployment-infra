@@ -94,7 +94,7 @@ class ManagementCase(unittest.TestCase):
         self.csrf: dict[str, str] = {}
 
     def tearDown(self) -> None:
-        self.broker.journal.close()
+        self.broker.close()
         self.identity.shutdown()
         self.identity.server_close()
         self.commons.shutdown()
@@ -1402,7 +1402,7 @@ class WebTransportTests(ManagementCase):
     def test_commons_sign_in_round_trip_through_web_broker_and_identity(self) -> None:
         from openstack_platform.management.broker.main import serve as broker_serve
 
-        self.broker.journal.close()
+        self.broker.close()
         self.broker, broker_server = broker_serve(self.config)
         thread = threading.Thread(
             target=broker_server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True

@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import copy
+import threading
 import time
+import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 from openstack_platform.controller.http import HttpError
 from openstack_platform.management.broker import bootstrap
 from openstack_platform.management.broker.accounts import security_change
 from openstack_platform.management.broker.class_reads import ReadLimits
+from openstack_platform.management.broker.client import ControllerUnavailable
+from openstack_platform.management.broker.sizing import FlavorCache
 from openstack_platform.management.common import canonical, digest, strict_json
 from openstack_platform.management.web.server import WebServer
 from tests import test_management_accounts as account_fixtures
@@ -97,6 +102,203 @@ class AdminApplicationTests(ManagementCase):
             "admin",
         )
         return identifier
+
+    def test_catalog_refreshes_stale_observations_without_waiting_and_single_flight(self) -> None:
+        started, release = threading.Event(), threading.Event()
+        with self.broker.database.connect(write=True) as db:
+            db.execute("DELETE FROM observations WHERE app_id=?", (self.app_id,))
+        original = self.broker.client.request
+        reads: list[str] = []
+
+        def slow(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+            reads.append(path)
+            started.set()
+            if not release.wait(5):
+                raise AssertionError("controller was not released")
+            return original(method, path, *args, **kwargs)
+
+        with patch.object(self.broker.client, "request", side_effect=slow):
+            with ThreadPoolExecutor(max_workers=1) as caller:
+                try:
+                    response = caller.submit(self.call, "GET", "/v1/all-apps", owner="admin")
+                    page = response.result(timeout=1).body["data"]["items"]
+                    self.assertTrue(started.wait(1))
+                    self.assertEqual(page[0]["appState"], "unknown")
+                    self.assertTrue(page[0]["refreshing"])
+                    self.assertIsNone(page[0]["observedAt"])
+                    self.call("GET", "/v1/all-apps", owner="admin")
+                    self.assertEqual(len(reads), 1)
+                finally:
+                    release.set()
+                    self.broker.app_management.close()
+        with self.broker.database.connect() as db:
+            cached = db.execute(
+                "SELECT * FROM observations WHERE app_id=?", (self.app_id,)
+            ).fetchone()
+        self.assertIsNotNone(cached)
+        self.assertFalse(strict_json(cached["body"].encode())["stale"])
+        self.assertEqual(self.broker.app_management.refreshing, set())
+        # A successful refresh makes the following response settled and quiet.
+        item = self.call("GET", "/v1/all-apps", owner="admin").body["data"]["items"][0]
+        self.assertEqual(item["appState"], "not_deployed")
+        self.assertFalse(item["refreshing"])
+        self.assertIsNotNone(item["observedAt"])
+
+    def test_catalog_refreshes_only_stale_rows_on_the_returned_page(self) -> None:
+        second = self.create(slug="second-app")
+        third = self.create(owner="admin", slug="third-app")
+        with self.broker.database.connect() as db:
+            rows = [dict(row) for row in db.execute("SELECT * FROM apps")]
+        for row in rows:
+            self.broker.app_model(row)
+        with self.broker.database.connect(write=True) as db:
+            db.execute(
+                "UPDATE observations SET updated=? WHERE app_id IN (?,?)",
+                (time.time() - 31, second, third),
+            )
+        with patch.object(self.broker, "app_model", wraps=self.broker.app_model) as read:
+            first = self.call("GET", "/v1/all-apps?limit=1", owner="admin").body["data"]
+            self.broker.app_management.close()
+            self.assertEqual([call.args[0]["id"] for call in read.call_args_list], [third])
+            self.assertEqual(len(first["items"]), 1)
+        self.assertNotEqual(second, third)
+
+    def test_catalog_skips_fresh_observations(self) -> None:
+        with self.broker.database.connect() as db:
+            row = dict(db.execute("SELECT * FROM apps WHERE id=?", (self.app_id,)).fetchone())
+        self.broker.app_model(row)
+        with (
+            patch.object(self.broker, "app_model") as read,
+            patch.object(self.broker.client, "request") as controller,
+        ):
+            item = self.call("GET", "/v1/all-apps", owner="admin").body["data"]["items"][0]
+            self.broker.app_management.close()
+            read.assert_not_called()
+            controller.assert_not_called()
+        self.assertFalse(item["refreshing"])
+
+    def test_background_refresh_has_four_workers_and_a_bounded_single_flight_queue(self) -> None:
+        release = threading.Event()
+        condition = threading.Condition()
+        active = peak = started = 0
+        rows = [
+            {"id": str(uuid.uuid4()), "lifecycle": "ready", "observation_updated": None}
+            for _ in range(105)
+        ]
+
+        def slow(_row: dict[str, Any], **_kwargs: Any) -> None:
+            nonlocal active, peak, started
+            with condition:
+                active += 1
+                started += 1
+                peak = max(peak, active)
+                condition.notify_all()
+            release.wait(5)
+            with condition:
+                active -= 1
+
+        with patch.object(self.broker, "app_model", side_effect=slow) as read:
+            try:
+                self.broker.app_management.refresh_observations(rows[:100])
+                with condition:
+                    self.assertTrue(condition.wait_for(lambda: started == 4, timeout=1))
+                self.broker.app_management.refresh_observations(rows)
+                self.assertEqual(len(self.broker.app_management.refreshing), 100)
+                self.assertEqual(read.call_count, 4)
+            finally:
+                release.set()
+                # Wait for queued work too, so every admitted app can be counted.
+                self.broker.app_management.refresh_pool.shutdown(wait=True)
+            self.assertEqual(read.call_count, 100)
+            self.assertEqual(peak, 4)
+            self.assertEqual(self.broker.app_management.refreshing, set())
+
+    def test_background_refresh_failure_keeps_last_observation_and_releases_single_flight(
+        self,
+    ) -> None:
+        with self.broker.database.connect() as db:
+            row = dict(db.execute("SELECT * FROM apps WHERE id=?", (self.app_id,)).fetchone())
+        with self.broker.database.connect(write=True) as db:
+            db.execute(
+                "UPDATE observations SET updated=? WHERE app_id=?", (time.time() - 31, self.app_id)
+            )
+            before = tuple(
+                db.execute(
+                    "SELECT body,updated FROM observations WHERE app_id=?", (self.app_id,)
+                ).fetchone()
+            )
+        row["observation_updated"] = before[1]
+        with patch.object(
+            self.broker.client, "request", side_effect=ControllerUnavailable("offline")
+        ):
+            self.broker.app_management.refresh_observations([row])
+            self.broker.app_management.refresh_pool.shutdown(wait=True)
+        self.assertEqual(self.broker.app_management.refreshing, set())
+        with self.broker.database.connect() as db:
+            after = tuple(
+                db.execute(
+                    "SELECT body,updated FROM observations WHERE app_id=?", (self.app_id,)
+                ).fetchone()
+            )
+        self.assertEqual(after, before)
+
+    def test_background_observation_reconciles_an_externally_deleted_app(self) -> None:
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE observations SET updated=0 WHERE app_id=?", (self.app_id,))
+        del self.fixture.apps[self.app_id]
+        self.call("GET", "/v1/all-apps", owner="admin")
+        self.broker.app_management.close()
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT lifecycle FROM apps WHERE id=?", (self.app_id,)).fetchone()[0],
+                "deleted",
+            )
+        self.assertEqual(self.call("GET", "/v1/all-apps", owner="admin").body["data"]["items"], [])
+
+    def test_catalog_uses_last_known_state_for_ten_minutes(self) -> None:
+        now = time.time()
+        body = canonical(
+            {
+                "acceptedDeployment": {"acceptedAt": "2026-01-01T00:00:00Z"},
+                "desiredRunning": True,
+                "health": {"allocationHealthy": True, "routeHealthy": True},
+            }
+        )
+        with patch.object(self.broker.app_management, "refresh_observations", return_value=set()):
+            for age, expected in (
+                (29, "healthy"),
+                (31, "healthy"),
+                (599, "healthy"),
+                (601, "unknown"),
+            ):
+                with self.subTest(age=age), self.broker.database.connect(write=True) as db:
+                    db.execute(
+                        "INSERT INTO observations VALUES(?,?,?) ON CONFLICT(app_id) DO UPDATE SET body=excluded.body,updated=excluded.updated",
+                        (self.app_id, body, now - age),
+                    )
+                item = self.call("GET", "/v1/all-apps", owner="admin").body["data"]["items"][0]
+                self.assertEqual(item["appState"], expected)
+                filtered = self.call("GET", f"/v1/all-apps?status={expected}", owner="admin").body[
+                    "data"
+                ]["items"]
+                self.assertEqual(len(filtered), 1)
+            with self.broker.database.connect(write=True) as db:
+                db.execute("DELETE FROM observations WHERE app_id=?", (self.app_id,))
+            self.assertEqual(
+                self.call("GET", "/v1/all-apps", owner="admin").body["data"]["items"][0][
+                    "appState"
+                ],
+                "unknown",
+            )
+
+    def test_sizing_enrichment_is_cached_and_remains_staff_only(self) -> None:
+        for _ in range(2):
+            size = self.call("GET", self.prefix, owner="admin").body["data"]["sizing"]
+            self.assertEqual((size["vcpus"], size["ram_mib"]), (1, 2048))
+        self.assertEqual(
+            sum(path == "/v1/flavors" for _method, path, _key in self.fixture.calls), 1
+        )
+        self.assertNotIn("sizing", self.call("GET", self.prefix, owner="alice").body["data"])
 
     def test_staff_and_admin_read_sizes_and_forward_the_exact_plan(self) -> None:
         self.staff()
@@ -744,10 +946,12 @@ class AdminApplicationTests(ManagementCase):
                 "lastDeployedAt",
                 "appState",
                 "attention",
+                "observedAt",
+                "refreshing",
             },
             {"applicationId", "slug", "ownerId", "savedRevision", "lifecycleState"},
         )
-        # The list never reads the controller; values come from the last observation.
+        # The response uses cached values while a background read warms the cache.
         self.assertIsNone(before[operator]["lastDeployedAt"])
         detail = self.call("GET", f"/v1/apps/{operator}", owner="admin").body["data"]
         self.assertEqual(
@@ -1589,3 +1793,80 @@ class AdminApplicationTests(ManagementCase):
                 "POST", "/v1/all-apps/adopt", {}, "admin", headers={"origin": "null"}
             ),
         )
+
+
+class FlavorCacheTests(unittest.TestCase):
+    def test_cache_expires_after_ten_minutes_and_matches_names_or_ids(self) -> None:
+        client = Mock()
+        item = {
+            "name": "xl.4core",
+            "flavor_id": "200",
+            "vcpus": 4,
+            "ram_mib": 16384,
+            "disk_gib": 64,
+        }
+        cache = FlavorCache(client)
+        with (
+            patch(
+                "openstack_platform.management.broker.sizing.flavors", return_value=[item]
+            ) as read,
+            patch(
+                "openstack_platform.management.broker.sizing.time.monotonic", return_value=100
+            ) as clock,
+        ):
+            for reference in ("xl.4core", "200"):
+                enriched = cache.enrich(
+                    {"workerFlavor": reference, "cpuMHz": 7916, "memoryMiB": 14395}
+                )
+                self.assertIsNotNone(enriched)
+                self.assertEqual(enriched["vcpus"], 4)
+                self.assertEqual(enriched["ram_mib"], 16384)
+            clock.return_value = 699
+            cache.get()
+            self.assertEqual(read.call_count, 1)
+            clock.return_value = 700
+            cache.get()
+            self.assertEqual(read.call_count, 2)
+            self.assertEqual(cache.enrich({"workerFlavor": "missing"}), {"workerFlavor": "missing"})
+
+    def test_concurrent_reads_share_one_flavor_request(self) -> None:
+        cache = FlavorCache(Mock())
+        started, release = threading.Event(), threading.Event()
+
+        def slow(_client: Any) -> list[dict[str, Any]]:
+            started.set()
+            if not release.wait(5):
+                raise AssertionError("flavor read was not released")
+            return []
+
+        with (
+            patch("openstack_platform.management.broker.sizing.flavors", side_effect=slow) as read,
+            ThreadPoolExecutor(max_workers=4) as callers,
+        ):
+            try:
+                futures = [callers.submit(cache.get) for _ in range(4)]
+                self.assertTrue(started.wait(1))
+            finally:
+                release.set()
+            self.assertEqual([future.result(timeout=1) for future in futures], [[], [], [], []])
+            read.assert_called_once()
+
+    def test_failure_omits_capacity_and_shares_a_short_retry_cooldown(self) -> None:
+        cache = FlavorCache(Mock())
+        size = {"workerFlavor": "xl.4core", "cpuMHz": 7916, "memoryMiB": 14395}
+        with (
+            patch(
+                "openstack_platform.management.broker.sizing.flavors",
+                side_effect=ControllerUnavailable("offline"),
+            ) as read,
+            patch(
+                "openstack_platform.management.broker.sizing.time.monotonic", return_value=100
+            ) as clock,
+        ):
+            self.assertEqual(cache.enrich(size), size)
+            self.assertEqual(cache.enrich(size), size)
+            read.assert_called_once()
+            clock.return_value = 130
+            cache.enrich(size)
+            self.assertEqual(read.call_count, 2)
+        self.assertNotIn("vcpus", size)

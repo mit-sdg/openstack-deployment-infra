@@ -96,6 +96,7 @@ export function BuilderSizeControl({ id }: { id: string }) {
           <Field label="Build machine" id="builder-size" hint={builderExplanation}>
             <Select
               className="app-size-select"
+              autoFocus={window.location.hash === '#builder-size'}
               value={value}
               disabled={busy}
               onChange={(event) => choose(event.target.value)}

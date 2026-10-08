@@ -216,7 +216,7 @@ def run(
         db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
 
     broker, broker_server = serve(config)
-    resources.callback(broker.journal.close)
+    resources.callback(broker.close)
     resources.callback(broker_server.server_close)
     web = HarnessWeb(
         ("127.0.0.1", 0 if args.vite else args.port), config, assets, tls=tls, fixture=fixture

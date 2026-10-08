@@ -34,7 +34,7 @@ const flavors = (v: unknown) => {
 };
 export const sizeLabel = (size: Flavor) =>
   `${size.vcpus} vCPU · ${size.ram_mib / 1024} GB RAM · ${size.disk_gib} GB disk (${size.name})`;
-export const workerSizeLabel = (size: Flavor) =>
+export const workerSizeLabel = (size: Pick<Flavor, 'vcpus' | 'ram_mib' | 'name'>) =>
   `${size.vcpus} vCPU · ${size.ram_mib / 1024} GB RAM (${size.name})`;
 export const buildMachineLabel = (size: BuilderSize) =>
   `${size.flavor.vcpus} vCPU · ${size.flavor.ram_mib / 1024} GB · ${size.useDefault ? 'platform default' : 'set for this app'}`;

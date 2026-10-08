@@ -363,6 +363,7 @@ export function DeployPage({ id }: { id: string }) {
                     <Field label="Worker size" id="worker-size">
                       <Select
                         className="app-size-select"
+                        autoFocus={window.location.hash === '#worker-size'}
                         value={size}
                         onChange={(event) => {
                           setSize(event.target.value);

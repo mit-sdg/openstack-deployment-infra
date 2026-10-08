@@ -129,6 +129,25 @@ for (const [layout, viewport] of [
       }
       await target.emulateMedia({ colorScheme: 'light' });
     }
+    async function attentionSizeShot(target: Page, screen: string, machines = false) {
+      await expect(target.locator('.ui-skeleton')).toHaveCount(0);
+      await target.evaluate(() => document.fonts.ready);
+      await target.mouse.move(0, 0);
+      await mkdir('/tmp/attention-size-shots', { recursive: true });
+      for (const theme of ['light', 'dark'] as const) {
+        await target.emulateMedia({ colorScheme: theme });
+        expect(
+          await target.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        ).toBe(true);
+        const path = `/tmp/attention-size-shots/${screen}-${layout}-${theme}.png`;
+        if (machines)
+          await target
+            .getByRole('region', { name: 'Machines', exact: true })
+            .screenshot({ path, animations: 'disabled' });
+        else await target.screenshot({ path, fullPage: true, animations: 'disabled' });
+      }
+      await target.emulateMedia({ colorScheme: 'light' });
+    }
     const extraSizes = ['colas', 'lg', 'm1', 's1', 'ups', 'xl'].flatMap((family) =>
       [1, 2, 4, 8, 16].map((vcpus) => ({
         flavor_id: `fixture-${family}-${vcpus}`,
@@ -326,7 +345,18 @@ for (const [layout, viewport] of [
           await target.getByRole('button', { name: 'Save', exact: true }).click();
           await expect(target.getByText('Build machine saved.', { exact: true })).toBeVisible();
           await expect(builder).toHaveValue('200');
-          if (role === 'admin') await sizingShot(target, 'settings-build-machine', true);
+          if (role === 'admin') {
+            await sizingShot(target, 'settings-build-machine', true);
+            await target.goto(`/apps/${id}`);
+            const machines = target.getByRole('region', { name: 'Machines', exact: true });
+            await expect(machines.getByText(/GB RAM .*set for this app/)).toBeVisible();
+            await attentionSizeShot(target, 'machines-app-specific', true);
+            await machines.getByRole('link', { name: 'Change size', exact: true }).click();
+            await expect(target.getByLabel('Worker size', { exact: true })).toBeFocused();
+            await target.goto(`/apps/${id}`);
+            await machines.getByRole('link', { name: 'Change', exact: true }).click();
+            await expect(builder).toBeFocused();
+          }
           await target.getByRole('button', { name: 'Use platform default', exact: true }).click();
           await target.getByRole('button', { name: 'Save', exact: true }).click();
           await expect(builder).toHaveValue('');
@@ -355,6 +385,35 @@ for (const [layout, viewport] of [
         .data.items;
       expect(members).toHaveLength(1);
       expect(members[0].userId).toBe(ownerSession.user.id);
+      // Adopt a healthy local operator fixture so the catalog compares distinct states.
+      const operatorId =
+        layout === 'desktop'
+          ? '00000000-0000-4000-8000-000000000081'
+          : '00000000-0000-4000-8000-000000000083';
+      const adminSession = (await (await page.request.get('/api/v1/session')).json()).data;
+      const adopted = await page.request.post('/api/v1/all-apps/adopt', {
+        headers: {
+          'X-CSRF-Token': adminSession.csrfToken,
+          Origin: new URL(page.url()).origin,
+          'Idempotency-Key': crypto.randomUUID(),
+        },
+        data: { applicationId: operatorId },
+      });
+      expect(adopted.status()).toBe(201);
+      await page.goto(`/apps/${operatorId}`);
+      const defaultMachines = page.getByRole('region', { name: 'Machines', exact: true });
+      await expect(defaultMachines.getByText(/GB RAM .*platform default/)).toBeVisible();
+      await expect(defaultMachines.getByText('4 vCPU · 16 GB RAM (worker-large)')).toBeVisible();
+      await attentionSizeShot(page, 'machines-default', true);
+      const undeployed = await page.request.post('/api/v1/apps', {
+        headers: {
+          'X-CSRF-Token': adminSession.csrfToken,
+          Origin: new URL(page.url()).origin,
+          'Idempotency-Key': crypto.randomUUID(),
+        },
+        data: { slug: `not-deployed-${suffix}` },
+      });
+      expect(undeployed.ok()).toBe(true);
       for (const [role, target] of [
         ['staff', staffPage],
         ['admin', page],
@@ -405,6 +464,20 @@ for (const [layout, viewport] of [
             await expect(
               target.getByText(/from Activity|Open Activity|previous change hasn’t finished/),
             ).toHaveCount(0);
+          }
+          if (name === 'all-apps') {
+            const table = target.getByRole('table', { name: 'All apps' });
+            await expect(table.getByRole('columnheader', { name: 'Needs attention' })).toHaveCount(
+              0,
+            );
+            const healthy = table.getByRole('row').filter({
+              hasText:
+                layout === 'desktop' ? 'operator-class-fixture' : 'operator-class-fixture-mobile',
+            });
+            await expect(healthy.getByText('Healthy', { exact: true })).toBeVisible();
+            await expect(healthy.getByText('Needs attention', { exact: true })).toHaveCount(0);
+            await expect(table.getByText('Not deployed', { exact: true }).first()).toBeVisible();
+            if (role === 'staff') await attentionSizeShot(target, 'all-apps');
           }
           await shot(target, role, name);
         }
