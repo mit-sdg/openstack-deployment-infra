@@ -47,6 +47,33 @@ EOF
 genisoimage -quiet -rock -joliet -volid config-2 \
   -output "$work/config.iso" "$work/config"
 
+# Admin and storage expect deployment-owned Cinder filesystems. Supplying
+# empty, disposable volumes exercises those mounts rather than waiting for
+# their 60-second missing-device timeout before cloud-init can start.
+volume_args=()
+volumes=()
+case "$role" in
+  admin) volumes=(adminState backup) ;;
+  storage) volumes=(data) ;;
+esac
+if [[ ${#volumes[@]} -gt 0 ]]; then
+  for command in python3 mkfs.xfs truncate; do
+    command -v "$command" >/dev/null || {
+      echo "required command is unavailable: $command" >&2
+      exit 2
+    }
+  done
+  repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+  platform_config=${PLATFORM_CONFIG:-$repository/config/platform.example.json}
+  for volume in "${volumes[@]}"; do
+    label=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["volumes"][sys.argv[2]]["label"])' "$platform_config" "$volume")
+    disk="$work/$volume.raw"
+    truncate -s 512M "$disk"
+    mkfs.xfs -q -f -L "$label" "$disk"
+    volume_args+=(-drive "file=$disk,if=virtio,format=raw")
+  done
+fi
+
 qemu-img create -q -f qcow2 -F qcow2 -b "$(realpath "$image")" "$work/root.qcow2"
 qemu-img check "$work/root.qcow2" >/dev/null
 
@@ -65,6 +92,7 @@ qemu-system-x86_64 \
   -uuid "$instance_uuid" \
   -drive "file=$work/root.qcow2,if=virtio,format=qcow2" \
   -drive "file=$work/config.iso,media=cdrom,readonly=on" \
+  "${volume_args[@]}" \
   -nic user,model=virtio-net-pci \
   -display none \
   -monitor none \

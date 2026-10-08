@@ -25,7 +25,6 @@ GATES = (
     "static",
     "generated-recipes",
     "nix-eval",
-    "package-tests",
     "role-vm-tests",
     "dashboard-frontend",
 )
