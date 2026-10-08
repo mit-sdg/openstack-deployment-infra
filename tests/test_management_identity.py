@@ -325,13 +325,19 @@ class IdentityTests(ManagementCase):
         )
         broker_thread.start()
         client = ProjectClient(self.config.broker_socket, timeout=10, capacity=participants)
-        self.commons.delay_seconds = 0.15
         fixtures = {
             f"student-{index}": (str(uuid.uuid4()), f"Student {index}")
             for index in range(participants)
         }
         barrier = threading.Barrier(participants)
         headers = {"x-portal-client-address": "192.0.2.1"}
+        redemptions = threading.Barrier(participants)
+        redeem = self.commons.redeem
+
+        def concurrent_redeem(headers, raw):
+            # A serialized identity path cannot release this barrier.
+            redemptions.wait(timeout=5)
+            return redeem(headers, raw)
 
         def login(name: str) -> int:
             status, started = client.request("GET", "/v1/auth/commons/start", headers=headers)
@@ -347,18 +353,19 @@ class IdentityTests(ManagementCase):
                 "/v1/auth/commons/callback?" + urlencode({"code": code, "state": state}),
                 headers={**headers, "cookie": self.config.commons_cookie + "=" + binder},
             )
+            if status != 200:
+                return status
             return status if completed["browser"]["location"] == "/apps" else 0
 
-        started = time.monotonic()
         try:
             with (
                 patch.dict(USERS, fixtures),
+                patch.object(self.commons, "redeem", side_effect=concurrent_redeem),
                 ThreadPoolExecutor(max_workers=participants) as executor,
             ):
                 statuses = list(executor.map(login, fixtures))
             self.assertEqual(statuses, [200] * participants)
             self.assertEqual(self.commons.calls, participants)
-            self.assertLess(time.monotonic() - started, 6)
         finally:
             broker_server.shutdown()
             broker_server.server_close()
