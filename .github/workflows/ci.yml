@@ -311,6 +311,14 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      # Reuse main's store for this role's pinned nixpkgs closure. Only main
+      # saves, once per flake.lock, so PRs restore without spending cache space.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ matrix.role }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-${{ matrix.role }}-
+          save: ${{ github.ref == 'refs/heads/main' && matrix.vm }}
+          gc-max-store-size-linux: 8G
       - name: Enable KVM when available
         run: |
           if [[ -e /dev/kvm ]]; then
