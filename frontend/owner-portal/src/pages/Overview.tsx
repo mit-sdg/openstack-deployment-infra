@@ -168,6 +168,12 @@ export function Overview({ id }: { id: string }) {
   const activity =
     intents.data?.filter((intent) => !['blocked', 'unknown'].includes(intent.state)).slice(0, 6) ??
     [];
+  // Subscribe to the attention card's query without starting another poll.
+  const attention = useQuery({
+    queryKey: ['attention', id],
+    queryFn: () => api.attention(id),
+    enabled: false,
+  });
   const latest = history.data?.items[0];
   const deploy = (
     <>
@@ -191,6 +197,30 @@ export function Overview({ id }: { id: string }) {
         app.data && (
           <>
             <AttentionActivity id={id} />
+            {app.data.access === 'admin' && app.data.ownerId && (
+              <Section title="Owner">
+                <KeyValueList
+                  items={[
+                    {
+                      label: 'Owner',
+                      value: (
+                        <Link className="ui-link" href={`/people/${app.data.ownerId}`}>
+                          {app.data.ownerDisplayName ?? 'View person'}
+                        </Link>
+                      ),
+                    },
+                    ...(app.data.sizing
+                      ? [
+                          {
+                            label: 'Size',
+                            value: `${app.data.sizing.cpuMHz / 1000} GHz CPU · ${app.data.sizing.memoryMiB} MB memory`,
+                          },
+                        ]
+                      : []),
+                  ]}
+                />
+              </Section>
+            )}
             {app.data.stale && !!app.data.savedRevision && (
               <Alert tone="warning">
                 Health information is unavailable right now. It updates again automatically.
@@ -238,28 +268,34 @@ export function Overview({ id }: { id: string }) {
             {app.data.acceptedDeployment && <RuntimeActions app={app.data} />}
             {history.error && <QueryError query={history} what="deployments" />}
             {/* The current deployment is already shown above; list the latest
-                only when a newer attempt is in progress or failed. */}
-            {latest && latest.deploymentId !== app.data.acceptedDeployment?.deploymentId && (
-              <Section
-                title="Latest deployment"
-                flush
-                actions={
-                  (history.data!.items.length > 1 || history.data!.nextCursor) && (
-                    <Link
-                      href={`/apps/${id}/deployments`}
-                      className={buttonClass({ variant: 'ghost', size: 'sm' })}
-                    >
-                      View all
-                      <Icon name="chevron-right" />
-                    </Link>
-                  )
-                }
-              >
-                <List label="Latest deployment">
-                  <DeploymentRow id={id} deployment={latest} active={app.data.activeDeploymentId} />
-                </List>
-              </Section>
-            )}
+                only when a newer attempt is in progress or failed and is not already in Needs attention. */}
+            {latest &&
+              latest.deploymentId !== app.data.acceptedDeployment?.deploymentId &&
+              !attention.data?.some((intent) => intent.operationId === latest.deploymentId) && (
+                <Section
+                  title="Latest deployment"
+                  flush
+                  actions={
+                    (history.data!.items.length > 1 || history.data!.nextCursor) && (
+                      <Link
+                        href={`/apps/${id}/deployments`}
+                        className={buttonClass({ variant: 'ghost', size: 'sm' })}
+                      >
+                        View all
+                        <Icon name="chevron-right" />
+                      </Link>
+                    )
+                  }
+                >
+                  <List label="Latest deployment">
+                    <DeploymentRow
+                      id={id}
+                      deployment={latest}
+                      active={app.data.activeDeploymentId}
+                    />
+                  </List>
+                </Section>
+              )}
             {intents.error && <QueryError query={intents} what="activity" />}
             {!!activity.length && (
               <Section title="Activity" flush>

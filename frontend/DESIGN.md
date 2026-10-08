@@ -143,7 +143,7 @@ The portal adds a few shared pieces in `owner-portal/src/components`:
 
 - `Status` maps a state to its label and tone and applies the badge rule.
 - `Operation` and `OperationList` render activity rows.
-- `Feedback` re-exports the shared feedback components and adds `QueryError`.
+- `Feedback` adds `QueryError` and plain load-error messages; import presentation components directly from the shared package.
 - `ThemeButton` is `ThemeToggle` with the portal's storage key.
 - `Mark` re-exports the shared mark.
 

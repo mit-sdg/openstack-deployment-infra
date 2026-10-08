@@ -183,12 +183,12 @@ export function StorageSection({
   service = api,
   notice,
   save,
-  identityProvider: managedIdentityProvider = false,
+  identityProvider: providedIdentityProvider = false,
 }: {
   id: string;
   service?: ReturnType<typeof resourceApi>;
   /**
-   * For managed apps: show sign-in information with storage changes.
+   * Show sign-in information with storage changes.
    * Owners read the sign-in flag themselves.
    */
   identityProvider?: boolean;
@@ -202,27 +202,27 @@ export function StorageSection({
   /** Optional message shown at the top of the section, e.g. unsaved changes. */
   notice?: ReactNode;
 }) {
-  const owner = service === api;
-  const scope = owner ? [] : ['admin'];
+  const injected = service !== api;
   const client = useQueryClient();
   const storage = useQuery({
-    queryKey: [...scope, 'storage', id],
+    queryKey: ['storage', id],
     queryFn: () => service.storage(id),
-    refetchInterval: owner ? 1500 : 5000,
-    refetchOnWindowFocus: owner,
+    refetchInterval: 1500,
+    refetchOnWindowFocus: true,
   });
   const environment = useQuery({
-    queryKey: [...scope, 'environment', id],
+    queryKey: ['environment', id],
     queryFn: () => service.environment(id),
   });
   // Show the sign-in dependency in the dialog. Owners read the flag here;
-  // managed app pages pass it in.
+  // callers may pass it in.
   const app = useQuery({
     queryKey: ['app', id],
     queryFn: () => api.app(id),
-    enabled: owner,
+    enabled: !injected,
   });
-  const identityProvider = owner ? app.data?.identityProvider === true : managedIdentityProvider;
+  const identityProvider = providedIdentityProvider || app.data?.identityProvider === true;
+  const owner = app.data?.access !== 'admin';
   const busy =
     storage.data?.intents.some((intent) => !['succeeded', 'failed'].includes(intent.state)) ||
     environment.data?.intents?.some((intent) => !['succeeded', 'failed'].includes(intent.state));
@@ -254,7 +254,7 @@ export function StorageSection({
       if (variables.type) setCreatedType(variables.type);
       pending.current = null;
       setStarted((current) => [...current, result.intentId]);
-      client.invalidateQueries({ queryKey: [...scope, 'storage', id] });
+      client.invalidateQueries({ queryKey: ['storage', id] });
       client.invalidateQueries({ queryKey: ['intents'] });
     },
   });

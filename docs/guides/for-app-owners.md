@@ -27,9 +27,9 @@ app.listen(Number(process.env.PORT ?? 3000), '0.0.0.0');
 
 ## Create an app
 
-On **Apps**, select **Create app** and enter an **App name**. It becomes your address, `https://<app-name>.example.edu`, and can't be changed later. Use 3 to 40 lowercase letters, numbers, and single hyphens, starting with a letter and ending with a letter or number. Some names are reserved; deleted app names can't be reused.
+On **My apps**, select **Create app** and enter an **App name**. It becomes your address, `https://<app-name>.example.edu`, and can't be changed later. Use 3 to 40 lowercase letters, numbers, and single hyphens, starting with a letter and ending with a letter or number. Some names are reserved; deleted app names can't be reused.
 
-**Apps** shows how many of your allowed apps you've used, for example `1 of 2`. Ask course staff if you need more, or if you want an app deleted.
+**My apps** shows how many of your allowed apps you've used, for example `1 of 2`. Ask course staff if you need more, or if you want an app deleted.
 
 ## Fill in the settings
 
@@ -132,9 +132,9 @@ If a deploy fails, your previous version keeps running. Under **Deployments**, o
 | The app can't reach its database | Select **Use default variables** (or **Choose names**), then deploy. |
 | The commit list doesn't load | GitHub limits how often it can be asked. Paste the commit SHA instead. |
 | **Your change to … didn't finish** | Select **Finish change**, enter the same value again, and save. |
-| **Needs attention** | Open your app's **Overview** or **Deployments**. In **Activity**, select **Resume** on the unfinished deployment. Ask course staff if it stays blocked. |
+| **Needs attention** | Open your app's **Overview** or **Deployments**. In **Needs attention**, select **Resume** on the unfinished deployment. Ask course staff if it stays blocked. |
 
-A deploy that needs attention hasn't finished, even if your app is already online with the new version. Until it finishes, the portal refuses another deploy or an environment edit. **Resume** continues the same deploy with its original commit and settings. It doesn't create another deployment. You or a teammate can resume it, and staff can help from their app management page.
+A deploy that needs attention hasn't finished, even if your app is already online with the new version. Until it finishes, the portal refuses another deploy or an environment edit. **Resume** continues the same deploy with its original commit and settings. It doesn't create another deployment. You or a teammate can resume it, and staff and admins can help from the same app pages.
 
 ## Related
 

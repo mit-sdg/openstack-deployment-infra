@@ -1,7 +1,7 @@
 import { ListItem, RelativeTime } from '@openstack-platform/ui';
 import { Link } from 'wouter';
 import { short } from '../utils/presentation';
-import { Status } from './Status';
+import { DeploymentStatus } from './DeploymentStatus';
 
 /** One deployment as a list row. Put rows inside a shared <List>. */
 export function DeploymentRow({
@@ -40,7 +40,11 @@ export function DeploymentRow({
       }
       trailing={
         // The live deployment reads "Live"; it succeeded by definition.
-        <Status state={deployment.deploymentId === active ? 'live' : deployment.status} />
+        <DeploymentStatus
+          id={id}
+          deployment={deployment.deploymentId}
+          state={deployment.deploymentId === active ? 'live' : deployment.status}
+        />
       }
     />
   );

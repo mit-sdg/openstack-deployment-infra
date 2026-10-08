@@ -86,20 +86,20 @@ describe('private repository access', () => {
     expect(screen.queryByRole('button', { name: 'Remove key' })).toBeNull();
   });
 
-  it('waits for saved settings and hides where deploy keys are unavailable', async () => {
+  it('requires saved settings and shows deploy-key read failures', async () => {
     const api = service(key, new Error('unused'));
     const { unmount } = wrap(<RepositoryAccess id="app" service={api as never} saved={false} />);
     expect(await screen.findByRole('button', { name: 'Check access' })).toBeDisabled();
     unmount();
-    const older = {
+    const failed = {
       ...api,
       sourceKey: vi.fn(() =>
-        Promise.reject(new ApiError(409, 'SOURCE_KEYS_UNAVAILABLE', 'Not available yet.')),
+        Promise.reject(new ApiError(503, 'STATE_UNAVAILABLE', 'Deploy key unavailable.')),
       ),
     };
-    wrap(<RepositoryAccess id="app" service={older as never} saved />);
-    await waitFor(() => expect(older.sourceKey).toHaveBeenCalled());
-    await waitFor(() => expect(screen.queryByText('Private repository')).toBeNull());
+    wrap(<RepositoryAccess id="app" service={failed as never} saved />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Deploy key unavailable.');
+    expect(screen.getByText('Private repository')).toBeVisible();
   });
 
   it('lists private commits with the same picker after a browser failure', async () => {
@@ -136,35 +136,5 @@ describe('private repository access', () => {
       expect.objectContaining({ sha: 'c'.repeat(40), author: 'Ada' }),
     );
     expect(source.recentSourceCommits).toHaveBeenCalledWith('app');
-  });
-
-  it('offers the latest commit through the deploy key when GitHub hides the repository', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(() => Promise.resolve(new Response('{}', { status: 404 }))),
-    );
-    const onSelect = vi.fn();
-    const latest = vi.fn(() =>
-      Promise.resolve({
-        keyPresent: true as const,
-        reachable: true,
-        head: 'b'.repeat(40),
-        branch: 'main',
-        problem: null,
-      }),
-    );
-    wrap(
-      <RecentCommits
-        repository="https://github.com/ada/private"
-        branch="main"
-        value=""
-        onSelect={onSelect}
-        latest={latest}
-      />,
-    );
-    fireEvent.click(await screen.findByRole('button', { name: 'Use the latest commit on main' }));
-    await waitFor(() =>
-      expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ sha: 'b'.repeat(40) })),
-    );
   });
 });

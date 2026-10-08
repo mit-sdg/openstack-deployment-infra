@@ -1,63 +1,47 @@
 # Manage apps and people
 
-Use this guide to help students with their apps and, as a portal admin, manage accounts, limits, and audit records. Install the portal first with [Open the owner portal](open-the-portal.md).
+Use the owner portal to manage apps across the class and help people finish blocked changes. Staff and portal admins have the same app controls. Account controls and the audit log require a portal admin.
 
-## Roles
+## Choose a destination
 
-Every account has one role. Sessions keep the role assigned at sign-in.
-
-| What you can do | Owner | Staff | Portal admin |
+| Destination | URL | Who sees it | What it shows |
 | --- | --- | --- | --- |
-| Create your own apps | Up to your limit | No limit | No limit |
-| Manage your own and teammates' apps: settings, variables, add/verify/rotate storage, deploy, stop/start/restart, logs, deploy keys | Yes | Yes | Yes |
-| Add and remove teammates | On apps you own | On any app | On any app |
-| Read the course catalog (**Staff** pages) | No | Yes | Yes |
-| Manage any app: settings, variables, storage, deploy, stop, start, logs, team | No | Yes | Yes |
-| Create an app for someone else | No | Yes | Yes |
-| Adopt an app the operator deployed, or change an app's owner | No | Yes | Yes |
-| Delete a database or storage | No | Yes, with typed confirmation | Yes, with typed confirmation |
-| Allow a brief outage or set an app's size when deploying | No | Yes | Yes |
-| Manage accounts, roles, and limits; read the audit log | No | No | Yes |
-| Sign in with | Commons or a local account | Commons or a local account | A local account with an authenticator app |
+| **My apps** | `/apps` | Everyone | Apps you own or work on as a teammate |
+| **All apps** | `/all-apps` | Staff and portal admins | Every managed app, with search by app or owner and a status filter |
+| **People** | `/people` | Staff and portal admins | Everyone, including owners, staff, admins and accounts awaiting setup; each person’s apps and activity |
+| **Activity** | `/activity` | Staff and portal admins | Class-wide changes, with blocked and unknown changes at the top |
+| **Audit log** | `/audit` | Portal admins | Account changes and app-management actions |
 
-App actions need no password or authenticator confirmation for staff or portal admins. Account changes still ask for both in **Confirm it’s you**, unless you confirmed them in the last five minutes.
+A portal admin lands on **People** after signing in. Other accounts land on **My apps**. There are no role-named navigation sections. Retired portal and broker URLs are removed; update bookmarks to these destinations.
 
-Where to find things:
+## Open and manage an app
 
-- Everyone has **Apps**, which lists only the apps you own or are a teammate on.
-- Staff also have **Staff** (the course catalog, with **Owners** and **Activity** tabs) and **Manage apps** (every app).
-- Portal admins have **Staff** and **Admin**, with the tabs **All apps**, **Accounts**, and **Audit log**. A portal admin lands on **Accounts** after signing in.
+Open **All apps**, search by app name, owner name or username, and select the app. Use **Status** to filter the full catalog, including **Needs attention**. An app appears after it is created in the portal or adopted. Lists contain 25 apps per page.
 
-## Manage any app
+Staff and portal admins open the same app pages as owners without joining the team:
 
-Staff open **Manage apps**; portal admins open **Admin** > **All apps**. The list shows every app the portal knows about, 25 to a page, with its status, owner, URL, last deployment, and app ID. Apps that the operator created outside the portal don't appear until staff or a portal admin adopts them ([Adopt an app](#adopt-an-app-the-operator-deployed)).
+- **Overview** shows the current deployment, activity and start, stop and restart controls.
+- **Settings** holds repository and runtime settings, deploy keys, environment variables, databases and storage. Staff and admins additionally get **Danger zone**, with **Change owner** and storage deletion.
+- **Deploy** lets you choose a commit, review it, and deploy. Staff and admins additionally get the deployment method and sizing plan.
+- **Deployments** lists attempts. Open one to see its details and build output.
+- **Logs** shows runtime output and errors.
+- **Team** lets owners, staff and admins add or remove teammates. Members can leave their own team.
 
-Select an app for its management tools:
+The optional **Build script** has no default. Leave it empty when the app has no build step. Environment values stay write-only for everyone. See [Deploy an app](for-app-owners.md) for the shared controls.
 
-- **Deploy** opens a dialog with the branch's recent commits. Pick one or paste the full 40-character SHA. The portal checks the commit against the build's rules before you deploy.
-- **Stop app** and **Start app** change whether the app runs. Stopping takes it offline and keeps its settings and data.
-- **Details** shows the owner, URL, last deployed commit, current size, and app ID.
-- **Logs** shows the last 500 lines of runtime output or errors. Find build output under **Deployments**.
-- The settings form, **Private repository**, **Environment variables**, and **Databases and storage** work as described in [Deploy an app](for-app-owners.md). Environment values stay write-only for everyone: no one, including portal admins, can read a value back.
-- **Team** lets you add or remove teammates.
+Staff and admins have no app or concurrency limit. Creating an app for another person uses that owner’s app limit. Every app still accepts one change at a time. Staff and admin app changes appear under their usernames in **Audit log**; their reads go into a separate private read log.
 
-Changes appear in the **Audit log** under your username. Staff and portal admins have no concurrency limit, and your changes don't use the owner's limit. Each app still accepts only one change at a time.
+## Resume a change that needs attention
 
-### Resume a deploy that needs attention
+**Needs attention** means a change is blocked; **Unknown** means its outcome has not been confirmed. Both offer **Resume** when the change can be replayed. Find the same status and action on **Overview**, deployment lists and details, **All apps**, **Activity**, or the person’s apps and activity under **People**.
 
-Open the app from **Manage apps** (staff) or **Admin** > **All apps** (portal admins). **Activity** shows unfinished changes and who started them, including changes started by the owner or a teammate.
+Select **Resume** to continue the original request with its original commit, settings and request keys. Wait for it to finish before starting another change. Staff and admins can resume anyone’s change without a password or authenticator confirmation; owners and teammates can resume changes on their apps. The audit log records who resumed it.
 
-If a deployment shows **Needs attention**, select **Resume**. The app may already be serving the new version; the deployment still needs to finish before another change can start. Resume continues the original request with the same commit and settings. It doesn't start a new deployment. Wait for the attention row to disappear, then retry the change that was refused.
-
-Staff and portal admins can resume any app's deployment without a password or authenticator confirmation. The audit log records who resumed it. Owners and teammates can also resume changes on their apps. For an unfinished environment edit, ask the person who started it to enter the same value again in **Environment variables**; values aren't stored for replay.
+An unfinished environment edit requires the person who started it to enter the same value again in **Settings** > **Environment variables**. It has no generic Resume action because values are not stored for replay.
 
 ## Create, adopt, and move apps
 
-Staff and portal admins can create apps for others, transfer ownership, delete storage, and change app sizing.
-
-### Create an app for someone
-
-On **All apps**, select **Create app**, enter the **App name**, choose the **Owner**, and select **Create app**. The app counts against that owner's limit, and the owner must be an active, enabled account.
+On **All apps**, select **Create app**, enter the **App name**, choose an active, enabled **Owner**, and select **Create app**. The app opens on the shared Overview page; open **Settings** to configure it.
 
 ### Adopt an app the operator deployed
 
@@ -77,7 +61,7 @@ Adoption is refused when:
 
 ### Change an app's owner
 
-On the app's page, under **Danger zone**, select **Change owner**, choose the new owner, and select **Change owner**. The portal refuses while the app has a change in progress (`APP_BUSY`), or if someone else changed the owner since you loaded the page (`OWNER_CONFLICT`; reload). If the new owner was a teammate, they're removed from the team list; other teammates stay. The new owner keeps the app even if it puts them over their limit.
+On the app's **Settings** page, under **Danger zone**, select **Change owner**, choose the new owner, and select **Change owner**. The portal refuses while the app has a change in progress (`APP_BUSY`), or if someone else changed the owner since you loaded the page (`OWNER_CONFLICT`; reload). If the new owner was a teammate, they're removed from the team list; other teammates stay. The new owner keeps the app even if it puts them over their limit.
 
 ### Delete a database or storage
 
@@ -86,9 +70,9 @@ On the app's page, under **Danger zone**, select **Change owner**, choose the ne
 
 1. Under **Databases and storage** in the app's settings, open **Edit variables** for the resource. Remove every variable, select **Save variables**, and deploy so the running app stops using it. Saved settings that still connect to the resource block deletion (`STORAGE_BOUND`).
 2. Make sure a recent managed-data backup exists ([Backups and recovery](backups-and-recovery.md)).
-3. Under **Danger zone**, select **Delete a database or storage**. Choose it under **Database or storage**.
+3. In **Settings** > **Danger zone**, select **Delete**. Choose it under **Database or storage**.
 4. Type the app's name, a space, and the storage type, for example `my-app postgres` (the types are `postgres`, `mongo`, and `s3`). Select **Delete permanently**.
-5. Watch **Latest change** until it shows success, then check that the storage is gone from **Databases and storage**.
+5. Check the app’s **Overview** activity until it shows success, then check that the storage is gone from **Databases and storage**.
 
 ### Allow an outage or change an app's size
 
@@ -97,20 +81,13 @@ Staff and portal admins have these deploy options:
 - **Deployment method** > **Replace the running app in one step** chooses a maintenance cutover instead of starting the new version alongside it. The app goes offline briefly while the new version starts. For an app that keeps a fixed IP address, the portal applies this automatically and shows an information message about the brief outage.
 - **Sizing plan** takes a reviewed plan, as JSON, from the operator. Leave it empty to keep the app's current size. The operator creates plans with the controller API ([Deploy apps from the command line](deploy-apps-from-the-command-line.md)).
 
-## The Commons app
+## Help a person
 
-The portal recognizes Commons when an app's public URL matches `commonsOrigin`. App controls show **Signing in to this portal depends on this app.** as information. Deploying, stopping, starting, restarting, changing its owner, and storage actions proceed without a confirmation checkbox. Adoption also explains the sign-in dependency.
+Open **People** and search by name or username. Select the person to see their apps and recent activity, including changes needing attention. App links open the shared app pages.
 
-If Commons goes down, new Commons sign-ins fail. Existing portal sessions and local sign-in keep working. Keep a local portal admin available for repairs.
+Portal admins additionally see **Account controls** on that person’s page: role, limits, access, invitation and recovery actions. Staff do not see these controls and cannot use their API. **Create account** appears only for admins on **People**.
 
-## Manage accounts
-
-**Admin** > **Accounts** lists Commons and local accounts. Search by name or username. Rows show status (**Active**, **Setup pending**, or **Disabled**), username, role, sign-in method, app count and limit, and last sign-in. Select a row to manage access.
-
-Actions that change who can do what ask you to confirm with your password and a fresh code: creating an account, changing a role, enabling or disabling, **Sign out everywhere**, and reset or invitation links. Changing limits doesn't.
-
-> [!NOTE]
-> Authenticator codes can't be reused. If the portal rejects a code you used a moment ago, for example right after signing in, wait for your app to show the next one.
+Account actions that change access ask for your password and a fresh authenticator code unless you confirmed them in the last five minutes. Changing limits does not require that confirmation. Codes cannot be reused; wait for a new code if you just signed in.
 
 ### Create a local account
 
@@ -163,44 +140,15 @@ To help someone who is blocked, wait for the window to pass, or send **Reset pas
 
 </details>
 
-## Read the course catalog
-
-The **Staff** pages give staff and portal admins a read-only view of the class:
-
-- **Owners** lists accounts with the Owner role. Select one to see their app count and limit, apps, and recent activity.
-- **Activity** lists every change across the class, newest first, and filters by owner or app.
-
-These pages show metadata only: names, app URLs, repository addresses, deployment status, and commits. They never show environment variables, storage, or logs; an app's management page shows its variable names, storage, and runtime logs. Lists show 25 entries a page.
-
-The portal records each catalog read in a private read log for 30 days. If the portal is too busy, or can't write that record, the page shows an error; wait 30 seconds before trying again.
-
 ## Review the audit log
 
-**Admin** > **Audit log** lists account changes and every change made through app management, newest first, with the action, the account it affected, who did it, details such as the app or the new role, and when. It never contains passwords, codes, links, or environment values. Changes staff make to other people's apps appear here too.
+Open **Audit log** to see account changes and app-management actions, newest first, with the affected person, actor and time. Staff app changes and Resume actions appear here too. Passwords, authenticator codes, setup links and environment values are excluded.
 
-What staff and portal admins look at (catalog pages and app management pages) goes to the separate private read log, not the audit log. Only someone with access to the portal's database can read it.
-
-<details>
-<summary>Recover read-log capacity</summary>
-
-Pruning happens during staff reads, in batches of up to 1,000 expired entries. If a full batch is removed, the next read can prune another; once fewer than 1,000 remain to delete, pruning waits a day. An unused portal can keep entries beyond 30 days. At 2 million entries, or if a read can't be recorded, staff catalog and app management reads fail. Owners aren't affected.
-
-If that happens:
-
-1. Use the operator's recovery connection to stop the portal services and backup timer, then take a broker backup ([Backups and recovery](backups-and-recovery.md)).
-2. Export the private read-log entries to your approved private evidence store.
-3. As the `management-broker` account, in one SQLite transaction on `<adminState>/management-broker/management.sqlite3`: delete the reviewed or expired rows from `staff_read_audit`, set `staff_read_state.row_count` to the result of `SELECT COUNT(*) FROM staff_read_audit`, and set `staff_read_state.pruned_at` to the current Unix timestamp.
-4. Check the database's integrity and the counts, take a new backup, and start the services again.
-
-Never reset the counter without removing the rows, and never delete recent entries only to let more staff reads through.
-
-</details>
+The separate private read log records staff and admin reads and is retained for 30 days. It is available only through the portal database. If the service cannot record a read, it refuses that read. See [Internals](../reference/internals.md#staff-and-admin-authority) for authorization and read-log limits.
 
 ## Related
 
-- [Open the owner portal](open-the-portal.md): installing the portal, the first portal admin, and recovering a lost one
-- [Roll back to a retained portal pair](open-the-portal.md#roll-back-to-a-retained-portal-pair): returning to an earlier portal release
-- [Deploy an app](for-app-owners.md): what owners see, and the guide to share with students
-- [Deploy apps from the command line](deploy-apps-from-the-command-line.md): operator deployments, sizing plans, and app IDs
-- [Backups and recovery](backups-and-recovery.md): managed-data backups and restoring the portal's database
-- [Security](../security.md#the-owner-portal): why the roles are split this way
+- [Open the owner portal](open-the-portal.md)
+- [Deploy an app](for-app-owners.md)
+- [Deploy apps from the command line](deploy-apps-from-the-command-line.md)
+- [Backups and recovery](backups-and-recovery.md)

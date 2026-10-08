@@ -225,12 +225,12 @@ def mutate_storage(self: Broker, request: Request) -> Response:
     user, app = self.own(request, mutation=True)
     creating = "resource" not in request.path_parameters
     if creating:
-        body = self.identity_mutation_body(request, app, {"type"})
+        body = self.mutation_body(request, {"type"})
         if not isinstance(body["type"], str) or body["type"] not in RESOURCE_OUTPUTS:
             raise HttpError(400, "INVALID_FIELD", "Choose postgres, mongo or s3.")
         path, kind = f"/v1/applications/{app['id']}/storage", "storage_create"
     else:
-        self.identity_mutation_body(request, app, set())
+        self.mutation_body(request, set())
         resource = checked_uuid(request.path_parameters["resource"])
         action = request.path.rsplit("/", 1)[1]
         body, path, kind = {}, f"/v1/storage/{resource}/{action}", f"storage_{action}"
@@ -333,13 +333,11 @@ def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: 
     ).fetchone()
     if current:
         message = (
-            (
-                "A previous deploy hasn't finished. Resume it from Activity."
-                if current["kind"] == "deploy"
-                else "A previous change hasn't finished. Open Activity to finish it."
-            )
-            if current["state"] == "blocked"
-            else "A change is still in progress. Check Activity before trying again."
+            "Finish the previous deployment in the app's Overview before trying again."
+            if current["state"] in {"blocked", "unknown"} and current["kind"] == "deploy"
+            else "Finish the previous change in the app's Overview before trying again."
+            if current["state"] in {"blocked", "unknown"}
+            else "Check the change in the app's Overview before trying again."
         )
         raise HttpError(409, "APP_BUSY", message)
     if unlimited(db, user_id):

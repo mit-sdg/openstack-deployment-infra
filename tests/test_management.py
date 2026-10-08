@@ -594,7 +594,7 @@ class OwnerIntentTests(ManagementCase):
                 admin = intent_model(row, diagnostic=True)
                 self.assertEqual(admin["safeError"], expected or "Generic failure.")
                 self.assertEqual(admin["controllerErrorCode"], code)
-                staff = self.broker.staff.operation_model(row)
+                staff = self.broker.class_reads.operation_model(row)
                 self.assertEqual(staff["guidance"], expected)
                 self.assertEqual(staff["controllerErrorCode"], code)
         self.assertIsNone(deploy_failure_guidance("env_set", "failed", "BUILD_REJECTED", None))
@@ -632,7 +632,7 @@ class OwnerIntentTests(ManagementCase):
             row = dict(
                 db.execute("SELECT * FROM intents WHERE id=?", (intent["intentId"],)).fetchone()
             )
-        staff = self.broker.staff.operation_model(row)
+        staff = self.broker.class_reads.operation_model(row)
         self.assertEqual(
             (staff["state"], staff["controllerErrorCode"], staff["guidance"]),
             ("failed", "PLATFORM_BUSY", BUSY_GUIDANCE),
@@ -695,9 +695,7 @@ class OwnerIntentTests(ManagementCase):
                     "data"
                 ]
                 self.assertEqual(detail["controllerErrorCode"], expected)
-                operations = self.call("GET", "/v1/staff/operations", owner="alice").body["data"][
-                    "items"
-                ]
+                operations = self.call("GET", "/v1/activity", owner="alice").body["data"]["items"]
                 self.assertEqual(
                     next(item for item in operations if item["intentId"] == intent["intentId"])[
                         "controllerErrorCode"
@@ -1408,7 +1406,7 @@ class WebTransportTests(ManagementCase):
         for method, path in (
             ("POST", f"/api/v1/apps/{app}/source/commits"),
             ("POST", f"/api/v1/apps/{app}/source/check"),
-            ("POST", f"/api/v1/admin-apps/{app}/source/check"),
+            ("POST", f"/api/v1/apps/{app}/source/check"),
             ("GET", f"/api/v1/apps/{app}/logs"),
             ("POST", f"/api/v1/apps/{app}/source-key/check"),
             ("DELETE", f"/api/v1/apps/{app}/source-key"),
@@ -1433,7 +1431,7 @@ class WebTransportTests(ManagementCase):
         connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
         connection.request(
             "PATCH",
-            f"/api/v1/accounts/{uuid.uuid4()}",
+            f"/api/v1/people/{uuid.uuid4()}/account",
             body=b'{"action":"role","value":"staff"}',
             headers={"Host": "127.0.0.1:18080", "Content-Type": "application/json"},
         )

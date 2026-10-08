@@ -21,7 +21,6 @@ export function useCommitChecks(
   return useQuery({
     queryKey: [
       'commit-checks',
-      platform?.scope ?? '',
       platform?.id ?? '',
       platform?.revision ?? 0,
       repository,

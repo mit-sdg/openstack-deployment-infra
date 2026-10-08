@@ -426,7 +426,7 @@ class LocalAdmissionTests(ManagementCase):
     def owner_device(self):
         invited = self.call(
             "POST",
-            "/v1/accounts",
+            "/v1/people",
             {"username": "limitowner", "displayName": "Owner", "role": "owner"},
             "admin",
         ).body["data"]

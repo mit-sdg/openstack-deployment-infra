@@ -19,15 +19,15 @@ from ..common import canonical, digest, object_body, strict_json, utc
 from ..config import Config
 from . import resources
 from .accounts import Accounts, audit
-from .admin_apps import AdminApps
+from .app_management import AppManagement
 from .auth import Auth
+from .class_reads import ClassReads, profile
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
 from .journal import Journal, intent_model
 from .members import Members, activity
 from .runtime_logs import RuntimeLogs
 from .source_keys import SourceKeys
-from .staff import StaffReads
 
 RESERVED = {"admin", "api", "auth", "status", "www", "platform", "class"}
 # Apps a user may work on: their own, and those they're a team member of.
@@ -78,9 +78,9 @@ class Broker:
         self.auth = Auth(config, self.database)
         self.client = ProjectClient(config.controller_socket, config.controller_timeout)
         self.journal = Journal(self.database, self.client)
-        self.staff = StaffReads(self)
+        self.class_reads = ClassReads(self)
         self.accounts = Accounts(self)
-        self.admin_apps = AdminApps(self)
+        self.app_management = AppManagement(self)
         self.runtime_logs = RuntimeLogs(self)
         self.source_keys = SourceKeys(self)
         self.members = Members(self)
@@ -121,8 +121,8 @@ class Broker:
             ("POST", "/v1/apps/{app}/storage", self.mutate_storage),
             ("POST", "/v1/apps/{app}/storage/{resource}/verify", self.mutate_storage),
             ("POST", "/v1/apps/{app}/storage/{resource}/rotate", self.mutate_storage),
-            ("POST", "/v1/apps/{app}/state", self.admin_apps.state),
-            ("POST", "/v1/apps/{app}/restart", self.admin_apps.restart),
+            ("POST", "/v1/apps/{app}/state", self.app_management.state),
+            ("POST", "/v1/apps/{app}/restart", self.app_management.restart),
             ("POST", "/v1/apps/{app}/deployments", self.deploy),
             ("GET", "/v1/apps/{app}/deployments", self.history),
             ("GET", "/v1/apps/{app}/deployments/{deployment}", self.deployment),
@@ -137,37 +137,44 @@ class Broker:
             ("POST", "/v1/auth/token-info", self.accounts.token_info),
             ("POST", "/v1/auth/enroll", self.accounts.enroll),
             ("POST", "/v1/auth/enroll/finish", self.accounts.finish),
-            ("GET", "/v1/accounts", self.accounts.listing),
-            ("POST", "/v1/accounts", self.accounts.create),
-            ("PATCH", "/v1/accounts/{user}", self.accounts.change),
-            ("PUT", "/v1/accounts/{user}/quotas", self.accounts.quotas),
-            ("GET", "/v1/account-audit", self.accounts.history),
+            ("GET", "/v1/people/{user}/account", self.accounts.detail),
+            ("POST", "/v1/people", self.accounts.create),
+            ("PATCH", "/v1/people/{user}/account", self.accounts.change),
+            ("PUT", "/v1/people/{user}/quotas", self.accounts.quotas),
+            ("GET", "/v1/audit", self.accounts.history),
             ("POST", "/v1/reauthenticate", self.accounts.reauthenticate),
-            ("GET", "/v1/staff/owners", self.staff.owners),
-            ("GET", "/v1/staff/owners/{owner}", self.staff.owner),
-            ("GET", "/v1/staff/apps", self.staff.apps),
-            ("GET", "/v1/staff/apps/{app}", self.staff.app),
-            ("GET", "/v1/staff/apps/{app}/deployments", self.staff.deployments),
-            ("GET", "/v1/staff/apps/{app}/deployments/{deployment}", self.staff.deployment),
-            ("GET", "/v1/staff/operations", self.staff.operations),
+            ("GET", "/v1/people", self.class_reads.owners),
+            ("GET", "/v1/people/{owner}", self.class_reads.owner),
+            ("GET", "/v1/activity", self.class_reads.operations),
         ]
         routes.extend(self.source_keys.routes("/v1/apps"))
         routes.extend(self.members.routes("/v1/apps"))
-        routes.extend(self.admin_apps.routes())
+        routes = self.app_management.routes() + routes
         for method, path, handler in routes:
 
             def guarded(request: Request, handler: Any = handler, route: str = path) -> Response:
                 actor_token = self.request_actor.set(None)
                 try:
-                    if route.startswith("/v1/admin-apps"):
-                        return self.admin_apps.handle(request, handler)
-                    if route.startswith("/v1/staff/"):
-                        return self.staff.handle(request, handler, route)
+                    if route.startswith("/v1/apps/{app}"):
+                        user, _sid = self.auth.authenticate(request, touch=False)
+                        if user["role"] in {"staff", "admin"}:
+                            return self.app_management.handle(request, handler)
+                    if route.startswith("/v1/all-apps") or route in {
+                        "/v1/people/eligible-owners",
+                        "/v1/apps/{app}/owner",
+                        "/v1/apps/{app}/storage/{resource}",
+                    }:
+                        return self.app_management.handle(request, handler)
+                    if (
+                        route in {"/v1/people", "/v1/people/{owner}", "/v1/activity"}
+                        and request.method == "GET"
+                    ):
+                        return self.class_reads.handle(request, handler, route)
                     if route in {
-                        "/v1/accounts",
-                        "/v1/accounts/{user}",
-                        "/v1/accounts/{user}/quotas",
-                        "/v1/account-audit",
+                        "/v1/people",
+                        "/v1/people/{user}/account",
+                        "/v1/people/{user}/quotas",
+                        "/v1/audit",
                         "/v1/reauthenticate",
                     }:
                         self.auth.authenticate(
@@ -232,7 +239,7 @@ class Broker:
     def own(
         self, request: Request, *, mutation: bool = False
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        admin = request.path.startswith("/v1/admin-apps/")
+        admin = self.app_management.context.get() is not None
         user, _sid = self.auth.authenticate(
             request, kind="staff" if admin else None, mutation=mutation
         )
@@ -258,18 +265,12 @@ class Broker:
             )
         return user, app
 
-    def identity_mutation_body(
-        self, request: Request, app: dict[str, Any], fields: set[str]
-    ) -> dict[str, Any]:
+    @staticmethod
+    def mutation_body(request: Request, fields: set[str]) -> dict[str, Any]:
         body = {} if request.body is None and not fields else request.body
-        if (
-            not isinstance(body, dict)
-            or not fields <= set(body)
-            or set(body) - fields - {"identityProviderConfirmed"}
-        ):
+        if not isinstance(body, dict) or not fields <= set(body) or set(body) - fields:
             raise HttpError(400, "INVALID_REQUEST", "Unexpected mutation fields.")
-        self.admin_apps.validate_identity_field(body)
-        return {key: value for key, value in body.items() if key != "identityProviderConfirmed"}
+        return body
 
     def quota(self, user_id: str) -> dict[str, Any]:
         with self.database.connect() as db:
@@ -514,9 +515,19 @@ class Broker:
         _user, app = self.own(request)
         model = self.app_model(app)
         model["access"] = app["access"]
-        if app["access"] == "member":
+        if app["access"] in {"member", "admin"}:
             model["ownerDisplayName"] = self.owner_names([app["user_id"]]).get(app["user_id"])
-        model["identityProvider"] = self.admin_apps.identity(model)
+        if app["access"] == "admin":
+            model["ownerId"] = app["user_id"]
+            with self.database.connect() as db:
+                owner = db.execute(
+                    "SELECT username FROM users WHERE id=?", (app["user_id"],)
+                ).fetchone()
+            model["ownerUsername"] = profile(owner["username"], 32)
+            current = self.app_management.observed(app["id"])
+            model["requiresMaintenance"] = current.get("requiresMaintenance") is True
+            model["sizing"] = current.get("sizing")
+        model["identityProvider"] = self.app_management.identity(model)
         model["configurationChanged"] = False
         if model["activeDeploymentId"]:
             try:
@@ -564,12 +575,12 @@ class Broker:
         body: object,
         controller_key: str,
     ) -> str:
-        self.admin_apps.check(db)
+        self.app_management.check(db)
         context = self.request_actor.get()
         if context is not None:
             actor = self.auth.session_row(db, context[0], self.auth.clock())
             if (
-                self.admin_apps.context.get() is None
+                self.app_management.context.get() is None
                 and context[1] is not None
                 and db.execute(
                     "SELECT 1 FROM apps WHERE id=? AND " + ACCESS,
@@ -580,7 +591,7 @@ class Broker:
                 raise HttpError(404, "NOT_FOUND", "Application not found.")
         identifier, now = str(uuid.uuid4()), time.time()
         stored_body = dict(cast(dict[str, Any], body))
-        if self.admin_apps.context.get() is not None:
+        if self.app_management.context.get() is not None:
             stored_body["_portalAdmin"] = True
         db.execute(
             "INSERT INTO intents(id,user_id,app_id,kind,client_key,controller_key,fingerprint,method,path,body,state,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,'prepared',?,?)",
@@ -603,13 +614,13 @@ class Broker:
             "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
             (user, app, identifier, kind, now),
         )
-        self.admin_apps.record_audit(db, user, app, kind, identifier, now)
+        self.app_management.record_audit(db, user, app, kind, identifier, now)
         return identifier
 
     def create(self, request: Request) -> Response:
         user, _sid = self.auth.authenticate(request, mutation=True)
         self.request_actor.set((_sid, None))
-        admin = request.path == "/v1/admin-apps"
+        admin = request.path == "/v1/all-apps"
         body = object_body(request.body, {"slug", "ownerId"} if admin else {"slug"})
         owner = checked_uuid(body["ownerId"]) if admin else user["id"]
         name = slug(body["slug"])
@@ -621,7 +632,7 @@ class Broker:
         )
         with self.database.connect(write=True) as db:
             if admin:
-                self.admin_apps.check_owner(db, owner)
+                self.app_management.check_owner(db, owner)
             existing = self.existing(db, user["id"], key, fingerprint)
             if existing is not None:
                 identifier, app_id = existing["id"], existing["app_id"]
@@ -769,9 +780,9 @@ class Broker:
     def deploy(self, request: Request) -> Response:
         user, app = self.own(request, mutation=True)
         body = (
-            self.admin_apps.deployment_body(request, app)
-            if request.path.startswith("/v1/admin-apps/")
-            else self.identity_mutation_body(request, app, {"configurationRevision", "commit"})
+            self.app_management.deployment_body(request, app)
+            if self.app_management.context.get() is not None
+            else self.mutation_body(request, {"configurationRevision", "commit"})
         )
         sha = commit(body["commit"])
         revision = body["configurationRevision"]
@@ -802,7 +813,7 @@ class Broker:
                     "configurationRevision": revision,
                     "configuration": strict_json(cfg["configuration"].encode()),
                 }
-                if request.path.startswith("/v1/admin-apps/"):
+                if self.app_management.context.get() is not None:
                     controller_body.update(
                         {k: body[k] for k in ("maintenance", "plan") if k in body}
                     )
@@ -877,7 +888,7 @@ class Broker:
         user, _sid = self.auth.authenticate(request)
         response = self.intent_response(checked_uuid(request.path_parameters["intent"]), user["id"])
         if user["role"] in {"staff", "admin"}:
-            self.staff.audit(
+            self.class_reads.audit(
                 request,
                 "/v1/intents/{intent}",
                 user["id"],

@@ -30,7 +30,7 @@ Sessions are stored on the server:
 
 Owner times default to `absoluteSeconds` and `idleSeconds` in the inventory (step 2). Shorter owner times also shorten staff and admin sessions. Sessions keep the role assigned at sign-in; role changes, disabling an account, and credential resets end its sessions.
 
-Commons password changes, account archival, and revoked approval don't end existing portal sessions. To cut off access, use **Disable account**. **Sign out everywhere** ends sessions but allows the person to sign in again. See [Manage accounts](manage-apps-and-people.md#manage-accounts).
+Commons password changes, account archival, and revoked approval don't end existing portal sessions. To cut off access, use **Disable account**. **Sign out everywhere** ends sessions but allows the person to sign in again. See [Manage accounts](manage-apps-and-people.md#help-a-person).
 
 ## Before you start
 
@@ -221,17 +221,17 @@ Print a single-use setup link on the admin host. It expires after 24 hours; a ne
 4. Choose a **Username** (3 to 32 characters: lowercase letters, digits, `.`, `_`, or `-`, starting with a letter), an optional **Display name**, and a **New password** (at least 12 characters, at most 1024 bytes, not containing the username). Select **Continue**.
 5. On **Add your authenticator**, scan the QR code or enter the key in your authenticator app. The key is shown only this once. Enter the 6-digit **Authentication code** and select **Finish setup**. You have 10 minutes and five tries.
 
-You're now signed in as a portal admin, on **Admin** > **Accounts**.
+You're now signed in as a portal admin, on **People**.
 
 If setup is abandoned or uses all five tries, print a new link and choose another username. The unfinished account keeps its username reserved; you can disable it later.
 
 ## 6. Add staff and set limits
 
-As the portal admin, open **Admin** > **Accounts**:
+As the portal admin, open **People**:
 
 - **Staff with local accounts.** Select **Create account**, set **Role** to **Staff**, and send the **Setup link** privately. It works once and expires in 72 hours. The portal sends no email.
 - **Staff who use Commons.** Ask them to sign in once, so their account exists. Then open their account, set **Role** to **Staff**, and select **Change role**.
-- **Limits.** Owners get `appLimit` and `concurrencyLimit` from the inventory. To give one owner more or less, open their account and change **Apps** or **Changes at a time** under **Limits**.
+- **Limits.** Owners get `appLimit` and `concurrencyLimit` from the inventory. To give one owner more or less, open their account and change **My apps** or **Changes at a time** under **Limits**.
 
 Creating accounts and changing roles ask for your password and a fresh authenticator code, unless you confirmed them in the last five minutes. [Manage apps and people](manage-apps-and-people.md) covers roles, limits, and the rest of the account tools.
 
@@ -239,7 +239,7 @@ Creating accounts and changing roles ask for your password and a fresh authentic
 
 1. Open `https://<domain>` in a private browser window.
 2. Select **Sign in with your class account** (with your `classLabel`). Commons asks you to approve the portal the first time.
-3. You should land on **Apps**. As the portal admin, you'll now see that account in **Accounts** with the role **Owner**.
+3. You should land on **My apps**. As the portal admin, you'll now see that account in **People** with the role **Owner**.
 
 If sign-in doesn't finish, the portal returns to the sign-in page with a message:
 
@@ -249,7 +249,7 @@ If sign-in doesn't finish, the portal returns to the sign-in page with a message
 | Sign-in was cancelled. | The person chose Cancel on Commons. | Try again. |
 | That sign-in expired. Try again. | Commons refused the code (already used, expired, approval withdrawn, or the person was archived), or the browser took more than 10 minutes to come back. | Try again. If it keeps happening for everyone, check that the inventory's `commonsOrigin` is the Commons that people approve on. |
 | Signing in with your class account is unavailable right now. Try again in a minute. | `management-identity` couldn't reach Commons or got an unexpected answer. | Read its journal (`recovery sudo journalctl -u <namespace>-management-identity.service -n 100 --no-pager`). Lines read `identity-check=unavailable reason=<reason>`. A `connect:` reason points at the network: check `identityEgressCidrs` and that Commons answers over HTTPS. |
-| This account is disabled or archived. Contact staff if you think this is a mistake. | The portal account is disabled. | A portal admin enables it in **Accounts**. |
+| This account is disabled or archived. Contact staff if you think this is a mistake. | The portal account is disabled. | A portal admin enables it in **People**. |
 | Too many attempts. Wait a minute, then try again. | The address made too many sign-in attempts in a minute. | Wait a minute. For a class behind one shared address, raise `anonymousStartsPerMinute`. |
 
 ## Portal startup and controller restarts
@@ -263,7 +263,7 @@ You don't need to start or restart the portal by hand:
 
 ## Recover a lost portal admin
 
-If no one can sign in as a portal admin, create a new one with the same command as step 5. Choose a new username. The new admin can then open the old account in **Accounts** and either disable it or send it a reset link.
+If no one can sign in as a portal admin, create a new one with the same command as step 5. Choose a new username. The new admin can then open the old account in **People** and either disable it or send it a reset link.
 
 To replace both the password and the authenticator of an existing account, send **Reset authenticator** first and let the person finish it, then send **Reset password**. Sending a second reset cancels any earlier reset link for that account.
 

@@ -617,39 +617,18 @@ class Accounts:
             audit(db, actor["id"], user["id"], "quotas", dict(body), self.broker.auth.clock())
         return Response(200, {"data": self.broker.quota(user["id"])})
 
-    def listing(self, request: Request) -> Response:
+    def detail(self, request: Request) -> Response:
         self.admin(request)
-        if set(request.query) - {"limit", "cursor", "q"} or any(
-            len(v) != 1 or not v[0] for v in request.query.values()
-        ):
-            raise HttpError(400, "INVALID_REQUEST", "Invalid account page fields.")
-        limit = self.broker.staff.page_limit(request)
-        search = request.query.get("q", ("",))[0]
-        if len(search) > 64 or any(ord(c) < 32 for c in search):
-            raise HttpError(400, "INVALID_FIELD", "Account search exceeds its bounds.")
-        pattern = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        clause = "(username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')"
-        args: list[object] = [pattern, pattern]
+        if request.query:
+            raise HttpError(400, "INVALID_REQUEST", "Unexpected account fields.")
+        identifier = checked_uuid(request.path_parameters["user"])
         with self.broker.database.connect() as db:
-            cursor = request.query.get("cursor", (None,))[0]
-            if cursor:
-                point = db.execute(
-                    f"SELECT created,id FROM users WHERE {clause} AND id=?",
-                    (*args, checked_uuid(cursor)),
-                ).fetchone()
-                if point is None:
-                    raise HttpError(400, "INVALID_REQUEST", "Unknown account page cursor.")
-                clause += " AND (created<? OR (created=? AND id<?))"
-                args += [point["created"], point["created"], point["id"]]
             rows = db.execute(
-                f"SELECT id,username,display_name,role,enabled,status,last_login,issuer,COALESCE((SELECT apps FROM quotas WHERE user_id=users.id),?) AS app_limit,COALESCE((SELECT concurrent FROM quotas WHERE user_id=users.id),?) AS concurrent_limit,(SELECT COUNT(*) FROM apps WHERE user_id=users.id AND lifecycle!='rejected') AS app_count,(SELECT totp_confirmed FROM local_accounts WHERE user_id=users.id) AS totp_enabled FROM users WHERE {clause} ORDER BY created DESC,id DESC LIMIT ?",
-                (
-                    self.broker.config.app_limit,
-                    self.broker.config.concurrency_limit,
-                    *args,
-                    limit + 1,
-                ),
+                "SELECT id,username,display_name,role,enabled,status,last_login,issuer,COALESCE((SELECT apps FROM quotas WHERE user_id=users.id),?) AS app_limit,COALESCE((SELECT concurrent FROM quotas WHERE user_id=users.id),?) AS concurrent_limit,(SELECT COUNT(*) FROM apps WHERE user_id=users.id AND lifecycle NOT IN ('rejected','deleted')) AS app_count,(SELECT totp_confirmed FROM local_accounts WHERE user_id=users.id) AS totp_enabled FROM users WHERE id=?",
+                (self.broker.config.app_limit, self.broker.config.concurrency_limit, identifier),
             ).fetchall()
+        if not rows:
+            raise HttpError(404, "NOT_FOUND", "Account not found.")
         items = [
             {
                 "userId": row["id"],
@@ -668,18 +647,9 @@ class Accounts:
                 else row["concurrent_limit"],
                 "totpEnabled": bool(row["totp_enabled"]),
             }
-            for row in rows[:limit]
+            for row in rows
         ]
-        return Response(
-            200,
-            {
-                "data": {
-                    "items": items,
-                    "nextCursor": rows[limit - 1]["id"] if len(rows) > limit else None,
-                    "truncated": len(rows) > limit,
-                }
-            },
-        )
+        return Response(200, {"data": items[0]})
 
     def history(self, request: Request) -> Response:
         self.admin(request)
@@ -687,7 +657,7 @@ class Accounts:
             len(v) != 1 for v in request.query.values()
         ):
             raise HttpError(400, "INVALID_REQUEST", "Invalid audit page fields.")
-        limit = self.broker.staff.page_limit(request)
+        limit = self.broker.class_reads.page_limit(request)
         cursor = request.query.get("cursor", ("9223372036854775807",))[0]
         if not cursor.isdecimal() or len(cursor) > 19 or not 0 < int(cursor) <= 9223372036854775807:
             raise HttpError(400, "INVALID_REQUEST", "Invalid audit cursor.")

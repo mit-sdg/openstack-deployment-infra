@@ -45,7 +45,7 @@ export function NewApp() {
         back={
           <Link href="/apps" className={backLinkClass}>
             <Icon name="arrow-left" />
-            Apps
+            My apps
           </Link>
         }
       />

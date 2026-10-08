@@ -1,6 +1,6 @@
-import { Button, Fieldset, Hint, LoadingRows, Radio, RelativeTime } from '@openstack-platform/ui';
-import { useMutation, useQuery } from '@tanstack/react-query';
-import type { SourceAccess, SourceReadOptions } from '../api';
+import { Fieldset, Hint, LoadingRows, Radio, RelativeTime } from '@openstack-platform/ui';
+import { useQuery } from '@tanstack/react-query';
+import type { SourceReadOptions } from '../api';
 import { useId } from 'react';
 import { GitHubError, recentCommits, type RecentCommit } from '../utils/github';
 import '../pages/app-pages.css';
@@ -16,14 +16,7 @@ const problems = {
 /** Query for the newest commits on a branch, shared by pickers of the same branch. */
 export function useRecentCommits(repository: string, branch: string, platform?: SourceReadOptions) {
   return useQuery({
-    queryKey: [
-      'github-commits',
-      repository,
-      branch,
-      platform?.scope ?? '',
-      platform?.id ?? '',
-      platform?.revision ?? 0,
-    ],
+    queryKey: ['github-commits', repository, branch, platform?.id ?? '', platform?.revision ?? 0],
     queryFn: async ({ signal }) => {
       try {
         return await recentCommits(repository, branch, signal);
@@ -39,65 +32,18 @@ export function useRecentCommits(repository: string, branch: string, platform?: 
   });
 }
 
-/**
- * For a private repository GitHub won't list commits to the browser; the app's
- * deploy key can still read the branch's newest commit on the platform side.
- */
-function LatestWithKey({
-  branch,
-  latest,
-  onSelect,
-}: {
-  branch: string;
-  latest: () => Promise<SourceAccess>;
-  onSelect: (commit: RecentCommit) => void;
-}) {
-  const read = useMutation({
-    mutationFn: latest,
-    onSuccess: (access) => {
-      if (access.keyPresent && access.head)
-        onSelect({
-          sha: access.head,
-          message: `Latest commit on ${branch}`,
-          author: null,
-          date: null,
-        });
-    },
-  });
-  const access = read.data;
-  return (
-    <div className="ui-stack ui-gap-2">
-      <div>
-        <Button size="sm" loading={read.isPending} onClick={() => read.mutate()}>
-          Use the latest commit on {branch}
-        </Button>
-      </div>
-      {(read.error || (access && !(access.keyPresent && access.head))) && (
-        <Hint>
-          {access && !access.keyPresent
-            ? 'This app has no deploy key. Create one in Settings to deploy from a private repository.'
-            : 'The deploy key couldn’t read the branch. Check access in Settings.'}
-        </Hint>
-      )}
-    </div>
-  );
-}
-
 /** Pick one of the newest commits on the branch; a SHA field stays the fallback. */
 export function RecentCommits({
   repository,
   branch,
   value,
   onSelect,
-  latest,
   platform,
 }: {
   repository: string;
   branch: string;
   value: string;
   onSelect: (commit: RecentCommit) => void;
-  /** Reads the branch's newest commit with the app's deploy key. */
-  latest?: () => Promise<SourceAccess>;
   platform?: SourceReadOptions;
 }) {
   const name = useId();
@@ -111,12 +57,7 @@ export function RecentCommits({
     );
   if (commits.error) {
     const problem = commits.error instanceof GitHubError ? commits.error.problem : 'unavailable';
-    return (
-      <>
-        <Hint>{problems[problem]}</Hint>
-        {latest && <LatestWithKey branch={branch} latest={latest} onSelect={onSelect} />}
-      </>
-    );
+    return <Hint>{problems[problem]}</Hint>;
   }
   if (!commits.data.length) return <Hint>{problems['not-found']}</Hint>;
   return (

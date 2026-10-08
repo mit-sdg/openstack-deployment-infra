@@ -298,7 +298,7 @@ describe('owner resources', () => {
       );
     vi.stubGlobal('fetch', fetcher);
     try {
-      for (const prefix of ['/apps', '/admin-apps']) {
+      for (const prefix of ['/apps']) {
         const service = resourceApi(prefix);
         await service.createStorage('app', 'postgres', 'key');
         expect(JSON.parse(fetcher.mock.lastCall![1].body)).toEqual({ type: 'postgres' });
@@ -344,7 +344,7 @@ describe('owner resources', () => {
   it('shows sign-in information for managed storage changes without a checkbox', async () => {
     vi.spyOn(api, 'intent').mockResolvedValue(intent);
     // Managed sign-in apps show information without requiring consent.
-    const service = resourceApi('/admin-apps');
+    const service = resourceApi('/apps');
     vi.spyOn(service, 'environment').mockResolvedValue({ revision: 1, updatedAt: null, items: [] });
     vi.spyOn(service, 'storage').mockResolvedValue({ items: [], intents: [] });
     const confirm = vi.spyOn(window, 'confirm');
@@ -372,7 +372,7 @@ describe('owner resources', () => {
       expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
       fireEvent.click(submit);
       await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
-      expect(fetcher.mock.calls[0][0]).toBe('/api/v1/admin-apps/app/storage');
+      expect(fetcher.mock.calls[0][0]).toBe('/api/v1/apps/app/storage');
       expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
         type: 'mongo',
       });

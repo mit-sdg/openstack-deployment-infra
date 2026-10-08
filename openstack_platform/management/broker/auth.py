@@ -239,7 +239,7 @@ class Auth:
             "INSERT INTO audit(user_id,action,created) VALUES(?,'sign_in',?)", (user["id"], now)
         )
         return {
-            "data": {"returnPath": "/admin/accounts" if user["role"] == "admin" else "/apps"},
+            "data": {"returnPath": "/people" if user["role"] == "admin" else "/apps"},
             "browser": {
                 "cookies": [self.directive("login"), self.directive("session", session, lifetime)]
                 + (

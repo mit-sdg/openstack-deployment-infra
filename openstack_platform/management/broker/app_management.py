@@ -21,10 +21,10 @@ from ...validation import flavor_reference, repository_url, slug
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, strict_json
 from .accounts import audit
+from .class_reads import ReadLimits, profile
 from .client import ControllerUnavailable
-from .members import activity
+from .journal import intent_model
 from .resources import operation_quota
-from .staff import ReadLimits, profile
 from .staff_policy import public_url
 
 if TYPE_CHECKING:
@@ -37,7 +37,7 @@ class Authority(NamedTuple):
     sid: str
 
 
-class AdminApps:
+class AppManagement:
     def __init__(self, broker: Broker) -> None:
         self.broker = broker
         # Authority is request-local, including concurrent Unix-server threads.
@@ -50,42 +50,24 @@ class AdminApps:
 
     def routes(self) -> list[tuple[str, str, Any]]:
         b = self.broker
-        root = "/v1/admin-apps"
         return [
-            ("GET", root, self.listing),
-            ("POST", root, b.create),
-            ("POST", root + "/adopt", self.adopt),
-            ("GET", root + "/owners", self.owners),
-            ("GET", root + "/{app}", self.detail),
-            ("GET", root + "/{app}/configuration", b.configuration),
-            ("PUT", root + "/{app}/configuration", b.save),
-            ("GET", root + "/{app}/environment", b.environment),
-            ("PUT", root + "/{app}/environment/{key}", b.mutate_environment),
-            ("DELETE", root + "/{app}/environment/{key}", b.mutate_environment),
-            ("GET", root + "/{app}/storage", b.storage),
-            ("POST", root + "/{app}/storage", b.mutate_storage),
-            ("POST", root + "/{app}/storage/{resource}/verify", b.mutate_storage),
-            ("POST", root + "/{app}/storage/{resource}/rotate", b.mutate_storage),
-            ("DELETE", root + "/{app}/storage/{resource}", self.delete_storage),
-            ("POST", root + "/{app}/deployments", b.deploy),
-            ("GET", root + "/{app}/deployments", b.history),
-            ("GET", root + "/{app}/deployments/{deployment}", b.deployment),
-            ("GET", root + "/{app}/logs", b.runtime_logs.handle),
-            ("GET", root + "/{app}/activity", lambda request: activity(b, request)),
-            *b.source_keys.routes(root),
-            *b.members.routes(root),
-            ("PUT", root + "/{app}/owner", self.reassign),
-            ("POST", root + "/{app}/state", self.state),
-            ("POST", root + "/{app}/restart", self.restart),
+            ("GET", "/v1/all-apps", self.listing),
+            ("POST", "/v1/all-apps", b.create),
+            ("POST", "/v1/all-apps/adopt", self.adopt),
+            ("GET", "/v1/people/eligible-owners", self.owners),
+            ("PUT", "/v1/apps/{app}/owner", self.reassign),
+            ("DELETE", "/v1/apps/{app}/storage/{resource}", self.delete_storage),
         ]
 
     def handle(self, request: Request, handler: Callable[[Request], Response]) -> Response:
         user, sid = self.broker.accounts.admin(request, kind="staff")
         allowed = (
             {"q", "limit", "cursor"}
-            if request.path == "/v1/admin-apps/owners"
+            if request.path == "/v1/people/eligible-owners"
+            else {"limit", "cursor", "q", "ownerId", "status"}
+            if request.path == "/v1/all-apps"
             else {"limit", "cursor"}
-            if request.path == "/v1/admin-apps" or request.path.endswith("/deployments")
+            if request.path.endswith("/deployments")
             else {"limit", "attention"}
             if request.path.endswith("/activity")
             else {"lines", "offset"}
@@ -120,7 +102,7 @@ class AdminApps:
                 route = request.path
                 for value in request.path_parameters.values():
                     route = route.replace(value, "{id}")
-                self.broker.staff.audit(
+                self.broker.class_reads.audit(
                     request,
                     route,
                     user["id"],
@@ -174,16 +156,6 @@ class AdminApps:
             isinstance(value, str)
             and urlsplit(value).hostname == urlsplit(self.broker.config.commons_origin).hostname
         )
-
-    @staticmethod
-    def validate_identity_field(body: dict[str, Any]) -> None:
-        """Accept the retired boolean confirmation field during mixed-version rollouts."""
-        if (
-            "identityProviderConfirmed" in body
-            and type(body["identityProviderConfirmed"]) is not bool
-        ):
-            raise HttpError(400, "INVALID_FIELD", "Identity-provider confirmation must be boolean.")
-        body.pop("identityProviderConfirmed", None)
 
     @staticmethod
     def sizing_plan(value: dict[str, Any], app: str, model: dict[str, Any]) -> None:
@@ -269,7 +241,6 @@ class AdminApps:
                 "commit",
                 "maintenance",
                 "plan",
-                "identityProviderConfirmed",
             }
         ):
             raise HttpError(400, "INVALID_REQUEST", "Invalid deployment fields.")
@@ -283,7 +254,6 @@ class AdminApps:
                 400, "INVALID_FIELD", "Maintenance must be boolean and plan must be an object."
             )
         model = self.observed(app["id"])
-        self.validate_identity_field(body)
         if "plan" in body:
             self.sizing_plan(body["plan"], app["id"], model)
         if model.get("requiresMaintenance") is True:
@@ -295,7 +265,7 @@ class AdminApps:
             len(v) != 1 or not v[0] for v in request.query.values()
         ):
             raise HttpError(400, "INVALID_REQUEST", "Invalid owner page fields.")
-        limit = self.broker.staff.page_limit(request)
+        limit = self.broker.class_reads.page_limit(request)
         search = request.query.get("q", ("",))[0]
         if len(search) > 64 or any(ord(c) < 32 for c in search):
             raise HttpError(400, "INVALID_FIELD", "Owner search exceeds its bounds.")
@@ -341,14 +311,48 @@ class AdminApps:
 
     def listing(self, request: Request) -> Response:
         b = self.broker
-        limit, cursor = b.staff.page_limit(request), request.query.get("cursor", (None,))[0]
+        viewer, _sid = b.auth.authenticate(request, kind="staff", touch=False)
+        limit, cursor = b.class_reads.page_limit(request), request.query.get("cursor", (None,))[0]
         with b.database.connect() as db:
             parameters: list[object] = []
             where = "a.lifecycle NOT IN ('rejected','deleted')"
+            search = request.query.get("q", ("",))[0].strip()
+            if len(search) > 64:
+                raise HttpError(400, "INVALID_REQUEST", "Search is too long.")
+            if search:
+                pattern = (
+                    "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                )
+                where += " AND (a.slug LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\' OR u.display_name LIKE ? ESCAPE '\\')"
+                parameters.extend([pattern] * 3)
+            owner = request.query.get("ownerId", (None,))[0]
+            if owner:
+                where += " AND a.user_id=?"
+                parameters.append(checked_uuid(owner))
+            state = request.query.get("status", (None,))[0]
+            status_sql = f"CASE WHEN a.lifecycle!='ready' THEN a.lifecycle WHEN json_extract(o.body,'$.acceptedDeployment') IS NULL THEN 'not_deployed' WHEN o.updated<{time.time() - 30:.6f} THEN 'unknown' WHEN json_extract(o.body,'$.desiredRunning')=0 THEN 'stopped' WHEN json_extract(o.body,'$.health.allocationHealthy')=1 AND json_extract(o.body,'$.health.routeHealthy')=1 THEN 'healthy' WHEN json_extract(o.body,'$.health.allocationHealthy')=0 OR json_extract(o.body,'$.health.routeHealthy')=0 THEN 'unhealthy' ELSE 'unknown' END"
+            if state:
+                if state not in {
+                    "creating",
+                    "not_deployed",
+                    "stopped",
+                    "healthy",
+                    "unhealthy",
+                    "unknown",
+                    "attention",
+                }:
+                    raise HttpError(400, "INVALID_REQUEST", "Invalid app status.")
+                where += " AND " + (
+                    "EXISTS (SELECT 1 FROM intents i WHERE i.app_id=a.id AND i.state IN ('blocked','unknown'))"
+                    if state == "attention"
+                    else f"({status_sql})=?"
+                )
+                if state != "attention":
+                    parameters.append(state)
             if cursor:
                 point = db.execute(
-                    "SELECT created,id FROM apps WHERE id=?",
-                    (checked_uuid(cursor),),
+                    f"SELECT a.created,a.id FROM apps a JOIN users u ON u.id=a.user_id LEFT JOIN observations o ON o.app_id=a.id WHERE {where} AND a.id=?",
+                    (*parameters, checked_uuid(cursor)),
                 ).fetchone()
                 if point is None:
                     raise HttpError(400, "INVALID_REQUEST", "Unknown page cursor.")
@@ -360,12 +364,24 @@ class AdminApps:
                 dict(row)
                 for row in db.execute(
                     "SELECT a.*,u.username AS owner_username,u.display_name AS owner_display_name,"
-                    "o.body AS observation FROM apps a JOIN users u ON u.id=a.user_id"
+                    f"o.body AS observation,({status_sql}) AS app_state FROM apps a JOIN users u ON u.id=a.user_id"
                     f" LEFT JOIN observations o ON o.app_id=a.id WHERE {where}"
                     " ORDER BY a.created DESC,a.id DESC LIMIT ?",
                     (*parameters, limit + 1),
                 )
             ]
+        with b.database.connect() as db:
+            for row in rows[:limit]:
+                row["attention"] = [
+                    {
+                        **intent_model(item, diagnostic=True, viewer=viewer["id"]),
+                        "appSlug": row["slug"],
+                    }
+                    for item in db.execute(
+                        "SELECT * FROM intents WHERE app_id=? AND state IN ('blocked','unknown') ORDER BY created DESC,id DESC",
+                        (row["id"],),
+                    )
+                ]
         # Existence checks use bounded SQLite-only project reads, not live health.
         b.journal.reconcile_page(rows)
         return Response(
@@ -379,6 +395,8 @@ class AdminApps:
                             "ownerId": row["user_id"],
                             "savedRevision": row["revision"],
                             "lifecycleState": row["lifecycle"],
+                            "appState": row["app_state"],
+                            "attention": row["attention"],
                             **self.catalog_extras(row),
                         }
                         for row in rows[:limit]
@@ -411,37 +429,17 @@ class AdminApps:
             else None,
         }
 
-    def detail(self, request: Request) -> Response:
-        _user, app = self.broker.own(request)
-        response = self.broker.app(request)
-        model = dict(cast(dict[str, Any], response.body)["data"])
-        current = self.observed(app["id"])
-        with self.broker.database.connect() as db:
-            owner = db.execute(
-                "SELECT username,display_name FROM users WHERE id=?", (app["user_id"],)
-            ).fetchone()
-        model.update(
-            ownerId=app["user_id"],
-            ownerUsername=profile(owner["username"], 32),
-            ownerDisplayName=profile(owner["display_name"], 256),
-            identityProvider=self.identity(current),
-            requiresMaintenance=current.get("requiresMaintenance") is True,
-            sizing=current.get("sizing"),
-        )
-        return Response(200, {"data": model})
-
     def adopt(self, request: Request) -> Response:
         b = self.broker
         actor, _sid = b.auth.authenticate(request, kind="staff", mutation=True)
         if (
             not isinstance(request.body, dict)
             or "applicationId" not in request.body
-            or set(request.body) - {"applicationId", "ownerId", "identityProviderConfirmed"}
+            or set(request.body) - {"applicationId", "ownerId"}
         ):
             raise HttpError(
                 400, "INVALID_REQUEST", "Supply an application ID and optional owner ID."
             )
-        self.validate_identity_field(request.body)
         identifier = checked_uuid(request.body["applicationId"])
         owner = checked_uuid(request.body.get("ownerId", actor["id"]))
         key, fingerprint = (
@@ -553,7 +551,7 @@ class AdminApps:
     def reassign(self, request: Request) -> Response:
         b = self.broker
         actor, app = b.own(request, mutation=True)
-        body = b.identity_mutation_body(request, app, {"ownerId", "expectedOwnerId"})
+        body = b.mutation_body(request, {"ownerId", "expectedOwnerId"})
         owner, expected = checked_uuid(body["ownerId"]), checked_uuid(body["expectedOwnerId"])
         with b.database.connect(write=True) as db:
             self.check(db)
@@ -568,7 +566,7 @@ class AdminApps:
                 raise HttpError(
                     409,
                     "APP_BUSY",
-                    "A previous change hasn't finished. Open Activity to finish it before changing the owner.",
+                    "Finish the previous change in the app's Overview before changing the owner.",
                 )
             db.execute("UPDATE apps SET user_id=? WHERE id=?", (owner, app["id"]))
             # The new owner isn't also a member; other teammates stay.
@@ -589,11 +587,10 @@ class AdminApps:
         if (
             not isinstance(request.body, dict)
             or "desiredRunning" not in request.body
-            or set(request.body) - {"desiredRunning", "identityProviderConfirmed"}
+            or set(request.body) - {"desiredRunning"}
             or type(request.body["desiredRunning"]) is not bool
         ):
             raise HttpError(400, "INVALID_REQUEST", "Supply desiredRunning as a boolean.")
-        self.validate_identity_field(request.body)
         action = "enable" if request.body["desiredRunning"] else "disable"
         return self.dispatch(
             request,
@@ -608,7 +605,7 @@ class AdminApps:
     def restart(self, request: Request) -> Response:
         b = self.broker
         actor, app = b.own(request, mutation=True)
-        b.identity_mutation_body(request, app, set())
+        b.mutation_body(request, set())
         return self.dispatch(
             request,
             actor,
@@ -625,12 +622,11 @@ class AdminApps:
         if (
             not isinstance(request.body, dict)
             or "confirmation" not in request.body
-            or set(request.body) - {"confirmation", "identityProviderConfirmed"}
+            or set(request.body) - {"confirmation"}
         ):
             raise HttpError(
                 400, "INVALID_REQUEST", "Supply the typed application and storage confirmation."
             )
-        self.validate_identity_field(request.body)
         resource_id = checked_uuid(request.path_parameters["resource"])
         # Match single-use journal admission before the resource disappears.
         key, fingerprint = (
