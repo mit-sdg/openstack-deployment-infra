@@ -286,50 +286,65 @@ jobs:
           git diff --exit-code -- '*.nix'
 
   role-vm-tests:
-    name: Test ${{ matrix.role }} VM and image
+    name: Test ${{ matrix.role }} ${{ matrix.vm && matrix.image && 'VM and image' || matrix.vm && 'VM' || 'image and packages' }}
     needs: publication-context
     # PRs skip publication-context; the integration gates must still run.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
-      BUILD_EXAMPLE_IMAGE: ${{ inputs.development_publish != true && needs.publication-context.outputs.publish != 'true' }}
+      BUILD_EXAMPLE_IMAGE: ${{ matrix.image && inputs.development_publish != true && needs.publication-context.outputs.publish != 'true' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 5
       matrix:
-        role:
-          - admin
-          - ingress
-          - storage
-          - worker
-          - builder
+        # Admin's VM test and image each boot a VM; separate runners keep them
+        # from competing for CPU. Smaller roles share one store per runner.
+        include:
+          - { role: admin, vm: true, image: false }
+          - { role: admin, vm: false, image: true }
+          - { role: ingress, vm: true, image: true }
+          - { role: storage, vm: true, image: true }
+          - { role: worker, vm: true, image: true }
+          - { role: builder, vm: true, image: true }
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      # Reuse main's store for this role's pinned nixpkgs closure. Only main
+      # saves, once per flake.lock, so PRs restore without spending cache space.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ matrix.role }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-${{ matrix.role }}-
+          save: ${{ github.ref == 'refs/heads/main' && matrix.vm }}
+          gc-max-store-size-linux: 8G
       - name: Enable KVM when available
         run: |
           if [[ -e /dev/kvm ]]; then
             sudo chmod 0666 /dev/kvm
           fi
-      - name: Test role integration, admin packages, and build the image
+      - name: Build the role checks and example image
         run: |
-          checks=(".#checks.x86_64-linux.vm-${{ matrix.role }}")
-          if [[ ${{ matrix.role }} == admin ]]; then
+          checks=()
+          if [[ ${{ matrix.vm }} == true ]]; then
+            checks+=(".#checks.x86_64-linux.vm-${{ matrix.role }}")
+          elif [[ ${{ matrix.role }} == admin ]]; then
             checks+=(".#checks.x86_64-linux.package-smoke")
           fi
-          # One evaluation and store for the role's test and example image.
           # Production builds use their protected inventory/evidence job.
           if [[ $BUILD_EXAMPLE_IMAGE == true ]]; then
             checks+=(".#${{ matrix.role }}-image")
+            # Install the boot-smoke tools while Nix evaluates and builds.
+            tests/install_ci_apt_packages.sh xfsprogs genisoimage qemu-system-x86 qemu-utils \
+              > "$RUNNER_TEMP/apt.log" 2>&1 &
+            apt_pid=$!
           fi
           nix build --no-link --print-out-paths --print-build-logs "${checks[@]}" > build-outputs
-
-      - name: Install QEMU smoke-test tools
-        if: env.BUILD_EXAMPLE_IMAGE == 'true'
-        run: tests/install_ci_apt_packages.sh xfsprogs genisoimage qemu-system-x86 qemu-utils
+          if [[ -n ${apt_pid:-} ]] && ! wait "$apt_pid"; then
+            cat "$RUNNER_TEMP/apt.log" >&2
+            exit 1
+          fi
 
       - name: Boot role image with an OpenStack config drive
         if: env.BUILD_EXAMPLE_IMAGE == 'true'

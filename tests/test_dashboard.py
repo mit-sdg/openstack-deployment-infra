@@ -728,7 +728,8 @@ class ServerTests(unittest.TestCase):
         thread.start()
         try:
             connection = UnixHTTPConnection(foreign_path)
-            with self.assertRaises((http.client.RemoteDisconnected, ConnectionResetError)):
+            # The server may drop the peer before or after the request is sent.
+            with self.assertRaises((http.client.RemoteDisconnected, ConnectionError)):
                 connection.request("GET", "/", headers={"Host": "localhost"})
                 connection.getresponse()
             connection.close()
