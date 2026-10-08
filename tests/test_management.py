@@ -1187,9 +1187,16 @@ class WebTransportTests(ManagementCase):
         )
         thread.start()
         try:
-            status, response = ProjectClient(path).request("GET", "/v1/health")
-            self.assertEqual(status, 503)
-            self.assertEqual(response["error"]["code"], "PEER_IDENTITY_REJECTED")
+            # Send nothing: the rejection must arrive before any HTTP is parsed.
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+                peer.settimeout(5)
+                peer.connect(str(path))
+                raw = b""
+                while chunk := peer.recv(65536):
+                    raw += chunk
+            head, _, body = raw.partition(b"\r\n\r\n")
+            self.assertTrue(head.startswith(b"HTTP/1.1 503 "), head)
+            self.assertEqual(json.loads(body)["error"]["code"], "PEER_IDENTITY_REJECTED")
             self.assertEqual(path.stat().st_mode & 0o777, 0o660)
         finally:
             server.shutdown()
