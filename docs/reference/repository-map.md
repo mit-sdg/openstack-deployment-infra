@@ -138,20 +138,22 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 
 #### App core
 
+- `frontend/owner-portal/src/hooks/useAppDestination.ts` — keeps the task navigation and app back link consistent with personal or class access.
+- `frontend/owner-portal/src/hooks/useClassReads.tsx` — class read polling, hidden-tab pause, idle expiry and sequential refresh.
+- `frontend/owner-portal/src/classApi.ts` — typed, cancellable People and Activity metadata reads.
+- `frontend/owner-portal/src/appManagementApi.ts` — typed class app catalog, adoption, ownership and storage deletion requests.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory query cache.
-- `frontend/owner-portal/src/App.tsx` — role-gated sign-in, setup, owner, staff, and admin routes.
+- `frontend/owner-portal/src/App.tsx` — sign-in, setup, task destinations and shared app routes.
 - `frontend/owner-portal/src/api.ts` — typed requests, response checks, settings validation, and CSRF retries.
 - `frontend/owner-portal/src/authOptions.ts` — shared query for CSRF, sign-in label, and platform name.
-- `frontend/owner-portal/src/staffApi.ts` — typed, cancellable staff reads.
 - `frontend/owner-portal/src/adminApi.ts` — account, quota, step-up, and audit requests.
-- `frontend/owner-portal/src/adminAppsApi.ts` — typed staff and admin app-management requests.
 - `frontend/owner-portal/src/styles/app.css` — shared font, token, and component stylesheet imports.
-- `frontend/owner-portal/src/shell/PortalShell.tsx` — role navigation, theme toggle, and account menu.
+- `frontend/owner-portal/src/shell/PortalShell.tsx` — task navigation, theme toggle, and account menu.
 - `frontend/owner-portal/src/hooks/useIntentPolling.ts` — polls activity and individual operations until completion.
 - `frontend/owner-portal/src/hooks/useSession.ts` — session loading, sign-out, and expiry redirects.
 - `frontend/owner-portal/src/test-setup.ts` — Vitest DOM matchers and cleanup.
 
-#### Owner pages
+#### Shared app and sign-in pages
 
 - `frontend/owner-portal/src/pages/SignIn.tsx` — class sign-in, local accounts, and returned errors.
 - `frontend/owner-portal/src/pages/Enrollment.tsx` — one-time account setup and reset with authenticator enrollment.
@@ -166,30 +168,30 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/pages/Team.tsx` — an app's team.
 - `frontend/owner-portal/src/pages/app-pages.css` — app page layout using design tokens.
 
-#### Staff and admin pages
+#### Class pages and account setup
 
-- `frontend/owner-portal/src/pages/Staff.tsx` — staff routes and redirects from old app links.
-- `frontend/owner-portal/src/pages/staff/common.tsx` — staff polling, paging, idle timeout, tables, and activity.
-- `frontend/owner-portal/src/pages/staff/Owners.tsx` — owners, quotas, apps, and recent activity.
-- `frontend/owner-portal/src/pages/staff/Apps.tsx` — owner display names for app filters.
-- `frontend/owner-portal/src/pages/staff/Deployments.tsx` — staff deployment history and details.
-- `frontend/owner-portal/src/pages/staff/Activity.tsx` — activity feed with owner and app filters.
-- `frontend/owner-portal/src/pages/AdminApps.tsx` — shared staff/admin app pages with gated admin actions.
-- `frontend/owner-portal/src/pages/Accounts.tsx` — admin accounts, setup links, quotas, roles, and audit.
+- `frontend/owner-portal/src/pages/Audit.tsx` — admin-only account and app action audit.
+- `frontend/owner-portal/src/pages/People.tsx` — all people, their apps and activity, with admin-only account controls.
+- `frontend/owner-portal/src/pages/AllApps.tsx` — searchable app catalog with status filters, create-for and adoption.
+- `frontend/owner-portal/src/pages/Activity.tsx` — class activity with independently paged changes needing attention.
 - `frontend/owner-portal/src/pages/admin/common.tsx` — step-up flow, owner picker, and admin error messages.
 - `frontend/owner-portal/src/pages/admin/admin.css` — admin and account layout using tokens.
 - `frontend/owner-portal/src/pages/admin/QrCode.tsx` — the authenticator setup QR code, drawn as SVG.
 
 #### Components
 
+- `frontend/owner-portal/src/components/AccountControls.tsx` — admin-only account creation, roles, limits, access and recovery controls on People.
+- `frontend/owner-portal/src/components/DeploymentStatus.tsx` — deployment status joined with the original change and shared Resume action.
+- `frontend/owner-portal/src/components/ClassRecords.tsx` — shared pagers, loading states and class activity adapters.
+- `frontend/owner-portal/src/components/AppManagement.tsx` — elevated ownership and storage controls on shared Settings.
 - `frontend/owner-portal/src/components/AppFrame.tsx` — app header, state, URL, and tabs.
 - `frontend/owner-portal/src/components/AttentionActivity.test.tsx` — tests for the attention list: who sees it, the original actor, and Resume.
-- `frontend/owner-portal/src/components/AttentionActivity.tsx` — an app's operations that need attention (blocked or unknown), with who started each and a Resume button, for owners, staff, and admins.
+- `frontend/owner-portal/src/components/AttentionActivity.tsx` — an app's activity that needs attention (blocked or unknown), with who started each and a Resume button, for owners, staff, and admins.
 - `frontend/owner-portal/src/components/BoundaryText.tsx` — re-exports the shared `BoundaryText`.
 - `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy checks, runtime versions, and review problems.
 - `frontend/owner-portal/src/components/DeploymentRow.tsx` — deployment list row.
 - `frontend/owner-portal/src/components/EnvironmentSection.tsx` — write-only environment editor and progress.
-- `frontend/owner-portal/src/components/Feedback.tsx` — portal feedback, load errors, and retryable `QueryError`.
+- `frontend/owner-portal/src/components/Feedback.tsx` — load-error messages and retryable `QueryError`, using shared presentation components directly.
 - `frontend/owner-portal/src/components/LogViewer.tsx` — runtime output and error logs for owner/admin pages.
 - `frontend/owner-portal/src/components/Mark.tsx` — re-exports the shared `Mark`.
 - `frontend/owner-portal/src/components/Operation.tsx` — activity rows and lists.
@@ -220,10 +222,9 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 #### Unit tests
 
 - `frontend/owner-portal/src/App.test.tsx` — settings, conflicts, status, API decoding, CSRF, and runtime actions.
-- `frontend/owner-portal/src/AdminApps.test.tsx` — admin gates, step-up, maintenance, identity confirmations, and storage deletion.
+- `frontend/owner-portal/src/ClassPages.test.tsx` — task navigation, shared Resume, metadata validation and account step-up tests.
 - `frontend/owner-portal/src/Routing.test.tsx` — nested routes and redirects from old staff links.
 - `frontend/owner-portal/src/Shell.test.tsx` — branding, role navigation, and app list tests.
-- `frontend/owner-portal/src/Staff.test.tsx` — staff views, expiry, idle timeout, and redirects.
 - `frontend/owner-portal/src/components/CommitChecks.test.tsx` — commit problems, versions, unreadable sources, and rate limits.
 - `frontend/owner-portal/src/components/LogViewer.test.tsx` — log streams, refresh, and unavailable states.
 - `frontend/owner-portal/src/components/RepositoryAccess.test.tsx` — deploy keys, access checks, and private commit reads.
@@ -478,6 +479,8 @@ The broker authorizes portal actions and owns accounts, sessions, ownership, quo
 
 - `openstack_platform/management/broker/__init__.py` — package marker for the broker.
 - `openstack_platform/management/broker/main.py` — production broker entry point without development imports.
+- `openstack_platform/management/broker/app_management.py` — shared app authority, catalog filters, adoption, ownership and storage deletion.
+- `openstack_platform/management/broker/class_reads.py` — bounded audited People and Activity projections.
 - `openstack_platform/management/broker/api.py` — owner routes with ownership and quota checks.
 - `openstack_platform/management/broker/auth.py` — Commons/local sign-in, sessions, CSRF, and sign-out.
 - `openstack_platform/management/broker/anonymous.py` — signed anonymous challenges and per-address request budgets.
@@ -487,12 +490,10 @@ The broker authorizes portal actions and owns accounts, sessions, ownership, quo
 - `openstack_platform/management/broker/known_device.py` — returning-browser recognition cookies, separate from sign-in credentials.
 - `openstack_platform/management/broker/bootstrap.py` — first admin bootstrap CLI and one-time setup links.
 - `openstack_platform/management/broker/accounts.py` — admin accounts, step-up, setup/reset links, and audit.
-- `openstack_platform/management/broker/admin_apps.py` — staff/admin app authority with admin-only ownership, maintenance, and deletion.
 - `openstack_platform/management/broker/members.py` — app teams and activity feeds.
 - `openstack_platform/management/broker/resources.py` — environment and storage routes with secret-free results.
 - `openstack_platform/management/broker/runtime_logs.py` — authorized runtime logs with bounded shared reads.
 - `openstack_platform/management/broker/source_keys.py` — audited public deploy key routes and serialized access checks.
-- `openstack_platform/management/broker/staff.py` — bounded audited staff metadata reads.
 - `openstack_platform/management/broker/staff_policy.py` — staff metadata limits and URL checks.
 - `openstack_platform/management/broker/journal.py` — durable mutations, same-key retries, polling, and recovery.
 - `openstack_platform/management/broker/database.py` — broker SQLite schema, migrations, and short transactions.

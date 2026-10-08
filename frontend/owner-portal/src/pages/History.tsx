@@ -17,7 +17,7 @@ import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { QueryError } from '../components/Feedback';
 import { AttentionActivity } from '../components/AttentionActivity';
-import { Status } from '../components/Status';
+import { DeploymentStatus } from '../components/DeploymentStatus';
 import { short } from '../utils/presentation';
 
 function columns(id: string, active: string | null | undefined): Column<Deployment>[] {
@@ -41,7 +41,11 @@ function columns(id: string, active: string | null | undefined): Column<Deployme
       mobile: 'trailing',
       // The live deployment reads "Live"; it succeeded by definition.
       cell: (deployment) => (
-        <Status state={deployment.deploymentId === active ? 'live' : deployment.status} />
+        <DeploymentStatus
+          id={id}
+          deployment={deployment.deploymentId}
+          state={deployment.deploymentId === active ? 'live' : deployment.status}
+        />
       ),
     },
     {

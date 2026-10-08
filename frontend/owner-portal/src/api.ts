@@ -4,7 +4,6 @@ import type { CommitCheck } from './utils/preflight';
 export type SourceReadOptions = {
   id: string;
   revision: number;
-  scope?: 'admin';
   service: Pick<
     ReturnType<typeof resourceApi>,
     'sourceKey' | 'recentSourceCommits' | 'checkSourceCommit'
@@ -58,8 +57,12 @@ export type Settings = {
 };
 export type AppRecord = {
   applicationId: string;
-  /** "member" for a teammate's app; absent from older brokers. */
+  /** Access on app reads; the creation response may omit it. */
   access?: 'owner' | 'member' | 'admin';
+  ownerId?: string;
+  ownerUsername?: string;
+  requiresMaintenance?: boolean;
+  sizing?: { workerFlavor: string; cpuMHz: number; memoryMiB: number } | null;
   /** The owner's name, on apps you're a team member of. */
   ownerDisplayName?: string | null;
   slug: string;
@@ -134,7 +137,7 @@ export type Deployment = {
   configuration: Configuration;
   configurationSha256: string;
   imageDigest: string | null;
-  /** Absent from older platforms, and null until the build finishes. */
+  /** Null until a build captures its runtime; historical deployments may have no capture. */
   runtime?: DeploymentRuntime | null;
   cleanupState: string;
   requestedAt: string;
@@ -152,8 +155,8 @@ export type Session = {
   expiresAt: string;
   role: 'owner' | 'staff' | 'admin';
   stepUpExpiresAt: string | null;
-  /** Brand shown in the shell; absent from older brokers. */
-  platformName?: string;
+  /** Server-configured brand shown in the shell. */
+  platformName: string;
 };
 export type Page<T> = { items: T[]; nextCursor: string | null; truncated: boolean };
 export type BuildLog = {
@@ -219,9 +222,11 @@ export class ApiError extends Error {
   }
 }
 let csrf = '';
+let elevatedSession = false;
 let credentialEpoch = 0;
 export function clearCredentials() {
   csrf = '';
+  elevatedSession = false;
   credentialEpoch++;
 }
 export function record(value: unknown): Record<string, unknown> {
@@ -268,15 +273,15 @@ export function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<
   };
 }
 // Keep metadata panels inside the broker's two-active-reads account bound.
-let adminReads = 0;
-const adminReadWaiters: (() => void)[] = [];
-async function adminReadSlot() {
-  if (adminReads >= 2) await new Promise<void>((resolve) => adminReadWaiters.push(resolve));
-  else adminReads++;
+let classReads = 0;
+const classReadWaiters: (() => void)[] = [];
+async function classReadSlot() {
+  if (classReads >= 2) await new Promise<void>((resolve) => classReadWaiters.push(resolve));
+  else classReads++;
   return () => {
-    const next = adminReadWaiters.shift();
+    const next = classReadWaiters.shift();
     if (next) next();
-    else adminReads--;
+    else classReads--;
   };
 }
 export async function request<T>(
@@ -288,11 +293,18 @@ export async function request<T>(
 ): Promise<T> {
   const epoch = credentialEpoch;
   const staff =
-    path.startsWith('/admin-apps') ||
-    path.startsWith('/staff/') ||
-    path.startsWith('/accounts') ||
-    path.startsWith('/account-audit');
-  const release = !options && path.startsWith('/admin-apps') ? await adminReadSlot() : () => {};
+    path.startsWith('/all-apps') ||
+    path.startsWith('/people') ||
+    path.startsWith('/activity') ||
+    path.startsWith('/audit') ||
+    path.startsWith('/apps/') ||
+    path.startsWith('/intents/');
+  const release =
+    !options &&
+    staff &&
+    (elevatedSession || (!path.startsWith('/apps/') && !path.startsWith('/intents/')))
+      ? await classReadSlot()
+      : () => {};
   let response: Response;
   try {
     if (epoch !== credentialEpoch)
@@ -354,12 +366,18 @@ export const api = {
     request(
       '/session',
       (v) => {
-        const data = fields(v, { csrfToken: 'string', expiresAt: 'string' });
+        const data = fields(v, {
+          csrfToken: 'string',
+          expiresAt: 'string',
+          platformName: 'string',
+          role: 'string',
+        });
         fields(data.user, { id: 'string', displayName: 'string', username: 'string' });
         if (!['owner', 'staff', 'admin'].includes(String(data.role)))
           throw new Error('Invalid session role');
         csrf = data.csrfToken as string;
-        if (typeof data.platformName !== 'string' || !data.platformName) delete data.platformName;
+        elevatedSession = data.role === 'staff' || data.role === 'admin';
+        if (!data.platformName) throw new Error('Invalid session brand');
         return data as Session;
       },
       undefined,

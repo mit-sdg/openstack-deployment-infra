@@ -14,13 +14,13 @@ from unittest.mock import patch
 from openstack_platform.controller.http import HttpError
 from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker.accounts import security_change
+from openstack_platform.management.broker.class_reads import ReadLimits
 from openstack_platform.management.broker.database import (
     MIGRATION_2,
     SCHEMA_V1,
     Database,
     validate_database,
 )
-from openstack_platform.management.broker.staff import ReadLimits
 from openstack_platform.management.broker.staff_policy import public_url
 from openstack_platform.management.common import canonical, digest
 from tests.test_management import ROOT, ManagementCase
@@ -38,31 +38,17 @@ class StaffTests(ManagementCase):
             security_change(db, self.alice)
         self.login()
 
-    def test_role_is_db_decided_and_staff_can_manage_only_own_apps(self) -> None:
-        self.staff()
-        own = self.create()
-        self.save(own)
+    def test_role_is_db_decided_and_staff_open_shared_app_pages(self) -> None:
         foreign = self.create("bob", "bob-project")
-        calls = len(self.fixture.calls)
-        for method, path, body in (
-            ("GET", f"/v1/apps/{foreign}", None),
-            ("PUT", f"/v1/apps/{foreign}/configuration", {}),
-            ("POST", f"/v1/apps/{foreign}/deployments", {}),
-        ):
-            self.assert_error(
-                "NOT_FOUND", lambda m=method, p=path, b=body: self.call(m, p, b, "alice")
-            )
-        self.assertEqual(len(self.fixture.calls), calls)
+        self.staff()
         self.assertEqual(
-            self.call("GET", "/v1/session", owner="alice").body["data"]["role"], "staff"
-        )
-        self.assertEqual(
-            len(self.call("GET", "/v1/staff/apps", owner="alice").body["data"]["items"]), 2
+            self.call("GET", f"/v1/apps/{foreign}", owner="alice").body["data"]["access"], "admin"
         )
         self.assert_error(
             "ACCESS_DENIED",
-            lambda: self.call("GET", "/v1/staff/owners", owner="bob", headers={"x-role": "admin"}),
+            lambda: self.call("GET", "/v1/people", owner="bob", headers={"x-role": "admin"}),
         )
+        self.assertEqual(len(self.call("GET", "/v1/apps", owner="alice").body["data"]["items"]), 0)
 
     def test_catalog_owner_quota_repository_and_operations_are_projected_without_fanout(
         self,
@@ -74,14 +60,14 @@ class StaffTests(ManagementCase):
             db.execute("INSERT INTO quotas VALUES(?,7,3)", (self.alice,))
             db.execute("INSERT INTO quotas VALUES(?,5,2)", (self.bob,))
         calls = len(self.fixture.calls)
-        owner = self.call("GET", f"/v1/staff/owners/{self.alice}", owner="alice").body["data"]
+        owner = self.call("GET", f"/v1/people/{self.alice}", owner="alice").body["data"]
         # Staff have no limits; a quota stored for them applies only if they become owners.
         self.assertEqual(owner["quota"]["apps"], {"limit": None, "used": 1, "reserved": 0})
-        owner = self.call("GET", f"/v1/staff/owners/{self.bob}", owner="alice").body["data"]
+        owner = self.call("GET", f"/v1/people/{self.bob}", owner="alice").body["data"]
         self.assertEqual(owner["quota"]["apps"], {"limit": 5, "used": 0, "reserved": 0})
-        apps = self.call("GET", "/v1/staff/apps", owner="alice").body["data"]["items"]
-        self.assertEqual(apps[0]["repository"], "https://github.com/example/student-app")
-        self.call("GET", "/v1/staff/operations", owner="alice")
+        apps = self.call("GET", "/v1/all-apps", owner="alice").body["data"]["items"]
+        self.assertEqual(apps[0]["slug"], "student-app")
+        self.call("GET", "/v1/activity", owner="alice")
         self.assertEqual(
             self.fixture.calls[calls:], [("GET", f"/v1/applications/{app}/environment", None)]
         )
@@ -93,7 +79,7 @@ class StaffTests(ManagementCase):
         import time
         import uuid
 
-        from openstack_platform.management.broker.staff import INTENT_KINDS
+        from openstack_platform.management.broker.class_reads import INTENT_KINDS
 
         app = self.create()
         self.staff()
@@ -117,7 +103,7 @@ class StaffTests(ManagementCase):
                         now,
                     ),
                 )
-        page = self.call("GET", "/v1/staff/operations?limit=50", owner="alice").body["data"]
+        page = self.call("GET", "/v1/activity?limit=50", owner="alice").body["data"]
         self.assertTrue({item["kind"] for item in page["items"]} >= INTENT_KINDS)
         self.assertNotIn("unknown", {item["kind"] for item in page["items"]})
         # Every kind named in the broker's SQL or passed to record() is known.
@@ -143,8 +129,8 @@ class StaffTests(ManagementCase):
                 row["id"]: (row["username"], row["display_name"])
                 for row in db.execute("SELECT id,username,display_name FROM users")
             }
-        apps = self.call("GET", "/v1/staff/apps", owner="alice").body["data"]["items"]
-        operations = self.call("GET", "/v1/staff/operations", owner="alice").body["data"]["items"]
+        apps = self.call("GET", "/v1/all-apps", owner="alice").body["data"]["items"]
+        operations = self.call("GET", "/v1/activity", owner="alice").body["data"]["items"]
         self.assertEqual({app["applicationId"] for app in apps}, {first, second})
         slugs = {app["applicationId"]: app["slug"] for app in apps}
         self.assertEqual(
@@ -155,71 +141,37 @@ class StaffTests(ManagementCase):
             self.assertEqual(
                 (item["ownerUsername"], item["ownerDisplayName"]), names[item["ownerId"]]
             )
-        # Additive: every earlier field is still present.
-        self.assertEqual(
-            set(apps[0]) - {"ownerUsername", "ownerDisplayName"},
-            {
-                "applicationId",
-                "ownerId",
-                "slug",
-                "lifecycleState",
-                "savedRevision",
-                "createdAt",
-                "repository",
-            },
-        )
         # Filters and cursors still work across the owner join.
-        scoped = self.call("GET", f"/v1/staff/operations?ownerId={self.bob}", owner="alice")
+        scoped = self.call("GET", f"/v1/activity?ownerId={self.bob}", owner="alice")
         self.assertEqual({item["ownerId"] for item in scoped.body["data"]["items"]}, {self.bob})
-        page = self.call("GET", "/v1/staff/apps?limit=1", owner="alice").body["data"]
+        page = self.call("GET", "/v1/all-apps?limit=1", owner="alice").body["data"]
         rest = self.call(
-            "GET", "/v1/staff/apps?limit=1&cursor=" + page["nextCursor"], owner="alice"
+            "GET", "/v1/all-apps?limit=1&cursor=" + page["nextCursor"], owner="alice"
         ).body["data"]
         self.assertEqual(len(page["items"] + rest["items"]), 2)
-        owners = self.call("GET", "/v1/staff/owners", owner="alice").body["data"]["items"]
+        owners = self.call("GET", "/v1/people", owner="alice").body["data"]["items"]
         roles = {owner["ownerId"]: owner["role"] for owner in owners}
         self.assertEqual((roles[self.alice], roles[self.bob]), ("staff", "owner"))
-        detail = self.call("GET", f"/v1/staff/owners/{self.bob}", owner="alice").body["data"]
+        detail = self.call("GET", f"/v1/people/{self.bob}", owner="alice").body["data"]
         self.assertEqual(detail["role"], "owner")
 
     def test_owner_role_filter_and_activity_kinds(self) -> None:
         self.create()
         self.create("bob", "bob-project")
         self.staff()
-        # The optional role filter lists only matching accounts and pages within them.
-        listed = self.call("GET", "/v1/staff/owners?role=owner", owner="alice").body["data"]
-        self.assertEqual({owner["role"] for owner in listed["items"]}, {"owner"})
-        self.assertNotIn(self.alice, {owner["ownerId"] for owner in listed["items"]})
-        first = self.call("GET", "/v1/staff/owners?role=owner&limit=1", owner="alice").body["data"]
-        if first["nextCursor"]:
-            rest = self.call(
-                "GET",
-                "/v1/staff/owners?role=owner&limit=1&cursor=" + first["nextCursor"],
-                owner="alice",
-            ).body["data"]
-            self.assertEqual({owner["role"] for owner in rest["items"]}, {"owner"})
-        staff = self.call("GET", "/v1/staff/owners?role=staff", owner="alice").body["data"]
-        self.assertEqual([owner["ownerId"] for owner in staff["items"]], [self.alice])
-        for role in ("root", "OWNER"):
-            self.assert_error(
-                "INVALID_REQUEST",
-                lambda r=role: self.call("GET", f"/v1/staff/owners?role={r}", owner="alice"),
-            )
-        self.assert_error(
-            "INVALID_REQUEST",
-            lambda: self.call("GET", "/v1/staff/apps?role=owner", owner="alice"),
-        )
+        listed = self.call("GET", "/v1/people", owner="alice").body["data"]
+        self.assertEqual({person["role"] for person in listed["items"]}, {"owner", "staff"})
+        search = self.call("GET", "/v1/people?q=bob", owner="alice").body["data"]
+        self.assertEqual([person["ownerId"] for person in search["items"]], [self.bob])
         # Activity names every broker intent kind and keeps a fallback.
-        operations = self.call("GET", "/v1/staff/operations", owner="alice").body["data"]["items"]
+        operations = self.call("GET", "/v1/activity", owner="alice").body["data"]["items"]
         ids = [item["intentId"] for item in operations]
         with self.broker.database.connect(write=True) as db:
             db.execute("UPDATE intents SET kind='env_set' WHERE id=?", (ids[0],))
             db.execute("UPDATE intents SET kind='mystery' WHERE id=?", (ids[1],))
         kinds = {
             item["intentId"]: item["kind"]
-            for item in self.call("GET", "/v1/staff/operations", owner="alice").body["data"][
-                "items"
-            ]
+            for item in self.call("GET", "/v1/activity", owner="alice").body["data"]["items"]
         }
         self.assertEqual((kinds[ids[0]], kinds[ids[1]]), ("env_set", "unknown"))
 
@@ -232,7 +184,7 @@ class StaffTests(ManagementCase):
         ):
             self.assert_error(
                 code,
-                lambda h=headers: self.call("GET", "/v1/staff/owners", owner="alice", headers=h),
+                lambda h=headers: self.call("GET", "/v1/people", owner="alice", headers=h),
             )
         for query in (
             "limit=51",
@@ -242,30 +194,30 @@ class StaffTests(ManagementCase):
             "scope=all",
             "cursor=bad",
         ):
-            self.broker.staff.limits = ReadLimits()
+            self.broker.class_reads.limits = ReadLimits()
             self.assert_error(
                 "INVALID_REQUEST",
-                lambda q=query: self.call("GET", "/v1/staff/owners?" + q, owner="alice"),
+                lambda q=query: self.call("GET", "/v1/people?" + q, owner="alice"),
             )
 
     def test_scoped_pagination_and_unknown_controller_app(self) -> None:
         self.create()
         foreign = self.create("bob", "bob-project")
         self.staff()
-        first = self.call("GET", "/v1/staff/owners?limit=1", owner="alice").body["data"]
+        first = self.call("GET", "/v1/people?limit=1", owner="alice").body["data"]
         second = self.call(
-            "GET", "/v1/staff/owners?limit=1&cursor=" + first["nextCursor"], owner="alice"
+            "GET", "/v1/people?limit=1&cursor=" + first["nextCursor"], owner="alice"
         ).body["data"]
         self.assertNotEqual(first["items"], second["items"])
         self.assert_error(
             "INVALID_REQUEST",
             lambda: self.call(
-                "GET", f"/v1/staff/apps?ownerId={self.alice}&cursor={foreign}", owner="alice"
+                "GET", f"/v1/all-apps?ownerId={self.alice}&cursor={foreign}", owner="alice"
             ),
         )
         calls = len(self.fixture.calls)
         self.assert_error(
-            "NOT_FOUND", lambda: self.call("GET", f"/v1/staff/apps/{uuid.uuid4()}", owner="alice")
+            "NOT_FOUND", lambda: self.call("GET", f"/v1/apps/{uuid.uuid4()}", owner="alice")
         )
         self.assertEqual(len(self.fixture.calls), calls)
 
@@ -289,12 +241,12 @@ class StaffTests(ManagementCase):
             body["refs"] = {"environment": sentinel}
             body["safeError"] = sentinel
             for item in body.get("items", []):
-                item["configuration"] = {"secret": sentinel}
+                item["refs"] = {"secret": sentinel}
             return status, body
 
         self.broker.client.request = extra
         for suffix in ("", "/deployments", "/deployments/" + intent["operationId"]):
-            result = self.call("GET", "/v1/staff/apps/" + app + suffix, owner="alice")
+            result = self.call("GET", "/v1/apps/" + app + suffix, owner="alice")
             self.assertEqual(result.status, 200)
             self.assertNotIn(sentinel, canonical(result.body))
         with self.broker.database.connect(write=True) as db:
@@ -302,9 +254,7 @@ class StaffTests(ManagementCase):
                 "UPDATE intents SET operation=?,safe_error=?",
                 (canonical({"phase": sentinel, "refs": sentinel}), sentinel),
             )
-        self.assertNotIn(
-            sentinel, canonical(self.call("GET", "/v1/staff/operations", owner="alice").body)
-        )
+        self.assertNotIn(sentinel, canonical(self.call("GET", "/v1/activity", owner="alice").body))
         self.broker.client.request = lambda *args, **kwargs: (
             200,
             {"applicationId": str(uuid.uuid4()), "deploymentId": intent["operationId"]},
@@ -312,7 +262,7 @@ class StaffTests(ManagementCase):
         self.assert_error(
             "NOT_FOUND",
             lambda: self.call(
-                "GET", f"/v1/staff/apps/{app}/deployments/{intent['operationId']}", owner="alice"
+                "GET", f"/v1/apps/{app}/deployments/{intent['operationId']}", owner="alice"
             ),
         )
 
@@ -332,7 +282,7 @@ class StaffTests(ManagementCase):
 
         self.broker.client.request = slow
         with ThreadPoolExecutor() as pool:
-            pending = pool.submit(self.call, "GET", f"/v1/staff/apps/{app}", None, "alice")
+            pending = pool.submit(self.call, "GET", f"/v1/apps/{app}", None, "alice")
             try:
                 self.assertTrue(entered.wait(2))
                 with self.broker.database.connect(write=True) as db:
@@ -347,28 +297,28 @@ class StaffTests(ManagementCase):
         self.staff()
         with self.broker.database.connect(write=True) as db:
             db.execute("UPDATE staff_read_state SET row_count=2000000,pruned_at=?", (time.time(),))
-        self.assertEqual(self.call("GET", "/v1/staff/owners", owner="alice").status, 503)
+        self.assertEqual(self.call("GET", "/v1/people", owner="alice").status, 503)
         self.assertEqual(self.call("GET", "/v1/apps", owner="bob").status, 200)
         with patch.object(
-            self.broker.staff, "audit", side_effect=sqlite3.OperationalError("sentinel")
+            self.broker.class_reads, "audit", side_effect=sqlite3.OperationalError("sentinel")
         ):
-            self.assertEqual(self.call("GET", "/v1/staff/owners", owner="alice").status, 503)
+            self.assertEqual(self.call("GET", "/v1/people", owner="alice").status, 503)
 
     def test_read_budget_response_size_and_throttle_do_not_refresh_activity(self) -> None:
         now = time.time()
         self.broker.auth.clock = lambda: now
         self.staff()
         for _ in range(10):
-            self.call("GET", "/v1/staff/owners", owner="alice")
+            self.call("GET", "/v1/people", owner="alice")
         self.broker.auth.clock = lambda: now + 0.1
-        self.assertEqual(self.call("GET", "/v1/staff/owners", owner="alice").status, 429)
+        self.assertEqual(self.call("GET", "/v1/people", owner="alice").status, 429)
         with self.broker.database.connect() as db:
             self.assertEqual(
                 db.execute("SELECT last_used FROM sessions WHERE kind='staff'").fetchone()[0], now
             )
-        self.broker.staff.limits = ReadLimits()
-        with patch("openstack_platform.management.broker.staff.RESPONSE_BYTES", 16):
-            self.assertEqual(self.call("GET", "/v1/staff/owners", owner="alice").status, 503)
+        self.broker.class_reads.limits = ReadLimits()
+        with patch("openstack_platform.management.broker.class_reads.RESPONSE_BYTES", 16):
+            self.assertEqual(self.call("GET", "/v1/people", owner="alice").status, 503)
 
     def test_restore_keeps_roles_deletes_tokens_and_increments_generation(self) -> None:
         self.staff()

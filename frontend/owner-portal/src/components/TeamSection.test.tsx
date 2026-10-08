@@ -75,7 +75,7 @@ describe('app team', () => {
     wrap(<TeamSection id="app" service={service} />);
     const team = await screen.findByRole('table', { name: 'Team' });
     expect(screen.queryByLabelText('Add by username')).toBeNull();
-    expect(screen.getByText(/Only the owner adds or removes people/)).toBeVisible();
+    expect(screen.getByText(/The owner, staff and admins can add or remove people/)).toBeVisible();
     fireEvent.click(within(team).getByRole('button', { name: 'Leave' }));
     const dialog = screen.getByRole('dialog', { name: 'Leave this app?' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Leave app' }));

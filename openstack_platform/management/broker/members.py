@@ -144,7 +144,10 @@ class Members:
             "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
             (actor, app["id"], None, action, now),
         )
-        if request.path.startswith("/v1/admin-apps/"):
+        if db.execute("SELECT role FROM users WHERE id=?", (actor,)).fetchone()[0] in {
+            "staff",
+            "admin",
+        }:
             audit(
                 db,
                 actor,

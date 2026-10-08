@@ -31,9 +31,8 @@ export function EnvironmentSection({
   bindings: StorageBinding[];
   service?: ReturnType<typeof resourceApi>;
 }) {
-  const scope = service === api ? [] : ['admin'];
   const environment = useQuery({
-    queryKey: [...scope, 'environment', id],
+    queryKey: ['environment', id],
     queryFn: () => service.environment(id),
     refetchInterval: 5000,
   });
@@ -50,8 +49,8 @@ export function EnvironmentSection({
   useEffect(() => {
     if (intent.data?.state === 'succeeded' || intent.data?.state === 'failed') {
       attempt.current = null;
-      client.invalidateQueries({ queryKey: [...scope, 'environment', id] });
-      client.invalidateQueries({ queryKey: [...scope, 'app', id] });
+      client.invalidateQueries({ queryKey: ['environment', id] });
+      client.invalidateQueries({ queryKey: ['app', id] });
     }
   }, [intent.data?.state, client, id]);
   const edit = useMutation({
@@ -73,7 +72,7 @@ export function EnvironmentSection({
     onSuccess: (result) => {
       setIntentId(result.intentId);
       client.invalidateQueries({ queryKey: ['intents'] });
-      client.invalidateQueries({ queryKey: [...scope, 'environment', id] });
+      client.invalidateQueries({ queryKey: ['environment', id] });
     },
   });
   const recoverable =

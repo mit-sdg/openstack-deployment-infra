@@ -31,8 +31,7 @@ export function TeamSection({
   id: string;
   service?: Pick<typeof api, 'members' | 'addMember' | 'removeMember'>;
 }) {
-  const scope = service === api ? [] : ['admin'];
-  const key = [...scope, 'members', id];
+  const key = ['members', id];
   const client = useQueryClient();
   const [, navigate] = useLocation();
   const provider = useProviderLabel();
@@ -158,8 +157,8 @@ export function TeamSection({
             <ErrorAlert error={add.error ?? remove.error} />
             <Hint>
               {manages
-                ? `Teammates can change settings, deploy and see logs. They need to sign in once with their ${provider.toLowerCase()} before you add them. Only the owner adds or removes people.`
-                : 'You can change settings, deploy and see logs. Only the owner adds or removes people.'}
+                ? `Teammates can change settings, deploy and see logs. They need to sign in once with their ${provider.toLowerCase()} before you add them. The owner, staff and admins can add or remove people.`
+                : 'You can change settings, deploy and see logs. The owner, staff and admins can add or remove people.'}
             </Hint>
           </div>
         </>

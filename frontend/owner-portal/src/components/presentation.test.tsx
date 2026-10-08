@@ -93,7 +93,7 @@ describe('reviewed owner presentation', () => {
     // INTENT_KINDS in the broker is the source of truth for activity kinds.
     // Tests run from the owner-portal workspace directory.
     const source = readFileSync(
-      resolve(process.cwd(), '../../openstack_platform/management/broker/staff.py'),
+      resolve(process.cwd(), '../../openstack_platform/management/broker/class_reads.py'),
       'utf8',
     );
     const block = source.slice(source.indexOf('INTENT_KINDS = frozenset('));

@@ -11,7 +11,6 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlencode
 
 from ...controller.http import HttpError, Request, Response
 from ...validation import ValidationError, slug
@@ -19,8 +18,8 @@ from ...validation import uuid as checked_uuid
 from ..common import canonical, strict_json, utc
 from .anonymous import client_address_bucket
 from .client import ControllerUnavailable
-from .journal import controller_error_code, deploy_failure_guidance
-from .staff_policy import AUDIT_ROWS, AUDIT_SECONDS, RESPONSE_BYTES, public_url
+from .journal import attention_guidance, controller_error_code, deploy_failure_guidance
+from .staff_policy import AUDIT_ROWS, AUDIT_SECONDS, RESPONSE_BYTES
 
 if TYPE_CHECKING:
     from .api import Broker
@@ -165,30 +164,24 @@ def profile(value: object, maximum: int) -> str:
     return value
 
 
-def commit(value: object) -> str | None:
-    return value if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{40}", value) else None
-
-
-class StaffReads:
+class ClassReads:
     def __init__(self, broker: Broker) -> None:
         self.broker = broker
         self.limits = ReadLimits()
-        self.upstream = threading.BoundedSemaphore(1)
 
     def query(self, request: Request, route: str) -> None:
         allowed: set[str] = set()
         if route in {
-            "/v1/staff/owners",
-            "/v1/staff/apps",
-            "/v1/staff/operations",
-        } or route.endswith("/deployments"):
+            "/v1/people",
+            "/v1/activity",
+        }:
             allowed |= {"limit", "cursor"}
-        if route in {"/v1/staff/apps", "/v1/staff/operations"}:
+        if route == "/v1/activity":
             allowed.add("ownerId")
-        if route == "/v1/staff/owners":
-            allowed.add("role")
-        if route == "/v1/staff/operations":
-            allowed.add("applicationId")
+        if route == "/v1/people":
+            allowed.add("q")
+        if route == "/v1/activity":
+            allowed |= {"applicationId", "attention"}
         if (
             request.body is not None
             or set(request.query) - allowed
@@ -197,8 +190,10 @@ class StaffReads:
             raise HttpError(400, "INVALID_REQUEST", "Invalid staff read fields.")
         for key in {"cursor", "ownerId", "applicationId"} & set(request.query):
             checked_uuid(request.query[key][0])
-        if "role" in request.query and request.query["role"][0] not in ROLES:
-            raise HttpError(400, "INVALID_REQUEST", "Invalid staff read fields.")
+        if "q" in request.query and len(request.query["q"][0]) > 64:
+            raise HttpError(400, "INVALID_REQUEST", "Search is too long.")
+        if "attention" in request.query and request.query["attention"][0] != "1":
+            raise HttpError(400, "INVALID_REQUEST", "Invalid attention filter.")
         self.page_limit(request)
 
     @staticmethod
@@ -346,21 +341,11 @@ class StaffReads:
             )
         raise error
 
-    @contextmanager
-    def controller_slot(self) -> Iterator[None]:
-        if not self.upstream.acquire(blocking=False):
-            raise HttpError(
-                429, "RATE_LIMITED", "Staff observations are temporarily limited.", retryable=True
-            )
-        try:
-            yield
-        finally:
-            self.upstream.release()
-
     def owner_record(self, owner: str) -> dict[str, Any]:
         with self.broker.database.connect() as db:
             row = db.execute(
-                "SELECT id,username,display_name,enabled,role FROM users WHERE id=?", (owner,)
+                "SELECT id,username,display_name,enabled,role,status FROM users WHERE id=?",
+                (owner,),
             ).fetchone()
         if row is None:
             raise HttpError(404, "NOT_FOUND", "Owner not found.")
@@ -374,6 +359,7 @@ class StaffReads:
             "displayName": profile(row["display_name"], 256),
             "portalEnabled": row["enabled"] == 1,
             "role": enum(row["role"], ROLES),
+            "status": enum(row["status"], {"active", "pending"}),
         }
 
     @staticmethod
@@ -405,49 +391,37 @@ class StaffReads:
             )
         return dict(row)
 
-    @staticmethod
-    def catalog_model(row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "applicationId": identifier(row["id"]),
-            "ownerId": identifier(row["user_id"]),
-            "slug": slug(row["slug"]),
-            "lifecycleState": enum(row["lifecycle"], {"creating", "ready", "rejected"}),
-            "savedRevision": number(row["revision"]),
-            "createdAt": utc(row["created"]),
-            "repository": public_url(row["repository"]),
-        }
-
     def local_page(self, request: Request, table: str) -> dict[str, Any]:
         sources = {
             "users": (
                 "users a",
-                "a.id,a.username,a.display_name,a.enabled,a.role",
+                "a.id,a.username,a.display_name,a.enabled,a.role,a.status",
                 self.owner_model,
-            ),
-            "apps": (
-                "apps a LEFT JOIN configurations c ON c.app_id=a.id AND c.revision=a.revision"
-                " JOIN users u ON u.id=a.user_id",
-                "a.id,a.user_id,a.slug,a.lifecycle,a.revision,a.created,c.repository,"
-                "u.username AS owner_username,u.display_name AS owner_display_name",
-                self.with_owner(self.catalog_model),
             ),
             "intents": (
                 "intents a JOIN users u ON u.id=a.user_id LEFT JOIN apps p ON p.id=a.app_id",
-                "a.id,a.user_id,a.app_id,a.kind,a.state,a.operation,a.created,a.updated,"
+                "a.id,a.user_id,a.app_id,a.kind,a.state,a.operation,a.operation_id,a.created,a.updated,"
                 "u.username AS owner_username,u.display_name AS owner_display_name,"
                 "p.slug AS app_slug",
                 self.with_owner(self.activity_model),
             ),
         }
         source, columns, model = sources[table]
-        conditions = ["a.lifecycle NOT IN ('rejected','deleted')"] if table == "apps" else ["1=1"]
+        conditions = ["1=1"]
         parameters: list[object] = []
         owner = request.query.get("ownerId", (None,))[0]
         app = request.query.get("applicationId", (None,))[0]
-        role = request.query.get("role", (None,))[0]
-        if role is not None:
-            conditions.append("a.role=?")
-            parameters.append(role)
+        search = request.query.get("q", ("",))[0].strip()
+        if search:
+            pattern = (
+                "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            )
+            conditions.append(
+                "(a.username LIKE ? ESCAPE '\\' OR a.display_name LIKE ? ESCAPE '\\')"
+            )
+            parameters.extend([pattern, pattern])
+        if "attention" in request.query:
+            conditions.append("a.state IN ('blocked','unknown')")
         if owner is not None:
             self.owner_record(owner)
             conditions.append("a.user_id=?")
@@ -475,8 +449,6 @@ class StaffReads:
                 (*parameters, limit + 1),
             ).fetchall()
         projected = [dict(row) for row in rows]
-        if table == "apps":
-            self.broker.journal.reconcile_page(projected)
         return {
             "items": [model(row) for row in projected[:limit] if row.get("lifecycle") != "deleted"],
             "nextCursor": rows[limit - 1]["id"] if len(rows) > limit else None,
@@ -501,152 +473,6 @@ class StaffReads:
             for key in ("apps", "concurrentOperations")
         }
         return result
-
-    def apps(self, request: Request) -> dict[str, Any]:
-        return self.local_page(request, "apps")
-
-    def app(self, request: Request) -> dict[str, Any]:
-        app = self.app_record(checked_uuid(request.path_parameters["app"]))
-        result = self.catalog_model(app)
-        with self.controller_slot():
-            observed = self.broker.app_model(app, cache_seconds=15)
-        accepted = observed.get("acceptedDeployment")
-        active = observed.get("activeDeploymentId")
-        accepted_model = None
-        if active is not None:
-            identifier(active)
-            if not isinstance(accepted, dict) or accepted.get("deploymentId") != active:
-                raise ControllerUnavailable("invalid accepted staff evidence")
-            accepted_model = {
-                "deploymentId": active,
-                "sourceCommit": commit(accepted.get("sourceCommit")),
-                "acceptedAt": utc(accepted.get("acceptedAt")),
-            }
-        live = observed.get("health")
-        live = live if isinstance(live, dict) else {}
-        running = observed.get("desiredRunning") is True
-        result.update(
-            url=public_url(observed.get("url")),
-            desiredRunning=running,
-            activeDeploymentId=active,
-            acceptedDeployment=accepted_model,
-            health={
-                "process": "unknown"
-                if observed.get("stale") is not False
-                else "stopped"
-                if not running
-                else "healthy"
-                if live.get("allocationHealthy") is True
-                else "unhealthy"
-                if live.get("allocationHealthy") is False
-                else "unknown",
-                "route": "unknown"
-                if observed.get("stale") is not False
-                else "healthy"
-                if live.get("routeHealthy") is True
-                else "unhealthy"
-                if live.get("routeHealthy") is False
-                else "unknown",
-            },
-            observedAt=utc(observed.get("observedAt")),
-            stale=observed.get("stale") is not False,
-        )
-        # The owner from the app itself: activity rows name whoever acted.
-        with self.broker.database.connect() as db:
-            members = db.execute(
-                "SELECT u.username,u.display_name FROM app_members m JOIN users u ON u.id=m.user_id"
-                " WHERE m.app_id=? ORDER BY m.created,u.id LIMIT 10",
-                (app["id"],),
-            ).fetchall()
-        result.update(
-            ownerUsername=profile(app["owner_username"], 32),
-            ownerDisplayName=profile(app["owner_display_name"], 256),
-            members=[
-                {
-                    "username": profile(row["username"], 32),
-                    "displayName": profile(row["display_name"], 256),
-                }
-                for row in members
-            ],
-        )
-        return result
-
-    def deployments(self, request: Request) -> dict[str, Any]:
-        app = checked_uuid(request.path_parameters["app"])
-        self.app_record(app)
-        query = {"limit": str(self.page_limit(request))}
-        if "cursor" in request.query:
-            query["cursor"] = request.query["cursor"][0]
-        body = self.project(f"/v1/applications/{app}/deployments?{urlencode(query)}")
-        items = body.get("items")
-        if not isinstance(items, list) or len(items) > int(query["limit"]):
-            raise ControllerUnavailable("invalid staff deployment page")
-        models = [self.deployment_model(item, app) for item in items]
-        cursor = body.get("nextCursor")
-        truncated = body.get("truncated")
-        if (
-            type(truncated) is not bool
-            or (
-                cursor is not None
-                and (not models or identifier(cursor) != models[-1]["deploymentId"])
-            )
-            or truncated != (cursor is not None)
-        ):
-            raise ControllerUnavailable("invalid staff deployment cursor")
-        return {"items": models, "nextCursor": cursor, "truncated": truncated}
-
-    def deployment(self, request: Request) -> dict[str, Any]:
-        app = checked_uuid(request.path_parameters["app"])
-        self.app_record(app)
-        deployment = checked_uuid(request.path_parameters["deployment"])
-        body = self.project(f"/v1/deployments/{deployment}")
-        if body.get("deploymentId") != deployment:
-            raise HttpError(404, "NOT_FOUND", "Deployment not found.")
-        return self.deployment_model(body, app)
-
-    def project(self, path: str) -> dict[str, Any]:
-        # Never let this adapter become a general project API proxy.
-        key = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
-        if not re.fullmatch(
-            rf"/v1/(?:deployments/{key}|applications/{key}/deployments\?limit=[0-9]{{1,2}}(?:&cursor={key})?)",
-            path,
-        ):
-            raise ControllerUnavailable("unregistered staff project read")
-        with self.controller_slot():
-            status, body = self.broker.client.request("GET", path)
-        if status in {400, 404}:
-            raise HttpError(
-                status,
-                "NOT_FOUND" if status == 404 else "INVALID_REQUEST",
-                "Deployment page or resource unavailable.",
-            )
-        if status != 200:
-            raise ControllerUnavailable("staff project read unavailable")
-        return body
-
-    @staticmethod
-    def deployment_model(body: object, app: str) -> dict[str, Any]:
-        if not isinstance(body, dict) or body.get("applicationId") != app:
-            raise HttpError(404, "NOT_FOUND", "Deployment not found.")
-        return {
-            "deploymentId": identifier(body.get("deploymentId")),
-            "applicationId": app,
-            "status": enum(
-                body.get("status"),
-                {"queued", "building", "deploying", "succeeded", "failed", "recovery_required"},
-            ),
-            "repositoryCommit": commit(body.get("repositoryCommit")),
-            "configurationRevision": number(body["configurationRevision"])
-            if body.get("configurationRevision") is not None
-            else None,
-            "cleanupState": enum(
-                body.get("cleanupState"), {"confirmed", "not_required", "pending"}
-            ),
-            **{
-                key: utc(body.get(key))
-                for key in ("requestedAt", "updatedAt", "acceptedAt", "lastHealthyAt")
-            },
-        }
 
     def operations(self, request: Request) -> dict[str, Any]:
         return self.local_page(request, "intents")
@@ -684,6 +510,11 @@ class StaffReads:
             stage = "recovery"
         return {
             "intentId": identifier(row["id"]),
+            "operationId": row["operation_id"],
+            "canResume": row["kind"] not in {"env_set", "env_delete"}
+            and state in {"blocked", "unknown"},
+            "requiresResubmit": row["kind"] in {"env_set", "env_delete"}
+            and state in {"blocked", "unknown"},
             "applicationId": identifier(row["app_id"]),
             "ownerId": identifier(row["user_id"]),
             "kind": enum(row["kind"], INTENT_KINDS),
@@ -696,7 +527,8 @@ class StaffReads:
             "updatedAt": utc(row["updated"]),
             "statusObservedAt": utc(operation.get("updatedAt")),
             "controllerErrorCode": controller_error_code(operation.get("controllerErrorCode")),
-            "guidance": deploy_failure_guidance(
+            "guidance": attention_guidance(row["kind"], state)
+            or deploy_failure_guidance(
                 row["kind"],
                 row["state"],
                 controller_error_code(operation.get("controllerErrorCode")),

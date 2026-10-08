@@ -46,12 +46,6 @@ class SourceKeys:
 
     def controller(self, method: str, path: str, body: object = None) -> dict[str, Any]:
         status, result = self.broker.client.request(method, path, body)
-        detail = result.get("error")
-        if status == 404 and isinstance(detail, dict) and detail.get("code") == "NOT_FOUND":
-            # A controller from before deploy keys has no such route.
-            raise HttpError(
-                409, "SOURCE_KEYS_UNAVAILABLE", "Private repositories aren't available yet."
-            )
         if status != 200:
             raise ControllerUnavailable("deploy key request failed")
         return result
@@ -106,7 +100,7 @@ class SourceKeys:
                     now,
                 ),
             )
-            if request.path.startswith("/v1/admin-apps/"):
+            if self.broker.app_management.context.get() is not None:
                 audit(
                     db,
                     user["id"],
@@ -133,7 +127,7 @@ class SourceKeys:
                 "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
                 (user["id"], app["id"], None, "source_key_remove", now),
             )
-            if request.path.startswith("/v1/admin-apps/"):
+            if self.broker.app_management.context.get() is not None:
                 audit(
                     db,
                     user["id"],

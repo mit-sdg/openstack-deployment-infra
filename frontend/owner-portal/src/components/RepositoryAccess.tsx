@@ -11,7 +11,7 @@ import {
 } from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { ApiError, api, type SourceAccess } from '../api';
+import { api, type SourceAccess } from '../api';
 import { short } from '../utils/presentation';
 
 const problems: Record<string, string> = {
@@ -55,18 +55,17 @@ export function RepositoryAccess({
   /** Whether a repository is saved, so access can be checked. */
   saved: boolean;
 }) {
-  const scope = service === api ? [] : ['admin'];
   const client = useQueryClient();
   const [confirming, setConfirming] = useState<'replace' | 'remove' | null>(null);
   const key = useQuery({
-    queryKey: [...scope, 'source-key', id],
+    queryKey: ['source-key', id],
     queryFn: () => service.sourceKey(id),
     retry: false,
   });
   const create = useMutation({
     mutationFn: (replace: boolean) => service.createSourceKey(id, replace),
     onSuccess: (data) => {
-      client.setQueryData([...scope, 'source-key', id], data);
+      client.setQueryData(['source-key', id], data);
       check.reset();
       setConfirming(null);
     },
@@ -74,14 +73,13 @@ export function RepositoryAccess({
   const remove = useMutation({
     mutationFn: () => service.removeSourceKey(id),
     onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: [...scope, 'source-key', id] });
+      await client.invalidateQueries({ queryKey: ['source-key', id] });
       check.reset();
       create.reset();
       setConfirming(null);
     },
   });
   const check = useMutation({ mutationFn: () => service.checkSourceKey(id) });
-  if (key.error instanceof ApiError && key.error.code === 'SOURCE_KEYS_UNAVAILABLE') return null;
   return (
     <Section
       title="Private repository"

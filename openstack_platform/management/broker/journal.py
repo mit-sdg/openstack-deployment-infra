@@ -62,6 +62,24 @@ def deploy_failure_guidance(kind: str, state: str, code: object, phase: object) 
     return None
 
 
+def attention_guidance(kind: str, state: str, *, can_resume: bool = True) -> str | None:
+    """One inline instruction; the Resume control supplies its location."""
+    if state not in {"blocked", "unknown"}:
+        return None
+    if kind in {"env_set", "env_delete"}:
+        return (
+            "The person who started this environment edit must enter the value again in Settings."
+        )
+    change = "deployment" if kind == "deploy" else "change"
+    if not can_resume:
+        return f"Ask staff to resume this {change}."
+    return (
+        f"Resume this {change} to finish it."
+        if state == "blocked"
+        else f"Resume this {change} to check its outcome."
+    )
+
+
 def report_exception(error: Exception, intent_id: str = "recovery-scan") -> None:
     # A dedicated message-only handler never formats exception values/tracebacks,
     # which could contain submitted bodies or credential material.
@@ -106,7 +124,7 @@ class Journal:
         now = time.time()
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT intents.id FROM intents JOIN users ON users.id=intents.user_id WHERE intents.state IN ('prepared','unknown','accepted') AND (intents.kind NOT IN ('env_set','env_delete') OR intents.state='accepted') AND next_retry<=? AND lease<=? AND users.enabled=1 ORDER BY intents.created LIMIT 4",
+                "SELECT intents.id FROM intents JOIN users ON users.id=intents.user_id WHERE intents.state IN ('prepared','unknown','accepted') AND (intents.kind NOT IN ('env_set','env_delete') OR intents.state='accepted') AND next_retry<=? AND lease<=? AND (users.enabled=1 OR intents.state='accepted') ORDER BY intents.created LIMIT 4",
                 (now, now),
             ).fetchall()
         for row in rows:
@@ -275,11 +293,7 @@ class Journal:
                     else result["status"]
                 )
                 if state == "blocked":
-                    error = (
-                        "This deploy hasn’t finished. Resume it from Activity."
-                        if intent["kind"] == "deploy"
-                        else "This change hasn’t finished. Resume it from Activity."
-                    )
+                    error = attention_guidance(intent["kind"], state)
                 if state == "failed":
                     error = (
                         "The controller rejected this operation. Review its status before retrying."
@@ -290,7 +304,7 @@ class Journal:
                 }:
                     # An uncertain cleanup is still a held application scope.
                     state = "blocked"
-                    error = "This change hasn’t finished. Resume it from Activity."
+                    error = attention_guidance(intent["kind"], state)
             else:
                 status, result = self.client.request(
                     intent["method"],
@@ -317,7 +331,7 @@ class Journal:
                     if code in {"RECOVERY_REQUIRED", "UNFINISHED_OPERATION", "OPERATION_CONFLICT"}:
                         state, error = (
                             "blocked",
-                            "A previous change hasn’t finished. Open Activity to resume it before trying again.",
+                            attention_guidance(intent["kind"], "blocked"),
                         )
                     else:
                         state, error = (
@@ -371,6 +385,11 @@ def intent_model(
         if isinstance(operation, dict)
         else None
     )
+    can_resume = (
+        row["kind"] not in {"env_set", "env_delete"}
+        and row["state"] in {"blocked", "unknown"}
+        and (body.get("_portalAdmin") is not True or diagnostic)
+    )
     model = {
         "intentId": row["id"],
         "appId": row["app_id"],
@@ -379,23 +398,14 @@ def intent_model(
         "operationId": row["operation_id"],
         "operation": operation or None,
         "statusUrl": f"/api/v1/intents/{row['id']}",
-        "safeError": deploy_failure_guidance(
+        "safeError": attention_guidance(row["kind"], row["state"], can_resume=can_resume)
+        or deploy_failure_guidance(
             row["kind"],
             row["state"],
             code,
             operation.get("phase") if isinstance(operation, dict) else None,
         )
-        or (
-            (
-                "This deploy hasn’t finished. Resume it from Activity."
-                if row["kind"] == "deploy"
-                else "This change hasn’t finished. Resume it from Activity."
-            )
-            if row["state"] == "blocked"
-            and isinstance(operation, dict)
-            and operation.get("status") == "recovery_required"
-            else row["safe_error"]
-        ),
+        or row["safe_error"],
         "createdAt": utc(row["created"]),
         "updatedAt": utc(row["updated"]),
         "commit": body.get("commit") if row["kind"] == "deploy" else None,
@@ -404,9 +414,7 @@ def intent_model(
         if row["kind"] in {"env_set", "env_delete"}
         and row["state"] in {"prepared", "unknown", "blocked"}
         else None,
-        "canResume": row["kind"] not in {"env_set", "env_delete"}
-        and row["state"] in {"blocked", "unknown"}
-        and (body.get("_portalAdmin") is not True or diagnostic),
+        "canResume": can_resume,
         "requiresResubmit": row["kind"] in {"env_set", "env_delete"}
         and row["state"] in {"prepared", "unknown", "blocked"},
     }

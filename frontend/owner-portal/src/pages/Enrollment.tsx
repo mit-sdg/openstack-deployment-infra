@@ -135,7 +135,7 @@ export function Enrollment() {
         totp,
       }),
     onSuccess: (data) => {
-      if (!['/apps', '/admin/accounts', '/sign-in'].includes(data.returnPath))
+      if (!['/apps', '/people', '/sign-in'].includes(data.returnPath))
         throw new Error('Invalid enrollment result');
       setStage(undefined);
       setTotp('');

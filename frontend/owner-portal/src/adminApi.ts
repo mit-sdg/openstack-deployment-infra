@@ -27,47 +27,42 @@ export type AdminAudit = {
   targetDisplayName: string | null;
 };
 export const adminApi = {
-  accounts: (q = '', cursor?: string, limit?: number) =>
-    request(
-      '/accounts?' +
-        new URLSearchParams({
-          ...(q ? { q } : {}),
-          ...(cursor ? { cursor } : {}),
-          ...(limit ? { limit: String(limit) } : {}),
-        }),
-      (v) =>
-        pageData(v, (item) => {
-          const account = fields(item, {
-            userId: 'string',
-            username: 'string',
-            displayName: 'string',
-            role: 'string',
-            enabled: 'boolean',
-            status: 'string',
-            method: 'string',
-            appCount: 'number',
-            totpEnabled: 'boolean',
-          });
-          for (const key of ['appLimit', 'concurrencyLimit'])
-            if (account[key] !== null && typeof account[key] !== 'number')
-              throw new Error('Invalid service response');
-          return account as Account;
-        }),
-    ),
+  account: (id: string) =>
+    request(`/people/${id}/account`, (v) => {
+      const account = fields(v, {
+        userId: 'string',
+        username: 'string',
+        displayName: 'string',
+        role: 'string',
+        enabled: 'boolean',
+        status: 'string',
+        method: 'string',
+        appCount: 'number',
+        totpEnabled: 'boolean',
+      });
+      for (const key of ['appLimit', 'concurrencyLimit'])
+        if (account[key] !== null && typeof account[key] !== 'number')
+          throw new Error('Invalid service response');
+      return account as Account;
+    }),
   create: (username: string, displayName: string, role: string) =>
     request(
-      '/accounts',
+      '/people',
       (v) =>
         fields(v, { userId: 'string', setupUrl: 'string' }) as { userId: string; setupUrl: string },
       { method: 'POST', body: { username, displayName, role } },
     ),
   change: (userId: string, action: string, value: unknown = null) =>
-    request(`/accounts/${userId}`, (v) => record(v) as { userId: string; setupUrl?: string }, {
-      method: 'PATCH',
-      body: { action, value },
-    }),
+    request(
+      `/people/${userId}/account`,
+      (v) => record(v) as { userId: string; setupUrl?: string },
+      {
+        method: 'PATCH',
+        body: { action, value },
+      },
+    ),
   quotas: (userId: string, apps: number, concurrentOperations: number) =>
-    request(`/accounts/${userId}/quotas`, (v) => v as Quota, {
+    request(`/people/${userId}/quotas`, (v) => v as Quota, {
       method: 'PUT',
       body: { apps, concurrentOperations },
     }),
@@ -77,7 +72,7 @@ export const adminApi = {
       body: { password, totp },
     }),
   audit: (cursor?: string) =>
-    request('/account-audit' + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''), (v) =>
+    request('/audit' + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''), (v) =>
       pageData(
         v,
         (item) =>

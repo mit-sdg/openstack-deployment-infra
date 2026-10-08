@@ -155,6 +155,24 @@ describe('typed API', () => {
     );
     await expect(api.app('app')).rejects.toThrow('Invalid service response');
   });
+  it('rejects a session without the paired broker brand field', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            csrfToken: 'csrf',
+            expiresAt: '2026-10-01T12:00:00Z',
+            role: 'owner',
+            user: { id: 'u', displayName: 'Owner', username: 'owner' },
+          },
+        }),
+      }),
+    );
+    await expect(api.session()).rejects.toThrow('Invalid service response');
+  });
   it('refreshes expired CSRF once while retaining the same mutation key', async () => {
     const fetch = vi
       .fn()
@@ -169,6 +187,7 @@ describe('typed API', () => {
         json: async () => ({
           data: {
             csrfToken: 'replacement',
+            platformName: 'Example platform',
             role: 'owner',
             stepUpExpiresAt: null,
             expiresAt: '2026-10-01T12:00:00Z',
@@ -317,18 +336,18 @@ describe('redeploy selection', () => {
         read.mockResolvedValue([
           { sha: 'b'.repeat(40), message: 'Newest', author: null, date: null },
         ]);
-      vi.spyOn(api, 'checkSourceKey').mockResolvedValue({
-        keyPresent: true,
-        reachable: true,
-        head: 'b'.repeat(40),
-        branch: 'main',
-        problem: null,
-      });
+      vi.spyOn(api, 'sourceKey').mockResolvedValue({ present: true } as never);
+      const platform = vi
+        .spyOn(api, 'recentSourceCommits')
+        .mockResolvedValue([{ sha: 'b'.repeat(40), message: 'Newest', author: null, date: null }]);
+      const head = vi.spyOn(api, 'checkSourceKey');
       const deploy = vi.spyOn(api, 'deploy');
       show('?latest=1');
       expect(await screen.findByRole('dialog')).toHaveTextContent('b'.repeat(40));
       expect(screen.getByRole('dialog')).toHaveTextContent('current saved settings');
       expect(deploy).not.toHaveBeenCalled();
+      expect(head).not.toHaveBeenCalled();
+      if (privateRepo) expect(platform).toHaveBeenCalledWith('app');
       expect(read).toHaveBeenCalledWith(
         settings.repository,
         settings.branch,
