@@ -251,14 +251,31 @@ Values go to the app's Nomad Variable and are never returned. Each change restar
 
 ### Sizing and rollback
 
-Both are plan-first. You read a plan, review it, then apply exactly that plan with the app's slug as confirmation. Both reuse a retained image, so neither rebuilds.
+Operator resize and rollback are plan-first. Read a plan, review it, then apply exactly that plan with the app's slug as confirmation. Both reuse a retained image, so neither rebuilds. The portal can also use a worker sizing plan on a new deployment, which builds the requested commit.
 
 | Route | Socket | Key | Purpose |
 | --- | --- | --- | --- |
+| `GET /v1/flavors` | project | no | Available worker sizes as `{"items": [{"flavor_id", "name", "vcpus", "ram_mib", "disk_gib"}]}`; no body or query. Sizes must leave at least 64 MiB after the greater of 512 MiB or 10% OS/service reserve. No provider metadata is exposed. |
+| `GET /v1/applications/{id}/resize-plan` | project | no | Same exact fingerprinted plan as the privileged route; requires one `flavor` query field, no body. The broker permits only staff and admins. |
 | `GET /v1/admin/applications/{id}/resize-plan` | privileged | no | Sizing plan for one target; requires exactly one `flavor` query field |
 | `POST /v1/admin/applications/{id}/resize` | privileged | yes | Apply `{plan, confirmation}`; reuses the accepted image on a new worker of the planned size |
 | `GET /v1/admin/applications/{id}/rollback-plan` | privileged | no | Plan to redeploy an earlier successful attempt; requires `deploymentId`, optional `reuseWorker=true` or `false` (default `false`) |
 | `POST /v1/admin/applications/{id}/rollback` | privileged | yes | Apply `{plan, confirmation}` through the normal health checks and acceptance |
+
+### Builder sizes
+
+A builder is a temporary machine used only to build an app's image. These settings affect builds that start afterwards, leave workers unchanged, and require no resize plan or maintenance. The broker admits only admins to default-setting routes, and staff or admins to app builder routes. The project socket still authenticates only the broker process.
+
+| Route | Socket | Key | Purpose |
+| --- | --- | --- | --- |
+| `GET /v1/settings/default-builder-size` | project | no | Effective platform default as `{"flavor": <size>}`; initially inventory `flavors.builder`. No body or query. |
+| `PUT /v1/settings/default-builder-size` | project | yes | Set the default from `{flavor, expectedFlavor}`; `expectedFlavor` is the current effective name. Validates an existing size with at least 1 vCPU and 1024 MiB RAM. Returns `202`; operation kind `infra.builder-size.set`, scope `infrastructure`. |
+| `GET /v1/admin/settings/default-builder-size` | privileged | no | Same default read for operators. |
+| `PUT /v1/admin/settings/default-builder-size` | privileged | yes | Same audited default change for operators; poll the privileged operation route. |
+| `GET /v1/applications/{id}/builder-size` | project | no | `{flavor, defaultFlavor, useDefault}`: effective app size, effective platform default, and whether the app uses the default. No body or query. |
+| `PUT /v1/applications/{id}/builder-size` | project | yes | Set `{flavor, expectedFlavor}`. `flavor` is a name or ID, or `null` to reset to the platform default. `expectedFlavor` is the current override's name, or `null` when using the default. Same 1 vCPU/1024 MiB minimum. Returns `202`; kind `app.builder-size.set`, scope `app-<id>`. |
+
+Each size has `flavor_id`, `name`, `vcpus`, `ram_mib`, and `disk_gib`. Flavor references accept names or opaque IDs. Selections store the observed name so builder creation can check both the selected image and flavor. A changed expected selection fails without changing the setting; read it again and use a new request key. A recorded selection interrupted after writing can be resumed with the original body and key.
 
 ### Retained addresses
 

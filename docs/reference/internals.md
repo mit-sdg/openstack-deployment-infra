@@ -242,6 +242,16 @@ Rollback redeploys a different complete, successful attempt of the same enabled 
 
 Rollback keeps current sizing and secrets; derived values such as `PORT` follow candidate configuration. It restores no environment snapshot, database, bucket objects, or worker filesystem. Ordinary candidate failure keeps the predecessor. Acceptance transfers and verifies any floating IP before predecessor cleanup. Resize follows the same path with the accepted image and new sizing. See [Deploy apps from the command line](../guides/deploy-apps-from-the-command-line.md).
 
+### Worker and builder sizes
+
+The project peer can list closed OpenStack flavor capacity projections and fetch the same fingerprinted worker sizing plan as the operator. Sizes that cannot leave 64 MiB after the OS/service memory reserve are excluded. The broker admits only staff and admins, validates the plan against the current app observation, and forwards it unchanged on deploy. CPU comes from measured worker capacity minus reserve; the plan does not promise a vCPU-to-MHz conversion. A selected worker size replaces the worker, and a retained primary address requires maintenance after the build.
+
+Schema migration 6 adds nullable `applications.builder_flavor` and the singleton `builder_settings` table. An app override takes precedence over the platform default. A null override uses the current default; an unset platform default uses inventory `flavors.builder`. Admins change the default; staff and admins set or reset an app's override. Existing apps migrate with no override or stored default. Worker upserts preserve overrides.
+
+Builder choices require at least 1 vCPU and 1024 MiB RAM. Default changes serialize through the infrastructure lock and journal `infra.builder-size.set`; app changes use the app lock and journal `app.builder-size.set`. Both compare the expected current selection and record the observed flavor name before writing. The broker uses its durable intent journal and audit log; staff cannot manage or resume default changes.
+
+Immediately before starting a build, the controller records the app's effective builder flavor under the infrastructure lock, alongside its pinned builder image. Recovery keeps that flavor. The `app.build` helper request requires `builderFlavor` next to `builderImageId`; the helper validates it with `flavor_reference` and no longer reads inventory for a build's flavor. Builder creation still checks that the created server has the selected image and flavor. Changing a builder size affects later builds, needs no plan or maintenance, and leaves workers alone.
+
 ### Retained worker primary ports
 
 An app can retain a fixed primary IPv4 across worker replacements.
@@ -264,7 +274,7 @@ Key removal renames the directory before deletion, exposing the whole pair or no
 
 SQLite stores controller decisions and operation checkpoints. After restart, callers resume interrupted foreground work with the same request and key. Accepted finishing work resumes automatically from its recorded intent; uncertain provider outcomes remain unresolved until checked.
 
-[`openstack_platform/controller/database.py`](../../openstack_platform/controller/database.py) owns schema creation, forward migrations, the deployment binding, and the tables for apps, immutable deployment attempts, active deployment pointers, environment metadata, managed resources, image selections, slug tombstones, idempotency requests, operations, operation dispatches, and the optional floating-IP and fixed-port reservations. Unsupported prior schemas fail before any migration or provider call.
+[`openstack_platform/controller/database.py`](../../openstack_platform/controller/database.py) owns schema creation, forward migrations, the deployment binding, and the tables for apps, immutable deployment attempts, active deployment pointers, environment metadata, managed resources, image selections, slug tombstones, idempotency requests, operations, operation dispatches, and the optional floating-IP and fixed-port reservations, and builder size settings. Unsupported prior schemas fail before any migration or provider call.
 
 Transactions do not span provider calls. Domain-service checkpoints coordinate external work. Provider observations are evidence, not accepted state; reconciliation never creates app or storage records from matching external resources.
 
@@ -379,7 +389,7 @@ Local accounts use issuer `local`, an immutable UUID subject, and a unique lower
 
 Staff and portal admins use the shared `/api/v1/apps/{app}` endpoints for every app, without ownership or team membership. These requests pass through the app-management authority context: reads require CSRF and same-origin metadata, enter the private read audit, and suppress results if authority changes during the read. Mutations recheck the live role in the write transaction, carry the server-only journal marker and enter the app action audit. Owners and teammates retain their app-scoped authority. The `/api/v1/apps` and `/api/v1/intents` lists remain personal for every role.
 
-The portal routes are `/apps`, `/all-apps`, `/people`, `/people/:id`, `/activity`, and `/audit`. App pages live under `/apps/:id`. Role-named routes and duplicate app layouts have been removed, with no redirects.
+The portal routes are `/apps`, `/all-apps`, `/people`, `/people/:id`, `/activity`, `/audit`, and admin-only `/platform-settings`. App pages live under `/apps/:id`. Role-named routes and duplicate app layouts have been removed, with no redirects.
 
 | Action | Owner (own and team apps) | Staff | Portal admin |
 | --- | --- | --- | --- |
@@ -389,7 +399,8 @@ The portal routes are `/apps`, `/all-apps`, `/people`, `/people/:id`, `/activity
 | Accounts, roles, quotas, account audit | No | No | Yes |
 | Create an app for another owner | No | Yes | Yes |
 | Adopt an operator-created app, reassign an owner, delete storage | No | Yes | Yes |
-| Maintenance outage or sizing plan on deploy | No | Yes | Yes |
+| Maintenance outage, worker size, or app builder size | No | Yes | Yes |
+| Default builder size | No | No | Yes |
 
 The app-owner picker reads only IDs, names, roles, enabled flags, and account status from `/api/v1/people/eligible-owners`, with bounded name search and pagination. It grants no account-management access.
 

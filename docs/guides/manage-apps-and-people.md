@@ -22,7 +22,7 @@ Staff and portal admins open the same app pages as owners without joining the te
 
 - **Overview** shows the current deployment, activity and start, stop and restart controls.
 - **Settings** holds repository and runtime settings, deploy keys, environment variables, databases and storage. Staff and admins additionally get **Danger zone**, with **Change owner** and storage deletion.
-- **Deploy** lets you choose a commit, review it, and deploy. Staff and admins additionally get the deployment method and sizing plan.
+- **Deploy** lets you choose a commit, review it, and deploy. Staff and admins additionally get the deployment method, worker size, and builder size.
 - **Deployments** lists attempts. Open one to see its details and build output.
 - **Logs** shows runtime output and errors.
 - **Team** lets owners, staff and admins add or remove teammates. Members can leave their own team.
@@ -35,7 +35,7 @@ Staff and admins have no app or concurrency limit. Creating an app for another p
 
 **Needs attention** means a change is blocked; **Unknown** means its outcome has not been confirmed. Both offer **Resume** when the change can be replayed. Find the same status and action on **Overview**, deployment lists and details, **All apps**, **Activity**, or the person’s apps and activity under **People**.
 
-Select **Resume** to continue the original request with its original commit, settings and request keys. Wait for it to finish before starting another change. Staff and admins can resume anyone’s change without a password or authenticator confirmation; owners and teammates can resume changes on their apps. The audit log records who resumed it.
+Select **Resume** to continue the original request with its original commit, settings and request keys. Wait for it to finish before starting another change. Staff and admins can resume anyone’s app change without a password or authenticator confirmation; owners and teammates can resume changes on their apps. The audit log records who resumed it.
 
 An unfinished environment edit requires the person who started it to enter the same value again in **Settings** > **Environment variables**. It has no generic Resume action because values are not stored for replay.
 
@@ -79,7 +79,17 @@ On the app's **Settings** page, under **Danger zone**, select **Change owner**, 
 Staff and portal admins have these deploy options:
 
 - **Deployment method** > **Replace the running app in one step** chooses a maintenance cutover instead of starting the new version alongside it. The app goes offline briefly while the new version starts. For an app that keeps a fixed IP address, the portal applies this automatically and shows an information message about the brief outage.
-- **Sizing plan** takes a reviewed plan, as JSON, from the operator. Leave it empty to keep the app's current size. The operator creates plans with the controller API ([Deploy apps from the command line](deploy-apps-from-the-command-line.md)).
+- **Size** starts at **Keep current size**. Choose a different size to see the current and new sizes, the app's memory budget, and how CPU is measured. Review and deploy to apply the change. It replaces the worker; an app with a retained address uses maintenance after building. The portal sends the reviewed plan unchanged, and the controller checks it again before provisioning.
+
+### Change the builder size
+
+Staff and portal admins can change **Builder size** next to **Size** on the app's **Deploy** page. Choose an app-specific size or **Platform default**, then select **Save builder size**. Check the change's activity until it succeeds. The control shows the effective size and whether it comes from the platform default.
+
+Each deploy builds on a temporary machine of this size. A bigger builder builds faster and fits heavier builds, such as Next.js; a smaller builder lets more builds run at once. If a build runs out of memory, choose a bigger builder. Builders need at least 1 vCPU and 1 GB RAM.
+
+Saving a builder size applies to builds that start afterwards. It keeps the worker, needs no sizing plan or maintenance, and does not change a build already started. Owners cannot read or change builder sizes.
+
+Portal admins can open **Platform settings** near **People** and **Audit log**, change **Default builder size**, and select **Save default builder size**. Check for success and the new current selection. The new default applies to subsequent builds of apps using **Platform default**; app-specific choices stay the same. Both app and default changes enter the audit log. The inventory's `flavors.builder` supplies the default until an admin sets one. Admin VM size remains an operator task.
 
 ## Help a person
 

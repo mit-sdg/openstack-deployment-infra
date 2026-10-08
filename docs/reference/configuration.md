@@ -117,7 +117,7 @@ Provider CIDRs govern the ingress security group, host firewall, and trusted `X-
 | `PLATFORM_INGRESS_FLAVOR` | Yes (prompted) | 2 vCPUs, 2,048 MiB | Flavor for the ingress host |
 | `PLATFORM_STORAGE_FLAVOR` | Yes (prompted) | 4 vCPUs, 8,192 MiB | Flavor for the storage host |
 | `PLATFORM_WORKER_FLAVOR` | Yes (prompted) | 1 vCPU, 4,096 MiB | Flavor for app workers. Also the standard size for every app. |
-| `PLATFORM_BUILDER_FLAVOR` | Yes (prompted) | 4 vCPUs, 8,192 MiB | Flavor for builders |
+| `PLATFORM_BUILDER_FLAVOR` | Yes (prompted) | 4 vCPUs, 8,192 MiB | Initial default flavor for builders; controller settings and per-app overrides can replace it for later builds |
 
 Names must match one visible flavor meeting the minimum. The prompt offers the smallest qualifying flavor, by RAM then vCPUs.
 
@@ -249,6 +249,8 @@ Setup replaces these fields in `config/platform.example.json`; other fields are 
 | `images` | `<prefix>-nixos-<role>-<first 8 characters of the commit>` for each role | Derived |
 | `flavors` | One flavor name per role | `PLATFORM_<ROLE>_FLAVOR` |
 | `paths` | `root`: `/srv/<namespace>`; `adminState`, `backups`, `data`: same path with `-state`, `-backups`, `-data` | Derived |
+
+`flavors.builder` is the initial platform default for temporary build machines. A controller-held admin default overrides it, and an app-specific builder selection overrides that default. Portal builder selections require at least 1 vCPU and 1024 MiB RAM; setup still uses the role minimums above. Changing a builder selection affects builds that start afterwards. See [Manage apps and people](../guides/manage-apps-and-people.md#change-the-builder-size).
 
 Copied unchanged from the example file:
 

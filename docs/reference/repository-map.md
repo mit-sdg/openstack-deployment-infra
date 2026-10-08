@@ -145,6 +145,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory query cache.
 - `frontend/owner-portal/src/App.tsx` — sign-in, setup, task destinations and shared app routes.
 - `frontend/owner-portal/src/api.ts` — typed requests, response checks, settings validation, and CSRF retries.
+- `frontend/owner-portal/src/sizingApi.ts` — typed flavor lists, worker plans, builder settings, and size labels.
 - `frontend/owner-portal/src/authOptions.ts` — shared query for CSRF, sign-in label, and platform name.
 - `frontend/owner-portal/src/adminApi.ts` — account, quota, step-up, and audit requests.
 - `frontend/owner-portal/src/styles/app.css` — shared font, token, and component stylesheet imports.
@@ -161,7 +162,8 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/pages/NewApp.tsx` — create an app.
 - `frontend/owner-portal/src/pages/Overview.tsx` — app state, deployment, start, stop, restart, and activity.
 - `frontend/owner-portal/src/pages/Configuration.tsx` — source, build, runtime, environment, storage, and repository access.
-- `frontend/owner-portal/src/pages/Deploy.tsx` — commit selection, checks, review, and deploy.
+- `frontend/owner-portal/src/pages/Deploy.tsx` — commit selection, worker size plans, per-app builder size, checks, review, and deploy.
+- `frontend/owner-portal/src/pages/PlatformSettings.tsx` — admin-only default builder size selection and progress.
 - `frontend/owner-portal/src/pages/Deployment.tsx` — deployment details, runtime, build output, and startup record.
 - `frontend/owner-portal/src/pages/History.tsx` — an app's deployment history.
 - `frontend/owner-portal/src/pages/Logs.tsx` — an app's runtime logs.
@@ -188,6 +190,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/components/AttentionActivity.test.tsx` — tests for the attention list: who sees it, the original actor, and Resume.
 - `frontend/owner-portal/src/components/AttentionActivity.tsx` — an app's activity that needs attention (blocked or unknown), with who started each and a Resume button, for owners, staff, and admins.
 - `frontend/owner-portal/src/components/BoundaryText.tsx` — re-exports the shared `BoundaryText`.
+- `frontend/owner-portal/src/components/BuilderSize.tsx` — staff and admin per-app builder size selection, reset, and progress.
 - `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy checks, runtime versions, and review problems.
 - `frontend/owner-portal/src/components/DeploymentRow.tsx` — deployment list row.
 - `frontend/owner-portal/src/components/EnvironmentSection.tsx` — write-only environment editor and progress.
@@ -224,6 +227,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 #### Unit tests
 
 - `frontend/owner-portal/src/App.test.tsx` — settings, conflicts, status, API decoding, CSRF, and runtime actions.
+- `frontend/owner-portal/src/Sizing.test.tsx` — worker plan forwarding, size summaries, owner boundaries, and builder controls.
 - `frontend/owner-portal/src/ClassPages.test.tsx` — task navigation, shared Resume, metadata validation and account step-up tests.
 - `frontend/owner-portal/src/Routing.test.tsx` — nested routes and redirects from old staff links.
 - `frontend/owner-portal/src/Shell.test.tsx` — branding, role navigation, and app list tests.
@@ -410,6 +414,7 @@ The admin-host controller owns app state in SQLite. See the [controller API](con
 - `openstack_platform/controller/__init__.py` — package marker for the controller.
 - `openstack_platform/controller/main.py` — controller startup and composition.
 - `openstack_platform/controller/api.py` — routes, services, helper transport, and socket authority split.
+- `openstack_platform/controller/builder_settings.py` — effective per-app builder sizes and audited default and override selections.
 - `openstack_platform/controller/http.py` — bounded Unix HTTP/1.1 server with peer checks.
 - `openstack_platform/controller/database.py` — SQLite schema, migrations, identity, journals, and state operations.
 - `openstack_platform/controller/async_operations.py` — bounded worker pool serializing changes per app.
@@ -489,7 +494,9 @@ The broker authorizes portal actions and owns accounts, sessions, ownership, quo
 
 - `openstack_platform/management/broker/__init__.py` — package marker for the broker.
 - `openstack_platform/management/broker/main.py` — production broker entry point without development imports.
-- `openstack_platform/management/broker/app_management.py` — shared app authority, catalog filters, adoption, ownership and storage deletion.
+- `openstack_platform/management/broker/app_management.py` — shared app authority, catalog filters, sizing, adoption, ownership and storage deletion.
+- `openstack_platform/management/broker/sizing.py` — closed flavor projections and optional controller sizing reads.
+- `openstack_platform/management/broker/builder_settings.py` — admin-only default builder size reads and durable audited changes.
 - `openstack_platform/management/broker/class_reads.py` — bounded audited People and Activity projections.
 - `openstack_platform/management/broker/api.py` — owner routes with ownership and quota checks.
 - `openstack_platform/management/broker/auth.py` — Commons/local sign-in, sessions, CSRF, and sign-out.
@@ -580,6 +587,7 @@ Python `unittest` modules grouped by boundary. See [test layout](../development.
 - `tests/test_log_timestamps.py` — Node.js and Bun wrapper streams, partial and long lines, binary bytes, exit and signal behavior, and build recording.
 - `tests/test_application_health_observation.py` — health path and route checks, and stopped apps.
 - `tests/test_application_sizing.py` — worker sizes, per-app plans, resizing, retries, and rollback.
+- `tests/test_portal_sizing.py` — project sizing routes, builder defaults and overrides, schema migration, and recovery.
 - `tests/test_application_deployment_docs.py` — checks that the command-line deploy guide's examples are valid Bash and valid configuration.
 - `tests/test_build_failure_cleanup.py` — classifying rejected builds and confirming the builder and registry image are gone.
 - `tests/test_checkout_preflight_parity.py` — runs the shared preflight cases through the build's `validate_checkout`.

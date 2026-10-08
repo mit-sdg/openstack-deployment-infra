@@ -149,7 +149,7 @@ class DocumentationTests(unittest.TestCase):
         implementation = (ROOT / "openstack_platform" / "controller" / "api.py").read_text()
         reference = read("reference/controller-api.md")
         routes = set(ROUTE_RE.findall(implementation))
-        self.assertEqual(len(routes), 52)
+        self.assertEqual(len(routes), 60)
         for method, path in routes:
             with self.subTest(method=method, path=path):
                 self.assertIn(f"`{method} {path}`", reference)
