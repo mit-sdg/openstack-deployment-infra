@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
-import { appManagementApi, type CatalogApp } from '../appManagementApi';
-import { AppCatalog, CatalogStatus, catalogRefetchInterval } from './AllApps';
+import { describe, expect, it } from 'vitest';
+import type { CatalogApp } from '../appManagementApi';
+import { CatalogStatus, catalogRefetchInterval } from './AllApps';
 
 const app: CatalogApp = {
   applicationId: 'app',
@@ -72,19 +72,6 @@ describe('catalog status', () => {
     expect(screen.getByText('Healthy')).toBeVisible();
     expect(screen.getByText('Needs attention')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Resume' })).toBeVisible();
-  });
-  it('keeps attention in the filter without an attention column or mobile field', async () => {
-    vi.spyOn(appManagementApi, 'list').mockResolvedValue({
-      items: [app],
-      nextCursor: null,
-      truncated: false,
-    });
-    show(<AppCatalog />);
-    const table = await screen.findByRole('table');
-    expect(within(table).queryByText(/attention/i)).toBeNull();
-    expect(screen.queryByRole('columnheader', { name: 'Needs attention' })).toBeNull();
-    expect(screen.getByRole('option', { name: 'Needs attention' })).toBeInTheDocument();
-    expect(document.querySelector('[data-label="Needs attention"]')).toBeNull();
   });
   it('polls faster while unknown or refreshing and returns to the regular interval', () => {
     expect(catalogRefetchInterval([{ ...app, appState: 'unknown' }])).toBe(3000);

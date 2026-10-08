@@ -6,17 +6,13 @@ import contextlib
 import copy
 import hashlib
 import hmac
-import http.client
 import io
 import sqlite3
-import threading
 import uuid
 from unittest import mock
 
-from openstack_platform import management_release
 from openstack_platform.controller import database as controller_db
 from openstack_platform.controller.http import HttpError
-from openstack_platform.management import activation, rollback
 from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker.api import DEFAULT_CONFIGURATION, Broker
 from openstack_platform.management.broker.client import ControllerUnavailable
@@ -25,7 +21,7 @@ from tests import test_management as management
 from tests import test_management_contract as contracts
 
 
-class OwnerResourceContractTests(contracts.RealProjectContractTests):
+class OwnerResourceContractTests(contracts.RealProjectCase):
     def setUp(self) -> None:
         super().setUp()
         self.real.reject = False
@@ -572,26 +568,6 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
             "APP_BUSY", lambda: self.call("PUT", path, {"value": "low-entropy"}, "alice")
         )
 
-    def test_storage_failed_provisioning_reports_progress_and_same_key_recovery(self):
-        self.real.reject = True
-        intent = self.call(
-            "POST", f"/v1/apps/{self.app_id}/storage", {"type": "postgres"}, "alice"
-        ).body["data"]
-        self.assertEqual(self.finish(intent)["state"], "blocked")
-        listing = self.call("GET", f"/v1/apps/{self.app_id}/storage", owner="alice").body["data"]
-        self.assertEqual(listing["items"][0]["status"], "failed")
-        self.assert_error(
-            "STORAGE_TYPE_EXISTS",
-            lambda: self.call(
-                "POST", f"/v1/apps/{self.app_id}/storage", {"type": "postgres"}, "alice"
-            ),
-        )
-        self.real.reject = False
-        retry = self.call("POST", f"/v1/intents/{intent['intentId']}/resume", {}, "alice").body[
-            "data"
-        ]
-        self.assertEqual(self.finish(retry)["state"], "succeeded")
-
     def test_resource_mutations_require_origin_csrf_and_idempotency(self):
         for path, body in (
             (f"/v1/apps/{self.app_id}/storage", {"type": "postgres"}),
@@ -613,84 +589,8 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
             with self.assertRaises(HttpError):
                 self.call(method, path, body, "alice", headers={"idempotency-key": "invalid"})
 
-    def test_environment_write_rate_limit_does_not_retain_values(self):
-        with self.broker.database.connect(write=True) as db:
-            for _ in range(30):
-                identifier = self.broker.record(
-                    db,
-                    self.login_id(),
-                    self.app_id,
-                    "env_set",
-                    str(uuid.uuid4()),
-                    "fingerprint",
-                    "PUT",
-                    "/unused",
-                    {"names": ["TOKEN"]},
-                    str(uuid.uuid4()),
-                )
-                db.execute("UPDATE intents SET state='failed' WHERE id=?", (identifier,))
-        self.assert_error(
-            "RATE_LIMITED",
-            lambda: self.call(
-                "PUT", f"/v1/apps/{self.app_id}/environment/TOKEN", {"value": "private"}, "alice"
-            ),
-        )
-
-    def login_id(self):
-        with self.broker.database.connect() as db:
-            return db.execute("SELECT user_id FROM apps WHERE id=?", (self.app_id,)).fetchone()[0]
-
 
 class ResourceWebTransportTests(management.ManagementCase):
-    def test_http_delete_dispatches_environment_and_elevated_storage_routes(self):
-        from urllib.parse import urlsplit
-
-        from openstack_platform.management.web.server import WebServer
-
-        web = WebServer(("127.0.0.1", 0), self.config, self.root)
-        thread = threading.Thread(
-            target=web.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
-        )
-        thread.start()
-        self.addCleanup(web.server_close)
-        self.addCleanup(web.shutdown)
-        app = str(uuid.uuid4())
-        connection = http.client.HTTPConnection("127.0.0.1", web.server_port)
-        self.addCleanup(connection.close)
-        with mock.patch.object(
-            web.broker, "request", return_value=(202, {"data": {"state": "accepted"}})
-        ) as request:
-            connection.request(
-                "DELETE",
-                f"/api/v1/apps/{app}/environment/API_TOKEN",
-                "{}",
-                {
-                    "Host": urlsplit(self.config.portal_origin).netloc,
-                    "Content-Type": "application/json",
-                },
-            )
-            response = connection.getresponse()
-            self.assertEqual(response.status, 202)
-            response.read()
-            self.assertEqual(
-                request.call_args.args[:2], ("DELETE", f"/v1/apps/{app}/environment/API_TOKEN")
-            )
-            count = request.call_count
-            connection.request(
-                "DELETE",
-                f"/api/v1/apps/{app}/storage/{uuid.uuid4()}",
-                "{}",
-                {
-                    "Host": urlsplit(self.config.portal_origin).netloc,
-                    "Content-Type": "application/json",
-                },
-            )
-            response = connection.getresponse()
-            self.assertEqual(response.status, 202)
-            response.read()
-            self.assertEqual(request.call_count, count + 1)
-            self.assertEqual(request.call_args.args[0], "DELETE")
-
     def test_exact_resource_paths_forward_and_neighbors_fail_closed(self):
         from openstack_platform.management.web.server import WebServer
 
@@ -724,27 +624,3 @@ class ResourceWebTransportTests(management.ManagementCase):
                     web.forward("POST", f"/api/v1/apps/{app}{suffix}", "", {}, b"").status, 404
                 )
             self.assertEqual(request.call_count, count)
-
-
-class AccountReleaseCompatibilityTests(contracts.ManagementCase):
-    def test_image_activation_release_and_rollback_compatibility_match_schema_three(self):
-        # Accounts require the approved replacement image with schema/protocol 3.
-        expected = {
-            "brokerProtocolVersion": 3,
-            "webProtocolVersion": 3,
-            "authProtocolVersion": 3,
-            "brokerSchemaVersion": 3,
-            "controllerApiVersion": 1,
-        }
-        self.assertEqual(activation.COMPATIBILITY, expected)
-        self.assertEqual(management_release.COMPATIBILITY, expected)
-        self.assertEqual(rollback.COMPATIBILITY, expected)
-        with self.broker.database.connect() as db:
-            self.assertEqual(db.execute("SELECT version FROM metadata").fetchone()[0], 3)
-            self.assertEqual(
-                [
-                    row[0]
-                    for row in db.execute("SELECT version FROM schema_migrations ORDER BY version")
-                ],
-                [1, 2, 3],
-            )

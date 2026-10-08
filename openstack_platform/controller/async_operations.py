@@ -30,10 +30,12 @@ class AsyncOperationExecutor:
         *,
         workers: int = 4,
         capacity: int = 32,
+        retry_poll_seconds: float = 1.0,
         finishing_work: Callable[[sqlite3.Connection, str], object] | None = None,
     ) -> None:
         if workers < 1 or capacity < workers:
             raise ValueError("async operation bounds are invalid")
+        self._retry_poll_seconds = retry_poll_seconds
         self.database_path = database_path
         self._slots = threading.BoundedSemaphore(capacity)
         self._queue: queue.Queue[tuple[str, OperationWork] | None] = queue.Queue()
@@ -187,7 +189,7 @@ class AsyncOperationExecutor:
     def _retry_loop(self) -> None:
         connection = db.connect(self.database_path, create=False)
         try:
-            while not self._stop_retries.wait(1):
+            while not self._stop_retries.wait(self._retry_poll_seconds):
                 if self._finishing_work is None:
                     continue
                 for operation in finishing_retries.due(connection):

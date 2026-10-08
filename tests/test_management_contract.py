@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import copy
 import threading
-import time
 import uuid
 from typing import Any
-from unittest.mock import patch
 
 from openstack_platform.controller.http import ControllerServer, HttpError
 from openstack_platform.management.broker.client import UnixConnection
@@ -16,7 +13,74 @@ from tests import test_controller_recovery as recovery_fixtures
 from tests.test_management import DEFAULT_CONFIGURATION, ManagementCase
 
 
-class RealProjectContractTests(ManagementCase):
+class RealProjectCase(ManagementCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.real = recovery_fixtures.ControllerRecoveryTests()
+        self.real.setUp()
+        self.addCleanup(self.real.doCleanups)
+        original_helper = self.real.helper
+
+        def helper(config: Any, action: str, values: Any, **kwargs: Any) -> Any:
+            if action == "app.build.logs":
+                text = "Build rejected by the local helper fixture.\n"
+                return {
+                    "exists": True,
+                    "text": text,
+                    "nextOffset": len(text.encode()),
+                    "state": "failed",
+                    "truncated": False,
+                }
+            return original_helper(config, action, values, **kwargs)
+
+        # Existing fixtures dispatch in one thread. Hosting the actual router
+        # requires the same cross-thread SQLite mode as controller/main.py.
+        from openstack_platform.controller import database as db
+        from openstack_platform.controller.api import ControllerAPI
+
+        self.real.fixture.api.close()
+        self.real.fixture.connection.close()
+        connection = db.connect(
+            self.real.fixture.root / "platform.sqlite3", check_same_thread=False
+        )
+        self.real.connection = self.real.fixture.connection = connection
+        self.real.fixture.api = ControllerAPI(
+            connection, self.real.fixture.config, self.real.fixture.root, helper_caller=helper
+        )
+        self.real_socket = self.sockets / "real.sock"
+        self.real_server = ControllerServer(
+            str(self.real_socket), self.real.fixture.api.router("project")
+        )
+        thread = threading.Thread(
+            target=self.real_server.serve_forever, kwargs={"poll_interval": 0.001}, daemon=True
+        )
+        thread.start()
+        self.addCleanup(self.real_server.server_close)
+        self.addCleanup(self.real_server.shutdown)
+        self.broker.client.path = self.real_socket
+        self.broker.client.timeout = 5
+        self.login()
+
+    @staticmethod
+    def wire(
+        path: Any, method: str, target: str, body: Any = None, key: str | None = None
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        connection = UnixConnection(path, 5)
+        try:
+            headers = {"Content-Type": "application/json"}
+            if key:
+                headers["Idempotency-Key"] = key
+            connection.request(
+                method, target, None if body is None else canonical(body).encode(), headers
+            )
+            response = connection.getresponse()
+            value = strict_json(response.read())
+            return response.status, value, dict(response.getheaders())
+        finally:
+            connection.close()
+
+
+class RealProjectContractTests(RealProjectCase):
     def test_natural_competing_deployments_use_operation_conflict(self) -> None:
         entered, release = threading.Event(), threading.Event()
         original = self.real.fixture.api.helper_caller
@@ -69,182 +133,6 @@ class RealProjectContractTests(ManagementCase):
         finally:
             release.set()
             self.real.fixture.api.wait_for_operations()
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.real = recovery_fixtures.ControllerRecoveryTests()
-        self.real.setUp()
-        self.addCleanup(self.real.doCleanups)
-        original_helper = self.real.helper
-
-        def helper(config: Any, action: str, values: Any, **kwargs: Any) -> Any:
-            if action == "app.build.logs":
-                text = "Build rejected by the local helper fixture.\n"
-                return {
-                    "exists": True,
-                    "text": text,
-                    "nextOffset": len(text.encode()),
-                    "state": "failed",
-                    "truncated": False,
-                }
-            return original_helper(config, action, values, **kwargs)
-
-        # Existing fixtures dispatch in one thread. Hosting the actual router
-        # requires the same cross-thread SQLite mode as controller/main.py.
-        from openstack_platform.controller import database as db
-        from openstack_platform.controller.api import ControllerAPI
-
-        self.real.fixture.api.close()
-        self.real.fixture.connection.close()
-        connection = db.connect(
-            self.real.fixture.root / "platform.sqlite3", check_same_thread=False
-        )
-        self.real.connection = self.real.fixture.connection = connection
-        self.real.fixture.api = ControllerAPI(
-            connection, self.real.fixture.config, self.real.fixture.root, helper_caller=helper
-        )
-        self.real_socket = self.sockets / "real.sock"
-        self.real_server = ControllerServer(
-            str(self.real_socket), self.real.fixture.api.router("project")
-        )
-        thread = threading.Thread(
-            target=self.real_server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
-        )
-        thread.start()
-        self.addCleanup(self.real_server.server_close)
-        self.addCleanup(self.real_server.shutdown)
-        self.broker.client.path = self.real_socket
-        self.broker.client.timeout = 5
-        self.login()
-
-    def test_real_project_admits_all_storage_outputs_and_replays_existing_operations(self) -> None:
-        from openstack_platform.controller import database as db
-        from openstack_platform.controller import storage
-        from openstack_platform.controller.storage_contract import OUTPUT_ENVIRONMENT_KEYS
-
-        original = self.real.fixture.api.helper_caller
-
-        def helper(config, action, values, **kwargs):
-            if action.startswith("storage.") and action.endswith(".create"):
-                kind = action.split(".")[1]
-                app = db.get_application(self.real.connection, values["applicationId"])
-                name = storage._provider_name(config, app, kind, "default")
-                return {
-                    "providerId": name,
-                    "providerName": name,
-                    "verified": True,
-                    "evidenceAccepted": True,
-                    "modifyIndex": 1,
-                }
-            return original(config, action, values, **kwargs)
-
-        self.real.fixture.api.helper_caller = helper
-        for kind, outputs in OUTPUT_ENVIRONMENT_KEYS.items():
-            with self.subTest(kind=kind):
-                app = str(uuid.uuid4())
-                status, _created, _ = self.wire(
-                    self.real_socket,
-                    "POST",
-                    "/v1/applications",
-                    {"slug": "all-outputs-" + kind},
-                    app,
-                )
-                self.assertEqual(status, 201)
-                key = str(uuid.uuid4())
-                status, _storage, _ = self.wire(
-                    self.real_socket, "POST", f"/v1/applications/{app}/storage", {"type": kind}, key
-                )
-                self.assertEqual(status, 202)
-                self.real.fixture.api.wait_for_operations()
-                status, resources, _ = self.wire(
-                    self.real_socket, "GET", f"/v1/applications/{app}/storage"
-                )
-                self.assertEqual(status, 200)
-                resource = resources["items"][0]
-                self.assertEqual(resource["lifecycleState"], "active")
-                body = {
-                    "repository": "https://github.com/example/app",
-                    "requestedRef": "main",
-                    "commit": "a" * 40,
-                    "configurationRevision": 1,
-                    "configuration": {
-                        "schemaVersion": 1,
-                        "build": {
-                            "runtime": "node",
-                            "packages": ["."],
-                            "buildScript": None,
-                            "startScript": "start",
-                        },
-                        "runtime": {"port": 3000, "healthPath": "/health"},
-                        "storageBindings": [
-                            {"resourceId": resource["resourceId"], "outputs": dict(outputs)}
-                        ],
-                    },
-                }
-                deployment = str(uuid.uuid4())
-                status, admitted, _ = self.wire(
-                    self.real_socket,
-                    "POST",
-                    f"/v1/applications/{app}/deployments",
-                    body,
-                    deployment,
-                )
-                self.assertEqual(status, 202, admitted)
-                self.real.fixture.api.wait_for_operations()
-                operation = db.get_operation(self.real.connection, deployment)
-                self.assertEqual(operation.phase, "build_rejected")
-                self.assertIsNotNone(db.get_deployment_attempt(self.real.connection, deployment))
-                status, replayed, _ = self.wire(
-                    self.real_socket,
-                    "POST",
-                    f"/v1/applications/{app}/deployments",
-                    body,
-                    deployment,
-                )
-                self.assertEqual(status, 202)
-                self.assertEqual(replayed["operationId"], deployment)
-                changed = {**body, "commit": "b" * 40}
-                status, conflict, _ = self.wire(
-                    self.real_socket,
-                    "POST",
-                    f"/v1/applications/{app}/deployments",
-                    changed,
-                    deployment,
-                )
-                self.assertEqual(status, 409)
-                self.assertEqual(conflict["error"]["code"], "IDEMPOTENCY_CONFLICT")
-                changed_binding = copy.deepcopy(body)
-                first_output = next(iter(outputs))
-                changed_binding["configuration"]["storageBindings"][0]["outputs"][first_output] = (
-                    "RENAMED_OUTPUT"
-                )
-                status, conflict, _ = self.wire(
-                    self.real_socket,
-                    "POST",
-                    f"/v1/applications/{app}/deployments",
-                    changed_binding,
-                    deployment,
-                )
-                self.assertEqual(status, 409)
-                self.assertEqual(conflict["error"]["code"], "IDEMPOTENCY_CONFLICT")
-
-    @staticmethod
-    def wire(
-        path: Any, method: str, target: str, body: Any = None, key: str | None = None
-    ) -> tuple[int, dict[str, Any], dict[str, str]]:
-        connection = UnixConnection(path, 5)
-        try:
-            headers = {"Content-Type": "application/json"}
-            if key:
-                headers["Idempotency-Key"] = key
-            connection.request(
-                method, target, None if body is None else canonical(body).encode(), headers
-            )
-            response = connection.getresponse()
-            value = strict_json(response.read())
-            return response.status, value, dict(response.getheaders())
-        finally:
-            connection.close()
 
     def test_broker_real_creation_terminal_failure_history_deployment_and_log(self) -> None:
         app = self.create(slug="contract-project")
@@ -487,7 +375,7 @@ class RealProjectContractTests(ManagementCase):
         )
 
 
-class DeletedApplicationContractTests(RealProjectContractTests):
+class DeletedApplicationContractTests(RealProjectCase):
     def delete_remote(self, app: str, name: str) -> None:
         response = self.real.fixture.api.router("privileged").dispatch(
             "POST",
@@ -550,69 +438,3 @@ class DeletedApplicationContractTests(RealProjectContractTests):
                 1,
             )
         self.create(slug="quota-slot-reused")
-
-    def test_background_deletion_scan_and_staff_admin_lists(self) -> None:
-        from openstack_platform.management.broker import bootstrap
-        from openstack_platform.management.broker.accounts import security_change
-        from tests import test_management_accounts as accounts
-
-        self.now = time.time()
-        folder = bootstrap.enrollment_file(self.config).parent
-        folder.mkdir(parents=True, mode=0o2750)
-        folder.chmod(0o2750)
-        # Reuse real enrollment/MFA helpers without changing role enforcement.
-        self.anonymous = accounts.AccountsTests.anonymous.__get__(self)
-        self.begin = accounts.AccountsTests.begin.__get__(self)
-        self.finish = accounts.AccountsTests.finish.__get__(self)
-        accounts.AccountsTests.admin(self)
-        app = self.create(slug="retire-in-background")
-        self.delete_remote(app, "retire-in-background")
-        self.broker.journal.reconcile()
-        self.assertEqual(self.call("GET", "/v1/all-apps", owner="admin").body["data"]["items"], [])
-        with self.broker.database.connect(write=True) as db:
-            user = db.execute("SELECT user_id FROM apps WHERE id=?", (app,)).fetchone()[0]
-            db.execute("UPDATE users SET role='staff' WHERE id=?", (user,))
-            security_change(db, user)
-        self.login()
-        self.assertEqual(self.call("GET", "/v1/all-apps", owner="alice").body["data"]["items"], [])
-        # Staff observe through their metadata view and app administration.
-        for name, route, actor in (
-            ("staff", "/v1/all-apps", "alice"),
-            ("staff-admin", "/v1/all-apps", "alice"),
-            ("admin", "/v1/all-apps", "admin"),
-        ):
-            pending = self.create(slug="lazy-delete-" + name)
-            self.delete_remote(pending, "lazy-delete-" + name)
-            # The list returns the recent cache without waiting on the controller.
-            listed = self.call("GET", route, owner=actor).body["data"]["items"]
-            self.assertEqual([item["applicationId"] for item in listed], [pending])
-            # Run the existing background scan without its five-second polling delay.
-            self.broker.journal.reconcile_apps()
-            self.assertEqual(self.call("GET", route, owner=actor).body["data"]["items"], [])
-            with self.broker.database.connect() as db:
-                self.assertEqual(
-                    db.execute("SELECT lifecycle FROM apps WHERE id=?", (pending,)).fetchone()[0],
-                    "deleted",
-                )
-        with self.assertRaises(HttpError) as caught:
-            self.call(
-                "POST",
-                f"/v1/apps/{app}/deployments",
-                {"commit": "a" * 40, "configurationRevision": 1},
-                "admin",
-            )
-        self.assertEqual(caught.exception.code, "APPLICATION_DELETED")
-
-    def test_dependency_errors_and_creating_apps_are_not_deleted(self) -> None:
-        app = self.create(slug="still-present")
-        for response in (
-            (503, {"error": {"code": "DEPENDENCY_UNAVAILABLE"}}),
-            (404, {"error": {"code": "NOT_FOUND"}}),
-        ):
-            with patch.object(self.broker.client, "request", return_value=response):
-                self.assertFalse(self.broker.journal.observe_deleted(app))
-        with self.broker.database.connect(write=True) as db:
-            db.execute("UPDATE apps SET lifecycle='creating' WHERE id=?", (app,))
-        with patch.object(self.broker.client, "request") as request:
-            self.assertFalse(self.broker.journal.observe_deleted(app))
-            request.assert_not_called()

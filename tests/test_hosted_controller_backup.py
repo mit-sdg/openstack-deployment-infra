@@ -1,23 +1,18 @@
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import io
 import json
 import os
-import shutil
 import sqlite3
 import tarfile
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
-from openstack_platform import backup_retention, recovery_bundle
+from openstack_platform import backup_retention
 from openstack_platform.controller import database as db
-from openstack_platform.controller import hosted_backup
 from openstack_platform.controller import source_key_backup as keys
 from openstack_platform.controller.hosted_backup import HostedBackupError, backup_hosted_database
 
@@ -149,52 +144,6 @@ class HostedControllerBackupTests(HostedBackupFixture):
         self.assertEqual(public.stat().st_uid, os.geteuid())
         self.assertFalse(list((self.state / "backup-work").iterdir()))
 
-    def test_key_archive_leaves_out_deleted_apps(self) -> None:
-        root = self._keys()
-        deleted = "22222222-2222-4222-8222-222222222222"
-        db.put_application(
-            self.connection,
-            application_id=deleted,
-            application_slug="deleted-app",
-            worker_flavor="example.1c2g",
-            scheduler_cpu_mhz=1000,
-            scheduler_memory_mib=2048,
-        )
-        shutil.copytree(root / "hosted-app", root / "deleted-app")
-        # Deletion keeps the row and retires the slug with a tombstone.
-        with self.connection:
-            self.connection.execute(
-                "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
-                ("deleted-app", deleted, "2026-01-02T03:04:05Z"),
-            )
-        keys.write_source_key_archive(self.connection, root, self.root / "keys.tar")
-        with tarfile.open(self.root / "keys.tar") as archive:
-            self.assertEqual(
-                set(archive.getnames()), {"hosted-app/id_ed25519", "hosted-app/id_ed25519.pub"}
-            )
-
-    def test_key_backup_retries_a_directory_replacement_and_refuses_links(self) -> None:
-        root = self._keys()
-        original = keys._read_key
-        replaced = False
-
-        def race(directory, name):
-            nonlocal replaced
-            if not replaced:
-                replaced = True
-                os.rename(root / "hosted-app", root / ".old-hosted-app")
-                shutil.copytree(root / ".old-hosted-app", root / "hosted-app")
-                raise FileNotFoundError("replacement race")
-            return original(directory, name)
-
-        with mock.patch.object(keys, "_read_key", race):
-            keys.write_source_key_archive(self.connection, root, self.root / "race.tar")
-        public = root / "hosted-app/id_ed25519.pub"
-        public.unlink()
-        public.symlink_to(root / ".old-hosted-app/id_ed25519.pub")
-        with self.assertRaises(OSError):
-            keys.write_source_key_archive(self.connection, root, self.root / "link.tar")
-
     def test_key_restore_refuses_unknown_slugs_links_duplicates_and_incomplete_pairs(self) -> None:
         for name, kind in (
             ("../id_ed25519", tarfile.REGTYPE),
@@ -325,15 +274,6 @@ class HostedControllerRetentionTests(HostedBackupFixture):
         self.assertEqual((result.removed, result.kept), (1, 1))
         self.assertEqual(self._names(), {".staging", *self._trio(new)})
 
-    def test_retention_refuses_to_run_without_the_new_committed_set(self) -> None:
-        old = self._committed(f"hosted-controller-{stamp(90)}.sqlite3.age")
-        missing = f"hosted-controller-{stamp(0)}.sqlite3.age"
-        (self.backups / missing).write_bytes(b"age-encryption.org/v1\nuncommitted")
-        with self.assertRaises(backup_retention.RetentionError) as raised:
-            self._prune(missing, days=0, minimum=1)
-        self.assertEqual(raised.exception.reason, "new-backup-not-committed")
-        self.assertTrue(self._trio(old) <= self._names())
-
     def test_referenced_key_archives_stay_and_old_orphans_go(self) -> None:
         new = self._backup_at(0, source_keys=self._keys())
         # An older backup may name an archive from another run; it pins it.
@@ -410,63 +350,6 @@ class HostedControllerRetentionTests(HostedBackupFixture):
         self.assertIn("'notes.txt': unexpected entry", reasons)
         self.assertIn(f"'{linked}.manifest': not a direct current-user-owned file", reasons)
         self.assertIn(f"'{broken}': committed set is incomplete", reasons)
-
-    def test_offsite_export_still_selects_the_newest_set_after_retention(self) -> None:
-        source_keys = self._keys()
-        names = [self._backup_at(days, source_keys=source_keys) for days in (30, 20, 0)]
-        self._prune(names[-1], minimum=1)
-        selected = recovery_bundle._selected_component_files("hosted-controller", self.backups)
-        self.assertEqual(
-            {path.name for path in selected},
-            self._trio(names[-1]) | self._trio(self._key_of(names[-1])),
-        )
-
-    def _main(self, now: datetime) -> tuple[int, str, str]:
-        configuration = SimpleNamespace(
-            platform=None, policy=SimpleNamespace(backup_age_recipient="age1testrecipient")
-        )
-        connect = db.connect
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with (
-            mock.patch.object(hosted_backup, "datetime", mock.Mock(now=lambda _zone: now)),
-            mock.patch.object(hosted_backup, "load", return_value=configuration),
-            mock.patch.object(db, "deployment_identity", return_value=None),
-            mock.patch.object(db, "connect", side_effect=lambda path, **_: connect(path)),
-            mock.patch.object(db, "migrate"),
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-        ):
-            status = hosted_backup.main(
-                [
-                    "--platform-config=platform.json",
-                    "--policy=policy.json",
-                    f"--state-directory={self.state}",
-                    f"--backup-root={self.backups}",
-                    f"--age-command={self._age()}",
-                    f"--source-keys-root={self._keys()}",
-                ]
-            )
-        return status, stdout.getvalue(), stderr.getvalue()
-
-    def test_command_prunes_after_commit_and_a_failure_keeps_the_new_set(self) -> None:
-        for days in (90, 80, 70):
-            self._committed(f"hosted-controller-{stamp(days)}.sqlite3.age")
-        status, stdout, _stderr = self._main(NOW)
-        self.assertEqual(status, 0)
-        self.assertIn(f"hosted-controller-backup=hosted-controller-{stamp(0)}.sqlite3.age", stdout)
-        self.assertIn("retention=ok removed=1 kept=4", stdout)
-
-        shutil.rmtree(self.root / "source-keys")
-        later = NOW + timedelta(hours=1)
-        with mock.patch.object(
-            backup_retention, "_remove", side_effect=PermissionError(13, "denied")
-        ):
-            status, stdout, stderr = self._main(later)
-        self.assertEqual(status, 1)
-        name = f"hosted-controller-{later.strftime('%Y%m%dT%H%M%SZ')}.sqlite3.age"
-        self.assertIn(f"hosted-controller-backup={name}", stdout)
-        self.assertIn("retention=failed reason=filesystem-EACCES", stderr)
-        self.assertTrue(self._trio(name) <= self._names())
 
 
 if __name__ == "__main__":

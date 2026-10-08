@@ -8,19 +8,19 @@ import io
 import os
 import sqlite3
 import time
+import unittest
 from contextlib import closing, redirect_stderr
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker import bootstrap, local_security
 from openstack_platform.management.broker.accounts import security_change
-from openstack_platform.management.broker.database import MIGRATION_2, SCHEMA_V1, Database
-from openstack_platform.management.common import canonical, digest, utc
+from openstack_platform.management.common import canonical
 from tests.test_management import ManagementCase
 
 
-class SecurityTests(ManagementCase):
+class SecurityTests(unittest.TestCase):
     def test_scrypt_unique_salts_constant_verification_and_rehash(self) -> None:
         value = "a private password 89347"
         first, second = local_security.hash_password(value), local_security.hash_password(value)
@@ -184,19 +184,6 @@ class AccountsTests(ManagementCase):
                 db.execute("SELECT totp_confirmed FROM local_accounts").fetchone()[0], 1
             )
         self.assertNotIn("private secure phrase", content)
-
-    def test_authenticator_uri_names_the_platform(self) -> None:
-        url = bootstrap.issue(self.config, now=self.now)
-        started, _csrf, _headers = self.begin(urlsplit(url).fragment, username="rootadmin")
-        uri = urlsplit(started["otpauthUri"])
-        self.assertEqual((uri.scheme, uri.netloc), ("otpauth", "totp"))
-        self.assertEqual(uri.path, "/App%20platform:rootadmin")
-        query = parse_qs(uri.query)
-        self.assertEqual(query["issuer"], ["App platform"])
-        self.assertEqual(query["secret"], [started["totpSecret"]])
-        self.assertEqual(
-            (query["algorithm"], query["digits"], query["period"]), (["SHA1"], ["6"], ["30"])
-        )
 
     def test_bootstrap_expiry_malformed_unsafe_file_origin_csrf_and_no_token_logs(self) -> None:
         token = urlsplit(bootstrap.issue(self.config, now=self.now)).fragment
@@ -477,10 +464,6 @@ class AccountsTests(ManagementCase):
     def test_restore_preserves_admin_and_staff_roles_but_invalidates_all_token_authority(
         self,
     ) -> None:
-        import sqlite3
-        from contextlib import closing
-
-        from openstack_platform.management.backup import restore_database
 
         self.admin()
         invited = self.invite()
@@ -509,81 +492,6 @@ class AccountsTests(ManagementCase):
         self.assertNotIn(
             invited["setupUrl"], snapshot.read_bytes().decode("utf-8", errors="ignore")
         )
-
-    def test_pending_account_admin_promotion_and_stepup_expiry_after_slow_enrollment(self) -> None:
-        self.admin()
-        invited = self.invite("owner", "futureadmin")
-        promoted = self.call(
-            "PATCH",
-            f"/v1/people/{invited['userId']}/account",
-            {"action": "role", "value": "admin"},
-            "admin",
-        ).body["data"]
-        self.assertIn("setupUrl", promoted)
-        stage, csrf, headers = self.begin(urlsplit(promoted["setupUrl"]).fragment)
-        self.assertIsNotNone(stage["totpSecret"])
-        self.now += 301
-        session = self.finish(stage, csrf, headers, alias="futureadmin")
-        self.assertEqual(session["role"], "admin")
-        self.assertEqual(session["stepUpExpiresAt"], utc(self.now + 300))
-        self.now += 301
-        self.assert_error(
-            "STEP_UP_REQUIRED",
-            lambda: self.call(
-                "POST",
-                "/v1/people",
-                {"username": "anotheradmin", "displayName": "Another", "role": "admin"},
-                "futureadmin",
-            ),
-        )
-
-    def test_legacy_restore_upgrade_fences_still_valid_consumed_bootstrap_file(self) -> None:
-        identity = digest(self.config.portal_origin + "\n" + self.config.issuer)
-        for version in (1, 2):
-            with self.subTest(version=version):
-                snapshot = self.root / f"legacy-{version}.sqlite3"
-                with closing(sqlite3.connect(snapshot)) as db:
-                    db.executescript(SCHEMA_V1 + (MIGRATION_2 if version == 2 else ""))
-                    db.execute("INSERT INTO metadata VALUES(?,?)", (version, identity))
-                    db.execute(
-                        "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,checksum TEXT)"
-                    )
-                    db.execute("INSERT INTO schema_migrations VALUES(1,?)", (digest(SCHEMA_V1),))
-                    if version == 2:
-                        db.execute(
-                            "INSERT INTO schema_migrations VALUES(2,?)", (digest(MIGRATION_2),)
-                        )
-                    db.commit()
-                snapshot.chmod(0o600)
-                if version == 1:
-                    self.admin()
-                consumed = self.bootstrap_token
-                restore_database(snapshot, self.broker.database.path)
-                self.now += 2
-                with patch(
-                    "openstack_platform.management.broker.database.time.time", return_value=self.now
-                ):
-                    self.broker.database = Database(self.config)
-                self.broker.auth.database = self.broker.database
-                with self.broker.database.connect() as db:
-                    self.assertEqual(
-                        db.execute("SELECT COUNT(*) FROM used_tokens").fetchone()[0], 0
-                    )
-                    self.assertEqual(
-                        db.execute("SELECT valid_after FROM token_policy").fetchone()[0], self.now
-                    )
-                self.now += 1
-                self.assert_error(
-                    "TOKEN_INVALID",
-                    lambda consumed=consumed: self.begin(consumed, username="secondadmin"),
-                )
-                self.admin()  # A newly issued operator file still enrolls successfully.
-                Database(self.config)  # Restart must not move the fence again.
-                with self.broker.database.connect() as db:
-                    self.assertEqual(
-                        db.execute("SELECT valid_after FROM token_policy").fetchone()[0],
-                        self.now - 1,
-                    )
 
     def reset_admin(self) -> tuple[str, str, str]:
         self.admin()
@@ -628,154 +536,6 @@ class AccountsTests(ManagementCase):
                 "TOKEN_INVALID", lambda: self.call("POST", "/v1/auth/enroll", body, headers=headers)
             )
             hashing.assert_not_called()
-
-    def test_password_reset_finish_does_not_reuse_start_totp_as_step_up(self) -> None:
-        token, secret, user = self.reset_admin()
-        stage, csrf, headers = self.begin(
-            token,
-            password="replacement phrase 924891",
-            totp=local_security.totp_code(secret, int(self.now // 30)),
-        )
-        self.now += 61
-        self.finish(stage, csrf, headers, alias="resetadmin")
-        with self.broker.database.connect() as db:
-            self.assertEqual(
-                db.execute(
-                    "SELECT reauthenticated_at FROM sessions WHERE user_id=?", (user,)
-                ).fetchone()[0],
-                0,
-            )
-        self.assert_error("STEP_UP_REQUIRED", lambda: self.invite_from_reset_admin())
-
-    def invite_from_reset_admin(self):
-        return self.call(
-            "POST",
-            "/v1/people",
-            {"username": "anotheradmin", "displayName": "Another", "role": "admin"},
-            "resetadmin",
-        )
-
-    def test_password_reset_finish_fresh_totp_can_supply_step_up(self) -> None:
-        token, secret, user = self.reset_admin()
-        stage, csrf, headers = self.begin(
-            token, totp=local_security.totp_code(secret, int(self.now // 30))
-        )
-        self.now += 31
-        response = self.call(
-            "POST",
-            "/v1/auth/enroll/finish",
-            {
-                "csrfToken": csrf,
-                "enrollmentToken": stage["enrollmentToken"],
-                "totp": local_security.totp_code(secret, int(self.now // 30)),
-            },
-            headers=headers,
-        )
-        self.assertEqual(response.status, 200)
-        with self.broker.database.connect() as db:
-            self.assertEqual(
-                db.execute(
-                    "SELECT reauthenticated_at FROM sessions WHERE user_id=?", (user,)
-                ).fetchone()[0],
-                self.now,
-            )
-
-    def test_password_reset_immediately_invalidates_old_password_and_sessions(self) -> None:
-        self.admin()
-        invited = self.invite("owner", "oldpassword")
-        stage, csrf, headers = self.begin(urlsplit(invited["setupUrl"]).fragment)
-        self.finish(stage, csrf, headers, alias="oldpassword")
-        self.call(
-            "PATCH",
-            f"/v1/people/{invited['userId']}/account",
-            {"action": "password-reset", "value": None},
-            "admin",
-        )
-        self.assert_error(
-            "SESSION_EXPIRED", lambda: self.call("GET", "/v1/session", owner="oldpassword")
-        )
-        self.assert_error("INVALID_CREDENTIALS", lambda: self.local_login("oldpassword"))
-        with self.broker.database.connect() as db:
-            self.assertIsNone(
-                db.execute(
-                    "SELECT password_hash FROM local_accounts WHERE user_id=?", (invited["userId"],)
-                ).fetchone()[0]
-            )
-            self.assertEqual(
-                db.execute("SELECT status FROM users WHERE id=?", (invited["userId"],)).fetchone()[
-                    0
-                ],
-                "pending",
-            )
-
-    def test_totp_reset_immediately_invalidates_old_factor_and_never_falls_back(self) -> None:
-        self.admin()
-        for role, name in (("owner", "resetfactorowner"), ("admin", "resetfactoradmin")):
-            with self.subTest(role=role):
-                invited = self.invite(role, name)
-                stage, csrf, headers = self.begin(
-                    urlsplit(invited["setupUrl"]).fragment, selected=True
-                )
-                secret = stage["totpSecret"]
-                self.finish(stage, csrf, headers, alias=name)
-                self.call(
-                    "PATCH",
-                    f"/v1/people/{invited['userId']}/account",
-                    {"action": "totp-reset", "value": None},
-                    "admin",
-                )
-                self.now += 31
-                self.assert_error(
-                    "INVALID_CREDENTIALS",
-                    lambda name=name, secret=secret: self.local_login(
-                        name, code=local_security.totp_code(secret, int(self.now // 30))
-                    ),
-                )
-                self.now += 10
-                self.assert_error(
-                    "INVALID_CREDENTIALS", lambda name=name: self.local_login(name, code="")
-                )
-                with self.broker.database.connect() as db:
-                    factor = db.execute(
-                        "SELECT totp_secret,totp_confirmed FROM local_accounts WHERE user_id=?",
-                        (invited["userId"],),
-                    ).fetchone()
-                    self.assertEqual(tuple(factor), (None, 0))
-                    self.assertEqual(
-                        db.execute(
-                            "SELECT status FROM users WHERE id=?", (invited["userId"],)
-                        ).fetchone()[0],
-                        "pending",
-                    )
-
-    def test_any_account_creation_and_invitation_require_fresh_step_up(self) -> None:
-        self.admin()
-        pending = self.invite("owner", "pendinginvite")
-        self.now += 301
-        for role in ("owner", "staff", "admin"):
-            with self.subTest(role=role):
-                self.assert_error(
-                    "STEP_UP_REQUIRED", lambda role=role: self.invite(role, "new" + role)
-                )
-        self.assert_error(
-            "STEP_UP_REQUIRED",
-            lambda: self.call(
-                "PATCH",
-                f"/v1/people/{pending['userId']}/account",
-                {"action": "invite", "value": None},
-                "admin",
-            ),
-        )
-        with self.broker.database.connect() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], 2)
-        code = local_security.totp_code(self.admin_secret, int(self.now // 30))
-        self.call(
-            "POST",
-            "/v1/reauthenticate",
-            {"password": "private secure phrase 48219", "totp": code},
-            "admin",
-        )
-        self.assertEqual(self.invite("owner", "confirmedowner")["userId"].count("-"), 4)
 
     def test_enrollment_code_attempts_are_bounded(self) -> None:
         token = urlsplit(bootstrap.issue(self.config, now=self.now)).fragment

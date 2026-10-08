@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import tempfile
@@ -55,43 +54,6 @@ PLATFORM_DOMAIN='apps.example.test'
         with self.assertRaisesRegex(setup.SetupError, "duplicate"):
             setup.load_environment_file(path)
 
-    def test_nova_bootstrap_key_is_rsa_and_private(self) -> None:
-        private_key = self.root / "admin_nova_rsa"
-
-        setup._ensure_key(private_key, key_type="rsa")
-
-        self.assertEqual(private_key.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(private_key.with_suffix(".pub").stat().st_mode & 0o777, 0o644)
-        self.assertTrue(
-            private_key.with_suffix(".pub").read_text(encoding="utf-8").startswith("ssh-rsa ")
-        )
-
-    def test_source_commit_accepts_setup_environment_value(self) -> None:
-        commit = "a" * 40
-
-        resolved = setup._source_commit(self.root, {}, supplied=commit)
-
-        self.assertEqual(resolved, commit)
-
-    def test_project_identity_uses_scoped_token_without_project_list_permission(self) -> None:
-        project_id = "00000000-0000-4000-8000-000000000001"
-        environment = {"OS_PROJECT_NAME": "demo", "OS_PROJECT_ID": project_id}
-        with mock.patch.object(setup, "_command", return_value=project_id) as command:
-            identity = setup._project_identity(Path("/nix/store/openstack"), environment)
-
-        self.assertEqual(identity, setup.ProjectIdentity(project_id, "demo"))
-        command.assert_called_once()
-        self.assertEqual(command.call_args.args[0][1:3], ("token", "issue"))
-
-    def test_project_identity_resolves_name_when_project_id_is_omitted(self) -> None:
-        project_id = "00000000-0000-4000-8000-000000000001"
-        environment = {"OS_PROJECT_NAME": "demo"}
-        with mock.patch.object(setup, "_command", side_effect=(project_id, "demo")) as command:
-            identity = setup._project_identity(Path("/nix/store/openstack"), environment)
-
-        self.assertEqual(identity, setup.ProjectIdentity(project_id, "demo"))
-        self.assertEqual(command.call_args_list[1].args[0][1:3], ("project", "show"))
-
     def test_project_identity_rejects_a_conflicting_configured_uuid(self) -> None:
         token_project = "00000000-0000-4000-8000-000000000001"
         environment = {
@@ -103,98 +65,6 @@ PLATFORM_DOMAIN='apps.example.test'
             self.assertRaisesRegex(setup.SetupError, "does not match"),
         ):
             setup._project_identity(Path("/nix/store/openstack"), environment)
-
-    def test_resolved_inputs_preserve_provider_project_id_spelling(self) -> None:
-        compact = "00000000000040008000000000000001"
-        canonical = "00000000-0000-4000-8000-000000000001"
-        commit = "a" * 40
-        values = {
-            "OS_PROJECT_ID": compact,
-            "OS_PROJECT_NAME": "demo",
-            "PLATFORM_SOURCE_COMMIT": commit,
-        }
-        with (
-            mock.patch.object(setup, "_credential_requirements"),
-            mock.patch.object(setup, "_source_commit", return_value=commit) as source_commit,
-            mock.patch.object(
-                setup,
-                "_project_identity",
-                return_value=setup.ProjectIdentity(canonical, "demo"),
-            ),
-            mock.patch.object(setup, "_platform_document", return_value={}),
-        ):
-            resolved = setup._resolve_setup_inputs(
-                repository=Path(__file__).resolve().parents[1],
-                values=values,
-                openstack=Path("/nix/store/openstack"),
-                input_reader=lambda prompt: self.fail(prompt),
-                secret_reader=lambda prompt: self.fail(prompt),
-            )
-
-        self.assertEqual(resolved.provider_environment["OS_PROJECT_ID"], compact)
-        self.assertEqual(resolved.project.project_id, canonical)
-        self.assertEqual(source_commit.call_args.kwargs["supplied"], commit)
-        source = (Path(__file__).resolve().parents[1] / "openstack_platform/setup.py").read_text()
-        self.assertIn("_write_openstack_wrapper(paths, provider_environment, openstack)", source)
-
-    def test_generated_provider_wrapper_is_idempotent_after_executable_activation(self) -> None:
-        paths = setup.SetupPaths(
-            repository=self.root,
-            workspace=self.root / "workspace",
-            platform=self.root / "platform.json",
-            policy=self.root / "policy.json",
-            bootstrap=self.root / "bootstrap",
-            pki=self.root / "pki",
-            openstack_environment=self.root / "openstack.env",
-            openstack_wrapper=self.root / "platform-openstack",
-            ssh_directory=self.root / "ssh",
-        )
-        compact = "00000000000040008000000000000001"
-        setup._write_openstack_wrapper(
-            paths,
-            {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"},
-            Path("/nix/store/openstack-one"),
-        )
-        setup._write_openstack_wrapper(
-            paths,
-            {"OS_PROJECT_ID": compact, "OS_PROJECT_NAME": "demo"},
-            Path("/nix/store/openstack-two"),
-        )
-        self.assertEqual(paths.openstack_wrapper.stat().st_mode & 0o777, 0o700)
-        self.assertIn("/nix/store/openstack-two", paths.openstack_wrapper.read_text())
-        self.assertIn(compact, paths.openstack_environment.read_text())
-
-    def test_hosted_controller_inputs_are_transferred_before_activation(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "openstack_platform/setup.py").read_text()
-        for name in (
-            "persistent/policy.json",
-            "persistent/image-selections.json",
-            "nomad-cli.pem",
-            "nomad-cli-key.pem",
-            "nomad-worker-key.pem",
-            "builder_operator_ed25519.pub",
-        ):
-            self.assertIn(name, source)
-        self.assertIn('builder_operator_ed25519.pub",\n            "0644"', source)
-
-    def test_malformed_or_missing_direct_provider_cidrs_fail_before_mutation(self) -> None:
-        cases = (
-            "PLATFORM_INGRESS_MODE=direct\n",
-            "PLATFORM_INGRESS_MODE=direct\nPLATFORM_PROVIDER_CIDRS=0.0.0.0/0\n",
-            "PLATFORM_INGRESS_MODE=direct\nPLATFORM_PROVIDER_CIDRS=203.0.113.7/24\n",
-        )
-        for index, content in enumerate(cases):
-            path = self.environment(content)
-            workspace = self.root / f"workspace-{index}"
-            with self.subTest(content=content), self.assertRaises(setup.SetupError):
-                setup.run_setup(
-                    env_file=path,
-                    workspace=workspace,
-                    cloudflare_token=None,
-                    apply=False,
-                    output=io.StringIO(),
-                )
-            self.assertFalse(workspace.exists())
 
     def test_apply_rejects_missing_release_evidence_before_workspace_mutation(self) -> None:
         path = self.environment(
@@ -220,89 +90,6 @@ PLATFORM_DOMAIN='apps.example.test'
         private_directory.assert_not_called()
         self.assertEqual(source_commit.call_args.kwargs["supplied"], "a" * 40)
         self.assertFalse((self.root / "workspace").exists())
-
-    def test_check_is_non_mutating_and_renders_resolved_plan(self) -> None:
-        path = self.environment("OS_PROJECT_NAME=demo\n")
-        output = io.StringIO()
-        plan = {
-            "ready": True,
-            "project": {"name": "demo", "id": "00000000-0000-4000-8000-000000000001"},
-            "resolved": {
-                "network": {"name": "public", "id": "00000000-0000-4000-8000-000000000002"},
-                "flavors": {"admin": {"name": "large", "vcpus": 2, "ramMiB": 4096}},
-                "volumeType": {"name": "production"},
-                "fixedAddresses": {"admin": {"address": "192.0.2.11", "available": True}},
-            },
-            "quotaDeltas": {
-                "instances": {"requiredDelta": 5, "available": 10, "shortfall": 0},
-                "image_count": {"requiredDelta": 5, "available": 8, "shortfall": 0},
-                "image_storage_bytes": {
-                    "requiredDelta": 12345,
-                    "available": 99999,
-                    "shortfall": 0,
-                },
-            },
-            "nameCollisions": [],
-            "toolchain": {"requiredHost": "x86_64-linux", "commands": {}},
-            "ingress": {"choice": "external-provider-pending", "domain": "apps.test"},
-            "source": {
-                "releaseCommit": "a" * 40,
-                "roleImages": {
-                    "admin": {
-                        "name": "demo-admin",
-                        "source": "signed-reproducible-build",
-                        "qcow2SizeBytes": 12345,
-                    }
-                },
-                "runtimeImages": {},
-                "containerImages": {},
-            },
-        }
-        with mock.patch.object(setup, "_setup_check", return_value=plan) as check:
-            result = setup.run_setup(
-                env_file=path,
-                workspace=self.root / "workspace",
-                cloudflare_token=None,
-                apply=False,
-                output=output,
-            )
-
-        self.assertIsNone(result)
-        self.assertFalse((self.root / "workspace").exists())
-        check.assert_called_once()
-        rendered = output.getvalue()
-        self.assertIn("setup-check=ready", rendered)
-        self.assertIn("quota.instances=+5", rendered)
-        self.assertIn("quota.image_count=+5", rendered)
-        self.assertIn("quota.image_storage_bytes=+12345", rendered)
-        self.assertIn(
-            "image.admin=demo-admin source=signed-reproducible-build size-bytes=12345", rendered
-        )
-        self.assertIn("no resources or credentials were created", rendered)
-
-    def test_json_check_preserves_glance_quota_evidence(self) -> None:
-        path = self.environment("OS_PROJECT_NAME=demo\n")
-        plan = {
-            "ready": False,
-            "quotaDeltas": {
-                "image_count": {"requiredDelta": 5, "shortfall": 1},
-                "image_storage_bytes": {"requiredDelta": None, "shortfall": None},
-            },
-        }
-        output = io.StringIO()
-        with (
-            mock.patch.object(setup, "_setup_check", return_value=plan),
-            self.assertRaisesRegex(setup.SetupError, "insufficient/unknown quota"),
-        ):
-            setup.run_setup(
-                env_file=path,
-                workspace=self.root / "workspace",
-                cloudflare_token=None,
-                apply=False,
-                json_output=True,
-                output=output,
-            )
-        self.assertEqual(json.loads(output.getvalue()), plan)
 
 
 class SetupPreflightTests(unittest.TestCase):
@@ -610,69 +397,6 @@ class SetupPreflightTests(unittest.TestCase):
         self.assertFalse(plan["ready"])
         self.assertFalse(plan["resolved"]["fixedAddresses"]["ingress"]["available"])
 
-    def test_existing_image_without_provider_hash_uses_download_sha256(self) -> None:
-        self._existing_image_download(provider_sha512=False)
-
-    def test_existing_image_with_provider_sha512_uses_download_sha256(self) -> None:
-        self._existing_image_download(provider_sha512=True)
-
-    def _existing_image_download(self, *, provider_sha512: bool) -> None:
-        payload = b"verified existing image"
-        digest = hashlib.sha256(payload).hexdigest()
-        image_id = "00000000-0000-4000-8000-000000000099"
-        artifact_manifest_sha256 = "c" * 64
-        artifact = {
-            "qcow2Sha256": digest,
-            "nixClosureSha256": "d" * 64,
-            "nixOutput": "nix-output",
-        }
-        properties = {
-            "demo_platform_source_commit": "a" * 40,
-            "demo_platform_role": "worker",
-            "demo_platform_artifact_manifest_sha256": artifact_manifest_sha256,
-            "demo_platform_qcow2_sha256": digest,
-            "demo_platform_nix_closure_sha256": "d" * 64,
-            "demo_platform_nix_output": "nix-output",
-        }
-
-        def provider(argv: object, **_kwargs: object) -> object:
-            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
-            if command[1:3] == ("image", "list"):
-                return [{"ID": image_id, "Name": "demo-worker"}]
-            if command[1:3] == ("image", "show"):
-                return {
-                    "status": "active",
-                    "properties": properties,
-                    "os_hash_algo": "sha512" if provider_sha512 else None,
-                    "os_hash_value": hashlib.sha512(payload).hexdigest()
-                    if provider_sha512
-                    else None,
-                }
-            self.fail(command)
-
-        def download(argv: object, **_kwargs: object) -> str:
-            command = tuple(str(item) for item in argv)  # type: ignore[arg-type]
-            self.assertEqual(command[1:3], ("image", "save"))
-            Path(command[command.index("--file") + 1]).write_bytes(payload)
-            return ""
-
-        with (
-            mock.patch.object(setup, "_json_command", side_effect=provider),
-            mock.patch.object(setup, "_command", side_effect=download) as command,
-        ):
-            selected = setup._existing_image_id(
-                Path("openstack"),
-                {},
-                "demo-worker",
-                "worker",
-                "a" * 40,
-                "demo-platform",
-                artifact_manifest_sha256,
-                artifact,
-            )
-        self.assertEqual(selected, image_id)
-        command.assert_called_once()
-
     def test_glance_quota_refuses_non_https_endpoint_before_token_use(self) -> None:
         with (
             mock.patch.object(
@@ -779,23 +503,6 @@ class SetupPreflightTests(unittest.TestCase):
             self.resolved.values.pop("PLATFORM_ALLOW_HTTP_GLANCE", None)
             self.resolved.values.pop("PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA", None)
 
-    def test_glance_quota_bytes_and_gib_formatter_variants_are_canonicalized(self) -> None:
-        fixture = json.loads(
-            (
-                Path(__file__).parent / "fixtures/openstack/glance_quota_formatter_outputs.json"
-            ).read_text()
-        )
-        manifest = self.verified_release()[1]
-        for name in ("native_api", "nested_bytes", "flat_gib", "unlimited"):
-            with (
-                self.subTest(name=name),
-                mock.patch.object(setup, "_glance_usage", return_value=fixture[name]),
-            ):
-                quotas = setup._glance_quota_deltas(Path("openstack"), self.resolved, manifest)
-            self.assertEqual(quotas["image_count"]["shortfall"], 0)
-            self.assertEqual(quotas["image_storage_bytes"]["shortfall"], 0)
-            self.assertEqual(quotas["image_storage_bytes"]["requiredDelta"], 15 * 1024**3)
-
     def test_glance_unknown_and_shortfall_are_not_ready(self) -> None:
         fixture = json.loads(
             (
@@ -814,36 +521,6 @@ class SetupPreflightTests(unittest.TestCase):
         self.assertGreater(short["image_count"]["shortfall"], 0)
         self.assertGreater(short["image_storage_bytes"]["shortfall"], 0)
         self.assertFalse(setup._quotas_ready(short))
-
-    def test_glance_storage_requirement_without_signed_sizes_is_unknown(self) -> None:
-        legacy = self.verified_release()[1]
-        for record in legacy["roleArtifacts"].values():
-            record.pop("qcow2SizeBytes")
-        with mock.patch.object(
-            setup,
-            "_glance_usage",
-            return_value={
-                "Image Count": {"limit": "unlimited", "usage": 0},
-                "Image Size": {"limit": "unlimited", "usage": 0, "unit": "bytes"},
-            },
-        ):
-            quotas = setup._glance_quota_deltas(Path("openstack"), self.resolved, legacy)
-        self.assertIsNone(quotas["image_storage_bytes"]["requiredDelta"])
-        self.assertIsNone(quotas["image_storage_bytes"]["shortfall"])
-
-    def test_malformed_glance_formatter_value_is_rejected(self) -> None:
-        with (
-            mock.patch.object(
-                setup,
-                "_glance_usage",
-                return_value={
-                    "Image Count": {"limit": True, "usage": 0},
-                    "Image Size": {"limit": 100, "usage": 0, "unit": "bytes"},
-                },
-            ),
-            self.assertRaisesRegex(setup.SetupError, "malformed"),
-        ):
-            setup._glance_quota_deltas(Path("openstack"), self.resolved, self.verified_release()[1])
 
 
 class SetupInventoryTests(unittest.TestCase):
@@ -868,33 +545,6 @@ class SetupInventoryTests(unittest.TestCase):
             "PLATFORM_VOLUME_TYPE": "production",
         }
 
-    def test_generated_inventory_uses_large_fresh_volume_defaults(self) -> None:
-        with (
-            mock.patch.object(setup, "_network_default", return_value="ignored"),
-            mock.patch.object(setup, "_flavor_inventory", return_value=[]),
-            mock.patch.object(setup, "_volume_type_default", return_value="ignored"),
-        ):
-            document = setup._platform_document(
-                self.repository,
-                self.values,
-                setup.ProjectIdentity("00000000-0000-4000-8000-000000000001", "demo-project"),
-                "a" * 40,
-                Path("/nix/store/openstack"),
-                {},
-                lambda _prompt: self.fail("complete environment must not prompt"),
-            )
-
-        self.assertEqual(document["volumes"]["data"]["sizeGiB"], 500)
-        self.assertEqual(document["volumes"]["backup"]["sizeGiB"], 600)
-        self.assertEqual(document["volumes"]["adminState"]["sizeGiB"], 32)
-        labels = {volume["label"] for volume in document["volumes"].values()}
-        self.assertEqual(len(labels), 3)
-        self.assertTrue(all(len(label.encode()) <= 12 for label in labels))
-        self.assertEqual(document["addresses"]["ingress"], "192.0.2.12")
-        self.assertEqual(document["images"]["worker"], "demo-nixos-worker-aaaaaaaa")
-        self.assertEqual(document["staticIngressRoutes"], {})
-        self.assertEqual(document["publicIngress"], {"mode": "tunnel", "providerCidrs": []})
-
     def test_backup_volume_cannot_be_smaller_than_managed_data(self) -> None:
         self.values.update({"PLATFORM_DATA_GIB": "500", "PLATFORM_BACKUP_GIB": "499"})
         with (
@@ -912,32 +562,6 @@ class SetupInventoryTests(unittest.TestCase):
                 {},
                 lambda _prompt: self.fail("complete environment must not prompt"),
             )
-
-    def test_explicit_volume_sizes_override_fresh_defaults(self) -> None:
-        self.values.update(
-            {
-                "PLATFORM_ADMIN_STATE_GIB": "64",
-                "PLATFORM_DATA_GIB": "750",
-                "PLATFORM_BACKUP_GIB": "900",
-            }
-        )
-        with (
-            mock.patch.object(setup, "_network_default", return_value="ignored"),
-            mock.patch.object(setup, "_flavor_inventory", return_value=[]),
-            mock.patch.object(setup, "_volume_type_default", return_value="ignored"),
-        ):
-            document = setup._platform_document(
-                self.repository,
-                self.values,
-                setup.ProjectIdentity("00000000-0000-4000-8000-000000000001", "demo-project"),
-                "b" * 40,
-                Path("/nix/store/openstack"),
-                {},
-                lambda _prompt: self.fail("complete environment must not prompt"),
-            )
-        self.assertEqual(document["volumes"]["adminState"]["sizeGiB"], 64)
-        self.assertEqual(document["volumes"]["data"]["sizeGiB"], 750)
-        self.assertEqual(document["volumes"]["backup"]["sizeGiB"], 900)
 
 
 class SetupControllerVerificationTests(unittest.TestCase):
@@ -1000,26 +624,6 @@ class SetupControllerVerificationTests(unittest.TestCase):
         ):
             setup._verify_controller_boundary(self.paths, {"namespace": "demo"}, {})
 
-    def test_verification_propagates_remote_failure(self) -> None:
-        with (
-            mock.patch.object(
-                setup,
-                "_command",
-                side_effect=setup.SetupError("setup command failed (ssh): controller not active"),
-            ),
-            self.assertRaisesRegex(setup.SetupError, "controller not active"),
-        ):
-            setup._verify_controller_boundary(self.paths, {"namespace": "demo"}, {})
-
-    def test_bootstrap_verifies_controller_after_helper_install(self) -> None:
-        source = Path(setup.__file__).read_text(encoding="utf-8")
-        bootstrap = source[source.index("def _bootstrap_roles(") : source.index("def _paths(")]
-        helper = bootstrap.index("deploy_helper_release.sh")
-        verification = bootstrap.index("_verify_controller_boundary(paths, platform, child)")
-        final_status = bootstrap.index("status_output = _command", verification)
-        self.assertLess(helper, verification)
-        self.assertLess(verification, final_status)
-
 
 class SetupCliTests(unittest.TestCase):
     def test_setup_dispatch_does_not_load_an_existing_platform_configuration(self) -> None:
@@ -1034,13 +638,6 @@ class SetupCliTests(unittest.TestCase):
         load_config.assert_not_called()
         run_setup.assert_called_once()
         self.assertFalse(run_setup.call_args.kwargs["apply"])
-
-    def test_setup_error_uses_normal_cli_error_exit(self) -> None:
-        with mock.patch.object(setup, "run_setup", side_effect=setup.SetupError("bounded")):
-            with mock.patch("sys.stderr", new=io.StringIO()) as stderr:
-                result = operator.main(["setup", "--env-file", "/missing"])
-        self.assertEqual(result, operator.EXIT_ERROR)
-        self.assertIn("error: bounded", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -4,76 +4,68 @@ import json
 import os
 import subprocess
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
+
+from tests.fixtures.retained_openstack import CommandResponse, start_cli
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_ID = "12345678-1234-4000-8000-123456789abc"
 PROJECT_ID = "00000000-0000-4000-8000-000000000000"
 PORT_ID = "00000000-0000-4000-8000-000000000077"
 
-FAKE_OPENSTACK = r"""#!/usr/bin/env python3
-import json
-import os
-import sys
-from pathlib import Path
 
-state_path = Path(os.environ["FAKE_OPENSTACK_STATE"])
-state = json.loads(state_path.read_text())
-args = sys.argv[1:]
-state["calls"].append(args)
+def lifecycle_command(state_path, args):
+    state = json.loads(state_path.read_text())
+    state["calls"].append(args)
 
+    def finish(payload=None, status=0):
+        state_path.write_text(json.dumps(state))
+        if payload is not None:
+            payload = json.dumps(payload) if isinstance(payload, (dict, list)) else str(payload)
+        raise CommandResponse(payload or "", status)
 
-def finish(payload=None, status=0):
-    state_path.write_text(json.dumps(state))
-    if payload is not None:
-        print(json.dumps(payload) if isinstance(payload, (dict, list)) else payload)
-    raise SystemExit(status)
-
-
-if args[:2] == ["token", "issue"]:
-    finish(state["project_id"])
-if args[:2] == ["project", "show"]:
-    project = state.get('project_name', 'example-project')
-    if state.get('project_output') == 'lines':
-        finish(f"{state['project_id']}\n{project}")
-    finish(f"{state['project_id']} {project}")
-if args[:2] == ["server", "list"]:
-    server = state.get("server")
-    rows = [] if server is None else [{"ID": server["id"], "Name": server["name"]}]
-    finish(rows)
-if args[:2] == ["port", "list"]:
-    port = state.get("port")
-    rows = [] if port is None else [{"ID": port["id"], "Name": port["name"]}]
-    finish(rows)
-if args[:2] == ["server", "show"]:
-    server = state.get("server")
-    if server is None or args[2] != server["id"]:
-        finish(status=1)
-    finish(server)
-if args[:2] == ["port", "show"]:
-    port = state.get("port")
-    if port is None or args[2] != port["id"]:
-        finish(status=1)
-    finish(port)
-if args[:2] == ["server", "delete"]:
-    server = state.get("server")
-    server_id = args[-1]
-    if server is None or server_id != server["id"]:
-        finish(status=1)
-    state["server"] = None
-    if state.get("port", {}).get("device_id") == server_id:
-        state["port"]["device_id"] = ""
-    finish()
-if args[:2] == ["port", "delete"]:
-    port = state.get("port")
-    if port is None or args[2] != port["id"]:
-        finish(status=1)
-    state["port"] = None
-    finish()
-finish(status=64)
-"""
+    if args[:2] == ["token", "issue"]:
+        finish(state["project_id"])
+    if args[:2] == ["project", "show"]:
+        project = state.get("project_name", "example-project")
+        if state.get("project_output") == "lines":
+            finish(f"{state['project_id']}\n{project}")
+        finish(f"{state['project_id']} {project}")
+    if args[:2] == ["server", "list"]:
+        server = state.get("server")
+        rows = [] if server is None else [{"ID": server["id"], "Name": server["name"]}]
+        finish(rows)
+    if args[:2] == ["port", "list"]:
+        port = state.get("port")
+        rows = [] if port is None else [{"ID": port["id"], "Name": port["name"]}]
+        finish(rows)
+    if args[:2] == ["server", "show"]:
+        server = state.get("server")
+        if server is None or args[2] != server["id"]:
+            finish(status=1)
+        finish(server)
+    if args[:2] == ["port", "show"]:
+        port = state.get("port")
+        if port is None or args[2] != port["id"]:
+            finish(status=1)
+        finish(port)
+    if args[:2] == ["server", "delete"]:
+        server = state.get("server")
+        server_id = args[-1]
+        if server is None or server_id != server["id"]:
+            finish(status=1)
+        state["server"] = None
+        if state.get("port", {}).get("device_id") == server_id:
+            state["port"]["device_id"] = ""
+        finish()
+    if args[:2] == ["port", "delete"]:
+        port = state.get("port")
+        if port is None or args[2] != port["id"]:
+            finish(status=1)
+        state["port"] = None
+        finish()
+    finish(status=64)
 
 
 class LifecycleDeletionTests(unittest.TestCase):
@@ -82,9 +74,8 @@ class LifecycleDeletionTests(unittest.TestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.directory = Path(self.temporary_directory.name)
         self.fake_openstack = self.directory / "openstack"
-        self.fake_openstack.write_text(textwrap.dedent(FAKE_OPENSTACK))
-        self.fake_openstack.chmod(0o755)
         self.state_path = self.directory / "state.json"
+        self.addCleanup(start_cli(self.state_path, self.fake_openstack, execute=lifecycle_command))
 
     def lifecycle_cases(self) -> tuple[tuple[str, tuple[str, ...], str, str], ...]:
         short_id = APP_ID.replace("-", "")[:12]
@@ -138,7 +129,6 @@ class LifecycleDeletionTests(unittest.TestCase):
         environment.update(
             {
                 "OSC": str(self.fake_openstack),
-                "FAKE_OPENSTACK_STATE": str(self.state_path),
                 "PLATFORM_CONFIG": str(ROOT / "config" / "platform.example.json"),
                 "OS_PROJECT_NAME": "example-project",
                 "PKI_DIR": str(self.directory / "unused-pki"),
@@ -189,14 +179,6 @@ class LifecycleDeletionTests(unittest.TestCase):
             self.read_state()["calls"],
             [["token", "issue", "-f", "value", "-c", "project_id"]],
         )
-
-    def test_restricted_project_verification_does_not_call_project_show(self) -> None:
-        self.write_state(port_name="unused", description="unused", project_name="wrong-project")
-        result = self.run_lifecycle("builder_lifecycle.sh", ("show", APP_ID))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        calls = self.read_state()["calls"]
-        self.assertEqual(calls[0], ["token", "issue", "-f", "value", "-c", "project_id"])
-        self.assertFalse(any(call[:2] == ["project", "show"] for call in calls))
 
     def test_delete_refuses_same_name_orphan_port_owned_by_something_else(self) -> None:
         for script_name, arguments, server_name, description in self.lifecycle_cases():

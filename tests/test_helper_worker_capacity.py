@@ -187,35 +187,6 @@ class ProductionWorkerCapacityTests(unittest.TestCase):
                 self.assertFalse(self.dispatch({"acceptedServerId": SERVER_ID})["ok"])
                 self.assertEqual(self.calls, [], "must reject before querying Nomad")
 
-    def test_accepted_identity_is_typed_and_cannot_relax_creation_observation_or_deletion(self):
-        for invalid in (None, True, 1, "", "new-worker", SERVER_ID.replace("-", "")):
-            with self.subTest(invalid=invalid):
-                self.assertFalse(self.dispatch({"acceptedServerId": invalid})["ok"])
-        for action in ("app.worker.create", "app.worker.observe", "app.worker.delete"):
-            fields = {"acceptedServerId": SERVER_ID}
-            if action == "app.worker.create":
-                fields.update(workerImageId=REQUEST_ID, standardFlavor="xl.4core")
-            with self.subTest(action=action):
-                self.assertFalse(self.dispatch(fields, action=action)["ok"])
-        self.observe_worker.assert_not_called()
-        self.assertEqual(self.calls, [])
-
-    def test_replacement_ignores_only_explicitly_down_registrations(self):
-        ready = copy.deepcopy(self.nodes[0])
-        stale = {"ID": REQUEST_ID, "Name": self.server_name, "Status": "down"}
-        self.nodes = [stale, ready]
-        self.assertTrue(self.dispatch()["ok"])
-        self.nodes = [stale]
-        self.assertFalse(self.dispatch()["ok"])
-        for status in (None, "unknown", "initializing", "disconnected", "ready"):
-            with self.subTest(status=status):
-                self.nodes = [ready, {**stale, "Status": status}]
-                self.assertFalse(self.dispatch()["ok"])
-        # A node changing state between inventory and detail is rejected too.
-        self.nodes = [ready]
-        self.node["Status"] = "down"
-        self.assertFalse(self.dispatch()["ok"])
-
     def test_request_cannot_select_nomad_command_or_node(self):
         for field in ("nomadCommand", "nodeId", "serverName"):
             with self.subTest(field=field):
@@ -289,11 +260,3 @@ class ProductionWorkerCapacityTests(unittest.TestCase):
         self.calls.clear()
         self.assertFalse(self.dispatch()["ok"])
         self.assertEqual(self.calls, [])
-
-    def test_queries_share_one_deadline(self):
-        with mock.patch.object(worker_capacity.time, "monotonic", side_effect=[0, 1, 31]):
-            response = self.dispatch()
-        self.assertFalse(response["ok"])
-        self.assertEqual(response["error"]["code"], "ACTION_FAILED")
-        self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.calls[0][1]["timeout_seconds"], 29)

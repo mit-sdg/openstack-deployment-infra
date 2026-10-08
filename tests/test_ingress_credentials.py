@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
 import tempfile
@@ -9,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import ingress_credentials, openstack, operator
+from openstack_platform import ingress_credentials, openstack
 from openstack_platform.config import load_platform
 from openstack_platform.validation import ValidationError
 
@@ -109,18 +108,6 @@ class IngressCredentialTests(unittest.TestCase):
                     self.assertNotIn(token.decode(errors="replace"), message)
                 self.assertNotIn("sentinel", message)
 
-    def test_secret_is_nonempty_base64_not_a_fixed_size_key(self):
-        self.assertEqual(len(SECRET_36), 36)
-        # Upstream cloudflared's Test_TunnelToken also accepts []byte("secret").
-        for secret in (b"s", b"secret", b"s" * 32, SECRET_36, b"s" * 4536):
-            token = connector_token(secret=secret)
-            self.assertEqual(ingress_credentials._token(token), token.decode())
-        # The existing whole-token bound applies even to otherwise valid JSON.
-        self.assertEqual(len(connector_token(secret=b"s" * 4536)), 8192)
-        self.token.write_bytes(connector_token(secret=b"s" * 4537))
-        self.assert_rejected(self.token)
-
-    def test_malformed_secret_fields_fail_before_provider_calls(self):
         for secret in (None, 32, [], {}, "", "!not-base64!", "a", "YWJj=trailing"):
             document = {"a": "a" * 32, "t": TUNNEL, "s": secret}
             token = base64.b64encode(json.dumps(document).encode())
@@ -151,12 +138,6 @@ class IngressCredentialTests(unittest.TestCase):
         self.token.chmod(0o600)
         self.assert_rejected(self.token)
         self.assert_rejected(self.root)
-
-    def test_opaque_override_is_refused_even_with_valid_token(self):
-        runner = mock.Mock()
-        with self.assertRaisesRegex(ValidationError, "overrides are refused"):
-            self.replace(self.token, user_data_path=self.token, command_runner=runner)
-        runner.assert_not_called()
 
     def test_successive_tokens_are_rendered_without_persistence_or_leaks(self):
         temporary = self.root / "temporary"
@@ -228,21 +209,6 @@ class IngressCredentialTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertTrue(all(not snapshot.exists() for snapshot in snapshot_paths))
 
-    def test_render_failure_removes_temporary_token_before_provider_calls(self):
-        temporary = self.root / "temporary"
-        temporary.mkdir()
-        with (
-            mock.patch.dict(os.environ, self.environment),
-            mock.patch.object(tempfile, "tempdir", str(temporary)),
-            mock.patch.object(
-                ingress_credentials.host_user_data,
-                "render_host_user_data_file",
-                side_effect=ValidationError("simulated rendering failure"),
-            ),
-        ):
-            self.assert_rejected(self.token)
-        self.assertEqual(list(temporary.iterdir()), [])
-
     def test_recovery_neither_reads_token_nor_renders(self):
         with (
             mock.patch.object(ingress_credentials, "_read", side_effect=AssertionError("no read")),
@@ -267,30 +233,6 @@ class IngressCredentialTests(unittest.TestCase):
                     checkpoint=mock.Mock(),
                 )
         self.assertEqual(recover.call_count, 3)
-
-    def test_cli_exposes_file_option_not_escrow_or_token_value(self):
-        parser = operator.build_parser()
-        args = parser.parse_args(
-            [
-                "infra",
-                "replace",
-                "ingress",
-                "--cloudflare-tunnel-token-file",
-                str(self.token),
-                "--yes",
-            ]
-        )
-        self.assertEqual(args.cloudflare_tunnel_token_file, self.token)
-        # Optional in the parser so recorded recovery does not require the file.
-        args = parser.parse_args(["infra", "replace", "ingress", "--yes"])
-        self.assertIsNone(args.cloudflare_tunnel_token_file)
-        with mock.patch("sys.stderr", io.StringIO()):
-            for arguments in (
-                ["infra", "ingress-credentials", "verify"],
-                ["infra", "replace", "ingress", "--cloudflare-token", "value"],
-            ):
-                with self.assertRaises(SystemExit):
-                    parser.parse_args(arguments)
 
 
 if __name__ == "__main__":

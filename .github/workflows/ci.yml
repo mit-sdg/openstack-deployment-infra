@@ -47,13 +47,24 @@ jobs:
       - name: Install locked Python environment
         run: uv sync --frozen
 
-      - name: Check Python formatting, lint, and types
+      - name: Check Python formatting, lint, types, and tests
         run: |
-          uv lock --check
-          uv run ruff format --check openstack_platform deploy/releases infra tests
-          uv run ruff check openstack_platform deploy/releases infra tests
-          uv run mypy
-          uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
+          # Run independent Python checks alongside the module-isolated suite.
+          (
+            set -e
+            uv lock --check
+            uv run ruff format --check openstack_platform deploy/releases infra tests
+            uv run ruff check openstack_platform deploy/releases infra tests
+            uv run mypy
+            uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
+          ) &
+          checks_pid=$!
+          uv run python tests/run_parallel.py --jobs 4 &
+          tests_pid=$!
+          status=0
+          wait "$checks_pid" || status=$?
+          wait "$tests_pid" || status=$?
+          exit "$status"
 
       - name: Install ShellCheck
         run: tests/install_ci_apt_packages.sh shellcheck
@@ -109,9 +120,6 @@ jobs:
             echo "Integrated entrypoints are not present on this feature branch"
           fi
 
-      - name: Run unit and packaging tests
-        run: uv run python -m unittest discover -s tests -v
-
       - name: Check shell syntax
         run: |
           find deploy infra tests -type f \( -name '*.sh' -o -path 'infra/control/bin/*' \) \
@@ -122,82 +130,8 @@ jobs:
           find deploy infra tests -type f \( -name '*.sh' -o -path 'infra/control/bin/*' \) -print0 \
             | xargs -0 shellcheck -e SC1090,SC1091,SC2016
 
-  owner-portal:
-    name: Owner portal frontend and HTTPS smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.14"
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
-        with:
-          version: "0.12.2"
-          enable-cache: true
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
-        with:
-          node-version: "24.19.0"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Pin npm
-        run: npm install --global npm@11.17.0
-
-      - name: Install locked harness and frontend dependencies
-        run: |
-          uv sync --frozen
-          npm --prefix frontend ci
-
-      - name: Check and build frontend
-        run: |
-          npm --prefix frontend/owner-portal run format:check
-          npm --prefix frontend/owner-portal run typecheck
-          npm --prefix frontend/owner-portal test
-          npm --prefix frontend/owner-portal run build
-
-      - name: Install Chromium headless shell
-        working-directory: frontend/owner-portal
-        run: npx playwright install --with-deps --only-shell chromium
-
-      - name: Run production-parity HTTPS smoke
-        run: npm --prefix frontend/owner-portal run smoke
-
-      - name: Build and verify commit-bound management evidence
-        run: |
-          uv run python -m openstack_platform.management_release build \
-            --repository . --commit "$GITHUB_SHA" \
-            --output management-release-evidence --unsigned-development
-          uv run python -m openstack_platform.management_release verify \
-            --repository . --commit "$GITHUB_SHA" \
-            --component-manifest management-release-evidence/release-manifest.json \
-            --manifest management-release-evidence/management-artifacts.json \
-            --allow-unsigned-development
-
-      - name: Upload management development archives and evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: management-release-evidence-${{ github.sha }}
-          path: management-release-evidence
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Collect bounded failure evidence
-        if: failure()
-        run: python3 tests/collect_owner_portal_artifacts.py
-
-      - name: Upload sanitized failure evidence
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: owner-portal-failure-${{ github.run_id }}
-          path: .tmp/owner-portal-playwright/upload
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 3
-
   dashboard-frontend:
-    name: Frontend workspace and committed dashboard freshness
+    name: Frontend checks, HTTPS smoke and dashboard freshness
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -233,9 +167,40 @@ jobs:
           npm --prefix frontend run build
           git diff --exit-code -- openstack_platform/dashboard/static
           npm --prefix frontend run check:freshness
+      - name: Resolve Playwright browser cache version
+        id: playwright
+        run: |
+          version=$(node -p "require('./frontend/node_modules/playwright-core/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=$ImageOS" >> "$GITHUB_OUTPUT"
+      - name: Cache Chromium headless shell
+        id: chromium
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.image }}-playwright-${{ steps.playwright.outputs.version }}
       - name: Install Chromium headless shell
+        if: steps.chromium.outputs.cache-hit != 'true'
         working-directory: frontend
-        run: npx playwright install --with-deps --only-shell chromium
+        run: npx playwright install --only-shell chromium
+      - name: Verify Chromium runtime dependencies
+        working-directory: frontend
+        # Hosted Ubuntu already supplies Chromium's libraries. Validate by
+        # launching the pinned shell, and install OS dependencies only if needed.
+        run: |
+          node --input-type=module <<'JS'
+          import { chromium } from '@playwright/test';
+          import { execFileSync } from 'node:child_process';
+          try {
+            await (await chromium.launch()).close();
+          } catch (error) {
+            console.error(error);
+            execFileSync('npx', ['playwright', 'install-deps', 'chromium'], { stdio: 'inherit' });
+            await (await chromium.launch()).close();
+          }
+          JS
+      - name: Run production-parity owner HTTPS smoke
+        run: npm --prefix frontend/owner-portal run smoke
       - name: Exercise dashboard under production CSP at all four widths
         run: npm --prefix frontend/operator-dashboard run smoke
       - name: Upload synthetic dashboard screenshots
@@ -246,6 +211,39 @@ jobs:
           path: .tmp/dashboard-screenshots/after
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Build and verify commit-bound management evidence
+        run: |
+          uv run python -m openstack_platform.management_release build \
+            --repository . --commit "$GITHUB_SHA" \
+            --output management-release-evidence --unsigned-development
+          uv run python -m openstack_platform.management_release verify \
+            --repository . --commit "$GITHUB_SHA" \
+            --component-manifest management-release-evidence/release-manifest.json \
+            --manifest management-release-evidence/management-artifacts.json \
+            --allow-unsigned-development
+
+      - name: Upload management development archives and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: management-release-evidence-${{ github.sha }}
+          path: management-release-evidence
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Collect bounded failure evidence
+        if: failure()
+        run: python3 tests/collect_owner_portal_artifacts.py
+
+      - name: Upload sanitized failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: owner-portal-failure-${{ github.run_id }}
+          path: .tmp/owner-portal-playwright/upload
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 3
 
   generated-recipes:
     name: Build, start, and health-check generated Bun and Node recipes
@@ -287,19 +285,14 @@ jobs:
           nix fmt -- .
           git diff --exit-code -- '*.nix'
 
-  package-tests:
-    name: Test packaged binaries
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - run: nix build --print-build-logs .#checks.x86_64-linux.package-smoke
-
   role-vm-tests:
-    name: Test ${{ matrix.role }} VM
+    name: Test ${{ matrix.role }} VM and image
+    needs: publication-context
+    # PRs skip publication-context; the integration gates must still run.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    env:
+      BUILD_EXAMPLE_IMAGE: ${{ inputs.development_publish != true && needs.publication-context.outputs.publish != 'true' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -321,7 +314,32 @@ jobs:
           if [[ -e /dev/kvm ]]; then
             sudo chmod 0666 /dev/kvm
           fi
-      - run: nix build --print-build-logs ".#checks.x86_64-linux.vm-${{ matrix.role }}"
+      - name: Test role integration, admin packages, and build the image
+        run: |
+          checks=(".#checks.x86_64-linux.vm-${{ matrix.role }}")
+          if [[ ${{ matrix.role }} == admin ]]; then
+            checks+=(".#checks.x86_64-linux.package-smoke")
+          fi
+          # One evaluation and store for the role's test and example image.
+          # Production builds use their protected inventory/evidence job.
+          if [[ $BUILD_EXAMPLE_IMAGE == true ]]; then
+            checks+=(".#${{ matrix.role }}-image")
+          fi
+          nix build --no-link --print-out-paths --print-build-logs "${checks[@]}" > build-outputs
+
+      - name: Install QEMU smoke-test tools
+        if: env.BUILD_EXAMPLE_IMAGE == 'true'
+        run: tests/install_ci_apt_packages.sh xfsprogs genisoimage qemu-system-x86 qemu-utils
+
+      - name: Boot role image with an OpenStack config drive
+        if: env.BUILD_EXAMPLE_IMAGE == 'true'
+        run: |
+          qcow=$(while IFS= read -r output; do
+            find "$output" -type f -name '*.qcow2' -print
+          done < build-outputs)
+          test -n "$qcow"
+          test "$(printf '%s\n' "$qcow" | wc -l)" -eq 1
+          tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"
 
   publication-context:
     name: Detect publishable image changes
@@ -345,51 +363,6 @@ jobs:
         run: |
           python3 -m openstack_platform.image_pipeline context \
             --before "$BEFORE_SHA" >> "$GITHUB_OUTPUT"
-
-  build-images:
-    name: Build ${{ matrix.role }} image
-    needs: publication-context
-    if: >-
-      always() &&
-      inputs.development_publish != true &&
-      needs.publication-context.outputs.publish != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 5
-      matrix:
-        role:
-          - admin
-          - ingress
-          - storage
-          - worker
-          - builder
-
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install QEMU smoke-test tools
-        run: |
-          tests/install_ci_apt_packages.sh genisoimage qemu-system-x86 qemu-utils
-          if [[ -e /dev/kvm ]]; then
-            sudo chmod 0666 /dev/kvm
-          fi
-
-      - name: Build role image
-        run: |
-          nix build --print-build-logs \
-            --out-link "result-${{ matrix.role }}" \
-            ".#${{ matrix.role }}-image"
-
-      - name: Locate and boot role image
-        run: |
-          qcow=$(find -L "result-${{ matrix.role }}" -type f -name '*.qcow2' -print -quit)
-          test -n "$qcow"
-          tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"
 
   production-role-builds:
     name: Build production ${{ matrix.role }} image
@@ -417,7 +390,7 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install QEMU tools
         run: |
-          tests/install_ci_apt_packages.sh genisoimage qemu-system-x86 qemu-utils
+          tests/install_ci_apt_packages.sh xfsprogs genisoimage qemu-system-x86 qemu-utils
           if [[ -e /dev/kvm ]]; then sudo chmod 0666 /dev/kvm; fi
       - name: Install validated inventory outside artifact root
         env:
@@ -441,7 +414,7 @@ jobs:
           compression-level: 0
           retention-days: 30
       - name: Retain build and QEMU diagnostics only
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: production-logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.role }}
@@ -461,7 +434,6 @@ jobs:
       - static
       - generated-recipes
       - nix-eval
-      - package-tests
       - role-vm-tests
       - dashboard-frontend
       - publication-context
@@ -729,7 +701,7 @@ jobs:
           PY
 
       - name: Upload compact role evidence
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: development-role-input-${{ github.sha }}-${{ matrix.role }}
@@ -865,6 +837,7 @@ jobs:
       - name: Install publication and smoke-test tools
         run: |
           tests/install_ci_apt_packages.sh \
+            xfsprogs \
             genisoimage \
             python3-openstackclient \
             qemu-system-x86 \

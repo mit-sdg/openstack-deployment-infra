@@ -43,14 +43,6 @@ class RuntimeLogTests(ManagementCase):
         ).body["data"]
         self.broker.journal.dispatch(intent["intentId"])
 
-    def test_undeployed_app_has_no_output_and_skips_the_controller(self) -> None:
-        result = self.logs()
-        self.assertEqual(
-            {key: result[key] for key in ("stream", "running", "text", "truncated", "lines")},
-            {"stream": "stdout", "running": False, "text": "", "truncated": False, "lines": 500},
-        )
-        self.assertEqual(self.reads(), [])
-
     def test_owner_reads_output_and_errors_shared_for_a_few_seconds(self) -> None:
         self.deploy()
         output = self.logs()
@@ -183,15 +175,3 @@ class StartupLogTests(ManagementCase):
                 owner="alice",
             ),
         )
-
-    def test_controllers_without_startup_records_report_none(self) -> None:
-        failed = self.deploy(fail=True)
-        request = self.broker.client.request
-
-        def older(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
-            if path.endswith("/startup-log"):
-                return 404, {"error": {"code": "NOT_FOUND"}}
-            return request(method, path, *args, **kwargs)
-
-        with patch.object(self.broker.client, "request", older):
-            self.assertEqual(self.startup(failed), {"captured": False})

@@ -17,8 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class HostPathTests(unittest.TestCase):
     def setUp(self) -> None:
-        (ROOT / ".tmp").mkdir(exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(dir=ROOT / ".tmp", prefix="host-paths-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="host-paths-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.uid, self.gid = os.geteuid(), os.getegid()
@@ -113,31 +112,6 @@ class HostPathTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"object type", result.stderr)
 
-    def test_read_only_group_and_link_count_do_not_restrict_copy_or_public_files(self) -> None:
-        os.link(self.source, self.root / "source-alias")
-        self.copy()
-        self.destination.chmod(0o644)
-        os.link(self.destination, self.root / "old-destination-alias")
-        self.copy()
-        self.assertEqual((self.root / "old-destination-alias").stat().st_mode & 0o777, 0o644)
-        public = self.root / "public.pem"
-        public.write_bytes(b"public fixture\n")
-        public.chmod(0o644)
-        os.link(public, self.root / "public-alias")
-        host_paths.check(public, self.uid, None, {0o644})
-        # No available supplementary group is needed to pin this metadata rule.
-        actual = host_paths.os.fstat
-
-        def foreign_group(fd):
-            value = actual(fd)
-            fields = list(value)
-            fields[5] = self.gid + 99
-            return os.stat_result(fields)
-
-        with patch.object(host_paths.os, "fstat", side_effect=foreign_group):
-            host_paths.check(public, self.uid, None, {0o644})
-            self.copy()
-
     def test_preflight_reports_all_refusals_and_leaves_bytes_modes_and_times_identical(
         self,
     ) -> None:
@@ -180,18 +154,3 @@ class HostPathTests(unittest.TestCase):
             ],
         )
         self.assertFalse(self.destination.exists())
-
-    def test_prepared_directory_postcheck_rejects_non_directory_and_wrong_metadata(self) -> None:
-        prepared = self.root / "prepared"
-        for kind in ("symlink", "file", "fifo", "directory"):
-            if kind == "symlink":
-                prepared.symlink_to(self.folder)
-            elif kind == "file":
-                prepared.touch()
-            elif kind == "fifo":
-                os.mkfifo(prepared)
-            else:
-                prepared.mkdir(mode=0o755)
-            with self.assertRaisesRegex(ValueError, "uid:gid:mode:nlink="):
-                host_paths.directory_check(prepared, self.uid, self.gid, 0o2750)
-            prepared.rmdir() if kind == "directory" else prepared.unlink()

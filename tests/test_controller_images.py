@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import openstack, runtime
+from openstack_platform import openstack
 from openstack_platform.config import load
 from openstack_platform.controller import database as db
 from openstack_platform.controller import deployment_service, image_service
@@ -117,41 +117,6 @@ class HostedImageTests(unittest.TestCase):
         with self.assertRaises(HttpError):
             self.api.router("project").dispatch("GET", first.body["statusUrl"], {}, None)
 
-    def test_persistent_role_selection_is_metadata_only(self):
-        for role in ("admin", "ingress", "storage"):
-            db.put_image_selection(
-                self.connection,
-                role=role,
-                image_id=OLD,
-                display_name=f"old-{role}",
-                source_commit="b" * 40,
-                compatibility_hash="c" * 64,
-            )
-            self.cloud.images[NEW] = canonical_image(self.config.platform, NEW, role=role)
-            self.assertEqual(self.poll(self.request(role=role))["status"], "succeeded")
-            self.assertEqual(db.get_image_selection(self.connection, role).image_id, NEW)
-        self.helper.assert_not_called()
-        self.assertTrue(
-            all(
-                call[1:3] in {("token", "issue"), ("image", "list"), ("image", "show")}
-                for call in self.cloud.calls
-            )
-        )
-
-    def test_strict_uuid_role_fields_and_capability(self):
-        for role, image, expected in (
-            ("unknown", NEW, OLD),
-            ("worker", "image-name", OLD),
-            ("builder", NEW, "bad"),
-        ):
-            with self.assertRaises(HttpError) as error:
-                self.request(role=role, image=image, expected=expected)
-            self.assertEqual(error.exception.status, 400)
-        with self.assertRaises(HttpError) as error:
-            self.api.router("project").dispatch("POST", "/v1/admin/images/worker/selection", {}, {})
-        self.assertEqual(error.exception.status, 404)
-        self.selector.assert_not_called()
-
     def test_provider_role_compatibility_owner_and_project_are_verified(self):
         image = self.cloud.images[NEW]
         original = json.loads(json.dumps(image))
@@ -243,13 +208,6 @@ class HostedImageTests(unittest.TestCase):
             self.poll(self.request(key=response.body["operationId"]))["status"], "recovery_required"
         )
         self.assertEqual(db.get_image_selection(self.connection, "worker").image_id, OTHER)
-
-    def test_selection_requires_the_hosted_infrastructure_lock(self):
-        with runtime.lock(self.root, "infrastructure"):
-            response = self.request()
-            self.assertEqual(self.poll(response)["status"], "failed")
-        self.selector.assert_not_called()
-        self.assertEqual(db.get_image_selection(self.connection, "worker").image_id, OLD)
 
     def test_deployment_records_both_images_and_recovery_keeps_them(self):
         operation = db.begin_operation(

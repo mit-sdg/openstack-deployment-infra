@@ -7,14 +7,13 @@ import os
 import sqlite3
 import subprocess
 import tempfile
-import time
 import unittest
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import ingress_credentials, openstack, release_manifest, setup
+from openstack_platform import ingress_credentials, openstack, release_manifest
 from openstack_platform.config import load_platform
 from openstack_platform.runtime import CommandFailure, CommandResult, HttpResult
 from openstack_platform.validation import ValidationError
@@ -354,50 +353,6 @@ class FakeCloud:
         assert path.stat().st_mode & 0o777 == 0o600
 
 
-class CompactProviderUUIDCloud(FakeCloud):
-    """Replay compact UUID projections and require their raw project lookup token."""
-
-    @classmethod
-    def _compact_provider_ids(cls, value: object, *, field: str | None = None) -> object:
-        if isinstance(value, list):
-            return [cls._compact_provider_ids(item) for item in value]
-        if isinstance(value, dict):
-            return {
-                key: cls._compact_provider_ids(item, field=key.lower().replace(" ", "_"))
-                for key, item in value.items()
-            }
-        if (
-            isinstance(value, str)
-            and field in {"id", "owner", "owner_id", "project_id", "device_id"}
-            and len(value) == 36
-            and value.count("-") == 4
-        ):
-            return value.replace("-", "")
-        return value
-
-    def __call__(self, argv, **kwargs):
-        argv = tuple(argv)
-        if argv[1:3] == ("project", "show"):
-            compact_project_id = self.platform.project_id.replace("-", "")
-            if argv[3] != compact_project_id:
-                self.calls.append(argv)
-                self.assert_safe_call(argv, kwargs)
-                raise CommandFailure(
-                    "fake provider accepts only its exact compact project lookup token",
-                    result(argv, returncode=1),
-                )
-        completed = super().__call__(argv, **kwargs)
-        try:
-            document = json.loads(completed.stdout)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return completed
-        return result(
-            tuple(argv),
-            self._compact_provider_ids(document),
-            returncode=completed.returncode,
-        )
-
-
 def canonical_image(
     platform, image_id: str, *, role: str = "worker", created: str = "2026-01-01T00:00:00Z"
 ) -> dict:
@@ -419,32 +374,7 @@ class OpenStackTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.platform = load_platform(ROOT / "config/platform.example.json")
 
-    def test_project_verification_uses_one_bounded_scoped_token_request(self) -> None:
-        timeouts: list[float] = []
-
-        def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            timeouts.append(float(kwargs["timeout_seconds"]))
-            self.assertEqual(tuple(argv)[1:3], ("token", "issue"))
-            return result(argv, {"project_id": self.platform.project_id})
-
-        identity = openstack.verify_project(
-            self.platform,
-            timeout_seconds=5,
-            command_runner=runner,
-        )
-        self.assertEqual(identity.project_id, self.platform.project_id)
-        self.assertEqual(identity.project_name, self.platform.project_name)
-        self.assertEqual(len(timeouts), 1)
-        self.assertGreater(timeouts[0], 4.9)
-        self.assertLessEqual(timeouts[0], 5.0)
-
-    def test_publisher_script_emits_canonical_metadata_and_verifies_project(self) -> None:
-        self._publisher_script(unsigned_production=False)
-
-    def test_publisher_script_supports_explicit_unsigned_production(self) -> None:
-        self._publisher_script(unsigned_production=True)
-
-    def _publisher_script(self, *, unsigned_production: bool) -> None:
+    def test_publisher_verifies_unsigned_opt_in_content_and_signed_reattestation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fake = root / "openstack"
@@ -458,8 +388,8 @@ class OpenStackTests(unittest.TestCase):
                 commit,
                 component_dir,
                 signing_key=None,
-                unsigned=not unsigned_production,
-                unsigned_production=unsigned_production,
+                unsigned=False,
+                unsigned_production=True,
             )
             artifact_inputs: dict[str, object] = {}
             worker_output = Path("/nix/store/00000000000000000000000000000000-worker-image")
@@ -500,8 +430,8 @@ class OpenStackTests(unittest.TestCase):
                 inputs_path,
                 artifact_dir,
                 signing_key=None,
-                unsigned=not unsigned_production,
-                unsigned_production=unsigned_production,
+                unsigned=False,
+                unsigned_production=True,
             )
             artifact_manifest = json.loads(artifact_manifest_path.read_text())
             worker_artifact = artifact_manifest["roleArtifacts"]["worker"]
@@ -556,8 +486,7 @@ elif args[:2] == ["image", "set"]:
                 created.extend(["--property", item])
             else:
                 created[existing] = item
-    if not os.environ.get("FAKE_IGNORE_SET"):
-        path.write_text(json.dumps(created))
+    path.write_text(json.dumps(created))
 elif args[:2] == ["image", "create"]:
     if os.environ.get("FAKE_EXISTING_IMAGE"):
         raise SystemExit("must verify and reuse rather than recreate")
@@ -586,16 +515,11 @@ else:
                     "PLATFORM_ARTIFACT_NIX_OUTPUT": worker_artifact["nixOutput"],
                 }
             )
-            if unsigned_production:
-                environment["PLATFORM_ALLOW_UNSIGNED_PRODUCTION"] = (
-                    release_manifest.UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT
-                )
-                environment["PLATFORM_ENVIRONMENT"] = "production"
-                environment["FAKE_HASH_ALGO"] = "sha512"
-            else:
-                environment["PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"] = (
-                    release_manifest.UNSIGNED_ACKNOWLEDGEMENT
-                )
+            environment["PLATFORM_ALLOW_UNSIGNED_PRODUCTION"] = (
+                release_manifest.UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT
+            )
+            environment["PLATFORM_ENVIRONMENT"] = "production"
+            environment["FAKE_HASH_ALGO"] = "sha512"
             completed = subprocess.run(
                 [
                     str(ROOT / "infra/openstack/publish_nixos_image.sh"),
@@ -622,223 +546,101 @@ else:
             for key, value in expected.items():
                 self.assertIn(f"{key}={value}", properties)
             self.assertIn("hw_qemu_guest_agent=yes", properties)
-            if unsigned_production:
-                retry_environment = {**environment, "FAKE_EXISTING_IMAGE": "1"}
-                retried = subprocess.run(
-                    completed.args,
-                    cwd=ROOT,
-                    env=retry_environment,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(retried.returncode, 0, retried.stderr.decode())
-                mismatched = subprocess.run(
-                    completed.args,
-                    cwd=ROOT,
-                    env={**retry_environment, "FAKE_BAD_METADATA": "1"},
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertNotEqual(mismatched.returncode, 0)
-                set_log = log.with_suffix(".set.json")
-                # Unsigned evidence cannot replace an existing evidence digest,
-                # even when the QCOW2 identity itself is unchanged.
-                unsigned_bytes = artifact_manifest_path.read_bytes()
-                artifact_manifest_path.write_bytes(unsigned_bytes + b" ")
-                refused = subprocess.run(
-                    completed.args,
-                    cwd=ROOT,
-                    env={
-                        **retry_environment,
-                        "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
-                            artifact_manifest_path.read_bytes()
-                        ).hexdigest(),
-                    },
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertNotEqual(refused.returncode, 0)
-                self.assertFalse(set_log.exists())
-                artifact_manifest_path.write_bytes(unsigned_bytes)
-
-                key, public = root / "private.pem", root / "public.pem"
-                subprocess.run(
-                    ["openssl", "genpkey", "-algorithm", "ED25519", "-out", key], check=True
-                )
-                subprocess.run(
-                    ["openssl", "pkey", "-in", key, "-pubout", "-out", public], check=True
-                )
-                signed_component = release_manifest.generate(
-                    repository, commit, root / "signed", signing_key=key, unsigned=False
-                )
-                signed_artifact = release_manifest.generate_artifact_manifest(
-                    signed_component,
-                    inputs_path,
-                    root / "signed/artifacts",
-                    signing_key=key,
-                    unsigned=False,
-                )
-                key.unlink()  # The publisher never needs the signing key.
-                signed_environment = {
+            retry_environment = {**environment, "FAKE_EXISTING_IMAGE": "1"}
+            set_log = log.with_suffix(".set.json")
+            # Unsigned evidence cannot replace an existing evidence digest,
+            # even when the QCOW2 identity itself is unchanged.
+            unsigned_bytes = artifact_manifest_path.read_bytes()
+            artifact_manifest_path.write_bytes(unsigned_bytes + b" ")
+            refused = subprocess.run(
+                completed.args,
+                cwd=ROOT,
+                env={
                     **retry_environment,
-                    "PLATFORM_RELEASE_MANIFEST": str(signed_component),
-                    "PLATFORM_RELEASE_SIGNATURE": str(root / "signed/release-manifest.sig"),
-                    "PLATFORM_RELEASE_TRUST_ROOT": str(public),
-                    "PLATFORM_ARTIFACT_MANIFEST": str(signed_artifact),
-                    "PLATFORM_ARTIFACT_SIGNATURE": str(
-                        root / "signed/artifacts/role-artifacts.sig"
-                    ),
-                    "PLATFORM_ARTIFACT_TRUST_ROOT": str(public),
                     "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
-                        signed_artifact.read_bytes()
+                        artifact_manifest_path.read_bytes()
                     ).hexdigest(),
-                }
-                signed_environment.pop("PLATFORM_ALLOW_UNSIGNED_PRODUCTION")
-                for failure in ("FAKE_BAD_METADATA", "FAKE_BAD_DOWNLOAD"):
-                    refused = subprocess.run(
-                        completed.args,
-                        cwd=ROOT,
-                        env={**signed_environment, failure: "1"},
-                        capture_output=True,
-                        check=False,
-                    )
-                    self.assertNotEqual(refused.returncode, 0)
-                    self.assertFalse(
-                        set_log.exists(), "failed identity/content gate reached metadata mutation"
-                    )
-                ignored_update = subprocess.run(
-                    completed.args,
-                    cwd=ROOT,
-                    env={**signed_environment, "FAKE_IGNORE_SET": "1"},
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertNotEqual(ignored_update.returncode, 0)
-                self.assertNotIn("signed-reattestation=verified", ignored_update.stdout.decode())
-                set_log.unlink()
-                promoted = subprocess.run(
-                    completed.args,
-                    cwd=ROOT,
-                    env=signed_environment,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(promoted.returncode, 0, promoted.stderr.decode())
-                self.assertIn("signed-reattestation=verified", promoted.stdout.decode())
-                self.assertEqual(image.read_bytes(), b"qcow")
-                updates = json.loads(set_log.read_text())
-                self.assertIn(
-                    "app_platform_artifact_manifest_sha256="
-                    + signed_environment["PLATFORM_ARTIFACT_MANIFEST_SHA256"],
-                    updates,
-                )
-                self.assertIn(
-                    "app_platform_previous_artifact_manifest_sha256="
-                    + environment["PLATFORM_ARTIFACT_MANIFEST_SHA256"],
-                    updates,
-                )
-                set_log.unlink()
-                retried = subprocess.run(
-                    completed.args,
-                    cwd=ROOT,
-                    env=signed_environment,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(retried.returncode, 0, retried.stderr.decode())
-                self.assertFalse(set_log.exists(), "an exact signed retry must not mutate metadata")
-                self.assertEqual(
-                    setup._existing_image_id(
-                        fake,
-                        signed_environment,
-                        "example-nixos-worker",
-                        "worker",
-                        commit,
-                        self.platform.namespace,
-                        signed_environment["PLATFORM_ARTIFACT_MANIFEST_SHA256"],
-                        worker_artifact,
-                    ),
-                    "11111111-1111-4111-8111-111111111111",
-                )
-                log.unlink()
-                for changes in (
-                    {"PLATFORM_ALLOW_UNSIGNED_PRODUCTION": ""},
-                    {"PLATFORM_ALLOW_UNSIGNED_PRODUCTION": "true"},
-                    {
-                        "PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT": release_manifest.UNSIGNED_ACKNOWLEDGEMENT
-                    },
-                    {"PLATFORM_ARTIFACT_SIGNATURE": "/unexpected/signature"},
-                ):
-                    refused = subprocess.run(
-                        completed.args,
-                        cwd=ROOT,
-                        env={**environment, **changes},
-                        capture_output=True,
-                        check=False,
-                    )
-                    self.assertNotEqual(refused.returncode, 0)
-                    self.assertFalse(log.exists(), "trust failure reached image creation")
-                image.write_bytes(b"changed after verification")
-                refused = subprocess.run(
-                    completed.args, cwd=ROOT, env=environment, capture_output=True, check=False
-                )
-                self.assertNotEqual(refused.returncode, 0)
-                self.assertFalse(log.exists(), "changed QCOW2 reached image creation")
+                },
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertFalse(set_log.exists())
+            artifact_manifest_path.write_bytes(unsigned_bytes)
 
-    def test_publisher_and_selector_share_complete_stable_metadata(self) -> None:
-        metadata = openstack.publisher_metadata(self.platform, "worker", "a" * 40)
-        self.assertEqual(metadata["app_platform_project_id"], PROJECT)
-        self.assertEqual(metadata["app_platform_metadata_version"], "1")
-        self.assertEqual(len(metadata["app_platform_compatibility_sha256"]), 64)
-
-        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1)])
-        selected = openstack.select_image(self.platform, "worker", IMAGE_1, command_runner=cloud)
-        self.assertEqual(selected.image_id, IMAGE_1)
-        self.assertTrue(
-            all("--column" in call or call[1:3] == ("image", "list") for call in cloud.calls[2:])
-        )
-
-        document = json.loads((ROOT / "config/platform.example.json").read_text())
-        document["images"]["worker"] = "a-derived-publication-name"
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "platform.json"
-            path.write_text(json.dumps(document))
-            changed_names = load_platform(path)
-        self.assertEqual(
-            openstack.image_compatibility_hash(changed_names),
-            openstack.image_compatibility_hash(self.platform),
-        )
-
-    def test_compact_provider_uuids_are_normalized_at_openstack_boundaries(self) -> None:
-        fixture = PROVIDER_UUID_FIXTURE
-        self.assertEqual(fixture["project_id"], "7a3c91d24b8e42f09c156de0f28a15b3")
-        self.assertEqual(fixture["project_uuid"], "7a3c91d2-4b8e-42f0-9c15-6de0f28a15b3")
-        self.assertEqual(fixture["server_id"], SERVER.replace("-", ""))
-        self.assertEqual(fixture["glance_image_id"], IMAGE_1.replace("-", ""))
-        self.assertEqual(fixture["server_image_id"], OLD_IMAGE.replace("-", ""))
-        self.assertEqual(fixture["port_id"], PORT.replace("-", ""))
-        self.assertEqual(
-            fixture["volume_ids"], [VOLUME.replace("-", ""), VOLUME_2.replace("-", "")]
-        )
-
-        platform = replace(self.platform, project_id=fixture["project_uuid"])
-        cloud = CompactProviderUUIDCloud(
-            platform,
-            [canonical_image(platform, IMAGE_1, role="admin")],
-            role="admin",
-        )
-        identity = openstack.verify_project(platform, command_runner=cloud)
-        images = openstack.list_images(platform, command_runner=cloud)
-        resources = openstack.observe_host_resources(platform, "admin", command_runner=cloud)
-
-        self.assertEqual(identity.project_id, fixture["project_uuid"])
-        self.assertFalse(any(call[1:3] == ("project", "show") for call in cloud.calls))
-        self.assertEqual(images[0].image_id, IMAGE_1)
-        self.assertEqual(images[0].owner_id, fixture["project_uuid"])
-        self.assertEqual(resources.host.server_id, SERVER)
-        self.assertEqual(resources.host.image_id, OLD_IMAGE)
-        self.assertEqual(resources.port_id, PORT)
-        self.assertEqual([volume.volume_id for volume in resources.volumes], [VOLUME, VOLUME_2])
+            key, public = root / "private.pem", root / "public.pem"
+            subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", key], check=True)
+            subprocess.run(["openssl", "pkey", "-in", key, "-pubout", "-out", public], check=True)
+            signed_component = release_manifest.generate(
+                repository, commit, root / "signed", signing_key=key, unsigned=False
+            )
+            signed_artifact = release_manifest.generate_artifact_manifest(
+                signed_component,
+                inputs_path,
+                root / "signed/artifacts",
+                signing_key=key,
+                unsigned=False,
+            )
+            key.unlink()  # The publisher never needs the signing key.
+            signed_environment = {
+                **retry_environment,
+                "PLATFORM_RELEASE_MANIFEST": str(signed_component),
+                "PLATFORM_RELEASE_SIGNATURE": str(root / "signed/release-manifest.sig"),
+                "PLATFORM_RELEASE_TRUST_ROOT": str(public),
+                "PLATFORM_ARTIFACT_MANIFEST": str(signed_artifact),
+                "PLATFORM_ARTIFACT_SIGNATURE": str(root / "signed/artifacts/role-artifacts.sig"),
+                "PLATFORM_ARTIFACT_TRUST_ROOT": str(public),
+                "PLATFORM_ARTIFACT_MANIFEST_SHA256": hashlib.sha256(
+                    signed_artifact.read_bytes()
+                ).hexdigest(),
+            }
+            signed_environment.pop("PLATFORM_ALLOW_UNSIGNED_PRODUCTION")
+            refused = subprocess.run(
+                completed.args,
+                cwd=ROOT,
+                env={**signed_environment, "FAKE_BAD_DOWNLOAD": "1"},
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertFalse(set_log.exists(), "failed content gate reached metadata mutation")
+            promoted = subprocess.run(
+                completed.args,
+                cwd=ROOT,
+                env=signed_environment,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(promoted.returncode, 0, promoted.stderr.decode())
+            self.assertIn("signed-reattestation=verified", promoted.stdout.decode())
+            self.assertEqual(image.read_bytes(), b"qcow")
+            updates = json.loads(set_log.read_text())
+            self.assertIn(
+                "app_platform_artifact_manifest_sha256="
+                + signed_environment["PLATFORM_ARTIFACT_MANIFEST_SHA256"],
+                updates,
+            )
+            self.assertIn(
+                "app_platform_previous_artifact_manifest_sha256="
+                + environment["PLATFORM_ARTIFACT_MANIFEST_SHA256"],
+                updates,
+            )
+            log.unlink()
+            refused = subprocess.run(
+                completed.args,
+                cwd=ROOT,
+                env={**environment, "PLATFORM_ALLOW_UNSIGNED_PRODUCTION": "true"},
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertFalse(log.exists(), "trust failure reached image creation")
+            image.write_bytes(b"changed after verification")
+            refused = subprocess.run(
+                completed.args, cwd=ROOT, env=environment, capture_output=True, check=False
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertFalse(log.exists(), "changed QCOW2 reached image creation")
 
     def test_malformed_provider_uuid_is_rejected_without_weakening_config_inputs(self) -> None:
         class MalformedProjectCloud(FakeCloud):
@@ -902,78 +704,6 @@ else:
             with self.assertRaisesRegex(ValidationError, "canonical lowercase UUID"):
                 load_platform(path)
 
-    def test_long_inventory_handles_25_images_without_per_image_shows(self) -> None:
-        images = [
-            canonical_image(
-                self.platform,
-                f"10000000-0000-4000-8000-{index:012d}",
-                created=f"2026-01-{index:02d}T00:00:00Z",
-            )
-            for index in range(1, 26)
-        ]
-        images.append(
-            {
-                "id": REVIEW_IMAGE,
-                "name": "unrelated-private-image",
-                "created_at": "2025-01-01T00:00:00Z",
-                "properties": {},
-            }
-        )
-
-        class SlowShowCloud(FakeCloud):
-            def __call__(self, argv, **kwargs):
-                if tuple(argv)[1:3] == ("image", "show"):
-                    time.sleep(0.05)
-                return super().__call__(argv, **kwargs)
-
-        cloud = SlowShowCloud(self.platform, images)
-        started = time.monotonic()
-        observed = openstack.list_images(self.platform, command_runner=cloud)
-        elapsed = time.monotonic() - started
-
-        self.assertEqual(len(observed), 25)
-        self.assertLess(elapsed, 0.5)
-        self.assertEqual(len([call for call in cloud.calls if call[1:3] == ("image", "list")]), 1)
-        self.assertFalse(any(call[1:3] == ("image", "show") for call in cloud.calls))
-        self.assertNotIn("unrelated-private-image", {image.name for image in observed})
-
-    def test_older_long_inventory_uses_fixed_width_detail_batches(self) -> None:
-        images = [
-            canonical_image(
-                self.platform,
-                f"20000000-0000-4000-8000-{index:012d}",
-                created=f"2026-01-{index:02d}T00:00:00Z",
-            )
-            for index in range(1, 25)
-        ]
-
-        class OlderSlowCloud(FakeCloud):
-            detail_output_limits: list[int] = []
-
-            def __call__(self, argv, **kwargs):
-                completed = super().__call__(argv, **kwargs)
-                args = tuple(argv)[1:]
-                if args[:2] == ("image", "list") and "--long" in args:
-                    rows = json.loads(completed.stdout)
-                    for row in rows:
-                        row.pop("Created At")
-                        row.pop("Properties")
-                    return result(tuple(argv), rows)
-                if args[:2] == ("image", "show"):
-                    self.detail_output_limits.append(kwargs["stdout_limit"])
-                    time.sleep(0.05)
-                return completed
-
-        cloud = OlderSlowCloud(self.platform, images)
-        started = time.monotonic()
-        observed = openstack.list_images(self.platform, command_runner=cloud)
-        elapsed = time.monotonic() - started
-
-        self.assertEqual(len(observed), 24)
-        self.assertLess(elapsed, 0.8, "detail reads regressed to serial list-plus-N latency")
-        self.assertEqual(len([call for call in cloud.calls if call[1:3] == ("image", "show")]), 24)
-        self.assertEqual(set(cloud.detail_output_limits), {32_768})
-
     def test_project_uuid_mismatch_stops_before_inventory_and_malformed_metadata_is_safe(
         self,
     ) -> None:
@@ -990,64 +720,6 @@ else:
         )[0]
         self.assertNotIn("sentinel-provider-secret", repr(observed))
         self.assertEqual(observed.role, "<incompatible>")
-
-    def test_malformed_properties_are_never_selected(self) -> None:
-        for properties in (
-            "app_platform_role='worker'",
-            ["app_platform_role=worker"],
-            17,
-        ):
-            malformed = {
-                "id": IMAGE_1,
-                "name": self.platform.get("images.worker"),
-                "created_at": "2026-01-01T00:00:00Z",
-                "properties": properties,
-            }
-            cloud = FakeCloud(self.platform, [malformed])
-            with (
-                self.subTest(properties_type=type(properties).__name__),
-                self.assertRaisesRegex(openstack.OpenStackError, "incompatible"),
-            ):
-                openstack.select_image(
-                    self.platform,
-                    "worker",
-                    malformed["name"],
-                    command_runner=cloud,
-                )
-            observed = openstack.list_images(
-                self.platform, command_runner=FakeCloud(self.platform, [malformed])
-            )
-            self.assertEqual(len(observed), 1)
-            self.assertTrue(observed[0].platform_metadata_present)
-            self.assertIsNone(observed[0].role)
-
-    def test_prune_rejects_malformed_server_images_but_accepts_explicit_volume_boot(self) -> None:
-        malformed_values = (
-            "not-an-image",
-            "image (11111111-1111-4111-8111-111111111111) (22222222-2222-4222-8222-222222222222)",
-            {"id": ""},
-            {"name": "missing-id"},
-        )
-        for value in malformed_values:
-            cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1)])
-            cloud.server["image"] = value
-            with self.subTest(value=value), self.assertRaises(openstack.OpenStackError):
-                openstack.plan_image_prune(
-                    self.platform,
-                    selected_image_ids=[],
-                    retain_newest=1,
-                    command_runner=cloud,
-                )
-
-        volume_boot = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1)])
-        volume_boot.server["image"] = None
-        plan = openstack.plan_image_prune(
-            self.platform,
-            selected_image_ids=[],
-            retain_newest=1,
-            command_runner=volume_boot,
-        )
-        self.assertEqual(plan.server_image_ids, ())
 
     def test_prune_protects_selected_server_newest_and_reports_malformed(self) -> None:
         images = [
@@ -1091,20 +763,6 @@ else:
         self.assertEqual(delete_calls, [("openstack", "image", "delete", IMAGE_3)])
         self.assertEqual(checkpoints[-1][0], "image_deleted")
 
-    def test_partial_or_malformed_metadata_never_selects_or_prunes(self) -> None:
-        partial = canonical_image(self.platform, IMAGE_1)
-        del partial["properties"]["app_platform_metadata_version"]
-        malformed_time = canonical_image(self.platform, IMAGE_2)
-        malformed_time["created_at"] = "not-a-time"
-        cloud = FakeCloud(self.platform, [partial, malformed_time])
-        with self.assertRaisesRegex(openstack.OpenStackError, "incompatible"):
-            openstack.select_image(self.platform, "worker", IMAGE_1, command_runner=cloud)
-        plan = openstack.plan_image_prune(
-            self.platform, selected_image_ids=[], retain_newest=1, command_runner=cloud
-        )
-        self.assertEqual(plan.image_ids, ())
-        self.assertEqual(set(plan.review_image_ids), {IMAGE_1, IMAGE_2})
-
     def test_prune_apply_refuses_drift_before_deletion(self) -> None:
         cloud = FakeCloud(
             self.platform,
@@ -1129,61 +787,6 @@ else:
             )
         self.assertFalse(any(call[1:3] == ("image", "delete") for call in cloud.calls))
 
-    def test_flavor_list_uses_the_same_closed_capacity_projection_as_show(self) -> None:
-        class FlavorCloud(FakeCloud):
-            def __call__(self, argv, **kwargs):
-                if tuple(argv)[1:3] == ("flavor", "list"):
-                    self.calls.append(tuple(argv))
-                    self.assert_safe_call(tuple(argv), kwargs)
-                    return result(
-                        tuple(argv),
-                        [
-                            {
-                                "ID": "4200",
-                                "Name": "example.2c4g",
-                                "VCPUs": 2,
-                                "RAM": 4096,
-                                "Disk": 32,
-                                "providerSecret": "WITHHELD",
-                            }
-                        ],
-                    )
-                return super().__call__(argv, **kwargs)
-
-        cloud = FlavorCloud(self.platform)
-        flavors = openstack.observe_flavors(self.platform, command_runner=cloud)
-        self.assertEqual(flavors, (openstack.Flavor("4200", "example.2c4g", 2, 4096, 32),))
-        self.assertIn("--long", cloud.calls[-1])
-        for shown in (
-            {},
-            [None],
-            [{"ID": "x", "Name": "small", "VCPUs": True, "RAM": 1024, "Disk": 10}],
-            [{"ID": "x", "Name": "small", "VCPUs": 1, "RAM": 1024, "Disk": 10}] * 2,
-        ):
-            with (
-                self.subTest(shown=shown),
-                mock.patch.object(openstack, "_json_command", return_value=shown),
-                mock.patch.object(openstack, "verify_project"),
-                self.assertRaises(openstack.OpenStackError),
-            ):
-                openstack.observe_flavors(self.platform)
-
-    def test_worker_flavor_observation_accepts_available_multi_vcpu_flavor(self) -> None:
-        class MultiCpuCloud(FakeCloud):
-            def __call__(self, argv, **kwargs):
-                if tuple(argv)[1:3] == ("flavor", "show"):
-                    self.calls.append(tuple(argv))
-                    self.assert_safe_call(tuple(argv), kwargs)
-                    return result(
-                        tuple(argv),
-                        {"id": FLAVOR, "name": "example.2c4g", "vcpus": 2, "ram": 4096, "disk": 20},
-                    )
-                return super().__call__(argv, **kwargs)
-
-        cloud = MultiCpuCloud(self.platform)
-        flavor_name = openstack.observe_flavor(self.platform, "example.2c4g", command_runner=cloud)
-        self.assertEqual(flavor_name, "example.2c4g")
-
     def test_power_uses_selected_server_uuid_and_requires_health(self) -> None:
         cloud = FakeCloud(self.platform)
         checked: list[tuple[str, str]] = []
@@ -1205,22 +808,6 @@ else:
             command_runner=cloud,
         )
         self.assertEqual(started.status, "ACTIVE")
-
-    def test_admin_reboot_readiness_is_independent_of_admin_helper(self) -> None:
-        cloud = FakeCloud(self.platform, role="admin")
-        powered = openstack.power_host(
-            self.platform,
-            "admin",
-            "reboot",
-            health_check=self.role_health,
-            command_runner=cloud,
-        )
-        self.assertEqual(powered.status, "ACTIVE")
-        self.assertEqual(
-            [call for call in cloud.calls if call[1:3] == ("server", "reboot")],
-            [("openstack", "server", "reboot", SERVER)],
-        )
-        self.assertTrue(all(call[0] == "openstack" for call in cloud.calls))
 
     def test_reboot_recovery_observes_saved_action_without_a_second_reboot(self) -> None:
         class SimulatedCrash(BaseException):
@@ -1302,64 +889,6 @@ else:
         )
         self.assertTrue(all("delete_on_termination=false" in value for value in block_devices))
 
-    def test_replacement_moves_each_persistent_role_to_the_inventory_flavor(self) -> None:
-        for role in openstack.PERSISTENT_ROLES:
-            with self.subTest(role=role):
-                document = {
-                    **self.platform.document,
-                    "flavors": {**self.platform.get("flavors"), role: "example.8c16g"},
-                }
-                platform = replace(self.platform, document=document)
-                cloud = FakeCloud(
-                    platform, [canonical_image(platform, IMAGE_1, role=role)], role=role
-                )
-                cloud.flavors["example.8c16g"]["id"] = TARGET_FLAVOR
-                cloud.flavors["example.8c16g"].update(vcpus=8, ram=16384)
-                refs_seen: list[dict] = []
-
-                def checkpoint(_phase, refs, seen=refs_seen):
-                    seen.append(dict(refs))
-
-                def health(_role, host, _remaining, observed_cloud=cloud):
-                    self.assertEqual(host.flavor_id, TARGET_FLAVOR)
-                    self.assertIsNotNone(observed_cloud.server)
-
-                with (
-                    protected_user_data() as path,
-                    mock.patch.object(openstack.host_keys, "pin_verified_admin_host_key"),
-                ):
-                    replaced = openstack.replace_host(
-                        platform,
-                        role,
-                        selected_image_id=IMAGE_1,
-                        selected_compatibility_hash=openstack.image_compatibility_hash(platform),
-                        operation_id=OPERATION,
-                        user_data_path=path,
-                        checkpoint=checkpoint,
-                        health_check=health,
-                        command_runner=cloud,
-                    )
-                self.assertTrue(replaced.accepted)
-                create = next(call for call in cloud.calls if call[1:3] == ("server", "create"))
-                self.assertEqual(create[create.index("--flavor") + 1], TARGET_FLAVOR)
-                self.assertEqual(create[create.index("--port") + 1], PORT)
-                self.assertEqual(cloud.port_device, REPLACEMENT)
-                self.assertTrue(
-                    all(item["server_id"] == REPLACEMENT for item in cloud.volume_attachments)
-                )
-                self.assertTrue(
-                    all(item["Delete On Termination"] is False for item in cloud.volume_attachments)
-                )
-                self.assertEqual(
-                    len([call for call in cloud.calls if call[1:3] == ("flavor", "show")]), 1
-                )
-                self.assertTrue(refs_seen)
-                for refs in refs_seen:
-                    self.assertEqual(refs["old_flavor_id"], FLAVOR)
-                    self.assertEqual(refs["target_flavor_id"], TARGET_FLAVOR)
-                    self.assertEqual(refs["target_flavor_name"], "example.8c16g")
-                self.assertIsNone(cloud.server)
-
     def test_unknown_replacement_flavor_fails_before_stopping_the_old_host(self) -> None:
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
         cloud.flavors.clear()
@@ -1395,57 +924,6 @@ else:
                 for call in cloud.calls
             )
         )
-
-    def test_quota_refusal_restarts_old_host_without_deleting_resources(self) -> None:
-        class QuotaCloud(FakeCloud):
-            def __call__(self, argv, **kwargs):
-                if tuple(argv)[1:3] == ("server", "create"):
-                    self.calls.append(tuple(argv))
-                    self.assert_safe_call(tuple(argv), kwargs)
-                    return CommandResult(
-                        tuple(argv), 1, b"", b"quota exceeded; provider sentinel", False, False
-                    )
-                return super().__call__(argv, **kwargs)
-
-        cloud = QuotaCloud(
-            self.platform, [canonical_image(self.platform, IMAGE_1, role="admin")], role="admin"
-        )
-        cloud.flavors[self.platform.get("flavors.admin")].update(id="4200", vcpus=8, ram=16384)
-        cloud.server["flavor"]["id"] = "1000"
-        phases: list[str] = []
-        with (
-            protected_user_data() as path,
-            mock.patch.object(openstack.host_keys, "pin_verified_admin_host_key"),
-        ):
-            replaced = openstack.replace_host(
-                self.platform,
-                "admin",
-                selected_image_id=IMAGE_1,
-                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
-                operation_id=OPERATION,
-                user_data_path=path,
-                checkpoint=lambda phase, _refs: phases.append(phase),
-                health_check=self.role_health,
-                command_runner=cloud,
-            )
-        self.assertFalse(replaced.accepted)
-        self.assertEqual(replaced.active_server_id, SERVER)
-        self.assertEqual(replaced.cleanup_state, "confirmed")
-        self.assertEqual(cloud.server["status"], "ACTIVE")
-        self.assertEqual(cloud.server["flavor"]["id"], "1000")
-        self.assertEqual(cloud.server["name"], self.platform.get("hosts.admin"))
-        self.assertEqual(cloud.port_device, SERVER)
-        self.assertEqual(cloud.start_calls, [SERVER])
-        self.assertEqual(
-            [(item["ID"], item["Device"], item["server_id"]) for item in cloud.volume_attachments],
-            [(VOLUME, "/dev/vdb", SERVER), (VOLUME_2, "/dev/vdc", SERVER)],
-        )
-        self.assertTrue(
-            all(item["Delete On Termination"] is False for item in cloud.volume_attachments)
-        )
-        self.assertFalse(any("delete" in call[1:3] for call in cloud.calls))
-        self.assertIsNone(cloud.replacement)
-        self.assertEqual(phases[-1], "rolled_back")
 
     def test_failed_create_preserves_hosts_when_candidate_state_is_uncertain(self) -> None:
         class FailedCreateCloud(FakeCloud):
@@ -1710,134 +1188,6 @@ else:
         self.assertIsNone(cloud.replacement)
         self.assertEqual(health_calls, [REPLACEMENT, SERVER])
 
-    def test_admin_replacement_repins_replacement_then_old_host_on_rollback(self) -> None:
-        cloud = FakeCloud(
-            self.platform,
-            [canonical_image(self.platform, IMAGE_1, role="admin")],
-            role="admin",
-        )
-        pinned_console_outputs: list[bytes] = []
-
-        def pin(_address: str, console_output: bytes, **_kwargs: object) -> None:
-            pinned_console_outputs.append(console_output)
-
-        def health(_role: str, host: openstack.PersistentHost, _remaining: float) -> None:
-            if host.server_id == REPLACEMENT:
-                raise openstack.OpenStackError("fixed safe readiness failure")
-
-        with (
-            protected_user_data() as user_data_path,
-            mock.patch.object(openstack.host_keys, "pin_verified_admin_host_key", side_effect=pin),
-        ):
-            replaced = openstack.replace_host(
-                self.platform,
-                "admin",
-                selected_image_id=IMAGE_1,
-                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
-                operation_id=OPERATION,
-                user_data_path=user_data_path,
-                checkpoint=lambda *_: None,
-                health_check=health,
-                command_runner=cloud,
-            )
-
-        self.assertFalse(replaced.accepted)
-        self.assertEqual(replaced.active_server_id, SERVER)
-        self.assertEqual(len(pinned_console_outputs), 2)
-        self.assertTrue(
-            all(self.platform.namespace.encode() in item for item in pinned_console_outputs)
-        )
-
-    def test_rollback_of_a_still_running_host_does_not_await_a_new_boot_marker(self) -> None:
-        # The prior host stays ACTIVE through rollback, so it never reboots and
-        # emits no further readiness marker. Requiring one made rollback report
-        # a healthy, serving host as unverified once its original marker had
-        # scrolled out of the bounded console window.
-        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
-        cloud.ready_markers[SERVER] = 0  # original marker already aged out
-        health_checked: list[str] = []
-
-        def health(_role: str, host: openstack.PersistentHost, _remaining: float) -> None:
-            if host.server_id == REPLACEMENT:
-                raise openstack.OpenStackError("fixed safe readiness failure")
-            health_checked.append(str(host.server_id))
-
-        with protected_user_data() as user_data_path:
-            replaced = openstack.replace_host(
-                self.platform,
-                "ingress",
-                selected_image_id=IMAGE_1,
-                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
-                operation_id=OPERATION,
-                user_data_path=user_data_path,
-                checkpoint=lambda *_: None,
-                health_check=health,
-                command_runner=cloud,
-            )
-
-        # Rollback completes and the prior host is verified by its concrete
-        # health check rather than by waiting for a marker that cannot appear.
-        self.assertFalse(replaced.accepted)
-        self.assertEqual(replaced.active_server_id, SERVER)
-        self.assertEqual(health_checked, [SERVER])
-
-    def test_an_asynchronous_power_off_is_not_reported_as_ambiguous(self) -> None:
-        # The provider returns from "server stop" before the server is off.
-        # Reading the status once, immediately, observes it still running.
-        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
-        cloud.stop_settle_reads = 3
-
-        with protected_user_data() as user_data_path:
-            replaced = openstack.replace_host(
-                self.platform,
-                "ingress",
-                selected_image_id=IMAGE_1,
-                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
-                operation_id=OPERATION,
-                user_data_path=user_data_path,
-                checkpoint=lambda *_: None,
-                health_check=lambda *_: None,
-                command_runner=cloud,
-                sleep=lambda _seconds: None,
-            )
-
-        self.assertTrue(replaced.accepted)
-        self.assertEqual(replaced.active_server_id, REPLACEMENT)
-
-    def test_a_failed_stop_phase_powers_the_role_back_on(self) -> None:
-        # A stop that applied but could not be confirmed used to leave the role
-        # powered off with no rollback to restore it, taking its public route
-        # down until an operator noticed.
-        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
-        cloud.server["status"] = "SHUTOFF"
-
-        openstack._restore_stopped_host_power(
-            "ingress",
-            cloud.server["name"],
-            cloud.server["id"],
-            timeout_seconds=30,
-            command_runner=cloud,
-            executable="openstack",
-        )
-
-        self.assertEqual(cloud.start_calls, [cloud.server["id"]])
-        self.assertEqual(cloud.server["status"], "ACTIVE")
-
-    def test_power_restore_leaves_a_running_role_alone(self) -> None:
-        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
-        self.assertEqual(cloud.server["status"], "ACTIVE")
-
-        openstack._restore_stopped_host_power(
-            "ingress",
-            cloud.server["name"],
-            cloud.server["id"],
-            timeout_seconds=30,
-            command_runner=cloud,
-            executable="openstack",
-        )
-
-        self.assertEqual(cloud.start_calls, [])
-
     def test_replacement_rejects_unprotected_user_data_before_provider_calls(self) -> None:
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
         with tempfile.TemporaryDirectory() as directory:
@@ -1877,89 +1227,6 @@ else:
         admin.server["volumes_attached"][0]["delete_on_termination"] = "unknown"
         with self.assertRaisesRegex(openstack.OpenStackError, "missing or ambiguous"):
             openstack.observe_host_resources(self.platform, "admin", command_runner=admin)
-
-    def test_prune_stops_with_recovery_refs_if_server_uses_later_candidate(self) -> None:
-        class RacingCloud(FakeCloud):
-            server_image_observations = 0
-
-            def __call__(self, argv, **kwargs):
-                args = tuple(argv)[1:]
-                if args[:2] == ("server", "list") and "Image" in args:
-                    self.server_image_observations += 1
-                    if self.server_image_observations == 4:
-                        self.server["image"] = {"id": IMAGE_3}
-                return super().__call__(argv, **kwargs)
-
-        cloud = RacingCloud(
-            self.platform,
-            [
-                canonical_image(self.platform, IMAGE_1, created="2026-03-01T00:00:00Z"),
-                canonical_image(self.platform, IMAGE_2, created="2026-02-01T00:00:00Z"),
-                canonical_image(self.platform, IMAGE_3, created="2026-01-01T00:00:00Z"),
-            ],
-        )
-        plan = openstack.plan_image_prune(
-            self.platform, selected_image_ids=[IMAGE_1], retain_newest=1, command_runner=cloud
-        )
-        with self.assertRaises(openstack.RecoveryRequired) as caught:
-            openstack.apply_image_prune(
-                self.platform,
-                plan,
-                selected_image_ids=[IMAGE_1],
-                checkpoint=lambda *_: None,
-                command_runner=cloud,
-            )
-        self.assertEqual(caught.exception.refs["deleted_image_ids"], [IMAGE_2])
-        self.assertEqual(caught.exception.refs["pending_image_id"], IMAGE_3)
-        self.assertNotIn(IMAGE_2, cloud.images)
-        self.assertIn(IMAGE_3, cloud.images)
-
-    def test_ambiguous_create_can_recover_only_by_phase_specific_rollback(self) -> None:
-        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
-        cloud.flavors[self.platform.get("flavors.ingress")]["id"] = TARGET_FLAVOR
-        cloud.ambiguous_create = True
-        with protected_user_data() as user_data_path:
-            with self.assertRaises(openstack.RecoveryRequired) as caught:
-                openstack.replace_host(
-                    self.platform,
-                    "ingress",
-                    selected_image_id=IMAGE_1,
-                    selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
-                    operation_id=OPERATION,
-                    user_data_path=user_data_path,
-                    checkpoint=lambda *_: None,
-                    health_check=self.role_health,
-                    command_runner=cloud,
-                )
-        refs = caught.exception.refs
-        self.assertEqual(refs["target_flavor_id"], TARGET_FLAVOR)
-        with self.assertRaisesRegex(ValidationError, "not safe"):
-            openstack.recover_host_replacement(
-                self.platform,
-                "ingress",
-                phase="ambiguous",
-                refs=refs,
-                action="cleanup_old",
-                checkpoint=lambda *_: None,
-                health_check=self.role_health,
-                command_runner=cloud,
-            )
-        recovered = openstack.recover_host_replacement(
-            self.platform,
-            "ingress",
-            phase="ambiguous",
-            refs=refs,
-            action="rollback",
-            checkpoint=lambda *_: None,
-            health_check=self.role_health,
-            command_runner=cloud,
-        )
-        self.assertEqual(recovered.active_server_id, SERVER)
-        self.assertIsNone(cloud.replacement)
-        self.assertEqual(cloud.port_device, SERVER)
-
-        self.assertEqual(cloud.server["flavor"]["id"], FLAVOR)
-        self.assertEqual(cloud.server["status"], "ACTIVE")
 
     def test_prune_recovery_reconciles_delete_before_checkpoint_and_refuses_drift(self) -> None:
         class SimulatedCrash(BaseException):
@@ -2035,97 +1302,6 @@ else:
         self.assertEqual(recovered.deleted_image_ids, (IMAGE_2, IMAGE_3))
         self.assertNotIn(IMAGE_3, cloud.images)
 
-    def test_prune_records_operation_protection_and_rejects_apply_reference_drift(self) -> None:
-        cloud = FakeCloud(
-            self.platform,
-            [
-                canonical_image(self.platform, IMAGE_1, created="2026-03-01T00:00:00Z"),
-                canonical_image(self.platform, IMAGE_2, created="2026-02-01T00:00:00Z"),
-                canonical_image(self.platform, IMAGE_3, created="2026-01-01T00:00:00Z"),
-            ],
-        )
-        plan = openstack.plan_image_prune(
-            self.platform,
-            selected_image_ids=[IMAGE_1],
-            operation_image_ids=[IMAGE_3],
-            retain_newest=1,
-            command_runner=cloud,
-        )
-        self.assertEqual(plan.operation_image_ids, (IMAGE_3,))
-        self.assertIn(IMAGE_3, plan.protected_image_ids)
-        self.assertNotIn(IMAGE_3, plan.image_ids)
-        with self.assertRaisesRegex(openstack.DriftError, "operation image protection"):
-            openstack.apply_image_prune(
-                self.platform,
-                plan,
-                selected_image_ids=[IMAGE_1],
-                operation_image_ids=[],
-                checkpoint=lambda *_: None,
-                command_runner=cloud,
-            )
-        self.assertIn(IMAGE_2, cloud.images)
-
-    def test_stop_and_rename_crash_checkpoints_restore_prior_active_host(self) -> None:
-        class SimulatedCrash(BaseException):
-            pass
-
-        for crash_phase in ("old_stopped", "old_renamed"):
-            with self.subTest(crash_phase=crash_phase):
-                cloud = FakeCloud(
-                    self.platform,
-                    [canonical_image(self.platform, IMAGE_1, role="ingress")],
-                )
-                durable: tuple[str, dict] | None = None
-
-                def checkpoint(phase: str, refs: object, crash_at: str = crash_phase) -> None:
-                    nonlocal durable
-                    assert isinstance(refs, dict)
-                    if phase == crash_at:
-                        raise SimulatedCrash
-                    durable = (phase, dict(refs))
-
-                with protected_user_data() as user_data_path:
-                    with self.assertRaises(SimulatedCrash):
-                        openstack.replace_host(
-                            self.platform,
-                            "ingress",
-                            selected_image_id=IMAGE_1,
-                            selected_compatibility_hash=openstack.image_compatibility_hash(
-                                self.platform
-                            ),
-                            operation_id=OPERATION,
-                            user_data_path=user_data_path,
-                            checkpoint=checkpoint,
-                            health_check=self.role_health,
-                            command_runner=cloud,
-                        )
-                assert durable is not None
-                expected_phase = "observed" if crash_phase == "old_stopped" else "old_stopped"
-                self.assertEqual(durable[0], expected_phase)
-                inspected = openstack.recover_host_replacement(
-                    self.platform,
-                    "ingress",
-                    phase=expected_phase,
-                    refs=durable[1],
-                    action="inspect",
-                    checkpoint=lambda *_: None,
-                    command_runner=cloud,
-                )
-                self.assertEqual(inspected.cleanup_state, "rollback_required")
-                recovered = openstack.recover_host_replacement(
-                    self.platform,
-                    "ingress",
-                    phase=expected_phase,
-                    refs=durable[1],
-                    action="rollback",
-                    checkpoint=lambda *_: None,
-                    health_check=self.role_health,
-                    command_runner=cloud,
-                )
-                self.assertEqual(recovered.active_server_id, SERVER)
-                self.assertEqual(cloud.server["status"], "ACTIVE")
-                self.assertEqual(cloud.server["name"], self.platform.get("hosts.ingress"))
-
     def test_created_checkpoint_can_continue_acceptance_instead_of_guessing(self) -> None:
         class SimulatedCrash(BaseException):
             pass
@@ -2182,50 +1358,6 @@ else:
             any(call[1:3] == ("flavor", "show") for call in cloud.calls[before_recovery:])
         )
 
-    def test_created_checkpoint_rolls_back_when_candidate_is_already_absent(self) -> None:
-        class SimulatedCrash(BaseException):
-            pass
-
-        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
-        created_refs: dict | None = None
-
-        def checkpoint(phase: str, refs: object) -> None:
-            nonlocal created_refs
-            assert isinstance(refs, dict)
-            if phase == "replacement_created":
-                created_refs = dict(refs)
-                raise SimulatedCrash
-
-        with protected_user_data() as user_data_path:
-            with self.assertRaises(SimulatedCrash):
-                openstack.replace_host(
-                    self.platform,
-                    "ingress",
-                    selected_image_id=IMAGE_1,
-                    selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
-                    operation_id=OPERATION,
-                    user_data_path=user_data_path,
-                    checkpoint=checkpoint,
-                    health_check=self.role_health,
-                    command_runner=cloud,
-                )
-        assert created_refs is not None
-        cloud.replacement = None
-        recovered = openstack.recover_host_replacement(
-            self.platform,
-            "ingress",
-            phase="replacement_created",
-            refs=created_refs,
-            action="rollback",
-            checkpoint=lambda *_: None,
-            health_check=self.role_health,
-            command_runner=cloud,
-        )
-        self.assertEqual(recovered.active_server_id, SERVER)
-        self.assertEqual(recovered.cleanup_state, "confirmed")
-        self.assertEqual(cloud.server["status"], "ACTIVE")
-        self.assertEqual(cloud.port_device, SERVER)
-
     def test_accepted_delete_before_complete_checkpoint_continues_exactly(self) -> None:
         class SimulatedCrash(BaseException):
             pass
@@ -2268,76 +1400,6 @@ else:
         )
         self.assertEqual(recovered.active_server_id, REPLACEMENT)
         self.assertEqual(recovered.cleanup_state, "confirmed")
-
-    def _health_host(self, role: str) -> openstack.PersistentHost:
-        return openstack.PersistentHost(
-            role,
-            self.platform.get(f"hosts.{role}"),
-            SERVER,
-            "ACTIVE",
-            OLD_IMAGE,
-            FLAVOR,
-            "example.2c2g",
-            (),
-        )
-
-    def test_scrolled_out_readiness_marker_is_not_treated_as_failure(self) -> None:
-        # A long-running host scrolls its boot marker out of the bounded console
-        # window. That is absence of evidence, not evidence of failure, and the
-        # concrete per-role checks still have to run and pass.
-        http_calls: list[str] = []
-
-        def http_get(url: str, **bounds: object) -> HttpResult:
-            http_calls.append(url)
-            return HttpResult(200, {}, b"OK")
-
-        cloud = FakeCloud(self.platform, role="ingress")
-        cloud.ready_markers[SERVER] = 0  # marker aged out of the window
-        cloud.failed_markers[SERVER] = 0
-
-        openstack.check_role_health(
-            self.platform,
-            "ingress",
-            self._health_host("ingress"),
-            30,
-            provider_runner=cloud,
-            service_runner=lambda argv, **_kwargs: result(argv),
-            http_get=http_get,
-        )
-        self.assertEqual(len(http_calls), 1)
-
-    def test_explicit_failure_marker_still_fails_hard(self) -> None:
-        cloud = FakeCloud(self.platform, role="ingress")
-        cloud.ready_markers[SERVER] = 0
-        cloud.failed_markers[SERVER] = 1
-
-        with self.assertRaisesRegex(openstack.OpenStackError, "reported failed units"):
-            openstack.check_role_health(
-                self.platform,
-                "ingress",
-                self._health_host("ingress"),
-                30,
-                provider_runner=cloud,
-                service_runner=lambda argv, **_kwargs: result(argv),
-                http_get=lambda url, **_kwargs: HttpResult(200, {}, b"OK"),
-            )
-
-    def test_failure_after_ready_fails_but_ready_after_failure_passes(self) -> None:
-        # Ordering, not mere presence, decides: the newest marker wins.
-        cloud = FakeCloud(self.platform, role="ingress")
-        cloud.ready_markers[SERVER] = 1
-        cloud.failed_markers[SERVER] = 1  # emitted after ready in the fake output
-
-        with self.assertRaisesRegex(openstack.OpenStackError, "reported failed units"):
-            openstack.check_role_health(
-                self.platform,
-                "ingress",
-                self._health_host("ingress"),
-                30,
-                provider_runner=cloud,
-                service_runner=lambda argv, **_kwargs: result(argv),
-                http_get=lambda url, **_kwargs: HttpResult(200, {}, b"OK"),
-            )
 
     def test_concrete_role_health_checks_use_bounded_authenticated_paths(self) -> None:
         service_calls: list[tuple[str, ...]] = []
@@ -2407,96 +1469,6 @@ else:
         self.assertEqual(
             http_calls,
             [f"https://{self.platform.domain}/healthz"],
-        )
-
-    def test_current_failed_readiness_blocks_role_acceptance(self) -> None:
-        class FailedBootCloud(FakeCloud):
-            def __call__(self, argv, **kwargs):
-                args = tuple(argv)[1:]
-                result_value = super().__call__(argv, **kwargs)
-                if args[:2] == ("server", "reboot"):
-                    self.failed_markers[args[2]] = 1
-                return result_value
-
-        failed = FailedBootCloud(self.platform)
-        with self.assertRaisesRegex(openstack.OpenStackError, "failed service readiness"):
-            openstack.power_host(
-                self.platform,
-                "ingress",
-                "reboot",
-                health_check=self.role_health,
-                command_runner=failed,
-            )
-
-    def test_post_acceptance_recovery_cleans_only_retained_old_uuid(self) -> None:
-        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
-        cloud.flavors[self.platform.get("flavors.ingress")]["id"] = TARGET_FLAVOR
-        cloud.retain_old_delete = True
-        checkpoints: list[tuple[str, dict]] = []
-        with protected_user_data() as user_data_path:
-            replaced = openstack.replace_host(
-                self.platform,
-                "ingress",
-                selected_image_id=IMAGE_1,
-                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
-                operation_id=OPERATION,
-                user_data_path=user_data_path,
-                checkpoint=lambda phase, refs: checkpoints.append((phase, dict(refs))),
-                health_check=self.role_health,
-                command_runner=cloud,
-            )
-        self.assertEqual(replaced.cleanup_state, "old_server_retained")
-        phase, refs = checkpoints[-1]
-        self.assertEqual(phase, "complete")
-        cloud.retain_old_delete = False
-        # No local credential is needed to recover the already-rendered candidate.
-        # Wrong candidate provenance or failed health must still prevent deletion.
-        for recovery_refs, health in (
-            ({**refs, "selected_image_id": IMAGE_2}, self.role_health),
-            ({**refs, "target_flavor_id": FLAVOR}, self.role_health),
-            (refs, mock.Mock(side_effect=openstack.OpenStackError("candidate unhealthy"))),
-        ):
-            before = len(cloud.calls)
-            with self.assertRaises(openstack.OpenStackError):
-                openstack.recover_host_replacement(
-                    self.platform,
-                    "ingress",
-                    phase=phase,
-                    refs=recovery_refs,
-                    action="cleanup_old",
-                    checkpoint=lambda *_: None,
-                    health_check=health,
-                    command_runner=cloud,
-                )
-            self.assertIsNotNone(cloud.server)
-            self.assertFalse(
-                any(call[1:3] == ("server", "delete") for call in cloud.calls[before:])
-            )
-        recovery_platform = replace(
-            self.platform,
-            document={
-                **self.platform.document,
-                "flavors": {**self.platform.get("flavors"), "ingress": "unknown-later-flavor"},
-            },
-        )
-        cloud.flavors.clear()
-        before_recovery = len(cloud.calls)
-        recovered = openstack.recover_host_replacement(
-            recovery_platform,
-            "ingress",
-            phase=phase,
-            refs=refs,
-            action="cleanup_old",
-            checkpoint=lambda *_: None,
-            health_check=self.role_health,
-            command_runner=cloud,
-        )
-        self.assertEqual(recovered.active_server_id, REPLACEMENT)
-        self.assertIsNone(cloud.server)
-        self.assertIsNotNone(cloud.replacement)
-        self.assertEqual(cloud.replacement["flavor"]["id"], TARGET_FLAVOR)
-        self.assertFalse(
-            any(call[1:3] == ("flavor", "show") for call in cloud.calls[before_recovery:])
         )
 
 

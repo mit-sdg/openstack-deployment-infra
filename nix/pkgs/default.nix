@@ -72,6 +72,21 @@ let
     packageOverrides = _final: prev: {
       openstacksdk = prev.openstacksdk.overridePythonAttrs (old: {
         patches = (old.patches or [ ]) ++ [ ./openstacksdk-security-group-project-alias.patch ];
+        # The patched runtime does not need to regenerate upstream manuals.
+        outputs = [ "out" ];
+        nativeBuildInputs = builtins.filter (
+          input: input != prev.sphinxHook && input != prev.openstackdocstheme
+        ) (old.nativeBuildInputs or [ ]);
+      });
+      python-openstackclient = prev.python-openstackclient.overridePythonAttrs (old: {
+        build-system = builtins.filter (
+          input:
+          input != prev.sphinxHook && input != prev.openstackdocstheme && input != prev.sphinxcontrib-apidoc
+        ) old.build-system;
+        # Our exact patched SDK/CLI is exercised by package-smoke. Re-running
+        # thousands of unrelated upstream CLI tests on every image adds no
+        # coverage of the local ownership projection patch.
+        doCheck = false;
       });
     };
   };
@@ -178,9 +193,12 @@ let
     name = "openstack-platform-image-smoke";
     runtimeInputs = [
       pkgs.cdrkit
+      pkgs.xfsprogs
+      pkgs.python3
       pkgs.qemu
     ];
     text = ''
+      export PLATFORM_CONFIG="''${PLATFORM_CONFIG:-${pkgs.writeText "smoke-platform.json" (builtins.toJSON platform)}}"
       exec ${../../tests/smoke_openstack_image.sh} "$@"
     '';
   };

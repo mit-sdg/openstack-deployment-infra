@@ -251,9 +251,10 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 
 #### Browser tests
 
-- `frontend/owner-portal/e2e/owner-flow.spec.ts` — owner isolation, deployments, lost responses, CSP, themes, and widths.
-- `frontend/owner-portal/e2e/resources.spec.ts` — environment variables, renamed PostgreSQL bindings, injected names, and rotation.
-- `frontend/owner-portal/e2e/staff-flow.spec.ts` — admin bootstrap, staff invitation, authority, adoption, and audit.
+- `frontend/owner-portal/e2e/helpers.ts` — shared sign-in, app creation, and settings steps for the smoke journeys.
+- `frontend/owner-portal/e2e/owner-flow.spec.ts` — owner sign-in, app creation, deploy key, deployment, logs, and sign-out.
+- `frontend/owner-portal/e2e/resources.spec.ts` — write-only environment variables and PostgreSQL bindings.
+- `frontend/owner-portal/e2e/staff-flow.spec.ts` — staff finding an owner app and using its settings, people, and activity pages.
 
 ### Operator dashboard
 
@@ -546,7 +547,7 @@ The broker authorizes portal actions and owns accounts, sessions, ownership, quo
 
 ## tests
 
-Python `unittest` modules grouped by boundary. See [test layout](../development.md#understand-the-test-layout).
+Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs module discovery in isolated parallel processes. See [test layout](../development.md#understand-the-test-layout).
 
 ### Fixtures and scripts
 
@@ -571,7 +572,6 @@ Python `unittest` modules grouped by boundary. See [test layout](../development.
 
 - `tests/test_controller_api.py` — route wiring, the socket split, responses, idempotency, lock-free reads, and service integration.
 - `tests/test_controller_database.py` — schema, migrations, identity, journals, state changes, and database recovery.
-- `tests/test_controller_hosting.py` — how Nix hosts the controller: accounts, sockets, backups, and services.
 - `tests/test_controller_http.py` — Unix socket HTTP parsing, deadlines, keep-alive, peer checks, overload, and shutdown.
 - `tests/test_controller_images.py` — image selection compare-and-set, provider checks, recovery, and pinned provisioning.
 - `tests/test_controller_recovery.py` — storage recovery, rejected builds, crash and retry, and lock waits.

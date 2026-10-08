@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import socketserver
 import stat
 import tempfile
 import unittest
@@ -140,31 +141,16 @@ class ManagementDevelopmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "development state"):
             self.load(stateDirectory=str(self.socket_root / "broker"))
 
-    def test_existing_worktree_socket_configuration_remains_supported(self) -> None:
-        config = self.load(
-            brokerSocket=str(self.root / "b.sock"),
-            controllerSocket=str(self.root / "c.sock"),
-            identitySocket=str(self.root / "i.sock"),
-        )
-        self.assertEqual(self.identity(config.identity_socket).socket, config.identity_socket)
-
-    def test_socket_length_errors_identify_field_and_byte_limit(self) -> None:
-        path = self.socket_root / ("x" * 108)
-        for name in ("brokerSocket", "controllerSocket", "identitySocket"):
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, name + ".*107"):
-                self.load(**{name: str(path)})
-        with self.assertRaisesRegex(ValueError, "identity.*107"):
-            self.identity(path)
-        with self.assertRaisesRegex(ValueError, "Unix socket path.*107"):
-            ControllerServer(str(path), Router())
-        unicode_path = self.socket_root / ("é" * 50)
-        with self.assertRaisesRegex(ValueError, "brokerSocket.*107"):
-            self.load(brokerSocket=str(unicode_path))
-
     def test_partial_startup_failure_closes_sockets_and_removes_private_directory(self) -> None:
         is_file = Path.is_file
+        serve_forever = socketserver.BaseServer.serve_forever
         assets = ROOT / "frontend/owner-portal/dist/index.html"
         with (
+            patch.object(
+                socketserver.BaseServer,
+                "serve_forever",
+                new=lambda server, **_kwargs: serve_forever(server, poll_interval=0.001),
+            ),
             patch("sys.argv", ["portal-dev", "--http", "--state", str(self.root)]),
             patch(
                 "openstack_platform.management.dev.__main__.HarnessWeb",

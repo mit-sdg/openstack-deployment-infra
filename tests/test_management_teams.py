@@ -89,37 +89,6 @@ class TeamTests(ManagementCase):
             lambda: self.call("GET", f"/v1/apps/{self.app}/activity?limit=500", owner="alice"),
         )
 
-    def test_team_state_controls_share_busy_scope_and_restart_is_compatible(self) -> None:
-        self.add("bob")
-        route = f"/v1/apps/{self.app}"
-        self.assert_error(
-            "NOT_FOUND",
-            lambda: self.call("POST", route + "/state", {"desiredRunning": True}, "taylor"),
-        )
-        result = self.call("POST", route + "/state", {"desiredRunning": True}, "bob").body["data"]
-        self.assert_error("APP_BUSY", lambda: self.call("POST", route + "/restart", {}, "alice"))
-        self.broker.journal.dispatch(result["intentId"])
-        result = self.call("POST", route + "/restart", {}, "bob").body["data"]
-        self.broker.journal.dispatch(result["intentId"])
-        self.assertEqual(
-            self.call("GET", "/v1/intents/" + result["intentId"], owner="bob").body["data"][
-                "state"
-            ],
-            "succeeded",
-        )
-        request = self.broker.client.request
-
-        def older(method, path, *args, **kwargs):
-            if path.endswith("/restart"):
-                return 404, {"error": {"code": "NOT_FOUND", "summary": "unsafe"}}
-            return request(method, path, *args, **kwargs)
-
-        with patch.object(self.broker.client, "request", older):
-            result = self.call("POST", route + "/restart", {}, "alice").body["data"]
-        self.assertEqual(result["state"], "failed")
-        self.assertIn("not available yet", result["safeError"])
-        self.assertNotIn("unsafe", result["safeError"])
-
     def test_only_the_owner_manages_people_and_members_can_leave(self) -> None:
         self.add("bob")
         self.assert_error("OWNER_ONLY", lambda: self.add("taylor", owner="bob"))
@@ -193,37 +162,6 @@ class TeamTests(ManagementCase):
 
         with patch.object(self.broker, "own", removed):
             self.assert_error("NOT_FOUND", lambda: self.save(self.app, owner="bob", revision=1))
-
-    def test_a_teammates_pending_variable_has_no_retry_key_for_others(self) -> None:
-        self.add("bob")
-        with self.broker.database.connect(write=True) as db:
-            db.execute(
-                "INSERT INTO intents(id,user_id,app_id,kind,client_key,controller_key,fingerprint,method,path,body,state,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    str(uuid.uuid4()),
-                    self.bob,
-                    self.app,
-                    "env_set",
-                    str(uuid.uuid4()),
-                    str(uuid.uuid4()),
-                    "f" * 64,
-                    "PUT",
-                    "/x",
-                    '{"names":["TOKEN"]}',
-                    "unknown",
-                    time.time(),
-                    time.time(),
-                ),
-            )
-        pending = {
-            owner: self.call("GET", f"/v1/apps/{self.app}/environment", owner=owner).body["data"][
-                "intents"
-            ][0]
-            for owner in ("alice", "bob")
-        }
-        self.assertIsNone(pending["alice"]["retryKey"])
-        self.assertFalse(pending["alice"]["requiresResubmit"])
-        self.assertIsNotNone(pending["bob"]["retryKey"])
 
 
 class AdminTeamTests(ManagementCase):

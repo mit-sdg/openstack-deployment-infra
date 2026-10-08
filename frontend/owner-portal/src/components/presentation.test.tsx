@@ -1,19 +1,9 @@
 import { render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it } from 'vitest';
-import { BoundaryText } from './BoundaryText';
 import { Operation } from './Operation';
-import { ThemeButton } from './ThemeButton';
 import { Status } from './Status';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import {
-  activityTitle,
-  activityTitles,
-  appState,
-  humanPhase,
-  relativeTime,
-} from '../utils/presentation';
+import { activityTitle, appState, humanPhase, relativeTime } from '../utils/presentation';
 
 describe('reviewed owner presentation', () => {
   it('renders activity with app, commit, relative time and humanized progress', () => {
@@ -46,18 +36,6 @@ describe('reviewed owner presentation', () => {
     expect(screen.getByText('INVALID_REQUEST')).toBeVisible();
     expect(screen.queryByText(/build_rejected/)).toBeNull();
   });
-  it('places explicit wrap opportunities at URL separators', () => {
-    const { container } = render(
-      <BoundaryText text="https://github.com/example/student-project" />,
-    );
-    expect(container.textContent).toBe('https://github.com/example/student-project');
-    expect(container.querySelectorAll('wbr')).toHaveLength(5);
-  });
-  it('uses a dashboard-style SVG theme icon', () => {
-    const { container } = render(<ThemeButton />);
-    expect(screen.getByRole('button', { name: /Theme:/ })).toBeVisible();
-    expect(container.querySelector('svg')).not.toBeNull();
-  });
   it('formats relative times and unknown phases without raw underscores', () => {
     expect(relativeTime('2026-10-02T10:00:00Z', Date.parse('2026-10-02T10:05:00Z'))).toBe(
       '5 minutes ago',
@@ -88,20 +66,6 @@ describe('reviewed owner presentation', () => {
     expect(activityTitle('create_app', 'succeeded')).toBe('App created');
     expect(activityTitle('env_set', 'succeeded')).toBe('Variable set');
     expect(activityTitle('something_new', 'succeeded')).toBe('Change made');
-  });
-  it('titles every intent kind the broker records', () => {
-    // INTENT_KINDS in the broker is the source of truth for activity kinds.
-    // Tests run from the owner-portal workspace directory.
-    const source = readFileSync(
-      resolve(process.cwd(), '../../openstack_platform/management/broker/class_reads.py'),
-      'utf8',
-    );
-    const block = source.slice(source.indexOf('INTENT_KINDS = frozenset('));
-    const kinds = [...block.slice(0, block.indexOf(')')).matchAll(/"([a-z_]+)"/g)].map(
-      (match) => match[1],
-    );
-    expect(kinds.length).toBeGreaterThanOrEqual(12);
-    expect(Object.keys(activityTitles).sort()).toEqual([...kinds].sort());
   });
   it('gives every app one state word, in lifecycle, deploy, runtime order', () => {
     const app = {

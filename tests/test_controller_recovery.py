@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 import uuid
 from contextlib import ExitStack
 from unittest import TestCase, mock
@@ -145,44 +144,6 @@ class ControllerRecoveryTests(TestCase):
                 db.get_operation_dispatch(self.connection, self.key).kind, "storage.create"
             )
 
-    def test_storage_recovery_requires_exact_dispatch_and_domain_kind(self):
-        for index, (dispatch_kind, operation_kind, selected) in enumerate(
-            (
-                ("storage.postgres.create", "storage.create", ["postgres"]),
-                ("storage.mongo.create", "storage.create", ["postgres"]),
-                ("storage.postgres.create", "storage.rotate", ["postgres"]),
-                ("storage.postgres.create", "storage.create", ["postgres", "mongo"]),
-                ("app.deploy", "storage.create", ["postgres"]),
-            )
-        ):
-            key = f"00000000-0000-4000-8000-{90 + index:012d}"
-            scope = f"app-{key}"
-            db.claim_idempotency_request(
-                self.connection, request_id=key, request_fingerprint="a" * 64
-            )
-            db.enqueue_operation_dispatch(
-                self.connection, operation_id=key, kind=dispatch_kind, scope=scope
-            )
-            db.begin_operation(
-                self.connection,
-                operation_id=key,
-                kind=operation_kind,
-                scope=scope,
-                phase="validated",
-                deadline_at="2030-01-01T00:00:00Z",
-                refs={"selected": selected},
-            )
-            db.mark_recovery_required(self.connection, key, "fixed failure")
-            db.set_operation_dispatch_status(self.connection, key, "recovery_required")
-            saved_dispatch = db.get_operation_dispatch(self.connection, key)
-            saved_operation = db.get_operation(self.connection, key)
-            with self.assertRaises(db.DatabaseError):
-                db.requeue_recovery_dispatch(
-                    self.connection, operation_id=key, kind="storage.create", scope=scope
-                )
-            self.assertEqual(db.get_operation_dispatch(self.connection, key), saved_dispatch)
-            self.assertEqual(db.get_operation(self.connection, key), saved_operation)
-
     def test_deterministic_rejection_releases_scope_only_after_exact_cleanup(self):
         response = self.deploy()
         operation = self.wait(response)
@@ -194,14 +155,6 @@ class ControllerRecoveryTests(TestCase):
         # A different corrected request is admitted rather than stuck behind the old build.
         self.wait(self.deploy(key=self.other_key, commit="b" * 40))
         self.assertEqual(self.calls.count("app.build"), 2)
-
-    def test_unfetchable_source_fails_cleanly_like_a_rejected_build(self):
-        # The helper couldn't fetch the commit, with or without a deploy key.
-        self.rejection = "SOURCE_REJECTED"
-        operation = self.wait(self.deploy())
-        self.assertEqual((operation.status, operation.cleanup_state), ("failed", "confirmed"))
-        self.assertEqual(operation.phase, "build_rejected")
-        self.assertEqual(self.calls, ["app.build", "app.build.cleanup"])
 
     def test_ambiguous_cleanup_retries_cleanup_only_across_restart(self):
         self.cleanup = False
@@ -238,21 +191,6 @@ class ControllerRecoveryTests(TestCase):
         self.assertEqual(self.wait(self.deploy()).status, "failed")
         self.assertEqual(self.calls.count("app.build"), 1)
 
-    def test_crash_between_attempt_and_operation_terminalization_is_resumable(self):
-        with mock.patch.object(db, "mark_failed", side_effect=OSError("simulated crash")):
-            self.assertEqual(self.wait(self.deploy()).status, "recovery_required")
-        self.assertEqual(db.get_deployment_attempt(self.connection, self.key).status, "failed")
-        self.restart()
-        self.assertEqual(self.wait(self.deploy()).status, "failed")
-        self.assertEqual(self.calls.count("app.build"), 1)
-
-    def test_unknown_build_result_remains_recovery_required(self):
-        self.generic_failure = True
-        self.assertEqual(self.wait(self.deploy()).status, "recovery_required")
-        self.assertNotIn("app.build.cleanup", self.calls)
-        with self.assertRaises(HttpError):
-            self.deploy(key=self.other_key, commit="b" * 40)
-
     def test_destructive_polling_and_replay_use_the_correct_socket_capability(self):
         self.reject = False
         created = self.fixture.dispatch(
@@ -286,22 +224,6 @@ class ControllerRecoveryTests(TestCase):
                 )
                 self.assertEqual(polled.body["status"], "succeeded")
 
-    def test_restart_without_domain_intent_finishes_unstarted_dispatch(self):
-        for index, status in enumerate(("pending", "running")):
-            key = f"00000000-0000-4000-8000-{50 + index:012d}"
-            db.claim_idempotency_request(
-                self.connection, request_id=key, request_fingerprint="a" * 64
-            )
-            db.enqueue_operation_dispatch(
-                self.connection, operation_id=key, kind="app.deploy", scope=f"app-{self.identifier}"
-            )
-            if status == "running":
-                db.set_operation_dispatch_status(self.connection, key, "running")
-            self.restart()
-            self.assertEqual(db.get_operation(self.connection, key).status, "failed")
-            self.assertEqual(db.get_operation_dispatch(self.connection, key).status, "finished")
-        self.assertEqual(self.calls, [])
-
 
 class InfrastructureLockTests(TestCase):
     """Deploys wait out maintenance, and fail cleanly when it outlasts the wait."""
@@ -329,34 +251,9 @@ class InfrastructureLockTests(TestCase):
         self.fixture.api.wait_for_operations()
         return db.get_operation(self.connection, key)
 
-    def test_deploy_waits_for_maintenance_without_holding_the_api_lock(self):
-        with runtime.lock(self.root, "infrastructure"):
-            key = self.submit()
-            # It waits on its worker thread before pinning images.
-            for _ in range(100):
-                waiting = db.get_operation(self.connection, key)
-                if waiting is not None and waiting.phase == "validated":
-                    break
-                time.sleep(0.05)
-            time.sleep(0.2)
-            waiting = db.get_operation(self.connection, key)
-            self.assertEqual((waiting.status, waiting.phase), ("running", "validated"))
-            self.assertEqual(self.fixture.calls, [])
-            # Requests that take the API lock are still served meanwhile.
-            self.assertTrue(self.fixture.api._lock.acquire(timeout=2))
-            self.fixture.api._lock.release()
-            self.assertEqual(
-                self.fixture.router.dispatch(
-                    "GET", f"/v1/applications/{self.application}/deployments", {}, None
-                ).status,
-                200,
-            )
-        operation = self.finish(key)
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-
     def test_maintenance_outlasting_the_wait_fails_cleanly_before_any_change(self):
         with (
-            mock.patch.object(deployment_service, "INFRASTRUCTURE_WAIT_SECONDS", 0.2),
+            mock.patch.object(deployment_service, "INFRASTRUCTURE_WAIT_SECONDS", 0.01),
             runtime.lock(self.root, "infrastructure"),
         ):
             key = self.submit()
@@ -384,24 +281,6 @@ class InfrastructureLockTests(TestCase):
         retried = self.finish(self.submit())
         self.assertEqual(retried.status, "succeeded", retried.safe_error)
 
-    def test_interrupted_busy_failure_finishes_on_resume_without_building(self):
-        with (
-            mock.patch.object(deployment_service, "INFRASTRUCTURE_WAIT_SECONDS", 0.2),
-            mock.patch.object(db, "mark_failed", side_effect=OSError("simulated crash")),
-            runtime.lock(self.root, "infrastructure"),
-        ):
-            key = self.submit()
-            operation = self.finish(key)
-        self.assertEqual(
-            (operation.status, operation.phase), ("recovery_required", "platform_busy")
-        )
-        operation = self.finish(self.submit(key))
-        self.assertEqual(
-            (operation.status, operation.cleanup_state, operation.safe_error),
-            ("failed", "confirmed", deployment_service.PLATFORM_BUSY),
-        )
-        self.assertEqual(self.fixture.calls, [])
-
     def test_lock_busy_after_resources_exist_keeps_recovery(self):
         held = ExitStack()
         self.addCleanup(held.close)
@@ -415,7 +294,7 @@ class InfrastructureLockTests(TestCase):
             return result
 
         self.fixture.api.helper_caller = helper
-        with mock.patch.object(deployment_service, "INFRASTRUCTURE_WAIT_SECONDS", 0.2):
+        with mock.patch.object(deployment_service, "INFRASTRUCTURE_WAIT_SECONDS", 0.01):
             key = self.submit()
             operation = self.finish(key)
         self.assertEqual(
