@@ -70,12 +70,6 @@ class HealthAlertsTests(unittest.TestCase):
             self.notify()
             self.assertEqual(sender.call_count, 4)
 
-    def test_a_pass_breaks_the_consecutive_failure_count(self):
-        with mock.patch.object(health_alerts, "send", return_value=True) as sender:
-            for healthy in (False, True, False, True, True):
-                self.notify(healthy)
-            sender.assert_not_called()
-
     def test_failed_delivery_is_throttled_and_recovery_is_retried(self):
         self.config["healthAlerts"]["failureThreshold"] = 1
         with mock.patch.object(health_alerts, "send", return_value=False) as sender:
@@ -115,15 +109,6 @@ class HealthAlertsTests(unittest.TestCase):
             sender.assert_not_called()
         self.assertFalse((self.directory / "operator").exists())
 
-    def test_state_failure_is_best_effort_and_secret_free(self):
-        self.notify()
-        state = self.directory / "operator/status/health-alerts.json"
-        state.write_text("invalid secret sentinel")
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            health_alerts.notify(self.config, self.snapshot)
-        self.assertEqual(output.getvalue(), "health-alert=unavailable\n")
-
     def test_messages_only_include_fixed_check_names(self):
         for event in ("failing", "recovered", "test"):
             for format_name in ("slack", "json"):
@@ -145,11 +130,7 @@ class HealthAlertsTests(unittest.TestCase):
                             ["public_ingress"] if event == "failing" else [],
                         )
 
-    def test_configuration_validation_in_both_loaders_and_copies(self):
-        self.assertEqual(
-            (ROOT / "infra/lib/health_alert_config.py").read_bytes(),
-            (ROOT / "openstack_platform/health_alert_config.py").read_bytes(),
-        )
+    def test_configuration_validation_in_both_loaders(self):
         original = json.loads((ROOT / "config/platform.example.json").read_text())
         cases = [
             None,

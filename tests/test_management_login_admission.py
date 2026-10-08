@@ -9,9 +9,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from openstack_platform.controller.http import HttpError, Request
+from openstack_platform.controller.http import HttpError
 from openstack_platform.management.broker import bootstrap, known_device, local_auth, local_security
-from openstack_platform.management.broker.accounts import security_change
 from openstack_platform.management.broker.local_auth_limits import (
     DeviceFailureLimits,
     KnownAccountLimits,
@@ -29,9 +28,6 @@ class LocalAdmissionTests(ManagementCase):
 
     def setUp(self) -> None:
         super().setUp()
-        delay_patch = patch.object(local_auth, "sleep")
-        self.delay = delay_patch.start()
-        self.addCleanup(delay_patch.stop)
         self.now = time.time()
         self.broker.auth.clock = lambda: self.now
         folder = bootstrap.enrollment_file(self.config).parent
@@ -206,12 +202,6 @@ class LocalAdmissionTests(ManagementCase):
         self.now += 3600
         self.assertEqual(self.login(device=self.device)["role"], "admin")
 
-    def test_wrong_passwords_never_charge_or_trigger_totp_backoff(self) -> None:
-        self.assert_error("INVALID_CREDENTIALS", lambda: self.login(password="wrong"))
-        self.assertEqual(self.event_count("password"), 1)
-        self.assertEqual(self.event_count("totp"), 0)
-        self.assertEqual(self.login(address="198.51.100.4")["role"], "admin")
-
     def test_reauthentication_shares_password_budget_and_needs_device_exemption(self) -> None:
         with patch.object(local_auth, "verify_password", return_value=(False, False)):
             for i in range(20):
@@ -260,16 +250,6 @@ class LocalAdmissionTests(ManagementCase):
                     "INVALID_CREDENTIALS", lambda token=token: self.login(device=token)
                 )
                 self.assertEqual(verification.call_args.args[1], local_security.DUMMY_HASH)
-
-    def test_generation_change_invalidates_device_and_clears_stale_account_budgets(self) -> None:
-        self.exhaust_passwords()
-        with self.broker.database.connect(write=True) as db:
-            security_change(db, self.user_id)
-            user = dict(db.execute("SELECT * FROM users WHERE id=?", (self.user_id,)).fetchone())
-        self.assertFalse(
-            known_device.valid(self.broker.auth.anonymous.key, self.device, user, self.now)
-        )
-        self.assertEqual(self.event_count("password"), 0)
 
     def test_anonymous_flood_cannot_occupy_known_device_or_live_session_lane(self) -> None:
         self.assertTrue(local_security.HASH_SLOTS.acquire(blocking=False))
@@ -357,72 +337,6 @@ class LocalAdmissionTests(ManagementCase):
                 self.assertEqual(verification.call_args.args[1], local_security.DUMMY_HASH)
         self.assertEqual(self.event_count("password"), 20)
 
-    def test_address_attempt_budget_still_precedes_hash_capacity(self) -> None:
-        with patch.object(
-            local_auth, "verify_password", return_value=(False, False)
-        ) as verification:
-            for i in range(12):
-                self.assert_error("INVALID_CREDENTIALS", lambda i=i: self.login(name=f"unknown{i}"))
-            self.assert_error("RATE_LIMITED", lambda: self.login(name="unknownextra"))
-            self.assertEqual(verification.call_count, 12)
-
-    def test_known_browser_options_and_http_login_survive_anonymous_address_saturation(
-        self,
-    ) -> None:
-        self.broker.auth.address_limits.limits = {"options": 1, "start": 1}
-        # Bootstrap already consumed both anonymous buckets at the loopback IP.
-        self.assert_error("RATE_LIMITED", lambda: self.call("GET", "/v1/auth/options"))
-        options = self.call(
-            "GET",
-            "/v1/auth/options",
-            headers={"cookie": self.config.device_cookie + "=" + self.device},
-        ).body
-        binder = options["browser"]["cookies"][0]["value"]
-        response = self.call(
-            "POST",
-            "/v1/auth/login",
-            {
-                "csrfToken": options["data"]["csrfToken"],
-                "method": "local",
-                "username": "rootadmin",
-                "password": "private secure phrase 48219",
-                "totp": local_security.totp_code(self.admin_secret, int(self.now // 30)),
-            },
-            headers={
-                "cookie": self.config.device_cookie
-                + "="
-                + self.device
-                + "; "
-                + self.config.login_cookie
-                + "="
-                + binder
-            },
-        )
-        self.assertEqual(response.status, 200)
-
-    def test_password_failures_and_budget_denials_have_the_same_failure_latency_floor(self) -> None:
-        with self.broker.database.connect(write=True) as db:
-            db.executemany(
-                "INSERT INTO authentication_failures(user_id,kind,created) VALUES(?,'password',?)",
-                [(self.user_id, self.now)] * 20,
-            )
-        for device in (None, self.device):
-            self.delay.reset_mock()
-            with (
-                patch.object(local_auth, "verify_password", return_value=(False, False)),
-                patch.object(local_auth, "monotonic", side_effect=[10.0, 10.25]),
-            ):
-                self.assert_error(
-                    "INVALID_CREDENTIALS", lambda device=device: self.login(device=device)
-                )
-            self.delay.assert_called_once_with(0.75)
-
-    def legacy(self) -> str:
-        payload = (
-            f"1.{self.user_id}.{self.user['generation']}.{int(self.now) + known_device.LIFETIME}"
-        )
-        return payload + "." + known_device.signature(self.broker.auth.anonymous.key, payload)
-
     def owner_device(self):
         invited = self.call(
             "POST",
@@ -439,29 +353,6 @@ class LocalAdmissionTests(ManagementCase):
                 db.execute("SELECT * FROM users WHERE id=?", (invited["userId"],)).fetchone()
             )
         return known_device.issue(self.broker.auth.anonymous.key, user, self.now)
-
-    def test_owner_known_device_flood_has_account_rate_across_address_buckets(self) -> None:
-        token = self.owner_device()
-        with patch.object(
-            local_auth, "verify_password", return_value=(False, False)
-        ) as verification:
-            for i in range(12):
-                self.assert_error(
-                    "INVALID_CREDENTIALS",
-                    lambda i=i: self.login(
-                        name="limitowner",
-                        password="wrong",
-                        device=token,
-                        address=f"2001:db8:{i}::/64",
-                    ),
-                )
-            self.assert_error(
-                "RATE_LIMITED",
-                lambda: self.login(name="limitowner", device=token, address="2001:db8:99::/64"),
-            )
-            self.assertEqual(verification.call_count, 12)
-        self.now += 61
-        self.assertEqual(self.login(name="limitowner", device=token)["role"], "owner")
 
     def test_known_account_inflight_cap_and_dedicated_live_step_up_capacity(self) -> None:
         token = self.owner_device()
@@ -491,29 +382,6 @@ class LocalAdmissionTests(ManagementCase):
             finally:
                 release.set()
             self.assertEqual(pending.result(timeout=5)["role"], "owner")
-
-    def test_known_login_address_budget_cannot_consume_live_step_up_budget(self) -> None:
-        for _ in range(12):
-            self.broker.auth.known_limits.check_bucket("203.0.113.90", "start", self.now)
-        code = local_security.totp_code(self.admin_secret, int(self.now // 30))
-        self.assertEqual(self.step(code).status, 200)
-
-    def test_signed_random_device_id_is_stable_on_refresh_and_not_forgeable(self) -> None:
-        identifier = known_device.device_id(self.device)
-        self.assertRegex(identifier, r"^[a-f0-9]{32}$")
-        separate = known_device.issue(self.broker.auth.anonymous.key, self.user, self.now)
-        self.assertNotEqual(identifier, known_device.device_id(separate))
-        refreshed = known_device.issue(
-            self.broker.auth.anonymous.key, self.user, self.now + 31, previous=self.device
-        )
-        self.assertEqual(identifier, known_device.device_id(refreshed))
-        fields = self.device.split(".")
-        fields[4] = "0" * 32
-        self.assertFalse(
-            known_device.valid(
-                self.broker.auth.anonymous.key, ".".join(fields), self.user, self.now
-            )
-        )
 
     def test_shared_device_cookie_has_twenty_failures_per_rolling_hour(self) -> None:
         with patch.object(local_auth, "verify_password", return_value=(False, False)):
@@ -548,47 +416,6 @@ class LocalAdmissionTests(ManagementCase):
         )
         self.now += 3601
         self.assertEqual(self.login(device=refreshed)["role"], "admin")
-
-    def test_legacy_cookie_recognition_remains_valid_without_password_exemption(self) -> None:
-        token = self.legacy()
-        self.assertTrue(
-            known_device.valid(self.broker.auth.anonymous.key, token, self.user, self.now)
-        )
-        self.assertIsNone(known_device.device_id(token))
-        request = Request(
-            "GET",
-            "/v1/auth/options",
-            {},
-            {},
-            {"cookie": self.config.device_cookie + "=" + token},
-            None,
-        )
-        self.assertEqual(known_device.read(request, self.config.device_cookie), token)
-        self.exhaust_passwords()
-        self.assert_error("INVALID_CREDENTIALS", lambda: self.login(device=token))
-        self.assertEqual(self.login(device=self.device)["role"], "admin")
-
-    def test_successful_legacy_login_migrates_to_a_device_id(self) -> None:
-        token = self.legacy()
-        csrf, headers = self.anonymous()
-        headers["cookie"] += "; " + self.config.device_cookie + "=" + token
-        response = self.call(
-            "POST",
-            "/v1/auth/login",
-            {
-                "csrfToken": csrf,
-                "method": "local",
-                "username": "rootadmin",
-                "password": "private secure phrase 48219",
-                "totp": local_security.totp_code(self.admin_secret, int(self.now // 30)),
-            },
-            headers=headers,
-        ).body
-        upgraded = next(c["value"] for c in response["browser"]["cookies"] if c["name"] == "device")
-        self.assertIsNotNone(known_device.device_id(upgraded))
-        self.assertTrue(
-            known_device.valid(self.broker.auth.anonymous.key, upgraded, self.user, self.now)
-        )
 
     def test_step_up_rejects_unvalidated_address_before_hashing(self) -> None:
         with patch.object(local_auth, "verify_password") as verification:

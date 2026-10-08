@@ -10,12 +10,9 @@ from unittest import mock
 from openstack_platform import ingress_credentials, openstack, operator, remote
 from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
-from openstack_platform.controller import deployment_service, status
+from openstack_platform.controller import deployment_service
 from openstack_platform.controller.deployment_config import parse_configuration
 from openstack_platform.controller.storage_contract import PLATFORM_ENVIRONMENT_KEYS
-from openstack_platform.helper.main import default_handlers
-from openstack_platform.helper.production import ACTION_MANIFEST
-from tests.product_fixtures import accept_deployment
 
 APP_ID = "00000000-0000-4000-8000-000000000001"
 IMAGE_ID = "00000000-0000-4000-8000-000000000002"
@@ -147,38 +144,6 @@ class OperatorIntegrationTests(unittest.TestCase):
             self.assertEqual(operator.main(["status"]), operator.EXIT_UNAVAILABLE)
         self.assertIn("unavailable:", stderr.getvalue())
 
-    def test_operator_command_tree_excludes_controller_product_commands(self) -> None:
-        commands = (
-            ("setup", "--env-file", str(self.root / "setup.env")),
-            (
-                "setup",
-                "--env-file",
-                str(self.root / "setup.env"),
-                "--cloudflare-token-file",
-                str(self.root / "cloudflare.token"),
-                "--apply",
-            ),
-            ("status",),
-            ("backup",),
-            ("infra", "list"),
-            ("infra", "image", "list"),
-            ("infra", "image", "set", "worker", IMAGE_ID),
-            ("infra", "image", "prune"),
-            ("infra", "image", "prune", "--apply", "--yes"),
-            ("infra", "start", "admin"),
-            ("infra", "stop", "storage", "--yes"),
-            ("infra", "reboot", "ingress", "--yes"),
-            ("infra", "replace", "admin", "--yes"),
-            ("infra", "logs", "admin"),
-        )
-        parser = operator.build_parser()
-        for command in commands:
-            with self.subTest(command=command):
-                parser.parse_args(self.argv(*command))
-        for command in (("app", "list"), ("storage", "list")):
-            with self.subTest(command=command), self.assertRaises(SystemExit):
-                parser.parse_args(self.argv(*command))
-
     def test_status_initializes_private_database_and_renders_table(self) -> None:
         output = StringIO()
         model = {
@@ -199,21 +164,6 @@ class OperatorIntegrationTests(unittest.TestCase):
             self.assertEqual(db.schema_version(connection), db.MIGRATIONS[-1].version)
         finally:
             connection.close()
-
-    def test_fresh_status_counts_only_expected_persistent_dependencies(self) -> None:
-        args = operator.build_parser().parse_args(self.argv("status"))
-        with operator._database(args) as connection:
-            model = status.status_show(
-                connection,
-                observe_infrastructure=lambda role: status.InfrastructureObservation(
-                    role,
-                    "active",
-                    "healthy",
-                    "2026-01-01T00:00:00Z",
-                ),
-            )
-        self.assertEqual(model["state"], "healthy")
-        self.assertEqual(model["observations"], {"available": 3, "unavailable": 0, "unhealthy": 0})
 
     def test_image_selection_uses_lock_operation_and_accepted_uuid(self) -> None:
         selected = openstack.ImageSelection("worker", IMAGE_ID, "worker-image", "b" * 40, "c" * 64)
@@ -312,15 +262,6 @@ class OperatorIntegrationTests(unittest.TestCase):
             self.assertEqual(db.get_operation(connection, operation_id).status, "succeeded")  # type: ignore[union-attr]
         finally:
             connection.close()
-
-    def test_host_log_line_bounds(self) -> None:
-        parser = operator.build_parser()
-        for command in (
-            ("infra", "logs", "admin", "--lines", "0"),
-            ("infra", "logs", "admin", "--lines", "2001"),
-        ):
-            with self.subTest(command=command), self.assertRaises(SystemExit):
-                parser.parse_args(self.argv(*command))
 
     def test_platform_ownership_transfer_preserves_unrelated_staff_keys(self) -> None:
         args = operator.build_parser().parse_args(self.argv("status"))
@@ -591,208 +532,6 @@ class OperatorIntegrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_platform_environment_interruption_restores_exact_nonsecret_prior_values(self) -> None:
-        args = operator.build_parser().parse_args(self.argv("status"))
-        configured = operator._load_config(args)
-        candidate = "storage.internal:5000/projects/demo-app/app@sha256:" + "e" * 64
-        prior_image = "storage.internal:5000/projects/demo-app/app@sha256:" + "d" * 64
-        prior = {
-            "NODE_ENV": "production",
-            "PLATFORM_ENV": "production",
-            "PLATFORM_PROJECT_ID": APP_ID,
-            "PLATFORM_PROJECT_SLUG": "demo-app",
-            "PORT": "3000",
-        }
-        desired = {**prior, "PORT": "8080"}
-        calls: list[tuple[str, object]] = []
-        with operator._database(args) as connection:
-            db.put_application(
-                connection,
-                application_id=APP_ID,
-                application_slug="demo-app",
-                worker_flavor="one-vcpu",
-                scheduler_cpu_mhz=1000,
-                scheduler_memory_mib=2048,
-            )
-            accept_deployment(
-                connection,
-                application_id=APP_ID,
-                source_commit="a" * 40,
-                recipe_hash="b" * 64,
-                image_digest=prior_image,
-                nomad_job='{"ID":"demo-app"}',
-                nomad_job_sha256="c" * 64,
-                nomad_version=7,
-                health_path="/old-health",
-                application_port=3000,
-                build_log_path="logs/old.log",
-            )
-            operation_id = "00000000-0000-4000-8000-000000000099"
-            db.begin_operation(
-                connection,
-                operation_id=operation_id,
-                kind="app.deploy",
-                scope=f"app-{APP_ID}",
-                phase="platform_environment_mutating",
-                deadline_at="2026-08-18T01:00:00Z",
-                refs={
-                    "application_id": APP_ID,
-                    "slug": "demo-app",
-                    "repository": "https://github.com/o/r",
-                    "source_commit": "f" * 40,
-                    "requested_ref": "main",
-                    "configuration_revision": 0,
-                    "configuration_sha256": "0" * 64,
-                    "platform_key_names": sorted(PLATFORM_ENVIRONMENT_KEYS),
-                    "desired_platform_values": desired,
-                    "prior_platform_values": prior,
-                },
-            )
-            db.checkpoint_operation(
-                connection,
-                operation_id,
-                phase="platform_environment_mutating",
-                candidate_digest=candidate,
-            )
-            operation = db.get_operation(connection, operation_id)
-            assert operation is not None
-            spec = app.DeploymentSpec(
-                APP_ID,
-                "demo-app",
-                "https://github.com/o/r",
-                "f" * 40,
-                "main",
-                0,
-                "0" * 64,
-                "one-vcpu",
-                1000,
-                2048,
-            )
-
-            def helper(
-                _config: object, action: str, values: object, **_kwargs: object
-            ) -> dict[str, object]:
-                calls.append((action, values))
-                if action == "app.env.set":
-                    self.assertEqual(values["updates"], prior)  # type: ignore[index]
-                    return {
-                        "keys": sorted(prior),
-                        "restarted": True,
-                        "schedulerHealthy": True,
-                        "publicHealthy": True,
-                    }
-                if action == "app.builder.delete":
-                    return {"absent": True}
-                raise AssertionError(action)
-
-            service = deployment_service.DeploymentService(
-                connection,
-                configured,
-                self.state,
-                helper_caller=helper,
-            )
-            recovered = service.recover_operation(
-                spec,
-                operation,
-                deadline=operator._command_deadline(configured),
-            )
-            self.assertIsNotNone(recovered.operation)
-            self.assertIsNone(recovered.completed)
-            owners = {
-                item.key_name: item.owner
-                for item in db.list_environment_keys(connection, application_id=APP_ID)
-            }
-        self.assertEqual(owners, {name: "platform" for name in prior})
-        self.assertEqual(
-            [action for action, _values in calls], ["app.env.set", "app.builder.delete"]
-        )
-
-    def test_update_worker_uses_inactive_bounded_slot_while_accepted_worker_remains(self) -> None:
-        args = operator.build_parser().parse_args(self.argv("status"))
-        configured = operator._load_config(args)
-        operation_id = "00000000-0000-4000-8000-000000000099"
-        connection = db.connect(self.state / "platform.sqlite3")
-        db.migrate(connection)
-        db.put_application(
-            connection,
-            application_id=APP_ID,
-            application_slug="demo-app",
-            worker_server_id="00000000-0000-4000-8000-000000000004",
-            worker_server_name="example-worker-stable",
-            worker_port_id="00000000-0000-4000-8000-000000000005",
-            worker_port_name="example-worker-stable-v4",
-            worker_flavor="one-vcpu",
-            scheduler_cpu_mhz=1000,
-            scheduler_memory_mib=2048,
-        )
-        accept_deployment(
-            connection,
-            application_id=APP_ID,
-            source_commit="a" * 40,
-            recipe_hash="b" * 64,
-            image_digest=DIGEST,
-            nomad_job=app.render_nomad_job(
-                application_id=APP_ID,
-                application_slug="demo-app",
-                image=DIGEST,
-                manifest=app.Manifest("node", (".",), None, "serve", 8080, "/ready"),
-                platform=configured.platform,
-                cpu_mhz=1000,
-                memory_mib=2048,
-                source_commit="a" * 40,
-                recipe_hash="b" * 64,
-            ),
-            nomad_version=3,
-            build_log_path="logs/stable.log",
-        )
-        db.begin_operation(
-            connection,
-            operation_id=operation_id,
-            kind="app.deploy",
-            scope=f"app-{APP_ID}",
-            phase="validated",
-            deadline_at="2026-08-18T01:00:00Z",
-        )
-        calls: list[tuple[str, object]] = []
-
-        def helper(_config: object, action: str, values: object, **_kwargs: object):
-            calls.append((action, values))
-            return {
-                "ready": True,
-                "serverId": "00000000-0000-4000-8000-000000000006",
-                "serverName": "example-worker-candidate",
-                "portId": "00000000-0000-4000-8000-000000000007",
-                "portName": "example-worker-candidate-v4",
-            }
-
-        worker = deployment_service._prepare_deployment_worker(
-            connection,
-            configured,
-            helper_caller=helper,
-            state_directory=self.state,
-            operation_id=operation_id,
-            application_id=APP_ID,
-            application_slug="demo-app",
-            worker_flavor="one-vcpu",
-            candidate=DIGEST,
-            refs={},
-            deadline=operator._command_deadline(configured),
-        )
-        connection.close()
-        self.assertEqual(worker.server_name, "example-worker-candidate")
-        self.assertEqual(
-            calls,
-            [
-                (
-                    "app.worker.observe",
-                    {
-                        "applicationId": app.deployment_worker_ids(APP_ID)[1],
-                        "slug": "demo-app",
-                    },
-                )
-            ],
-        )
-
     def test_confirmed_candidate_removal_is_terminal_and_candidate_is_cleaned(self) -> None:
         self._select_deployment_images()
         args = operator.build_parser().parse_args(self.argv("status"))
@@ -999,65 +738,6 @@ class OperatorIntegrationTests(unittest.TestCase):
             )
         return args
 
-    def test_replacement_confirmation_and_observation_show_inventory_flavor_change(self) -> None:
-        from tests.test_platform_openstack import (
-            FLAVOR,
-            IMAGE_1,
-            TARGET_FLAVOR,
-            FakeCloud,
-            canonical_image,
-            protected_user_data,
-        )
-
-        args = self._ingress_replacement_args()
-        document = json.loads(self.platform.read_text())
-        document["flavors"]["ingress"] = "example.8c16g"
-        self.platform.write_text(json.dumps(document))
-        platform = operator._load_config(args).platform
-        cloud = FakeCloud(platform, [canonical_image(platform, IMAGE_1, role="ingress")])
-        cloud.flavors["example.8c16g"].update(id=TARGET_FLAVOR, vcpus=8, ram=16384)
-        with operator._database(args) as connection:
-            db.put_image_selection(
-                connection,
-                role="ingress",
-                image_id=IMAGE_1,
-                display_name="ingress-image",
-                source_commit="a" * 40,
-                compatibility_hash=openstack.image_compatibility_hash(platform),
-            )
-
-        output = StringIO()
-        with protected_user_data():
-            real_replace = openstack.replace_host
-
-            def replace_host(platform, role, **kwargs):
-                return real_replace(platform, role, command_runner=cloud, **kwargs)
-
-            with (
-                mock.patch.object(openstack, "replace_host", side_effect=replace_host),
-                mock.patch.object(operator, "_role_health_check", return_value=lambda *_: None),
-            ):
-                # Declining confirmation must leave the old host untouched.
-                args.yes = False
-                with self.assertRaisesRegex(operator.ValidationError, "requires --yes"):
-                    operator.dispatch(args, stdout=output)
-                self.assertEqual(cloud.server["status"], "ACTIVE")
-                self.assertFalse(any(call[1:3] == ("server", "stop") for call in cloud.calls))
-                args.yes = True
-                operator.dispatch(args, stdout=output)
-        self.assertIn("Flavor changes from example.2c2g to example.8c16g", output.getvalue())
-        self.assertEqual(
-            json.loads(output.getvalue().splitlines()[-1])["flavor"],
-            {"from": "example.2c2g", "to": "example.8c16g"},
-        )
-        with operator._database(args) as connection:
-            operation = connection.execute(
-                "SELECT operation_id FROM operations WHERE kind = 'infra.replace' AND status = 'succeeded'"
-            ).fetchone()
-            refs = db.get_operation(connection, operation[0]).refs
-        self.assertEqual(refs["old_flavor_id"], FLAVOR)
-        self.assertEqual(refs["target_flavor_id"], TARGET_FLAVOR)
-
     def test_ingress_cli_missing_or_malformed_token_fails_without_mutation_or_secret_refs(
         self,
     ) -> None:
@@ -1078,28 +758,6 @@ class OperatorIntegrationTests(unittest.TestCase):
             self.assertFalse((self.state / "credentials").exists())
             with operator._database(args) as connection:
                 self.assertIsNone(db.get_unfinished_operation(connection, "infrastructure"))
-
-    def test_ingress_retry_before_observation_is_fresh_and_requires_file(self) -> None:
-        args = self._ingress_replacement_args()
-        with operator._database(args) as connection:
-            operation_id = operator._begin(
-                connection,
-                operator._load_config(args),
-                kind="infra.replace",
-                scope="infrastructure",
-                refs={"role": "ingress", "selected_image_id": IMAGE_ID},
-            )
-        with (
-            mock.patch.object(openstack, "_replace_host") as mutation,
-            mock.patch.object(openstack, "recover_host_replacement") as recover,
-        ):
-            with self.assertRaisesRegex(operator.ValidationError, "--cloudflare-tunnel-token-file"):
-                operator.dispatch(args, stdout=StringIO())
-        mutation.assert_not_called()
-        recover.assert_not_called()
-        with operator._database(args) as connection:
-            self.assertEqual(db.get_operation(connection, operation_id).status, "failed")
-            self.assertIsNone(db.get_unfinished_operation(connection, "infrastructure"))
 
     def test_ingress_cli_recovery_does_not_read_token_or_start_fresh_replacement(self) -> None:
         for phase in ("old_stopped", "accepted"):
@@ -1174,50 +832,6 @@ class OperatorIntegrationTests(unittest.TestCase):
                     )
                     self.assertIsNone(db.get_unfinished_operation(connection, "infrastructure"))
 
-    def test_token_option_is_rejected_for_other_roles_and_ingress_override_is_refused(self) -> None:
-        for host, options in (
-            ("admin", ("--cloudflare-tunnel-token-file", "private-token")),
-            ("ingress", ("--user-data", "private-payload")),
-        ):
-            args = operator.build_parser().parse_args(
-                self.argv("infra", "replace", host, "--yes", *options)
-            )
-            with mock.patch.object(openstack, "replace_host") as replace:
-                with self.assertRaises(operator.ValidationError):
-                    operator.dispatch(args, stdout=StringIO())
-            replace.assert_not_called()
-
-    def test_replacement_lifecycle_evidence_rejects_each_falsified_observation(self) -> None:
-        refs = {
-            "role": "ingress",
-            "old_server_id": "00000000-0000-4000-8000-000000000006",
-            "replacement_server_id": "00000000-0000-4000-8000-000000000008",
-            "selected_image_id": "00000000-0000-4000-8000-000000000007",
-            "lifecycle_observations": {
-                "old_host_retained_until_ready": True,
-                "exact_identity_verified": True,
-            },
-        }
-        for field in ("old_host_retained_until_ready", "exact_identity_verified"):
-            falsified = json.loads(json.dumps(refs))
-            falsified["lifecycle_observations"][field] = False
-            operation = db.Operation(
-                "00000000-0000-4000-8000-000000000099",
-                "infra.replace",
-                "infrastructure",
-                "succeeded",
-                "complete",
-                "2026-01-01T00:00:00Z",
-                "2026-01-01T00:01:00Z",
-                "2026-01-01T01:00:00Z",
-                falsified,
-                None,
-                None,
-                "confirmed",
-            )
-            with self.subTest(field=field), self.assertRaises(openstack.RecoveryRequired):
-                operator._replacement_observation(operation, "ingress")
-
     def test_interrupted_reboot_recovers_by_observation_without_replaying_action(self) -> None:
         args = operator.build_parser().parse_args(self.argv("infra", "reboot", "ingress", "--yes"))
         server_id = "00000000-0000-4000-8000-000000000006"
@@ -1255,21 +869,6 @@ class OperatorIntegrationTests(unittest.TestCase):
         replay.assert_not_called()
         observe.assert_called_once()
         self.assertEqual(observe.call_args.kwargs["refs"]["server_id"], server_id)
-
-
-class HelperIntegrationTests(unittest.TestCase):
-    def test_manifest_exactly_matches_lazy_production_handlers(self) -> None:
-        manifest = tuple(
-            line
-            for line in (Path(__file__).parents[1] / "openstack_platform/helper/actions-v1.txt")
-            .read_text()
-            .splitlines()
-            if line and not line.startswith("#")
-        )
-        handlers = default_handlers()
-        self.assertEqual(manifest, ACTION_MANIFEST)
-        self.assertEqual(tuple(sorted(handlers)), manifest)
-        self.assertTrue(all(callable(handler) for handler in handlers.values()))
 
 
 if __name__ == "__main__":

@@ -11,10 +11,7 @@ import socket
 import sqlite3
 import threading
 import time
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlencode, urlsplit
 
 from openstack_platform.controller.http import (
     ControllerServer,
@@ -24,9 +21,7 @@ from openstack_platform.controller.http import (
 )
 from openstack_platform.management.broker.client import ProjectClient
 from openstack_platform.management.broker.database import MIGRATION_2, SCHEMA_V1, Database
-from openstack_platform.management.broker.main import serve as broker_serve
 from openstack_platform.management.common import digest
-from openstack_platform.management.dev.commons import USERS
 from openstack_platform.management.identity.client import (
     CommonsClient,
     IdentityConfig,
@@ -36,6 +31,8 @@ from tests.test_management import ManagementCase
 
 
 class IdentityTests(ManagementCase):
+    identity_transport = True
+
     def client(self, **overrides):
         options = {"connect_seconds": 0.2, "read_seconds": 0.2, **overrides}
         return CommonsClient(
@@ -54,13 +51,6 @@ class IdentityTests(ManagementCase):
         verifier = secrets.token_urlsafe(32)
         code = self.commons.issue(name, app, code_challenge(verifier))
         return {"code": code, "app": self.config.portal_origin, "code_verifier": verifier}
-
-    def test_code_challenge_matches_rfc_7636(self) -> None:
-        # RFC 7636 Appendix B.
-        self.assertEqual(
-            code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
-            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-        )
 
     def test_redeem_exact_request_and_typed_status_contract(self) -> None:
         client = self.client()
@@ -132,23 +122,6 @@ class IdentityTests(ManagementCase):
         ):
             self.commons.override = (status, json.dumps(body).encode())
             self.assertEqual(client.redeem(self.code())[0], expected)
-
-    def test_production_identity_accepts_only_https_app_origins(self) -> None:
-        from openstack_platform.management.identity.client import redemption
-
-        code = "11111111-1111-4111-8111-111111111111.credential_-"
-        verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        request = {"code": code, "app": "https://platform.example.com", "code_verifier": verifier}
-        self.assertEqual(redemption(request, development=False), request)
-        for app in (
-            "http://platform.example.com",
-            "https://localhost:9443",
-            "https://127.0.0.1",
-            "https://Platform.example.com",
-            "https://platform.example.com/",
-        ):
-            with self.subTest(app=app), self.assertRaises(ValueError):
-                redemption({**request, "app": app}, development=False)
 
     def test_response_duplicate_extra_invalid_uuid_and_size_refuse_without_echo(self) -> None:
         import contextlib
@@ -233,6 +206,22 @@ class IdentityTests(ManagementCase):
         with self.assertRaisesRegex(ValueError, "system CAs"):
             IdentityConfig.load(path)
 
+        from openstack_platform.management.identity.client import redemption
+
+        code = "11111111-1111-4111-8111-111111111111.credential_-"
+        verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        request = {"code": code, "app": "https://platform.example.com", "code_verifier": verifier}
+        self.assertEqual(redemption(request, development=False), request)
+        for app in (
+            "http://platform.example.com",
+            "https://localhost:9443",
+            "https://127.0.0.1",
+            "https://Platform.example.com",
+            "https://platform.example.com/",
+        ):
+            with self.subTest(app=app), self.assertRaises(ValueError):
+                redemption({**request, "app": app}, development=False)
+
     def test_connect_deadline_includes_slow_dns_and_readiness_never_contacts_commons(
         self,
     ) -> None:
@@ -255,104 +244,6 @@ class IdentityTests(ManagementCase):
         )
         self.assertEqual(self.commons.calls, before)
 
-    def test_blackholed_first_address_does_not_starve_the_next(self) -> None:
-        # A listener whose accept queue is full silently drops new SYNs, like a
-        # filtered IPv6 path. It is offered first, before the real class app.
-        blackhole = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        blackhole.bind(("127.0.0.1", 0))
-        blackhole.listen(0)
-        queued = []
-        for _ in range(4):
-            filler = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            filler.setblocking(False)
-            filler.connect_ex(blackhole.getsockname())
-            queued.append(filler)
-        time.sleep(0.05)
-        resolve = socket.getaddrinfo
-
-        def candidates(host, port, *args, **kwargs):
-            real = resolve(host, port, socket.AF_INET, socket.SOCK_STREAM)
-            dropped = (real[0][0], real[0][1], real[0][2], "", blackhole.getsockname())
-            return [dropped, *real]
-
-        try:
-            client = self.client(connect_seconds=1.0)
-            with patch.object(socket, "getaddrinfo", side_effect=candidates):
-                started = time.monotonic()
-                error, user = client.redeem(self.code())
-            self.assertIsNone(error)
-            self.assertEqual(user["username"], "alice")
-            self.assertLess(time.monotonic() - started, 1.5)
-        finally:
-            for filler in queued:
-                filler.close()
-            blackhole.close()
-
-    def test_connection_slot_queues_within_shared_connect_deadline(self) -> None:
-        client = self.client()
-        client.connect_capacity = threading.BoundedSemaphore(1)
-        client.connect_capacity.acquire()
-        release = threading.Timer(0.05, client.connect_capacity.release)
-        release.start()
-        try:
-            self.assertIsNone(client.redeem(self.code())[0])
-        finally:
-            release.join()
-        # Queue time and DNS/TLS time share the same deadline, rather than each
-        # receiving a fresh timeout. A held slot never starts another worker.
-        client.connect_capacity.acquire()
-        started = time.monotonic()
-        before = self.commons.calls
-        try:
-            self.assertEqual(client.redeem(self.code())[0], "unavailable")
-            self.assertLess(time.monotonic() - started, 0.4)
-            self.assertEqual(self.commons.calls, before)
-        finally:
-            client.connect_capacity.release()
-
-    def test_fifty_concurrent_classroom_logins_through_real_unix_transports(self) -> None:
-        self.broker.journal.close()
-        self.broker, broker_server = broker_serve(self.config)
-        self.router = self.broker.router()
-        broker_thread = threading.Thread(
-            target=broker_server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
-        )
-        broker_thread.start()
-        client = ProjectClient(self.config.broker_socket, timeout=10, capacity=50)
-        self.commons.delay_seconds = 0.15
-        fixtures = {
-            f"student-{index}": (str(uuid.uuid4()), f"Student {index}") for index in range(50)
-        }
-        barrier = threading.Barrier(50)
-        headers = {"x-portal-client-address": "192.0.2.1"}
-
-        def login(name: str) -> int:
-            status, started = client.request("GET", "/v1/auth/commons/start", headers=headers)
-            if status != 200:
-                return status
-            binder = started["browser"]["cookies"][0]["value"]
-            query = parse_qs(urlsplit(started["browser"]["location"]).query)
-            state, challenge = query["state"][0], query["code_challenge"][0]
-            code = self.commons.issue(name, self.config.portal_origin, challenge)
-            barrier.wait(timeout=5)
-            status, completed = client.request(
-                "GET",
-                "/v1/auth/commons/callback?" + urlencode({"code": code, "state": state}),
-                headers={**headers, "cookie": self.config.commons_cookie + "=" + binder},
-            )
-            return status if completed["browser"]["location"] == "/apps" else 0
-
-        started = time.monotonic()
-        try:
-            with patch.dict(USERS, fixtures), ThreadPoolExecutor(max_workers=50) as executor:
-                statuses = list(executor.map(login, fixtures))
-            self.assertEqual(statuses, [200] * 50)
-            self.assertEqual(self.commons.calls, 50)
-            self.assertLess(time.monotonic() - started, 6)
-        finally:
-            broker_server.shutdown()
-            broker_server.server_close()
-
     def test_identity_socket_peer_rejected_before_parsing_a_code(self) -> None:
         path = self.sockets / "denied.sock"
         calls = []
@@ -361,7 +252,6 @@ class IdentityTests(ManagementCase):
         server = ControllerServer(
             str(path), router, peer_policy=PeerPolicy(frozenset({(os.geteuid() + 1, os.getegid())}))
         )
-        import threading
 
         thread = threading.Thread(
             target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True

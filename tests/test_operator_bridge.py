@@ -33,6 +33,19 @@ class OperatorBridgeTests(unittest.TestCase):
             self.assertTrue(destination.is_symlink())
             self.assertEqual(target.read_text(), "keep")
 
+        with self.assertRaises(bridge.BridgeError):
+            bridge._safe_path(Path("relative/config"), label="config")
+        with self.assertRaises(bridge.BridgeError):
+            bridge._safe_path(Path("/tmp/has space"), label="config")
+        self.assertEqual(
+            bridge._console_fingerprint(
+                b"noise\nED25519 SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+            ),
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        )
+        with self.assertRaisesRegex(bridge.BridgeError, "ED25519"):
+            bridge._console_fingerprint(b"RSA SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
+
     def test_provider_wrapper_requires_a_protected_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -98,20 +111,6 @@ class OperatorBridgeTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(output.getvalue(), "operator-bridge=prerequisites-ready\n")
-
-    def test_paths_and_console_fingerprint_are_strict(self) -> None:
-        with self.assertRaises(bridge.BridgeError):
-            bridge._safe_path(Path("relative/config"), label="config")
-        with self.assertRaises(bridge.BridgeError):
-            bridge._safe_path(Path("/tmp/has space"), label="config")
-        self.assertEqual(
-            bridge._console_fingerprint(
-                b"noise\nED25519 SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
-            ),
-            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        )
-        with self.assertRaisesRegex(bridge.BridgeError, "ED25519"):
-            bridge._console_fingerprint(b"RSA SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
 
 
 if __name__ == "__main__":

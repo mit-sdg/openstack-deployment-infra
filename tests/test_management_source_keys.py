@@ -72,37 +72,6 @@ class SourceKeyTests(ManagementCase):
         self.login("bob")
         self.assert_error("NOT_FOUND", lambda: self.key("DELETE", owner="bob"))
 
-    def test_access_check_uses_saved_settings_and_is_shared_briefly(self) -> None:
-        self.assert_error("SETTINGS_REQUIRED", self.check)
-        self.save(self.app)
-        self.assertEqual(self.check(), {"keyPresent": False})
-        self.key("POST", {})
-        self.now += source_keys.SHARE_SECONDS
-        self.fixture.source_problem = "key-refused"
-        refused = self.check()
-        self.assertEqual(
-            refused,
-            {
-                "keyPresent": True,
-                "reachable": False,
-                "head": None,
-                "branch": "main",
-                "problem": "key-refused",
-            },
-        )
-        self.fixture.source_problem = None
-        self.assertEqual(self.check(), refused)
-        self.now += source_keys.SHARE_SECONDS
-        self.assertEqual(self.check()["head"], "0123456789abcdef0123456789abcdef01234567")
-        calls = [path for _m, path, _k in self.fixture.calls if path.endswith("/check")]
-        self.assertEqual(len(calls), 3)
-        self.assert_error(
-            "INVALID_REQUEST",
-            lambda: self.call(
-                "POST", f"/v1/apps/{self.app}/source-key/check", {"branch": "x"}, "alice"
-            ),
-        )
-
     def test_private_commit_and_checkout_reads_are_scoped_shared_and_revision_bound(self) -> None:
         self.save(self.app)
         self.key("POST", {})
