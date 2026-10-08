@@ -584,7 +584,7 @@ class WorkerReuseTests(unittest.TestCase):
         self.f.fail_action = "app.manifest.retain"
         key, operation = self.release()
         self.assertEqual(operation.phase, "accepted")
-        self.assertEqual(operation.status, "recovery_required")
+        self.assertEqual(operation.status, "running")
         self.restart()
         self.success(self.release(key=key)[1])
         self.assertEqual(self.f.workers, workers)

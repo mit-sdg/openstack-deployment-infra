@@ -419,6 +419,7 @@ The admin-host controller owns app state in SQLite. See the [controller API](con
 - `openstack_platform/controller/sizing.py` — worker size plans, capacity budgets, and service reserves.
 - `openstack_platform/controller/nomad_jobs.py` — job rendering, placement checks, and route identity validation.
 - `openstack_platform/controller/environment_service.py` — write-only environment variable changes.
+- `openstack_platform/controller/finishing_retries.py` — durable, bounded retries of finishing work (removing the previous version) after a deployment goes live.
 - `openstack_platform/controller/storage.py` — managed storage state machine and helper calls.
 - `openstack_platform/controller/storage_contract.py` — storage ownership, secret keys, and environment mappings.
 - `openstack_platform/controller/storage_service.py` — managed storage request validation and execution.
@@ -637,6 +638,7 @@ Python `unittest` modules grouped by boundary. See [test layout](../development.
 - `tests/test_role_artifact_manifest.py` — role image evidence after a build, and tamper detection.
 - `tests/test_image_pipeline.py` — retained image bytes, CI run identity, signed promotion, and publication gates.
 - `tests/test_ci_publication.py` — the CI paths that trigger image publication.
+- `tests/test_controller_finishing.py` — finishing retries: recovery without rebuilding, restart persistence, exhaustion, allowed and blocked changes meanwhile, and secret-free failure logging.
 - `tests/test_live_acceptance.py` — live acceptance plans, checkpoints and resume, the evidence chain, and signatures.
 - `tests/test_live_acceptance_driver.py` — the live acceptance driver: protocol, observations, interruption, recovery, and teardown.
 

@@ -88,6 +88,12 @@ class DispatchQueueFullError(DatabaseError):
     pass
 
 
+class FinishingOperationConflictError(DatabaseError):
+    def __init__(self, operation_id: str) -> None:
+        self.operation_id = operation_id
+        super().__init__("accepted operation has conflicting finishing work pending")
+
+
 class UnfinishedOperationError(DatabaseError):
     def __init__(self, scope: str, operation_id: str, kind: str) -> None:
         self.scope = scope
@@ -132,6 +138,7 @@ class Operation:
     candidate_digest: str | None
     safe_error: str | None
     cleanup_state: str
+    finishing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +150,7 @@ class OperationDispatch:
     created_at: str
     updated_at: str
     safe_error: str | None
+    finishing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,6 +548,52 @@ MIGRATIONS += (
             record_json TEXT NOT NULL CHECK (json_valid(record_json))
         ) STRICT
     """,
+        ),
+    ),
+)
+
+# Accepted operations release foreground admission while retaining a separate
+# exclusive finishing reservation. Both lanes still use the same runtime app lock.
+MIGRATIONS += (
+    Migration(
+        5,
+        (
+            "ALTER TABLE operations ADD COLUMN finishing INTEGER NOT NULL DEFAULT 0 CHECK (finishing IN (0,1))",
+            "ALTER TABLE operation_dispatches ADD COLUMN finishing INTEGER NOT NULL DEFAULT 0 CHECK (finishing IN (0,1))",
+            "DROP INDEX one_unfinished_operation_per_scope",
+            "CREATE UNIQUE INDEX one_unfinished_operation_per_scope ON operations(scope) WHERE status IN ('running','recovery_required') AND finishing = 0",
+            "CREATE UNIQUE INDEX one_finishing_operation_per_scope ON operations(scope) WHERE status IN ('running','recovery_required') AND finishing = 1",
+            "DROP INDEX one_active_dispatch_per_scope",
+            "CREATE UNIQUE INDEX one_active_dispatch_per_scope ON operation_dispatches(scope) WHERE status IN ('pending','running','recovery_required') AND finishing = 0",
+            "CREATE UNIQUE INDEX one_finishing_dispatch_per_scope ON operation_dispatches(scope) WHERE status IN ('pending','running','recovery_required') AND finishing = 1",
+            """
+            UPDATE operations SET finishing = 1
+            WHERE kind = 'app.deploy' AND phase IN ('deployment_healthy','accepted')
+              AND status IN ('running','recovery_required')
+              AND EXISTS (
+                SELECT 1 FROM active_deployments a JOIN deployment_attempts d
+                  ON d.deployment_id = a.deployment_id
+                WHERE a.deployment_id = operations.operation_id
+                  AND operations.scope = 'app-' || a.application_id
+                  AND d.status = 'succeeded'
+                  AND d.image_digest = operations.candidate_digest
+              )
+            """,
+            """
+            UPDATE operations SET finishing = 1
+            WHERE kind = 'app.enable' AND phase = 'deployment_healthy'
+              AND status IN ('running','recovery_required')
+              AND EXISTS (
+                SELECT 1 FROM applications a JOIN active_deployments d
+                  ON d.application_id = a.application_id
+                WHERE operations.scope = 'app-' || a.application_id
+                  AND a.desired_running = 1
+                  AND d.deployment_id = json_extract(operations.refs_json, '$.deployment_id')
+                  AND a.worker_server_id = json_extract(operations.refs_json, '$.worker_server_id')
+                  AND a.worker_port_id = json_extract(operations.refs_json, '$.worker_port_id')
+              )
+            """,
+            "UPDATE operation_dispatches SET finishing = 1 WHERE operation_id IN (SELECT operation_id FROM operations WHERE finishing = 1)",
         ),
     ),
 )
@@ -1138,6 +1192,7 @@ def _operation_dispatch(row: sqlite3.Row | None) -> OperationDispatch | None:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         safe_error=row["safe_error"],
+        finishing=bool(row["finishing"]),
     )
 
 
@@ -1187,16 +1242,17 @@ def enqueue_operation_dispatch(
             raise DatabaseError("idempotency result has no operation dispatch")
         active = connection.execute(
             "SELECT operation_id, kind FROM operation_dispatches "
-            "WHERE scope = ? AND status IN ('pending','running','recovery_required')",
+            "WHERE scope = ? AND status IN ('pending','running','recovery_required') AND finishing = 0",
             (checked_scope,),
         ).fetchone()
         if active is not None:
             raise UnfinishedOperationError(checked_scope, active["operation_id"], active["kind"])
+        check_finishing_admission(connection, checked_scope, checked_kind)
         unfinished = get_unfinished_operation(connection, checked_scope)
         if unfinished is not None:
             raise UnfinishedOperationError(checked_scope, unfinished.operation_id, unfinished.kind)
         connection.execute(
-            "INSERT INTO operation_dispatches VALUES (?, ?, ?, 'pending', ?, ?, NULL)",
+            "INSERT INTO operation_dispatches(operation_id, kind, scope, status, created_at, updated_at, safe_error) VALUES (?, ?, ?, 'pending', ?, ?, NULL)",
             (identifier, checked_kind, checked_scope, timestamp, timestamp),
         )
         connection.execute(
@@ -1216,6 +1272,7 @@ def requeue_recovery_dispatch(
     kind: str,
     scope: str,
     now: str | None = None,
+    automatic: bool = False,
 ) -> OperationDispatch:
     """Move one matching recovery dispatch back to the in-memory executor."""
     identifier = uuid(operation_id, field="operation_id")
@@ -1228,11 +1285,24 @@ def requeue_recovery_dispatch(
             dispatch is None
             or operation is None
             or dispatch.status != "recovery_required"
-            or operation.status != "recovery_required"
+            or operation.status not in {"running", "recovery_required"}
+            or (operation.status != "recovery_required" and not operation.finishing)
             or (dispatch.kind, dispatch.scope) != (checked_kind, checked_scope)
             or (operation.kind, operation.scope) != (checked_kind, checked_scope)
         ):
             raise DatabaseError("operation is not eligible for recovery dispatch")
+        if operation.finishing:
+            retry = dict(operation.refs.get("finishing_retry", {}))
+            if automatic:
+                next_at = retry.get("next_at")
+                if not isinstance(next_at, str) or next_at > (now or utc_now()):
+                    raise DatabaseError("finishing retry is not due")
+                retry["attempts"] = int(retry.get("attempts", 0)) + 1
+            retry["next_at"] = None
+            connection.execute(
+                "UPDATE operations SET refs_json = ? WHERE operation_id = ?",
+                (_refs_json({**operation.refs, "finishing_retry": retry}), identifier),
+            )
         cursor = connection.execute(
             "UPDATE operation_dispatches SET status = 'pending', updated_at = ?, "
             "safe_error = NULL WHERE operation_id = ? AND status = 'recovery_required'",
@@ -1286,6 +1356,7 @@ def _operation(row: sqlite3.Row | None) -> Operation | None:
         candidate_digest=row["candidate_digest"],
         safe_error=row["safe_error"],
         cleanup_state=row["cleanup_state"],
+        finishing=bool(row["finishing"]),
     )
 
 
@@ -1314,10 +1385,74 @@ def list_application_deploy_operations(
 def get_unfinished_operation(connection: sqlite3.Connection, scope: str) -> Operation | None:
     return _operation(
         connection.execute(
-            "SELECT * FROM operations WHERE scope = ? AND status IN ('running','recovery_required')",
+            "SELECT * FROM operations WHERE scope = ? AND status IN ('running','recovery_required') AND finishing = 0",
             (scope,),
         ).fetchone()
     )
+
+
+def get_finishing_operation(connection: sqlite3.Connection, scope: str) -> Operation | None:
+    return _operation(
+        connection.execute(
+            "SELECT * FROM operations WHERE scope = ? AND finishing = 1 AND status IN ('running','recovery_required')",
+            (scope,),
+        ).fetchone()
+    )
+
+
+def check_finishing_admission(connection: sqlite3.Connection, scope: str, kind: str) -> None:
+    finishing = get_finishing_operation(connection, scope)
+    if finishing is None:
+        return
+    if kind in {
+        "app.env.set",
+        "app.env.unset",
+        "app.env.import",
+        "storage.verify",
+        "storage.rotate",
+        "app.restart",
+    }:
+        return
+    if kind in {"app.enable", "app.disable"} and finishing.phase in {
+        "predecessor_cleanup",
+        "accepted",
+    }:
+        # Address handover is already confirmed. Lifecycle can change the active
+        # placement only when cleanup cannot remove that placement's job/worker.
+        if kind == "app.enable":
+            application = get_application(connection, scope.removeprefix("app-"))
+            if application is None or not application.desired_running:
+                raise FinishingOperationConflictError(finishing.operation_id)
+            return  # Enable is a no-op for this accepted, running app.
+        if finishing.phase == "accepted":
+            return  # Only registry work remains.
+        if (
+            finishing.refs.get("predecessor_job_id") is not None
+            and finishing.refs.get("predecessor_job_absent") is not True
+        ):
+            # Removing the accepted route would expose the still-serving old job.
+            raise FinishingOperationConflictError(finishing.operation_id)
+        predecessor = finishing.refs.get("predecessor_worker_application_id")
+        active = finishing.refs.get("worker_application_id")
+        if predecessor is None or (isinstance(active, str) and predecessor != active):
+            return
+    raise FinishingOperationConflictError(finishing.operation_id)
+
+
+def mark_operation_finishing(
+    connection: sqlite3.Connection, operation_id: str, *, within_transaction: bool = False
+) -> None:
+    with _acceptance_write(connection, within_transaction):
+        operation = get_operation(connection, operation_id)
+        if operation is None or operation.kind not in {"app.deploy", "app.enable"}:
+            raise DatabaseError("finishing operation intent is missing")
+        connection.execute(
+            "UPDATE operations SET finishing = 1, cleanup_state = 'pending' WHERE operation_id = ?",
+            (operation_id,),
+        )
+        connection.execute(
+            "UPDATE operation_dispatches SET finishing = 1 WHERE operation_id = ?", (operation_id,)
+        )
 
 
 def begin_operation(
@@ -1340,6 +1475,7 @@ def begin_operation(
         raise ValidationError("operation deadline is malformed")
     timestamp = now or utc_now()
     with transaction(connection):
+        check_finishing_admission(connection, scope, kind)
         existing = get_unfinished_operation(connection, scope)
         if existing is not None:
             raise UnfinishedOperationError(scope, existing.operation_id, existing.kind)
@@ -1512,6 +1648,24 @@ def mark_recovery_required(
         phase=phase,
         cleanup_state=None,
         now=now,
+    )
+
+
+def record_finishing_failure(
+    connection: sqlite3.Connection, operation_id: str, error: BaseException
+) -> Operation:
+    """Record a failed attempt without presenting scheduled work as human recovery."""
+    operation = get_operation(connection, operation_id)
+    if operation is None or not operation.finishing:
+        raise DatabaseError("accepted finishing intent is missing")
+    return _finish_operation(
+        connection,
+        operation_id,
+        status="running",
+        error=error,
+        phase=None,
+        cleanup_state=None,
+        now=None,
     )
 
 
@@ -1808,6 +1962,7 @@ def set_application_runtime(
     worker_port_name: str | None = None,
     nomad_version: int | None = None,
     now: str | None = None,
+    _within_transaction: bool = False,
 ) -> None:
     """Atomically record only accepted runtime presence; deployment snapshots stay intact."""
     identifier = uuid(application_id, field="application_id")
@@ -1825,7 +1980,7 @@ def set_application_runtime(
     if nomad_version is not None:
         _revision(nomad_version, field="nomad version")
     timestamp = now or utc_now()
-    with transaction(connection):
+    with _acceptance_write(connection, _within_transaction):
         cursor = connection.execute(
             "UPDATE applications SET desired_running = ?, worker_server_id = ?, "
             "worker_server_name = ?, worker_port_id = ?, worker_port_name = ?, updated_at = ? "

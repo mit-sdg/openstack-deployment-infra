@@ -150,7 +150,7 @@ class EnvironmentService:
 
         deadline = operation_deadline(self.config)
         scope = f"app-{application.application_id}"
-        with runtime.lock(self.state_directory, scope, deadline=deadline):
+        with runtime.lock(self.state_directory, scope, wait=True, deadline=deadline):
             openstack.verify_project(
                 self.config.platform,
                 timeout_seconds=remaining_seconds(

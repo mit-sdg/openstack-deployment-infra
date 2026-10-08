@@ -39,7 +39,7 @@ from .environment_service import EnvironmentMutationRequest, EnvironmentService
 from .http import HttpError, Request, Response, Router
 from .image_service import IMAGE_SELECTION_KIND, ImageSelectionService, hosted_role
 from .log_service import LogService
-from .service_support import ServiceDeadlineError, operation_deadline
+from .service_support import ServiceDeadlineError, logged_helper, operation_deadline, wall_deadline
 from .storage_service import StorageMutationRequest, StorageService
 
 API_VERSION = 1
@@ -214,6 +214,7 @@ class ControllerAPI:
             local = LocalHelperTransport(config)
             helper_caller = local.service
             observer_helper = local.observer
+        helper_caller = logged_helper(helper_caller)
         if observer_helper is None:
             # Tests may inject one config-shaped helper. Adapt it without ever
             # falling back to the SSH transport.
@@ -227,9 +228,10 @@ class ControllerAPI:
                     deadline=time.monotonic() + self.config.policy.limits.helper_seconds,
                 )
 
+            observe.__dict__["_logs_helper_failures"] = True
             observer_helper = observe
         self.helper_caller = helper_caller
-        self.observer_helper = observer_helper
+        self.observer_helper = logged_helper(observer_helper, config_shaped=False)
         self._live = _SingleFlight(_LIVE_REUSE_SECONDS)
         self.applications = ApplicationService(
             connection, config, state_directory, helper_caller=helper_caller
@@ -242,7 +244,31 @@ class ControllerAPI:
             connection,
             workers=operation_workers,
             capacity=operation_capacity,
+            finishing_work=self._finish_operation,
         )
+
+    def _finish_operation(self, connection: sqlite3.Connection, operation_id: str) -> None:
+        from .deployment_service import finish_accepted_operation
+
+        deadline = time.monotonic() + min(120, self.config.policy.limits.process_seconds)
+        operation = db.get_operation(connection, operation_id)
+        if operation is None or not operation.finishing:
+            raise db.DatabaseError("accepted finishing intent is missing")
+        from .. import runtime
+
+        with runtime.lock(self.state_directory, operation.scope, wait=True, deadline=deadline):
+            operation = db.renew_operation_deadline(
+                connection, operation_id, wall_deadline(deadline)
+            )
+            from .fixed_ip_service import worker_helper
+
+            finish_accepted_operation(
+                connection,
+                self.config,
+                operation,
+                helper_caller=worker_helper(connection, self.helper_caller),
+                deadline=deadline,
+            )
 
     def close(self) -> None:
         self.executor.close()
@@ -366,6 +392,13 @@ class ControllerAPI:
                         409,
                         "IDEMPOTENCY_CONFLICT",
                         "Idempotency-Key was already used for different input",
+                    ) from None
+                except db.FinishingOperationConflictError as error:
+                    raise HttpError(
+                        409,
+                        "POST_ACCEPTANCE_CONFLICT",
+                        "accepted operation has finishing work pending; this change must wait until cleanup or recovery completes",
+                        operation_id=error.operation_id,
                     ) from None
                 except db.UnfinishedOperationError as error:
                     raise HttpError(
@@ -516,7 +549,7 @@ class ControllerAPI:
             dispatch is not None
             and operation is not None
             and dispatch.status == "recovery_required"
-            and operation.status == "recovery_required"
+            and (operation.status == "recovery_required" or operation.finishing)
         )
 
     def _external(
@@ -542,7 +575,7 @@ class ControllerAPI:
                 dispatch is not None
                 and operation is not None
                 and dispatch.status == "recovery_required"
-                and operation.status == "recovery_required"
+                and (operation.status == "recovery_required" or operation.finishing)
             ):
                 self.executor.resubmit_recovery(
                     self.connection,
@@ -1713,6 +1746,7 @@ class ControllerAPI:
             and dispatch is not None
             and dispatch.status in {"pending", "running"}
         )
+        retry = operation.refs.get("finishing_retry", {})
         return {
             "operationId": operation.operation_id,
             "kind": operation.kind,
@@ -1725,6 +1759,9 @@ class ControllerAPI:
             "safeError": None if retry_active else operation.safe_error,
             "errorCode": _failure_code(operation) if operation.status == "failed" else None,
             "cleanupState": operation.cleanup_state,
+            "finishing": operation.finishing,
+            "finishingRetryAttempts": retry.get("attempts", 0),
+            "nextRetryAt": retry.get("next_at"),
         }
 
     @staticmethod
@@ -1748,6 +1785,9 @@ class ControllerAPI:
             "safeError": dispatch.safe_error,
             "errorCode": None,
             "cleanupState": "pending",
+            "finishing": dispatch.finishing,
+            "finishingRetryAttempts": 0,
+            "nextRetryAt": None,
         }
 
     @staticmethod

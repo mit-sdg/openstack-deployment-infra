@@ -346,7 +346,7 @@ class PublicIPTests(unittest.TestCase):
             plan = self.fixture.plan()
             self.cloud.fault, self.cloud.fault_after = "set", after
             key, operation = self.fixture.resize(plan)
-            self.assertEqual(operation.status, "recovery_required", operation.safe_error)
+            self.assertEqual(operation.status, "running", operation.safe_error)
             self.assertEqual(operation.phase, "deployment_healthy")
             self.assertEqual(len(self.fixture.workers), 2)
             pending = service.get(self.connection, self.app_id)
@@ -365,17 +365,17 @@ class PublicIPTests(unittest.TestCase):
         plan = self.fixture.plan()
         self.cloud.fault = "set"
         key, operation = self.fixture.resize(plan)
-        self.assertEqual(operation.status, "recovery_required")
+        self.assertEqual(operation.status, "running")
         calls = len(self.cloud.mutations)
         self.fixture.fail_health = True
         _, operation = self.fixture.resize(plan, key)
-        self.assertEqual(operation.status, "recovery_required")
+        self.assertEqual(operation.status, "running")
         self.assertEqual(len(self.cloud.mutations), calls)
         self.assertEqual(len(self.fixture.workers), 2)
         self.fixture.fail_health = False
         self.cloud.fips[FIP].update(port_id=identifier(999), fixed_ip_address="10.0.0.250")
         _, operation = self.fixture.resize(plan, key)
-        self.assertEqual(operation.status, "recovery_required")
+        self.assertEqual(operation.status, "running")
         self.assertEqual(len(self.cloud.mutations), calls)
         self.assertEqual(len(self.fixture.workers), 2)
 
@@ -385,7 +385,7 @@ class PublicIPTests(unittest.TestCase):
         self.fixture.fail_action = "app.remove"
         plan = self.fixture.plan()
         key, operation = self.fixture.resize(plan)
-        self.assertEqual(operation.status, "recovery_required", operation.safe_error)
+        self.assertEqual(operation.status, "running", operation.safe_error)
         self.assertEqual(service.get(self.connection, self.app_id)["phase"], "active")
         self.assertEqual(len(self.fixture.workers), 2)
         mutations = len(self.cloud.mutations)

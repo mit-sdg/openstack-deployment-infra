@@ -322,7 +322,7 @@ class RetainedRollbackTests(unittest.TestCase):
         plan = self.plan(first)
         self.fixture.fail_action = "app.worker.delete"
         key, operation = self.apply(plan)
-        self.assertEqual(operation.status, "recovery_required", operation.safe_error)
+        self.assertEqual(operation.status, "running", operation.safe_error)
         self.assertEqual(db.get_active_deployment(self.connection, self.app_id).deployment_id, key)
         self.fixture.api.close()
         db.renew_operation_deadline(self.connection, key, operation.deadline_at)
@@ -394,7 +394,7 @@ class RetainedRollbackTests(unittest.TestCase):
         fixture.cloud.fault, fixture.cloud.fault_after = "set", True
         body = {"plan": plan, "confirmation": "commons"}
         key, operation = fixture.fixture.post(path + "/rollback", body)
-        self.assertEqual(operation.status, "recovery_required", operation.safe_error)
+        self.assertEqual(operation.status, "running", operation.safe_error)
         self.assertEqual(
             db.get_active_deployment(fixture.connection, fixture.app_id).deployment_id, key
         )

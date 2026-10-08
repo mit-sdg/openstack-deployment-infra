@@ -26,6 +26,7 @@ The commands use the shell variables and the `recovery` function from [Run the p
 | The off-site check fails | [The off-site export fails](#the-off-site-export-fails) |
 | A restore refuses to run | [A restore is refused](#a-restore-is-refused) |
 | The dashboard won't load or shows warnings | [The dashboard won't open or shows warnings](#the-dashboard-wont-open-or-shows-warnings) |
+| App changes are blocked with “wait until recovery” | [App changes are blocked with wait until recovery](#app-changes-are-blocked-with-wait-until-recovery) |
 | An app deploy hangs, fails, or needs recovery | [An app deploy is stuck or failed](#an-app-deploy-is-stuck-or-failed) |
 | People can't sign in to the owner portal | [People can't sign in to the portal](#people-cant-sign-in-to-the-portal) |
 | Image selection or pruning is refused | [An image change is refused](#an-image-change-is-refused) |
@@ -315,6 +316,31 @@ Common causes are in the app, not the platform: no `package.json` at the reposit
    - For a request an operator sent to the controller, repeat it with the same method, path, body, and idempotency key. See [Deploy apps from the command line](deploy-apps-from-the-command-line.md).
 
 Don't send a changed request under the old key (the controller treats it as a conflict), and don't clear the operation to free the app. An environment-variable change that ended unknown asks you to enter the value again; that is expected, because values are never stored where the portal can read them back.
+
+### App changes are blocked with 'wait until recovery'
+
+A conflict with a blocking operation ID means an earlier change still owns work for the app. `OPERATION_CONFLICT` covers unfinished foreground work; `POST_ACCEPTANCE_CONFLICT` covers a change that could interfere with an accepted deployment's finishing work. The portal can show `APP_BUSY` until it has observed the controller's finishing state.
+
+Use the `admin`, `admin_all`, and `wait_for` helpers from [Deploy apps from the command line](deploy-apps-from-the-command-line.md#set-up-your-shell) to read the operation through the privileged socket:
+
+```bash
+OPERATION_ID='<BLOCKING_OPERATION_UUID>'
+admin "http://localhost/v1/admin/operations/$OPERATION_ID" > operation.json
+jq '{operationId, kind, status, phase, safeError, cleanupState,
+     finishing, finishingRetryAttempts, nextRetryAt}' operation.json
+```
+
+If `finishing` is `true`, acceptance already succeeded. The controller retries address handover, exact predecessor cleanup, or registry retention automatically, with five waits totaling 25 minutes plus execution time. `status: running` and a `nextRetryAt` mean another attempt is scheduled. Environment set/delete/import, storage verify/rotate, and restart can proceed. Enable can be a no-op after handover. Disable also waits for confirmed predecessor job absence, so an old route cannot keep serving; creating a worker for a stopped app must wait. Another deploy, resize, rollback, deletion, or address change must wait until finishing completes.
+
+An older checkpoint can have `cleanupState: confirmed` because its builder was removed while predecessor cleanup still remains. Read `status`, `finishing`, and `nextRetryAt` together.
+
+After all five retries fail, `status` becomes `recovery_required` and `nextRetryAt` is `null`. Read the controller service journal using the recovery account to find the bounded `helper failure` line: it names the action, error class, and safe code. Fix that dependency, then replay the original request with its original `Idempotency-Key`. Replaying can also request an earlier attempt while the controller is waiting; it shares admission with the automatic retry. Do not use a new key, edit state, or remove the predecessor by hand.
+
+For command-line requests, use the saved body and key with the same socket helper, HTTP method, and path. Then run `wait_for "$OPERATION_ID"`; success means the operation reads `succeeded` and cleanup is confirmed. A healthy active app alone does not prove finishing completed.
+
+For portal-started operations, the broker's `intents` table in `<adminState>/management-broker/management.sqlite3` records the exact `method`, `path`, `body`, and `controller_key`. Use a read-only query through the recovery account to select the row whose `controller_key` matches the operation ID. Keep the body in a private file, remove only the broker's server-only `_portalAdmin` marker if present, and replay the recorded method/path/body with `Idempotency-Key: <controller_key>` as `management-broker` on the project socket. The `project` helper in the command-line guide uses that account. Never print request bodies or secret values. Environment values are omitted from broker state; a lost environment request needs its original value supplied again.
+
+If `finishing` is `false`, the controller has not proven acceptance and cannot automatically repeat the request. Read the phase and safe error, fix the cause, and replay the exact original request and key. [An app deploy is stuck or failed](#an-app-deploy-is-stuck-or-failed) describes candidate and health failures.
 
 ## Owner portal
 

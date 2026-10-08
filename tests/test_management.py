@@ -1017,6 +1017,40 @@ class OwnerIntentTests(ManagementCase):
             "NOT_FOUND", lambda: self.call("POST", f"/v1/intents/{identifier}/resume", {}, "bob")
         )
 
+    def test_controller_finishing_evidence_releases_portal_app_and_quota(self) -> None:
+        user_id = self.login()
+        app = self.create()
+        self.save(app)
+        self.fixture.recovery_next = True
+        intent = self.call(
+            "POST",
+            f"/v1/apps/{app}/deployments",
+            {"commit": "1" * 40, "configurationRevision": 1},
+            "alice",
+        ).body["data"]
+        self.fixture.operations[intent["operationId"]].update(
+            status="recovery_required",
+            phase="predecessor_cleanup",
+            finishing=True,
+        )
+        self.broker.journal.dispatch(intent["intentId"])
+        with self.broker.database.connect() as db:
+            held = dict(
+                db.execute("SELECT * FROM intents WHERE id=?", (intent["intentId"],)).fetchone()
+            )
+        self.assertTrue(json.loads(held["operation"])["finishing"])
+        self.assertEqual(self.broker.quota(user_id)["concurrentOperations"]["used"], 0)
+        # The controller retains the authority to reject conflicting changes.
+        # Portal admission no longer refuses compatible work with APP_BUSY.
+        from openstack_platform.management.broker.resources import operation_quota
+
+        with self.broker.database.connect() as db:
+            operation_quota(self.broker, db, held["user_id"], app)
+        env = self.call(
+            "PUT", f"/v1/apps/{app}/environment/MESSAGE", {"value": "secret-value"}, "alice"
+        )
+        self.assertEqual(env.status, 202)
+
     def test_recovery_required_resume_preserves_key_and_prior_accepted_pointer(self) -> None:
         self.login()
         app = self.create()

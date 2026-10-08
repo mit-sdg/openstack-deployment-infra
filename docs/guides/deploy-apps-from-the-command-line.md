@@ -37,7 +37,7 @@ A failed candidate is removed. Rolling deployments keep the accepted version ser
 
 ### How requests behave
 
-Save each keyed request body with its lowercase UUID `Idempotency-Key`. Replaying both returns or resumes the operation; changing the body gives `409 IDEMPOTENCY_CONFLICT`. Unfinished app operations block new work with `409 OPERATION_CONFLICT`, naming the blocking `operationId`.
+Save each keyed request body with its lowercase UUID `Idempotency-Key`. Replaying both returns or resumes the operation; changing the body gives `409 IDEMPOTENCY_CONFLICT`. Unfinished foreground app operations block new work with `409 OPERATION_CONFLICT`, naming the blocking `operationId`. Accepted finishing work retries automatically and permits compatible changes; conflicting requests return `409 POST_ACCEPTANCE_CONFLICT`. See [App changes are blocked with wait until recovery](troubleshooting.md#app-changes-are-blocked-with-wait-until-recovery).
 
 App declaration returns `201`. Infrastructure changes return `202` with `operationId` and `statusUrl`; admission isn't success. A deployment's ID, operation ID, and key are the same UUID. Poll for `running`, `succeeded`, `failed`, or `recovery_required`, along with `phase`, `safeError`, `errorCode`, and `cleanupState`. `recovery_required` means the outcome is uncertain: fix the dependency and replay the request.
 
@@ -105,7 +105,7 @@ wait_for() {
   local state
   while :; do
     admin "http://localhost/v1/admin/operations/$1" > "operation-$1.json" || return 1
-    jq -c '{status, phase, safeError, errorCode, cleanupState}' "operation-$1.json"
+    jq -c '{status, phase, safeError, errorCode, cleanupState, finishing, finishingRetryAttempts, nextRetryAt}' "operation-$1.json"
     state=$(jq -r .status "operation-$1.json")
     case "$state" in
       running) sleep 10 ;;

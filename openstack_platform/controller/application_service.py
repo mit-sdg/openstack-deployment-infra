@@ -147,7 +147,7 @@ class ApplicationService:
         """Restart the accepted task once, without rebuilding or replacing its worker."""
         deadline = min(operation_deadline(self.config), time.monotonic() + 30)
         scope = f"app-{application_identifier}"
-        with runtime.lock(self.state_directory, scope, deadline=deadline):
+        with runtime.lock(self.state_directory, scope, wait=True, deadline=deadline):
             current = db.get_application(self.connection, application_identifier)
             if current is None or not current.desired_running:
                 raise ValidationError("restart requires a running application")
@@ -208,7 +208,7 @@ class ApplicationService:
             raise ValidationError("application does not exist")
         deadline = operation_deadline(self.config)
         scope = f"app-{application.application_id}"
-        with runtime.lock(self.state_directory, scope, deadline=deadline):
+        with runtime.lock(self.state_directory, scope, wait=True, deadline=deadline):
             openstack.verify_project(
                 self.config.platform,
                 timeout_seconds=remaining_seconds(
@@ -317,7 +317,7 @@ class ApplicationService:
             raise ValidationError("application does not exist")
         deadline = operation_deadline(self.config)
         scope = f"app-{application.application_id}"
-        with runtime.lock(self.state_directory, scope, deadline=deadline):
+        with runtime.lock(self.state_directory, scope, wait=True, deadline=deadline):
             openstack.verify_project(
                 self.config.platform,
                 timeout_seconds=remaining_seconds(
@@ -331,6 +331,22 @@ class ApplicationService:
             if deployment is None:
                 raise ValidationError("enable requires an accepted deployment")
             unfinished = db.get_unfinished_operation(self.connection, scope)
+            finishing = db.get_finishing_operation(self.connection, scope)
+            if finishing is not None and finishing.operation_id == request_id:
+                from .deployment_service import finish_accepted_operation
+
+                db.renew_operation_deadline(
+                    self.connection, finishing.operation_id, wall_deadline(deadline)
+                )
+                finish_accepted_operation(
+                    self.connection,
+                    self.config,
+                    finishing,
+                    helper_caller=self.helper_caller,
+                    deadline=deadline,
+                )
+                return ApplicationLifecycleChanged(current.application_id, current.slug, "enabled")
+            db.check_finishing_admission(self.connection, scope, "app.enable")
             if current.desired_running and unfinished is None:
                 from .fixed_ip_service import get as get_fixed
 
@@ -475,26 +491,39 @@ class ApplicationService:
                     phase="deployment_healthy",
                     refs={**refs, "nomad_version": result.nomad_version},
                 )
-                db.set_application_runtime(
-                    self.connection,
-                    current.application_id,
-                    running=True,
-                    worker_server_id=server_id,
-                    worker_server_name=server_name,
-                    worker_port_id=port_id,
-                    worker_port_name=port_name,
-                    nomad_version=result.nomad_version,
-                )
-                from .public_ip_service import reconcile_accepted
+                with db.transaction(self.connection):
+                    db.set_application_runtime(
+                        self.connection,
+                        current.application_id,
+                        running=True,
+                        worker_server_id=server_id,
+                        worker_server_name=server_name,
+                        worker_port_id=port_id,
+                        worker_port_name=port_name,
+                        nomad_version=result.nomad_version,
+                        _within_transaction=True,
+                    )
+                    db.mark_operation_finishing(
+                        self.connection, operation.operation_id, within_transaction=True
+                    )
+                from .deployment_service import finish_accepted_operation
 
-                reconcile_accepted(
-                    self.connection, self.config, current.application_id, deadline=deadline
+                accepted_operation = db.get_operation(self.connection, operation.operation_id)
+                assert accepted_operation is not None
+                finish_accepted_operation(
+                    self.connection,
+                    self.config,
+                    accepted_operation,
+                    helper_caller=self.helper_caller,
+                    deadline=deadline,
                 )
-                db.mark_succeeded(self.connection, operation.operation_id)
             except Exception as error:
                 latest = db.get_operation(self.connection, operation.operation_id)
                 if latest is not None and latest.status == "running":
-                    db.mark_recovery_required(self.connection, operation.operation_id, error)
+                    if latest.finishing:
+                        db.record_finishing_failure(self.connection, operation.operation_id, error)
+                    else:
+                        db.mark_recovery_required(self.connection, operation.operation_id, error)
                 raise
         return ApplicationLifecycleChanged(current.application_id, current.slug, "enabled")
 
@@ -513,7 +542,7 @@ class ApplicationService:
             raise ValidationError("application deletion requires the exact slug")
         deadline = operation_deadline(self.config)
         scope = f"app-{application.application_id}"
-        with runtime.lock(self.state_directory, scope, deadline=deadline):
+        with runtime.lock(self.state_directory, scope, wait=True, deadline=deadline):
             openstack.verify_project(
                 self.config.platform,
                 timeout_seconds=remaining_seconds(

@@ -6,9 +6,11 @@ import queue
 import sqlite3
 import threading
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 from . import database as db
+from . import finishing_retries
 
 OperationWork = Callable[[sqlite3.Connection], object]
 
@@ -17,8 +19,8 @@ class AsyncOperationExecutor:
     """Execute accepted work off request threads with bounded memory use.
 
     The dispatch journal contains no request payloads (environment mutations can
-    contain secrets).  Consequently startup never guesses or replays work: an
-    interrupted dispatch is made recovery-required before the socket is served.
+    contain secrets). Interrupted foreground work needs caller replay. Accepted
+    finishing work resumes from its separate durable intent and retry schedule.
     """
 
     def __init__(
@@ -28,6 +30,7 @@ class AsyncOperationExecutor:
         *,
         workers: int = 4,
         capacity: int = 32,
+        finishing_work: Callable[[sqlite3.Connection, str], object] | None = None,
     ) -> None:
         if workers < 1 or capacity < workers:
             raise ValueError("async operation bounds are invalid")
@@ -35,6 +38,8 @@ class AsyncOperationExecutor:
         self._slots = threading.BoundedSemaphore(capacity)
         self._queue: queue.Queue[tuple[str, OperationWork] | None] = queue.Queue()
         self._closed = False
+        self._finishing_work = finishing_work
+        self._stop_retries = threading.Event()
         self._state_lock = threading.Lock()
         self._recover_startup(startup_connection)
         self._threads = [
@@ -47,12 +52,33 @@ class AsyncOperationExecutor:
         ]
         for thread in self._threads:
             thread.start()
+        self._retry_thread = threading.Thread(
+            target=self._retry_loop, name="controller-finishing-retries", daemon=False
+        )
+        self._retry_thread.start()
 
     def _recover_startup(self, connection: sqlite3.Connection) -> None:
         for dispatch in db.list_operation_dispatches(connection):
+            operation = db.get_operation(connection, dispatch.operation_id)
+            if (
+                operation is not None
+                and operation.finishing
+                and operation.status not in {"succeeded", "failed"}
+            ):
+                retry = operation.refs.get("finishing_retry")
+                interrupted = dispatch.status in {"pending", "running"}
+                if interrupted or retry is None:
+                    finishing_retries.schedule(
+                        connection,
+                        operation.operation_id,
+                        "controller stopped before finishing work completed",
+                    )
+                    db.set_operation_dispatch_status(
+                        connection, dispatch.operation_id, "recovery_required"
+                    )
+                continue
             if dispatch.status not in {"pending", "running"}:
                 continue
-            operation = db.get_operation(connection, dispatch.operation_id)
             no_domain_intent = operation is None
             if operation is not None and operation.status in {"succeeded", "failed"}:
                 db.set_operation_dispatch_status(connection, dispatch.operation_id, "finished")
@@ -136,6 +162,7 @@ class AsyncOperationExecutor:
         kind: str,
         scope: str,
         work: OperationWork,
+        automatic: bool = False,
     ) -> db.OperationDispatch:
         """Re-dispatch recovery using only the identical caller-supplied body."""
         with self._state_lock:
@@ -149,12 +176,40 @@ class AsyncOperationExecutor:
                     operation_id=operation_id,
                     kind=kind,
                     scope=scope,
+                    automatic=automatic,
                 )
                 self._queue.put_nowait((operation_id, work))
                 return dispatch
             except BaseException:
                 self._slots.release()
                 raise
+
+    def _retry_loop(self) -> None:
+        connection = db.connect(self.database_path, create=False)
+        try:
+            while not self._stop_retries.wait(1):
+                if self._finishing_work is None:
+                    continue
+                for operation in finishing_retries.due(connection):
+                    try:
+                        self.resubmit_recovery(
+                            connection,
+                            operation_id=operation.operation_id,
+                            kind=operation.kind,
+                            scope=operation.scope,
+                            work=partial(self._finish, operation_id=operation.operation_id),
+                            automatic=True,
+                        )
+                    except db.DatabaseError:
+                        # Capacity, shutdown or a concurrent manual same-key claim
+                        # leaves the durable next retry available to the next tick.
+                        continue
+        finally:
+            connection.close()
+
+    def _finish(self, connection: sqlite3.Connection, operation_id: str) -> object:
+        assert self._finishing_work is not None
+        return self._finishing_work(connection, operation_id)
 
     def _run(self) -> None:
         connection = db.connect(self.database_path, create=False)
@@ -175,7 +230,7 @@ class AsyncOperationExecutor:
                         db.begin_operation(
                             connection,
                             operation_id=operation_id,
-                            kind="api.noop",
+                            kind=dispatch.kind,
                             scope=dispatch.scope,
                             phase="accepted",
                             deadline_at=db.utc_now(),
@@ -204,13 +259,29 @@ class AsyncOperationExecutor:
                         except db.UnfinishedOperationError:
                             pass
                     elif operation.status == "running":
-                        db.mark_recovery_required(connection, operation_id, error)
+                        if operation.finishing:
+                            db.record_finishing_failure(connection, operation_id, error)
+                        else:
+                            db.mark_recovery_required(connection, operation_id, error)
                 finally:
                     try:
                         operation = db.get_operation(connection, operation_id)
+                        finishing_pending = (
+                            operation is not None
+                            and operation.finishing
+                            and operation.status in {"running", "recovery_required"}
+                        )
+                        if finishing_pending:
+                            assert operation is not None
+                            finishing_retries.schedule(
+                                connection,
+                                operation_id,
+                                operation.safe_error or "accepted finishing work was interrupted",
+                            )
                         dispatch_status = (
                             "recovery_required"
-                            if operation is not None and operation.status == "recovery_required"
+                            if finishing_pending
+                            or (operation is not None and operation.status == "recovery_required")
                             else "finished"
                         )
                         db.set_operation_dispatch_status(connection, operation_id, dispatch_status)
@@ -228,6 +299,8 @@ class AsyncOperationExecutor:
             if self._closed:
                 return
             self._closed = True
+        self._stop_retries.set()
+        self._retry_thread.join()
         self._queue.join()
         for _thread in self._threads:
             self._queue.put(None)

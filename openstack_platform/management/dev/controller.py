@@ -110,6 +110,9 @@ class FakeController:
                 item.setdefault("deadlineAt", None)
                 item.setdefault("safeError", None)
                 item.setdefault("errorCode", None)
+                item.setdefault("finishing", False)
+                item.setdefault("finishingRetryAttempts", 0)
+                item.setdefault("nextRetryAt", None)
                 item["updatedAt"] = utc(item.get("updatedAt"))
                 if item.get("cleanupState") == "complete":
                     item["cleanupState"] = "confirmed"
@@ -360,6 +363,9 @@ class FakeController:
             "deadlineAt": utc(time.time() + 30),
             "safeError": None,
             "errorCode": None,
+            "finishing": False,
+            "finishingRetryAttempts": 0,
+            "nextRetryAt": None,
             "ready": time.time() + self.delay,
             "fixtureFail": self.failed_next,
             "fixtureRecovery": self.recovery_next,
