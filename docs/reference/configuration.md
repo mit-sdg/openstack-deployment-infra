@@ -8,6 +8,7 @@ Look up setup values, generated inventory, and operator configuration here. Foll
 | --- | --- | --- | --- |
 | [Setup file](#setup-file) | Operator host, mode `0600` | Operator | Secret |
 | [Tunnel token](#cloudflare-tunnel-token-file) | Operator host, mode `0600` | Operator | Secret |
+| [Health alert webhook](#health-alerts) | Admin persistent operator secrets, mode `0600` | Operator | Secret |
 | Release evidence and trust root | Operator host | [Maintainer](../guides/releases-and-upgrades.md) | Integrity-critical |
 | [Inventory](#generated-inventory) | Operator host and VMs | Setup | Private, no secrets |
 | [Policy](#operator-policy) | Operator and admin hosts | Setup | Private |
@@ -190,6 +191,25 @@ Token options: `--cloudflare-token-file` for setup/check; `--cloudflare-tunnel-t
 Apply places the token at `/etc/<namespace>/secrets/cloudflared.env`, root-owned mode `0600`. Keep your local token file for replacements.
 
 Configure Cloudflare routes for `<domain>`, `*.<domain>`, and extra hostnames to `http://127.0.0.1:80`.
+
+## Health alerts
+
+`healthAlerts` is an optional object in `platform.json`. Omission is equivalent to `{"enabled": false}`. Unknown fields, including a webhook URL, are rejected by the Python inventory validators and Nix inventory loader.
+
+| Field | Default | Accepted values | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | Boolean | Enable notifications from the admin health timer |
+| `format` | `"slack"` | `"slack"`, `"json"` | Incoming webhook payload format |
+| `failureThreshold` | `2` | Integer, 1–100 | Consecutive failed runs before the first alert |
+| `repeatSeconds` | `14400` | Integer, 3600–604800 | Minimum interval between failure-alert attempts during one incident |
+
+The secret URL lives at `<paths.adminState>/operator/secrets/health-alert-webhook`, also reachable through `<paths.root>/secrets/health-alert-webhook`. It is a direct regular file owned by the admin operator account (`agentops`), mode exactly `0600`, with one link and at most 4097 bytes. Contents are one URL of at most 4096 characters and an optional trailing newline. HTTPS is required; userinfo, fragments, whitespace, control characters, and invalid ports are refused. Paths and query strings can contain webhook tokens. Keep this file out of source control, inventory, image builds, and release archives.
+
+`slack` sends only `{"text": "..."}`. `json` sends `text`, `namespace`, UTC ISO-8601 `timestamp`, `event` (`failing`, `recovered`, or `test`), and `failed_checks` (the first failed check, or an empty array for recovery/test). Messages contain fixed check names rather than raw exceptions or command output.
+
+The HTTP sender verifies TLS, disables redirects and ambient proxies, and accepts only 2xx responses. Its socket timeout is eight seconds, with a ten-second process deadline covering DNS and other blocking work. URL values, response bodies, and exceptions are never logged by the sender. Persistent alert state is separate from the health snapshot at `<paths.adminState>/operator/status/health-alerts.json`, mode `0600`; disabling alerts preserves this state. Failure attempts are throttled even when delivery fails. Recovery is attempted on the first passing run of an incident, then on passing runs at least five minutes apart until delivery succeeds.
+
+`<namespace>-platform-health-alert-test.service` sends one test notification with a 15-second unit timeout. It fails when disabled or delivery fails and never changes incident state. See [Get alerts when health fails](../guides/run-the-platform.md#get-alerts-when-health-fails) for configuration and testing.
 
 ## Generated inventory
 

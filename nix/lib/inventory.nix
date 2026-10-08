@@ -37,6 +37,29 @@ in
       document = builtins.fromJSON (builtins.readFile path);
       missing = missingPaths document;
       unknown = lib.subtractLists allowedTopLevel (builtins.attrNames document);
+      alerts = document.healthAlerts or { };
+      alertKeys = [
+        "enabled"
+        "format"
+        "failureThreshold"
+        "repeatSeconds"
+      ];
+      threshold = alerts.failureThreshold or 2;
+      repeat = alerts.repeatSeconds or 14400;
+      validAlerts =
+        builtins.isAttrs alerts
+        && lib.subtractLists alertKeys (builtins.attrNames alerts) == [ ]
+        && builtins.isBool (alerts.enabled or false)
+        && builtins.elem (alerts.format or "slack") [
+          "slack"
+          "json"
+        ]
+        && builtins.isInt threshold
+        && threshold >= 1
+        && threshold <= 100
+        && builtins.isInt repeat
+        && repeat >= 3600
+        && repeat <= 604800;
     in
     if !builtins.isAttrs document then
       throw "platform inventory must be a JSON object"
@@ -44,6 +67,8 @@ in
       throw "platform inventory has unknown values: ${lib.concatStringsSep ", " unknown}"
     else if missing != [ ] then
       throw "platform inventory is missing required values: ${lib.concatStringsSep ", " missing}"
+    else if !validAlerts then
+      throw "platform inventory healthAlerts has invalid or unknown fields"
     else
       document;
 

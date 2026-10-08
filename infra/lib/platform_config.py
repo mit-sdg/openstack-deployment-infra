@@ -64,6 +64,14 @@ def load() -> dict[str, Any]:
         raise ValueError(f"platform config is missing keys: {', '.join(sorted(missing))}")
 
     validate(document)
+    alert_spec = importlib.util.spec_from_file_location(
+        "health_alert_inventory", LIB_DIRECTORY / "health_alert_config.py"
+    )
+    if alert_spec is None or alert_spec.loader is None:
+        raise ValueError("health alert validator is unavailable")
+    alert_module = importlib.util.module_from_spec(alert_spec)
+    alert_spec.loader.exec_module(alert_module)
+    alert_module.validate(document.get("healthAlerts", {}))
     # Infra is shipped without the Python package (for example as a raw store
     # copy on storage), so its validator copy must live beside this file.
     validator = LIB_DIRECTORY / "owner_portal_config.py"

@@ -109,5 +109,8 @@
     "commonsOrigin": "https://class.example.com",
     "identityEgressCidrs": [],
     "classLabel": "class account"
+  },
+  "healthAlerts": {
+    "enabled": false
   }
 }
