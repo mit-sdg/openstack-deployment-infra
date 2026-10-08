@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 from ...controller.http import HttpError, Request, Response
 from ..common import MANAGEMENT_REQUESTS, digest, object_body, opaque, utc
 from ..config import Config
-from ..identity.client import CONNECT_CODE
+from ..identity.client import CONNECT_CODE, code_challenge
 from . import known_device
 from .anonymous import AddressLimits, AnonymousChallenge, client_address_bucket
 from .client import ControllerUnavailable, ProjectClient
@@ -341,6 +341,8 @@ class Auth:
             {
                 "app": self.config.portal_origin,
                 "state": self.anonymous.mac("commons-state", binder),
+                "code_challenge": code_challenge(self.commons_verifier(binder)),
+                "code_challenge_method": "S256",
             }
         )
         return self.redirect(
@@ -373,7 +375,7 @@ class Auth:
             or not hmac.compare_digest(self.anonymous.mac("commons-state", binder), state)
         ):
             return self.redirect("/sign-in?error=SIGN_IN_EXPIRED", cleared)
-        profile = self.redeem(query["code"])
+        profile = self.redeem(query["code"], self.commons_verifier(binder))
         if isinstance(profile, str):
             return self.redirect("/sign-in?error=" + profile, cleared)
         issuer, subject = self.config.issuer, profile["subject"]
@@ -402,17 +404,28 @@ class Auth:
             minted = self.mint(db, dict(row), request)
         return self.redirect(minted["data"]["returnPath"], minted["browser"]["cookies"] + cleared)
 
-    def redeem(self, code: str) -> dict[str, str] | str:
+    def commons_verifier(self, binder: str) -> str:
+        """The PKCE verifier for one sign-in, derived from its binder and never sent out.
+
+        Commons binds the code to this verifier's challenge, so a code read from
+        the callback address is useless without the binder and the broker's key.
+        """
+        return self.anonymous.mac("commons-verifier", binder)
+
+    def redeem(self, code: str, verifier: str) -> dict[str, str] | str:
         """Exchange a code through identity; a string is the sign-in page's error."""
         try:
             status, result = self.identity.request(
-                "POST", "/v1/redeem", {"code": code, "app": self.config.portal_origin}
+                "POST",
+                "/v1/redeem",
+                {"code": code, "app": self.config.portal_origin, "code_verifier": verifier},
             )
         except ControllerUnavailable:
             return "IDENTITY_UNAVAILABLE"
         error = result.get("error")
         if status == 400 and isinstance(error, dict) and error.get("code") == "invalid_code":
-            # Used, expired, withdrawn or for another app: Commons doesn't say.
+            # Used, expired, withdrawn, for another app or another verifier:
+            # Commons doesn't say.
             return "SIGN_IN_EXPIRED"
         user = result.get("data")
         if (

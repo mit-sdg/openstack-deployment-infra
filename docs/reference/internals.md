@@ -341,15 +341,15 @@ browser -> HTTPS provider -> ingress -> management-web -> broker.sock -> managem
 
 ### Sign in with Commons
 
-Commons Connect uses an authorization-code flow; the portal never receives a Commons password. Commons must accept the portal origin (`https://<domain>`) as an app.
+Commons Connect uses an authorization-code flow with PKCE (RFC 7636, `S256`); the portal never receives a Commons password. Commons must accept the portal origin (`https://<domain>`) as an app.
 
-1. `GET /auth/commons/start` checks per-address admission and accepts only a same-origin or typed navigation. It sets a short-lived HMAC binder cookie, `__Host-portal-commons` (HttpOnly, Secure, SameSite=Lax, 10 minutes), and redirects to `<commonsOrigin>/connect?app=<portal origin>&state=<state>`. The state is a separate HMAC of the binder, so only that browser can finish.
+1. `GET /auth/commons/start` checks per-address admission and accepts only a same-origin or typed navigation. It sets a short-lived HMAC binder cookie, `__Host-portal-commons` (HttpOnly, Secure, SameSite=Lax, 10 minutes), and redirects to `<commonsOrigin>/connect?app=<portal origin>&state=<state>&code_challenge=<challenge>&code_challenge_method=S256`. The state is an HMAC of the binder, so only that browser can finish. The PKCE verifier is a second, separate HMAC of the binder. It never leaves the broker until redemption, and the challenge is its SHA-256 in unpadded base64url. Deriving both from the binder means the broker stores nothing per sign-in.
 2. Commons asks the person to approve, then redirects to `/auth/commons/callback` with `code` and `state`, or with `error=access_denied` after Cancel.
-3. The callback always clears the binder cookie and checks admission, the binder, and a constant-time state match. Only then does the identity service redeem the code.
-4. The identity service posts `{code, app}` to Commons `/api/connect/redeem` with verified system TLS, no redirects or proxies, strict JSON, and tight time and size bounds. It keeps only the stable subject UUID, username, and display name.
+3. The callback always clears the binder cookie and checks admission, the binder, and a constant-time state match. Only then does the identity service redeem the code, with the verifier derived from the same binder.
+4. The identity service posts `{code, app, code_verifier}` to Commons `/api/connect/redeem` with verified system TLS, no redirects or proxies, strict JSON, and tight time and size bounds. Commons redeems a code only with the verifier whose challenge it was issued for, so a code read from the callback address, a log, or browser history is useless on its own. The identity service keeps only the stable subject UUID, username, and display name.
 5. The broker maps the person by Commons origin (the issuer) and stable subject, provisions an `owner` account on first sign-in, refuses disabled or pending accounts, and creates a session.
 
-Both navigations answer only with `303` redirects: start leaves only for the exact Commons approval URL, and the callback lands only on an allowlisted portal page or `/sign-in?error=CODE`. The sign-in page explains `COMMONS_CANCELLED`, `SIGN_IN_EXPIRED`, `IDENTITY_UNAVAILABLE`, `ACCOUNT_DISABLED`, and `RATE_LIMITED`. Codes and states are never stored, logged, or echoed. If the identity service is down, new Commons sign-ins fail but existing sessions keep working.
+Both navigations answer only with `303` redirects: start leaves only for the exact Commons approval URL, and the callback lands only on an allowlisted portal page or `/sign-in?error=CODE`. The sign-in page explains `COMMONS_CANCELLED`, `SIGN_IN_EXPIRED`, `IDENTITY_UNAVAILABLE`, `ACCOUNT_DISABLED`, and `RATE_LIMITED`. Codes, states, and verifiers are never stored, logged, or echoed. If the identity service is down, new Commons sign-ins fail but existing sessions keep working.
 
 ### Sessions and CSRF
 

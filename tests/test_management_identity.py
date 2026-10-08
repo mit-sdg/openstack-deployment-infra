@@ -6,6 +6,7 @@ import dataclasses
 import http.client
 import json
 import os
+import secrets
 import socket
 import sqlite3
 import threading
@@ -13,7 +14,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from openstack_platform.controller.http import (
     ControllerServer,
@@ -26,7 +27,11 @@ from openstack_platform.management.broker.database import MIGRATION_2, SCHEMA_V1
 from openstack_platform.management.broker.main import serve as broker_serve
 from openstack_platform.management.common import digest
 from openstack_platform.management.dev.commons import USERS
-from openstack_platform.management.identity.client import CommonsClient, IdentityConfig
+from openstack_platform.management.identity.client import (
+    CommonsClient,
+    IdentityConfig,
+    code_challenge,
+)
 from tests.test_management import ManagementCase
 
 
@@ -43,10 +48,19 @@ class IdentityTests(ManagementCase):
             )
         )
 
-    def code(self, name: str = "alice") -> dict[str, str]:
+    def code(self, name: str = "alice", app: str = "") -> dict[str, str]:
         """A fresh redeem request for a code Commons issued to the portal."""
-        app = self.config.portal_origin
-        return {"code": self.commons.issue(name, app), "app": app}
+        app = app or self.config.portal_origin
+        verifier = secrets.token_urlsafe(32)
+        code = self.commons.issue(name, app, code_challenge(verifier))
+        return {"code": code, "app": self.config.portal_origin, "code_verifier": verifier}
+
+    def test_code_challenge_matches_rfc_7636(self) -> None:
+        # RFC 7636 Appendix B.
+        self.assertEqual(
+            code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        )
 
     def test_redeem_exact_request_and_typed_status_contract(self) -> None:
         client = self.client()
@@ -63,30 +77,45 @@ class IdentityTests(ManagementCase):
             },
         )
         self.assertEqual(client.redeem(request)[0], "invalid_code")
-        other = self.commons.issue("alice", "https://other.example.com")
         self.assertEqual(
-            client.redeem({"code": other, "app": self.config.portal_origin})[0], "invalid_code"
+            client.redeem(self.code(app="https://other.example.com"))[0], "invalid_code"
         )
         self.assertEqual(client.redeem(self.code("carol"))[0], "invalid_code")
-        code = self.commons.issue("alice", self.config.portal_origin)
+        # A code is bound to its challenge: another sign-in's verifier spends it.
+        stolen = self.code()
+        self.assertEqual(
+            client.redeem({**stolen, "code_verifier": secrets.token_urlsafe(32)})[0],
+            "invalid_code",
+        )
+        self.assertEqual(client.redeem(stolen)[0], "invalid_code")
+        valid = self.code()
+        code, verifier = valid["code"], valid["code_verifier"]
+        portal = self.config.portal_origin
         for value in (
-            {"code": code, "app": self.config.portal_origin, "extra": True},
-            {"code": code},
-            {"code": code, "app": None},
-            {"code": None, "app": self.config.portal_origin},
-            {"code": "", "app": self.config.portal_origin},
-            {"code": "x" * 129, "app": self.config.portal_origin},
-            {"code": "a b", "app": self.config.portal_origin},
-            {"code": "a/b", "app": self.config.portal_origin},
-            {"code": "é", "app": self.config.portal_origin},
-            {"code": code, "app": self.config.portal_origin + "/"},
-            {"code": code, "app": self.config.portal_origin + "/auth"},
-            {"code": code, "app": self.config.portal_origin + "?x=1"},
-            {"code": code, "app": "HTTP://127.0.0.1:18080"},
-            {"code": code, "app": "https://user@127.0.0.1:18080"},
+            {**valid, "extra": True},
+            {"code": code, "app": portal},
+            {"code": code, "code_verifier": verifier},
+            {**valid, "app": None},
+            {**valid, "code": None},
+            {**valid, "code": ""},
+            {**valid, "code": "x" * 129},
+            {**valid, "code": "a b"},
+            {**valid, "code": "a/b"},
+            {**valid, "code": "é"},
+            {**valid, "app": portal + "/"},
+            {**valid, "app": portal + "/auth"},
+            {**valid, "app": portal + "?x=1"},
+            {**valid, "app": "HTTP://127.0.0.1:18080"},
+            {**valid, "app": "https://user@127.0.0.1:18080"},
             # Development admits loopback apps only.
-            {"code": code, "app": "https://class.example.com"},
-            [code, self.config.portal_origin],
+            {**valid, "app": "https://class.example.com"},
+            {**valid, "code_verifier": None},
+            {**valid, "code_verifier": ""},
+            {**valid, "code_verifier": verifier[:42]},
+            {**valid, "code_verifier": "v" * 129},
+            {**valid, "code_verifier": verifier[:42] + "/"},
+            {**valid, "code_verifier": verifier[:42] + "\n"},
+            [code, portal, verifier],
         ):
             before = self.commons.calls
             self.assertEqual(client.redeem(value)[0], "invalid_request")
@@ -108,10 +137,9 @@ class IdentityTests(ManagementCase):
         from openstack_platform.management.identity.client import redemption
 
         code = "11111111-1111-4111-8111-111111111111.credential_-"
-        self.assertEqual(
-            redemption({"code": code, "app": "https://platform.example.com"}, development=False),
-            {"code": code, "app": "https://platform.example.com"},
-        )
+        verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        request = {"code": code, "app": "https://platform.example.com", "code_verifier": verifier}
+        self.assertEqual(redemption(request, development=False), request)
         for app in (
             "http://platform.example.com",
             "https://localhost:9443",
@@ -120,7 +148,7 @@ class IdentityTests(ManagementCase):
             "https://platform.example.com/",
         ):
             with self.subTest(app=app), self.assertRaises(ValueError):
-                redemption({"code": code, "app": app}, development=False)
+                redemption({**request, "app": app}, development=False)
 
     def test_response_duplicate_extra_invalid_uuid_and_size_refuse_without_echo(self) -> None:
         import contextlib
@@ -185,7 +213,7 @@ class IdentityTests(ManagementCase):
         )
         client = CommonsClient(config)
         # Production refuses loopback apps, so this request names a public one.
-        request = {"code": self.code()["code"], "app": "https://platform.example.com"}
+        request = {**self.code(), "app": "https://platform.example.com"}
         self.assertEqual(client.redeem(request)[0], "unavailable")
         with patch.dict(os.environ, {"SSL_CERT_FILE": str(self.root / "ca.pem")}):
             self.assertEqual(CommonsClient(config).redeem(request)[0], "unavailable")
@@ -303,8 +331,9 @@ class IdentityTests(ManagementCase):
             if status != 200:
                 return status
             binder = started["browser"]["cookies"][0]["value"]
-            state = urlsplit(started["browser"]["location"]).query.split("state=")[1]
-            code = self.commons.issue(name, self.config.portal_origin)
+            query = parse_qs(urlsplit(started["browser"]["location"]).query)
+            state, challenge = query["state"][0], query["code_challenge"][0]
+            code = self.commons.issue(name, self.config.portal_origin, challenge)
             barrier.wait(timeout=5)
             status, completed = client.request(
                 "GET",
