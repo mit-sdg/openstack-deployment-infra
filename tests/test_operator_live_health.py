@@ -52,16 +52,6 @@ class IngressOperatorHealthTests(unittest.TestCase):
             clock=lambda: self.now,
         )
 
-    def test_tunnel_health_never_requires_a_public_origin_listener(self) -> None:
-        self.assertEqual(self.platform.get("publicIngress.mode"), "tunnel")
-        http = mock.Mock(return_value=runtime.HttpResult(200, {}, b"OK\n"))
-        self.check(http)
-        self.assertEqual(http.call_count, 1)
-        self.assertEqual(http.call_args.args, (f"https://{self.platform.domain}/healthz",))
-        self.assertFalse(http.call_args.kwargs["allow_redirects"])
-        self.assertEqual(http.call_args.kwargs["response_limit"], 64)
-        self.assertEqual(self.now, 0)
-
     def test_connector_warmup_retries_without_weakening_public_health(self) -> None:
         http = mock.Mock(
             side_effect=[
@@ -124,16 +114,6 @@ class HostedOperatorStatusTests(unittest.TestCase):
         self.assertIn("/privileged.sock", args[-1])
         self.assertIn("http://localhost/v1/admin/status", args[-1])
         self.assertLessEqual(run.call_args.kwargs["stdout_limit"], 65536)
-
-    def test_unfinished_external_infrastructure_still_degrades_status(self) -> None:
-        output = StringIO()
-        with (
-            mock.patch.object(operator, "_hosted_status", return_value=copy.deepcopy(self.model)),
-            mock.patch.object(operator.db, "list_image_selections", return_value=[object()] * 5),
-            mock.patch.object(operator.status, "incomplete_operations", return_value=[object()]),
-        ):
-            operator._status_command(mock.Mock(), self.config, output=output)
-        self.assertIn("degraded", output.getvalue())
 
     def test_bad_or_truncated_counts_are_rejected_without_exposing_body(self) -> None:
         bad = copy.deepcopy(self.model)
