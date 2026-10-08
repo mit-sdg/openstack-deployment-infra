@@ -1,4 +1,7 @@
-"""Loopback HTTPS double pinned to the Commons Connect contract: approve, then redeem."""
+"""Loopback HTTPS double pinned to the Commons Connect contract: approve, then redeem.
+
+Every sign-in carries an S256 challenge, and a code redeems only with its verifier.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..common import canonical, strict_json
 from ..config import origin
+from ..identity.client import CODE_VERIFIER, code_challenge
 from ..web.server import Reply, WebServer
 
 USERS = {
@@ -33,7 +37,7 @@ class Commons(WebServer):
         # None shows a sign-in and approval page, as for a first sign-in.
         self.approve: str | None = "alice"
         self.deny = False
-        self.codes: dict[str, tuple[str, str, float]] = {}
+        self.codes: dict[str, tuple[str, str, float, str]] = {}
         self.code_lock = threading.Lock()
         self.override: tuple[int, bytes] | None = None
         self.delay_seconds = 0.0
@@ -43,11 +47,11 @@ class Commons(WebServer):
     def csp(self) -> str:
         return "default-src 'none'; frame-ancestors 'none'"
 
-    def issue(self, name: str, app: str) -> str:
-        """Issue a single-use code for one person and app, valid for 60 s."""
+    def issue(self, name: str, app: str, challenge: str) -> str:
+        """Issue a single-use code for one person, app and challenge, valid for 60 s."""
         code = f"{uuid.uuid4()}.{secrets.token_urlsafe(32)}"
         with self.code_lock:
-            self.codes[code] = (name, app, time.monotonic() + 60)
+            self.codes[code] = (name, app, time.monotonic() + 60, challenge)
         return code
 
     def handle(self, method: str, target: str, headers: dict[str, str], raw: bytes) -> Reply:
@@ -73,13 +77,16 @@ class Commons(WebServer):
             )
             values = {name: items[0] for name, items in fields.items() if len(items) == 1}
             app, state = values["app"], values["state"]
+            challenge = values["code_challenge"]
             if (
                 len(values) != len(fields)
                 or app != app.lower()
                 or origin(app, development=True) != app
                 or not re.fullmatch(r"[A-Za-z0-9._~-]{16,256}", state)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{43}", challenge)
+                or values["code_challenge_method"] != "S256"
             ):
-                raise ValueError("invalid app or state")
+                raise ValueError("invalid app, state or challenge")
         except (KeyError, ValueError, UnicodeError):
             return Reply(
                 400,
@@ -90,7 +97,7 @@ class Commons(WebServer):
         if self.deny or values.get("decision") == "cancel":
             return self.send(callback + urlencode({"error": "access_denied", "state": state}))
         if method == "GET" and self.approve is not None:
-            code = self.issue(self.approve, app)
+            code = self.issue(self.approve, app, challenge)
             return self.send(callback + urlencode({"code": code, "state": state}))
         name = values.get("username", "")
         if (
@@ -98,11 +105,11 @@ class Commons(WebServer):
             and name in self.passwords
             and values.get("password") == self.passwords[name]
         ):
-            code = self.issue(name, app)
+            code = self.issue(name, app, challenge)
             return self.send(callback + urlencode({"code": code, "state": state}))
         return Reply(
             401 if method == "POST" else 200,
-            self.page(app, state, failed=method == "POST").encode(),
+            self.page(app, state, challenge, failed=method == "POST").encode(),
             "text/html; charset=utf-8",
         )
 
@@ -111,11 +118,16 @@ class Commons(WebServer):
         return Reply(303, b"", "", (("Location", location),))
 
     @staticmethod
-    def page(app: str, state: str, *, failed: bool) -> str:
+    def page(app: str, state: str, challenge: str, *, failed: bool) -> str:
         host = html.escape(urlsplit(app).netloc)
         hidden = "".join(
             f'<input type="hidden" name="{name}" value="{html.escape(value)}">'
-            for name, value in (("app", app), ("state", state))
+            for name, value in (
+                ("app", app),
+                ("state", state),
+                ("code_challenge", challenge),
+                ("code_challenge_method", "S256"),
+            )
         )
         return (
             "<!doctype html><html lang=en><title>Commons (development)</title>"
@@ -146,7 +158,7 @@ class Commons(WebServer):
             value = strict_json(raw)
             if (
                 not isinstance(value, dict)
-                or set(value) != {"code", "app"}
+                or not {"code", "app"} <= set(value) <= {"code", "app", "code_verifier"}
                 or not all(isinstance(item, str) for item in value.values())
             ):
                 raise ValueError("invalid redeem fields")
@@ -154,12 +166,17 @@ class Commons(WebServer):
             return Reply(
                 400, b'{"error":"INVALID_REQUEST"}', headers=(("Cache-Control", "no-store"),)
             )
+        # Like Commons, spend the code first; a missing, wrong or malformed
+        # verifier then gets the same refusal as every other failure.
         with self.code_lock:
             issued = self.codes.pop(value["code"], None)
+        verifier = value.get("code_verifier", "")
         if (
             issued is None
             or issued[1] != value["app"]
             or issued[2] <= time.monotonic()
+            or not CODE_VERIFIER.fullmatch(verifier)
+            or code_challenge(verifier) != issued[3]
             or issued[0] in ARCHIVED
         ):
             return Reply(

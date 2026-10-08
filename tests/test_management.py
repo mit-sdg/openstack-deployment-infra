@@ -30,6 +30,7 @@ from openstack_platform.management.broker.database import Database
 from openstack_platform.management.common import canonical, opaque
 from openstack_platform.management.config import Config
 from openstack_platform.management.dev.controller import FakeController
+from openstack_platform.management.identity.client import code_challenge
 from openstack_platform.management.web.server import NAVIGATIONS, Reply, WebHandler, WebServer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,11 +216,24 @@ class CeremonyTests(ManagementCase):
         anonymous = self.broker.auth.anonymous
         state = anonymous.mac("commons-state", binder)
         self.assertRegex(state, r"^[A-Za-z0-9._~-]{16,256}$")
+        # PKCE: the verifier is a separate MAC of the binder and never leaves
+        # the broker until it redeems; Commons sees only its S256 challenge.
+        verifier = self.broker.auth.commons_verifier(binder)
+        self.assertRegex(verifier, r"^[A-Za-z0-9_-]{43}$")
+        self.assertNotEqual(verifier, state)
+        self.assertNotIn(verifier, started["location"])
         self.assertEqual(
             started["location"],
             self.config.commons_origin
             + "/connect?"
-            + urlencode({"app": self.config.portal_origin, "state": state}),
+            + urlencode(
+                {
+                    "app": self.config.portal_origin,
+                    "state": state,
+                    "code_challenge": code_challenge(verifier),
+                    "code_challenge_method": "S256",
+                }
+            ),
         )
         self.assertIn("app=http%3A%2F%2F127.0.0.1%3A18080&", started["location"])
         # The binder is only good for Commons sign-in, and the reverse.
@@ -332,13 +346,13 @@ class CeremonyTests(ManagementCase):
         self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
         target, binder = self.flow()
         with self.commons.code_lock:
-            for code, (name, app, _expires) in list(self.commons.codes.items()):
-                self.commons.codes[code] = (name, app, time.monotonic() - 1)
+            for code, (name, app, _expires, challenge) in list(self.commons.codes.items()):
+                self.commons.codes[code] = (name, app, time.monotonic() - 1, challenge)
         self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
         target, binder = self.flow()
         with self.commons.code_lock:
-            for code, (name, _app, expires) in list(self.commons.codes.items()):
-                self.commons.codes[code] = (name, "https://other.example.com", expires)
+            for code, (name, _app, expires, challenge) in list(self.commons.codes.items()):
+                self.commons.codes[code] = (name, "https://other.example.com", expires, challenge)
         self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
         target, binder = self.flow("carol")
         self.assert_sign_in_error(self.callback(target, binder), "SIGN_IN_EXPIRED")
@@ -1273,11 +1287,18 @@ class WebTransportTests(ManagementCase):
                 self.assertNotIn(reply.status, {404, 405}, json.loads(reply.body))
 
     def test_commons_navigations_answer_only_with_checked_redirects(self) -> None:
-        state = "s" * 43
+        state, challenge = "s" * 43, "c" * 43
         approval = (
             self.config.commons_origin
             + "/connect?"
-            + urlencode({"app": self.config.portal_origin, "state": state})
+            + urlencode(
+                {
+                    "app": self.config.portal_origin,
+                    "state": state,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                }
+            )
         )
         directive = {"name": "commons", "value": opaque(), "maxAge": 600}
 
@@ -1306,6 +1327,11 @@ class WebTransportTests(ManagementCase):
             ("/auth/commons/start", approval.replace("127.0.0.1", "127.0.0.2")),
             ("/auth/commons/start", approval + "&next=/apps"),
             ("/auth/commons/start", approval.replace(state, "short")),
+            # Every sign-in carries an S256 challenge, never plain or none.
+            ("/auth/commons/start", approval.split("&code_challenge=")[0]),
+            ("/auth/commons/start", approval.replace("S256", "plain")),
+            ("/auth/commons/start", approval.replace(challenge, challenge[:42])),
+            ("/auth/commons/start", approval.replace(challenge, challenge + "=")),
             ("/auth/commons/start", "/apps\r\nSet-Cookie: injected=1"),
             # Only start may leave the portal, and only for Commons' approval page.
             ("/auth/commons/callback", approval),

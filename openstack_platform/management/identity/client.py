@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import errno
+import hashlib
 import http.client
 import json
 import queue
@@ -26,6 +28,14 @@ from ..config import development_socket_path, management_peer, origin, socket_pa
 IDENTITY_CONNECTIONS = 64
 # Commons issues "<voucher id>.<credential>"; clients treat it as opaque.
 CONNECT_CODE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+# PKCE (RFC 7636): a verifier is 43 to 128 unreserved characters.
+CODE_VERIFIER = re.compile(r"[A-Za-z0-9._~-]{43,128}")
+
+
+def code_challenge(verifier: str) -> str:
+    """The S256 challenge of a verifier: its SHA-256 in unpadded base64url."""
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 def describe(error: BaseException) -> str:
@@ -47,17 +57,19 @@ def unavailable(reason: str) -> tuple[str, None]:
 
 
 def redemption(value: object, *, development: bool) -> dict[str, str]:
-    """Accept one opaque code and the app origin it was issued to, nothing else."""
-    if not isinstance(value, dict) or set(value) != {"code", "app"}:
+    """Accept one opaque code, the app origin it was issued to, and its verifier."""
+    if not isinstance(value, dict) or set(value) != {"code", "app", "code_verifier"}:
         raise ValueError("invalid redeem fields")
-    code, app = value["code"], value["app"]
+    code, app, verifier = value["code"], value["app"], value["code_verifier"]
     if not isinstance(code, str) or not CONNECT_CODE.fullmatch(code):
         raise ValueError("invalid connect code")
     # Commons compares the exact origin text, so only its canonical form is sent.
     if not isinstance(app, str) or app != app.lower():
         raise ValueError("invalid app origin")
     origin(app, development=development)
-    return {"code": code, "app": app}
+    if not isinstance(verifier, str) or not CODE_VERIFIER.fullmatch(verifier):
+        raise ValueError("invalid code verifier")
+    return {"code": code, "app": app, "code_verifier": verifier}
 
 
 @dataclass(frozen=True)

@@ -201,7 +201,11 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         if (
             path == "/auth/commons/start"
             and location.startswith(approval)
-            and re.fullmatch(r"[A-Za-z0-9._~-]{16,256}", location.removeprefix(approval))
+            and re.fullmatch(
+                r"[A-Za-z0-9._~-]{16,256}&code_challenge=[A-Za-z0-9_-]{43}"
+                r"&code_challenge_method=S256",
+                location.removeprefix(approval),
+            )
         ):
             return True
         return path in NAVIGATIONS and bool(
