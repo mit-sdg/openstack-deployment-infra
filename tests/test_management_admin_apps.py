@@ -817,6 +817,151 @@ class AdminApplicationTests(ManagementCase):
             self.call("GET", self.prefix + "/storage", owner="admin").body["data"]["items"], []
         )
 
+    def test_staff_and_admin_resume_student_deploy_with_original_request_and_audit(self) -> None:
+        staff = self.staff()
+        self.login("bob")
+        for role, actor in (("taylor", staff), ("admin", self.admin_user)):
+            with self.subTest(role=role):
+                self.fixture.recovery_next = True
+                started = self.call(
+                    "POST",
+                    f"/v1/apps/{self.app_id}/deployments",
+                    {"commit": "a" * 40, "configurationRevision": 1},
+                    "alice",
+                )
+                blocked = self.complete(started, "alice")
+                identifier = blocked["intentId"]
+                self.assertEqual(blocked["state"], "blocked")
+                self.assertIn("Resume it from Activity", blocked["safeError"])
+                # The attention filter finds it even behind more recent activity.
+                with self.broker.database.connect(write=True) as db:
+                    original = dict(
+                        db.execute("SELECT * FROM intents WHERE id=?", (identifier,)).fetchone()
+                    )
+                    db.execute("UPDATE intents SET created=0 WHERE id=?", (identifier,))
+                activity = self.call("GET", self.prefix + "/activity?attention=1", owner=role).body[
+                    "data"
+                ]["items"]
+                self.assertEqual([item["intentId"] for item in activity], [identifier])
+                self.assertEqual(
+                    activity[0]["actor"], {"displayName": "Alice Student", "you": False}
+                )
+                self.assertIsNone(activity[0]["retryKey"])
+                calls = len(self.fixture.calls)
+                self.assert_error(
+                    "NOT_FOUND",
+                    lambda identifier=identifier: self.call(
+                        "POST", f"/v1/intents/{identifier}/resume", {}, "bob"
+                    ),
+                )
+                self.assert_error(
+                    "NOT_FOUND",
+                    lambda identifier=identifier: self.call(
+                        "GET", f"/v1/intents/{identifier}", owner="bob"
+                    ),
+                )
+                self.assert_error(
+                    "NOT_FOUND",
+                    lambda: self.call(
+                        "GET", f"/v1/apps/{self.app_id}/activity?attention=1", owner="bob"
+                    ),
+                )
+                self.assertEqual(len(self.fixture.calls), calls)
+                for viewer, prefix in (("alice", f"/v1/apps/{self.app_id}"), (role, self.prefix)):
+                    with self.assertRaises(HttpError) as refused:
+                        self.call(
+                            "PUT", prefix + "/environment/TOKEN", {"value": "private"}, viewer
+                        )
+                    self.assertEqual(refused.exception.code, "APP_BUSY")
+                    self.assertEqual(
+                        refused.exception.summary,
+                        "A previous deploy hasn't finished. Resume it from Activity.",
+                    )
+                with patch.object(
+                    self.broker.client, "request", wraps=self.broker.client.request
+                ) as replay:
+                    resumed = self.call("POST", f"/v1/intents/{identifier}/resume", {}, role)
+                captured = [call.args for call in replay.call_args_list if call.args[0] == "POST"]
+                self.assertEqual(resumed.status, 202)
+                self.assertEqual(
+                    captured,
+                    [
+                        (
+                            original["method"],
+                            original["path"],
+                            strict_json(original["body"].encode()),
+                            original["controller_key"],
+                        )
+                    ],
+                )
+                self.assertEqual(self.complete(resumed, role)["state"], "succeeded")
+                with self.broker.database.connect() as db:
+                    after = db.execute("SELECT * FROM intents WHERE id=?", (identifier,)).fetchone()
+                    for field in (
+                        "user_id",
+                        "body",
+                        "controller_key",
+                        "client_key",
+                        "fingerprint",
+                        "operation_id",
+                        "path",
+                        "method",
+                    ):
+                        self.assertEqual(after[field], original[field], field)
+                    self.assertEqual(
+                        tuple(
+                            db.execute(
+                                "SELECT user_id,app_id,intent_id FROM audit WHERE action='resume' AND intent_id=?",
+                                (identifier,),
+                            ).fetchone()
+                        ),
+                        (actor, self.app_id, identifier),
+                    )
+                    audit_row = db.execute(
+                        "SELECT actor_id,target_id,details FROM admin_audit WHERE action='app_resume' AND json_extract(details,'$.intentId')=?",
+                        (identifier,),
+                    ).fetchone()
+                    self.assertEqual(tuple(audit_row[:2]), (actor, self.owner))
+                    self.assertEqual(
+                        strict_json(audit_row["details"].encode()),
+                        {"applicationId": self.app_id, "intentId": identifier},
+                    )
+                    self.assertTrue(
+                        db.execute(
+                            "SELECT 1 FROM staff_read_audit WHERE route='/v1/intents/{intent}' AND actor_id=?",
+                            (actor,),
+                        ).fetchone()
+                    )
+
+    def test_staff_resume_admin_intent_after_original_actors_role_is_revoked(self) -> None:
+        staff = self.staff()
+        self.fixture.recovery_next = True
+        result = self.call(
+            "POST",
+            self.prefix + "/deployments",
+            {"commit": "b" * 40, "configurationRevision": 1},
+            "taylor",
+        )
+        identifier = self.complete(result, "taylor")["intentId"]
+        owner_activity = self.call(
+            "GET", f"/v1/apps/{self.app_id}/activity?attention=1", owner="alice"
+        ).body["data"]["items"]
+        self.assertFalse(owner_activity[0]["canResume"])
+        self.assertTrue(
+            self.call("GET", self.prefix + "/activity?attention=1", owner="admin").body["data"][
+                "items"
+            ][0]["canResume"]
+        )
+        self.assert_error(
+            "ACCESS_DENIED",
+            lambda: self.call("POST", f"/v1/intents/{identifier}/resume", {}, "alice"),
+        )
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE users SET role='owner' WHERE id=?", (staff,))
+            security_change(db, staff)
+        resumed = self.call("POST", f"/v1/intents/{identifier}/resume", {}, "admin")
+        self.assertEqual(self.complete(resumed)["state"], "succeeded")
+
     def test_admins_resume_their_app_administration_changes(self) -> None:
         result = self.call("POST", self.prefix + "/storage", {"type": "s3"}, "admin")
         self.assertEqual(self.complete(result)["state"], "succeeded")

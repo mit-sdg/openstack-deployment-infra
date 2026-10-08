@@ -536,6 +536,7 @@ const auditLabels: Record<string, string> = {
   app_adopt_app: 'App import started',
   app_create_app: 'App created',
   app_deploy: 'App deployed',
+  app_resume: 'Change resumed',
   app_state: 'App started or stopped',
   app_storage: 'Storage added',
   app_storage_delete: 'Storage deleted',

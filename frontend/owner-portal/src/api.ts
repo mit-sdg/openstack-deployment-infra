@@ -93,6 +93,7 @@ export type Intent = {
   controllerErrorCode?: string | null;
   names?: string[];
   requiresResubmit?: boolean;
+  canResume?: boolean;
   retryKey?: string | null;
   /** Who made the change, in an app's activity. */
   actor?: { displayName: string | null; you: boolean };
@@ -242,7 +243,7 @@ const appData = (v: unknown) =>
     desiredRunning: 'boolean',
     stale: 'boolean',
   }) as AppRecord;
-const intentData = (v: unknown) =>
+export const intentData = (v: unknown) =>
   fields(v, { intentId: 'string', appId: 'string', kind: 'string', state: 'string' }) as Intent;
 const deploymentData = (v: unknown) =>
   fields(v, {
@@ -419,6 +420,12 @@ export const api = {
     }),
   activity: (app: string) =>
     request(`/apps/${app}/activity?limit=8`, (v) => {
+      const data = record(v);
+      if (!Array.isArray(data.items)) throw new Error('Invalid service response');
+      return data.items.map(intentData);
+    }),
+  attention: (app: string) =>
+    request(`/apps/${app}/activity?attention=1`, (v) => {
       const data = record(v);
       if (!Array.isArray(data.items)) throw new Error('Invalid service response');
       return data.items.map(intentData);

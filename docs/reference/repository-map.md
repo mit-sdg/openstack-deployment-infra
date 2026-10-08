@@ -183,6 +183,8 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 #### Components
 
 - `frontend/owner-portal/src/components/AppFrame.tsx` — app header, state, URL, and tabs.
+- `frontend/owner-portal/src/components/AttentionActivity.test.tsx` — tests for the attention list: who sees it, the original actor, and Resume.
+- `frontend/owner-portal/src/components/AttentionActivity.tsx` — an app's operations that need attention (blocked or unknown), with who started each and a Resume button, for owners, staff, and admins.
 - `frontend/owner-portal/src/components/BoundaryText.tsx` — re-exports the shared `BoundaryText`.
 - `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy checks, runtime versions, and review problems.
 - `frontend/owner-portal/src/components/DeploymentRow.tsx` — deployment list row.

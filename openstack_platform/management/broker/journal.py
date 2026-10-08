@@ -214,8 +214,15 @@ class Journal:
                 strict_json(row["body"].encode()).get("_portalAdmin") is True
                 and row["state"] != "accepted"
             ):
+                # A reviewed resume grants app authority without changing the
+                # original actor, controller key, or stored request body.
+                resumed = db.execute(
+                    "SELECT user_id FROM audit WHERE intent_id=? AND action='resume' ORDER BY rowid DESC LIMIT 1",
+                    (identifier,),
+                ).fetchone()
                 actor = db.execute(
-                    "SELECT role,enabled,status FROM users WHERE id=?", (row["user_id"],)
+                    "SELECT role,enabled,status FROM users WHERE id=?",
+                    (resumed[0] if resumed is not None else row["user_id"],),
                 ).fetchone()
                 if (
                     actor is None
@@ -267,6 +274,12 @@ class Journal:
                     if result["status"] == "recovery_required"
                     else result["status"]
                 )
+                if state == "blocked":
+                    error = (
+                        "This deploy hasn’t finished. Resume it from Activity."
+                        if intent["kind"] == "deploy"
+                        else "This change hasn’t finished. Resume it from Activity."
+                    )
                 if state == "failed":
                     error = (
                         "The controller rejected this operation. Review its status before retrying."
@@ -277,7 +290,7 @@ class Journal:
                 }:
                     # An uncertain cleanup is still a held application scope.
                     state = "blocked"
-                    error = "Cleanup requires controller recovery."
+                    error = "This change hasn’t finished. Resume it from Activity."
             else:
                 status, result = self.client.request(
                     intent["method"],
@@ -302,7 +315,10 @@ class Journal:
                     # diagnostic in existing JSON without inventing an operation.
                     operation = {"controllerErrorCode": code} if code else None
                     if code in {"RECOVERY_REQUIRED", "UNFINISHED_OPERATION", "OPERATION_CONFLICT"}:
-                        state, error = "blocked", "This application requires controller recovery."
+                        state, error = (
+                            "blocked",
+                            "A previous change hasn’t finished. Open Activity to resume it before trying again.",
+                        )
                     else:
                         state, error = (
                             "failed",
@@ -369,7 +385,17 @@ def intent_model(
             code,
             operation.get("phase") if isinstance(operation, dict) else None,
         )
-        or row["safe_error"],
+        or (
+            (
+                "This deploy hasn’t finished. Resume it from Activity."
+                if row["kind"] == "deploy"
+                else "This change hasn’t finished. Resume it from Activity."
+            )
+            if row["state"] == "blocked"
+            and isinstance(operation, dict)
+            and operation.get("status") == "recovery_required"
+            else row["safe_error"]
+        ),
         "createdAt": utc(row["created"]),
         "updatedAt": utc(row["updated"]),
         "commit": body.get("commit") if row["kind"] == "deploy" else None,
@@ -378,6 +404,9 @@ def intent_model(
         if row["kind"] in {"env_set", "env_delete"}
         and row["state"] in {"prepared", "unknown", "blocked"}
         else None,
+        "canResume": row["kind"] not in {"env_set", "env_delete"}
+        and row["state"] in {"blocked", "unknown"}
+        and (body.get("_portalAdmin") is not True or diagnostic),
         "requiresResubmit": row["kind"] in {"env_set", "env_delete"}
         and row["state"] in {"prepared", "unknown", "blocked"},
     }

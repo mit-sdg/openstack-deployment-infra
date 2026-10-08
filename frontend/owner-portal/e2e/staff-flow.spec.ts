@@ -361,6 +361,143 @@ for (const [layout, viewport, colorScheme] of [
       );
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
+      // Resume a student's original deploy as staff and as an admin, using only
+      // the local harness recovery hook. Exercise both owner app pages too.
+      const ownerSession = (await (await ownerPage.request.get('/api/v1/session')).json()).data;
+      const ownerHeaders = {
+        'X-CSRF-Token': ownerSession.csrfToken,
+        Origin: new URL(ownerPage.url()).origin,
+      };
+      let ownerSettings = (
+        await (await ownerPage.request.get(`/api/v1/apps/${foreign}/configuration`)).json()
+      ).data;
+      if (!ownerSettings.revision) {
+        const saved = await ownerPage.request.put(`/api/v1/apps/${foreign}/configuration`, {
+          headers: { ...ownerHeaders, 'Idempotency-Key': crypto.randomUUID() },
+          data: {
+            expectedRevision: 0,
+            repository: 'https://github.com/example/student-app',
+            branch: 'main',
+            configuration: {
+              schemaVersion: 1,
+              build: { runtime: 'node', packages: ['.'], buildScript: null, startScript: 'start' },
+              runtime: { port: 3000, healthPath: '/health' },
+              storageBindings: [],
+            },
+          },
+        });
+        expect(saved.status()).toBe(200);
+        ownerSettings = (
+          await (await ownerPage.request.get(`/api/v1/apps/${foreign}/configuration`)).json()
+        ).data;
+      }
+      let otherSession = (await (await otherPage.request.get('/api/v1/session')).json()).data;
+      if (otherSession.role !== 'owner') {
+        const adminSession = (await (await page.request.get('/api/v1/session')).json()).data;
+        const resetRole = await page.request.patch(`/api/v1/accounts/${otherSession.user.id}`, {
+          headers: { 'X-CSRF-Token': adminSession.csrfToken, Origin: new URL(page.url()).origin },
+          data: { action: 'role', value: 'owner' },
+        });
+        expect(resetRole.status()).toBe(200);
+        await commons(otherPage, 'bob');
+        otherSession = (await (await otherPage.request.get('/api/v1/session')).json()).data;
+      }
+      expect(otherSession.role).toBe('owner');
+      const resumedIds: string[] = [];
+      for (const [role, helper] of [
+        ['staff', staffPage],
+        ['admin', page],
+      ] as const) {
+        expect(
+          (
+            await ownerPage.request.post('/__test__/recovery-required', {
+              headers: ownerHeaders,
+              data: {},
+            })
+          ).status(),
+        ).toBe(200);
+        const deployKey = crypto.randomUUID();
+        const started = await ownerPage.request.post(`/api/v1/apps/${foreign}/deployments`, {
+          headers: { ...ownerHeaders, 'Idempotency-Key': deployKey },
+          data: { commit: 'd'.repeat(40), configurationRevision: ownerSettings.revision },
+        });
+        expect(started.status()).toBe(202);
+        const original = (await started.json()).data;
+        resumedIds.push(original.intentId);
+        const status = async () =>
+          (await (await ownerPage.request.get(`/api/v1/intents/${original.intentId}`)).json()).data;
+        await expect.poll(async () => (await status()).state, { timeout: 15000 }).toBe('blocked');
+        for (const path of [`/apps/${foreign}`, `/apps/${foreign}/deployments`]) {
+          await ownerPage.goto(path);
+          await expect(
+            ownerPage.getByRole('button', { name: 'Resume', exact: true }),
+          ).toBeVisible();
+          await expect(
+            ownerPage
+              .getByRole('list', { name: 'Activity that needs attention' })
+              .getByText('Alice Student', { exact: true }),
+          ).toBeVisible();
+        }
+        const denied = await otherPage.request.post(`/api/v1/intents/${original.intentId}/resume`, {
+          headers: {
+            'X-CSRF-Token': otherSession.csrfToken,
+            Origin: new URL(otherPage.url()).origin,
+          },
+          data: {},
+        });
+        expect(denied.status()).toBe(404);
+        expect((await otherPage.request.get(`/api/v1/intents/${original.intentId}`)).status()).toBe(
+          404,
+        );
+        await helper.goto(`/admin/apps/${foreign}`);
+        await expect(
+          helper
+            .getByRole('list', { name: 'Activity that needs attention' })
+            .getByText('Alice Student', { exact: true }),
+        ).toBeVisible();
+        await expect(helper.getByRole('button', { name: 'Resume', exact: true })).toBeVisible();
+        await helper
+          .getByLabel('Variable name')
+          .fill(`RECOVERY_${role.toUpperCase()}_${suffix.toUpperCase()}`);
+        await helper.getByLabel('New value').fill('local fixture value');
+        await helper.getByRole('button', { name: 'Save variable', exact: true }).click();
+        await expect(
+          helper.getByText("A previous deploy hasn't finished. Resume it from Activity.", {
+            exact: true,
+          }),
+        ).toBeVisible();
+        await helper.getByRole('button', { name: 'Resume', exact: true }).click();
+        await expect.poll(async () => (await status()).state, { timeout: 15000 }).toBe('succeeded');
+        const finished = await status();
+        expect(finished.operationId).toBe(original.operationId);
+        await expect(helper.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0);
+        const deployments = (
+          await (await ownerPage.request.get(`/api/v1/apps/${foreign}/deployments`)).json()
+        ).data.items;
+        expect(
+          deployments.filter(
+            (deployment: { deploymentId: string }) =>
+              deployment.deploymentId === original.operationId,
+          ),
+        ).toHaveLength(1);
+      }
+      // Staff resumes appear in the admin audit with the staff actor.
+      const auditSession = (await (await page.request.get('/api/v1/session')).json()).data;
+      const resumedAudit = (
+        await (
+          await page.request.get('/api/v1/account-audit', {
+            headers: { 'X-CSRF-Token': auditSession.csrfToken },
+          })
+        ).json()
+      ).data.items;
+      expect(
+        resumedAudit.filter(
+          (entry: { action: string; details: { applicationId?: string; intentId?: string } }) =>
+            entry.action === 'app_resume' &&
+            entry.details.applicationId === foreign &&
+            resumedIds.includes(entry.details.intentId ?? ''),
+        ),
+      ).toHaveLength(2);
       // Bob is already signed in; his role changes through the Accounts page (a PATCH).
       const role = async () =>
         (await (await page.request.get('/api/v1/accounts?q=bob', { headers: csrfHeaders })).json())

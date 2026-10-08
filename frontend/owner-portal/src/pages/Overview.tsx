@@ -21,6 +21,7 @@ import { api, type AppRecord } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { DeploymentRow } from '../components/DeploymentRow';
 import { QueryError } from '../components/Feedback';
+import { AttentionActivity } from '../components/AttentionActivity';
 import { Operation, OperationList } from '../components/Operation';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 import { Status } from '../components/Status';
@@ -164,7 +165,9 @@ export function Overview({ id }: { id: string }) {
     queryFn: () => api.activity(id),
     refetchInterval: 5000,
   });
-  const activity = intents.data?.slice(0, 6) ?? [];
+  const activity =
+    intents.data?.filter((intent) => !['blocked', 'unknown'].includes(intent.state)).slice(0, 6) ??
+    [];
   const latest = history.data?.items[0];
   const deploy = (
     <>
@@ -187,6 +190,7 @@ export function Overview({ id }: { id: string }) {
       ) : (
         app.data && (
           <>
+            <AttentionActivity id={id} />
             {app.data.stale && !!app.data.savedRevision && (
               <Alert tone="warning">
                 Health information is unavailable right now. It updates again automatically.

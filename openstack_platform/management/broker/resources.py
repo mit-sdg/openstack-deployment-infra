@@ -327,13 +327,21 @@ def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: 
         "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed')",
         (user_id,),
     ).fetchall()
-    if db.execute(
-        "SELECT 1 FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed')",
+    current = db.execute(
+        "SELECT state,kind FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed')",
         (app_id,),
-    ).fetchone():
-        raise HttpError(
-            409, "APP_BUSY", "Wait for or recover this application's current operation first."
+    ).fetchone()
+    if current:
+        message = (
+            (
+                "A previous deploy hasn't finished. Resume it from Activity."
+                if current["kind"] == "deploy"
+                else "A previous change hasn't finished. Open Activity to finish it."
+            )
+            if current["state"] == "blocked"
+            else "A change is still in progress. Check Activity before trying again."
         )
+        raise HttpError(409, "APP_BUSY", message)
     if unlimited(db, user_id):
         return
     policy = db.execute("SELECT concurrent FROM quotas WHERE user_id=?", (user_id,)).fetchone()

@@ -16,6 +16,7 @@ import { Link, useLocation } from 'wouter';
 import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { QueryError } from '../components/Feedback';
+import { AttentionActivity } from '../components/AttentionActivity';
 import { Status } from '../components/Status';
 import { short } from '../utils/presentation';
 
@@ -90,6 +91,7 @@ export function HistoryPage({ id }: { id: string }) {
   const [, navigate] = useLocation();
   return (
     <AppFrame id={id} active="Deployments">
+      <AttentionActivity id={id} />
       {history.isPending ? (
         <PageSkeleton label="Loading deployments…">
           <SectionSkeleton variant="table" columns={4} rows={3} />

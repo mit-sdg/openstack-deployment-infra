@@ -1,5 +1,6 @@
 import {
   fields,
+  intentData,
   pageData,
   record,
   request,
@@ -45,6 +46,12 @@ const nullableString = (value: unknown) => {
 };
 const intent = (v: unknown) => fields(v, { intentId: 'string', state: 'string' }) as Intent;
 export const adminAppsApi = {
+  attention: (id: string) =>
+    request(`/admin-apps/${id}/activity?attention=1`, (v) => {
+      const data = record(v);
+      if (!Array.isArray(data.items)) throw new Error('Invalid service response');
+      return data.items.map(intentData);
+    }),
   owners: (q: string) =>
     request('/admin-apps/owners?' + new URLSearchParams({ q, limit: '6' }), (v) =>
       pageData(

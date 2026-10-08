@@ -43,6 +43,14 @@ Select an app for its management tools:
 
 Changes appear in the **Audit log** under your username. Staff and portal admins have no concurrency limit, and your changes don't use the owner's limit. Each app still accepts only one change at a time.
 
+### Resume a deploy that needs attention
+
+Open the app from **Manage apps** (staff) or **Admin** > **All apps** (portal admins). **Activity** shows unfinished changes and who started them, including changes started by the owner or a teammate.
+
+If a deployment shows **Needs attention**, select **Resume**. The app may already be serving the new version; the deployment still needs to finish before another change can start. Resume continues the original request with the same commit and settings. It doesn't start a new deployment. Wait for the attention row to disappear, then retry the change that was refused.
+
+Staff and portal admins can resume any app's deployment without a password or authenticator confirmation. The audit log records who resumed it. Owners and teammates can also resume changes on their apps. For an unfinished environment edit, ask the person who started it to enter the same value again in **Environment variables**; values aren't stored for replay.
+
 ## Create, adopt, and move apps
 
 Staff and portal admins can create apps for others, transfer ownership, delete storage, and change app sizing.
