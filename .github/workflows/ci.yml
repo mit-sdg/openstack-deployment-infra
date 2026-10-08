@@ -287,19 +287,14 @@ jobs:
           nix fmt -- .
           git diff --exit-code -- '*.nix'
 
-  package-tests:
-    name: Test packaged binaries
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - run: nix build --print-build-logs .#checks.x86_64-linux.package-smoke
-
   role-vm-tests:
-    name: Test ${{ matrix.role }} VM
+    name: Test ${{ matrix.role }} VM and image
+    needs: publication-context
+    # PRs skip publication-context; the integration gates must still run.
+    if: always()
     runs-on: ubuntu-latest
+    env:
+      BUILD_EXAMPLE_IMAGE: ${{ inputs.development_publish != true && needs.publication-context.outputs.publish != 'true' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -321,7 +316,32 @@ jobs:
           if [[ -e /dev/kvm ]]; then
             sudo chmod 0666 /dev/kvm
           fi
-      - run: nix build --print-build-logs ".#checks.x86_64-linux.vm-${{ matrix.role }}"
+      - name: Test role integration, admin packages, and build the image
+        run: |
+          checks=(".#checks.x86_64-linux.vm-${{ matrix.role }}")
+          if [[ ${{ matrix.role }} == admin ]]; then
+            checks+=(".#checks.x86_64-linux.package-smoke")
+          fi
+          # One evaluation and store for the role's test and example image.
+          # Production builds use their protected inventory/evidence job.
+          if [[ $BUILD_EXAMPLE_IMAGE == true ]]; then
+            checks+=(".#${{ matrix.role }}-image")
+          fi
+          nix build --no-link --print-out-paths --print-build-logs "${checks[@]}" > build-outputs
+
+      - name: Install QEMU smoke-test tools
+        if: env.BUILD_EXAMPLE_IMAGE == 'true'
+        run: tests/install_ci_apt_packages.sh xfsprogs genisoimage qemu-system-x86 qemu-utils
+
+      - name: Boot role image with an OpenStack config drive
+        if: env.BUILD_EXAMPLE_IMAGE == 'true'
+        run: |
+          qcow=$(while IFS= read -r output; do
+            find "$output" -type f -name '*.qcow2' -print
+          done < build-outputs)
+          test -n "$qcow"
+          test "$(printf '%s\n' "$qcow" | wc -l)" -eq 1
+          tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"
 
   publication-context:
     name: Detect publishable image changes
@@ -345,51 +365,6 @@ jobs:
         run: |
           python3 -m openstack_platform.image_pipeline context \
             --before "$BEFORE_SHA" >> "$GITHUB_OUTPUT"
-
-  build-images:
-    name: Build ${{ matrix.role }} image
-    needs: publication-context
-    if: >-
-      always() &&
-      inputs.development_publish != true &&
-      needs.publication-context.outputs.publish != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 5
-      matrix:
-        role:
-          - admin
-          - ingress
-          - storage
-          - worker
-          - builder
-
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install QEMU smoke-test tools
-        run: |
-          tests/install_ci_apt_packages.sh genisoimage qemu-system-x86 qemu-utils
-          if [[ -e /dev/kvm ]]; then
-            sudo chmod 0666 /dev/kvm
-          fi
-
-      - name: Build role image
-        run: |
-          nix build --print-build-logs \
-            --out-link "result-${{ matrix.role }}" \
-            ".#${{ matrix.role }}-image"
-
-      - name: Locate and boot role image
-        run: |
-          qcow=$(find -L "result-${{ matrix.role }}" -type f -name '*.qcow2' -print -quit)
-          test -n "$qcow"
-          tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"
 
   production-role-builds:
     name: Build production ${{ matrix.role }} image
@@ -417,7 +392,7 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install QEMU tools
         run: |
-          tests/install_ci_apt_packages.sh genisoimage qemu-system-x86 qemu-utils
+          tests/install_ci_apt_packages.sh xfsprogs genisoimage qemu-system-x86 qemu-utils
           if [[ -e /dev/kvm ]]; then sudo chmod 0666 /dev/kvm; fi
       - name: Install validated inventory outside artifact root
         env:
@@ -461,7 +436,6 @@ jobs:
       - static
       - generated-recipes
       - nix-eval
-      - package-tests
       - role-vm-tests
       - dashboard-frontend
       - publication-context
@@ -865,6 +839,7 @@ jobs:
       - name: Install publication and smoke-test tools
         run: |
           tests/install_ci_apt_packages.sh \
+            xfsprogs \
             genisoimage \
             python3-openstackclient \
             qemu-system-x86 \

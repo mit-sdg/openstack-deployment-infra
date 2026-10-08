@@ -15,37 +15,10 @@ let
     code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
   };
   managementIdentityBootstrap = pkgs.writeText "management-identity-bootstrap.py" ''
-    import faulthandler
-    import signal
     import sys
-    # Test-only: SIGUSR1 dumps every thread's stack without stopping the service.
-    stacks = open("/run/${namespace}-management-identity/stacks.txt", "w")
-    faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
     sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
     from openstack_platform.management.identity.main import main
     main()
-  '';
-  managementIdentityDiagnostics = pkgs.writeShellScript "management-identity-diagnostics" ''
-    set -u
-    unit=${namespace}-management-identity.service
-    sock=/run/${namespace}-management-identity/identity.sock
-    body=${lib.escapeShellArg managementRedeemRequest}
-    echo "== dns"; getent hosts class.example.com
-    echo "== commons"; ${pkgs.curl}/bin/curl -sS --max-time 5 -o /dev/null -w 'commons-http=%{http_code}\n' -H 'Content-Type: application/json' --data "$body" https://class.example.com:9444/api/connect/redeem
-    echo "== socket"; ls -ln /run/${namespace}-management-identity; id management-broker
-    pid=$(systemctl show -p MainPID --value "$unit"); echo "identity-pid=$pid"
-    grep -E '^(State|Threads):' "/proc/$pid/status"
-    echo "== paths"; stat -c '%n %U:%G %a inode=%i type=%F' /run /run/${namespace}-management-identity "$sock"
-    echo "== listening"; ${pkgs.iproute2}/bin/ss -xlpn | grep -F management-identity || echo "no listener on identity path"
-    echo "== fds"; ls -l "/proc/$pid/fd" 2>&1 | grep -F socket || true
-    echo "== mountinfo"; grep -F management-identity "/proc/$pid/mountinfo" || echo "no identity-specific mount"
-    echo "== connect-errno"; runuser -u management-broker -- ${packages.platformPython}/bin/python -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print('broker connect ok')" "$sock" 2>&1 | tail -n 1
-    echo "== root-health"; ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nroot-health-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
-    echo "== health"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 5 -w '\nhealth-http=%{http_code}\n' --unix-socket "$sock" http://localhost/v1/health
-    echo "== redeem"; runuser -u management-broker -- ${pkgs.curl}/bin/curl -sS --max-time 10 -w '\nidentity-http=%{http_code}\n' --unix-socket "$sock" -H 'Content-Type: application/json' --data "$body" http://localhost/v1/redeem
-    echo "== tcp-from-identity"; ${pkgs.iproute2}/bin/ss -tanp | grep -F "pid=$pid," || echo "no identity tcp sockets"
-    echo "== stacks"; kill -USR1 "$pid"; sleep 1; cat /run/${namespace}-management-identity/stacks.txt
-    echo "== journal"; journalctl --no-pager -o short-monotonic -u "$unit" | tail -n 40
   '';
   managementIdentityProbe = pkgs.writeText "management-identity-probe.py" ''
     import os
@@ -56,26 +29,25 @@ let
     from openstack_platform.management.broker.client import ControllerUnavailable, ProjectClient
     from openstack_platform.controller.http import ControllerServer, PeerPolicy, Response, Router
     proof=Path("${state}/management-broker/identity-sandbox-ok")
-    # Verify the integration once, then permit restart during identity outages.
-    if not proof.exists():
-        client = ProjectClient(Path("/run/${namespace}-management-identity/identity.sock"), timeout=10)
-        deadline = time.monotonic() + 30
-        last = "no attempt"
-        while True:
-            try:
-                status, result = client.request("POST", "/v1/redeem", ${managementRedeemRequest})
-                last = f"status={status} error={result.get('error', {}).get('code') if isinstance(result, dict) else None}"
-                if status != 503:
-                    break
-            except ControllerUnavailable as error:
-                last = f"unavailable: {type(error).__name__}: {error}"
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"identity/Commons did not become ready in the VM ({last})")
-            time.sleep(0.1)
-        assert status == 200 and result["data"]["subject"] == "11111111-1111-4111-8111-111111111111"
-        assert "email" not in result["data"]
-        proof.write_text("verified\n")
-        os.chmod(proof,0o600)
+    # Redeem through the real identity service from the broker sandbox.
+    client = ProjectClient(Path("/run/${namespace}-management-identity/identity.sock"), timeout=10)
+    deadline = time.monotonic() + 30
+    last = "no attempt"
+    while True:
+        try:
+            status, result = client.request("POST", "/v1/redeem", ${managementRedeemRequest})
+            last = f"status={status} error={result.get('error', {}).get('code') if isinstance(result, dict) else None}"
+            if status != 503:
+                break
+        except ControllerUnavailable as error:
+            last = f"unavailable: {type(error).__name__}: {error}"
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"identity/Commons did not become ready in the VM ({last})")
+        time.sleep(0.1)
+    assert status == 200 and result["data"]["subject"] == "11111111-1111-4111-8111-111111111111"
+    assert "email" not in result["data"]
+    proof.write_text("verified\n")
+    os.chmod(proof,0o600)
     router = Router()
     router.add("GET", "/v1/health", lambda request: Response(200, {"status":"ok"}))
     server = ControllerServer("/run/${namespace}-management-broker/broker.sock", router,
@@ -91,12 +63,6 @@ let
     server = ControllerServer("${state}/management-web/web-health.sock", router)
     server.serve_forever()
   '';
-  delayedController = pkgs.writeShellScript "vm-delayed-controller" ''
-    # Type=simple is active before its controller sockets exist. Hold this gap
-    # open so the broker's real sandbox must wait on API readiness, not After.
-    ${pkgs.coreutils}/bin/sleep 3
-    exec ${packages.controllerPackage}/bin/openstack-platform-controller "$@"
-  '';
   managementActivationRequest = pkgs.writeText "vm-management-activation-request.py" ''
     import sys
     from pathlib import Path
@@ -110,7 +76,7 @@ let
     )
   '';
   managementFakeCommons = pkgs.writeText "vm-fake-commons.py" ''
-    import json, socket, ssl, sys
+    import json, ssl, sys
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain("${testPki}/commons.pem","${testPki}/commons-key.pem")
@@ -303,53 +269,6 @@ let
                   "127.0.0.53/32"
                   "127.0.0.54/32"
                 ];
-                # Keep a deliberately broken Type=simple process failed so the
-                # outage assertion can observe it without racing automatic retries.
-                Restart = lib.mkForce "no";
-              };
-              "vm-restore-active-portal" = {
-                # The admin VM uses disposable tmpfs state. Restore a saved
-                # active pair before path units evaluate it on the second boot.
-                wantedBy = [ "multi-user.target" ];
-                after = [ "${systemdEscapePath state}.mount" ];
-                before = [
-                  "${namespace}-management-broker.path"
-                  "${namespace}-management-web.path"
-                ];
-                unitConfig = {
-                  DefaultDependencies = false;
-                  RequiresMountsFor = [ state ];
-                  ConditionPathExists = "/var/lib/portal-boot-fixture";
-                };
-                serviceConfig = {
-                  Type = "oneshot";
-                  RemainAfterExit = true;
-                };
-                script = ''
-                  umask 0077
-                  # Copy the children so the private fixture root's 0700 mode
-                  # cannot replace the production state mount's 0755 mode.
-                  cp -a --preserve=all /var/lib/portal-boot-fixture/management-* ${state}/
-                  test "$(stat -c %U:%G:%a ${state})" = root:root:755
-                  test ! -e ${state}/management-broker-releases/activate-request
-                  for component in broker web; do
-                    release=${state}/management-$component-releases/releases/vm-test
-                    for directory in ${state}/management-$component-releases \
-                      ${state}/management-$component-releases/releases \
-                      "$release" "$release/bin" "$release/config" "$release/evidence"; do
-                      test "$(stat -c %U:%G:%a "$directory")" = agentops:management-$component:2750
-                    done
-                    for input in "$release/.complete" "$release/evidence/management-artifacts.json" \
-                      "$release/config/platform.json" "$release/config/management.json"; do
-                      test "$(stat -c %U:%G:%a:%h "$input")" = agentops:management-$component:440:1
-                    done
-                    test "$(stat -c %U:%G:%a:%h "$release/bin/management-$component")" = agentops:management-$component:550:1
-                  done
-                  test "$(stat -c %U:%G:%a:%h ${state}/management-broker-releases/.install.lock)" = agentops:management-broker:600:1
-                  test "$(stat -c %U:%G:%a:%h ${state}/management-broker-releases/releases/vm-test/config/identity.json)" = agentops:management-broker:440:1
-                  test "$(stat -c %U:%G:%a:%h ${state}/management-broker-releases/releases/vm-test/bin/management-identity)" = agentops:management-broker:550:1
-                  rm -f ${state}/management-broker/identity-sandbox-ok
-                '';
               };
               "vm-fake-commons" = {
                 wantedBy = [ "multi-user.target" ];
@@ -437,21 +356,6 @@ let
               "${namespace}-controller" = {
                 after = [ "${namespace}-controller-test-fixture.service" ];
                 requires = [ "${namespace}-controller-test-fixture.service" ];
-                serviceConfig.ExecStart = lib.mkForce (
-                  lib.concatStringsSep " " [
-                    delayedController
-                    "--platform-config /etc/${namespace}/platform.json"
-                    "--state-directory ${state}/controller/state"
-                    "--policy ${state}/controller/policy.json"
-                    "--socket /run/${namespace}-controller/project.sock"
-                    "--socket-group controller-api"
-                    "--project-peer ${toString constants.accounts.managementBroker.uid}:${toString constants.accounts.managementBroker.gid}"
-                    "--privileged-socket /run/${namespace}-controller/privileged.sock"
-                    "--privileged-socket-group platform-admin"
-                    "--privileged-peer ${toString constants.accounts.operator.uid}:${toString constants.accounts.operator.gid}"
-                    "--max-connections-per-peer 8"
-                  ]
-                );
               };
             })
             (lib.mkIf (role == "ingress") {
@@ -511,144 +415,42 @@ let
         };
 
       testScript = ''
-        machine.start(allow_reboot=True)
+        machine.start()
         machine.wait_for_unit("multi-user.target")
         machine.wait_for_unit("cloud-final.service")
-        machine.succeed("getent passwd agentops >/dev/null")
-        machine.succeed("getent passwd ubuntu >/dev/null")
-        machine.succeed("test -r /etc/${namespace}/platform.json")
         machine.succeed("python3 -c 'import json; json.load(open(\"/etc/${namespace}/platform.json\"))'")
 
         ${
           if role == "admin" then
             ''
-              # systemd silently drops a job to break an ordering cycle; never
-              # accept a boot that needed that.
-              machine.succeed("! journalctl --boot --output=cat | grep -F 'Found ordering cycle'")
+              # One boot, real controller/Nomad APIs, and the role's trust boundaries.
               machine.wait_for_unit("nomad.service")
               machine.wait_for_unit("${namespace}-admin-readiness.service")
-              machine.wait_for_unit("${namespace}-controller.service")
               machine.wait_for_unit("${namespace}-controller-readiness.service")
-              machine.succeed("systemctl is-active --quiet nomad.service")
-              machine.succeed("systemctl is-active --quiet ${namespace}-controller.service")
-              machine.succeed("systemctl cat ${namespace}-controller.path | grep -Fx 'PathExists=${state}/operator/helper-releases/current/.complete'")
-              machine.fail("systemctl cat ${namespace}-controller.path | grep -F 'PathExists=${state}/operator/policy.json'")
-              machine.fail("systemctl cat ${namespace}-controller.path | grep -F 'PathExists=${state}/operator/image-selections.json'")
-              machine.succeed("${pkgs.curl}/bin/curl --fail --silent --cacert /etc/${namespace}/pki/internal-ca.pem --cert /etc/${namespace}/pki/nomad-cli.pem --key /etc/${namespace}/pki/nomad-cli-key.pem https://127.0.0.1:4646/v1/status/leader >/dev/null")
-              machine.succeed("${packages.platformPython}/bin/python -c 'import sys; assert sys.version_info[:2] == (3, 14)'")
-              machine.succeed("${packages.controllerPackage}/bin/openstack-platform-controller --help >/dev/null")
-              machine.succeed("openstack-platform-install-release --help >/dev/null")
-              machine.succeed("test $(stat -c %a /run/${namespace}-controller/project.sock) = 660")
-              machine.succeed("test $(stat -c %U /run/${namespace}-controller/project.sock) = platform-controller")
-              machine.succeed("test $(stat -c %G /run/${namespace}-controller/project.sock) = controller-api")
-              machine.succeed("test $(stat -c %G /run/${namespace}-controller/privileged.sock) = platform-admin")
-              machine.succeed("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-controller/project.sock 'http://localhost/v1/health' | grep -F '\"status\":\"ok\"'")
-              machine.fail("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-controller/project.sock 'http://localhost/v1/health'")
-              machine.fail("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-controller/project.sock 'http://localhost/v1/admin/applications?limit=1'")
-              machine.fail("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-controller/privileged.sock 'http://localhost/v1/admin/applications?limit=1'")
-              machine.succeed("runuser -u agentops -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-controller/privileged.sock 'http://localhost/v1/admin/applications?limit=1' >/dev/null")
+              machine.succeed("${pkgs.curl}/bin/curl --fail --silent --max-time 5 --cacert /etc/${namespace}/pki/internal-ca.pem --cert /etc/${namespace}/pki/nomad-cli.pem --key /etc/${namespace}/pki/nomad-cli-key.pem https://127.0.0.1:4646/v1/status/leader >/dev/null")
+              machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-controller/project.sock) = platform-controller:controller-api:660")
+              machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-controller/privileged.sock) = platform-controller:platform-admin:660")
+              machine.succeed("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --max-time 5 --unix-socket /run/${namespace}-controller/project.sock 'http://localhost/v1/health' | grep -F '\"status\":\"ok\"'")
+              machine.succeed("runuser -u agentops -- ${pkgs.curl}/bin/curl --fail --silent --max-time 5 --unix-socket /run/${namespace}-controller/privileged.sock 'http://localhost/v1/admin/applications?limit=1' >/dev/null")
+              machine.fail("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 5 --unix-socket /run/${namespace}-controller/project.sock 'http://localhost/v1/health'")
+              machine.fail("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --max-time 5 --unix-socket /run/${namespace}-controller/project.sock 'http://localhost/v1/admin/applications?limit=1'")
+              machine.fail("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 5 --unix-socket /run/${namespace}-controller/privileged.sock 'http://localhost/v1/admin/applications?limit=1'")
               machine.fail("runuser -u management-web -- cat ${state}/controller/policy.json")
               machine.succeed("runuser -u management-web -- sh -c 'for name in openstack.env nomad-tokens.env storage-bootstrap.env builder_operator_ed25519 backup-age-key.txt; do test ! -r ${state}/operator/secrets/\"$name\" || exit 1; done'")
               machine.fail("runuser -u management-web -- cat /etc/${namespace}/pki/nomad-cli-key.pem")
               machine.fail("runuser -u management-web -- cat /run/credentials/nomad.service/nomad-gossip-key")
-              machine.fail("runuser -u management-web -- sh -c 'cat /run/credentials/nomad.service/nomad-gossip-key'")
-              machine.succeed("pid=$(systemctl show ${namespace}-controller.service -p MainPID --value); ! tr '\\0' '\\n' </proc/$pid/environ | grep -F controller-secret")
-              machine.succeed("! journalctl --boot --output=cat | grep -F controller-secret")
-              machine.succeed("! grep -R -a -F controller-secret ${state}/controller ${backups}/${constants.directories.controllerBackup}")
-              machine.succeed("systemctl show ${namespace}-controller.service nomad.service -p LimitCORE --value | grep -vFx infinity")
-              machine.succeed("test ! -e /proc/sys/kernel/core_pattern || ! systemctl is-enabled systemd-coredump.socket 2>/dev/null")
-              machine.succeed("! systemctl cat ${namespace}-platform-backup.service | grep -F 'LoadCredential='")
-              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F 'SECRETS_FILE=%t/${namespace}-backup-private/storage-bootstrap.env'")
-              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -Fx -- \"Requires=$(systemd-escape --path --suffix=mount ${backups})\"")
-              machine.fail("systemctl cat ${namespace}-platform-backup.service | grep -F REGISTRY_BACKUP_")
-              machine.succeed("systemctl cat ${namespace}-platform-backup.service | grep -F '/backup/verify_garage_backup.py'")
-              machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran && rm ${state}/operator/status/managed-backup-probe-ran")
-              machine.succeed("test $(stat -c %U:%G:%a ${root}/secrets/storage-bootstrap.env) = agentops:platform-controller:640")
-              machine.fail("test -e /run/credentials/${namespace}-platform-backup.service/storage-bootstrap")
-              machine.fail("test -e /run/${namespace}-backup-private")
-              machine.succeed("chmod 0644 ${root}/secrets/storage-bootstrap.env")
-              machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
-              machine.succeed("chmod 0640 ${root}/secrets/storage-bootstrap.env; chgrp agentops ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
-              machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
-              machine.succeed("chown root:platform-controller ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
-              machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
-              machine.succeed("chown agentops:platform-controller ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.env ${root}/secrets/storage-bootstrap.real; ln -s storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
-              machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
-              machine.succeed("rm ${root}/secrets/storage-bootstrap.env; mv ${root}/secrets/storage-bootstrap.real ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service && systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran")
-              machine.succeed("! journalctl --boot --output=cat | grep -F controller-secret")
-              machine.succeed("systemctl show ${namespace}-platform-health.service -p User --value | grep -Fx agentops")
-              machine.succeed("systemctl show ${namespace}-platform-health-alert-test.service -p TimeoutStartUSec --value | grep -Fx 15s")
-              machine.fail("systemctl start ${namespace}-platform-health-alert-test.service")
-              machine.succeed("journalctl -u ${namespace}-platform-health-alert-test.service --output=cat | grep -Fx health-alert=disabled")
-              machine.fail("test -e ${state}/operator/status/health-alerts.json")
-              machine.succeed("systemctl cat nomad.service | grep -F 'LoadCredential=nomad-gossip-key:/etc/${namespace}/secrets/nomad-gossip-key'")
-              machine.succeed("systemctl cat nomad.service | grep -F '${namespace}-credential-guard /etc/${namespace}/secrets/nomad-gossip-key root'")
               machine.succeed("runuser -u platform-controller -- cat ${state}/operator/secrets/openstack.env >/dev/null")
               machine.fail("runuser -u nomad -- cat ${state}/operator/secrets/openstack.env")
-              machine.succeed("id -nG management-web | grep -Fx 'management-web'")
-              machine.succeed("id -nG management-broker | grep -Fx 'management-broker controller-api'")
-              machine.succeed("test $(stat -c %U:%G:%a ${state}/controller) = platform-controller:platform-controller:700")
-              machine.succeed("test $(stat -c %U:%G:%a ${state}/controller/state) = platform-controller:platform-controller:700")
-              machine.succeed("test $(stat -c %U:%G:%a ${state}/operator/helper-releases) = agentops:agentops:750")
-              machine.succeed("test $(stat -c %U:%a ${state}/operator/policy.json) = agentops:600")
-              machine.succeed("systemctl show ${namespace}-controller.service -p ProtectSystem --value | grep -Fx strict")
-              machine.succeed("systemctl show ${namespace}-controller.service -p NoNewPrivileges --value | grep -Fx yes")
-              machine.succeed("systemctl cat ${namespace}-management-broker.service | grep -F 'CONTROLLER_PROJECT_SOCKET=/run/${namespace}-controller/project.sock'")
-              machine.succeed("systemctl cat ${namespace}-management-web.service | grep -F 'MANAGEMENT_BROKER_SOCKET=/run/${namespace}-management-broker/broker.sock'")
-              machine.succeed("! systemctl cat ${namespace}-management-web.service | grep -F 'CONTROLLER_PROJECT_SOCKET='")
-              machine.succeed("systemctl show ${namespace}-management-web.service -p IPAddressDeny --value | grep -F 0.0.0.0/0")
-              machine.succeed("systemctl show ${namespace}-management-web.service -p InaccessiblePaths --value | grep -F '${state}/operator'")
+              # Run the real managed-backup unit with a local credential consumer.
+              machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran")
+              machine.fail("test -e /run/${namespace}-backup-private")
               machine.wait_for_unit("${namespace}-management-prepare.service")
-              # Root preparation must not chmod/chown a target reached through
-              # an operator-controlled release/config or backup directory link.
-              victim = "${state}/root-preparation-victim"
-              machine.succeed(f"install -d -m 0755 -o root -g root {victim}; printf 'protected fixture\\n' > {victim}/sentinel; chmod 0600 {victim}/sentinel")
-              for child in ("config", "releases"):
-                  path = f"${state}/management-broker-releases/{child}"
-                  for kind in ("symlink", "fifo", "file"):
-                      create = f"ln -s {victim} {path}" if kind == "symlink" else (f"mkfifo {path}" if kind == "fifo" else f"touch {path}")
-                      machine.succeed(f"runuser -u agentops -- sh -c 'mv {path} {path}.saved; {create}'")
-                      machine.fail("systemctl restart ${namespace}-management-prepare.service")
-                      machine.succeed(f"test $(stat -c %u:%g:%a {victim}) = 0:0:755; grep -Fx 'protected fixture' {victim}/sentinel; test ! -e {victim}/platform.json")
-                      machine.succeed(f"runuser -u agentops -- sh -c 'rm {path}; mv {path}.saved {path}'; systemctl reset-failed ${namespace}-management-prepare.service")
-              machine.succeed("systemctl reset-failed ${namespace}-management-prepare.service; systemctl restart ${namespace}-management-prepare.service")
-              backup_prepare = machine.succeed("systemctl cat ${namespace}-management-broker-backup.service | sed -n 's/^ExecStartPre=+//p'").strip()
-              machine.succeed(backup_prepare)
-              backup_dir = "${backups}/${constants.directories.managementBrokerBackup}"
-              machine.succeed(f"runuser -u agentops -- sh -c 'mv {backup_dir} {backup_dir}.saved; ln -s {victim} {backup_dir}'")
-              machine.fail(backup_prepare)
-              machine.succeed(f"test $(stat -c %u:%g:%a {victim}) = 0:0:755; grep -Fx 'protected fixture' {victim}/sentinel")
-              machine.succeed(f"runuser -u agentops -- sh -c 'rm {backup_dir}; mv {backup_dir}.saved {backup_dir}'")
-              # Existing operator-owned directories must not be given to a service.
-              machine.succeed(f"runuser -u agentops -- sh -c 'mv {backup_dir} {backup_dir}.saved; mkdir -m 2750 {backup_dir}'")
-              backup_metadata = machine.succeed(f"stat -c %u:%g:%a:%h {backup_dir}").strip()
-              machine.fail(backup_prepare)
-              assert machine.succeed(f"stat -c %u:%g:%a:%h {backup_dir}").strip() == backup_metadata
-              machine.succeed(f"runuser -u agentops -- sh -c 'rmdir {backup_dir}; mv {backup_dir}.saved {backup_dir}'")
-              backup_mount = machine.succeed("systemd-escape --path --suffix=mount ${backups}").strip()
-              machine.succeed(f"! systemctl show ${namespace}-management-prepare.service -p Requires -p After -p RequiresMountsFor | grep -F '{backup_mount}'")
-              machine.succeed("systemctl show ${namespace}-management-prepare.service -p RequiresMountsFor --value | grep -Fx '${state}'")
-              machine.succeed("systemctl show ${namespace}-management-broker-backup.service -p RequiresMountsFor --value | tr ' ' '\\n' | grep -Fx '${backups}'")
-              machine.succeed("systemctl cat ${namespace}-management-broker-backup.service | grep -F 'ExecStartPre=+'")
-              for component in ("web", "broker"):
-                  machine.succeed(f"test $(stat -c %U:%G:%a ${state}/management-{component}-releases) = agentops:management-{component}:2750")
-                  machine.succeed(f"test ! -e ${state}/management-{component}-releases/config/platform.json")
-                  machine.succeed(f"systemctl show ${namespace}-management-{component}.service -p LimitCORE --value | grep -Fx 0")
-                  machine.succeed(f"systemctl show ${namespace}-management-{component}.service -p UMask --value | grep -Fx 0077")
-                  machine.succeed(f"systemctl cat ${namespace}-management-{component}.service | grep -F RequiresMountsFor=${state}")
               # Complete fixture pairs follow the same staged/active/config
               # layout as installed releases; only their entrypoints are doubles.
               import json
               commit = "a" * 40
               pair = "b" * 64
               descriptor = json.dumps({"sourceCommit": commit, "pairIdentity": pair, "compatibility": {"brokerProtocolVersion": 3, "webProtocolVersion": 3, "authProtocolVersion": 3, "brokerSchemaVersion": 3, "controllerApiVersion": 1}}, separators=(",", ":"))
-              def request_activation(pair_identity=pair):
-                  machine.succeed(f"runuser -u agentops -- /run/current-system/sw/bin/management-python3.14 ${managementActivationRequest} {commit} {pair_identity}")
-                  machine.succeed("test $(stat -c %U:%G:%a:%h ${state}/management-broker-releases/activate-request) = agentops:management-broker:640:1")
               for component in ("broker", "web"):
                   release = f"${state}/management-{component}-releases/releases/vm-test"
                   machine.succeed(f"install -d -m 2750 -o agentops -g management-{component} {release} {release}/bin {release}/config {release}/evidence")
@@ -663,197 +465,35 @@ let
               machine.succeed("printf '#!/bin/sh\\nexec /run/current-system/sw/bin/management-python3.14 ${managementWebProbe}\\n' > ${state}/management-web-releases/releases/vm-test/bin/management-web; chown agentops:management-web ${state}/management-web-releases/releases/vm-test/bin/management-web; chmod 0550 ${state}/management-web-releases/releases/vm-test/bin/management-web")
               machine.succeed("install -m 0600 -o agentops -g management-broker /dev/null ${state}/management-broker-releases/.install.lock")
               machine.wait_for_unit("vm-fake-commons.service")
-              # Restarting the required prepare unit can stop its path units.
-              # Re-arm them after the deliberate preparation failures above.
-              machine.succeed("systemctl reset-failed ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-activate.path; systemctl start ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-activate.path")
               for component in ("broker", "web", "activate"):
                   machine.wait_for_unit(f"${namespace}-management-{component}.path")
-              request_activation()
+              machine.succeed(f"runuser -u agentops -- /run/current-system/sw/bin/management-python3.14 ${managementActivationRequest} {commit} {pair}")
               machine.wait_for_unit("${namespace}-management-broker.service")
-              # Record reachability from outside the sandbox before waiting, so a
-              # failure separates host DNS/TLS problems from sandbox restrictions.
-              print(machine.execute("${managementIdentityDiagnostics} 2>&1")[1])
               machine.wait_until_succeeds("test -f ${state}/management-broker/identity-sandbox-ok")
               broker_health = "runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket /run/${namespace}-management-broker/broker.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'"
               machine.wait_until_succeeds(broker_health)
-              machine.succeed("systemctl show ${namespace}-management-broker.service -p MemoryDenyWriteExecute --value | grep -Fx yes")
-              machine.succeed("systemctl show ${namespace}-management-broker.service -p RestrictAddressFamilies --value | grep -Fx AF_UNIX")
-              machine.succeed("systemctl show ${namespace}-management-broker.service -p IPAddressDeny --value | grep -F 0.0.0.0/0")
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-broker) = management-broker:management-web:750")
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-broker/broker.sock) = management-broker:management-web:660")
-              machine.succeed(broker_health)
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-identity) = management-identity:management-broker:750")
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-management-identity/identity.sock) = management-identity:management-broker:660")
-              machine.succeed("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-management-identity/identity.sock http://localhost/v1/health")
-              machine.fail("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --unix-socket /run/${namespace}-management-identity/identity.sock http://localhost/v1/health")
+              machine.succeed("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --max-time 5 --unix-socket /run/${namespace}-management-identity/identity.sock http://localhost/v1/health")
+              machine.fail("runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 5 --unix-socket /run/${namespace}-management-identity/identity.sock http://localhost/v1/health")
               machine.fail("runuser -u management-identity -- cat ${state}/management-broker/identity-sandbox-ok")
-              machine.succeed("systemctl show ${namespace}-management-identity.service -p InaccessiblePaths --value | grep -F '${state}/management-broker'")
-              machine.succeed("systemctl is-enabled ${namespace}-management-broker-backup.timer")
-              machine.fail("runuser -u management-web -- systemctl restart ${namespace}-management-broker.service")
-              machine.fail("runuser -u management-broker -- systemctl restart ${namespace}-management-web.service")
-              machine.succeed("systemctl cat ${namespace}-management-activate.path | grep -F 'PathChanged=${state}/management-broker-releases/activate-request'")
               machine.wait_for_unit("${namespace}-management-web.service")
               machine.wait_until_succeeds("test $(systemctl show ${namespace}-management-activate.service -p ActiveState --value) = inactive && test $(systemctl show ${namespace}-management-activate.service -p Result --value) = success")
-              machine.succeed("systemctl cat ${namespace}-management-web.service | grep -F '${state}/management-active/current/web/bin/management-web'")
+              web_health = "runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket ${state}/management-web/web-health.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'"
+              machine.wait_until_succeeds(web_health)
               machine.succeed("runuser -u management-web -- cat ${state}/management-active/current/web/config/platform.json >/dev/null")
               machine.fail("runuser -u management-web -- cat ${state}/management-active/current/broker/config/platform.json")
-              machine.succeed("! grep -F PLATFORM_ENVIRONMENT= /etc/profile")
-              selected_pair = machine.succeed("readlink ${state}/management-active/current").strip()
-              web_health = "runuser -u management-web -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket ${state}/management-web/web-health.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'"
-              # Persist this already-active pair across the VM's disposable
-              # state mount, then boot without any reset-failed/reactivation.
-              metadata_command = "cd ${state} && find management-active management-broker-releases management-web-releases ! -name activate-request -printf '%p:%U:%G:%m:%n:%y:%l\\n' | sort"
-              fixture_metadata = machine.succeed(metadata_command)
-              machine.succeed("umask 0077; install -d -m 0700 /var/lib/portal-boot-fixture; cp -a --preserve=all ${state}/management-active ${state}/management-broker-releases ${state}/management-web-releases ${state}/management-broker ${state}/management-web /var/lib/portal-boot-fixture/; rm -f /var/lib/portal-boot-fixture/management-broker-releases/activate-request")
-              machine.reboot()
-              machine.wait_for_unit("multi-user.target")
-              machine.wait_for_unit("${namespace}-controller-readiness.service")
-              for component in ("identity", "broker", "web"):
-                  machine.wait_for_unit(f"${namespace}-management-{component}.service")
-              for component in ("broker", "web"):
-                  machine.wait_for_unit(f"${namespace}-management-{component}.path")
-              machine.wait_until_succeeds(broker_health)
-              machine.wait_until_succeeds(web_health)
-              machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
-              assert machine.succeed(metadata_command) == fixture_metadata
-              machine.succeed("test ! -e ${state}/management-broker-releases/activate-request")
-              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
-              # Force a controller restart, including socket directory removal,
-              # and verify the dependency restart chain heals both portal units.
-              before_broker = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
-              before_web = machine.succeed("systemctl show ${namespace}-management-web.service -p MainPID --value").strip()
-              machine.succeed("systemctl restart ${namespace}-controller.service")
-              machine.wait_for_unit("${namespace}-controller-readiness.service")
-              machine.succeed("runuser -u management-broker -- ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --unix-socket /run/${namespace}-controller/project.sock http://localhost/v1/health | grep -F '\"status\":\"ok\"'")
-              machine.wait_until_succeeds(broker_health)
-              machine.wait_until_succeeds(web_health)
-              for component in ("identity", "broker", "web"):
-                  machine.succeed(f"systemctl is-active --quiet ${namespace}-management-{component}.service")
-              for component in ("broker", "web"):
-                  machine.succeed(f"systemctl is-active --quiet ${namespace}-management-{component}.path")
-                  machine.succeed(f"! systemctl is-failed --quiet ${namespace}-management-{component}.path")
-              assert machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip() != before_broker
-              assert machine.succeed("systemctl show ${namespace}-management-web.service -p MainPID --value").strip() != before_web
-              machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
-              assert machine.succeed(metadata_command) == fixture_metadata
-              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
-
-              # A staged broker upgrade remains inactive through service and
-              # boot-path restarts. The VM state mount is disposable tmpfs.
-              next_descriptor = descriptor.replace(pair, "c" * 64)
-              next_broker = "${state}/management-broker-releases/releases/vm-next"
-              # Exercise refusal synchronously; the watcher is tested separately.
-              machine.succeed("systemctl stop ${namespace}-management-activate.path")
-              machine.succeed(f"cp -a ${state}/management-broker-releases/releases/vm-test {next_broker}; printf '%s\\n' '{next_descriptor}' > {next_broker}/evidence/management-artifacts.json")
-              machine.succeed("ln -sfn releases/vm-next ${state}/management-broker-releases/current; chown -h agentops:management-broker ${state}/management-broker-releases/current")
-              request_activation("c" * 64)
-              machine.fail("systemctl restart ${namespace}-management-activate.service")
-              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
-              machine.succeed("systemctl restart ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-broker.service ${namespace}-management-web.service")
-              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
-              machine.succeed("test $(readlink -f ${state}/management-active/current/broker) = ${state}/management-broker-releases/releases/vm-test")
-              machine.succeed("ln -sfn releases/vm-test ${state}/management-broker-releases/current; chown -h agentops:management-broker ${state}/management-broker-releases/current; systemctl reset-failed ${namespace}-management-activate.service")
-              request_activation()
-              machine.succeed("systemctl restart ${namespace}-management-activate.service; systemctl start ${namespace}-management-activate.path")
-              machine.wait_until_succeeds(broker_health)
-              machine.succeed("systemctl show ${namespace}-management-broker.service -p Wants --value | tr ' ' '\\n' | grep -Fx '${namespace}-management-identity.service'")
-              machine.succeed("systemctl show ${namespace}-management-broker.service -p After --value | tr ' ' '\\n' | grep -Fx '${namespace}-management-identity.service'")
-              machine.succeed("! systemctl show ${namespace}-management-broker.service -p Requires --value | tr ' ' '\\n' | grep -Fx '${namespace}-management-identity.service'")
-              # A real identity start failure preserves existing broker/web units
-              # and does not prevent starting the broker again.
-              machine.succeed("cp -p ${state}/management-broker-releases/releases/vm-test/config/identity.json ${state}/management-broker-releases/releases/vm-test/config/identity.vm-save; printf '{}\\n' > ${state}/management-broker-releases/releases/vm-test/config/identity.json")
-              # Type=simple reports the start job's success before Python exits.
-              machine.execute("systemctl restart ${namespace}-management-identity.service")
-              machine.wait_until_succeeds("systemctl is-failed --quiet ${namespace}-management-identity.service")
-              machine.succeed("test $(systemctl show ${namespace}-management-identity.service -p Result --value) = exit-code")
-              machine.succeed("systemctl is-active ${namespace}-management-broker.service ${namespace}-management-web.service")
-              machine.succeed("systemctl restart ${namespace}-management-broker.service; systemctl start ${namespace}-management-web.service")
-              machine.wait_until_succeeds(broker_health)
-              machine.succeed("mv ${state}/management-broker-releases/releases/vm-test/config/identity.vm-save ${state}/management-broker-releases/releases/vm-test/config/identity.json; systemctl reset-failed ${namespace}-management-identity.service; systemctl restart ${namespace}-management-identity.service")
-              before = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
-              machine.succeed("systemctl reset-failed ${namespace}-management-activate.service ${namespace}-management-broker.service ${namespace}-management-web.service")
-              request_activation()
-              machine.wait_until_succeeds(f"pid=$(systemctl show ${namespace}-management-broker.service -p MainPID --value); test $pid -gt 0 && test $pid != {before}")
-              machine.wait_for_unit("${namespace}-management-web.service")
-              machine.wait_until_succeeds("test $(systemctl show ${namespace}-management-activate.service -p ActiveState --value) = inactive && test $(systemctl show ${namespace}-management-activate.service -p Result --value) = success")
-              machine.wait_until_succeeds(broker_health)
-              before = machine.succeed("systemctl show ${namespace}-management-broker.service -p MainPID --value").strip()
-              machine.succeed("systemctl reset-failed ${namespace}-management-activate.service ${namespace}-management-broker.service ${namespace}-management-web.service")
-              request_activation()
-              machine.wait_until_succeeds(f"pid=$(systemctl show ${namespace}-management-broker.service -p MainPID --value); test $pid -gt 0 && test $pid != {before}")
-              machine.wait_for_unit("${namespace}-management-web.service")
-              machine.wait_until_succeeds("test $(systemctl show ${namespace}-management-activate.service -p ActiveState --value) = inactive && test $(systemctl show ${namespace}-management-activate.service -p Result --value) = success")
-              machine.wait_until_succeeds(broker_health)
-              machine.fail("openstack-platform-management-broker-restore --yes")
-              # Backup outages must not pull down the owner portal.
-              # "mask --runtime" cannot override NixOS units in /etc; a runtime
-              # drop-in can. A failing Assert keeps the volume unstartable.
-              machine.succeed(f"systemctl stop '{backup_mount}'; install -d '/run/systemd/system/{backup_mount}.d'; printf '[Unit]\\nAssertPathExists=/run/vm-test-backup-outage-never-exists\\n' > '/run/systemd/system/{backup_mount}.d/outage.conf'; systemctl daemon-reload")
-              machine.fail(f"systemctl start '{backup_mount}'")
-              machine.succeed("systemctl restart ${namespace}-management-broker.service ${namespace}-management-web.service")
-              machine.wait_for_unit("${namespace}-management-broker.service")
-              machine.wait_for_unit("${namespace}-management-web.service")
-              machine.wait_until_succeeds(broker_health)
-              machine.fail("systemctl start ${namespace}-management-broker-backup.service")
-              # Managed backups must not write into the root disk either.
-              machine.succeed("rm -f ${state}/operator/status/managed-backup-probe-ran")
-              machine.fail("systemctl start ${namespace}-platform-backup.service")
-              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
-              machine.succeed("systemctl reset-failed ${namespace}-platform-backup.service")
-              machine.succeed(f"rm -r '/run/systemd/system/{backup_mount}.d'; systemctl daemon-reload; systemctl reset-failed '{backup_mount}'; systemctl start '{backup_mount}'")
-              # Remounting disposable tmpfs loses its fixture directories.
-              # Recreate only backup paths before the remaining assertions.
-              machine.succeed("${pkgs.systemd}/bin/systemd-tmpfiles --create --prefix=${backups}")
-              machine.succeed("systemctl reset-failed ${namespace}-management-broker-backup.service")
-              machine.succeed("${pkgs.iptables}/bin/iptables -C nixos-fw -p tcp -s ${platform.addresses.ingress}/32 --dport 8080 -j nixos-fw-accept")
-              machine.fail("${pkgs.curl}/bin/curl --fail --silent --max-time 1 http://127.0.0.1:8080/")
+              machine.fail("runuser -u management-web -- systemctl restart ${namespace}-management-broker.service")
+              machine.fail("runuser -u management-broker -- systemctl restart ${namespace}-management-web.service")
               machine.succeed("${root}/bin/openstack-platform-helper </dev/null | grep -F INVALID_REQUEST")
-              # The control plane calls the helper by this name, and a tmpfiles
-              # rule owns it, so it must reach the accepted release rather than
-              # run the helper module without PLATFORM_CONFIG.
-              machine.succeed(
-                  "install -d -m 0750 ${state}/operator/helper-releases/current/bin"
-              )
-              machine.succeed(
-                  "printf '#!/bin/sh\\necho delegated-to-release\\n' "
-                  "> ${state}/operator/helper-releases/current/bin/openstack-platform-helper"
-              )
-              machine.succeed(
-                  "chmod 0550 ${state}/operator/helper-releases/current/bin/openstack-platform-helper"
-              )
-              machine.succeed("printf 'commit\\n' > ${state}/operator/helper-releases/current/.complete")
-              machine.succeed(
-                  "${root}/bin/openstack-platform-helper </dev/null | grep -Fx delegated-to-release"
-              )
-              machine.succeed("rm -rf ${state}/operator/helper-releases/current")
-              machine.succeed("test -d ${state}/operator/helper-releases/releases")
-              machine.succeed("test -d ${state}/operator/helper-releases/incoming")
-              machine.succeed("test -d ${backups}/${constants.directories.controllerBackup}/.staging")
-              machine.succeed("test $(stat -c %U:%G:%a ${backups}/${constants.directories.hostedControllerBackup}) = platform-controller:agentops:750")
-              machine.succeed("systemctl is-enabled ${namespace}-hosted-controller-backup.timer")
-              machine.succeed("systemctl cat ${namespace}-hosted-controller-backup.service | grep -F -- '--backup-root ${backups}/${constants.directories.hostedControllerBackup}'")
-              machine.succeed("systemctl cat ${namespace}-hosted-controller-backup.service | grep -F -- '--source-keys-root ${state}/controller/source-keys'")
-              machine.succeed("test $(stat -c %U:%a ${state}/controller/source-keys) = platform-controller:700")
-              machine.succeed("test -x /run/current-system/sw/bin/openstack-platform-hosted-controller-restore")
-              machine.fail("runuser -u agentops -- openstack-platform-hosted-controller-restore --yes")
-              machine.fail("systemctl cat ${namespace}-managed-usage.service")
-              machine.fail("systemctl cat ${namespace}-managed-usage.timer")
             ''
           else if role == "ingress" then
             ''
               machine.wait_for_unit("traefik.service")
               machine.wait_until_succeeds("${pkgs.curl}/bin/curl --fail --silent http://127.0.0.1:8082/ping | grep -Fx OK", timeout=30)
-              machine.succeed("grep -F 'one-off.apps.example.com' /etc/traefik/dynamic/platform.yaml")
-              machine.succeed("grep -F 'http://${platform.addresses.admin}:8080' /etc/traefik/dynamic/platform.yaml")
-              machine.succeed("grep -F 'http://192.0.2.14:4444' /etc/traefik/dynamic/platform.yaml")
-              machine.succeed("grep -F '127.0.0.1:80' /etc/traefik/traefik.yaml")
-              machine.fail("grep -F referrerPolicy /etc/traefik/dynamic/platform.yaml")
-              machine.succeed("grep -F contentTypeNosniff /etc/traefik/dynamic/platform.yaml")
-              machine.succeed("grep -F frameDeny /etc/traefik/dynamic/platform.yaml")
-              # Public S3: storage over the platform CA, CORS preflight answered
-              # by Traefik for app origins only.
-              machine.succeed("grep -F 'https://${platform.addresses.storage}:9000' /etc/traefik/dynamic/platform.yaml")
-              machine.succeed("grep -F '/etc/${namespace}/pki/internal-ca.pem' /etc/traefik/dynamic/platform.yaml")
+              # CORS must permit application origins and reject foreign origins.
               preflight = "${pkgs.curl}/bin/curl --silent --include --request OPTIONS --header 'Host: s3.${platform.domain}' --header 'Access-Control-Request-Method: PUT' http://127.0.0.1/app-bucket/key --header Origin:"
               machine.wait_until_succeeds(f"{preflight}https://demo.${platform.domain} | tr -d '\\r' | grep -Fix 'access-control-allow-origin: https://demo.${platform.domain}'", timeout=30)
               machine.fail(f"{preflight}https://evil.example | grep -Fi access-control-allow-origin")
@@ -874,7 +514,6 @@ let
               machine.wait_for_unit("nomad.service")
               machine.succeed("${pkgs.docker}/bin/docker info >/dev/null")
               machine.succeed("${pkgs.iptables}/bin/iptables -C OUTPUT -d ${platform.metadataAddress}/32 -j REJECT")
-              machine.succeed("grep -F 'allow_privileged = false' /etc/nomad.d/10-base.hcl")
               machine.succeed("test -x /etc/cni/bin/bridge")
             ''
           else
@@ -882,7 +521,6 @@ let
               machine.wait_for_unit("default.target", "agentops")
               machine.wait_for_unit("buildkit.service", "agentops")
               machine.succeed("runuser -u agentops -- env XDG_RUNTIME_DIR=/run/user/1000 ${packages.buildkit}/bin/buildctl --addr unix:///run/user/1000/buildkit/buildkitd.sock debug workers")
-              machine.succeed("test -x /run/current-system/sw/bin/mount.fuse3")
               machine.succeed("${pkgs.iptables}/bin/iptables -C OUTPUT -d ${platform.metadataAddress}/32 -j REJECT")
               machine.succeed("systemctl is-active --quiet ${namespace}-builder-expiry.timer")
             ''

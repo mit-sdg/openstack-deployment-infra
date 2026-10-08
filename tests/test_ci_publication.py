@@ -123,6 +123,26 @@ class PublicationTriggerTests(unittest.TestCase):
             "OPENSTACK_PUBLISH_ENABLED ==", builds
         )  # Builds do not wait for signing/provider enablement.
 
+    def test_role_gate_runs_packages_and_boots_pr_images_in_the_same_store(self) -> None:
+        roles = job("role-vm-tests")
+        self.assertIn("needs: publication-context", roles)
+        self.assertIn("if: always()", roles)
+        self.assertIn("if [[ ${{ matrix.role }} == admin ]]", roles)
+        self.assertIn(".#checks.x86_64-linux.package-smoke", roles)
+        self.assertIn(".#checks.x86_64-linux.vm-${{ matrix.role }}", roles)
+        self.assertIn(".#${{ matrix.role }}-image", roles)
+        self.assertIn('tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"', roles)
+        self.assertIn("needs.publication-context.outputs.publish != 'true'", roles)
+        self.assertIn("inputs.development_publish != true", roles)
+        self.assertIn("if [[ $BUILD_EXAMPLE_IMAGE == true ]]", roles)
+        self.assertEqual(roles.count("nix build"), 1)
+        self.assertIn("--print-out-paths", roles)
+        self.assertEqual(roles.count("if: env.BUILD_EXAMPLE_IMAGE == 'true'"), 2)
+        self.assertNotIn("package-tests", GATES)
+        self.assertIn("role-vm-tests", GATES)
+        self.assertNotIn("  package-tests:", WORKFLOW.read_text())
+        self.assertNotIn("  build-images:", WORKFLOW.read_text())
+
     def test_all_gates_precede_serialized_no_rebuild_publication(self) -> None:
         publication = job("publish-images")
         for gate in (*GATES, "production-role-builds", "publication-context"):
@@ -256,6 +276,103 @@ class PublicationTriggerTests(unittest.TestCase):
             self.assertIn(value, workflow)
         self.assertNotIn("OPENSTACK_UNSIGNED_PRODUCTION", job("development-publish"))
         self.assertIn("max-parallel: 1", job("development-publish"))
+
+
+class ImageSmokeVolumeTests(unittest.TestCase):
+    """Exercise the smoke shell with process doubles, without starting a VM."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.log = self.root / "calls.jsonl"
+        self.image = self.root / "role.qcow2"
+        self.image.write_bytes(b"qcow fixture")
+        self.config = self.root / "platform.json"
+        document = json.loads((ROOT / "config/platform.example.json").read_text())
+        for key, label in (
+            ("adminState", "test-state"),
+            ("backup", "test-backup"),
+            ("data", "test-data"),
+        ):
+            document["volumes"][key]["label"] = label
+        self.config.write_text(json.dumps(document))
+        runner = f"#!{sys.executable}\n" + textwrap.dedent("""\
+            import json, os, sys, time
+            from pathlib import Path
+            name = Path(sys.argv[0]).name
+            args = sys.argv[1:]
+            with open(os.environ["SMOKE_CALLS"], "a") as stream:
+                stream.write(json.dumps([name, *args]) + "\\n")
+            if name == "mkfs.xfs":
+                sys.exit(int(os.environ.get("MKFS_STATUS", "0")))
+            if name == "genisoimage":
+                Path(args[args.index("-output") + 1]).touch()
+            if name == "qemu-img" and args[0] == "create":
+                Path(args[-1]).touch()
+            if name == "qemu-system-x86_64":
+                print("platform-" + os.environ["SMOKE_ROLE"] + "-qcow-smoke-passed", flush=True)
+                time.sleep(30)
+            """)
+        for name in ("genisoimage", "qemu-img", "qemu-system-x86_64", "mkfs.xfs", "sleep"):
+            executable = self.bin / name
+            executable.write_text(runner)
+            executable.chmod(0o755)
+
+    def run_smoke(self, role, **environment):
+        result = subprocess.run(
+            ["bash", str(ROOT / "tests/smoke_openstack_image.sh"), role, str(self.image)],
+            env={
+                **os.environ,
+                "PATH": f"{self.bin}:{os.environ['PATH']}",
+                "TMPDIR": str(self.root),
+                "PLATFORM_CONFIG": str(self.config),
+                "SMOKE_CALLS": str(self.log),
+                "SMOKE_ROLE": role,
+                **environment,
+            },
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return result, calls
+
+    def test_admin_and_storage_attach_configured_disposable_volumes(self):
+        for role, labels in (("admin", ["test-state", "test-backup"]), ("storage", ["test-data"])):
+            with self.subTest(role=role):
+                self.log.unlink(missing_ok=True)
+                result, calls = self.run_smoke(role)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                formats = [call for call in calls if call[0] == "mkfs.xfs"]
+                self.assertEqual([call[call.index("-L") + 1] for call in formats], labels)
+                qemu = next(call for call in calls if call[0] == "qemu-system-x86_64")
+                raw_drives = [arg for arg in qemu if arg.endswith(",if=virtio,format=raw")]
+                self.assertEqual(
+                    raw_drives, [f"file={call[-1]},if=virtio,format=raw" for call in formats]
+                )
+                # The input image is used only as the read-only overlay backing.
+                create = next(call for call in calls if call[:2] == ["qemu-img", "create"])
+                self.assertEqual(create[create.index("-b") + 1], str(self.image))
+                self.assertFalse(any(self.root.glob("tmp*")))
+
+    def test_other_roles_need_no_deployment_volumes(self):
+        for role in ("ingress", "worker", "builder"):
+            with self.subTest(role=role):
+                self.log.unlink(missing_ok=True)
+                result, calls = self.run_smoke(role)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(any(call[0] == "mkfs.xfs" for call in calls))
+                qemu = next(call for call in calls if call[0] == "qemu-system-x86_64")
+                self.assertFalse(any("format=raw" in arg for arg in qemu))
+
+    def test_volume_formatting_failure_stops_before_boot(self):
+        result, calls = self.run_smoke("admin", MKFS_STATUS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call[0] == "qemu-system-x86_64" for call in calls))
 
 
 class CIAptIsolationTests(unittest.TestCase):

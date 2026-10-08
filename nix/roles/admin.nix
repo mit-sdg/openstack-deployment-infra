@@ -1373,7 +1373,6 @@ in
             --cert /etc/${namespace}/pki/nomad-cli.pem \
             --key /etc/${namespace}/pki/nomad-cli-key.pem \
             https://127.0.0.1:${toString constants.ports.nomadHttp}/v1/status/leader >/dev/null; then
-          sleep 2
           echo "${namespace} NixOS admin services ready"
           exit 0
         fi
