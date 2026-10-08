@@ -39,7 +39,8 @@ export function CatalogStatus({ app }: { app: CatalogApp }) {
           app.observedAt ? `Last checked ${new Date(app.observedAt).toLocaleString()}` : undefined
         }
       >
-        <Status state={app.appState} />
+        {/* A row whose health is being re-read says so, instead of a bare Unknown. */}
+        <Status state={app.refreshing && app.appState === 'unknown' ? 'checking' : app.appState} />
       </span>
       {app.attention.map((intent) => (
         <OperationStatus key={intent.intentId} intent={intent} />
