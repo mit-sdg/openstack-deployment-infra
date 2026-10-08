@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from ...controller.deployment_config import branch_name, parse_configuration
 from ...controller.http import HttpError, Request, Response
@@ -20,6 +20,7 @@ from ...controller.storage_contract import RESOURCE_OUTPUTS
 from ...validation import flavor_reference, repository_url, slug
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, strict_json
+from . import sizing
 from .accounts import audit
 from .class_reads import ReadLimits, profile
 from .client import ControllerUnavailable
@@ -57,6 +58,10 @@ class AppManagement:
             ("GET", "/v1/people/eligible-owners", self.owners),
             ("PUT", "/v1/apps/{app}/owner", self.reassign),
             ("DELETE", "/v1/apps/{app}/storage/{resource}", self.delete_storage),
+            ("GET", "/v1/apps/{app}/sizes", self.sizes),
+            ("GET", "/v1/apps/{app}/resize-plan", self.resize_plan),
+            ("GET", "/v1/apps/{app}/builder-size", self.builder_size),
+            ("PUT", "/v1/apps/{app}/builder-size", self.set_builder_size),
         ]
 
     def handle(self, request: Request, handler: Callable[[Request], Response]) -> Response:
@@ -74,6 +79,8 @@ class AppManagement:
             if request.path.endswith("/build-log")
             else {"stream"}
             if request.path.endswith("/logs")
+            else {"flavor"}
+            if request.path.endswith("/resize-plan")
             else set()
         )
         if (
@@ -259,6 +266,52 @@ class AppManagement:
         if model.get("requiresMaintenance") is True:
             body["maintenance"] = True
         return body
+
+    def sizes(self, request: Request) -> Response:
+        self.broker.own(request)
+        return Response(200, {"data": {"items": sizing.flavors(self.broker.client)}})
+
+    def resize_plan(self, request: Request) -> Response:
+        _actor, app = self.broker.own(request)
+        if set(request.query) != {"flavor"}:
+            raise HttpError(400, "INVALID_REQUEST", "Choose a size.")
+        reference = flavor_reference(request.query["flavor"][0])
+        model = self.observed(app["id"])
+        plan = sizing.result(
+            self.broker.client,
+            f"/v1/applications/{app['id']}/resize-plan?" + urlencode({"flavor": reference}),
+        )
+        self.sizing_plan(plan, app["id"], model)
+        return Response(200, {"data": plan})
+
+    def builder_size(self, request: Request) -> Response:
+        _actor, app = self.broker.own(request)
+        value = sizing.result(self.broker.client, f"/v1/applications/{app['id']}/builder-size")
+        if type(value.get("useDefault")) is not bool:
+            raise ControllerUnavailable("invalid builder selection")
+        return Response(
+            200,
+            {
+                "data": {
+                    "flavor": sizing.flavor(value.get("flavor")),
+                    "defaultFlavor": sizing.flavor(value.get("defaultFlavor")),
+                    "useDefault": value["useDefault"],
+                }
+            },
+        )
+
+    def set_builder_size(self, request: Request) -> Response:
+        actor, app = self.broker.own(request, mutation=True)
+        body = sizing.builder_body(request.body)
+        return self.dispatch(
+            request,
+            actor,
+            app,
+            "builder_size",
+            "PUT",
+            f"/v1/applications/{app['id']}/builder-size",
+            body,
+        )
 
     def owners(self, request: Request) -> Response:
         if set(request.query) - {"limit", "cursor", "q"} or any(

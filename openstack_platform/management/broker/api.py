@@ -21,6 +21,7 @@ from . import resources
 from .accounts import Accounts, audit
 from .app_management import AppManagement
 from .auth import Auth
+from .builder_settings import BuilderSettings
 from .class_reads import ClassReads, profile
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
@@ -81,6 +82,7 @@ class Broker:
         self.class_reads = ClassReads(self)
         self.accounts = Accounts(self)
         self.app_management = AppManagement(self)
+        self.builder_settings = BuilderSettings(self)
         self.runtime_logs = RuntimeLogs(self)
         self.source_keys = SourceKeys(self)
         self.members = Members(self)
@@ -142,6 +144,8 @@ class Broker:
             ("PATCH", "/v1/people/{user}/account", self.accounts.change),
             ("PUT", "/v1/people/{user}/quotas", self.accounts.quotas),
             ("GET", "/v1/audit", self.accounts.history),
+            ("GET", "/v1/settings/default-builder-size", self.builder_settings.read),
+            ("PUT", "/v1/settings/default-builder-size", self.builder_settings.change),
             ("POST", "/v1/reauthenticate", self.accounts.reauthenticate),
             ("GET", "/v1/people", self.class_reads.owners),
             ("GET", "/v1/people/{owner}", self.class_reads.owner),
@@ -163,6 +167,9 @@ class Broker:
                         "/v1/people/eligible-owners",
                         "/v1/apps/{app}/owner",
                         "/v1/apps/{app}/storage/{resource}",
+                        "/v1/apps/{app}/sizes",
+                        "/v1/apps/{app}/resize-plan",
+                        "/v1/apps/{app}/builder-size",
                     }:
                         return self.app_management.handle(request, handler)
                     if (
@@ -175,6 +182,7 @@ class Broker:
                         "/v1/people/{user}/account",
                         "/v1/people/{user}/quotas",
                         "/v1/audit",
+                        "/v1/settings/default-builder-size",
                         "/v1/reauthenticate",
                     }:
                         self.auth.authenticate(
@@ -469,7 +477,12 @@ class Broker:
             raise HttpError(400, "INVALID_REQUEST", "Page limit must be 1–100.")
         # Apps include the ones the user is a team member of; intents stay their own.
         scope, scope_parameters = (
-            (ACCESS, [owner, owner]) if table == "apps" else ("user_id=?", [owner])
+            (ACCESS, [owner, owner])
+            if table == "apps"
+            else (
+                "user_id=? AND (kind!='default_builder_size' OR EXISTS (SELECT 1 FROM users WHERE id=? AND role='admin'))",
+                [owner, owner],
+            )
         )
         condition = scope + (
             " AND lifecycle NOT IN ('rejected','deleted')" if table == "apps" else ""
@@ -566,7 +579,7 @@ class Broker:
         self,
         db: sqlite3.Connection,
         user: str,
-        app: str,
+        app: str | None,
         kind: str,
         key: str,
         fingerprint: str,
@@ -614,7 +627,8 @@ class Broker:
             "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
             (user, app, identifier, kind, now),
         )
-        self.app_management.record_audit(db, user, app, kind, identifier, now)
+        if app is not None:
+            self.app_management.record_audit(db, user, app, kind, identifier, now)
         return identifier
 
     def create(self, request: Request) -> Response:
@@ -851,6 +865,10 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
+            if row["kind"] == "default_builder_size" and (actor is None or actor[0] != "admin"):
+                raise HttpError(
+                    403, "ACCESS_DENIED", "Only admins can manage the default builder size."
+                )
             model = intent_model(
                 row,
                 diagnostic=actor is not None and actor[0] in {"staff", "admin"},
@@ -919,6 +937,8 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
+            if row["kind"] == "default_builder_size":
+                self.accounts.checked_actor(db, _sid)
             app_state = db.execute(
                 "SELECT lifecycle FROM apps WHERE id=?", (row["app_id"],)
             ).fetchone()

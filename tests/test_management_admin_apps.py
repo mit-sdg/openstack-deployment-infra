@@ -98,6 +98,159 @@ class AdminApplicationTests(ManagementCase):
         )
         return identifier
 
+    def test_staff_and_admin_read_sizes_and_forward_the_exact_plan(self) -> None:
+        self.staff()
+        for actor in ("taylor", "admin"):
+            sizes = self.call("GET", self.prefix + "/sizes", owner=actor).body["data"]["items"]
+            self.assertTrue(
+                all(
+                    set(item) == {"flavor_id", "name", "vcpus", "ram_mib", "disk_gib"}
+                    for item in sizes
+                )
+            )
+            plan = self.call("GET", self.prefix + "/resize-plan?flavor=200", owner=actor).body[
+                "data"
+            ]
+            self.assertEqual(plan["flavor"]["name"], "worker-large")
+            response = self.call(
+                "POST",
+                self.prefix + "/deployments",
+                {"configurationRevision": 1, "commit": "a" * 40, "plan": plan},
+                actor,
+            )
+            with self.broker.database.connect() as db:
+                stored = strict_json(
+                    db.execute(
+                        "SELECT body FROM intents WHERE id=?", (response.body["data"]["intentId"],)
+                    )
+                    .fetchone()[0]
+                    .encode()
+                )
+            self.assertEqual(stored["plan"], plan)
+            self.assertEqual(self.complete(response, actor)["state"], "succeeded")
+
+    def test_staff_and_admin_set_and_reset_builder_without_changing_worker(self) -> None:
+        self.staff()
+        self.fixture.apps[self.app_id]["requiresMaintenance"] = True
+        before = copy.deepcopy(self.fixture.apps[self.app_id])
+        for actor in ("taylor", "admin"):
+            current = self.call("GET", self.prefix + "/builder-size", owner=actor).body["data"]
+            self.assertTrue(current["useDefault"])
+            change = self.call(
+                "PUT",
+                self.prefix + "/builder-size",
+                {"flavor": "200", "expectedFlavor": None},
+                actor,
+            )
+            self.assertEqual(self.complete(change, actor)["state"], "succeeded")
+            current = self.call("GET", self.prefix + "/builder-size", owner=actor).body["data"]
+            self.assertFalse(current["useDefault"])
+            self.assertEqual(current["flavor"]["name"], "worker-large")
+            reset = self.call(
+                "PUT",
+                self.prefix + "/builder-size",
+                {"flavor": None, "expectedFlavor": "worker-large"},
+                actor,
+            )
+            self.assertEqual(self.complete(reset, actor)["state"], "succeeded")
+        self.assertEqual(self.fixture.apps[self.app_id], before)
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM admin_audit WHERE action='app_builder_size'"
+                ).fetchone()[0],
+                4,
+            )
+
+    def test_only_admins_manage_default_builder_and_its_intents(self) -> None:
+        self.staff()
+        path = "/v1/settings/default-builder-size"
+        calls = len(self.fixture.calls)
+        for actor in ("alice", "taylor"):
+            for method in ("GET", "PUT"):
+                self.assert_error(
+                    "ACCESS_DENIED",
+                    lambda actor=actor, method=method: self.call(
+                        method,
+                        path,
+                        None
+                        if method == "GET"
+                        else {"flavor": "200", "expectedFlavor": "builder-small"},
+                        actor,
+                    ),
+                )
+        self.assertEqual(len(self.fixture.calls), calls)
+        current = self.call("GET", path, owner="admin").body["data"]
+        self.assertEqual(current["flavor"]["ram_mib"], 1024)
+        changed = self.call(
+            "PUT", path, {"flavor": "200", "expectedFlavor": "builder-small"}, "admin"
+        )
+        identifier = changed.body["data"]["intentId"]
+        self.assert_error(
+            "ACCESS_DENIED", lambda: self.call("GET", f"/v1/intents/{identifier}", owner="taylor")
+        )
+        self.assert_error(
+            "ACCESS_DENIED",
+            lambda: self.call("POST", f"/v1/intents/{identifier}/resume", {}, "taylor"),
+        )
+        self.assertEqual(self.complete(changed)["state"], "succeeded")
+        current = self.call("GET", self.prefix + "/builder-size", owner="admin").body["data"]
+        self.assertEqual(current["flavor"]["name"], "worker-large")
+        self.assertTrue(current["useDefault"])
+        with self.broker.database.connect() as db:
+            actions = {row[0] for row in db.execute("SELECT action FROM admin_audit")}
+        self.assertIn("default_builder_size_requested", actions)
+        self.assertIn("default_builder_size_succeeded", actions)
+        self.assertEqual(self.call("GET", "/v1/activity", owner="taylor").status, 200)
+        self.assertEqual(self.call("GET", "/v1/activity", owner="admin").status, 200)
+
+    def test_builder_reads_require_csrf_and_same_origin_metadata(self) -> None:
+        for path in (
+            self.prefix + "/sizes",
+            self.prefix + "/resize-plan?flavor=200",
+            self.prefix + "/builder-size",
+            "/v1/settings/default-builder-size",
+        ):
+            self.assert_error(
+                "CSRF_REJECTED",
+                lambda path=path: self.call(
+                    "GET", path, owner="admin", headers={"x-csrf-token": ""}
+                ),
+            )
+            self.assert_error(
+                "ORIGIN_REJECTED",
+                lambda path=path: self.call(
+                    "GET",
+                    path,
+                    owner="admin",
+                    headers={
+                        "origin": "https://other.example.test",
+                        "sec-fetch-site": "cross-site",
+                    },
+                ),
+            )
+
+    def test_older_controller_reports_unavailable_sizes_and_keeps_other_reads(self) -> None:
+        original = self.broker.client.request
+
+        def older(method, path, *args, **bounds):
+            if path == "/v1/flavors" or path == "/v1/settings/default-builder-size":
+                return 404, {"error": {"code": "NOT_FOUND"}}
+            return original(method, path, *args, **bounds)
+
+        with patch.object(self.broker.client, "request", side_effect=older):
+            self.assert_error(
+                "SIZING_UNAVAILABLE",
+                lambda: self.call("GET", self.prefix + "/sizes", owner="admin"),
+            )
+            self.assert_error(
+                "SIZING_UNAVAILABLE",
+                lambda: self.call("GET", "/v1/settings/default-builder-size", owner="admin"),
+            )
+            self.assertEqual(
+                self.call("GET", self.prefix + "/configuration", owner="admin").status, 200
+            )
+
     def test_owners_denied_every_app_administration_action_before_lookup(self) -> None:
         calls = len(self.fixture.calls)
         for method, _route, path in self.routes():

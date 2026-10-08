@@ -28,6 +28,7 @@ import { AllAppsPage } from './pages/AllApps';
 import { AdminAuditPage } from './pages/Audit';
 import { Enrollment } from './pages/Enrollment';
 import { PortalShell } from './shell/PortalShell';
+import { PlatformSettingsPage } from './pages/PlatformSettings';
 
 function NoAccess() {
   return (
@@ -82,12 +83,15 @@ export function App() {
                 {elevated ? <PeoplePage admin={role === 'admin'} /> : <NoAccess />}
               </Route>
               <Route path="/activity">{elevated ? <ActivityPage /> : <NoAccess />}</Route>
+              <Route path="/platform-settings">
+                {role === 'admin' ? <PlatformSettingsPage /> : <NoAccess />}
+              </Route>
               <Route path="/audit">{role === 'admin' ? <AdminAuditPage /> : <NoAccess />}</Route>
               <Route path="/apps/new">
                 <NewApp />
               </Route>
               <Route path="/apps/:id/configuration">{(p) => <ConfigurationPage id={p.id} />}</Route>
-              <Route path="/apps/:id/deploy">{(p) => <DeployPage id={p.id} />}</Route>
+              <Route path="/apps/:id/deploy">{(p) => <DeployPage key={p.id} id={p.id} />}</Route>
               <Route path="/apps/:id/deployments/:deployment">
                 {(p) => <DeploymentPage id={p.id} deployment={p.deployment} />}
               </Route>

@@ -221,6 +221,62 @@ for (const [layout, viewport] of [
             target.getByRole('button', { name: 'Change owner', exact: true }),
           ).toBeVisible();
       }
+      for (const [role, target] of [
+        ['owner', ownerPage],
+        ['staff', staffPage],
+        ['admin', page],
+      ] as const) {
+        await target.bringToFront();
+        await target.goto(`/apps/${id}/deploy`);
+        await expect(target.getByLabel('Commit SHA')).toBeVisible();
+        await expect(target.getByLabel('Sizing plan')).toHaveCount(0);
+        if (role === 'owner') {
+          await expect(target.getByLabel('Size', { exact: true })).toHaveCount(0);
+          await expect(target.getByLabel('Builder size', { exact: true })).toHaveCount(0);
+        } else {
+          const size = target.getByLabel('Size', { exact: true });
+          await expect(size).toHaveValue('');
+          await expect(size.locator('option[value="200"]')).toHaveCount(1);
+          await size.selectOption('200');
+          await expect(target.getByText(/Changing size replaces the worker/)).toBeVisible();
+          await expect(target.getByText(/The app gets up to/)).toBeVisible();
+          await shot(target, role, 'worker-size');
+          await size.selectOption('');
+          const builder = target.getByLabel('Builder size', { exact: true });
+          await expect(builder).toHaveValue('');
+          await builder.selectOption('200');
+          await target.getByRole('button', { name: 'Save builder size', exact: true }).click();
+          await expect(target.getByText('Builder size saved.', { exact: true })).toBeVisible();
+          await expect(builder).toHaveValue('200');
+          await shot(target, role, 'builder-size');
+          await builder.selectOption('');
+          await target.getByRole('button', { name: 'Save builder size', exact: true }).click();
+          await expect(builder).toHaveValue('');
+          await expect(
+            target.getByRole('button', { name: 'Save builder size', exact: true }),
+          ).toBeDisabled();
+        }
+        if (role !== 'admin') {
+          await target.goto('/platform-settings');
+          await expect(
+            target.getByRole('heading', { name: "You don't have access to this page" }),
+          ).toBeVisible();
+        }
+      }
+      await page.bringToFront();
+      await page.goto('/platform-settings');
+      const defaultBuilder = page.getByLabel('Default builder size', { exact: true });
+      await expect(defaultBuilder).toHaveValue('50');
+      await defaultBuilder.selectOption('200');
+      await page.getByRole('button', { name: 'Save default builder size', exact: true }).click();
+      await expect(page.getByText('Default builder size saved.', { exact: true })).toBeVisible();
+      await expect(defaultBuilder).toHaveValue('200');
+      await shot(page, 'admin', 'platform-settings');
+      await defaultBuilder.selectOption('50');
+      await page.getByRole('button', { name: 'Save default builder size', exact: true }).click();
+      await expect(
+        page.getByRole('button', { name: 'Save default builder size', exact: true }),
+      ).toBeDisabled();
       const members = (await (await ownerPage.request.get(`/api/v1/apps/${id}/members`)).json())
         .data.items;
       expect(members).toHaveLength(1);

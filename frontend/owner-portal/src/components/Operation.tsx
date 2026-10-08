@@ -45,7 +45,7 @@ export function Operation({
       }
       meta={
         <>
-          {showApp && (
+          {showApp && intent.appId && (
             <Link href={`/apps/${intent.appId}`} className="ui-link">
               {intent.appSlug ?? 'App'}
             </Link>
@@ -120,6 +120,8 @@ export function OperationStatus({
       client.invalidateQueries({ queryKey: ['deployment', intent.appId] });
       client.invalidateQueries({ queryKey: ['all-apps'] });
       client.invalidateQueries({ queryKey: ['class'] });
+      client.invalidateQueries({ queryKey: ['builder-size', intent.appId] });
+      client.invalidateQueries({ queryKey: ['default-builder-size'] });
     },
   });
 

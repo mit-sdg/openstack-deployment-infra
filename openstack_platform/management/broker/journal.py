@@ -230,8 +230,8 @@ class Journal:
                 return
             if (
                 strict_json(row["body"].encode()).get("_portalAdmin") is True
-                and row["state"] != "accepted"
-            ):
+                or row["kind"] == "default_builder_size"
+            ) and row["state"] != "accepted":
                 # A reviewed resume grants app authority without changing the
                 # original actor, controller key, or stored request body.
                 resumed = db.execute(
@@ -244,7 +244,10 @@ class Journal:
                 ).fetchone()
                 if (
                     actor is None
-                    or actor["role"] not in {"staff", "admin"}
+                    or actor["role"]
+                    not in (
+                        {"admin"} if row["kind"] == "default_builder_size" else {"staff", "admin"}
+                    )
                     or not actor["enabled"]
                     or actor["status"] != "active"
                 ):
@@ -276,7 +279,12 @@ class Journal:
                     not in {"running", "succeeded", "failed", "recovery_required"}
                 ):
                     raise ControllerUnavailable("invalid operation evidence")
-                if result.get("scope") != f"app-{intent['app_id']}":
+                expected_scope = (
+                    "infrastructure"
+                    if intent["kind"] == "default_builder_size"
+                    else f"app-{intent['app_id']}"
+                )
+                if result.get("scope") != expected_scope:
                     raise ControllerUnavailable("mismatched operation scope")
                 operation = {
                     key: result.get(key)
@@ -345,6 +353,9 @@ class Journal:
                             "failed",
                             "Restart is not available yet. Ask an admin to update the platform."
                             if intent["kind"] == "app_restart" and status == 404
+                            else "Sizes are not available yet. Ask an admin to update the platform."
+                            if intent["kind"] in {"builder_size", "default_builder_size"}
+                            and status == 404
                             else "The request was rejected. The slug may be unavailable or the input invalid.",
                         )
                 else:
@@ -378,6 +389,21 @@ class Journal:
                     "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
                     (intent["user_id"], intent["app_id"], identifier, state, now),
                 )
+                if intent["kind"] == "default_builder_size":
+                    from .accounts import audit
+
+                    audit(
+                        db,
+                        intent["user_id"],
+                        None,
+                        "default_builder_size_" + state,
+                        {
+                            "intentId": identifier,
+                            "flavor": controller_body["flavor"],
+                            "expectedFlavor": controller_body["expectedFlavor"],
+                        },
+                        now,
+                    )
 
 
 def intent_model(

@@ -9,7 +9,6 @@ import {
   Hint,
   Input,
   Select,
-  Textarea,
   KeyValueList,
   PageSkeleton,
   Section,
@@ -28,6 +27,8 @@ import { CommitChecks, CommitProblems, useCommitChecks } from '../components/Com
 import { RecentCommits, useRecentCommits } from '../components/RecentCommits';
 import { recentCommits } from '../utils/github';
 import { useIntentPolling } from '../hooks/useIntentPolling';
+import { sizingApi, sizeLabel, type ResizePlan } from '../sizingApi';
+import { BuilderSizeControl } from '../components/BuilderSize';
 
 function Names({ names }: { names: string[] }) {
   return names.length ? (
@@ -56,6 +57,33 @@ function summary(settings: Settings, names: string[]) {
     { label: 'Health check', value: <code>{settings.configuration.runtime.healthPath}</code> },
     { label: 'Environment variables', value: <Names names={names} /> },
   ];
+}
+
+function SizeSummary({ plan, maintenance }: { plan: ResizePlan; maintenance: boolean }) {
+  const memory =
+    plan.flavor.ram_mib -
+    Math.max(
+      plan.reserve.memoryMiBMinimum,
+      Math.ceil((plan.flavor.ram_mib * plan.reserve.percentMinimum) / 100),
+    );
+  return (
+    <Alert tone="info">
+      <p>
+        {plan.current.flavor} → {sizeLabel(plan.flavor)}
+      </p>
+      <p>
+        The app gets up to {memory} MiB of memory. CPU comes from the {plan.flavor.vcpus} vCPU
+        worker’s measured capacity, leaving at least {plan.reserve.cpuMHzMinimum} MHz or{' '}
+        {plan.reserve.percentMinimum}% for system services.
+      </p>
+      <p>
+        Changing size replaces the worker.
+        {maintenance
+          ? ' This app keeps its address, so the change uses maintenance and takes it offline briefly after the build.'
+          : ''}
+      </p>
+    </Alert>
+  );
 }
 
 export function DeployPage({ id }: { id: string }) {
@@ -92,7 +120,21 @@ export function DeployPage({ id }: { id: string }) {
   );
   const [error, setError] = useState<string | null>(null);
   const [maintenance, setMaintenance] = useState(false);
-  const [plan, setPlan] = useState('');
+  const [size, setSize] = useState('');
+  const elevated = identity.data?.access === 'admin';
+  const sizes = useQuery({
+    queryKey: ['sizes', id],
+    queryFn: () => sizingApi.sizes(id),
+    enabled: elevated,
+  });
+  const plan = useQuery({
+    queryKey: ['resize-plan', id, size],
+    queryFn: () => sizingApi.plan(id, size),
+    enabled: elevated && !!size,
+    staleTime: 0,
+  });
+  const sizeReady = !size || (!plan.isFetching && !!plan.data && !plan.error);
+
   const [intentId, setIntentId] = useState<string | null>(null);
   const [review, setReview] = useState(false);
   const [findingLatest, setFindingLatest] = useState(false);
@@ -137,14 +179,7 @@ export function DeployPage({ id }: { id: string }) {
     mutationFn: (key: string) => {
       if (identity.data?.access !== 'admin')
         return api.deploy(id, settings.data!.revision, sha, key);
-      let parsed: unknown;
-      if (plan.trim()) {
-        try {
-          parsed = JSON.parse(plan);
-        } catch {
-          throw new Error('Enter valid JSON in the sizing plan, or leave it empty.');
-        }
-      }
+      if (!sizeReady) throw new Error('Wait for the size details, or keep the current size.');
       return request(`/apps/${id}/deployments`, intentData, {
         method: 'POST',
         key,
@@ -152,7 +187,7 @@ export function DeployPage({ id }: { id: string }) {
           configurationRevision: settings.data!.revision,
           commit: sha,
           maintenance: identity.data.requiresMaintenance || maintenance,
-          ...(parsed ? { plan: parsed } : {}),
+          ...(size && plan.data ? { plan: plan.data } : {}),
         },
       });
     },
@@ -236,7 +271,7 @@ export function DeployPage({ id }: { id: string }) {
                   <Button
                     type="submit"
                     variant="primary"
-                    disabled={deploy.isPending || findingLatest}
+                    disabled={deploy.isPending || findingLatest || !sizeReady}
                   >
                     Review deployment
                   </Button>
@@ -294,19 +329,40 @@ export function DeployPage({ id }: { id: string }) {
                         </Select>
                       </Field>
                     )}
-                    <Field
-                      label="Sizing plan"
-                      id="sizing-plan"
-                      optional
-                      hint="Paste a reviewed plan as JSON. Leave empty to keep the current size."
-                    >
-                      <Textarea
-                        rows={3}
-                        value={plan}
-                        onChange={(event) => setPlan(event.target.value)}
-                        spellCheck={false}
-                      />
+                    {sizes.error && <QueryError query={sizes} what="the available sizes" />}
+                    <Field label="Size" id="worker-size">
+                      <Select
+                        value={size}
+                        onChange={(event) => {
+                          setSize(event.target.value);
+                          setPendingKey(null);
+                        }}
+                      >
+                        <option value="">
+                          Keep current size
+                          {identity.data.sizing ? ` (${identity.data.sizing.workerFlavor})` : ''}
+                        </option>
+                        {sizes.data?.map((item) => (
+                          <option
+                            key={item.flavor_id}
+                            value={item.flavor_id}
+                            disabled={item.name === identity.data?.sizing?.workerFlavor}
+                          >
+                            {sizeLabel(item)}
+                            {item.name === identity.data?.sizing?.workerFlavor ? ' (Current)' : ''}
+                          </option>
+                        ))}
+                      </Select>
                     </Field>
+                    {size && plan.isFetching && <Hint>Checking the selected size…</Hint>}
+                    {size && plan.error && <QueryError query={plan} what="the selected size" />}
+                    {size && plan.data && !plan.isFetching && (
+                      <SizeSummary
+                        plan={plan.data}
+                        maintenance={identity.data.requiresMaintenance === true}
+                      />
+                    )}
+                    <BuilderSizeControl key={id} id={id} sizes={sizes.data ?? []} />
                   </>
                 )}
                 <CommitChecks
@@ -347,6 +403,7 @@ export function DeployPage({ id }: { id: string }) {
             <Button
               variant="primary"
               loading={deploy.isPending}
+              disabled={!sizeReady}
               onClick={() => {
                 const key = pendingKey ?? crypto.randomUUID();
                 setPendingKey(key);
@@ -372,6 +429,9 @@ export function DeployPage({ id }: { id: string }) {
               ),
             ]}
           />
+        )}
+        {size && plan.data && (
+          <SizeSummary plan={plan.data} maintenance={identity.data?.requiresMaintenance === true} />
         )}
         <CommitProblems checks={checks.data} />
         <Hint>
