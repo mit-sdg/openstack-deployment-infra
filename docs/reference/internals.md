@@ -244,7 +244,7 @@ Rollback keeps current sizing and secrets; derived values such as `PORT` follow 
 
 ### Worker and builder sizes
 
-The project peer can list closed OpenStack flavor capacity projections and fetch the same fingerprinted worker sizing plan as the operator. Sizes that cannot leave 64 MiB after the OS/service memory reserve are excluded. The broker admits only staff and admins, validates the plan against the current app observation, and forwards it unchanged on deploy. CPU comes from measured worker capacity minus reserve; the plan does not promise a vCPU-to-MHz conversion. A selected worker size replaces the worker, and a retained primary address requires maintenance after the build.
+The project peer can list closed OpenStack flavor capacity projections and fetch the same fingerprinted worker sizing plan as the operator. The portal groups worker choices by flavor family and shows a plain before/after review. Staff and admins edit the app's build machine in its own Settings card; Deploy shows it read-only. Sizes that cannot leave 64 MiB after the OS/service memory reserve are excluded. The broker admits only staff and admins, validates the plan against the current app observation, and forwards it unchanged on deploy. CPU comes from measured worker capacity minus reserve; the plan does not promise a vCPU-to-MHz conversion. A selected worker size replaces the worker, and a retained primary address requires maintenance after the build.
 
 Schema migration 6 adds nullable `applications.builder_flavor` and the singleton `builder_settings` table. An app override takes precedence over the platform default. A null override uses the current default; an unset platform default uses inventory `flavors.builder`. Admins change the default; staff and admins set or reset an app's override. Existing apps migrate with no override or stored default. Worker upserts preserve overrides.
 
@@ -399,8 +399,8 @@ The portal routes are `/apps`, `/all-apps`, `/people`, `/people/:id`, `/activity
 | Accounts, roles, quotas, account audit | No | No | Yes |
 | Create an app for another owner | No | Yes | Yes |
 | Adopt an operator-created app, reassign an owner, delete storage | No | Yes | Yes |
-| Maintenance outage, worker size, or app builder size | No | Yes | Yes |
-| Default builder size | No | No | Yes |
+| Maintenance outage, worker size, or app build machine | No | Yes | Yes |
+| Default build machine | No | No | Yes |
 
 The app-owner picker reads only IDs, names, roles, enabled flags, and account status from `/api/v1/people/eligible-owners`, with bounded name search and pagination. It grants no account-management access.
 

@@ -250,7 +250,7 @@ Setup replaces these fields in `config/platform.example.json`; other fields are 
 | `flavors` | One flavor name per role | `PLATFORM_<ROLE>_FLAVOR` |
 | `paths` | `root`: `/srv/<namespace>`; `adminState`, `backups`, `data`: same path with `-state`, `-backups`, `-data` | Derived |
 
-`flavors.builder` is the initial platform default for temporary build machines. A controller-held admin default overrides it, and an app-specific builder selection overrides that default. Portal builder selections require at least 1 vCPU and 1024 MiB RAM; setup still uses the role minimums above. Changing a builder selection affects builds that start afterwards. See [Manage apps and people](../guides/manage-apps-and-people.md#change-the-builder-size).
+`flavors.builder` is the initial platform default for temporary build machines. A controller-held admin default overrides it, and an app-specific builder selection overrides that default. Portal build machine choices require at least 1 vCPU and 1024 MiB RAM; setup still uses the role minimums above. Changing a builder selection affects builds that start afterwards. See [Manage apps and people](../guides/manage-apps-and-people.md#change-the-build-machine).
 
 Copied unchanged from the example file:
 

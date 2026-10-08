@@ -162,8 +162,8 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/pages/NewApp.tsx` — create an app.
 - `frontend/owner-portal/src/pages/Overview.tsx` — app state, deployment, start, stop, restart, and activity.
 - `frontend/owner-portal/src/pages/Configuration.tsx` — source, build, runtime, environment, storage, and repository access.
-- `frontend/owner-portal/src/pages/Deploy.tsx` — commit selection, worker size plans, per-app builder size, checks, review, and deploy.
-- `frontend/owner-portal/src/pages/PlatformSettings.tsx` — admin-only default builder size selection and progress.
+- `frontend/owner-portal/src/pages/Deploy.tsx` — commit selection, grouped worker size plans, read-only build machine summary, checks, review, and deploy.
+- `frontend/owner-portal/src/pages/PlatformSettings.tsx` — admin-only default build machine selection and progress.
 - `frontend/owner-portal/src/pages/Deployment.tsx` — deployment details, runtime, build output, and startup record.
 - `frontend/owner-portal/src/pages/History.tsx` — an app's deployment history.
 - `frontend/owner-portal/src/pages/Logs.tsx` — an app's runtime logs.
@@ -190,7 +190,8 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/components/AttentionActivity.test.tsx` — tests for the attention list: who sees it, the original actor, and Resume.
 - `frontend/owner-portal/src/components/AttentionActivity.tsx` — an app's activity that needs attention (blocked or unknown), with who started each and a Resume button, for owners, staff, and admins.
 - `frontend/owner-portal/src/components/BoundaryText.tsx` — re-exports the shared `BoundaryText`.
-- `frontend/owner-portal/src/components/BuilderSize.tsx` — staff and admin per-app builder size selection, reset, and progress.
+- `frontend/owner-portal/src/components/BuilderSize.tsx` — staff and admin Settings card for per-app build machine selection, reset, and progress.
+- `frontend/owner-portal/src/components/SizeOptions.tsx` — size choices grouped by flavor family, sorted by CPU and RAM, with the current size marked.
 - `frontend/owner-portal/src/components/CommitChecks.tsx` — pre-deploy checks, runtime versions, and review problems.
 - `frontend/owner-portal/src/components/DeploymentRow.tsx` — deployment list row.
 - `frontend/owner-portal/src/components/EnvironmentSection.tsx` — write-only environment editor and progress.

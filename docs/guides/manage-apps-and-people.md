@@ -22,7 +22,7 @@ Staff and portal admins open the same app pages as owners without joining the te
 
 - **Overview** shows the current deployment, activity and start, stop and restart controls.
 - **Settings** holds repository and runtime settings, deploy keys, environment variables, databases and storage. Staff and admins additionally get **Danger zone**, with **Change owner** and storage deletion.
-- **Deploy** lets you choose a commit, review it, and deploy. Staff and admins additionally get the deployment method, worker size, and builder size.
+- **Deploy** lets you choose a commit, review it, and deploy. Staff and admins additionally get the deployment method, worker size, and a read-only build machine summary.
 - **Deployments** lists attempts. Open one to see its details and build output.
 - **Logs** shows runtime output and errors.
 - **Team** lets owners, staff and admins add or remove teammates. Members can leave their own team.
@@ -79,17 +79,17 @@ On the app's **Settings** page, under **Danger zone**, select **Change owner**, 
 Staff and portal admins have these deploy options:
 
 - **Deployment method** > **Replace the running app in one step** chooses a maintenance cutover instead of starting the new version alongside it. The app goes offline briefly while the new version starts. For an app that keeps a fixed IP address, the portal applies this automatically and shows an information message about the brief outage.
-- **Size** starts at **Keep current size**. Choose a different size to see the current and new sizes, the app's memory budget, and how CPU is measured. Review and deploy to apply the change. It replaces the worker; an app with a retained address uses maintenance after building. The portal sends the reviewed plan unchanged, and the controller checks it again before provisioning.
+- **Worker size** starts at **Keep current size**, with the current CPU and RAM. Choices are grouped by flavor family, with CPU then RAM increasing within each family. Choose a different size to see **Now**, **After deploy**, and how much memory the app can use. Review and deploy to apply the change. It replaces the worker; an app with a retained address uses maintenance after building. The portal sends the reviewed plan unchanged, and the controller checks it again before provisioning.
 
-### Change the builder size
+### Change the build machine
 
-Staff and portal admins can change **Builder size** next to **Size** on the app's **Deploy** page. Choose an app-specific size or **Platform default**, then select **Save builder size**. Check the change's activity until it succeeds. The control shows the effective size and whether it comes from the platform default.
+Staff and portal admins can open the app's **Settings** page and use the **Build machine** card. Choose a size and select **Save**. The state says **Uses the platform default** or **Set for this app**. To reset an app-specific choice, select **Use platform default**, then **Save**. **Build machine saved.** confirms success; pending or failed changes show their activity. The **Deploy** page shows the effective build machine in its read-only **Settings** summary.
 
-Each deploy builds on a temporary machine of this size. A bigger builder builds faster and fits heavier builds, such as Next.js; a smaller builder lets more builds run at once. If a build runs out of memory, choose a bigger builder. Builders need at least 1 vCPU and 1 GB RAM.
+Each deploy builds the app on a temporary machine of this size. A bigger machine builds faster and handles heavy builds such as Next.js; a smaller one lets more builds run at once. If a build runs out of memory, choose a bigger machine. Build machines need at least 1 vCPU and 1 GB RAM.
 
-Saving a builder size applies to builds that start afterwards. It keeps the worker, needs no sizing plan or maintenance, and does not change a build already started. Owners cannot read or change builder sizes.
+Saving a build machine applies to builds that start afterwards. It keeps the worker, needs no sizing plan or maintenance, and does not change a build already started. Owners cannot read or change build machines.
 
-Portal admins can open **Platform settings** near **People** and **Audit log**, change **Default builder size**, and select **Save default builder size**. Check for success and the new current selection. The new default applies to subsequent builds of apps using **Platform default**; app-specific choices stay the same. Both app and default changes enter the audit log. The inventory's `flavors.builder` supplies the default until an admin sets one. Admin VM size remains an operator task.
+Portal admins can open **Platform settings** near **People** and **Audit log**, change **Default build machine** in **Builds**, and select **Save**. **Default build machine saved.** confirms success and the select marks the current choice. The new default applies to subsequent builds of apps using **Platform default**; app-specific choices stay the same. Both app and default changes enter the audit log. The inventory's `flavors.builder` supplies the default until an admin sets one. Admin VM size remains an operator task.
 
 ## Help a person
 
