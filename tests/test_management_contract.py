@@ -13,7 +13,7 @@ from openstack_platform.controller.http import ControllerServer, HttpError
 from openstack_platform.management.broker.client import UnixConnection
 from openstack_platform.management.common import canonical, strict_json
 from tests import test_controller_recovery as recovery_fixtures
-from tests.test_management import ManagementCase
+from tests.test_management import DEFAULT_CONFIGURATION, ManagementCase
 
 
 class RealProjectContractTests(ManagementCase):
@@ -455,15 +455,19 @@ class RealProjectContractTests(ManagementCase):
         )
         connection.commit()
         for path in (
-            f"/v1/staff/apps/{app}",
-            f"/v1/staff/apps/{app}/deployments",
-            f"/v1/staff/apps/{app}/deployments/{intent['operationId']}",
+            f"/v1/apps/{app}",
+            f"/v1/apps/{app}/deployments?limit=25",
+            f"/v1/apps/{app}/deployments/{intent['operationId']}",
         ):
             response = self.call("GET", path, owner="alice")
             self.assertEqual(response.status, 200)
-            self.assertNotIn('"configuration"', canonical(response.body))
             self.assertNotIn('"operationId"', canonical(response.body))
-            if path.endswith("/deployments"):
+            # Staff read the same immutable deployment settings as owners.
+            data = response.body["data"]
+            if "/deployments" in path:
+                for item in data.get("items", [data]):
+                    self.assertEqual(item["configuration"], DEFAULT_CONFIGURATION)
+            if path.split("?")[0].endswith("/deployments"):
                 self.assertEqual(len(response.body["data"]["items"]), 25)
                 self.assertTrue(response.body["data"]["truncated"])
         for path in (
@@ -479,7 +483,7 @@ class RealProjectContractTests(ManagementCase):
             self.real_socket, "POST", "/v1/applications", {"slug": "operator-only-project"}, unowned
         )
         self.assert_error(
-            "NOT_FOUND", lambda: self.call("GET", f"/v1/staff/apps/{unowned}", owner="alice")
+            "NOT_FOUND", lambda: self.call("GET", f"/v1/apps/{unowned}", owner="alice")
         )
 
 
@@ -564,22 +568,18 @@ class DeletedApplicationContractTests(RealProjectContractTests):
         app = self.create(slug="retire-in-background")
         self.delete_remote(app, "retire-in-background")
         self.broker.journal.reconcile()
-        self.assertEqual(
-            self.call("GET", "/v1/admin-apps", owner="admin").body["data"]["items"], []
-        )
+        self.assertEqual(self.call("GET", "/v1/all-apps", owner="admin").body["data"]["items"], [])
         with self.broker.database.connect(write=True) as db:
             user = db.execute("SELECT user_id FROM apps WHERE id=?", (app,)).fetchone()[0]
             db.execute("UPDATE users SET role='staff' WHERE id=?", (user,))
             security_change(db, user)
         self.login()
-        self.assertEqual(
-            self.call("GET", "/v1/staff/apps", owner="alice").body["data"]["items"], []
-        )
+        self.assertEqual(self.call("GET", "/v1/all-apps", owner="alice").body["data"]["items"], [])
         # Staff observe through their metadata view and app administration.
         for name, route, actor in (
-            ("staff", "/v1/staff/apps", "alice"),
-            ("staff-admin", "/v1/admin-apps", "alice"),
-            ("admin", "/v1/admin-apps", "admin"),
+            ("staff", "/v1/all-apps", "alice"),
+            ("staff-admin", "/v1/all-apps", "alice"),
+            ("admin", "/v1/all-apps", "admin"),
         ):
             pending = self.create(slug="lazy-delete-" + name)
             self.delete_remote(pending, "lazy-delete-" + name)
@@ -592,7 +592,7 @@ class DeletedApplicationContractTests(RealProjectContractTests):
         with self.assertRaises(HttpError) as caught:
             self.call(
                 "POST",
-                f"/v1/admin-apps/{app}/deployments",
+                f"/v1/apps/{app}/deployments",
                 {"commit": "a" * 40, "configurationRevision": 1},
                 "admin",
             )

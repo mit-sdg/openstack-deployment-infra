@@ -1,7 +1,6 @@
 """Staff and admin app authority over the existing project peer and resource handlers.
 
-Staff manage every app as admins do. Ownership changes (creating an app for an
-owner, adoption, reassignment) and permanent storage deletion stay admin-only.
+Staff and admins have the same app authority, without account-management step-up.
 """
 
 from __future__ import annotations
@@ -22,39 +21,23 @@ from ...validation import flavor_reference, repository_url, slug
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, strict_json
 from .accounts import audit
+from .class_reads import ReadLimits, profile
 from .client import ControllerUnavailable
+from .journal import intent_model
 from .resources import operation_quota
-from .staff import ReadLimits, profile
 from .staff_policy import public_url
 
 if TYPE_CHECKING:
     from .api import Broker
 
-IDENTITY_WARNING = "Portal sign-in depends on this app"
-
 
 class Authority(NamedTuple):
-    """The session behind an app-administration request and what its route needs."""
+    """The session behind an app-administration request."""
 
     sid: str
-    # "staff" admits staff and admin sessions; "admin" admits only admins.
-    kind: str
-    step_up: bool
 
 
-def admin_only(request: Request) -> tuple[bool, bool]:
-    """Whether a route is admin-only, and whether it also needs a recent step-up."""
-    step_up = (
-        request.method == "DELETE"
-        and "/storage/" in request.path
-        or request.path.endswith("/owner")
-        or request.path == "/v1/admin-apps/adopt"
-    )
-    # Creating an app for an owner sets its ownership, but needs no step-up.
-    return step_up or (request.method == "POST" and request.path == "/v1/admin-apps"), step_up
-
-
-class AdminApps:
+class AppManagement:
     def __init__(self, broker: Broker) -> None:
         self.broker = broker
         # Authority is request-local, including concurrent Unix-server threads.
@@ -67,40 +50,26 @@ class AdminApps:
 
     def routes(self) -> list[tuple[str, str, Any]]:
         b = self.broker
-        root = "/v1/admin-apps"
         return [
-            ("GET", root, self.listing),
-            ("POST", root, b.create),
-            ("POST", root + "/adopt", self.adopt),
-            ("GET", root + "/{app}", self.detail),
-            ("GET", root + "/{app}/configuration", b.configuration),
-            ("PUT", root + "/{app}/configuration", b.save),
-            ("GET", root + "/{app}/environment", b.environment),
-            ("PUT", root + "/{app}/environment/{key}", b.mutate_environment),
-            ("DELETE", root + "/{app}/environment/{key}", b.mutate_environment),
-            ("GET", root + "/{app}/storage", b.storage),
-            ("POST", root + "/{app}/storage", b.mutate_storage),
-            ("POST", root + "/{app}/storage/{resource}/verify", b.mutate_storage),
-            ("POST", root + "/{app}/storage/{resource}/rotate", b.mutate_storage),
-            ("DELETE", root + "/{app}/storage/{resource}", self.delete_storage),
-            ("POST", root + "/{app}/deployments", b.deploy),
-            ("GET", root + "/{app}/deployments", b.history),
-            ("GET", root + "/{app}/deployments/{deployment}", b.deployment),
-            ("GET", root + "/{app}/logs", b.runtime_logs.handle),
-            *b.source_keys.routes(root),
-            *b.members.routes(root),
-            ("PUT", root + "/{app}/owner", self.reassign),
-            ("POST", root + "/{app}/state", self.state),
-            ("POST", root + "/{app}/restart", self.restart),
+            ("GET", "/v1/all-apps", self.listing),
+            ("POST", "/v1/all-apps", b.create),
+            ("POST", "/v1/all-apps/adopt", self.adopt),
+            ("GET", "/v1/people/eligible-owners", self.owners),
+            ("PUT", "/v1/apps/{app}/owner", self.reassign),
+            ("DELETE", "/v1/apps/{app}/storage/{resource}", self.delete_storage),
         ]
 
     def handle(self, request: Request, handler: Callable[[Request], Response]) -> Response:
-        restricted, sensitive = admin_only(request)
-        kind = "admin" if restricted else "staff"
-        user, sid = self.broker.accounts.admin(request, step_up=sensitive, kind=kind)
+        user, sid = self.broker.accounts.admin(request, kind="staff")
         allowed = (
-            {"limit", "cursor"}
-            if request.path == "/v1/admin-apps" or request.path.endswith("/deployments")
+            {"q", "limit", "cursor"}
+            if request.path == "/v1/people/eligible-owners"
+            else {"limit", "cursor", "q", "ownerId", "status"}
+            if request.path == "/v1/all-apps"
+            else {"limit", "cursor"}
+            if request.path.endswith("/deployments")
+            else {"limit", "attention"}
+            if request.path.endswith("/activity")
             else {"lines", "offset"}
             if request.path.endswith("/build-log")
             else {"stream"}
@@ -114,7 +83,7 @@ class AdminApps:
             and request.body is not None
         ):
             raise HttpError(400, "INVALID_REQUEST", "Unexpected request fields.")
-        token = self.context.set(Authority(sid, kind, sensitive))
+        token = self.context.set(Authority(sid))
         stack = ExitStack()
         try:
             if request.method == "GET":
@@ -133,7 +102,7 @@ class AdminApps:
                 route = request.path
                 for value in request.path_parameters.values():
                     route = route.replace(value, "{id}")
-                self.broker.staff.audit(
+                self.broker.class_reads.audit(
                     request,
                     route,
                     user["id"],
@@ -151,14 +120,7 @@ class AdminApps:
     def check(self, db: sqlite3.Connection) -> None:
         context = self.context.get()
         if context is not None:
-            self.broker.accounts.checked_actor(
-                db, context.sid, step_up=context.step_up, kind=context.kind
-            )
-
-    def kind(self) -> str:
-        """The session kind this request's route needs; admin when unknown."""
-        context = self.context.get()
-        return "admin" if context is None else context.kind
+            self.broker.accounts.checked_actor(db, context.sid, kind="staff")
 
     def record_audit(
         self, db: sqlite3.Connection, actor: str, app: str, kind: str, intent: str, now: float
@@ -194,20 +156,6 @@ class AdminApps:
             isinstance(value, str)
             and urlsplit(value).hostname == urlsplit(self.broker.config.commons_origin).hostname
         )
-
-    def identity_consent(
-        self, app: str, body: dict[str, Any], model: dict[str, Any] | None = None
-    ) -> None:
-        if (
-            "identityProviderConfirmed" in body
-            and type(body["identityProviderConfirmed"]) is not bool
-        ):
-            raise HttpError(400, "INVALID_FIELD", "Identity-provider confirmation must be boolean.")
-        if (
-            self.identity(model if model is not None else self.observed(app))
-            and body.get("identityProviderConfirmed") is not True
-        ):
-            raise HttpError(409, "IDENTITY_CONFIRMATION_REQUIRED", IDENTITY_WARNING)
 
     @staticmethod
     def sizing_plan(value: dict[str, Any], app: str, model: dict[str, Any]) -> None:
@@ -283,9 +231,7 @@ class AdminApps:
                 "Supply the exact current reviewed sizing plan; no extra configuration fields are accepted.",
             ) from None
 
-    def deployment_body(
-        self, request: Request, app: dict[str, Any], *, admin: bool
-    ) -> dict[str, Any]:
+    def deployment_body(self, request: Request, app: dict[str, Any]) -> dict[str, Any]:
         if (
             not isinstance(request.body, dict)
             or not {"configurationRevision", "commit"} <= set(request.body)
@@ -295,7 +241,6 @@ class AdminApps:
                 "commit",
                 "maintenance",
                 "plan",
-                "identityProviderConfirmed",
             }
         ):
             raise HttpError(400, "INVALID_REQUEST", "Invalid deployment fields.")
@@ -308,41 +253,106 @@ class AdminApps:
             raise HttpError(
                 400, "INVALID_FIELD", "Maintenance must be boolean and plan must be an object."
             )
-        # Cutover downtime and worker sizing are platform capacity decisions.
-        if not admin and (body.get("maintenance") is True or "plan" in body):
-            raise HttpError(
-                403,
-                "ADMIN_REQUIRED",
-                "Only an admin can allow a maintenance outage or change an app's size.",
-            )
         model = self.observed(app["id"])
-        self.identity_consent(app["id"], body, model)
         if "plan" in body:
             self.sizing_plan(body["plan"], app["id"], model)
-        if model.get("requiresMaintenance") is True and body.get("maintenance") is not True:
-            if not admin:
-                raise HttpError(
-                    403,
-                    "ADMIN_REQUIRED",
-                    "This app keeps a fixed IP address, so only an admin can deploy it.",
-                )
-            raise HttpError(
-                409,
-                "MAINTENANCE_REQUIRED",
-                "A retained primary IPv4 requires maintenance consent for the brief cutover downtime.",
-            )
+        if model.get("requiresMaintenance") is True:
+            body["maintenance"] = True
         return body
+
+    def owners(self, request: Request) -> Response:
+        if set(request.query) - {"limit", "cursor", "q"} or any(
+            len(v) != 1 or not v[0] for v in request.query.values()
+        ):
+            raise HttpError(400, "INVALID_REQUEST", "Invalid owner page fields.")
+        limit = self.broker.class_reads.page_limit(request)
+        search = request.query.get("q", ("",))[0]
+        if len(search) > 64 or any(ord(c) < 32 for c in search):
+            raise HttpError(400, "INVALID_FIELD", "Owner search exceeds its bounds.")
+        pattern = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        clause = "(username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')"
+        args: list[object] = [pattern, pattern]
+        with self.broker.database.connect() as db:
+            cursor = request.query.get("cursor", (None,))[0]
+            if cursor:
+                point = db.execute(
+                    f"SELECT created,id FROM users WHERE {clause} AND id=?",
+                    (*args, checked_uuid(cursor)),
+                ).fetchone()
+                if point is None:
+                    raise HttpError(400, "INVALID_REQUEST", "Unknown owner page cursor.")
+                clause += " AND (created<? OR (created=? AND id<?))"
+                args += [point["created"], point["created"], point["id"]]
+            rows = db.execute(
+                f"SELECT id,username,display_name,role,enabled,status FROM users WHERE {clause} ORDER BY created DESC,id DESC LIMIT ?",
+                (*args, limit + 1),
+            ).fetchall()
+        items = [
+            {
+                "userId": row["id"],
+                "username": profile(row["username"], 32),
+                "displayName": profile(row["display_name"], 256),
+                "role": row["role"],
+                "enabled": bool(row["enabled"]),
+                "status": row["status"],
+            }
+            for row in rows[:limit]
+        ]
+        return Response(
+            200,
+            {
+                "data": {
+                    "items": items,
+                    "nextCursor": rows[limit - 1]["id"] if len(rows) > limit else None,
+                    "truncated": len(rows) > limit,
+                }
+            },
+        )
 
     def listing(self, request: Request) -> Response:
         b = self.broker
-        limit, cursor = b.staff.page_limit(request), request.query.get("cursor", (None,))[0]
+        viewer, _sid = b.auth.authenticate(request, kind="staff", touch=False)
+        limit, cursor = b.class_reads.page_limit(request), request.query.get("cursor", (None,))[0]
         with b.database.connect() as db:
             parameters: list[object] = []
             where = "a.lifecycle NOT IN ('rejected','deleted')"
+            search = request.query.get("q", ("",))[0].strip()
+            if len(search) > 64:
+                raise HttpError(400, "INVALID_REQUEST", "Search is too long.")
+            if search:
+                pattern = (
+                    "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                )
+                where += " AND (a.slug LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\' OR u.display_name LIKE ? ESCAPE '\\')"
+                parameters.extend([pattern] * 3)
+            owner = request.query.get("ownerId", (None,))[0]
+            if owner:
+                where += " AND a.user_id=?"
+                parameters.append(checked_uuid(owner))
+            state = request.query.get("status", (None,))[0]
+            status_sql = f"CASE WHEN a.lifecycle!='ready' THEN a.lifecycle WHEN json_extract(o.body,'$.acceptedDeployment') IS NULL THEN 'not_deployed' WHEN o.updated<{time.time() - 30:.6f} THEN 'unknown' WHEN json_extract(o.body,'$.desiredRunning')=0 THEN 'stopped' WHEN json_extract(o.body,'$.health.allocationHealthy')=1 AND json_extract(o.body,'$.health.routeHealthy')=1 THEN 'healthy' WHEN json_extract(o.body,'$.health.allocationHealthy')=0 OR json_extract(o.body,'$.health.routeHealthy')=0 THEN 'unhealthy' ELSE 'unknown' END"
+            if state:
+                if state not in {
+                    "creating",
+                    "not_deployed",
+                    "stopped",
+                    "healthy",
+                    "unhealthy",
+                    "unknown",
+                    "attention",
+                }:
+                    raise HttpError(400, "INVALID_REQUEST", "Invalid app status.")
+                where += " AND " + (
+                    "EXISTS (SELECT 1 FROM intents i WHERE i.app_id=a.id AND i.state IN ('blocked','unknown'))"
+                    if state == "attention"
+                    else f"({status_sql})=?"
+                )
+                if state != "attention":
+                    parameters.append(state)
             if cursor:
                 point = db.execute(
-                    "SELECT created,id FROM apps WHERE id=?",
-                    (checked_uuid(cursor),),
+                    f"SELECT a.created,a.id FROM apps a JOIN users u ON u.id=a.user_id LEFT JOIN observations o ON o.app_id=a.id WHERE {where} AND a.id=?",
+                    (*parameters, checked_uuid(cursor)),
                 ).fetchone()
                 if point is None:
                     raise HttpError(400, "INVALID_REQUEST", "Unknown page cursor.")
@@ -354,12 +364,24 @@ class AdminApps:
                 dict(row)
                 for row in db.execute(
                     "SELECT a.*,u.username AS owner_username,u.display_name AS owner_display_name,"
-                    "o.body AS observation FROM apps a JOIN users u ON u.id=a.user_id"
+                    f"o.body AS observation,({status_sql}) AS app_state FROM apps a JOIN users u ON u.id=a.user_id"
                     f" LEFT JOIN observations o ON o.app_id=a.id WHERE {where}"
                     " ORDER BY a.created DESC,a.id DESC LIMIT ?",
                     (*parameters, limit + 1),
                 )
             ]
+        with b.database.connect() as db:
+            for row in rows[:limit]:
+                row["attention"] = [
+                    {
+                        **intent_model(item, diagnostic=True, viewer=viewer["id"]),
+                        "appSlug": row["slug"],
+                    }
+                    for item in db.execute(
+                        "SELECT * FROM intents WHERE app_id=? AND state IN ('blocked','unknown') ORDER BY created DESC,id DESC",
+                        (row["id"],),
+                    )
+                ]
         # Existence checks use bounded SQLite-only project reads, not live health.
         b.journal.reconcile_page(rows)
         return Response(
@@ -373,6 +395,8 @@ class AdminApps:
                             "ownerId": row["user_id"],
                             "savedRevision": row["revision"],
                             "lifecycleState": row["lifecycle"],
+                            "appState": row["app_state"],
+                            "attention": row["attention"],
                             **self.catalog_extras(row),
                         }
                         for row in rows[:limit]
@@ -405,32 +429,13 @@ class AdminApps:
             else None,
         }
 
-    def detail(self, request: Request) -> Response:
-        _user, app = self.broker.own(request)
-        response = self.broker.app(request)
-        model = dict(cast(dict[str, Any], response.body)["data"])
-        current = self.observed(app["id"])
-        with self.broker.database.connect() as db:
-            owner = db.execute(
-                "SELECT username,display_name FROM users WHERE id=?", (app["user_id"],)
-            ).fetchone()
-        model.update(
-            ownerId=app["user_id"],
-            ownerUsername=profile(owner["username"], 32),
-            ownerDisplayName=profile(owner["display_name"], 256),
-            identityProvider=self.identity(current),
-            requiresMaintenance=current.get("requiresMaintenance") is True,
-            sizing=current.get("sizing"),
-        )
-        return Response(200, {"data": model})
-
     def adopt(self, request: Request) -> Response:
         b = self.broker
-        actor, _sid = b.auth.authenticate(request, kind="admin", mutation=True)
+        actor, _sid = b.auth.authenticate(request, kind="staff", mutation=True)
         if (
             not isinstance(request.body, dict)
             or "applicationId" not in request.body
-            or set(request.body) - {"applicationId", "ownerId", "identityProviderConfirmed"}
+            or set(request.body) - {"applicationId", "ownerId"}
         ):
             raise HttpError(
                 400, "INVALID_REQUEST", "Supply an application ID and optional owner ID."
@@ -450,7 +455,6 @@ class AdminApps:
                     409, "ALREADY_OWNED", "This application already has a broker owner."
                 )
         model = self.observed(identifier)
-        self.identity_consent(identifier, request.body, model)
         active = model.get("activeDeploymentId")
         if active is None:
             raise HttpError(
@@ -547,7 +551,7 @@ class AdminApps:
     def reassign(self, request: Request) -> Response:
         b = self.broker
         actor, app = b.own(request, mutation=True)
-        body = b.identity_mutation_body(request, app, {"ownerId", "expectedOwnerId"})
+        body = b.mutation_body(request, {"ownerId", "expectedOwnerId"})
         owner, expected = checked_uuid(body["ownerId"]), checked_uuid(body["expectedOwnerId"])
         with b.database.connect(write=True) as db:
             self.check(db)
@@ -562,7 +566,7 @@ class AdminApps:
                 raise HttpError(
                     409,
                     "APP_BUSY",
-                    "Resolve this application's current operations before reassigning it.",
+                    "Finish the previous change in the app's Overview before changing the owner.",
                 )
             db.execute("UPDATE apps SET user_id=? WHERE id=?", (owner, app["id"]))
             # The new owner isn't also a member; other teammates stay.
@@ -583,11 +587,10 @@ class AdminApps:
         if (
             not isinstance(request.body, dict)
             or "desiredRunning" not in request.body
-            or set(request.body) - {"desiredRunning", "identityProviderConfirmed"}
+            or set(request.body) - {"desiredRunning"}
             or type(request.body["desiredRunning"]) is not bool
         ):
             raise HttpError(400, "INVALID_REQUEST", "Supply desiredRunning as a boolean.")
-        self.identity_consent(app["id"], request.body)
         action = "enable" if request.body["desiredRunning"] else "disable"
         return self.dispatch(
             request,
@@ -602,7 +605,7 @@ class AdminApps:
     def restart(self, request: Request) -> Response:
         b = self.broker
         actor, app = b.own(request, mutation=True)
-        b.identity_mutation_body(request, app, set())
+        b.mutation_body(request, set())
         return self.dispatch(
             request,
             actor,
@@ -619,12 +622,11 @@ class AdminApps:
         if (
             not isinstance(request.body, dict)
             or "confirmation" not in request.body
-            or set(request.body) - {"confirmation", "identityProviderConfirmed"}
+            or set(request.body) - {"confirmation"}
         ):
             raise HttpError(
                 400, "INVALID_REQUEST", "Supply the typed application and storage confirmation."
             )
-        self.identity_consent(app["id"], request.body)
         resource_id = checked_uuid(request.path_parameters["resource"])
         # Match single-use journal admission before the resource disappears.
         key, fingerprint = (

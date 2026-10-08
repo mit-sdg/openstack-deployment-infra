@@ -13,7 +13,8 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useId, useState, type FormEvent } from 'react';
 import { ApiError, type Session } from '../../api';
-import { adminApi, type Account } from '../../adminApi';
+import { adminApi } from '../../adminApi';
+import { appManagementApi, type AppOwner } from '../../appManagementApi';
 import { authOptionsQuery } from '../../authOptions';
 import './admin.css';
 
@@ -218,12 +219,12 @@ export function OwnerPicker({
   const [search, setSearch] = useState('');
   const query = useDebounced(search.trim());
   const results = useQuery({
-    queryKey: ['accounts', 'owner-search', query],
-    queryFn: () => adminApi.accounts(query, undefined, 6),
+    queryKey: ['admin', 'owner-search', query],
+    queryFn: () => appManagementApi.owners(query),
     enabled: !!query,
     retry: false,
   });
-  const [chosen, setChosen] = useState<Account | null>(null);
+  const [chosen, setChosen] = useState<AppOwner | null>(null);
   const items = results.data?.items ?? [];
   return (
     <div className="ui-stack ui-gap-3">
@@ -256,7 +257,7 @@ export function OwnerPicker({
                   key={account.userId}
                   name="owner"
                   label={account.displayName}
-                  description={`${account.username} · ${usable ? roleNames[account.role] : account.enabled ? 'Setup not finished' : 'Disabled'}`}
+                  description={`${account.username} · ${usable ? roleNames[account.role] : account.enabled ? 'Setup pending' : 'Disabled'}`}
                   checked={value === account.userId}
                   disabled={!usable}
                   onChange={() => {
@@ -274,7 +275,7 @@ export function OwnerPicker({
   );
 }
 
-export const roleNames: Record<Account['role'], string> = {
+export const roleNames: Record<AppOwner['role'], string> = {
   owner: 'Owner',
   staff: 'Staff',
   admin: 'Admin',

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
 
 const repository = path.resolve('../..');
 const mode = process.env.OWNER_PORTAL_SMOKE_MODE ?? 'https';
@@ -54,6 +55,7 @@ print(totp_code(sys.argv[1], int(time.time()//30)))
     .trim();
 }
 async function commons(page: Page, name: string) {
+  await page.bringToFront();
   await page.goto('/sign-in');
   // The fake class site asks who is signing in, then sends the browser back.
   await page.getByRole('link', { name: 'Sign in with your class account', exact: true }).click();
@@ -71,246 +73,304 @@ async function createApp(page: Page, slug: string) {
   await expect(page).toHaveURL(/\/configuration$/);
   return new URL(page.url()).pathname.split('/')[2];
 }
-for (const [layout, viewport, colorScheme] of [
-  ['desktop-light', { width: 1440, height: 1000 }, 'light'],
-  ['mobile-dark', { width: 390, height: 844 }, 'dark'],
+for (const [layout, viewport] of [
+  ['desktop', { width: 1280, height: 960 }],
+  ['mobile', { width: 390, height: 844 }],
 ] as const) {
-  test(`local admin bootstrap, invite and role boundaries · ${layout}`, async ({ browser }) => {
-    const admin = await browser.newContext({ viewport, colorScheme, ignoreHTTPSErrors: true });
-    const staff = await browser.newContext({ ignoreHTTPSErrors: true });
-    const owner = await browser.newContext({ ignoreHTTPSErrors: true });
-    const other = await browser.newContext({ ignoreHTTPSErrors: true });
+  test(`shared app pages and task navigation · ${layout}`, async ({ browser }) => {
+    test.setTimeout(180000);
+    const contexts = await Promise.all(
+      ['owner', 'staff', 'admin'].map(() =>
+        browser.newContext({ viewport, ignoreHTTPSErrors: true }),
+      ),
+    );
+    const [owner, staff, admin] = contexts;
+    const [ownerPage, staffPage, page] = await Promise.all(
+      contexts.map((context) => context.newPage()),
+    );
+    const failures: string[] = [];
+    for (const target of [ownerPage, staffPage, page])
+      target.on('response', (response) => {
+        const path = new URL(response.url()).pathname;
+        if (path.startsWith('/api/') && response.status() >= 400)
+          failures.push(`${response.status()} ${path}`);
+      });
+    const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 8);
+    async function shot(target: Page, role: string, name: string) {
+      if (layout !== 'desktop') return;
+      await expect(target.locator('.ui-skeleton')).toHaveCount(0);
+      await target.evaluate(() => document.fonts.ready);
+      await mkdir('/tmp/staff-admin-ui-shots', { recursive: true });
+      await target.screenshot({
+        path: `/tmp/staff-admin-ui-shots/${role}-${name}.png`,
+        fullPage: true,
+      });
+    }
     try {
-      const page = await admin.newPage();
-      const staffPage = await staff.newPage();
-      const ownerPage = await owner.newPage();
-      const otherPage = await other.newPage();
-      const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 8);
-      const url = bootstrapUrl();
-      const token = new URL(url).hash.slice(1);
-      const requestUrls: string[] = [];
-      const managedReads: string[] = [];
-      page.on('response', (response) => {
-        if (new URL(response.url()).pathname.startsWith('/api/v1/admin-apps'))
-          managedReads.push(`${response.status()} ${new URL(response.url()).pathname}`);
-      });
-      admin.on('request', (request) => requestUrls.push(request.url()));
-      // The admin deploy dialog lists recent commits from GitHub; keep it offline.
-      const github: string[] = [];
-      await admin.route('https://api.github.com/**', (route) => {
-        github.push(route.request().url());
-        // The class app's repository is private: its commit can't be read.
-        if (route.request().url().includes('/git/trees/'))
-          return route.fulfill({ status: 404, json: { message: 'Not Found' } });
-        return route.fulfill({
-          json: [
-            {
-              sha: 'c'.repeat(40),
-              commit: { message: 'Class app fixture', author: { name: 'Staff' } },
-            },
-          ],
-          headers: { 'Access-Control-Allow-Origin': '*' },
+      for (const context of contexts) {
+        await context.route('**/*', (route) => {
+          const host = new URL(route.request().url()).hostname;
+          return ['127.0.0.1', 'localhost'].includes(host)
+            ? route.continue()
+            : route.fulfill({
+                status: 404,
+                json: { message: 'Offline fixture' },
+                headers: { 'Access-Control-Allow-Origin': '*' },
+              });
         });
-      });
-      await page.goto(url);
-      await expect(page).toHaveURL(/\/setup$/);
+      }
+      await page.bringToFront();
+      await page.goto(bootstrapUrl());
       await page.getByLabel('Username', { exact: true }).fill('admin' + suffix);
       await page.getByLabel('New password', { exact: true }).fill(password);
       await page.getByRole('button', { name: 'Continue', exact: true }).click();
       const secret = await page.getByTestId('totp-secret').textContent();
-      expect(secret).toBeTruthy();
       await page.getByLabel('Authentication code', { exact: true }).fill(code(secret!));
       await page.getByRole('button', { name: 'Finish setup', exact: true }).click();
-      await expect(page).toHaveURL(/\/admin\/accounts$/);
-      await expect(page.getByRole('heading', { name: 'Accounts', exact: true })).toBeVisible();
-      expect(requestUrls.every((value) => !value.includes(token))).toBe(true);
+      await expect(page).toHaveURL(/\/people$/);
+      await expect(page.getByRole('heading', { name: 'People', exact: true })).toBeVisible();
       await page.getByRole('button', { name: 'Create account', exact: true }).click();
       const create = page.getByRole('dialog', { name: 'Create account', exact: true });
       await create.getByLabel('Username', { exact: true }).fill('staff' + suffix);
-      await create.getByLabel('Display name').fill('Local Staff');
+      await create.getByLabel('Display name').fill('Local Staff ' + suffix);
       await create.getByLabel('Role', { exact: true }).selectOption('staff');
       await create.getByRole('button', { name: 'Create account', exact: true }).click();
       const created = page.getByRole('dialog', { name: 'Account created', exact: true });
       const invitation = await created.getByLabel('Setup link', { exact: true }).inputValue();
       await created.getByRole('button', { name: 'Done', exact: true }).click();
+      await staffPage.bringToFront();
       await staffPage.goto(invitation);
       await staffPage.getByLabel('New password', { exact: true }).fill(password);
       await staffPage.getByRole('button', { name: 'Continue', exact: true }).click();
       await staffPage.getByRole('button', { name: 'Finish setup', exact: true }).click();
       await expect(staffPage).toHaveURL(/\/apps$/);
-      const own = await createApp(staffPage, 'local-staff-' + suffix);
       await commons(ownerPage, 'alice');
-      const foreign = await createApp(ownerPage, 'student-project');
-      expect((await staffPage.request.get(`/api/v1/apps/${foreign}`)).status()).toBe(404);
-      expect((await ownerPage.request.get(`/api/v1/apps/${own}`)).status()).toBe(404);
-      await staffPage.getByRole('link', { name: 'Staff', exact: true }).click();
-      await expect(staffPage.getByRole('heading', { name: 'Owners', exact: true })).toBeVisible();
+      const id = await createApp(ownerPage, 'review-' + suffix);
+      const ownerSession = (await (await ownerPage.request.get('/api/v1/session')).json()).data;
+      const headers = {
+        'X-CSRF-Token': ownerSession.csrfToken,
+        Origin: new URL(ownerPage.url()).origin,
+      };
+      let settings = (
+        await (await ownerPage.request.get(`/api/v1/apps/${id}/configuration`)).json()
+      ).data;
+      if (!settings.revision) {
+        const saved = await ownerPage.request.put(`/api/v1/apps/${id}/configuration`, {
+          headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
+          data: {
+            expectedRevision: 0,
+            repository: 'https://github.com/example/student-app',
+            branch: 'main',
+            configuration: {
+              schemaVersion: 1,
+              build: { runtime: 'node', packages: ['.'], buildScript: null, startScript: 'start' },
+              runtime: { port: 3000, healthPath: '/health' },
+              storageBindings: [],
+            },
+          },
+        });
+        expect(saved.status()).toBe(200);
+        settings = (await (await ownerPage.request.get(`/api/v1/apps/${id}/configuration`)).json())
+          .data;
+      }
+      for (const [role, target] of [
+        ['owner', ownerPage],
+        ['staff', staffPage],
+        ['admin', page],
+      ] as const) {
+        await target.bringToFront();
+        await target.goto('/apps');
+        await expect(target.getByRole('heading', { name: 'My apps', exact: true })).toBeVisible();
+        await shot(target, role, 'my-apps');
+        if (role !== 'owner') {
+          const csrf = (await (await target.request.get('/api/v1/session')).json()).data.csrfToken;
+          const read = await target.request.get(`/api/v1/apps/${id}`, {
+            headers: { 'X-CSRF-Token': csrf },
+          });
+          expect(read.status()).toBe(200);
+          expect((await read.json()).data.access).toBe('admin');
+          await target.goto(`/apps/${id}`);
+          for (const tab of ['Overview', 'Settings', 'Deploy', 'Deployments', 'Logs', 'Team']) {
+            await target
+              .getByRole('navigation', { name: 'App pages' })
+              .getByRole('link', { name: tab, exact: true })
+              .click();
+            await expect(target.getByRole('navigation', { name: 'App pages' })).toBeVisible();
+            await expect(target.locator('.ui-skeleton')).toHaveCount(0);
+            await expect(
+              target.getByRole('alert').filter({ hasText: /Couldn't load/ }),
+            ).toHaveCount(0);
+          }
+        }
+        if (role === 'owner') await target.goto(`/apps/${id}/configuration`);
+        else
+          await target
+            .getByRole('navigation', { name: 'App pages' })
+            .getByRole('link', { name: 'Settings', exact: true })
+            .click();
+        await expect(target.getByLabel('Build script')).toHaveValue('');
+        await expect(target.getByLabel('Build script')).not.toHaveAttribute('placeholder', 'build');
+        await expect(target.getByText('Leave empty if your app has no build step.')).toBeVisible();
+        await shot(target, role, 'settings');
+        if (role === 'owner')
+          await expect(
+            target.getByRole('button', { name: 'Change owner', exact: true }),
+          ).toHaveCount(0);
+        else
+          await expect(
+            target.getByRole('button', { name: 'Change owner', exact: true }),
+          ).toBeVisible();
+      }
+      const members = (await (await ownerPage.request.get(`/api/v1/apps/${id}/members`)).json())
+        .data.items;
+      expect(members).toHaveLength(1);
+      expect(members[0].userId).toBe(ownerSession.user.id);
+      for (const [role, target] of [
+        ['staff', staffPage],
+        ['admin', page],
+      ] as const) {
+        await ownerPage.request.post('/__test__/recovery-required', { headers, data: {} });
+        const started = await ownerPage.request.post(`/api/v1/apps/${id}/deployments`, {
+          headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
+          data: { configurationRevision: settings.revision, commit: 'a'.repeat(40) },
+        });
+        expect(started.status()).toBe(202);
+        const intentId = (await started.json()).data.intentId;
+        await expect
+          .poll(
+            async () =>
+              (await (await ownerPage.request.get(`/api/v1/intents/${intentId}`)).json()).data
+                .state,
+          )
+          .toBe('blocked');
+        const intent = (await (await ownerPage.request.get(`/api/v1/intents/${intentId}`)).json())
+          .data;
+        // Each surface must expose exactly the same status and action.
+        for (const [name, route] of [
+          ['overview', `/apps/${id}`],
+          ['deployments', `/apps/${id}/deployments`],
+          ['deployment', `/apps/${id}/deployments/${intent.operationId}`],
+          ['all-apps', '/all-apps'],
+          ['people', '/people'],
+          ['person', `/people/${ownerSession.user.id}`],
+          ['activity', '/activity'],
+        ] as const) {
+          await target.bringToFront();
+          await target.goto(route);
+          if (name !== 'people') {
+            await expect(
+              target
+                .locator('.ui-badge')
+                .filter({ hasText: /^Needs attention$/ })
+                .first(),
+            ).toBeVisible();
+            await expect(
+              target.getByRole('button', { name: 'Resume', exact: true }).first(),
+            ).toBeVisible();
+          }
+          if (name === 'overview') {
+            await expect(target.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(
+              1,
+            );
+            await expect(
+              target.getByText(/from Activity|Open Activity|previous change hasn’t finished/),
+            ).toHaveCount(0);
+          }
+          await shot(target, role, name);
+        }
+        await ownerPage.bringToFront();
+        await ownerPage.goto(`/apps/${id}`);
+        await expect(
+          ownerPage.getByRole('button', { name: 'Resume', exact: true }).first(),
+        ).toBeVisible();
+        await expect(ownerPage.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(1);
+        await shot(ownerPage, 'owner', 'overview');
+        await ownerPage.bringToFront();
+        await ownerPage.goto(`/apps/${id}/deployments`);
+        await expect(
+          ownerPage.getByRole('button', { name: 'Resume', exact: true }).first(),
+        ).toBeVisible();
+        await shot(ownerPage, 'owner', 'deployments');
+        await target.getByRole('button', { name: 'Resume', exact: true }).first().click();
+        await expect
+          .poll(
+            async () =>
+              (await (await ownerPage.request.get(`/api/v1/intents/${intentId}`)).json()).data
+                .state,
+            { timeout: 15000 },
+          )
+          .toBe('succeeded');
+      }
+      await staffPage.bringToFront();
+      await staffPage.goto('/people');
       await expect(
-        staffPage.getByRole('link', { name: 'Alice Student', exact: true }),
+        staffPage.getByRole('button', { name: 'Create account', exact: true }),
+      ).toHaveCount(0);
+      await staffPage.bringToFront();
+      await staffPage.goto(`/people/${ownerSession.user.id}`);
+      await expect(
+        staffPage.getByRole('heading', { name: 'Account controls', exact: true }),
+      ).toHaveCount(0);
+      await page.bringToFront();
+      await page.goto(`/people/${ownerSession.user.id}`);
+      await expect(
+        page.getByRole('heading', { name: 'Account controls', exact: true }),
       ).toBeVisible();
-      await staffPage.goto('/admin/accounts');
+      await shot(page, 'admin', 'person-controls');
+      const controls = page.getByRole('region', { name: 'Account controls' });
+      await controls.getByLabel('Apps', { exact: true }).fill('3');
+      await controls.getByRole('button', { name: 'Save limits', exact: true }).click();
+      await expect(page.getByText('Limits saved', { exact: true })).toBeVisible();
+      for (const route of [`/api/v1/people/${ownerSession.user.id}/account`, '/api/v1/audit'])
+        expect((await staffPage.request.get(route)).status()).toBe(403);
+      await staffPage.bringToFront();
+      await staffPage.goto('/audit');
       await expect(
         staffPage.getByRole('heading', { name: "You don't have access to this page" }),
       ).toBeVisible();
-      await ownerPage.goto('/admin/audit');
-      await expect(
-        ownerPage.getByRole('heading', { name: "You don't have access to this page" }),
-      ).toBeVisible();
-      expect((await staffPage.request.get('/api/v1/accounts')).status()).toBe(403);
-      expect((await ownerPage.request.get('/api/v1/account-audit')).status()).toBe(403);
-      await otherPage.goto(invitation);
-      await expect(otherPage.getByRole('alert')).toContainText('unavailable or expired');
-      const replay = await browser.newContext({ ignoreHTTPSErrors: true });
-      try {
-        const retry = await replay.newPage();
-        await retry.goto(url);
-        await expect(retry.getByRole('alert')).toContainText('unavailable or expired');
-      } finally {
-        await replay.close();
-      }
-      await page.getByRole('link', { name: 'Audit log', exact: true }).click();
+      await page.bringToFront();
+      await page.goto('/audit');
       await expect(page.getByRole('heading', { name: 'Audit log', exact: true })).toBeVisible();
-      await expect(page.getByText('Account created', { exact: true }).first()).toBeVisible();
-      await page.getByRole('link', { name: 'All apps', exact: true }).click();
-      await expect(page.getByRole('heading', { name: 'All apps', exact: true })).toBeVisible();
-      const operatorId =
-        layout === 'desktop-light'
-          ? '00000000-0000-4000-8000-000000000081'
-          : '00000000-0000-4000-8000-000000000083';
-      const liveSession = (await (await page.request.get('/api/v1/session')).json()).data;
-      const csrfHeaders = { 'X-CSRF-Token': liveSession.csrfToken };
-      const known = await page.request.get(`/api/v1/admin-apps/${operatorId}`, {
-        headers: csrfHeaders,
-      });
-      if (known.status() === 200) {
-        await page.goto(`/admin/apps/${operatorId}`);
-      } else {
-        expect(known.status()).toBe(404);
-        await page.getByRole('button', { name: 'Adopt app', exact: true }).click();
-        const adopt = page.getByRole('dialog', { name: 'Adopt app', exact: true });
-        await adopt.getByLabel('App ID', { exact: true }).fill(operatorId);
-        const submit = adopt.getByRole('button', { name: 'Adopt app', exact: true });
-        await submit.click();
-        // The sign-in app is only adopted after explicit consent.
-        const consent = adopt.getByLabel('Adopt the sign-in app', { exact: false });
-        await expect(consent).toBeVisible();
-        await expect(submit).toBeDisabled();
-        await expect(page).toHaveURL(/\/admin\/apps$/);
-        await consent.check();
-        await submit.click();
-      }
-      await expect(page).toHaveURL(new RegExp(`/admin/apps/${operatorId}$`));
-      try {
+      await expect(page.getByText('Change resumed', { exact: true }).first()).toBeVisible();
+      await shot(page, 'admin', 'audit');
+      // Retired destinations are removed, with no redirects.
+      for (const route of [
+        '/staff/owners',
+        '/staff/operations',
+        '/admin/apps',
+        '/admin/accounts',
+        '/admin/audit',
+      ]) {
+        await page.bringToFront();
+        await page.goto(route);
         await expect(
-          page.getByText('This app provides sign-in for the portal', { exact: true }).first(),
-        ).toBeVisible({ timeout: 15000 });
-      } catch (error) {
-        console.log(managedReads.join('\n'));
-        console.log(await page.locator('main').innerText());
-        throw error;
+          page.getByRole('heading', { name: 'Page not found', exact: true }),
+        ).toBeVisible();
+        expect(new URL(page.url()).pathname).toBe(route);
       }
-      await expect(page.getByLabel('Repository URL')).toHaveValue(
-        'https://github.com/example/class-app',
-      );
-      await page.getByLabel('Health check path').fill('/ready');
-      await page.getByRole('button', { name: 'Save settings', exact: true }).click();
-      // Shown only after the save succeeds.
-      await expect(page.getByText('Settings saved.', { exact: false })).toBeVisible();
-      await expect(page.getByLabel('Health check path')).toHaveValue('/ready');
-      // Give the class-app fixture a deploy key so its checkout check falls
-      // back to the platform when the browser cannot read the commit.
-      const privateAccess = page.getByRole('region', { name: 'Private repository' });
-      await privateAccess.getByRole('button', { name: 'Create deploy key' }).click();
-      await expect(privateAccess.getByLabel('Deploy key')).toHaveValue(/^ssh-ed25519 /);
-      await page.getByRole('button', { name: 'Deploy', exact: true }).click();
-      const dialog = page.getByRole('dialog', { name: /^Deploy / });
-      await expect(dialog).toContainText('this app keeps a fixed IP address');
-      await expect(dialog).toContainText('goes offline briefly');
-      const deploy = dialog.getByRole('button', { name: 'Deploy', exact: true });
-      await dialog.getByRole('radio', { name: 'Class app fixture' }).check();
-      await expect(dialog.getByLabel('Commit', { exact: true })).toHaveValue('c'.repeat(40));
-      await expect(
-        dialog.getByText('This commit has the package.json, scripts and lockfile the build needs.'),
-      ).toBeVisible();
-      expect(github).toEqual([
-        'https://api.github.com/repos/example/class-app/commits?sha=main&per_page=5',
-        `https://api.github.com/repos/example/class-app/git/trees/${'c'.repeat(40)}?recursive=1`,
-      ]);
-      await expect(deploy).toBeDisabled();
-      await dialog.getByLabel('Allow a brief outage', { exact: false }).check();
-      await expect(deploy).toBeDisabled();
-      await expect(dialog).toContainText('Leave empty to keep the current size');
-      await expect(dialog).toContainText('This app provides sign-in for the portal');
-      // Staff manage every app like admins, without ownership changes,
-      // storage deletion, outages or resizing.
-      await staffPage.getByRole('link', { name: 'Manage apps', exact: true }).click();
-      await expect(staffPage.getByRole('heading', { name: 'All apps', exact: true })).toBeVisible();
-      await expect(staffPage.getByRole('link', { name: 'Admin', exact: true })).toHaveCount(0);
-      await expect(staffPage.getByRole('link', { name: 'Accounts', exact: true })).toHaveCount(0);
-      await expect(staffPage.getByRole('button', { name: 'Adopt app', exact: true })).toHaveCount(
-        0,
-      );
-      await expect(staffPage.getByRole('button', { name: 'Create app', exact: true })).toHaveCount(
-        0,
-      );
-      // Earlier specs give Alice more apps, so open hers by ID, not by name.
-      const foreignSlug = (await (await ownerPage.request.get(`/api/v1/apps/${foreign}`)).json())
-        .data.slug as string;
-      await staffPage.goto(`/admin/apps/${foreign}`);
-      await expect(
-        staffPage.getByRole('heading', { name: foreignSlug, exact: true }),
-      ).toBeVisible();
-      await expect(staffPage.getByText('Danger zone', { exact: true })).toHaveCount(0);
-      const variable = `STAFF_NOTE_${suffix.toUpperCase()}`;
-      await staffPage.getByLabel('Variable name').fill(variable);
-      await staffPage.getByLabel('New value').fill('set by staff');
-      await staffPage.getByRole('button', { name: 'Save variable', exact: true }).click();
-      await expect(staffPage.getByRole('button', { name: `Replace ${variable}` })).toBeVisible();
-      const staffCsrf = {
-        'X-CSRF-Token': (await (await staffPage.request.get('/api/v1/session')).json()).data
-          .csrfToken,
-      };
-      expect(
-        (await staffPage.request.get('/api/v1/admin-apps', { headers: staffCsrf })).status(),
-      ).toBe(200);
-      const adopt = await staffPage.request.post('/api/v1/admin-apps/adopt', {
-        headers: {
-          ...staffCsrf,
-          Origin: new URL(staffPage.url()).origin,
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-        data: { applicationId: operatorId },
-      });
-      expect(adopt.status()).toBe(403);
-      expect((await adopt.json()).error.code).toBe('ACCESS_DENIED');
-      expect((await ownerPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
-      // Admins see the staff change in their audit log.
-      const audit = (
-        await (await page.request.get('/api/v1/account-audit', { headers: csrfHeaders })).json()
-      ).data.items as { action: string; actorUsername: string }[];
-      expect(audit).toContainEqual(
-        expect.objectContaining({ action: 'app_env_set', actorUsername: 'staff' + suffix }),
-      );
-      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-      await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
-      // A class account's role changes through the Accounts page (a PATCH).
-      await commons(otherPage, 'bob');
-      const role = async () =>
-        (await (await page.request.get('/api/v1/accounts?q=bob', { headers: csrfHeaders })).json())
-          .data.items[0].role as string;
-      const next = (await role()) === 'staff' ? 'owner' : 'staff';
-      await page.getByRole('link', { name: 'Accounts', exact: true }).click();
-      await page.getByRole('button', { name: 'Bob Student', exact: true }).click();
-      const manage = page.getByRole('dialog', { name: 'Bob Student', exact: true });
-      await manage.getByLabel('Role', { exact: true }).selectOption(next);
-      await manage.getByRole('button', { name: 'Change role', exact: true }).click();
-      await expect(page.getByText('Role changed', { exact: true })).toBeVisible();
-      expect(await role()).toBe(next);
+      for (const target of [ownerPage, staffPage, page])
+        expect(
+          await target.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        ).toBe(true);
+    } catch (error) {
+      await mkdir('/tmp/staff-ui-browser-debug', { recursive: true });
+      for (const [role, target] of [
+        ['owner', ownerPage],
+        ['staff', staffPage],
+        ['admin', page],
+      ] as const) {
+        await writeFile(
+          `/tmp/staff-ui-browser-debug/${layout}-${role}.txt`,
+          await target
+            .locator('main')
+            .innerText({ timeout: 1000 })
+            .catch(() => 'Page closed'),
+        );
+      }
+      console.log(failures.join('\n'));
+      throw error;
     } finally {
-      await admin.close();
-      await staff.close();
-      await owner.close();
-      await other.close();
+      await Promise.all(contexts.map((context) => context.close()));
     }
   });
 }

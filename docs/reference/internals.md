@@ -207,7 +207,7 @@ Nomad's healthy deadline is 10 minutes from placement, including image download;
 
 Before removing an unhealthy candidate, `app.startup` reads the newest allocation's status, restart count, last 12 task events, and last 200 stdout and stderr lines (64 KiB each). It gets at most 30 seconds or one third of the remaining deadline; failure never blocks removal. The mode-`0600` record is `startup-logs/<application>/<deployment>.json` under controller state and appears on the portal's failed deployment page.
 
-With `maintenance: true`, the old version serves during build and artifact/storage checks. Under the app lock, the controller journals its job, image, placement, server, and port, then stops it before starting the candidate. Acceptance alone changes the accepted pointer. Retries use the stop checkpoint. Only the operator or a portal admin can request this through their respective interfaces. Cutover interrupts service and prevents concurrent app processes.
+With `maintenance: true`, the old version serves during build and artifact/storage checks. Under the app lock, the controller journals its job, image, placement, server, and port, then stops it before starting the candidate. Acceptance alone changes the accepted pointer. Retries use the stop checkpoint. The operator, staff, or a portal admin can request this through their respective interfaces. Cutover interrupts service and prevents concurrent app processes.
 
 Operator-only `reuseWorker: true` requires `maintenance: true`. The controller pins the accepted worker and its size, rechecking `ACTIVE` state, ownership, attachment, Nomad and Docker health, and capacity. It stops the old job and starts the new image on that worker; no server or IP changes. Failed cutover keeps the accepted pointer but leaves the app stopped with its worker retained. OS or flavor changes require replacement.
 
@@ -367,36 +367,52 @@ Local accounts use issuer `local`, an immutable UUID subject, and a unique lower
 
 ### Staff and admin authority
 
-Staff and portal admins manage other people's apps only through a separate namespace, `/api/v1/admin-apps` (broker `/v1/admin-apps`). It never maps to the controller's `/v1/admin/*` routes. Owners are denied there before any app lookup or controller call. The normal `/api/v1/apps` namespace enforces ownership for every role.
+Staff and portal admins use the shared `/api/v1/apps/{app}` endpoints for every app, without ownership or team membership. These requests pass through the app-management authority context: reads require CSRF and same-origin metadata, enter the private read audit, and suppress results if authority changes during the read. Mutations recheck the live role in the write transaction, carry the server-only journal marker and enter the app action audit. Owners and teammates retain their app-scoped authority. The `/api/v1/apps` and `/api/v1/intents` lists remain personal for every role.
+
+The portal routes are `/apps`, `/all-apps`, `/people`, `/people/:id`, `/activity`, and `/audit`. App pages live under `/apps/:id`. Role-named routes and duplicate app layouts have been removed, with no redirects.
 
 | Action | Owner (own and team apps) | Staff | Portal admin |
 | --- | --- | --- | --- |
 | Settings, deploys, environment, storage create, verify, rotate, logs, deploy keys, stop, start, restart | Yes | Any app | Any app |
+| Resume blocked changes | Own and team apps; admin-created changes require staff authority | Any app | Any app |
 | App and concurrency limits | Quota (default 2 apps, 1 concurrent change) | None | None |
 | Accounts, roles, quotas, account audit | No | No | Yes |
-| Create an app for another owner | No | No | Yes |
-| Adopt an operator-created app, reassign an owner, delete storage | No | No | Yes, with step-up |
-| Maintenance outage or sizing plan on deploy | No | No (`403 ADMIN_REQUIRED`) | Yes |
+| Create an app for another owner | No | Yes | Yes |
+| Adopt an operator-created app, reassign an owner, delete storage | No | Yes | Yes |
+| Maintenance outage or sizing plan on deploy | No | Yes | Yes |
 
-Each staff or admin mutation is journaled with a server-only marker and written to the admin action audit, so admins see staff changes. Foreground app mutations share one busy scope per app (`409 APP_BUSY`). Once the broker observes a controller operation with confirmed `finishing: true`, that intent stops holding the app and concurrency quota; the controller enforces finishing conflicts. Without that evidence, the broker keeps the busy scope. Teams keep one owner plus members in an `app_members` table; members pass the same app checks as the owner, and only the owner or an admin adds or removes people. An app counts only against its owner's quota.
+The app-owner picker reads only IDs, names, roles, enabled flags, and account status from `/api/v1/people/eligible-owners`, with bounded name search and pagination. It grants no account-management access.
+
+App-administration actions and staff/admin intent resumption require a staff or admin session, with no step-up. Account-management step-up is unchanged. Storage deletion still requires typed confirmation and refuses saved bindings. For apps with `requiresMaintenance: true`, the broker sets `maintenance: true` on app-administration deploys. Sign-in dependency messages are informational. Mutation bodies accept only their declared fields; the retired `identityProviderConfirmed` field is rejected with `400 INVALID_REQUEST`.
+
+Each app-administration mutation is journaled with a server-only marker and written to the admin action audit, so admins see staff changes. Foreground app mutations share one busy scope per app (`409 APP_BUSY`). Once the broker observes a controller operation with confirmed `finishing: true`, that intent stops holding the app and concurrency quota; the controller enforces finishing conflicts. Without that evidence, the broker keeps the busy scope. Teams keep one owner plus members in an `app_members` table; members pass the same app checks as the owner, and only the owner, staff, or an admin adds or removes people. An app counts only against its owner's quota.
 
 When the operator deletes an app through the privileged socket, the broker learns of it only from a definitive `404 APPLICATION_NOT_FOUND` on the project read. It then marks its record deleted, stops counting it toward quota, writes one `app_deleted_by_administrator` audit event, and answers further mutations with `410 APPLICATION_DELETED`. Outages never trigger this.
 
-### Read-only course catalog
+`GET /api/v1/apps/{app}/activity` includes the original actor. `attention=1` selects blocked or unknown intents and cached recovery-required operations without a recent-activity limit, so an older blocked deploy remains visible.
 
-Staff can read the portal’s own account, app, deployment, and intent records under `/api/v1/staff/`:
+Resume rechecks the caller's live session and role inside the journal update transaction. Already accepted work continues to be observed when its original account is disabled; this does not authorize a disabled account to deliver a prepared or unknown request. It preserves the original actor, body, fingerprint, method, path, client key, and controller key. The `audit` table records `resume` under the caller; staff and admin resumes also record `app_resume` in `admin_audit`, with the app and intent IDs. For admin-created requests, dispatch checks the latest resumer's active staff/admin authority, or the original actor's authority when no resume has been recorded. Environment edits still require resubmission by their original actor with the original key and value; generic resume cannot replay them because the journal stores no values.
 
-| Route | Shows |
+### Class records
+
+| Route | Authorization and result |
 | --- | --- |
-| `/api/v1/staff/owners` | Accounts known to the portal: ID, username, display name, enabled flag, role; filter by `role` |
-| `/api/v1/staff/owners/{owner}` | The same, plus effective quotas and used and reserved counts |
-| `/api/v1/staff/apps` | Apps with owner, slug, lifecycle, saved revision, and sanitized repository URL; filter by `ownerId` |
-| `/api/v1/staff/apps/{app}` | Catalog fields plus public URL, desired state, accepted deployment, and coarse health |
-| `/api/v1/staff/apps/{app}/deployments` | That app's deployment history |
-| `/api/v1/staff/apps/{app}/deployments/{deployment}` | One deployment snapshot |
-| `/api/v1/staff/operations` | Portal intents with app, owner, kind, state, and a coarse stage; filter by `ownerId` or `applicationId` |
+| `GET /api/v1/all-apps` | Staff/admin; every managed app, owner names, cached app status and blocked/unknown changes. Filters: `q` (up to 64 characters), `ownerId`, `status` (including `attention`). Filtering precedes pagination. Cached runtime health older than 30 seconds shows Unknown. Environment retry keys are exposed only to the original actor. |
+| `POST /api/v1/all-apps` | Staff/admin; create for an active, enabled `ownerId` |
+| `POST /api/v1/all-apps/adopt` | Staff/admin; import an accepted app |
+| `GET /api/v1/people/eligible-owners` | Staff/admin; bounded owner picker search, without sensitive account fields |
+| `GET /api/v1/people` | Staff/admin; every person’s ID, username, display name, enabled flag, role and setup status; filter by `q` |
+| `GET /api/v1/people/{owner}` | Staff/admin; person metadata and effective app and concurrency counts |
+| `GET /api/v1/activity` | Staff/admin; class activity with app, actor, kind, status and resumability. Filters: `ownerId`, `applicationId`, `attention=1`. Attention has its own pagination so older blocked changes stay visible. |
+| `GET /api/v1/people/{user}/account` | Admin only; account details, sign-in method, limits and authenticator status |
+| `POST /api/v1/people` | Admin only; create a local account, with step-up |
+| `PATCH /api/v1/people/{user}/account` | Admin only; role, enabled state, sessions, invitations and credential resets, with step-up |
+| `PUT /api/v1/people/{user}/quotas` | Admin only; limits, without step-up |
+| `GET /api/v1/audit` | Admin only; account and app action audit |
+| `PUT /api/v1/apps/{app}/owner` | Staff/admin; reassign, with expected owner check |
+| `DELETE /api/v1/apps/{app}/storage/{resource}` | Staff/admin; typed confirmation, with saved-binding check |
 
-Every list defaults to 25 records, caps at 50, and pages with a cursor. Responses use separate field allowlists and never include issuer or subject, email, sessions, credentials, environment names or values, storage identifiers, logs, raw operation data, image digests, or provider, IP, or sizing records. Enumeration starts from the broker database; the controller's global lists stay privileged. Reads are rate-limited (60 per minute per user, 120 per address, two concurrent per user) and each successful read is recorded in a private read audit kept for 30 days.
+Class lists default to 25 records and cap at 50. People and Activity project bounded, allowlisted metadata. Shared app pages use the same app projections for all authorized users, including settings, environment names, storage and logs; secret values remain write-only. App enumeration starts from the broker database; controller global lists remain privileged. People and Activity reads retain the class read budgets (60 per minute per user, 120 per address, two concurrent per user) and the private read audit; app reads retain the queued app read budget. Read-log capacity and authority checks remain fail-closed.
 
 ### Portal data and releases
 

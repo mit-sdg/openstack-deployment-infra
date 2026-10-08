@@ -98,7 +98,7 @@ export function Dashboard() {
   if (apps.error)
     return (
       <Page>
-        <PageHeader title="Apps" />
+        <PageHeader title="My apps" />
         <QueryError query={apps} what="your apps" />
       </Page>
     );
@@ -116,7 +116,7 @@ export function Dashboard() {
   return (
     <Page>
       <PageHeader
-        title="Apps"
+        title="My apps"
         meta={
           items.length > 0 &&
           limit !== null && (
@@ -136,7 +136,7 @@ export function Dashboard() {
       {items.length ? (
         <Section flush aria-label="Your apps">
           <DataTable
-            label="Apps"
+            label="My apps"
             columns={columns}
             rows={items}
             rowKey={(app) => app.applicationId}

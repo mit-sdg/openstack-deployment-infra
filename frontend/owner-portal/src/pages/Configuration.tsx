@@ -30,6 +30,7 @@ import { EnvironmentSection } from '../components/EnvironmentSection';
 import { QueryError } from '../components/Feedback';
 import { RepositoryAccess } from '../components/RepositoryAccess';
 import { StorageSection } from '../components/StorageSection';
+import { AppManagement } from '../components/AppManagement';
 import './app-pages.css';
 
 export function ConfigurationPage({ id }: { id: string }) {
@@ -45,7 +46,10 @@ export function ConfigurationPage({ id }: { id: string }) {
       ) : query.error ? (
         <QueryError query={query} what="your settings" />
       ) : (
-        <ConfigurationForm key={id} id={id} initial={query.data} resources />
+        <>
+          <ConfigurationForm key={id} id={id} initial={query.data} resources />
+          <AppManagement id={id} />
+        </>
       )}
     </AppFrame>
   );
@@ -84,13 +88,12 @@ export function ConfigurationForm({
   initial: Settings;
   resources?: boolean;
   service?: ReturnType<typeof resourceApi>;
-  /** Admin view of the sign-in app: storage changes need explicit consent. */
+  /** Managed sign-in app: show information with storage changes. */
   identityProvider?: boolean;
 }) {
-  const scope = service === api ? [] : ['admin'];
   const formId = useId();
   const environment = useQuery({
-    queryKey: [...scope, 'environment', id],
+    queryKey: ['environment', id],
     queryFn: () => service.environment(id),
     enabled: resources,
   });
@@ -106,8 +109,8 @@ export function ConfigurationForm({
   const submitted = useRef<Settings>(initial);
   const client = useQueryClient();
   function refresh() {
-    client.invalidateQueries({ queryKey: [...scope, 'settings', id] });
-    client.invalidateQueries({ queryKey: [...scope, 'app', id] });
+    client.invalidateQueries({ queryKey: ['settings', id] });
+    client.invalidateQueries({ queryKey: ['app', id] });
   }
   const save = useMutation({
     mutationFn: (key: string) => {
@@ -253,9 +256,13 @@ export function ConfigurationForm({
               />
             </Field>
             <Grid columns={2}>
-              <Field label="Build script" id="build-script" optional>
+              <Field
+                label="Build script"
+                id="build-script"
+                optional
+                hint="Leave empty if your app has no build step."
+              >
                 <Input
-                  placeholder="build"
                   value={settings.configuration.build.buildScript ?? ''}
                   onChange={(e) => build({ buildScript: e.target.value || null })}
                 />

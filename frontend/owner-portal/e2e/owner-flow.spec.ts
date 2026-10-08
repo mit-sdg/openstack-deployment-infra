@@ -15,7 +15,7 @@ async function signIn(page: Page, owner: 'Alice' | 'Bob') {
   await page.goto('/sign-in');
   await approve(page, owner.toLowerCase());
   await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/apps$/);
-  await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'My apps', exact: true })).toBeVisible();
 }
 
 for (const [mode, viewport, colorScheme] of [
@@ -26,6 +26,7 @@ for (const [mode, viewport, colorScheme] of [
 ] as const) {
   test(`owner workflow · ${mode}`, async ({ browser }, testInfo) => {
     await mkdir(screenshots, { recursive: true });
+    test.setTimeout(90000);
     const context = await browser.newContext({ viewport, colorScheme, ignoreHTTPSErrors: true });
     const cspViolations: string[] = [];
     const unexpectedNetwork: string[] = [];

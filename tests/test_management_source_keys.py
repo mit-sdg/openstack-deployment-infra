@@ -141,14 +141,14 @@ class SourceKeyTests(ManagementCase):
                 lambda: self.call("POST", route + "commits", {}, "alice"),
             )
 
-    def test_controllers_without_deploy_keys_say_so(self) -> None:
+    def test_deploy_key_errors_are_reported_as_unavailable(self) -> None:
         request = self.broker.client.request
 
-        def older(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        def unavailable(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
             if "/source-key" in path:
                 return 404, {"error": {"code": "NOT_FOUND"}}
             return request(method, path, *args, **kwargs)
 
-        with patch.object(self.broker.client, "request", older):
-            self.assert_error("SOURCE_KEYS_UNAVAILABLE", self.key)
-            self.assert_error("SOURCE_KEYS_UNAVAILABLE", lambda: self.key("DELETE"))
+        with patch.object(self.broker.client, "request", unavailable):
+            self.assert_error("STATE_UNAVAILABLE", self.key)
+            self.assert_error("STATE_UNAVAILABLE", lambda: self.key("DELETE"))

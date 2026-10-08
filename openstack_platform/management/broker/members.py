@@ -144,7 +144,10 @@ class Members:
             "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
             (actor, app["id"], None, action, now),
         )
-        if request.path.startswith("/v1/admin-apps/"):
+        if db.execute("SELECT role FROM users WHERE id=?", (actor,)).fetchone()[0] in {
+            "staff",
+            "admin",
+        }:
             audit(
                 db,
                 actor,
@@ -161,12 +164,21 @@ def activity(broker: Broker, request: Request) -> Response:
     raw = request.query.get("limit", ("10",))
     if len(raw) != 1 or not raw[0].isdigit() or not 1 <= int(raw[0]) <= 50:
         raise HttpError(400, "INVALID_REQUEST", "Invalid activity limit.")
+    attention = request.query.get("attention", ("0",))
+    if attention not in {("0",), ("1",)}:
+        raise HttpError(400, "INVALID_REQUEST", "Invalid activity filter.")
     with broker.database.connect() as db:
         rows = db.execute(
             "SELECT i.*,u.display_name AS actor_name FROM intents i"
             " LEFT JOIN users u ON u.id=i.user_id WHERE i.app_id=?"
-            " ORDER BY i.created DESC,i.id DESC LIMIT ?",
-            (app["id"], int(raw[0])),
+            + (
+                " AND (i.state IN ('blocked','unknown') OR json_extract(i.operation,'$.status')='recovery_required')"
+                if attention == ("1",)
+                else ""
+            )
+            + " ORDER BY i.created DESC,i.id DESC"
+            + ("" if attention == ("1",) else " LIMIT ?"),
+            (app["id"],) if attention == ("1",) else (app["id"], int(raw[0])),
         ).fetchall()
     items = [
         {

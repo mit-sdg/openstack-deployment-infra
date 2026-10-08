@@ -1,7 +1,6 @@
 import {
   Alert,
   Button,
-  Checkbox,
   Dialog,
   EmptyState,
   ErrorAlert,
@@ -9,6 +8,8 @@ import {
   Grid,
   Hint,
   Input,
+  Select,
+  Textarea,
   KeyValueList,
   PageSkeleton,
   Section,
@@ -18,7 +19,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useSearch } from 'wouter';
-import { api, type Settings } from '../api';
+import { request, intentData, api, type Settings } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { BoundaryText } from '../components/BoundaryText';
 import { QueryError } from '../components/Feedback';
@@ -72,7 +73,6 @@ export function DeployPage({ id }: { id: string }) {
     ]),
   ].sort();
   const identity = useQuery({ queryKey: ['app', id], queryFn: () => api.app(id) });
-  const [identityConfirmed, setIdentityConfirmed] = useState(false);
   const search = new URLSearchParams(useSearch());
   const selected = search.get('commit') ?? '';
   const latest = search.get('latest') === '1';
@@ -91,6 +91,8 @@ export function DeployPage({ id }: { id: string }) {
     platform,
   );
   const [error, setError] = useState<string | null>(null);
+  const [maintenance, setMaintenance] = useState(false);
+  const [plan, setPlan] = useState('');
   const [intentId, setIntentId] = useState<string | null>(null);
   const [review, setReview] = useState(false);
   const [findingLatest, setFindingLatest] = useState(false);
@@ -109,16 +111,8 @@ export function DeployPage({ id }: { id: string }) {
           commit = (await recentCommits(repository!, branch!, abort.signal))[0]?.sha ?? null;
         } catch {
           if (abort.signal.aborted) return;
-          try {
-            if ((await api.sourceKey(id)).present)
-              commit = (await api.recentSourceCommits(id))[0]?.sha ?? null;
-          } catch {
-            /* Older platforms still expose a deploy-key head check. */
-          }
-          if (!commit) {
-            const access = await api.checkSourceKey(id);
-            commit = access.keyPresent && access.reachable ? access.head : null;
-          }
+          if ((await api.sourceKey(id)).present)
+            commit = (await api.recentSourceCommits(id))[0]?.sha ?? null;
         }
         if (abort.signal.aborted) return;
         if (!commit) throw new Error('missing latest commit');
@@ -140,8 +134,28 @@ export function DeployPage({ id }: { id: string }) {
   const client = useQueryClient();
   const intent = useIntentPolling(intentId);
   const deploy = useMutation({
-    mutationFn: (key: string) =>
-      api.deploy(id, settings.data!.revision, sha, key, identityConfirmed),
+    mutationFn: (key: string) => {
+      if (identity.data?.access !== 'admin')
+        return api.deploy(id, settings.data!.revision, sha, key);
+      let parsed: unknown;
+      if (plan.trim()) {
+        try {
+          parsed = JSON.parse(plan);
+        } catch {
+          throw new Error('Enter valid JSON in the sizing plan, or leave it empty.');
+        }
+      }
+      return request(`/apps/${id}/deployments`, intentData, {
+        method: 'POST',
+        key,
+        body: {
+          configurationRevision: settings.data!.revision,
+          commit: sha,
+          maintenance: identity.data.requiresMaintenance || maintenance,
+          ...(parsed ? { plan: parsed } : {}),
+        },
+      });
+    },
     onSuccess: (result) => {
       setIntentId(result.intentId);
       setReview(false);
@@ -231,7 +245,6 @@ export function DeployPage({ id }: { id: string }) {
                 <RecentCommits
                   repository={settings.data.repository}
                   branch={settings.data.branch}
-                  latest={() => api.checkSourceKey(id)}
                   platform={platform}
                   value={sha}
                   onSelect={(commit) => {
@@ -260,6 +273,42 @@ export function DeployPage({ id }: { id: string }) {
                     maxLength={40}
                   />
                 </Field>
+                {identity.data?.access === 'admin' && (
+                  <>
+                    {identity.data.requiresMaintenance ? (
+                      <Alert tone="info">
+                        This app keeps a fixed IP address, so deploying it takes it offline briefly.
+                      </Alert>
+                    ) : (
+                      <Field
+                        label="Deployment method"
+                        id="deployment-method"
+                        hint="Replacing the running app takes it offline briefly."
+                      >
+                        <Select
+                          value={maintenance ? 'replace' : 'alongside'}
+                          onChange={(event) => setMaintenance(event.target.value === 'replace')}
+                        >
+                          <option value="alongside">Start alongside the running app</option>
+                          <option value="replace">Replace the running app in one step</option>
+                        </Select>
+                      </Field>
+                    )}
+                    <Field
+                      label="Sizing plan"
+                      id="sizing-plan"
+                      optional
+                      hint="Paste a reviewed plan as JSON. Leave empty to keep the current size."
+                    >
+                      <Textarea
+                        rows={3}
+                        value={plan}
+                        onChange={(event) => setPlan(event.target.value)}
+                        spellCheck={false}
+                      />
+                    </Field>
+                  </>
+                )}
                 <CommitChecks
                   repository={settings.data.repository}
                   sha={sha}
@@ -298,7 +347,6 @@ export function DeployPage({ id }: { id: string }) {
             <Button
               variant="primary"
               loading={deploy.isPending}
-              disabled={needsIdentity && !identityConfirmed}
               onClick={() => {
                 const key = pendingKey ?? crypto.randomUUID();
                 setPendingKey(key);
@@ -331,13 +379,7 @@ export function DeployPage({ id }: { id: string }) {
           this commit is the one you mean: the branch name is only a label. Your app may briefly run
           both versions while the new one starts.
         </Hint>
-        {needsIdentity && (
-          <Checkbox
-            label="Signing in to this portal depends on this app. Deploy it anyway."
-            checked={identityConfirmed}
-            onChange={(event) => setIdentityConfirmed(event.target.checked)}
-          />
-        )}
+        {needsIdentity && <Alert tone="info">Signing in to this portal depends on this app.</Alert>}
         <ErrorAlert error={deploy.error} />
       </Dialog>
     </AppFrame>

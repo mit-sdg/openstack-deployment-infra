@@ -4,7 +4,6 @@ import type { CommitCheck } from './utils/preflight';
 export type SourceReadOptions = {
   id: string;
   revision: number;
-  scope?: 'admin';
   service: Pick<
     ReturnType<typeof resourceApi>,
     'sourceKey' | 'recentSourceCommits' | 'checkSourceCommit'
@@ -58,8 +57,12 @@ export type Settings = {
 };
 export type AppRecord = {
   applicationId: string;
-  /** "member" for a teammate's app; absent from older brokers. */
+  /** Access on app reads; the creation response may omit it. */
   access?: 'owner' | 'member' | 'admin';
+  ownerId?: string;
+  ownerUsername?: string;
+  requiresMaintenance?: boolean;
+  sizing?: { workerFlavor: string; cpuMHz: number; memoryMiB: number } | null;
   /** The owner's name, on apps you're a team member of. */
   ownerDisplayName?: string | null;
   slug: string;
@@ -93,6 +96,7 @@ export type Intent = {
   controllerErrorCode?: string | null;
   names?: string[];
   requiresResubmit?: boolean;
+  canResume?: boolean;
   retryKey?: string | null;
   /** Who made the change, in an app's activity. */
   actor?: { displayName: string | null; you: boolean };
@@ -133,7 +137,7 @@ export type Deployment = {
   configuration: Configuration;
   configurationSha256: string;
   imageDigest: string | null;
-  /** Absent from older platforms, and null until the build finishes. */
+  /** Null until a build captures its runtime; historical deployments may have no capture. */
   runtime?: DeploymentRuntime | null;
   cleanupState: string;
   requestedAt: string;
@@ -151,8 +155,8 @@ export type Session = {
   expiresAt: string;
   role: 'owner' | 'staff' | 'admin';
   stepUpExpiresAt: string | null;
-  /** Brand shown in the shell; absent from older brokers. */
-  platformName?: string;
+  /** Server-configured brand shown in the shell. */
+  platformName: string;
 };
 export type Page<T> = { items: T[]; nextCursor: string | null; truncated: boolean };
 export type BuildLog = {
@@ -218,9 +222,11 @@ export class ApiError extends Error {
   }
 }
 let csrf = '';
+let elevatedSession = false;
 let credentialEpoch = 0;
 export function clearCredentials() {
   csrf = '';
+  elevatedSession = false;
   credentialEpoch++;
 }
 export function record(value: unknown): Record<string, unknown> {
@@ -242,7 +248,7 @@ const appData = (v: unknown) =>
     desiredRunning: 'boolean',
     stale: 'boolean',
   }) as AppRecord;
-const intentData = (v: unknown) =>
+export const intentData = (v: unknown) =>
   fields(v, { intentId: 'string', appId: 'string', kind: 'string', state: 'string' }) as Intent;
 const deploymentData = (v: unknown) =>
   fields(v, {
@@ -267,15 +273,15 @@ export function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<
   };
 }
 // Keep metadata panels inside the broker's two-active-reads account bound.
-let adminReads = 0;
-const adminReadWaiters: (() => void)[] = [];
-async function adminReadSlot() {
-  if (adminReads >= 2) await new Promise<void>((resolve) => adminReadWaiters.push(resolve));
-  else adminReads++;
+let classReads = 0;
+const classReadWaiters: (() => void)[] = [];
+async function classReadSlot() {
+  if (classReads >= 2) await new Promise<void>((resolve) => classReadWaiters.push(resolve));
+  else classReads++;
   return () => {
-    const next = adminReadWaiters.shift();
+    const next = classReadWaiters.shift();
     if (next) next();
-    else adminReads--;
+    else classReads--;
   };
 }
 export async function request<T>(
@@ -287,11 +293,18 @@ export async function request<T>(
 ): Promise<T> {
   const epoch = credentialEpoch;
   const staff =
-    path.startsWith('/admin-apps') ||
-    path.startsWith('/staff/') ||
-    path.startsWith('/accounts') ||
-    path.startsWith('/account-audit');
-  const release = !options && path.startsWith('/admin-apps') ? await adminReadSlot() : () => {};
+    path.startsWith('/all-apps') ||
+    path.startsWith('/people') ||
+    path.startsWith('/activity') ||
+    path.startsWith('/audit') ||
+    path.startsWith('/apps/') ||
+    path.startsWith('/intents/');
+  const release =
+    !options &&
+    staff &&
+    (elevatedSession || (!path.startsWith('/apps/') && !path.startsWith('/intents/')))
+      ? await classReadSlot()
+      : () => {};
   let response: Response;
   try {
     if (epoch !== credentialEpoch)
@@ -353,12 +366,18 @@ export const api = {
     request(
       '/session',
       (v) => {
-        const data = fields(v, { csrfToken: 'string', expiresAt: 'string' });
+        const data = fields(v, {
+          csrfToken: 'string',
+          expiresAt: 'string',
+          platformName: 'string',
+          role: 'string',
+        });
         fields(data.user, { id: 'string', displayName: 'string', username: 'string' });
         if (!['owner', 'staff', 'admin'].includes(String(data.role)))
           throw new Error('Invalid session role');
         csrf = data.csrfToken as string;
-        if (typeof data.platformName !== 'string' || !data.platformName) delete data.platformName;
+        elevatedSession = data.role === 'staff' || data.role === 'admin';
+        if (!data.platformName) throw new Error('Invalid session brand');
         return data as Session;
       },
       undefined,
@@ -375,31 +394,24 @@ export const api = {
       (v) => ({ app: appData(record(v).app), intent: intentData(record(v).intent) }),
       { method: 'POST', body: { slug }, key },
     ),
-  state: (id: string, desiredRunning: boolean, key: string, identityProviderConfirmed = false) =>
+  state: (id: string, desiredRunning: boolean, key: string) =>
     request(`/apps/${id}/state`, intentData, {
       method: 'POST',
-      body: { desiredRunning, ...(identityProviderConfirmed ? { identityProviderConfirmed } : {}) },
+      body: { desiredRunning },
       key,
     }),
-  restart: (id: string, key: string, identityProviderConfirmed = false) =>
+  restart: (id: string, key: string) =>
     request(`/apps/${id}/restart`, intentData, {
       method: 'POST',
-      body: identityProviderConfirmed ? { identityProviderConfirmed } : {},
+      body: {},
       key,
     }),
-  deploy: (
-    id: string,
-    revision: number,
-    commit: string,
-    key: string,
-    identityProviderConfirmed = false,
-  ) =>
+  deploy: (id: string, revision: number, commit: string, key: string) =>
     request(`/apps/${id}/deployments`, intentData, {
       method: 'POST',
       body: {
         configurationRevision: revision,
         commit,
-        ...(identityProviderConfirmed ? { identityProviderConfirmed: true } : {}),
       },
       key,
     }),
@@ -426,6 +438,12 @@ export const api = {
     }),
   activity: (app: string) =>
     request(`/apps/${app}/activity?limit=8`, (v) => {
+      const data = record(v);
+      if (!Array.isArray(data.items)) throw new Error('Invalid service response');
+      return data.items.map(intentData);
+    }),
+  attention: (app: string) =>
+    request(`/apps/${app}/activity?attention=1`, (v) => {
       const data = record(v);
       if (!Array.isArray(data.items)) throw new Error('Invalid service response');
       return data.items.map(intentData);
@@ -506,35 +524,8 @@ export function validateBindings(bindings: StorageBinding[], names: string[]): s
   return null;
 }
 
-/** Thrown when someone declines a storage confirmation; never shown as an error. */
-export class ActionCanceled extends Error {
-  constructor() {
-    super('Action canceled.');
-  }
-}
-
-/**
- * Asks to confirm a storage change on the app that runs portal sign-in, for
- * example in a Dialog. Resolve true to continue.
- */
-export type ConfirmStorage = () => boolean | Promise<boolean>;
-
 // Both workspaces use the same resource requests and write-only controls.
-// Owner requests confirm only for the sign-in app; admin requests let the
-// callback decide. There is no native confirm fallback: owner storage changes
-// on the sign-in app need a ConfirmStorage callback.
-export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
-  async function consentFields(id: string) {
-    if (prefix === '/apps') {
-      if (!(await api.app(id)).identityProvider) return {};
-      if (!confirmStorage)
-        throw new Error(
-          'Portal sign-in depends on this app. Confirm storage changes from its settings page.',
-        );
-    } else if (!confirmStorage) return {};
-    if (!(await confirmStorage())) throw new ActionCanceled();
-    return { identityProviderConfirmed: true };
-  }
+export function resourceApi(prefix = '/apps') {
   return {
     settings: (id: string) =>
       request(
@@ -576,13 +567,13 @@ export function resourceApi(prefix = '/apps', confirmStorage?: ConfirmStorage) {
     createStorage: async (id: string, type: StorageResource['type'], key: string) =>
       request(`${prefix}/${id}/storage`, intentData, {
         method: 'POST',
-        body: { type, ...(await consentFields(id)) },
+        body: { type },
         key,
       }),
     storageAction: async (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>
       request(`${prefix}/${id}/storage/${resource}/${action}`, intentData, {
         method: 'POST',
-        body: await consentFields(id),
+        body: {},
         key,
       }),
     members: (id: string) => request(`${prefix}/${id}/members`, teamData),

@@ -354,7 +354,7 @@ Key details for debugging:
 
 4. Choose **Sign in with your class account**. The browser goes to the fake Commons at `https://localhost:9444`. Accept the certificate warning there too.
 
-5. Enter a fixture username and password from the table below, then choose **Allow**. You land on the **Apps** page. **Cancel** returns you to the sign-in page with a cancelled message.
+5. Enter a fixture username and password from the table below, then choose **Allow**. You land on the **My apps** page. **Cancel** returns you to the sign-in page with a cancelled message.
 
 Press Ctrl-C in the harness terminal to stop everything.
 
@@ -416,7 +416,7 @@ Create the first portal admin with a one-time setup link, as in production. Ther
 
 3. Sign in under **Use a local account** on the sign-in page. There is no role selector: each account's role decides what it sees.
 
-4. Go to **Accounts** and create a local account. Choose the role (owner, staff, or admin) and copy the setup link. The portal may ask for your password and authenticator code again first (step-up).
+4. Go to **People** and create a local account. Choose the role (owner, staff, or admin) and copy the setup link. The portal may ask for your password and authenticator code again first (step-up).
 
 5. Open the setup link in another browser profile or a private window to finish that account's setup.
 
@@ -498,7 +498,7 @@ Playwright resets `.tmp/e-accounts-<mode>` before each run. Ports are 9543 (HTTP
 | --- | --- |
 | `e2e/owner-flow.spec.ts` | Two owners signing in through the fake Commons, isolation between them, configuration, deploy and review, build output, recovery after a lost response, sign-out, and CSP, at desktop and phone widths in light and dark |
 | `e2e/resources.spec.ts` | Environment variables, renamed PostgreSQL bindings, the variable names a deploy injects, and credential rotation |
-| `e2e/staff-flow.spec.ts` | Bootstrapping a portal admin with an authenticator, inviting local staff, owner and staff boundaries, adopting a seeded operator app, staff managing another owner's app without admin-only actions, and the audit log |
+| `e2e/staff-flow.spec.ts` | Bootstrapping a portal admin with an authenticator, inviting local staff, owner and staff boundaries, adopting a seeded operator app, staff creating, adopting, reassigning, deploying, and deleting storage without step-up, with account-management boundaries, and the audit log |
 
 Traces and video are off; screenshots go to `.tmp/owner-portal-playwright/screenshots/`. On failure, `tests/collect_owner_portal_artifacts.py` collects fixture screenshots and sanitized diagnostics (method, path, status, error code), limited to 2 MiB per file and 20 MiB total. CI uploads no traces, videos, headers, query strings, or response bodies.
 

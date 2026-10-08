@@ -13,10 +13,6 @@ from ..common import canonical, strict_json, utc
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
 
-# App-administration intents only an admin may start or run: ownership changes
-# and permanent deletion. Staff may start the others, like admins.
-ADMIN_ONLY_INTENTS = frozenset({"create_app", "adopt_app", "storage_delete"})
-
 
 def controller_error_code(value: object) -> str | None:
     """Only a bounded public machine code, never upstream free text."""
@@ -66,6 +62,24 @@ def deploy_failure_guidance(kind: str, state: str, code: object, phase: object) 
     return None
 
 
+def attention_guidance(kind: str, state: str, *, can_resume: bool = True) -> str | None:
+    """One inline instruction; the Resume control supplies its location."""
+    if state not in {"blocked", "unknown"}:
+        return None
+    if kind in {"env_set", "env_delete"}:
+        return (
+            "The person who started this environment edit must enter the value again in Settings."
+        )
+    change = "deployment" if kind == "deploy" else "change"
+    if not can_resume:
+        return f"Ask staff to resume this {change}."
+    return (
+        f"Resume this {change} to finish it."
+        if state == "blocked"
+        else f"Resume this {change} to check its outcome."
+    )
+
+
 def report_exception(error: Exception, intent_id: str = "recovery-scan") -> None:
     # A dedicated message-only handler never formats exception values/tracebacks,
     # which could contain submitted bodies or credential material.
@@ -110,7 +124,7 @@ class Journal:
         now = time.time()
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT intents.id FROM intents JOIN users ON users.id=intents.user_id WHERE intents.state IN ('prepared','unknown','accepted') AND (intents.kind NOT IN ('env_set','env_delete') OR intents.state='accepted') AND next_retry<=? AND lease<=? AND users.enabled=1 ORDER BY intents.created LIMIT 4",
+                "SELECT intents.id FROM intents JOIN users ON users.id=intents.user_id WHERE intents.state IN ('prepared','unknown','accepted') AND (intents.kind NOT IN ('env_set','env_delete') OR intents.state='accepted') AND next_retry<=? AND lease<=? AND (users.enabled=1 OR intents.state='accepted') ORDER BY intents.created LIMIT 4",
                 (now, now),
             ).fetchall()
         for row in rows:
@@ -218,13 +232,19 @@ class Journal:
                 strict_json(row["body"].encode()).get("_portalAdmin") is True
                 and row["state"] != "accepted"
             ):
+                # A reviewed resume grants app authority without changing the
+                # original actor, controller key, or stored request body.
+                resumed = db.execute(
+                    "SELECT user_id FROM audit WHERE intent_id=? AND action='resume' ORDER BY rowid DESC LIMIT 1",
+                    (identifier,),
+                ).fetchone()
                 actor = db.execute(
-                    "SELECT role,enabled,status FROM users WHERE id=?", (row["user_id"],)
+                    "SELECT role,enabled,status FROM users WHERE id=?",
+                    (resumed[0] if resumed is not None else row["user_id"],),
                 ).fetchone()
                 if (
                     actor is None
-                    or actor["role"]
-                    not in ({"admin"} if row["kind"] in ADMIN_ONLY_INTENTS else {"staff", "admin"})
+                    or actor["role"] not in {"staff", "admin"}
                     or not actor["enabled"]
                     or actor["status"] != "active"
                 ):
@@ -279,6 +299,8 @@ class Journal:
                     if result["status"] == "recovery_required"
                     else result["status"]
                 )
+                if state == "blocked":
+                    error = attention_guidance(intent["kind"], state)
                 if state == "failed":
                     error = (
                         "The controller rejected this operation. Review its status before retrying."
@@ -289,7 +311,7 @@ class Journal:
                 }:
                     # An uncertain cleanup is still a held application scope.
                     state = "blocked"
-                    error = "Cleanup requires controller recovery."
+                    error = attention_guidance(intent["kind"], state)
             else:
                 status, result = self.client.request(
                     intent["method"],
@@ -314,7 +336,10 @@ class Journal:
                     # diagnostic in existing JSON without inventing an operation.
                     operation = {"controllerErrorCode": code} if code else None
                     if code in {"RECOVERY_REQUIRED", "UNFINISHED_OPERATION", "OPERATION_CONFLICT"}:
-                        state, error = "blocked", "This application requires controller recovery."
+                        state, error = (
+                            "blocked",
+                            attention_guidance(intent["kind"], "blocked"),
+                        )
                     else:
                         state, error = (
                             "failed",
@@ -367,6 +392,11 @@ def intent_model(
         if isinstance(operation, dict)
         else None
     )
+    can_resume = (
+        row["kind"] not in {"env_set", "env_delete"}
+        and row["state"] in {"blocked", "unknown"}
+        and (body.get("_portalAdmin") is not True or diagnostic)
+    )
     model = {
         "intentId": row["id"],
         "appId": row["app_id"],
@@ -375,7 +405,8 @@ def intent_model(
         "operationId": row["operation_id"],
         "operation": operation or None,
         "statusUrl": f"/api/v1/intents/{row['id']}",
-        "safeError": deploy_failure_guidance(
+        "safeError": attention_guidance(row["kind"], row["state"], can_resume=can_resume)
+        or deploy_failure_guidance(
             row["kind"],
             row["state"],
             code,
@@ -390,6 +421,7 @@ def intent_model(
         if row["kind"] in {"env_set", "env_delete"}
         and row["state"] in {"prepared", "unknown", "blocked"}
         else None,
+        "canResume": can_resume,
         "requiresResubmit": row["kind"] in {"env_set", "env_delete"}
         and row["state"] in {"prepared", "unknown", "blocked"},
     }

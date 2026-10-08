@@ -92,7 +92,7 @@ export function humanPhase(phase: string) {
 // Activity titles are events, phrased by outcome: "Deployed" when it
 // succeeded, "Deploying" while it runs, and the noun ("Deployment") next to a
 // Failed or Needs attention badge. Keys are exactly the broker's INTENT_KINDS
-// (openstack_platform/management/broker/staff.py); a test keeps them in sync.
+// (openstack_platform/management/broker/class_reads.py); a test keeps them in sync.
 export const activityTitles: Record<string, [done: string, running: string, noun: string]> = {
   create_app: ['App created', 'Creating app', 'App creation'],
   save_configuration: ['Settings saved', 'Saving settings', 'Settings change'],

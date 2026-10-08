@@ -1,25 +1,5 @@
-import {
-  EmptyState,
-  ErrorAlert,
-  LoadError,
-  LoadingRows,
-  PageSkeleton,
-} from '@openstack-platform/ui';
-import type { ReactNode } from 'react';
+import { LoadError } from '@openstack-platform/ui';
 import { ApiError } from '../api';
-
-// Portal-wide feedback. New code can also import these from @openstack-platform/ui.
-export { ErrorAlert as ErrorNotice, EmptyState, PageSkeleton };
-
-/** Compatibility wrapper for pages that predate EmptyState. */
-export function Empty({ title, children }: { title: string; children?: ReactNode }) {
-  return <EmptyState title={title}>{children}</EmptyState>;
-}
-
-/** Loading rows for a section or list. Use PageSkeleton for whole pages. */
-export function Loading() {
-  return <LoadingRows />;
-}
 
 /**
  * Says what failed and what to do. `what` is the plural thing the page shows,

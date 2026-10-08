@@ -247,7 +247,7 @@ class AdminTeamTests(ManagementCase):
     def test_admin_manages_any_team_and_reassigning_to_a_member_drops_their_membership(
         self,
     ) -> None:
-        prefix = f"/v1/admin-apps/{self.app}"
+        prefix = f"/v1/apps/{self.app}"
         added = self.call("POST", prefix + "/members", {"username": "bob"}, "admin").body["data"]
         self.assertEqual([person["role"] for person in added["items"]], ["owner", "member"])
         with self.broker.database.connect() as db:

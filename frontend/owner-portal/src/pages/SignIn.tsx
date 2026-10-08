@@ -71,7 +71,7 @@ export function SignIn() {
         if (!response.ok) throw new Error(message(value.error?.code, provider));
         if (
           typeof value.data?.returnPath !== 'string' ||
-          !/^\/(?:apps(?:\/[a-z0-9/-]+)?|activity|staff\/owners|admin\/accounts)$/.test(
+          !/^\/(?:apps(?:\/[a-z0-9/-]+)?|all-apps|people|activity|audit)$/.test(
             value.data.returnPath,
           )
         )

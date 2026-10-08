@@ -89,7 +89,7 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
             "alice",
         )
 
-    def test_project_storage_and_env_are_owner_scoped_and_no_delete_exists(self):
+    def test_project_storage_and_env_are_owner_scoped_and_storage_delete_is_elevated(self):
         self.login("bob")
         for method, suffix, body in (
             ("GET", "environment", None),
@@ -113,7 +113,7 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
                 )
         resource = self.storage_create()
         self.assert_error(
-            "NOT_FOUND",
+            "ACCESS_DENIED",
             lambda: self.call(
                 "DELETE", f"/v1/apps/{self.app_id}/storage/{resource['resourceId']}", {}, "alice"
             ),
@@ -642,7 +642,7 @@ class OwnerResourceContractTests(contracts.RealProjectContractTests):
 
 
 class ResourceWebTransportTests(management.ManagementCase):
-    def test_http_delete_dispatches_only_the_environment_route(self):
+    def test_http_delete_dispatches_environment_and_elevated_storage_routes(self):
         from urllib.parse import urlsplit
 
         from openstack_platform.management.web.server import WebServer
@@ -686,9 +686,10 @@ class ResourceWebTransportTests(management.ManagementCase):
                 },
             )
             response = connection.getresponse()
-            self.assertEqual(response.status, 404)
+            self.assertEqual(response.status, 202)
             response.read()
-            self.assertEqual(request.call_count, count)
+            self.assertEqual(request.call_count, count + 1)
+            self.assertEqual(request.call_args.args[0], "DELETE")
 
     def test_exact_resource_paths_forward_and_neighbors_fail_closed(self):
         from openstack_platform.management.web.server import WebServer
@@ -704,6 +705,7 @@ class ResourceWebTransportTests(management.ManagementCase):
             ("POST", f"/api/v1/apps/{app}/storage"),
             ("POST", f"/api/v1/apps/{app}/storage/{resource}/verify"),
             ("POST", f"/api/v1/apps/{app}/storage/{resource}/rotate"),
+            ("DELETE", f"/api/v1/apps/{app}/storage/{resource}"),
         ]
         with mock.patch.object(web.broker, "request", return_value=(200, {"data": {}})) as request:
             for method, path in paths:

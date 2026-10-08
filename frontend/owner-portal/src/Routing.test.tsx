@@ -3,9 +3,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { adminApi } from './adminApi';
-import { adminAppsApi } from './adminAppsApi';
 import { api, clearCredentials, type Session } from './api';
-import { staffApi } from './staffApi';
 
 // Nested staff and admin routes must reach their pages. Page data never
 // resolves: the test asserts routing (the right request, no "Page not
@@ -18,6 +16,7 @@ const session = (role: Session['role']): Session => ({
   role,
   stepUpExpiresAt: null,
   csrfToken: 'csrf',
+  platformName: 'Example platform',
   expiresAt: new Date(Date.now() + 3600000).toISOString(),
   user: { id: '11111111-1111-4111-8111-111111111111', username: 'taylor', displayName: 'Taylor' },
   quota: {
@@ -43,51 +42,38 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('nested routes', () => {
-  it.each([
-    ['owner detail', `/staff/owners/${owner}`, 'owner', [owner]],
-    ['deployment history', `/staff/apps/${app}/deployments`, 'deployments', [app]],
-    [
-      'deployment detail',
-      `/staff/apps/${app}/deployments/${deployment}`,
-      'deployment',
-      [app, deployment],
-    ],
-  ] as const)('opens the staff %s page', async (_name, path, method, ids) => {
-    const read = vi.spyOn(staffApi, method).mockImplementation(pending);
-    show(path, 'staff');
-    await waitFor(() => expect(read).toHaveBeenCalled());
-    expect(read.mock.calls[0].slice(0, ids.length)).toEqual(ids);
+describe('task routes', () => {
+  it.each(['owner', 'staff', 'admin'] as const)('opens the same app pages for %s', async (role) => {
+    const read = vi.spyOn(api, 'app').mockImplementation(pending);
+    show(`/apps/${app}/deployments/${deployment}`, role);
+    await waitFor(() => expect(read).toHaveBeenCalledWith(app));
     expect(screen.queryByRole('heading', { name: 'Page not found' })).toBeNull();
   });
-  it('sends an old staff app link to the managed app page', async () => {
-    const detail = vi.spyOn(adminAppsApi, 'detail').mockImplementation(pending);
-    show(`/staff/apps/${app}`, 'staff');
-    await waitFor(() => expect(detail).toHaveBeenCalledWith(app));
-    expect(window.location.pathname).toBe(`/admin/apps/${app}`);
-  });
-  it.each(['admin', 'staff'] as const)('opens a managed app for %s', async (role) => {
-    const detail = vi.spyOn(adminAppsApi, 'detail').mockImplementation(pending);
-    show(`/admin/apps/${app}`, role);
-    await waitFor(() => expect(detail).toHaveBeenCalledWith(app));
-    expect(screen.queryByRole('heading', { name: 'Page not found' })).toBeNull();
-  });
-  it('keeps nested managed apps closed to owners', async () => {
-    const detail = vi.spyOn(adminAppsApi, 'detail').mockImplementation(pending);
-    show(`/admin/apps/${app}`, 'owner');
+  it.each(['/all-apps', '/people', '/activity', '/audit'])('gates %s for owners', async (path) => {
+    show(path, 'owner');
     expect(
       await screen.findByRole('heading', { name: "You don't have access to this page" }),
     ).toBeVisible();
-    expect(detail).not.toHaveBeenCalled();
   });
-  it.each(['/admin/accounts', '/admin/audit'])('keeps %s closed to staff', async (path) => {
-    const accounts = vi.spyOn(adminApi, 'accounts').mockImplementation(pending);
-    const audit = vi.spyOn(adminApi, 'audit').mockImplementation(pending);
-    show(path, 'staff');
+  it('gates audit for staff', async () => {
+    const audit = vi.spyOn(adminApi, 'audit');
+    show('/audit', 'staff');
     expect(
       await screen.findByRole('heading', { name: "You don't have access to this page" }),
     ).toBeVisible();
-    expect(accounts).not.toHaveBeenCalled();
     expect(audit).not.toHaveBeenCalled();
+  });
+  it.each([
+    '/staff/owners',
+    '/staff/apps/x',
+    '/staff/operations',
+    '/admin/apps',
+    '/admin/apps/x',
+    '/admin/accounts',
+    '/admin/audit',
+  ])('has no retired route %s', async (path) => {
+    show(path, 'admin');
+    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeVisible();
+    expect(window.location.pathname).toBe(path);
   });
 });

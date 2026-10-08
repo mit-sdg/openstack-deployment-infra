@@ -82,8 +82,8 @@ Each account has a role:
 | Role | Can do |
 | --- | --- |
 | **Owner** | Create apps up to their quota, manage their own apps, add teammates |
-| **Staff** | Everything an owner can, plus manage any app, with no app limit |
-| **Portal admin** | Everything staff can, plus manage accounts, quotas, and the audit log; create, adopt, or reassign apps; delete storage; plan maintenance and resizing |
+| **Staff** | Shared app pages for every app without team membership, People and Activity, plus all app management: create for an owner, adopt, reassign, delete storage, deploy with maintenance or resizing; no app limit |
+| **Portal admin** | Everything staff can, plus manage accounts, roles, quotas, and the audit log |
 
 [Open the owner portal](guides/open-the-portal.md) and [Manage apps and people](guides/manage-apps-and-people.md) cover the details.
 

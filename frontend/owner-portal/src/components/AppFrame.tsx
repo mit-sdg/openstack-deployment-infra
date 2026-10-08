@@ -6,7 +6,9 @@ import { api, type AppRecord } from '../api';
 import { ownerAppState } from '../utils/presentation';
 import { BoundaryText } from './BoundaryText';
 import { QueryError } from './Feedback';
+import { Alert } from '@openstack-platform/ui';
 import { Status } from './Status';
+import { useAppDestination } from '../hooks/useAppDestination';
 import '../pages/app-pages.css';
 
 const tabs = [
@@ -30,7 +32,7 @@ export function AppFrame({
   children,
 }: {
   id: string;
-  active: (typeof tabs)[number][0] | 'Configuration';
+  active: (typeof tabs)[number][0];
   children: ReactNode;
 }) {
   const app = useQuery({
@@ -38,14 +40,15 @@ export function AppFrame({
     queryFn: () => api.app(id),
     refetchInterval: 5000,
   });
-  const current = active === 'Configuration' ? 'Settings' : active;
+  const destination = useAppDestination(id);
+  const current = active;
   return (
     <Page>
       <PageHeader
         back={
-          <Link href="/apps" className={backLinkClass}>
+          <Link href={destination} className={backLinkClass}>
             <Icon name="arrow-left" />
-            Apps
+            {destination === '/all-apps' ? 'All apps' : 'My apps'}
           </Link>
         }
         title={
@@ -98,6 +101,11 @@ export function AppFrame({
               </Link>
             ))}
           </TabNav>
+          {app.data?.identityProvider && (
+            <Alert tone="warning" title="This app provides sign-in for the portal">
+              Changes here can stop everyone from signing in.
+            </Alert>
+          )}
           {children}
         </>
       )}

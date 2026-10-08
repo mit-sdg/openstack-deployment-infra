@@ -1,6 +1,6 @@
 import {
+  Alert,
   Button,
-  Checkbox,
   Cluster,
   Dialog,
   ErrorAlert,
@@ -37,8 +37,6 @@ type Request = {
   type?: StorageResource['type'];
   resource?: string;
   action?: 'rotate' | 'verify';
-  /** The person confirmed that portal sign-in depends on this app. */
-  identity?: boolean;
 };
 
 function sentence(value: string) {
@@ -185,13 +183,13 @@ export function StorageSection({
   service = api,
   notice,
   save,
-  identityProvider: managedIdentityProvider = false,
+  identityProvider: providedIdentityProvider = false,
 }: {
   id: string;
   service?: ReturnType<typeof resourceApi>;
   /**
-   * For admin services: the app provides portal sign-in, so every storage
-   * change needs the dialog's explicit consent. Owners read this themselves.
+   * Show sign-in information with storage changes.
+   * Owners read the sign-in flag themselves.
    */
   identityProvider?: boolean;
   bindings: StorageBinding[];
@@ -204,27 +202,27 @@ export function StorageSection({
   /** Optional message shown at the top of the section, e.g. unsaved changes. */
   notice?: ReactNode;
 }) {
-  const owner = service === api;
-  const scope = owner ? [] : ['admin'];
+  const injected = service !== api;
   const client = useQueryClient();
   const storage = useQuery({
-    queryKey: [...scope, 'storage', id],
+    queryKey: ['storage', id],
     queryFn: () => service.storage(id),
-    refetchInterval: owner ? 1500 : 5000,
-    refetchOnWindowFocus: owner,
+    refetchInterval: 1500,
+    refetchOnWindowFocus: true,
   });
   const environment = useQuery({
-    queryKey: [...scope, 'environment', id],
+    queryKey: ['environment', id],
     queryFn: () => service.environment(id),
   });
-  // Identity-provider storage changes are confirmed in this section's dialog,
-  // never a native prompt: owners read the flag here, admins pass it in.
+  // Show the sign-in dependency in the dialog. Owners read the flag here;
+  // callers may pass it in.
   const app = useQuery({
     queryKey: ['app', id],
     queryFn: () => api.app(id),
-    enabled: owner,
+    enabled: !injected,
   });
-  const identityProvider = owner ? app.data?.identityProvider === true : managedIdentityProvider;
+  const identityProvider = providedIdentityProvider || app.data?.identityProvider === true;
+  const owner = app.data?.access !== 'admin';
   const busy =
     storage.data?.intents.some((intent) => !['succeeded', 'failed'].includes(intent.state)) ||
     environment.data?.intents?.some((intent) => !['succeeded', 'failed'].includes(intent.state));
@@ -239,33 +237,30 @@ export function StorageSection({
     }
   }, [storage.data, createdType]);
   const [confirming, setConfirming] = useState<Request | null>(null);
-  const [identityConfirmed, setIdentityConfirmed] = useState(false);
   const [applying, setApplying] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<unknown>(null);
   const [started, setStarted] = useState<string[]>([]);
   const pending = useRef<{ subject: string; key: string } | null>(null);
   const action = useMutation({
-    mutationFn: ({ type, resource, action, identity }: Request) => {
+    mutationFn: ({ type, resource, action }: Request) => {
       const subject = type ?? `${resource}/${action}`;
       const key = pending.current?.subject === subject ? pending.current.key : crypto.randomUUID();
       pending.current = { subject, key };
-      const target = owner && identity ? resourceApi('/apps', () => true) : service;
       return type
-        ? target.createStorage(id, type, key)
-        : target.storageAction(id, resource!, action!, key);
+        ? service.createStorage(id, type, key)
+        : service.storageAction(id, resource!, action!, key);
     },
     onSuccess: (result, variables) => {
       if (variables.type) setCreatedType(variables.type);
       pending.current = null;
       setStarted((current) => [...current, result.intentId]);
-      client.invalidateQueries({ queryKey: [...scope, 'storage', id] });
+      client.invalidateQueries({ queryKey: ['storage', id] });
       client.invalidateQueries({ queryKey: ['intents'] });
     },
   });
-  // Owners confirm adding storage because only an admin can delete it.
+  // Owners confirm adding storage because deletion needs staff or an admin.
   function request(next: Request) {
     if (next.action === 'rotate' || identityProvider || (owner && next.type)) {
-      setIdentityConfirmed(false);
       setConfirming(next);
     } else action.mutate(next);
   }
@@ -484,7 +479,7 @@ export function StorageSection({
         </div>
       )}
       <p className="app-block app-block--subtle ui-hint">
-        Databases are backed up every night. {configurationGuidance.postgres} Only an admin can
+        Databases are backed up every night. {configurationGuidance.postgres} Staff or an admin can
         delete a database or storage.
       </p>
       {editingResource && (
@@ -526,10 +521,8 @@ export function StorageSection({
             <Button onClick={() => setConfirming(null)}>Cancel</Button>
             <Button
               variant="primary"
-              disabled={identityProvider && !identityConfirmed}
               onClick={() => {
-                if (confirming)
-                  action.mutate({ ...confirming, identity: identityProvider && identityConfirmed });
+                if (confirming) action.mutate(confirming);
                 setConfirming(null);
               }}
             >
@@ -544,8 +537,8 @@ export function StorageSection({
       >
         {confirming?.type && (
           <p>
-            This adds {confirmingLabel} to this app. Only an admin can delete it later, so add it
-            only if your app needs it.
+            This adds {confirmingLabel} to this app. Staff or an admin can delete it later, so add
+            it only if your app needs it.
           </p>
         )}
         {confirming?.action === 'rotate' && (
@@ -555,11 +548,7 @@ export function StorageSection({
           </p>
         )}
         {identityProvider && (
-          <Checkbox
-            label="Signing in to this portal depends on this app. Continue anyway."
-            checked={identityConfirmed}
-            onChange={(event) => setIdentityConfirmed(event.target.checked)}
-          />
+          <Alert tone="info">Signing in to this portal depends on this app.</Alert>
         )}
       </Dialog>
     </Section>

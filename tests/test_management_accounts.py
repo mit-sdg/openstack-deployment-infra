@@ -136,7 +136,7 @@ class AccountsTests(ManagementCase):
     def invite(self, role: str = "staff", name: str = "localstaff") -> dict:
         return self.call(
             "POST",
-            "/v1/accounts",
+            "/v1/people",
             {"username": name, "displayName": "Local Account", "role": role},
             "admin",
         ).body["data"]
@@ -232,11 +232,11 @@ class AccountsTests(ManagementCase):
                 security_change(db, alice)
             self.login()
             for method, path, body in (
-                ("GET", "/v1/accounts", None),
-                ("POST", "/v1/accounts", {}),
-                ("PATCH", f"/v1/accounts/{alice}", {}),
-                ("PUT", f"/v1/accounts/{alice}/quotas", {}),
-                ("GET", "/v1/account-audit", None),
+                ("GET", f"/v1/people/{alice}/account", None),
+                ("POST", "/v1/people", {}),
+                ("PATCH", f"/v1/people/{alice}/account", {}),
+                ("PUT", f"/v1/people/{alice}/quotas", {}),
+                ("GET", "/v1/audit", None),
                 ("POST", "/v1/reauthenticate", {}),
             ):
                 self.assert_error(
@@ -246,7 +246,10 @@ class AccountsTests(ManagementCase):
         self.assert_error(
             "INVALID_ROLE",
             lambda: self.call(
-                "PATCH", f"/v1/accounts/{alice}", {"action": "role", "value": "admin"}, "admin"
+                "PATCH",
+                f"/v1/people/{alice}/account",
+                {"action": "role", "value": "admin"},
+                "admin",
             ),
         )
         with self.broker.database.connect(write=True) as db:
@@ -262,15 +265,19 @@ class AccountsTests(ManagementCase):
         started, csrf, headers = self.begin(token)
         session = self.finish(started, csrf, headers, alias="localstaff")
         self.assertEqual(session["role"], "staff")
-        self.assertEqual(self.call("GET", "/v1/staff/owners", owner="localstaff").status, 200)
+        self.assertEqual(self.call("GET", "/v1/people", owner="localstaff").status, 200)
         self.assert_error(
-            "ACCESS_DENIED", lambda: self.call("GET", "/v1/accounts", owner="localstaff")
+            "ACCESS_DENIED",
+            lambda: self.call(
+                "GET", f"/v1/people/{session['user']['id']}/account", owner="localstaff"
+            ),
         )
         own = self.create("localstaff", "local-project")
         self.login()
         foreign = self.create(slug="other-project")
-        self.assert_error(
-            "NOT_FOUND", lambda: self.call("GET", f"/v1/apps/{foreign}", owner="localstaff")
+        self.assertEqual(
+            self.call("GET", f"/v1/apps/{foreign}", owner="localstaff").body["data"]["access"],
+            "admin",
         )
         self.assertEqual(self.call("GET", f"/v1/apps/{own}", owner="localstaff").status, 200)
         self.assert_error("TOKEN_INVALID", lambda: self.begin(token))
@@ -287,7 +294,10 @@ class AccountsTests(ManagementCase):
         self.assert_error(
             "STEP_UP_REQUIRED",
             lambda: self.call(
-                "PATCH", f"/v1/accounts/{alice}", {"action": "role", "value": "staff"}, "admin"
+                "PATCH",
+                f"/v1/people/{alice}/account",
+                {"action": "role", "value": "staff"},
+                "admin",
             ),
         )
         fresh = local_security.totp_code(self.admin_secret, int(self.now // 30))
@@ -298,7 +308,9 @@ class AccountsTests(ManagementCase):
             "admin",
         )
         old = self.tokens["alice"]
-        self.call("PATCH", f"/v1/accounts/{alice}", {"action": "role", "value": "staff"}, "admin")
+        self.call(
+            "PATCH", f"/v1/people/{alice}/account", {"action": "role", "value": "staff"}, "admin"
+        )
         self.assert_error(
             "SESSION_EXPIRED",
             lambda: self.call(
@@ -314,31 +326,38 @@ class AccountsTests(ManagementCase):
             "ADMIN_UNLIMITED",
             lambda: self.call(
                 "PUT",
-                f"/v1/accounts/{alice}/quotas",
+                f"/v1/people/{alice}/quotas",
                 {"apps": 7, "concurrentOperations": 3},
                 "admin",
             ),
         )
         bob = self.login("bob")
         self.call(
-            "PUT", f"/v1/accounts/{bob}/quotas", {"apps": 7, "concurrentOperations": 3}, "admin"
+            "PUT", f"/v1/people/{bob}/quotas", {"apps": 7, "concurrentOperations": 3}, "admin"
         )
         for owner, limit in ((alice, None), (bob, 7)):
             self.assertEqual(
-                self.call("GET", f"/v1/staff/owners/{owner}", owner="alice").body["data"]["quota"][
+                self.call("GET", f"/v1/people/{owner}", owner="alice").body["data"]["quota"][
                     "apps"
                 ]["limit"],
                 limit,
             )
-        self.call("PATCH", f"/v1/accounts/{alice}", {"action": "enabled", "value": False}, "admin")
-        self.assert_error("SESSION_EXPIRED", lambda: self.call("GET", "/v1/session", owner="alice"))
-        self.call("PATCH", f"/v1/accounts/{alice}", {"action": "enabled", "value": True}, "admin")
-        self.login()
         self.call(
-            "PATCH", f"/v1/accounts/{alice}", {"action": "revoke-sessions", "value": None}, "admin"
+            "PATCH", f"/v1/people/{alice}/account", {"action": "enabled", "value": False}, "admin"
         )
         self.assert_error("SESSION_EXPIRED", lambda: self.call("GET", "/v1/session", owner="alice"))
-        actions = self.call("GET", "/v1/account-audit", owner="admin").body["data"]["items"]
+        self.call(
+            "PATCH", f"/v1/people/{alice}/account", {"action": "enabled", "value": True}, "admin"
+        )
+        self.login()
+        self.call(
+            "PATCH",
+            f"/v1/people/{alice}/account",
+            {"action": "revoke-sessions", "value": None},
+            "admin",
+        )
+        self.assert_error("SESSION_EXPIRED", lambda: self.call("GET", "/v1/session", owner="alice"))
+        actions = self.call("GET", "/v1/audit", owner="admin").body["data"]["items"]
         self.assertTrue(
             {"role", "enabled", "quotas", "revoke-sessions"} <= {row["action"] for row in actions}
         )
@@ -394,7 +413,7 @@ class AccountsTests(ManagementCase):
         result = self.local_login(
             "rootadmin", code=local_security.totp_code(self.admin_secret, int(self.now // 30))
         )
-        self.assertEqual(result["data"]["returnPath"], "/admin/accounts")
+        self.assertEqual(result["data"]["returnPath"], "/people")
         with self.broker.database.connect() as db:
             self.assertNotEqual(
                 db.execute("SELECT password_hash FROM local_accounts").fetchone()[0], weak
@@ -422,7 +441,7 @@ class AccountsTests(ManagementCase):
         before = self.tokens["resetowner"]
         reset = self.call(
             "PATCH",
-            f"/v1/accounts/{invitation['userId']}",
+            f"/v1/people/{invitation['userId']}/account",
             {"action": "password-reset", "value": None},
             "admin",
         ).body["data"]
@@ -439,7 +458,7 @@ class AccountsTests(ManagementCase):
         self.assert_error("TOKEN_INVALID", lambda: self.begin(token))
         reset = self.call(
             "PATCH",
-            f"/v1/accounts/{invitation['userId']}",
+            f"/v1/people/{invitation['userId']}/account",
             {"action": "totp-reset", "value": None},
             "admin",
         ).body["data"]
@@ -496,7 +515,7 @@ class AccountsTests(ManagementCase):
         invited = self.invite("owner", "futureadmin")
         promoted = self.call(
             "PATCH",
-            f"/v1/accounts/{invited['userId']}",
+            f"/v1/people/{invited['userId']}/account",
             {"action": "role", "value": "admin"},
             "admin",
         ).body["data"]
@@ -512,7 +531,7 @@ class AccountsTests(ManagementCase):
             "STEP_UP_REQUIRED",
             lambda: self.call(
                 "POST",
-                "/v1/accounts",
+                "/v1/people",
                 {"username": "anotheradmin", "displayName": "Another", "role": "admin"},
                 "futureadmin",
             ),
@@ -574,7 +593,7 @@ class AccountsTests(ManagementCase):
         self.finish(stage, csrf, headers, alias="resetadmin")
         reset = self.call(
             "PATCH",
-            f"/v1/accounts/{invited['userId']}",
+            f"/v1/people/{invited['userId']}/account",
             {"action": "password-reset", "value": None},
             "admin",
         ).body["data"]
@@ -631,7 +650,7 @@ class AccountsTests(ManagementCase):
     def invite_from_reset_admin(self):
         return self.call(
             "POST",
-            "/v1/accounts",
+            "/v1/people",
             {"username": "anotheradmin", "displayName": "Another", "role": "admin"},
             "resetadmin",
         )
@@ -668,7 +687,7 @@ class AccountsTests(ManagementCase):
         self.finish(stage, csrf, headers, alias="oldpassword")
         self.call(
             "PATCH",
-            f"/v1/accounts/{invited['userId']}",
+            f"/v1/people/{invited['userId']}/account",
             {"action": "password-reset", "value": None},
             "admin",
         )
@@ -701,7 +720,7 @@ class AccountsTests(ManagementCase):
                 self.finish(stage, csrf, headers, alias=name)
                 self.call(
                     "PATCH",
-                    f"/v1/accounts/{invited['userId']}",
+                    f"/v1/people/{invited['userId']}/account",
                     {"action": "totp-reset", "value": None},
                     "admin",
                 )
@@ -742,7 +761,7 @@ class AccountsTests(ManagementCase):
             "STEP_UP_REQUIRED",
             lambda: self.call(
                 "PATCH",
-                f"/v1/accounts/{pending['userId']}",
+                f"/v1/people/{pending['userId']}/account",
                 {"action": "invite", "value": None},
                 "admin",
             ),

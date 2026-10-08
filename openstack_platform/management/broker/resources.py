@@ -225,12 +225,12 @@ def mutate_storage(self: Broker, request: Request) -> Response:
     user, app = self.own(request, mutation=True)
     creating = "resource" not in request.path_parameters
     if creating:
-        body = self.identity_mutation_body(request, app, {"type"})
+        body = self.mutation_body(request, {"type"})
         if not isinstance(body["type"], str) or body["type"] not in RESOURCE_OUTPUTS:
             raise HttpError(400, "INVALID_FIELD", "Choose postgres, mongo or s3.")
         path, kind = f"/v1/applications/{app['id']}/storage", "storage_create"
     else:
-        self.identity_mutation_body(request, app, set())
+        self.mutation_body(request, set())
         resource = checked_uuid(request.path_parameters["resource"])
         action = request.path.rsplit("/", 1)[1]
         body, path, kind = {}, f"/v1/storage/{resource}/{action}", f"storage_{action}"
@@ -327,13 +327,19 @@ def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: 
         "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
         (user_id,),
     ).fetchall()
-    if db.execute(
-        "SELECT 1 FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
+    current = db.execute(
+        "SELECT state,kind FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
         (app_id,),
-    ).fetchone():
-        raise HttpError(
-            409, "APP_BUSY", "Wait for or recover this application's current operation first."
+    ).fetchone()
+    if current:
+        message = (
+            "Finish the previous deployment in the app's Overview before trying again."
+            if current["state"] in {"blocked", "unknown"} and current["kind"] == "deploy"
+            else "Finish the previous change in the app's Overview before trying again."
+            if current["state"] in {"blocked", "unknown"}
+            else "Check the change in the app's Overview before trying again."
         )
+        raise HttpError(409, "APP_BUSY", message)
     if unlimited(db, user_id):
         return
     policy = db.execute("SELECT concurrent FROM quotas WHERE user_id=?", (user_id,)).fetchone()

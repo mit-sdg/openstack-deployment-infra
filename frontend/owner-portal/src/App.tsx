@@ -1,8 +1,15 @@
-import { buttonClass, Page, ToastProvider } from '@openstack-platform/ui';
+import {
+  buttonClass,
+  EmptyState,
+  ErrorAlert,
+  Page,
+  PageSkeleton,
+  ToastProvider,
+} from '@openstack-platform/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Link, Route, Switch, useLocation } from 'wouter';
 import { authOptionsQuery } from './authOptions';
-import { EmptyState, ErrorNotice, PageSkeleton, QueryError } from './components/Feedback';
+import { QueryError } from './components/Feedback';
 import { useSession } from './hooks/useSession';
 import { ConfigurationPage } from './pages/Configuration';
 import { Dashboard } from './pages/Dashboard';
@@ -14,9 +21,11 @@ import { TeamPage } from './pages/Team';
 import { NewApp } from './pages/NewApp';
 import { Overview } from './pages/Overview';
 import { SignIn } from './pages/SignIn';
-import { StaffPages } from './pages/Staff';
-import { AdminAppsPages } from './pages/AdminApps';
-import { AccountsPage, AdminAuditPage } from './pages/Accounts';
+import { PeoplePage, PersonPage } from './pages/People';
+import { ActivityPage } from './pages/Activity';
+import { ClassContext, useActive } from './hooks/useClassReads';
+import { AllAppsPage } from './pages/AllApps';
+import { AdminAuditPage } from './pages/Audit';
 import { Enrollment } from './pages/Enrollment';
 import { PortalShell } from './shell/PortalShell';
 
@@ -34,6 +43,7 @@ export function App() {
   // Read-only view of the sign-in page's query; the shell never fetches it.
   const options = useQuery({ ...authOptionsQuery, enabled: false });
   const role = session.data?.role;
+  const active = useActive(role);
   const elevated = role === 'staff' || role === 'admin';
   return (
     <ToastProvider>
@@ -56,59 +66,58 @@ export function App() {
             <QueryError query={session} what="your account" />
           </Page>
         ) : (
-          <Switch>
-            {/* Wildcards: in wouter 3 ":rest*" matches one segment only, which
-                sent nested staff and admin pages to "Page not found". Staff
-                manage every app too; ownership changes stay admin-only. */}
-            <Route path="/admin/apps/*">
-              {elevated ? <AdminAppsPages admin={role === 'admin'} /> : <NoAccess />}
-            </Route>
-            <Route path="/admin/apps">
-              {elevated ? <AdminAppsPages admin={role === 'admin'} /> : <NoAccess />}
-            </Route>
-            <Route path="/admin/accounts">
-              {role === 'admin' ? <AccountsPage /> : <NoAccess />}
-            </Route>
-            <Route path="/admin/audit">
-              {role === 'admin' ? <AdminAuditPage /> : <NoAccess />}
-            </Route>
-            <Route path="/staff/*">
-              {elevated ? <StaffPages userId={session.data!.user.id} /> : <NoAccess />}
-            </Route>
-            <Route path="/apps/new">
-              <NewApp />
-            </Route>
-            <Route path="/apps/:id/configuration">{(p) => <ConfigurationPage id={p.id} />}</Route>
-            <Route path="/apps/:id/deploy">{(p) => <DeployPage id={p.id} />}</Route>
-            <Route path="/apps/:id/deployments/:deployment">
-              {(p) => <DeploymentPage id={p.id} deployment={p.deployment} />}
-            </Route>
-            <Route path="/apps/:id/deployments">{(p) => <HistoryPage id={p.id} />}</Route>
-            <Route path="/apps/:id/logs">{(p) => <LogsPage id={p.id} />}</Route>
-            <Route path="/apps/:id/team">{(p) => <TeamPage id={p.id} />}</Route>
-            <Route path="/apps/:id">{(p) => <Overview id={p.id} />}</Route>
-            <Route path="/apps">
-              <Dashboard />
-            </Route>
-            <Route path="/">
-              <Dashboard />
-            </Route>
-            <Route>
-              <EmptyState
-                title="Page not found"
-                icon="search"
-                action={
-                  <Link href="/apps" className={buttonClass()}>
-                    Go to apps
-                  </Link>
+          <ClassContext.Provider value={{ userId: session.data!.user.id, active }}>
+            <Switch>
+              <Route path="/all-apps">{elevated ? <AllAppsPage /> : <NoAccess />}</Route>
+              <Route path="/people/:id">
+                {(p) =>
+                  elevated ? (
+                    <PersonPage key={p.id} id={p.id} admin={role === 'admin'} />
+                  ) : (
+                    <NoAccess />
+                  )
                 }
-              >
-                Check the address, or go back to your apps.
-              </EmptyState>
-            </Route>
-          </Switch>
+              </Route>
+              <Route path="/people">
+                {elevated ? <PeoplePage admin={role === 'admin'} /> : <NoAccess />}
+              </Route>
+              <Route path="/activity">{elevated ? <ActivityPage /> : <NoAccess />}</Route>
+              <Route path="/audit">{role === 'admin' ? <AdminAuditPage /> : <NoAccess />}</Route>
+              <Route path="/apps/new">
+                <NewApp />
+              </Route>
+              <Route path="/apps/:id/configuration">{(p) => <ConfigurationPage id={p.id} />}</Route>
+              <Route path="/apps/:id/deploy">{(p) => <DeployPage id={p.id} />}</Route>
+              <Route path="/apps/:id/deployments/:deployment">
+                {(p) => <DeploymentPage id={p.id} deployment={p.deployment} />}
+              </Route>
+              <Route path="/apps/:id/deployments">{(p) => <HistoryPage id={p.id} />}</Route>
+              <Route path="/apps/:id/logs">{(p) => <LogsPage id={p.id} />}</Route>
+              <Route path="/apps/:id/team">{(p) => <TeamPage id={p.id} />}</Route>
+              <Route path="/apps/:id">{(p) => <Overview id={p.id} />}</Route>
+              <Route path="/apps">
+                <Dashboard />
+              </Route>
+              <Route path="/">
+                <Dashboard />
+              </Route>
+              <Route>
+                <EmptyState
+                  title="Page not found"
+                  icon="search"
+                  action={
+                    <Link href="/apps" className={buttonClass()}>
+                      Go to My apps
+                    </Link>
+                  }
+                >
+                  Check the address, or go back to your apps.
+                </EmptyState>
+              </Route>
+            </Switch>
+          </ClassContext.Provider>
         )}
-        <ErrorNotice error={logout.error} />
+        <ErrorAlert error={logout.error} />
       </PortalShell>
     </ToastProvider>
   );

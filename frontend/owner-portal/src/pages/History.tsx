@@ -16,7 +16,8 @@ import { Link, useLocation } from 'wouter';
 import { api, type Deployment } from '../api';
 import { AppFrame } from '../components/AppFrame';
 import { QueryError } from '../components/Feedback';
-import { Status } from '../components/Status';
+import { AttentionActivity } from '../components/AttentionActivity';
+import { DeploymentStatus } from '../components/DeploymentStatus';
 import { short } from '../utils/presentation';
 
 function columns(id: string, active: string | null | undefined): Column<Deployment>[] {
@@ -40,7 +41,11 @@ function columns(id: string, active: string | null | undefined): Column<Deployme
       mobile: 'trailing',
       // The live deployment reads "Live"; it succeeded by definition.
       cell: (deployment) => (
-        <Status state={deployment.deploymentId === active ? 'live' : deployment.status} />
+        <DeploymentStatus
+          id={id}
+          deployment={deployment.deploymentId}
+          state={deployment.deploymentId === active ? 'live' : deployment.status}
+        />
       ),
     },
     {
@@ -90,6 +95,7 @@ export function HistoryPage({ id }: { id: string }) {
   const [, navigate] = useLocation();
   return (
     <AppFrame id={id} active="Deployments">
+      <AttentionActivity id={id} />
       {history.isPending ? (
         <PageSkeleton label="Loading deployments…">
           <SectionSkeleton variant="table" columns={4} rows={3} />

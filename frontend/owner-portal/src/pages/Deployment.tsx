@@ -18,7 +18,7 @@ import { AppFrame } from '../components/AppFrame';
 import { QueryError } from '../components/Feedback';
 import { Repository } from '../components/Repository';
 import { StartupRecordSection } from '../components/StartupRecord';
-import { Status } from '../components/Status';
+import { DeploymentStatus } from '../components/DeploymentStatus';
 import { deploymentRuntime, short } from '../utils/presentation';
 
 /** "sha256:0123456789ab" from an image reference; the full value is copied. */
@@ -83,6 +83,9 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
   });
   return (
     <AppFrame id={id} active="Deployments">
+      <Link href={`/apps/${id}/deployments`} className="ui-link">
+        Back to deployments
+      </Link>
       {attempt.isPending ? (
         <PageSkeleton label="Loading deployment…">
           <SectionSkeleton title rows={3} />
@@ -98,7 +101,9 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
                 Deployment <span className="ui-mono">{short(attempt.data.repositoryCommit)}</span>
               </>
             }
-            actions={<Status state={attempt.data.status} />}
+            actions={
+              <DeploymentStatus id={id} deployment={deployment} state={attempt.data.status} />
+            }
           >
             <Details deployment={attempt.data} />
             <div>
