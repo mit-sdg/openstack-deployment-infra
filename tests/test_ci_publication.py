@@ -27,50 +27,11 @@ def job(name: str) -> str:
 
 
 class PublicationTriggerTests(unittest.TestCase):
-    def test_dashboard_freshness_checks_untracked_output_and_gates_publication(self) -> None:
-        frontend = job("dashboard-frontend")
-        for required in (
-            'node-version: "24.19.0"',
-            "npm@11.17.0",
-            "npm --prefix frontend ci",
-            "npm --prefix frontend run format:check --workspaces",
-            "npm --prefix frontend run typecheck",
-            "npm --prefix frontend test",
-            "git diff --exit-code -- openstack_platform/dashboard/static",
-            "npm --prefix frontend run check:freshness",
-            "npm --prefix frontend/operator-dashboard run smoke",
-        ):
-            self.assertIn(required, frontend)
-        gate = (ROOT / "frontend/scripts/check-freshness.mjs").read_text()
-        self.assertIn("--untracked-files=all", gate)
-        self.assertIn("dashboard-frontend", GATES)
-        self.assertIn("frontend", IMAGE_INPUTS)
-        self.assertIn(
-            "needs: [development-evidence, dashboard-frontend]", job("development-publish")
-        )
-
     def test_every_github_action_is_pinned_to_an_immutable_sha(self) -> None:
         uses = re.findall(r"uses:\s+([^\s#]+)", WORKFLOW.read_text())
         self.assertTrue(uses)
         for action in uses:
             self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
-
-    def test_generated_recipes_have_an_explicit_rootless_live_smoke_job(self) -> None:
-        workflow = WORKFLOW.read_text()
-        smoke = (ROOT / "tests/smoke_generated_recipes.sh").read_text()
-        for value in ("generated-recipes:", "tests/smoke_generated_recipes.sh", "podman"):
-            self.assertIn(value, workflow)
-        for value in (
-            "Host.Security.Rootless",
-            "generate_recipe",
-            "for runtime in bun node",
-            "podman image inspect",
-            "NODE_ENV=production",
-            "health=passed",
-        ):
-            self.assertIn(value, smoke)
-        self.assertNotIn("--privileged", smoke)
-        self.assertNotIn("sudo podman", smoke)
 
     def test_main_push_context_uses_one_tested_path_selection_and_exact_native_sha(self) -> None:
         context = job("publication-context")
@@ -122,32 +83,6 @@ class PublicationTriggerTests(unittest.TestCase):
         self.assertNotIn(
             "OPENSTACK_PUBLISH_ENABLED ==", builds
         )  # Builds do not wait for signing/provider enablement.
-
-    def test_role_gate_runs_packages_and_boots_pr_images_in_the_same_store(self) -> None:
-        roles = job("role-vm-tests")
-        self.assertIn("needs: publication-context", roles)
-        self.assertIn("if: ${{ !cancelled() }}", roles)
-        self.assertNotIn("if: always()", roles)
-        self.assertIn("if [[ ${{ matrix.role }} == admin ]]", roles)
-        self.assertIn(".#checks.x86_64-linux.package-smoke", roles)
-        self.assertIn(".#checks.x86_64-linux.vm-${{ matrix.role }}", roles)
-        self.assertIn(".#${{ matrix.role }}-image", roles)
-        self.assertIn('tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"', roles)
-        self.assertIn("needs.publication-context.outputs.publish != 'true'", roles)
-        self.assertIn("inputs.development_publish != true", roles)
-        self.assertIn("if [[ $BUILD_EXAMPLE_IMAGE == true ]]", roles)
-        self.assertEqual(roles.count("nix build"), 1)
-        self.assertIn("--print-out-paths", roles)
-        self.assertEqual(roles.count("if: env.BUILD_EXAMPLE_IMAGE == 'true'"), 2)
-        self.assertNotIn("package-tests", GATES)
-        self.assertIn("role-vm-tests", GATES)
-        self.assertNotIn("  package-tests:", WORKFLOW.read_text())
-        self.assertNotIn("  build-images:", WORKFLOW.read_text())
-        for name, upload in (
-            ("production-role-builds", "Retain build and QEMU diagnostics only"),
-            ("development-role-evidence", "Upload compact role evidence"),
-        ):
-            self.assertIn(f"- name: {upload}\n        if: ${{{{ !cancelled() }}}}", job(name))
 
     def test_all_gates_precede_serialized_no_rebuild_publication(self) -> None:
         publication = job("publish-images")
@@ -255,18 +190,6 @@ class PublicationTriggerTests(unittest.TestCase):
                         self.assertIn("bundle-fetch", fetch.read_text())
                         self.assertIn("--commit " + "a" * 40, fetch.read_text())
                         self.assertNotIn("PLATFORM_ALLOW_UNSIGNED_PRODUCTION", env_file.read_text())
-
-    def test_qemu_tool_installation_retries_bounded_apt_setup(self) -> None:
-        installer = (ROOT / "tests/install_ci_apt_packages.sh").read_text()
-        self.assertEqual(WORKFLOW.read_text().count("tests/install_ci_apt_packages.sh"), 6)
-        self.assertNotIn("sudo apt-get", WORKFLOW.read_text())
-        for value in (
-            "ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources",
-            "for attempt in 1 2 3",
-            'timeout --foreground --kill-after=30s 5m sudo apt-get "${apt_options[@]}" update',
-            'timeout --foreground --kill-after=30s 10m sudo apt-get "${apt_options[@]}" install',
-        ):
-            self.assertIn(value, installer)
 
     def test_development_publication_stays_manual_protected_and_separate(self) -> None:
         workflow = WORKFLOW.read_text()

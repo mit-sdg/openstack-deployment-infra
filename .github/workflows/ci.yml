@@ -324,12 +324,16 @@ jobs:
           # Production builds use their protected inventory/evidence job.
           if [[ $BUILD_EXAMPLE_IMAGE == true ]]; then
             checks+=(".#${{ matrix.role }}-image")
+            # Install the boot-smoke tools while Nix evaluates and builds.
+            tests/install_ci_apt_packages.sh xfsprogs genisoimage qemu-system-x86 qemu-utils \
+              > "$RUNNER_TEMP/apt.log" 2>&1 &
+            apt_pid=$!
           fi
           nix build --no-link --print-out-paths --print-build-logs "${checks[@]}" > build-outputs
-
-      - name: Install QEMU smoke-test tools
-        if: env.BUILD_EXAMPLE_IMAGE == 'true'
-        run: tests/install_ci_apt_packages.sh xfsprogs genisoimage qemu-system-x86 qemu-utils
+          if [[ -n ${apt_pid:-} ]] && ! wait "$apt_pid"; then
+            cat "$RUNNER_TEMP/apt.log" >&2
+            exit 1
+          fi
 
       - name: Boot role image with an OpenStack config drive
         if: env.BUILD_EXAMPLE_IMAGE == 'true'
