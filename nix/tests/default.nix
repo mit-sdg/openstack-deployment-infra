@@ -7,10 +7,12 @@ let
   state = platform.paths.adminState;
   backups = platform.paths.backups;
   packages = import ../pkgs { inherit pkgs platform; };
-  # The one Commons Connect code the fake redeems, issued to the portal's origin.
+  # The one Commons Connect code the fake redeems, issued to the portal's origin
+  # with the challenge of this verifier (the RFC 7636 Appendix B example).
   managementRedeemRequest = builtins.toJSON {
     code = "11111111-1111-4111-8111-111111111111.vm-fixture";
     app = "https://${platform.domain}";
+    code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
   };
   managementIdentityBootstrap = pkgs.writeText "management-identity-bootstrap.py" ''
     import faulthandler
