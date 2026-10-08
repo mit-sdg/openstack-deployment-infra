@@ -291,7 +291,7 @@ jobs:
     name: Test ${{ matrix.role }} VM and image
     needs: publication-context
     # PRs skip publication-context; the integration gates must still run.
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       BUILD_EXAMPLE_IMAGE: ${{ inputs.development_publish != true && needs.publication-context.outputs.publish != 'true' }}
@@ -416,7 +416,7 @@ jobs:
           compression-level: 0
           retention-days: 30
       - name: Retain build and QEMU diagnostics only
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: production-logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.role }}
@@ -703,7 +703,7 @@ jobs:
           PY
 
       - name: Upload compact role evidence
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: development-role-input-${{ github.sha }}-${{ matrix.role }}

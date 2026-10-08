@@ -126,7 +126,8 @@ class PublicationTriggerTests(unittest.TestCase):
     def test_role_gate_runs_packages_and_boots_pr_images_in_the_same_store(self) -> None:
         roles = job("role-vm-tests")
         self.assertIn("needs: publication-context", roles)
-        self.assertIn("if: always()", roles)
+        self.assertIn("if: ${{ !cancelled() }}", roles)
+        self.assertNotIn("if: always()", roles)
         self.assertIn("if [[ ${{ matrix.role }} == admin ]]", roles)
         self.assertIn(".#checks.x86_64-linux.package-smoke", roles)
         self.assertIn(".#checks.x86_64-linux.vm-${{ matrix.role }}", roles)
@@ -142,6 +143,11 @@ class PublicationTriggerTests(unittest.TestCase):
         self.assertIn("role-vm-tests", GATES)
         self.assertNotIn("  package-tests:", WORKFLOW.read_text())
         self.assertNotIn("  build-images:", WORKFLOW.read_text())
+        for name, upload in (
+            ("production-role-builds", "Retain build and QEMU diagnostics only"),
+            ("development-role-evidence", "Upload compact role evidence"),
+        ):
+            self.assertIn(f"- name: {upload}\n        if: ${{{{ !cancelled() }}}}", job(name))
 
     def test_all_gates_precede_serialized_no_rebuild_publication(self) -> None:
         publication = job("publish-images")
@@ -187,7 +193,9 @@ class PublicationTriggerTests(unittest.TestCase):
                 self.assertNotIn(".pem", step)
                 self.assertNotIn("github.workspace", step)
                 self.assertNotIn("secrets.", step)
-                if "if: always()" in step:
+                if any(
+                    condition in step for condition in ("if: always()", "if: ${{ !cancelled() }}")
+                ):
                     self.assertIn("/build.log", step)
                     self.assertIn("/qemu-serial.log", step)
                     self.assertNotIn("path: ${{ runner.temp }}/production-images\n", step)

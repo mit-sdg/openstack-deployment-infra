@@ -270,6 +270,33 @@ let
                   "127.0.0.54/32"
                 ];
               };
+              "vm-restore-active-portal" = {
+                # Restore the saved active pair before production preparation
+                # and path units see this VM's disposable tmpfs state.
+                wantedBy = [ "multi-user.target" ];
+                after = [ "${systemdEscapePath state}.mount" ];
+                before = [
+                  "${namespace}-management-prepare.service"
+                  "${namespace}-management-broker.path"
+                  "${namespace}-management-web.path"
+                  "${namespace}-management-activate.path"
+                ];
+                unitConfig = {
+                  DefaultDependencies = false;
+                  RequiresMountsFor = [ state ];
+                  ConditionPathExists = "/var/lib/portal-boot-fixture";
+                };
+                serviceConfig = {
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                };
+                script = ''
+                  umask 0077
+                  # Copy children, preserving the state mount's root metadata.
+                  cp -a --preserve=all /var/lib/portal-boot-fixture/management-* ${state}/
+                  rm -f ${state}/management-broker/identity-sandbox-ok
+                '';
+              };
               "vm-fake-commons" = {
                 wantedBy = [ "multi-user.target" ];
                 serviceConfig.ExecStart = "${packages.platformPython}/bin/python ${managementFakeCommons}";
@@ -415,7 +442,7 @@ let
         };
 
       testScript = ''
-        machine.start()
+        machine.start(allow_reboot=True)
         machine.wait_for_unit("multi-user.target")
         machine.wait_for_unit("cloud-final.service")
         machine.succeed("python3 -c 'import json; json.load(open(\"/etc/${namespace}/platform.json\"))'")
@@ -423,7 +450,7 @@ let
         ${
           if role == "admin" then
             ''
-              # One boot, real controller/Nomad APIs, and the role's trust boundaries.
+              # Real controller/Nomad APIs and the role's trust boundaries.
               machine.wait_for_unit("nomad.service")
               machine.wait_for_unit("${namespace}-admin-readiness.service")
               machine.wait_for_unit("${namespace}-controller-readiness.service")
@@ -444,7 +471,36 @@ let
               # Run the real managed-backup unit with a local credential consumer.
               machine.succeed("systemctl start ${namespace}-platform-backup.service && test -f ${state}/operator/status/managed-backup-probe-ran")
               machine.fail("test -e /run/${namespace}-backup-private")
+              # One refusal proves a world-readable shared secret never reaches ExecStart.
+              machine.succeed("rm ${state}/operator/status/managed-backup-probe-ran; chmod 0644 ${root}/secrets/storage-bootstrap.env")
+              machine.fail("systemctl start ${namespace}-platform-backup.service")
+              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
+              machine.succeed("chmod 0640 ${root}/secrets/storage-bootstrap.env; systemctl reset-failed ${namespace}-platform-backup.service")
               machine.wait_for_unit("${namespace}-management-prepare.service")
+              # Privileged preparation must reject operator-controlled links
+              # without touching their root-owned target (one case per path).
+              victim = "${state}/root-preparation-victim"
+              machine.succeed(f"install -d -m 0755 -o root -g root {victim}; printf 'protected fixture\\n' > {victim}/sentinel; chmod 0600 {victim}/sentinel")
+              victim_intact = f"test $(stat -c %u:%g:%a {victim}) = 0:0:755 && test $(stat -c %u:%g:%a {victim}/sentinel) = 0:0:600 && grep -Fx 'protected fixture' {victim}/sentinel && test ! -e {victim}/platform.json"
+              for child in ("config", "releases"):
+                  path = f"${state}/management-broker-releases/{child}"
+                  machine.succeed(f"runuser -u agentops -- sh -c 'mv {path} {path}.saved; ln -s {victim} {path}'")
+                  machine.fail("systemctl restart ${namespace}-management-prepare.service")
+                  machine.succeed(victim_intact)
+                  machine.succeed(f"runuser -u agentops -- sh -c 'rm {path}; mv {path}.saved {path}'; systemctl reset-failed ${namespace}-management-prepare.service")
+              machine.succeed("systemctl start ${namespace}-management-prepare.service")
+              # Invoke the real privileged backup pre-start without a broker DB.
+              backup_prepare = machine.succeed("systemctl cat ${namespace}-management-broker-backup.service | sed -n 's/^ExecStartPre=+//p'").strip()
+              machine.succeed(backup_prepare)
+              backup_dir = "${backups}/${constants.directories.managementBrokerBackup}"
+              machine.succeed(f"runuser -u agentops -- sh -c 'mv {backup_dir} {backup_dir}.saved; ln -s {victim} {backup_dir}'")
+              machine.fail(backup_prepare)
+              machine.succeed(victim_intact)
+              machine.succeed(f"runuser -u agentops -- sh -c 'rm {backup_dir}; mkdir -m 2750 {backup_dir}'")
+              backup_metadata = machine.succeed(f"stat -c %u:%g:%a:%h {backup_dir}")
+              machine.fail(backup_prepare)
+              assert machine.succeed(f"stat -c %u:%g:%a:%h {backup_dir}") == backup_metadata
+              machine.succeed(f"runuser -u agentops -- sh -c 'rmdir {backup_dir}; mv {backup_dir}.saved {backup_dir}'")
               # Complete fixture pairs follow the same staged/active/config
               # layout as installed releases; only their entrypoints are doubles.
               import json
@@ -465,6 +521,7 @@ let
               machine.succeed("printf '#!/bin/sh\\nexec /run/current-system/sw/bin/management-python3.14 ${managementWebProbe}\\n' > ${state}/management-web-releases/releases/vm-test/bin/management-web; chown agentops:management-web ${state}/management-web-releases/releases/vm-test/bin/management-web; chmod 0550 ${state}/management-web-releases/releases/vm-test/bin/management-web")
               machine.succeed("install -m 0600 -o agentops -g management-broker /dev/null ${state}/management-broker-releases/.install.lock")
               machine.wait_for_unit("vm-fake-commons.service")
+              machine.succeed("systemctl reset-failed ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-activate.path; systemctl start ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-activate.path")
               for component in ("broker", "web", "activate"):
                   machine.wait_for_unit(f"${namespace}-management-{component}.path")
               machine.succeed(f"runuser -u agentops -- /run/current-system/sw/bin/management-python3.14 ${managementActivationRequest} {commit} {pair}")
@@ -488,6 +545,53 @@ let
               machine.fail("runuser -u management-web -- systemctl restart ${namespace}-management-broker.service")
               machine.fail("runuser -u management-broker -- systemctl restart ${namespace}-management-web.service")
               machine.succeed("${root}/bin/openstack-platform-helper </dev/null | grep -F INVALID_REQUEST")
+
+              # The active pair must boot without reset-failed or reactivation.
+              selected_pair = machine.succeed("readlink ${state}/management-active/current").strip()
+              portal_units = "multi-user.target ${namespace}-admin-readiness.service ${namespace}-controller-readiness.service ${namespace}-management-identity.service ${namespace}-management-broker.service ${namespace}-management-web.service ${namespace}-management-broker.path ${namespace}-management-web.path"
+              portal_ready = f'for unit in {portal_units}; do systemctl is-active --quiet "$unit" || exit 1; done; {broker_health} && {web_health}'
+              machine.succeed("umask 0077; install -d -m 0700 /var/lib/portal-boot-fixture; cp -a --preserve=all ${state}/management-active ${state}/management-broker-releases ${state}/management-web-releases ${state}/management-broker ${state}/management-web /var/lib/portal-boot-fixture/; rm -f /var/lib/portal-boot-fixture/management-broker-releases/activate-request")
+              machine.reboot()
+              machine.wait_until_succeeds(portal_ready)
+              machine.succeed("test ! -e ${state}/management-broker-releases/activate-request")
+              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
+
+              # systemd removes the controller socket directory during restart;
+              # its dependency chain must restart both portal processes.
+              before = {component: machine.succeed(f"systemctl show ${namespace}-management-{component}.service -p MainPID --value").strip() for component in ("broker", "web")}
+              machine.succeed("systemctl restart ${namespace}-controller.service")
+              machine.wait_until_succeeds(portal_ready)
+              for component, pid in before.items():
+                  assert machine.succeed(f"systemctl show ${namespace}-management-{component}.service -p MainPID --value").strip() != pid
+
+              # A mismatched staged pair is refused synchronously and remains
+              # inactive when services/path units restart; do not reactivate it.
+              next_broker = "${state}/management-broker-releases/releases/vm-next"
+              next_descriptor = descriptor.replace(pair, "c" * 64)
+              machine.succeed("systemctl stop ${namespace}-management-activate.path")
+              machine.succeed(f"cp -a ${state}/management-broker-releases/releases/vm-test {next_broker}; printf '#!/bin/sh\\nexit 77\\n' > {next_broker}/bin/management-broker; printf '%s\\n' '{next_descriptor}' > {next_broker}/evidence/management-artifacts.json; ln -sfn releases/vm-next ${state}/management-broker-releases/current; chown -h agentops:management-broker ${state}/management-broker-releases/current")
+              machine.succeed(f"runuser -u agentops -- /run/current-system/sw/bin/management-python3.14 ${managementActivationRequest} {commit} {'c' * 64}")
+              machine.fail("systemctl restart ${namespace}-management-activate.service")
+              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
+              machine.succeed("systemctl restart ${namespace}-management-broker.path ${namespace}-management-web.path ${namespace}-management-broker.service ${namespace}-management-web.service")
+              machine.wait_until_succeeds(portal_ready)
+              assert machine.succeed("readlink ${state}/management-active/current").strip() == selected_pair
+              machine.succeed("test $(readlink -f ${state}/management-active/current/broker) = ${state}/management-broker-releases/releases/vm-test")
+              machine.succeed("ln -sfn releases/vm-test ${state}/management-broker-releases/current; chown -h agentops:management-broker ${state}/management-broker-releases/current; rm ${state}/management-broker-releases/activate-request; systemctl reset-failed ${namespace}-management-activate.service; systemctl start ${namespace}-management-activate.path")
+
+              # Make the backup volume unstartable, then prove the portal can
+              # still restart and backup ExecStart cannot reach the root disk.
+              backup_mount = machine.succeed("systemd-escape --path --suffix=mount ${backups}").strip()
+              machine.succeed(f"systemctl stop '{backup_mount}'; install -d '/run/systemd/system/{backup_mount}.d'; printf '[Unit]\\nAssertPathExists=/run/vm-test-backup-outage-never-exists\\n' > '/run/systemd/system/{backup_mount}.d/outage.conf'; systemctl daemon-reload; rm -f ${state}/operator/status/managed-backup-probe-ran")
+              machine.fail(f"systemctl start '{backup_mount}'")
+              machine.fail("mountpoint -q ${backups}")
+              machine.succeed(portal_ready)
+              machine.succeed("systemctl restart ${namespace}-management-broker.service ${namespace}-management-web.service")
+              machine.wait_until_succeeds(portal_ready)
+              machine.fail("systemctl start ${namespace}-management-broker-backup.service")
+              machine.fail("systemctl start ${namespace}-platform-backup.service")
+              machine.fail("test -e ${state}/operator/status/managed-backup-probe-ran")
+              machine.succeed(f"rm -r '/run/systemd/system/{backup_mount}.d'; systemctl daemon-reload; systemctl reset-failed '{backup_mount}' ${namespace}-platform-backup.service ${namespace}-management-broker-backup.service; systemctl start '{backup_mount}'")
             ''
           else if role == "ingress" then
             ''
