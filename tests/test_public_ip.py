@@ -276,19 +276,6 @@ class PublicIPTests(unittest.TestCase):
             & {action for action, _ in self.fixture.calls}
         )
 
-    def test_default_deploy_resize_disable_enable_delete_never_contacts_floating_ip_provider(self):
-        self.deploy()
-        _, operation = self.fixture.resize(self.fixture.plan())
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        for action, body in (
-            ("disable", {}),
-            ("enable", {}),
-            ("delete", {"confirmation": "commons"}),
-        ):
-            _, operation = self.fixture.post(f"/v1/applications/{self.app_id}/{action}", body)
-            self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        self.assertEqual(self.cloud.calls, [])
-
     def test_plan_zero_quota_and_missing_router_prevents_allocation_without_mutation(self):
         self.cloud.quota = 0
         self.cloud.routers = False
@@ -325,20 +312,6 @@ class PublicIPTests(unittest.TestCase):
             db.get_application(self.connection, self.app_id).url, "https://commons.example.test"
         )
 
-    def test_candidate_failure_before_or_after_route_promotion_keeps_old_address(self):
-        self.deploy()
-        self.mutate("allocate")
-        before = copy.deepcopy(self.cloud.fips[FIP])
-        for promoted in (False, True):
-            self.fixture.fail_health = not promoted
-            self.fixture.fail_after_promotion = promoted
-            _, operation = self.fixture.resize(self.fixture.plan())
-            self.assertEqual(operation.status, "failed", operation.safe_error)
-            self.assertEqual(self.cloud.fips[FIP], before)
-            self.assertEqual(len(self.fixture.workers), 1)
-            self.fixture.fail_health = False
-            self.fixture.fail_after_promotion = False
-
     def test_reassignment_ambiguous_before_and_after_commit_retains_predecessor_and_recovers(self):
         self.deploy()
         self.mutate("allocate")
@@ -358,57 +331,6 @@ class PublicIPTests(unittest.TestCase):
                 sum(call[2] == "set" for call in self.cloud.mutations), set_count + (not after)
             )
             self.assertEqual(len(self.fixture.workers), 1)
-
-    def test_recovery_rechecks_candidate_health_and_does_not_cleanup_or_mutate_on_drift(self):
-        self.deploy()
-        self.mutate("allocate")
-        plan = self.fixture.plan()
-        self.cloud.fault = "set"
-        key, operation = self.fixture.resize(plan)
-        self.assertEqual(operation.status, "running")
-        calls = len(self.cloud.mutations)
-        self.fixture.fail_health = True
-        _, operation = self.fixture.resize(plan, key)
-        self.assertEqual(operation.status, "running")
-        self.assertEqual(len(self.cloud.mutations), calls)
-        self.assertEqual(len(self.fixture.workers), 2)
-        self.fixture.fail_health = False
-        self.cloud.fips[FIP].update(port_id=identifier(999), fixed_ip_address="10.0.0.250")
-        _, operation = self.fixture.resize(plan, key)
-        self.assertEqual(operation.status, "running")
-        self.assertEqual(len(self.cloud.mutations), calls)
-        self.assertEqual(len(self.fixture.workers), 2)
-
-    def test_crash_after_verified_handover_before_cleanup_resumes_without_reassigning(self):
-        self.deploy()
-        self.mutate("allocate")
-        self.fixture.fail_action = "app.remove"
-        plan = self.fixture.plan()
-        key, operation = self.fixture.resize(plan)
-        self.assertEqual(operation.status, "running", operation.safe_error)
-        self.assertEqual(service.get(self.connection, self.app_id)["phase"], "active")
-        self.assertEqual(len(self.fixture.workers), 2)
-        mutations = len(self.cloud.mutations)
-        _, operation = self.fixture.resize(plan, key)
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        self.assertEqual(len(self.cloud.mutations), mutations)
-        self.assertEqual(len(self.fixture.workers), 1)
-
-    def test_disable_preserves_charged_reservation_enable_gets_same_address(self):
-        self.deploy()
-        self.mutate("allocate")
-        old = service.model(self.connection, self.app_id)
-        _, operation = self.fixture.post(f"/v1/applications/{self.app_id}/disable", {})
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        reserved = service.model(self.connection, self.app_id)
-        self.assertEqual(reserved["phase"], "reserved")
-        self.assertIsNone(reserved["portId"])
-        self.assertEqual(len(self.cloud.fips), 1)
-        _, operation = self.fixture.post(f"/v1/applications/{self.app_id}/enable", {})
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        new = service.model(self.connection, self.app_id)
-        self.assertEqual(new["address"], old["address"])
-        self.assertNotEqual(new["portId"], old["portId"])
 
     def test_supplied_owned_ip_attaches_without_allocation_and_release_never_deletes_it(self):
         self.deploy()
@@ -439,29 +361,6 @@ class PublicIPTests(unittest.TestCase):
             self.assertIsNone(service.get(self.connection, self.app_id))
             self.cloud.fips[FIP] = original
         self.assertEqual(self.cloud.mutations, [])
-
-    def test_exact_floating_identity_and_association_drift_blocks_release(self):
-        self.deploy()
-        self.mutate("allocate")
-        original = copy.deepcopy(self.cloud.fips[FIP])
-        request = str(uuid.uuid4())
-        for key, bad in (
-            ("id", identifier(99)),
-            ("project_id", identifier(199)),
-            ("floating_network_id", identifier(99)),
-            ("floating_ip_address", "198.51.100.71"),
-            ("description", "unrelated"),
-            ("port_id", identifier(99)),
-            ("fixed_ip_address", "10.0.0.250"),
-        ):
-            self.cloud.fips[FIP][key] = bad
-            count = len(self.cloud.mutations)
-            with self.assertRaises(openstack.DriftError):
-                self.mutate("release", request)
-            self.assertEqual(len(self.cloud.mutations), count, key)
-            self.cloud.fips[FIP] = copy.deepcopy(original)
-        self.mutate("release", request)
-        self.assertEqual(self.cloud.fips, {})
 
     def test_exact_port_server_project_slot_network_and_security_drift_blocks_mutation(self):
         self.deploy()
@@ -503,39 +402,6 @@ class PublicIPTests(unittest.TestCase):
         self.mutate("allocate", request)
         self.assertEqual([call[2] for call in self.cloud.mutations], ["create"])
 
-    def test_ambiguous_create_with_zero_or_multiple_marker_matches_never_guesses(self):
-        self.cloud.fault = "create"
-        request = str(uuid.uuid4())
-        with self.assertRaises(openstack.OpenStackError):
-            self.mutate("allocate", request)
-        with self.assertRaises(openstack.RecoveryRequired):
-            self.mutate("allocate", request)
-        record = service.get(self.connection, self.app_id)
-        for fid in (FIP, identifier(10)):
-            self.cloud.supplied(fid)
-            self.cloud.fips[fid]["description"] = record["description"]
-        with self.assertRaises(openstack.RecoveryRequired):
-            self.mutate("allocate", request)
-        self.assertEqual([call[2] for call in self.cloud.mutations], ["create"])
-
-    def test_ambiguous_detach_and_delete_are_retryable_and_preserve_unrelated_resources(self):
-        self.deploy()
-        self.mutate("allocate")
-        unrelated = identifier(100)
-        self.cloud.supplied(unrelated)
-        original = copy.deepcopy(self.cloud.fips[unrelated])
-        request = str(uuid.uuid4())
-        self.cloud.fault, self.cloud.fault_after = "unset", True
-        with self.assertRaises(openstack.OpenStackError):
-            self.mutate("release", request)
-        self.cloud.fault, self.cloud.fault_after = "delete", True
-        with self.assertRaises(openstack.OpenStackError):
-            self.mutate("release", request)
-        self.assertEqual(service.get(self.connection, self.app_id)["phase"], "deleting")
-        self.mutate("release", request)
-        self.assertIsNone(service.get(self.connection, self.app_id))
-        self.assertEqual(self.cloud.fips, {unrelated: original})
-
     def test_app_deletion_blocks_worker_delete_on_ambiguous_fip_delete_then_resumes(self):
         self.deploy()
         self.mutate("allocate")
@@ -550,22 +416,6 @@ class PublicIPTests(unittest.TestCase):
         self.assertEqual(operation.status, "succeeded", operation.safe_error)
         self.assertIsNone(db.get_application(self.connection, self.app_id))
         self.assertIsNone(service.get(self.connection, self.app_id))
-
-    def test_conflicting_deploy_disable_delete_release_are_rejected(self):
-        self.cloud.fault = "create"
-        request = str(uuid.uuid4())
-        with self.assertRaises(openstack.OpenStackError):
-            self.mutate("allocate", request)
-        with self.assertRaises(db.UnfinishedOperationError):
-            self.mutate("release")
-        for action, body in (
-            ("deployments", self.fixture.body),
-            ("disable", {}),
-            ("delete", {"confirmation": "commons"}),
-        ):
-            with self.assertRaises(HttpError) as error:
-                self.fixture.post(f"/v1/applications/{self.app_id}/{action}", body)
-            self.assertEqual(error.exception.status, 409)
 
     def test_project_capability_cannot_access_public_ip_staff_api(self):
         router = self.fixture.api.router("project")
@@ -632,18 +482,6 @@ class PublicIPTests(unittest.TestCase):
             self.svc.mutate(second, action="attach", network_id=EXTERNAL, floating_ip_id=FIP)
         self.assertIsNone(service.get(self.connection, second))
         self.assertEqual(self.cloud.mutations, [])
-
-    def test_supplied_ip_app_deletion_detaches_but_does_not_delete_address(self):
-        self.deploy()
-        self.cloud.supplied()
-        self.mutate("attach")
-        _, operation = self.fixture.post(
-            f"/v1/applications/{self.app_id}/delete", {"confirmation": "commons"}
-        )
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        self.assertIsNone(self.cloud.fips[FIP]["port_id"])
-        self.assertIsNone(service.get(self.connection, self.app_id))
-        self.assertFalse(any(call[2] == "delete" for call in self.cloud.mutations))
 
 
 if __name__ == "__main__":

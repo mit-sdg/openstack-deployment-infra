@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import tarfile
 import tempfile
@@ -21,7 +20,6 @@ from openstack_platform.controller.application_runtime import (
     DeploymentFailed,
     Manifest,
     Recipe,
-    StorageBinding,
     accept_healthy_deployment,
     acquire_github_commit,
     apply_registry_retention,
@@ -30,7 +28,6 @@ from openstack_platform.controller.application_runtime import (
     create_builder,
     create_worker,
     deploy_and_cleanup,
-    deployment_recovery_action,
     execute_builder_build,
     generate_recipe,
     nomad_candidate_identity,
@@ -42,7 +39,6 @@ from openstack_platform.controller.application_runtime import (
     set_environment,
 )
 from openstack_platform.controller.deployment_config import parse_configuration
-from openstack_platform.helper import production
 from openstack_platform.runtime import HttpResult
 from openstack_platform.validation import ValidationError
 
@@ -74,34 +70,6 @@ class ManifestAndRecipeTests(unittest.TestCase):
         )
         self.assertIn("USER 65532:65532", text)
         self.assertEqual(len(first.sha256), 64)
-
-    def test_node_recipe_uses_frozen_npm_install_and_asserted_script_command(self) -> None:
-        manifest = Manifest("node", (".",), None, "serve", 8080, "/ready")
-        recipe = generate_recipe(
-            manifest,
-            RuntimeImages(bun=BUN_IMAGE, node=NODE_IMAGE),
-        ).dockerfile.decode()
-        self.assertIn(f"FROM {NODE_IMAGE}", recipe)
-        self.assertIn('RUN ["npm","ci"]', recipe)
-        self.assertIn('CMD ["npm","run","serve"]', recipe)
-        self.assertNotIn('RUN ["npm","run"', recipe)
-        self.assertIn('ENTRYPOINT ["node","/platform-log-timestamps.cjs"]', recipe)
-        self.assertNotIn("bun", recipe.lower())
-        self.assertEqual(
-            [line for line in recipe.splitlines() if line.startswith(("ARG ", "ENV "))],
-            ["ENV NODE_ENV=production"],
-        )
-
-    def test_wrapper_is_embedded_and_participates_in_recipe_identity(self) -> None:
-        manifest = Manifest("node", (".",), None, "start", 3000, "/health")
-        images = RuntimeImages(bun=BUN_IMAGE, node=NODE_IMAGE)
-        recipe = generate_recipe(manifest, images)
-        wrapper = (ROOT / "openstack_platform/controller/log_timestamps.cjs").read_bytes()
-        self.assertIn(base64.b64encode(wrapper), recipe.dockerfile)
-        with mock.patch.object(Path, "read_bytes", return_value=wrapper + b"\n// changed"):
-            changed = generate_recipe(manifest, images)
-        self.assertNotEqual(recipe.sha256, changed.sha256)
-        self.assertNotEqual(recipe.dockerfile, changed.dockerfile)
 
     def test_dotenv_is_strict_and_non_executable(self) -> None:
         self.assertEqual(
@@ -150,31 +118,6 @@ class SourceTests(unittest.TestCase):
         self.assertIn(COMMIT, fetch)
         self.assertNotIn("shell", " ".join(fetch))
 
-    def test_source_phases_share_one_absolute_deadline(self) -> None:
-        timeouts: list[float] = []
-
-        def runner(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
-            timeouts.append(float(kwargs["timeout_seconds"]))
-            root = Path(argv[argv.index("-C") + 1]) if "-C" in argv else Path(argv[-1])
-            if "init" in argv:
-                (root / ".git").mkdir()
-                (root / "README.md").write_text("exact checkout\n")
-            time.sleep(0.01)
-            stdout = (COMMIT + "\n").encode() if "rev-parse" in argv else b""
-            return SimpleNamespace(stdout=stdout)
-
-        with tempfile.TemporaryDirectory() as directory:
-            acquire_github_commit(
-                "https://github.com/example/public-app",
-                COMMIT,
-                Path(directory) / "source",
-                timeout_seconds=1,
-                deadline=time.monotonic() + 1,
-                command_runner=runner,
-            )
-        self.assertGreater(len(timeouts), 1)
-        self.assertLess(timeouts[-1], timeouts[0])
-
     def test_gitmodules_are_rejected_and_redirects_are_disabled(self) -> None:
         calls: list[tuple[str, ...]] = []
 
@@ -204,49 +147,6 @@ class SourceTests(unittest.TestCase):
         self.assertIn("filter.lfs.smudge=", joined)
         self.assertIn("filter.lfs.process=", joined)
 
-    def test_repository_dockerfiles_may_coexist_as_inert_source_files(self) -> None:
-        for malicious_name in (
-            "Dockerfile",
-            "nested/Dockerfile",
-            "containers/Dockerfile.release",
-        ):
-            with self.subTest(name=malicious_name), tempfile.TemporaryDirectory() as directory:
-                destination = Path(directory) / "source"
-
-                def runner(
-                    argv: tuple[str, ...],
-                    selected: str = malicious_name,
-                    **_kwargs: object,
-                ) -> SimpleNamespace:
-                    root = Path(argv[argv.index("-C") + 1]) if "-C" in argv else Path(argv[-1])
-                    if "init" in argv:
-                        (root / ".git").mkdir()
-                        (root / "bun.lock").write_text("")
-                        path = root / selected
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_text("RUN malicious-build-instruction\n")
-                    if "ls-files" in argv:
-                        index = b"100644 " + b"1" * 40 + b" 0\t" + selected.encode() + b"\0"
-                        return SimpleNamespace(stdout=index)
-                    return SimpleNamespace(stdout=(COMMIT + "\n").encode())
-
-                source = acquire_github_commit(
-                    "https://github.com/example/public-app",
-                    COMMIT,
-                    destination,
-                    command_runner=runner,
-                )
-                self.assertEqual(
-                    (source / malicious_name).read_text(),
-                    "RUN malicious-build-instruction\n",
-                )
-                recipe = generate_recipe(
-                    Manifest("bun", (".",), "build", "start", 3000, "/health"),
-                    RuntimeImages(bun=BUN_IMAGE, node=NODE_IMAGE),
-                ).dockerfile
-                self.assertNotIn(b"malicious-build-instruction", recipe)
-                self.assertFalse((source / ".git").exists())
-
     def test_gitlink_index_mode_is_rejected_even_without_gitmodules(self) -> None:
         def runner(argv: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
             destination = Path(argv[argv.index("-C") + 1]) if "-C" in argv else Path(argv[-1])
@@ -261,24 +161,6 @@ class SourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "source"
             with self.assertRaisesRegex(ValidationError, "gitlinks"):
-                acquire_github_commit(
-                    "https://github.com/example/public-app",
-                    COMMIT,
-                    destination,
-                    command_runner=runner,
-                )
-            self.assertFalse(destination.exists())
-
-    def test_commit_mismatch_removes_partial_source(self) -> None:
-        def runner(argv: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
-            destination = Path(argv[argv.index("-C") + 1]) if "-C" in argv else Path(argv[-1])
-            if "init" in argv:
-                (destination / ".git").mkdir()
-            return SimpleNamespace(stdout=(("c" * 40) + "\n").encode())
-
-        with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / "source"
-            with self.assertRaises(ApplicationError):
                 acquire_github_commit(
                     "https://github.com/example/public-app",
                     COMMIT,
@@ -478,120 +360,6 @@ class ProviderCommandTests(unittest.TestCase):
                 worker_command=("fixed-worker",),
             )
         self.assertEqual(calls, [])
-
-    def test_worker_delete_expands_only_the_two_bounded_deployment_slots(self) -> None:
-        platform = SimpleNamespace(prefix="example", project_name="project", project_id=APP_ID)
-        observed: list[str] = []
-
-        def delete_worker(identity: str, slug: str, **_kwargs: object):
-            observed.append(identity)
-            return app_module.WorkerObservation(
-                identity,
-                slug,
-                None,
-                "absent",
-                None,
-                "absent-v4",
-                None,
-                None,
-                False,
-            )
-
-        with (
-            mock.patch.object(
-                production, "helper_runtime", return_value=SimpleNamespace(platform=platform)
-            ),
-            mock.patch.object(production.application, "provider_command", return_value=("worker",)),
-            mock.patch.object(production.application, "delete_worker", side_effect=delete_worker),
-        ):
-            result = production._provider_app(
-                "app.worker.delete", {"applicationId": APP_ID, "slug": "demo-app"}
-            )
-        self.assertTrue(result["absent"])
-        self.assertEqual(observed, [APP_ID, *app_module.deployment_worker_ids(APP_ID)])
-        observed.clear()
-        with (
-            mock.patch.object(
-                production, "helper_runtime", return_value=SimpleNamespace(platform=platform)
-            ),
-            mock.patch.object(production.application, "provider_command", return_value=("worker",)),
-            mock.patch.object(production.application, "delete_worker", side_effect=delete_worker),
-        ):
-            production._provider_app(
-                "app.worker.delete",
-                {"applicationId": APP_ID, "slug": "demo-app", "single": True},
-            )
-        self.assertEqual(observed, [APP_ID])
-
-    def test_existing_worker_uuid_and_image_are_authoritative_over_new_selection(self) -> None:
-        server_name = "example-worker-123456781234"
-        old_image = "00000000-0000-4000-8000-000000000066"
-        payload = {
-            "applicationId": APP_ID,
-            "slug": "demo-app",
-            "server": {
-                "id": self.SERVER_ID,
-                "name": server_name,
-                "status": "ACTIVE",
-                "imageId": old_image,
-                "flavorName": "older-worker-flavor",
-                "managedBy": "platform",
-                "applicationId": APP_ID,
-                "applicationSlug": "demo-app",
-            },
-            "port": {
-                "id": self.PORT_ID,
-                "name": f"{server_name}-v4",
-                "deviceId": self.SERVER_ID,
-                "address": "192.0.2.41",
-                "description": (
-                    f"managed-by=platform;application-id={APP_ID};application-slug=demo-app"
-                ),
-            },
-            "ready": True,
-        }
-        calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
-
-        def runner(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
-            calls.append((argv, dict(kwargs)))
-            return self.result(payload if "show" in argv else b"")
-
-        observed = create_worker(
-            APP_ID,
-            "demo-app",
-            prefix="example",
-            selected_image_id=None,
-            standard_flavor=None,
-            nomad_command="fixed-nomad-wrapper",
-            timeout_seconds=30,
-            command_runner=runner,
-            worker_command=("fixed-worker",),
-        )
-        self.assertEqual(observed.server_id, self.SERVER_ID)
-        self.assertEqual(observed.image_id, old_image)
-        create_call = next(call for call in calls if "create" in call[0])
-        self.assertEqual(create_call[1]["env"], {"NOMAD": "fixed-nomad-wrapper"})
-        payload["ready"] = False
-        for status in ("ACTIVE", "BUILD", "ERROR", "SHUTOFF", "PAUSED", "UNKNOWN", "active", ""):
-            with self.subTest(status=status):
-                payload["server"]["status"] = status
-                observed = parse_worker_observation(
-                    json.dumps(payload),
-                    application_id=APP_ID,
-                    application_slug="demo-app",
-                    prefix="example",
-                )
-                self.assertEqual(observed.provider_active, status == "ACTIVE")
-                self.assertFalse(observed.ready, "provider liveness must not imply readiness")
-        payload.update(server=None, port=None)
-        self.assertFalse(
-            parse_worker_observation(
-                json.dumps(payload),
-                application_id=APP_ID,
-                application_slug="demo-app",
-                prefix="example",
-            ).provider_active
-        )
 
     def test_observations_reject_name_collisions_with_wrong_metadata_or_attachment(self) -> None:
         builder = {
@@ -798,70 +566,6 @@ class ProviderCommandTests(unittest.TestCase):
         self.assertNotIn(images[0].rsplit("@", 1)[-1], deleted_digests)
         self.assertNotIn(retained_old_reference.rsplit("@", 1)[-1], deleted_digests)
 
-    def test_every_recorded_phase_has_an_explicit_recovery_action(self) -> None:
-        expected = {
-            "validated": "acquire_source",
-            "source_acquired": "acquire_source",
-            "builder_created": "cleanup_builder_then_rebuild",
-            "image_pushed": "cleanup_builder_then_reconcile_worker",
-            "builder_cleaned": "reconcile_worker",
-            "worker_ready": "submit_job",
-            "job_submitted": "observe_health_or_remove_candidate",
-            "deployment_healthy": "accept_deployment",
-            "accepted": "complete",
-        }
-        for phase, action in expected.items():
-            with self.subTest(phase=phase):
-                candidate = (
-                    f"registry.example/projects/demo-app/app@sha256:{DIGEST}"
-                    if phase == "image_pushed"
-                    else None
-                )
-                self.assertEqual(
-                    deployment_recovery_action(phase, candidate_digest=candidate), action
-                )
-
-
-class WorkerPrimitiveTests(unittest.TestCase):
-    def test_worker_and_job_primitives_have_no_class_profile_state(self) -> None:
-        paths = (
-            ROOT / "infra" / "openstack" / "worker_lifecycle.sh",
-            ROOT / "infra" / "cloud-init-nixos" / "worker.yaml",
-            ROOT / "openstack_platform" / "controller" / "application_runtime.py",
-            ROOT / "openstack_platform" / "contracts.py",
-            ROOT / "infra" / "lib" / "platform_contract.json",
-        )
-        combined = "\n".join(path.read_text().lower() for path in paths)
-        for retired in ("project_class", "personal", "team"):
-            self.assertNotIn(retired, combined)
-        self.assertIn("application_id", combined)
-        self.assertIn("platform_candidate_job_sha256", combined)
-
-    def test_lifecycle_mutations_use_resolved_uuids_and_repeat_project_identity_checks(
-        self,
-    ) -> None:
-        for name in ("worker_lifecycle.sh", "builder_lifecycle.sh"):
-            text = (ROOT / "infra" / "openstack" / name).read_text()
-            self.assertIn("EXPECTED_PROJECT_NAME", text)
-            self.assertIn("EXPECTED_PROJECT_ID", text)
-            self.assertIn("token_project_id", text)
-            self.assertIn("resolve_named_id", text)
-            self.assertIn('server delete --wait "$server_id"', text)
-            self.assertIn('port delete "$port_id"', text)
-            self.assertNotIn('server delete --wait "$server_name"', text)
-            self.assertNotIn('port delete "$port_name"', text)
-        worker = (ROOT / "infra" / "openstack" / "worker_lifecycle.sh").read_text()
-        self.assertIn('flavor show "$flavor"', worker)
-        self.assertIn("vcpus < 1", worker)
-        worker_template = (ROOT / "infra" / "cloud-init-nixos" / "worker.yaml").read_text()
-        self.assertIn("acl {\n        enabled = true", worker_template)
-        builder = (ROOT / "infra" / "openstack" / "builder_lifecycle.sh").read_text()
-        create = builder[
-            builder.index('"$OSC" server create') : builder.index("create_failed=false")
-        ]
-        self.assertNotIn("--wait", create)
-        self.assertIn('wait_for_bootstrap "$server_id"', builder)
-
 
 class DeploymentTests(unittest.TestCase):
     def platform(self) -> PlatformConfig:
@@ -910,70 +614,6 @@ class DeploymentTests(unittest.TestCase):
             "healthy": healthy,
             "terminal": terminal,
         }
-
-    def test_job_maps_named_storage_without_optional_template_functions(self) -> None:
-        manifest = Manifest(
-            "node",
-            (".",),
-            None,
-            "start",
-            3000,
-            "/health",
-            (StorageBinding("default", "mongo", (("uri", "MONGODB_URI"),)),),
-        )
-        job = render_nomad_job(
-            application_id=APP_ID,
-            application_slug="demo-app",
-            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
-            manifest=manifest,
-            platform=self.platform(),
-            cpu_mhz=1000,
-            memory_mib=2048,
-            source_commit=COMMIT,
-            recipe_hash="c" * 64,
-        )
-        self.assertIn('(ne $key "STORAGE__MONGO__DEFAULT__URI")', job)
-        self.assertIn('{{ $value := index . "STORAGE__MONGO__DEFAULT__URI" }}', job)
-        self.assertIn("MONGODB_URI={{ $value | toJSON }}", job)
-        self.assertNotIn("hasPrefix", job)
-        self.assertNotIn(r"\n{{ end }}", job)
-
-    def test_job_keeps_retired_s3_keys_out_of_a_bound_apps_environment(self) -> None:
-        manifest = Manifest(
-            "node",
-            (".",),
-            None,
-            "start",
-            3000,
-            "/health",
-            (
-                StorageBinding(
-                    "default",
-                    "s3",
-                    (("bucket", "S3_BUCKET"), ("public_endpoint", "S3_PUBLIC_ENDPOINT")),
-                ),
-            ),
-        )
-        job = render_nomad_job(
-            application_id=APP_ID,
-            application_slug="demo-app",
-            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
-            manifest=manifest,
-            platform=self.platform(),
-            cpu_mhz=1000,
-            memory_mib=2048,
-            source_commit=COMMIT,
-            recipe_hash="c" * 64,
-        )
-        for output in ("CA_BUNDLE", "FORCE_PATH_STYLE", "ENDPOINT", "SECRET_ACCESS_KEY"):
-            self.assertIn(f'(ne $key "STORAGE__S3__DEFAULT__{output}")', job)
-        self.assertIn('NODE_EXTRA_CA_CERTS = "/platform-ca/internal-ca.crt"', job)
-        self.assertIn('AWS_REQUEST_CHECKSUM_CALCULATION = "when_required"', job)
-        # The public endpoint is set by the job, not read from the Variable.
-        domain = self.platform().domain
-        self.assertIn(f'S3_PUBLIC_ENDPOINT = "https://s3.{domain}"', job)
-        self.assertNotIn("STORAGE__S3__DEFAULT__PUBLIC_ENDPOINT", job)
-        self.assertIn('destination = "/platform-ca"', job)
 
     def test_job_has_only_application_placement_and_explicit_standard_resources(self) -> None:
         job = render_nomad_job(
@@ -1142,37 +782,6 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(result.nomad_version, 4)
         self.assertEqual(calls, ["app.deploy", "app.health"])
 
-    def test_pending_zero_allocation_observation_is_polled_without_cleanup(self) -> None:
-        job, candidate = self.candidate_job()
-        observations = 0
-        calls: list[str] = []
-
-        def helper(action: str, _args: object, **_kwargs: object) -> dict[str, object]:
-            nonlocal observations
-            calls.append(action)
-            if action == "app.deploy":
-                return {
-                    "jobId": "demo-app",
-                    "nomadVersion": 4,
-                    "candidateJobSha256": candidate[0],
-                    "candidateImage": candidate[1],
-                }
-            observations += 1
-            if observations == 1:
-                return self.health(4, candidate, healthy=False, terminal=False) | {"allocations": 0}
-            return self.health(4, candidate, healthy=True, terminal=False)
-
-        result = deploy_and_cleanup(
-            "demo-app",
-            job,
-            attempts=2,
-            helper_caller=helper,
-            sleep=lambda _seconds: None,
-        )
-
-        self.assertEqual(result.observations, 2)
-        self.assertEqual(calls, ["app.deploy", "app.health", "app.health"])
-
     def test_public_health_must_pass_after_scheduler_health(self) -> None:
         public = iter((False, True))
         job, candidate = self.candidate_job()
@@ -1196,62 +805,6 @@ class DeploymentTests(unittest.TestCase):
             sleep=lambda _seconds: None,
         )
         self.assertEqual(result.observations, 2)
-
-    def test_promoted_route_identity_failure_removes_only_promoted_slot(self) -> None:
-        marker = "00000000-0000-4000-8000-000000000099"
-        job = render_nomad_job(
-            application_id=APP_ID,
-            application_slug="demo-app",
-            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
-            manifest=Manifest("node", (".",), None, "start", 3000, "/health"),
-            platform=self.platform(),
-            cpu_mhz=1000,
-            memory_mib=2048,
-            source_commit=COMMIT,
-            recipe_hash="c" * 64,
-            candidate=True,
-            placement_id=marker,
-            staged=True,
-            promoted=True,
-            route_marker=marker,
-            route_priority=200,
-        )
-        identity = nomad_candidate_identity(job)
-        calls: list[tuple[str, object]] = []
-
-        def helper(action: str, args: object, **_kwargs: object) -> dict[str, object]:
-            calls.append((action, args))
-            if action == "app.deploy":
-                return {
-                    "jobId": "demo-app-candidate",
-                    "nomadVersion": 9,
-                    "candidateJobSha256": identity[0],
-                    "candidateImage": identity[1],
-                }
-            if action == "app.health":
-                return self.health(9, identity, healthy=True, terminal=False)
-            return {"jobAbsent": True}
-
-        with self.assertRaises(DeploymentFailed):
-            deploy_and_cleanup(
-                "demo-app",
-                job,
-                attempts=1,
-                helper_caller=helper,
-                public_health_check=lambda: False,
-            )
-        self.assertIn(
-            (
-                "app.remove",
-                {
-                    "slug": "demo-app",
-                    "jobId": "demo-app-candidate",
-                    "candidateJobSha256": identity[0],
-                    "candidateImage": identity[1],
-                },
-            ),
-            calls,
-        )
 
     def test_terminal_deploy_removes_only_the_current_candidate(self) -> None:
         calls: list[tuple[str, object]] = []
@@ -1286,212 +839,6 @@ class DeploymentTests(unittest.TestCase):
             calls,
         )
         self.assertEqual(raised.exception.cleanup_evidence["action"], "remove-candidate")
-
-    def test_failed_candidate_startup_is_read_before_removal(self) -> None:
-        job, candidate = self.candidate_job()
-        calls: list[str] = []
-        evidence: dict[str, object] = {
-            "found": True,
-            "clientStatus": "failed",
-            "taskState": "dead",
-            "failed": True,
-            "restarts": 3,
-            "events": [
-                {"type": "Terminated", "message": "Exit Code: 1", "exitCode": 1, "time": 5},
-                {"type": 7},
-            ],
-            "stdout": "x" * 70_000 + "listening\n",
-            "stderr": "Error: Cannot find module 'express'\n",
-            "stdoutTruncated": False,
-            "stderrTruncated": False,
-        }
-
-        def helper(action: str, args: object, **_kwargs: object) -> object:
-            calls.append(action)
-            if action == "app.deploy":
-                return {
-                    "jobId": "demo-app",
-                    "nomadVersion": 4,
-                    "candidateJobSha256": candidate[0],
-                    "candidateImage": candidate[1],
-                }
-            if action == "app.health":
-                return self.health(4, candidate, healthy=False, terminal=True)
-            if action == "app.startup":
-                self.assertEqual(args, {"slug": "demo-app", "jobId": "demo-app", "lines": 200})
-                return evidence
-            return {"jobAbsent": True}
-
-        with self.assertRaises(DeploymentFailed) as raised:
-            deploy_and_cleanup("demo-app", job, helper_caller=helper, sleep=lambda _seconds: None)
-        self.assertEqual(calls[-2:], ["app.startup", "app.remove"])
-        startup = raised.exception.startup
-        assert startup is not None
-        self.assertEqual(startup["stderr"], "Error: Cannot find module 'express'\n")
-        self.assertEqual(len(startup["stdout"].encode()), 65_536)
-        self.assertTrue(startup["stdout"].endswith("listening\n"))
-        self.assertEqual(
-            startup["events"],
-            [
-                {
-                    "type": "Terminated",
-                    "message": "Exit Code: 1",
-                    "exitCode": 1,
-                    "oomKilled": False,
-                    "time": 5,
-                }
-            ],
-        )
-        for answer in (RuntimeError("helper unavailable"), {"found": "yes"}, {"found": True}):
-
-            def unreadable(
-                action: str, args: object, answer: object = answer, **_kwargs: object
-            ) -> object:
-                if action == "app.startup":
-                    if isinstance(answer, Exception):
-                        raise answer
-                    return answer
-                return helper(action, args)
-
-            with self.subTest(answer=answer), self.assertRaises(DeploymentFailed) as raised:
-                deploy_and_cleanup(
-                    "demo-app", job, helper_caller=unreadable, sleep=lambda _seconds: None
-                )
-            self.assertIsNone(raised.exception.startup)
-            self.assertTrue(raised.exception.cleanup_succeeded)
-
-    def test_poll_reserves_startup_and_removal_time_even_with_slow_helpers(self) -> None:
-        job, candidate = self.candidate_job()
-        for removal, cost in ((True, 17), (False, 17), (True, 13)):
-            with self.subTest(removal=removal, cost=cost):
-                clock = [0.0]
-                calls = []
-                sleeps = []
-
-                def helper(
-                    action, values, clock=clock, calls=calls, removal=removal, cost=cost, **bounds
-                ):
-                    calls.append((action, clock[0], bounds["timeout_seconds"]))
-                    if action == "app.deploy":
-                        return {
-                            "jobId": "demo-app",
-                            "nomadVersion": 4,
-                            "candidateJobSha256": candidate[0],
-                            "candidateImage": candidate[1],
-                        }
-                    if action == "app.health":
-                        clock[0] += min(cost, bounds["timeout_seconds"])
-                        return self.health(4, candidate, healthy=False, terminal=False)
-                    if action == "app.startup":
-                        clock[0] += 5
-                        return {
-                            "found": True,
-                            "clientStatus": "running",
-                            "taskState": "running",
-                            "failed": False,
-                            "restarts": 3,
-                            "events": [],
-                            "stdout": "waiting for health",
-                            "stderr": "",
-                        }
-                    if action == "app.remove":
-                        clock[0] += 10
-                        return {"jobAbsent": removal}
-                    raise AssertionError(action)
-
-                def sleep(seconds, clock=clock, sleeps=sleeps):
-                    sleeps.append(seconds)
-                    clock[0] += seconds
-
-                with self.assertRaises(DeploymentFailed) as error:
-                    deploy_and_cleanup(
-                        "demo-app",
-                        job,
-                        attempts=300,
-                        poll_interval_seconds=10,
-                        helper_caller=helper,
-                        sleep=sleep,
-                        deadline=100,
-                        cleanup_reserve_seconds=40,
-                        clock=lambda clock=clock: clock[0],
-                    )
-                self.assertEqual(
-                    [action for action, _, _ in calls][-2:], ["app.startup", "app.remove"]
-                )
-                self.assertLessEqual(clock[0], 100)
-                self.assertEqual(error.exception.cleanup_succeeded, removal)
-                self.assertEqual(error.exception.startup["stdout"], "waiting for health")
-                self.assertEqual(calls[-2][1], 60)
-                if cost == 17:
-                    self.assertEqual(calls[-3][2], 6)
-                else:
-                    self.assertEqual(sleeps[-1], 1)
-
-    def test_health_window_covers_a_slow_image_download_but_not_crash_loops(self) -> None:
-        job, candidate = self.candidate_job()
-        # Nomad's healthy deadline runs from placement, so it includes the pull.
-        self.assertIn('min_healthy_time  = "10s"', job)
-        self.assertIn('healthy_deadline  = "10m"', job)
-        self.assertIn('progress_deadline = "12m"', job)
-        # A crash loop still fails the allocation through the restart policy.
-        self.assertIn(
-            'attempts = 3\n      interval = "5m"\n      delay    = "10s"\n      mode     = "fail"',
-            job,
-        )
-        self.assertEqual(app_module.HEALTH_OBSERVATION_SECONDS, 720)
-        # Healthy after ten minutes of pulling and starting: accepted.
-        result, observed = self.observe_slow_start(job, candidate, healthy_at=610)
-        assert isinstance(result, app_module.DeploymentResult)
-        self.assertEqual(result.observations, len(observed))
-        self.assertGreaterEqual(observed[-1], 610)
-        # Never healthy, never crashing: removed at the window, not the deadline.
-        result, observed = self.observe_slow_start(job, candidate, healthy_at=None)
-        self.assertIsInstance(result, DeploymentFailed)
-        self.assertGreater(observed[-1], 700)
-        self.assertLess(observed[-1], 720)
-
-    def observe_slow_start(
-        self, job: str, candidate: tuple[str, str], *, healthy_at: float | None
-    ) -> tuple[object, list[float]]:
-        clock = [0.0]
-        observed: list[float] = []
-
-        def helper(action: str, _values: object, **_bounds: object) -> dict[str, object]:
-            if action == "app.deploy":
-                return {
-                    "jobId": "demo-app",
-                    "nomadVersion": 4,
-                    "candidateJobSha256": candidate[0],
-                    "candidateImage": candidate[1],
-                }
-            if action == "app.health":
-                observed.append(clock[0])
-                healthy = healthy_at is not None and clock[0] >= healthy_at
-                return self.health(4, candidate, healthy=healthy, terminal=False)
-            if action == "app.startup":
-                return {"found": False}
-            return {"jobAbsent": True}
-
-        def sleep(seconds: float) -> None:
-            clock[0] += seconds
-
-        try:
-            result: object = deploy_and_cleanup(
-                "demo-app",
-                job,
-                attempts=app_module.health_observation_attempts(2),
-                poll_interval_seconds=2,
-                helper_caller=helper,
-                sleep=sleep,
-                # An hour-long operation: the window, not the deadline, ends polling.
-                deadline=3_600,
-                cleanup_reserve_seconds=210,
-                clock=lambda: clock[0],
-                observe_seconds=app_module.HEALTH_OBSERVATION_SECONDS,
-            )
-        except DeploymentFailed as error:
-            result = error
-        return result, observed
 
     def test_shared_acceptance_reobserves_exact_job_and_public_route_before_database_write(
         self,

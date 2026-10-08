@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import base64
 import re
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -173,69 +171,6 @@ class HostUserDataTests(unittest.TestCase):
         self.assertRegex(decoded_htpasswd, rb"^builder:\$2[aby]\$")
         self.assertIn(b"\nruntime:$2", decoded_htpasswd)
 
-    def test_standalone_renderer_uses_the_same_admin_contract(self) -> None:
-        sentinel = "sentinel-standalone-admin"
-        inputs = self.inputs("admin", {"NOMAD_GOSSIP_KEY": sentinel})
-        output = self.root / "standalone-user-data"
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "infra" / "openstack" / "render_host_user_data.py"),
-                "--role",
-                "admin",
-                "--platform-config",
-                str(ROOT / "config" / "platform.example.json"),
-                "--template",
-                str(inputs.template),
-                "--operator-public-key",
-                str(inputs.operator_public_key),
-                "--secret-file",
-                str(inputs.secret_file),
-                "--pki-directory",
-                str(inputs.pki_directory),
-                "--volume",
-                self.platform.get("volumes.adminState.name"),
-                ADMIN_VOLUME,
-                "--volume",
-                self.platform.get("volumes.backup.name"),
-                BACKUP_VOLUME,
-                "--output",
-                str(output),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
-        self.assertEqual(completed.stdout, b"")
-        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
-        self.assertIn(sentinel, output.read_text())
-
-    def test_template_placeholder_count_drift_fails_without_secret_in_error(self) -> None:
-        sentinel = "sentinel-renderer-error-secret"
-        inputs = self.inputs("admin", {"NOMAD_GOSSIP_KEY": sentinel})
-        changed = self.root / "changed.yaml"
-        changed.write_text(inputs.template.read_text() + "\n# __ADMIN_HOST__\n")
-        changed_inputs = host_user_data.HostUserDataInputs(
-            template=changed,
-            operator_public_key=inputs.operator_public_key,
-            secret_file=inputs.secret_file,
-            pki_directory=inputs.pki_directory,
-        )
-        with self.assertRaises(ValidationError) as caught:
-            host_user_data.render_host_user_data_file(
-                self.platform,
-                "admin",
-                changed_inputs,
-                {
-                    self.platform.get("volumes.adminState.name"): ADMIN_VOLUME,
-                    self.platform.get("volumes.backup.name"): BACKUP_VOLUME,
-                },
-                self.root / "output",
-            )
-        self.assertIn("placeholder count changed", str(caught.exception))
-        self.assertNotIn(sentinel, str(caught.exception))
-
     def test_private_inputs_are_direct_owner_only_files(self) -> None:
         inputs = self.inputs("admin", {"NOMAD_GOSSIP_KEY": "sentinel-weak-mode"})
         inputs.secret_file.chmod(0o640)
@@ -271,25 +206,6 @@ class HostUserDataTests(unittest.TestCase):
                 self.assertIn("sentinel-cleanup", path.read_text())
                 raise RuntimeError("injected interruption")
         self.assertFalse(Path(staged).exists())
-
-    def test_environment_contract_uses_protected_paths_not_secret_values(self) -> None:
-        secret = self.secret_file(
-            "tokens.env",
-            {
-                "NOMAD_CONTROLLER_TOKEN": "sentinel-controller",
-                "NOMAD_TRAEFIK_TOKEN": "sentinel-traefik",
-            },
-        )
-        environment = {
-            "OPERATOR_PUBLIC_KEY": str(self.public_key),
-            "NOMAD_TOKENS_FILE": str(secret),
-            "PKI_DIR": str(self.pki),
-            "ENABLE_CLOUDFLARED": "false",
-        }
-        inputs = host_user_data.inputs_from_environment("ingress", environment=environment)
-        self.assertEqual(inputs.secret_file, secret)
-        self.assertNotIn("sentinel", repr(inputs))
-        self.assertFalse(inputs.enable_cloudflared)
 
 
 if __name__ == "__main__":

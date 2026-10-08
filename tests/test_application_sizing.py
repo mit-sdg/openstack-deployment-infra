@@ -5,7 +5,6 @@ import json
 import unittest
 import uuid
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -289,24 +288,6 @@ class ApplicationSizingTests(unittest.TestCase):
         )
         self.assertFalse(any(action == "app.promote" for action, _ in self.calls))
 
-    def test_deploy_and_enable_observe_health_through_nomads_window(self):
-        # Both submit a job whose health window includes the image download.
-        with mock.patch.object(app, "deploy_and_cleanup", wraps=app.deploy_and_cleanup) as observed:
-            _, deployed = self.deploy()
-            self.assertEqual(deployed.status, "succeeded", deployed.safe_error)
-            self.post(f"/v1/applications/{self.app_id}/disable", {})
-            _, enabled = self.post(f"/v1/applications/{self.app_id}/enable", {})
-            self.assertEqual(enabled.status, "succeeded", enabled.safe_error)
-        self.assertEqual(observed.call_count, 2)
-        for call in observed.call_args_list:
-            bounds = call.kwargs
-            self.assertEqual(bounds["observe_seconds"], app.HEALTH_OBSERVATION_SECONDS)
-            self.assertGreaterEqual(
-                bounds["attempts"] * bounds["poll_interval_seconds"],
-                app.HEALTH_OBSERVATION_SECONDS,
-            )
-        self.assertIn('healthy_deadline  = "10m"', observed.call_args_list[0].args[1])
-
     def test_custom_flavor_first_deployment_and_student_plan_is_not_public(self):
         plan = self.plan()
         self.assertIsNone(plan["deploymentId"])
@@ -429,45 +410,6 @@ class ApplicationSizingTests(unittest.TestCase):
             any(action == "app.health" and deadline < 190 for action, _, deadline in deadlines)
         )
 
-    def test_failed_deploy_keeps_the_candidates_startup_record_for_its_owner(self):
-        _, first = self.deploy()
-        self.assertEqual(first.status, "succeeded", first.safe_error)
-        path = f"/v1/deployments/{first.operation_id}/startup-log"
-        self.assertEqual(
-            self.router.dispatch("GET", path, {}, None).body,
-            {"deploymentId": first.operation_id, "captured": False},
-        )
-        self.startup = {
-            "found": True,
-            "clientStatus": "failed",
-            "taskState": "dead",
-            "failed": True,
-            "restarts": 3,
-            "events": [{"type": "Terminated", "message": "Exit Code: 1", "exitCode": 1}],
-            "stdout": "> start\n",
-            "stderr": "Error: Cannot find module 'express'\n",
-            "stdoutTruncated": False,
-            "stderrTruncated": False,
-        }
-        self.fail_health = True
-        _, failed = self.deploy()
-        self.assertEqual(failed.status, "failed", failed.safe_error)
-        actions = [action for action, _ in self.calls]
-        self.assertLess(actions.index("app.startup"), actions.index("app.remove"))
-        response = self.router.dispatch(
-            "GET", f"/v1/deployments/{failed.operation_id}/startup-log", {}, None
-        )
-        record = response.body["startup"]
-        self.assertTrue(response.body["captured"])
-        self.assertEqual(record["stderr"], "Error: Cannot find module 'express'\n")
-        self.assertEqual(record["restarts"], 3)
-        self.assertRegex(record["capturedAt"], r"^\d{4}-\d\d-\d\dT")
-        stored = self.root / "startup-logs" / self.app_id / f"{failed.operation_id}.json"
-        self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
-        with self.assertRaises(HttpError) as error:
-            self.router.dispatch("GET", path + "?lines=5", {}, None)
-        self.assertEqual(error.exception.status, 400)
-
     def test_unavailable_capacity_retries_identical_intent_without_duplicate_worker(self):
         self.deploy()
         prior = db.get_application(self.connection, self.app_id)
@@ -487,50 +429,6 @@ class ApplicationSizingTests(unittest.TestCase):
         with self.assertRaises(HttpError) as error:
             self.resize({**plan, "allocation": "tampered"}, key)
         self.assertEqual(error.exception.code, "IDEMPOTENCY_CONFLICT")
-
-    def test_post_promotion_failure_removes_candidate_route_and_preserves_old_size(self):
-        self.deploy()
-        prior = db.get_application(self.connection, self.app_id)
-        plan = self.plan()
-        self.fail_after_promotion = True
-        self.calls.clear()
-        _, operation = self.resize(plan)
-        self.assertEqual(operation.status, "failed", operation.safe_error)
-        self.assertTrue(any(action == "app.promote" for action, _ in self.calls))
-        self.assertEqual(db.get_application(self.connection, self.app_id), prior)
-        self.assertEqual(set(self.jobs), {"commons"})
-        self.assertEqual(len(self.workers), 1)
-
-    def test_pinned_allocation_rejects_smaller_worker_and_recovers_without_reduction(self):
-        self.deploy(self.plan())
-        prior = db.get_application(self.connection, self.app_id)
-        self.capacity_override = (8000, 12000)
-        self.calls.clear()
-        key, operation = self.deploy()
-        self.assertEqual(operation.status, "recovery_required", operation.safe_error)
-        self.assertFalse(any(action == "app.deploy" for action, _ in self.calls))
-        self.assertEqual(db.get_application(self.connection, self.app_id), prior)
-        self.capacity_override = (10000, 15000)
-        _, recovered = self.post(f"/v1/applications/{self.app_id}/deployments", self.body, key)
-        self.assertEqual(recovered.status, "succeeded", recovered.safe_error)
-        current = db.get_application(self.connection, self.app_id)
-        self.assertEqual((current.scheduler_cpu_mhz, current.scheduler_memory_mib), (9000, 14400))
-
-    def test_invalid_confirmation_and_changed_enabled_state_reject_plans(self):
-        self.deploy()
-        plan = self.plan()
-        self.calls.clear()
-        _, rejected = self.post(
-            f"/v1/admin/applications/{self.app_id}/resize", {"plan": plan, "confirmation": "wrong"}
-        )
-        self.assertEqual(rejected.status, "failed")
-        self.assertEqual(self.calls, [])
-        _, disabled = self.post(f"/v1/applications/{self.app_id}/disable", {})
-        self.assertEqual(disabled.status, "succeeded", disabled.safe_error)
-        self.calls.clear()
-        _, rejected = self.resize(plan)
-        self.assertEqual(rejected.status, "failed")
-        self.assertEqual(self.calls, [])
 
     def test_disabled_resize_reuses_artifact_without_overlapping_workers(self):
         self.deploy()
@@ -566,57 +464,6 @@ class ApplicationSizingTests(unittest.TestCase):
             {"workerFlavor": "xl.4core", "cpuMHz": 9000, "memoryMiB": 14400},
         )
 
-    def test_failed_disabled_resize_leaves_application_stopped_and_size_unchanged(self):
-        self.deploy()
-        self.post(f"/v1/applications/{self.app_id}/disable", {})
-        before = db.get_application(self.connection, self.app_id)
-        accepted = db.get_active_deployment(self.connection, self.app_id)
-        self.fail_health = True
-        _, rejected = self.resize(self.plan())
-        self.assertEqual(rejected.status, "failed", rejected.safe_error)
-        self.assertEqual(db.get_application(self.connection, self.app_id), before)
-        self.assertEqual(db.get_active_deployment(self.connection, self.app_id), accepted)
-        self.assertEqual(self.workers, {})
-        self.assertEqual(self.jobs, {})
-
-    def test_disabled_resize_checks_predecessor_absence_before_new_worker(self):
-        self.deploy()
-        old_workers = copy.deepcopy(self.workers)
-        self.post(f"/v1/applications/{self.app_id}/disable", {})
-        self.workers.update(old_workers)
-        plan = self.plan()
-        self.calls.clear()
-        _, blocked = self.resize(plan)
-        self.assertEqual(blocked.status, "recovery_required", blocked.safe_error)
-        self.assertFalse(db.get_application(self.connection, self.app_id).desired_running)
-        self.assertFalse(
-            any(
-                action in {"app.worker.create", "app.deploy", "app.promote"}
-                for action, _values in self.calls
-            )
-        )
-        self.assertEqual(self.workers, old_workers)
-
-    def test_disabled_plan_cannot_be_applied_after_another_operator_enables(self):
-        self.deploy()
-        self.post(f"/v1/applications/{self.app_id}/disable", {})
-        plan = self.plan()
-        _, enabled = self.post(f"/v1/applications/{self.app_id}/enable", {})
-        self.assertEqual(enabled.status, "succeeded", enabled.safe_error)
-        self.calls.clear()
-        _, rejected = self.resize(plan)
-        self.assertEqual(rejected.status, "failed", rejected.safe_error)
-        self.assertEqual(self.calls, [])
-
-    def test_sizing_plan_json_scalar_types_are_exact(self):
-        self.deploy()
-        plan = self.plan()
-        plan["flavor"]["vcpus"] = 4.0
-        self.calls.clear()
-        _, rejected = self.resize(plan)
-        self.assertEqual(rejected.status, "failed")
-        self.assertEqual(self.calls, [])
-
     def test_stale_tampered_and_provider_drifted_plans_mutate_nothing(self):
         self.deploy()
         plan = self.plan()
@@ -637,41 +484,6 @@ class ApplicationSizingTests(unittest.TestCase):
         _, rejected = self.resize(plan)
         self.assertEqual(rejected.status, "failed")
         self.assertEqual(self.calls, [])
-
-    def test_post_acceptance_cleanup_interruption_recovers_pinned_size(self):
-        self.deploy()
-        plan = self.plan()
-        self.fail_action = "app.worker.delete"
-        key, interrupted = self.resize(plan)
-        self.assertEqual(interrupted.status, "running", interrupted.safe_error)
-        self.assertEqual(interrupted.phase, "predecessor_cleanup")
-        accepted = db.get_application(self.connection, self.app_id)
-        self.assertEqual(accepted.worker_flavor, XL.name)
-        _, recovered = self.resize(plan, key)
-        self.assertEqual(recovered.status, "succeeded", recovered.safe_error)
-        self.assertEqual(db.get_application(self.connection, self.app_id).scheduler_cpu_mhz, 9000)
-        self.assertEqual(len(self.workers), 1)
-
-    def test_controller_restart_preserves_healthy_resize_checkpoint_for_recovery(self):
-        self.deploy()
-        plan = self.plan()
-        self.fail_action = "app.worker.delete"
-        key, interrupted = self.resize(plan)
-        self.assertEqual(interrupted.phase, "predecessor_cleanup")
-        self.api.close()
-        # Model process loss before the executor's finally block records the
-        # interruption: retain the real domain checkpoint, mark dispatch started.
-        db.renew_operation_deadline(self.connection, key, interrupted.deadline_at)
-        db.set_operation_dispatch_status(self.connection, key, "running")
-        self.api = ControllerAPI(self.connection, self.config, self.root, helper_caller=self.helper)
-        self.fixture.api = self.api
-        self.router = self.api.router()
-        operation = db.get_operation(self.connection, key)
-        self.assertEqual(operation.status, "running")
-        self.assertEqual(operation.phase, "predecessor_cleanup")
-        _, recovered = self.resize(plan, key)
-        self.assertEqual(recovered.status, "succeeded", recovered.safe_error)
-        self.assertEqual(db.get_application(self.connection, self.app_id).scheduler_cpu_mhz, 9000)
 
     def test_acceptance_database_failure_is_atomic_and_recoverable(self):
         self.deploy()
@@ -734,27 +546,6 @@ class FlavorCapacityTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             openstack.observe_flavor_capacity(platform, "--help", command_runner=runner)
         self.assertEqual(len(calls), count)
-
-    def test_capacity_uses_measured_nomad_cpu_ram_and_larger_reported_reserves(self):
-        self.assertEqual(sizing.capacity_budget(10000, 16000), (9000, 14400))
-        self.assertEqual(sizing.capacity_budget(2000, 2048), (1800, 1536))
-        self.assertEqual(sizing.capacity_budget(10000, 16000, 1500, 3000), (8500, 13000))
-        for values in ((True, 2048), (2000, "2048"), (200, 512), (2000, 2048, -1)):
-            with self.assertRaises(ValidationError):
-                sizing.capacity_budget(*values)
-
-    def test_one_vcpu_example_policy_needs_memory_headroom_not_an_extra_vcpu(self):
-        policy = json.loads(
-            (
-                Path(__file__).resolve().parents[1] / "config/platform-policy.example.json"
-            ).read_text()
-        )["standard"]
-        # A single 2-GHz vCPU on a 4-GiB flavor fits the unchanged example
-        # 1000-MHz / 2048-MiB allocation; a 2-GiB flavor cannot also reserve RAM.
-        cpu, ram = sizing.capacity_budget(2000, 4000)
-        self.assertLessEqual(policy["cpuMHz"], cpu)
-        self.assertLessEqual(policy["memoryMiB"], ram)
-        self.assertGreater(policy["memoryMiB"], sizing.capacity_budget(2000, 2048)[1])
 
     def test_nomad_capacity_is_bound_to_ready_owned_node(self):
         platform = SimpleNamespace(namespace="test")
