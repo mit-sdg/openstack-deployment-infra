@@ -31,6 +31,7 @@ SERVER = "55555555-5555-4555-8555-555555555555"
 REPLACEMENT = "66666666-6666-4666-8666-666666666666"
 PORT = "77777777-7777-4777-8777-777777777777"
 FLAVOR = "88888888-8888-4888-8888-888888888888"
+TARGET_FLAVOR = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 OPERATION = "99999999-9999-4999-8999-999999999999"
 OLD_IMAGE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 VOLUME = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -85,6 +86,10 @@ class FakeCloud:
         self.role = role
         self.images = {item["id"]: item for item in (images or [])}
         self.calls: list[tuple[str, ...]] = []
+        flavor_name = platform.get(f"flavors.{role}")
+        self.flavors = {
+            flavor_name: {"id": FLAVOR, "name": flavor_name, "vcpus": 4, "ram": 8192, "disk": 20}
+        }
         self.server = {
             "id": SERVER,
             "name": platform.get(f"hosts.{role}"),
@@ -108,26 +113,17 @@ class FakeCloud:
         self.stop_never_settles = False
         self._pending_stop_reads = 0
         self.start_calls: list[str] = []
-        self.volume_attachments = (
-            [
-                {
-                    "ID": VOLUME,
-                    "Device": "/dev/vdb",
-                    "Delete On Termination": False,
-                    "server_id": SERVER,
-                    "name": platform.get("volumes.adminState.name"),
-                },
-                {
-                    "ID": VOLUME_2,
-                    "Device": "/dev/vdc",
-                    "Delete On Termination": False,
-                    "server_id": SERVER,
-                    "name": platform.get("volumes.backup.name"),
-                },
-            ]
-            if role == "admin"
-            else []
-        )
+        volume_keys = {"admin": ("adminState", "backup"), "storage": ("data",)}.get(role, ())
+        self.volume_attachments = [
+            {
+                "ID": (VOLUME, VOLUME_2)[index],
+                "Device": ("/dev/vdb", "/dev/vdc")[index],
+                "Delete On Termination": False,
+                "server_id": SERVER,
+                "name": platform.get(f"volumes.{key}.name"),
+            }
+            for index, key in enumerate(volume_keys)
+        ]
         self.server["volumes_attached"] = [
             {
                 "id": item["ID"],
@@ -296,12 +292,16 @@ class FakeCloud:
                 for index, item in enumerate(args)
                 if index and args[index - 1] == "--property" and "=" in item
             }
+            flavor_id = args[args.index("--flavor") + 1]
+            flavor_name = next(
+                item["name"] for item in self.flavors.values() if item["id"] == flavor_id
+            )
             self.replacement = {
                 "id": REPLACEMENT,
                 "name": name,
                 "status": "ACTIVE",
                 "image": {"id": IMAGE_1},
-                "flavor": {"id": FLAVOR, "original_name": "example.2c2g"},
+                "flavor": {"id": flavor_id, "original_name": flavor_name},
                 "addresses": {"example-network": [self.platform.get(f"addresses.{self.role}")]},
                 "properties": properties,
                 "volumes_attached": [
@@ -338,7 +338,9 @@ class FakeCloud:
                 self.server = None  # type: ignore[assignment]
             return result(argv)
         if args[:2] == ("flavor", "show"):
-            return result(argv, {"id": FLAVOR, "name": "example.1c2g", "vcpus": 1, "ram": 2048})
+            if args[2] not in self.flavors:
+                raise CommandFailure("provider flavor lookup failed", result(argv, returncode=1))
+            return result(argv, self.flavors[args[2]])
         raise AssertionError(f"unexpected fake OpenStack call: {argv}")
 
     def assert_safe_call(self, argv: tuple[str, ...], kwargs: dict) -> None:
@@ -1261,6 +1263,210 @@ else:
         )
         self.assertTrue(all("delete_on_termination=false" in value for value in block_devices))
 
+    def test_replacement_moves_each_persistent_role_to_the_inventory_flavor(self) -> None:
+        for role in openstack.PERSISTENT_ROLES:
+            with self.subTest(role=role):
+                document = {
+                    **self.platform.document,
+                    "flavors": {**self.platform.get("flavors"), role: "example.8c16g"},
+                }
+                platform = replace(self.platform, document=document)
+                cloud = FakeCloud(
+                    platform, [canonical_image(platform, IMAGE_1, role=role)], role=role
+                )
+                cloud.flavors["example.8c16g"]["id"] = TARGET_FLAVOR
+                cloud.flavors["example.8c16g"].update(vcpus=8, ram=16384)
+                refs_seen: list[dict] = []
+
+                def checkpoint(_phase, refs, seen=refs_seen):
+                    seen.append(dict(refs))
+
+                def health(_role, host, _remaining, observed_cloud=cloud):
+                    self.assertEqual(host.flavor_id, TARGET_FLAVOR)
+                    self.assertIsNotNone(observed_cloud.server)
+
+                with (
+                    protected_user_data() as path,
+                    mock.patch.object(openstack.host_keys, "pin_verified_admin_host_key"),
+                ):
+                    replaced = openstack.replace_host(
+                        platform,
+                        role,
+                        selected_image_id=IMAGE_1,
+                        selected_compatibility_hash=openstack.image_compatibility_hash(platform),
+                        operation_id=OPERATION,
+                        user_data_path=path,
+                        checkpoint=checkpoint,
+                        health_check=health,
+                        command_runner=cloud,
+                    )
+                self.assertTrue(replaced.accepted)
+                create = next(call for call in cloud.calls if call[1:3] == ("server", "create"))
+                self.assertEqual(create[create.index("--flavor") + 1], TARGET_FLAVOR)
+                self.assertEqual(create[create.index("--port") + 1], PORT)
+                self.assertEqual(cloud.port_device, REPLACEMENT)
+                self.assertTrue(
+                    all(item["server_id"] == REPLACEMENT for item in cloud.volume_attachments)
+                )
+                self.assertTrue(
+                    all(item["Delete On Termination"] is False for item in cloud.volume_attachments)
+                )
+                self.assertEqual(
+                    len([call for call in cloud.calls if call[1:3] == ("flavor", "show")]), 1
+                )
+                self.assertTrue(refs_seen)
+                for refs in refs_seen:
+                    self.assertEqual(refs["old_flavor_id"], FLAVOR)
+                    self.assertEqual(refs["target_flavor_id"], TARGET_FLAVOR)
+                    self.assertEqual(refs["target_flavor_name"], "example.8c16g")
+                self.assertIsNone(cloud.server)
+
+    def test_unknown_replacement_flavor_fails_before_stopping_the_old_host(self) -> None:
+        cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        cloud.flavors.clear()
+        cloud.server["flavor"]["id"] = "1000"
+        checkpoints = mock.Mock()
+        with (
+            protected_user_data() as path,
+            self.assertRaisesRegex(openstack.OpenStackError, "provider details were withheld"),
+        ):
+            openstack.replace_host(
+                self.platform,
+                "ingress",
+                selected_image_id=IMAGE_1,
+                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
+                operation_id=OPERATION,
+                user_data_path=path,
+                checkpoint=checkpoints,
+                health_check=self.role_health,
+                command_runner=cloud,
+            )
+        checkpoints.assert_not_called()
+        self.assertEqual(cloud.server["status"], "ACTIVE")
+        self.assertEqual(cloud.port_device, SERVER)
+        self.assertFalse(
+            any(
+                call[1:3]
+                in {
+                    ("server", "stop"),
+                    ("server", "set"),
+                    ("server", "create"),
+                    ("server", "delete"),
+                }
+                for call in cloud.calls
+            )
+        )
+
+    def test_quota_refusal_restarts_old_host_without_deleting_resources(self) -> None:
+        class QuotaCloud(FakeCloud):
+            def __call__(self, argv, **kwargs):
+                if tuple(argv)[1:3] == ("server", "create"):
+                    self.calls.append(tuple(argv))
+                    self.assert_safe_call(tuple(argv), kwargs)
+                    return CommandResult(
+                        tuple(argv), 1, b"", b"quota exceeded; provider sentinel", False, False
+                    )
+                return super().__call__(argv, **kwargs)
+
+        cloud = QuotaCloud(
+            self.platform, [canonical_image(self.platform, IMAGE_1, role="admin")], role="admin"
+        )
+        cloud.flavors[self.platform.get("flavors.admin")].update(id="4200", vcpus=8, ram=16384)
+        cloud.server["flavor"]["id"] = "1000"
+        phases: list[str] = []
+        with (
+            protected_user_data() as path,
+            mock.patch.object(openstack.host_keys, "pin_verified_admin_host_key"),
+        ):
+            replaced = openstack.replace_host(
+                self.platform,
+                "admin",
+                selected_image_id=IMAGE_1,
+                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
+                operation_id=OPERATION,
+                user_data_path=path,
+                checkpoint=lambda phase, _refs: phases.append(phase),
+                health_check=self.role_health,
+                command_runner=cloud,
+            )
+        self.assertFalse(replaced.accepted)
+        self.assertEqual(replaced.active_server_id, SERVER)
+        self.assertEqual(replaced.cleanup_state, "confirmed")
+        self.assertEqual(cloud.server["status"], "ACTIVE")
+        self.assertEqual(cloud.server["flavor"]["id"], "1000")
+        self.assertEqual(cloud.server["name"], self.platform.get("hosts.admin"))
+        self.assertEqual(cloud.port_device, SERVER)
+        self.assertEqual(cloud.start_calls, [SERVER])
+        self.assertEqual(
+            [(item["ID"], item["Device"], item["server_id"]) for item in cloud.volume_attachments],
+            [(VOLUME, "/dev/vdb", SERVER), (VOLUME_2, "/dev/vdc", SERVER)],
+        )
+        self.assertTrue(
+            all(item["Delete On Termination"] is False for item in cloud.volume_attachments)
+        )
+        self.assertFalse(any("delete" in call[1:3] for call in cloud.calls))
+        self.assertIsNone(cloud.replacement)
+        self.assertEqual(phases[-1], "rolled_back")
+
+    def test_failed_create_preserves_hosts_when_candidate_state_is_uncertain(self) -> None:
+        class FailedCreateCloud(FakeCloud):
+            create_failed = False
+
+            def __init__(self, *args, failure_mode: str, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.failure_mode = failure_mode
+
+            def __call__(self, argv, **kwargs):
+                args = tuple(argv)[1:]
+                if args[:2] == ("server", "create"):
+                    if self.failure_mode == "candidate_exists":
+                        super().__call__(argv, **kwargs)
+                    else:
+                        self.calls.append(tuple(argv))
+                        self.assert_safe_call(tuple(argv), kwargs)
+                    self.create_failed = True
+                    if self.failure_mode == "timeout":
+                        raise openstack.runtime.CommandTimedOut("create timed out")
+                    return result(tuple(argv), returncode=1)
+                if (
+                    self.create_failed
+                    and self.failure_mode == "lookup_unavailable"
+                    and args[:2] == ("server", "list")
+                ):
+                    raise CommandFailure("provider observation unavailable")
+                return super().__call__(argv, **kwargs)
+
+        for failure_mode in ("candidate_exists", "lookup_unavailable", "timeout"):
+            with self.subTest(failure_mode=failure_mode):
+                cloud = FailedCreateCloud(
+                    self.platform,
+                    [canonical_image(self.platform, IMAGE_1, role="ingress")],
+                    failure_mode=failure_mode,
+                )
+                cloud.flavors[self.platform.get("flavors.ingress")]["id"] = TARGET_FLAVOR
+                with (
+                    protected_user_data() as path,
+                    self.assertRaises(openstack.RecoveryRequired) as caught,
+                ):
+                    openstack.replace_host(
+                        self.platform,
+                        "ingress",
+                        selected_image_id=IMAGE_1,
+                        selected_compatibility_hash=openstack.image_compatibility_hash(
+                            self.platform
+                        ),
+                        operation_id=OPERATION,
+                        user_data_path=path,
+                        checkpoint=lambda *_: None,
+                        health_check=self.role_health,
+                        command_runner=cloud,
+                    )
+                self.assertEqual(caught.exception.refs["target_flavor_id"], TARGET_FLAVOR)
+                self.assertIsNotNone(cloud.server)
+                self.assertFalse(any(call[1:3] == ("server", "delete") for call in cloud.calls))
+                self.assertEqual(cloud.start_calls, [])
+                self.assertEqual(cloud.replacement is not None, failure_mode == "candidate_exists")
+
     def test_replacement_rejects_candidate_image_or_flavor_drift_before_old_deletion(self) -> None:
         class MismatchCloud(FakeCloud):
             def __init__(self, *args, mismatch: str, **kwargs):
@@ -1272,17 +1478,25 @@ else:
                 if tuple(argv)[1:3] == ("server", "create") and self.replacement is not None:
                     if self.mismatch == "image":
                         self.replacement["image"] = {"id": OLD_IMAGE}
-                    else:
-                        self.replacement["flavor"] = {"id": OLD_IMAGE, "original_name": "wrong"}
+                    elif self.mismatch == "flavor":
+                        self.replacement["flavor"] = {"id": FLAVOR, "original_name": "example.2c2g"}
+                if (
+                    self.mismatch == "late_flavor"
+                    and tuple(argv)[1:4] == ("server", "show", REPLACEMENT)
+                    and "status" in argv
+                ):
+                    self.replacement["flavor"] = {"id": FLAVOR, "original_name": "example.2c2g"}
+                    return result(tuple(argv), self.replacement)
                 return result_value
 
-        for mismatch in ("image", "flavor"):
+        for mismatch in ("image", "flavor", "late_flavor"):
             with self.subTest(mismatch=mismatch):
                 cloud = MismatchCloud(
                     self.platform,
                     [canonical_image(self.platform, IMAGE_1, role="ingress")],
                     mismatch=mismatch,
                 )
+                cloud.flavors[self.platform.get("flavors.ingress")]["id"] = TARGET_FLAVOR
                 with protected_user_data() as user_data_path:
                     replaced = openstack.replace_host(
                         self.platform,
@@ -1333,6 +1547,10 @@ else:
         self.assertEqual(replaced.active_server_id, REPLACEMENT)
         self.assertTrue(cloud.user_data_seen)
         self.assertIsNone(cloud.server)
+        create = next(call for call in cloud.calls if call[1:3] == ("server", "create"))
+        self.assertEqual(create[create.index("--flavor") + 1], FLAVOR)
+        self.assertEqual(cloud.replacement["flavor"]["id"], FLAVOR)
+        self.assertEqual(len([call for call in cloud.calls if call[1:3] == ("flavor", "show")]), 1)
         self.assertEqual(checkpoints[-2:], ["accepted", "complete"])
         self.assertLess(checkpoints.index("accepted"), checkpoints.index("complete"))
 
@@ -1659,6 +1877,7 @@ else:
 
     def test_ambiguous_create_can_recover_only_by_phase_specific_rollback(self) -> None:
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        cloud.flavors[self.platform.get("flavors.ingress")]["id"] = TARGET_FLAVOR
         cloud.ambiguous_create = True
         with protected_user_data() as user_data_path:
             with self.assertRaises(openstack.RecoveryRequired) as caught:
@@ -1674,6 +1893,7 @@ else:
                     command_runner=cloud,
                 )
         refs = caught.exception.refs
+        self.assertEqual(refs["target_flavor_id"], TARGET_FLAVOR)
         with self.assertRaisesRegex(ValidationError, "not safe"):
             openstack.recover_host_replacement(
                 self.platform,
@@ -1698,6 +1918,9 @@ else:
         self.assertEqual(recovered.active_server_id, SERVER)
         self.assertIsNone(cloud.replacement)
         self.assertEqual(cloud.port_device, SERVER)
+
+        self.assertEqual(cloud.server["flavor"]["id"], FLAVOR)
+        self.assertEqual(cloud.server["status"], "ACTIVE")
 
     def test_prune_recovery_reconciles_delete_before_checkpoint_and_refuses_drift(self) -> None:
         class SimulatedCrash(BaseException):
@@ -1869,6 +2092,7 @@ else:
             pass
 
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        cloud.flavors[self.platform.get("flavors.ingress")]["id"] = "4200"
         created_refs: dict | None = None
 
         def checkpoint(phase: str, refs: object) -> None:
@@ -1892,8 +2116,17 @@ else:
                     command_runner=cloud,
                 )
         assert created_refs is not None
-        recovered = openstack.recover_host_replacement(
+        recovery_platform = replace(
             self.platform,
+            document={
+                **self.platform.document,
+                "flavors": {**self.platform.get("flavors"), "ingress": "unknown-later-flavor"},
+            },
+        )
+        cloud.flavors.clear()
+        before_recovery = len(cloud.calls)
+        recovered = openstack.recover_host_replacement(
+            recovery_platform,
             "ingress",
             phase="replacement_created",
             refs=created_refs,
@@ -1904,6 +2137,11 @@ else:
         )
         self.assertEqual(recovered.active_server_id, REPLACEMENT)
         self.assertIsNone(cloud.server)
+
+        self.assertEqual(cloud.replacement["flavor"]["id"], "4200")
+        self.assertFalse(
+            any(call[1:3] == ("flavor", "show") for call in cloud.calls[before_recovery:])
+        )
 
     def test_created_checkpoint_rolls_back_when_candidate_is_already_absent(self) -> None:
         class SimulatedCrash(BaseException):
@@ -2153,6 +2391,7 @@ else:
 
     def test_post_acceptance_recovery_cleans_only_retained_old_uuid(self) -> None:
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
+        cloud.flavors[self.platform.get("flavors.ingress")]["id"] = TARGET_FLAVOR
         cloud.retain_old_delete = True
         checkpoints: list[tuple[str, dict]] = []
         with protected_user_data() as user_data_path:
@@ -2175,6 +2414,7 @@ else:
         # Wrong candidate provenance or failed health must still prevent deletion.
         for recovery_refs, health in (
             ({**refs, "selected_image_id": IMAGE_2}, self.role_health),
+            ({**refs, "target_flavor_id": FLAVOR}, self.role_health),
             (refs, mock.Mock(side_effect=openstack.OpenStackError("candidate unhealthy"))),
         ):
             before = len(cloud.calls)
@@ -2193,8 +2433,17 @@ else:
             self.assertFalse(
                 any(call[1:3] == ("server", "delete") for call in cloud.calls[before:])
             )
-        recovered = openstack.recover_host_replacement(
+        recovery_platform = replace(
             self.platform,
+            document={
+                **self.platform.document,
+                "flavors": {**self.platform.get("flavors"), "ingress": "unknown-later-flavor"},
+            },
+        )
+        cloud.flavors.clear()
+        before_recovery = len(cloud.calls)
+        recovered = openstack.recover_host_replacement(
+            recovery_platform,
             "ingress",
             phase=phase,
             refs=refs,
@@ -2206,6 +2455,10 @@ else:
         self.assertEqual(recovered.active_server_id, REPLACEMENT)
         self.assertIsNone(cloud.server)
         self.assertIsNotNone(cloud.replacement)
+        self.assertEqual(cloud.replacement["flavor"]["id"], TARGET_FLAVOR)
+        self.assertFalse(
+            any(call[1:3] == ("flavor", "show") for call in cloud.calls[before_recovery:])
+        )
 
 
 if __name__ == "__main__":

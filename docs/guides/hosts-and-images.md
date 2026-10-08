@@ -159,13 +159,13 @@ Selection validation holds the infrastructure lock and can take minutes. Deploym
 
 ## Replace a persistent host
 
-Replace `admin`, `ingress`, or `storage` to deploy its new image while retaining ports and data volumes.
+Replace `admin`, `ingress`, or `storage` to use its selected image and inventory flavor while retaining ports and data volumes.
 
 ### What a replacement does
 
-1. Checks operator-selected image, fixed port, and volumes.
+1. Checks the operator-selected image, resolves `flavors.<role>`, and checks the fixed port and volumes.
 2. Stops and renames the old server, retaining it.
-3. Transfers port and volumes to the new image's server with fresh first-boot data.
+3. Transfers port and volumes to a server using the selected image and configured flavor, with fresh first-boot data.
 4. Checks console readiness, role health, and exact image/flavor/name/provenance.
 5. Deletes the old server only after acceptance.
 
@@ -193,6 +193,14 @@ See [Backups and recovery](backups-and-recovery.md) for commands.
 | `storage` | `STORAGE_SECRETS_FILE` | `/srv/openstack-platform/.secrets/setup/storage-bootstrap.env` |
 
 Every fresh [ingress replacement](#replace-the-ingress-host) also requires a Cloudflare connector token file.
+
+### Resize a persistent host
+
+1. Edit `flavors.<role>` in the operator inventory, `/srv/openstack-platform/config/platform.json`, to the desired provider flavor name. Keep the file operator-owned and mode `0600`.
+2. Follow the replacement procedure below for that role, including its backups and protected first-boot inputs, then run `infra replace <role>`. You can keep the current selected image; resizing doesn't require a new image. Ingress still requires `--cloudflare-tunnel-token-file`.
+3. Confirm the flavor change in the prompt. On success, the JSON observation includes `"flavor": {"from": "<old flavor>", "to": "<new flavor>"}`. Check the role's health as described below.
+
+Downtime is the same as for any replacement. The CLI validates the target flavor before stopping the old host. The old server keeps its original flavor for rollback; allow enough quota for both servers until acceptance. If creation is refused and the provider confirms no candidate exists, replacement returns the ports and volumes and restarts the old host.
 
 ### Replace the storage host
 
@@ -362,7 +370,7 @@ $PLATFORM_CLI infra replace <ROLE> --yes
 | After acceptance | Rechecks exact provenance, fixed resources, readiness, and ingress public health; deletes old server. Also handles `replacement accepted but retained old-server cleanup remains` |
 | Before any observation | Starts fresh |
 
-An ingress recovery doesn't read tokens or rerender data. Passing the token flag prints `Recovering recorded replacement; token file is not read.`; it cannot change an existing candidate's credentials. Passing the path on every attempt is safe; only fresh attempts read it.
+Recovery uses the target flavor ID recorded when replacement began, even if the inventory flavor later changes. An ingress recovery doesn't read tokens or rerender data. Passing the token flag prints `Recovering recorded replacement; token file is not read.`; it cannot change an existing candidate's credentials. Passing the path on every attempt is safe; only fresh attempts read it.
 
 Ingress public `https://<domain>/healthz` gets up to 120 seconds, no redirects, a 2xx response, and body `OK` after trimming whitespace. Tunnel HTTP listens on loopback; direct HTTP admits only provider addresses, so recovery uses public HTTPS.
 

@@ -267,7 +267,7 @@ The controller hashes these identity fields; changing them strands existing stat
 
 `project`, `projectId`, `prefix`, `namespace`, `domain`, `recoveryDomains`, `datacenter`, `region`, `network`, `internalNames`, `addresses`, `hosts`, `ports`, `volumes`, `paths`, `pki`
 
-Images, flavors, versions, checksums, and containers are excluded for upgrades.
+Images, flavors, versions, checksums, and containers are excluded for upgrades. Changing `flavors.admin`, `flavors.ingress`, or `flavors.storage` in the operator inventory moves that persistent host to the configured flavor on its next `infra replace <role>`. Editing the inventory alone does not resize a running host. See [Resize a persistent host](../guides/hosts-and-images.md#resize-a-persistent-host).
 
 ### The owner portal section
 
