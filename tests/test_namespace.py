@@ -66,11 +66,10 @@ class PlatformConfigNamespaceTests(unittest.TestCase):
 
     def test_nul_transport_preserves_shell_metacharacters_without_execution(self) -> None:
         document = self.example()
-        marker = Path(tempfile.gettempdir()) / "platform-config-eval-regression"
-        marker.unlink(missing_ok=True)
-        adversarial = f"example.invalid;$(touch {marker})\nquoted='value'"
-        document["domain"] = adversarial
         with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "platform-config-eval-regression"
+            adversarial = f"example.invalid;$(touch {marker})\nquoted='value'"
+            document["domain"] = adversarial
             path = Path(directory) / "platform.json"
             path.write_text(json.dumps(document))
             command = (
@@ -84,9 +83,9 @@ class PlatformConfigNamespaceTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 check=False,
             )
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
-        self.assertEqual(completed.stdout.decode(), adversarial)
-        self.assertFalse(marker.exists())
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            self.assertEqual(completed.stdout.decode(), adversarial)
+            self.assertFalse(marker.exists())
 
     def test_nul_transport_rejects_embedded_nul_and_is_bounded(self) -> None:
         document = self.example()

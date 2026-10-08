@@ -546,7 +546,7 @@ The broker authorizes portal actions and owns accounts, sessions, ownership, quo
 
 ## tests
 
-Python `unittest` modules grouped by boundary. See [test layout](../development.md#understand-the-test-layout).
+Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs module discovery in isolated parallel processes. See [test layout](../development.md#understand-the-test-layout).
 
 ### Fixtures and scripts
 
@@ -571,7 +571,6 @@ Python `unittest` modules grouped by boundary. See [test layout](../development.
 
 - `tests/test_controller_api.py` — route wiring, the socket split, responses, idempotency, lock-free reads, and service integration.
 - `tests/test_controller_database.py` — schema, migrations, identity, journals, state changes, and database recovery.
-- `tests/test_controller_hosting.py` — how Nix hosts the controller: accounts, sockets, backups, and services.
 - `tests/test_controller_http.py` — Unix socket HTTP parsing, deadlines, keep-alive, peer checks, overload, and shutdown.
 - `tests/test_controller_images.py` — image selection compare-and-set, provider checks, recovery, and pinned provisioning.
 - `tests/test_controller_recovery.py` — storage recovery, rejected builds, crash and retry, and lock waits.

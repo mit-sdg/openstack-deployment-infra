@@ -66,10 +66,10 @@ Image publication and live acceptance run only on `main` or by manual dispatch. 
 Run the whole suite:
 
 ```bash
-uv run python -m unittest discover -s tests -q
+uv run python tests/run_parallel.py --jobs 4
 ```
 
-CI uses `-v` to print each test name. While iterating, run one module or class:
+The runner uses one isolated process per module and reports failures in full. CI uses four workers. While iterating, run one module or class:
 
 ```bash
 uv run python -m unittest tests.test_documentation -v

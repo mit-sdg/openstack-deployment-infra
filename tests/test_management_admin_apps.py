@@ -264,7 +264,12 @@ class AdminApplicationTests(ManagementCase):
                 "health": {"allocationHealthy": True, "routeHealthy": True},
             }
         )
-        with patch.object(self.broker.app_management, "refresh_observations", return_value=set()):
+        with (
+            patch.object(self.broker.app_management, "refresh_observations", return_value=set()),
+            patch(
+                "openstack_platform.management.broker.app_management.time.time", return_value=now
+            ),
+        ):
             for age, expected in (
                 (29, "healthy"),
                 (31, "healthy"),

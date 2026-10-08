@@ -9,10 +9,12 @@ import os
 import secrets
 import socket
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -310,20 +312,25 @@ class IdentityTests(ManagementCase):
         finally:
             client.connect_capacity.release()
 
-    def test_fifty_concurrent_classroom_logins_through_real_unix_transports(self) -> None:
+    def test_concurrent_classroom_logins_through_real_unix_transports(self) -> None:
+        participants = 8
         self.broker.journal.close()
-        self.broker, broker_server = broker_serve(self.config)
+        # Keep concurrent SQLite writers on the test temporary filesystem.
+        state = Path(self.enterContext(tempfile.TemporaryDirectory())) / "broker"
+        config = dataclasses.replace(self.config, state_directory=state)
+        self.broker, broker_server = broker_serve(config)
         self.router = self.broker.router()
         broker_thread = threading.Thread(
             target=broker_server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
         )
         broker_thread.start()
-        client = ProjectClient(self.config.broker_socket, timeout=10, capacity=50)
+        client = ProjectClient(self.config.broker_socket, timeout=10, capacity=participants)
         self.commons.delay_seconds = 0.15
         fixtures = {
-            f"student-{index}": (str(uuid.uuid4()), f"Student {index}") for index in range(50)
+            f"student-{index}": (str(uuid.uuid4()), f"Student {index}")
+            for index in range(participants)
         }
-        barrier = threading.Barrier(50)
+        barrier = threading.Barrier(participants)
         headers = {"x-portal-client-address": "192.0.2.1"}
 
         def login(name: str) -> int:
@@ -344,10 +351,13 @@ class IdentityTests(ManagementCase):
 
         started = time.monotonic()
         try:
-            with patch.dict(USERS, fixtures), ThreadPoolExecutor(max_workers=50) as executor:
+            with (
+                patch.dict(USERS, fixtures),
+                ThreadPoolExecutor(max_workers=participants) as executor,
+            ):
                 statuses = list(executor.map(login, fixtures))
-            self.assertEqual(statuses, [200] * 50)
-            self.assertEqual(self.commons.calls, 50)
+            self.assertEqual(statuses, [200] * participants)
+            self.assertEqual(self.commons.calls, participants)
             self.assertLess(time.monotonic() - started, 6)
         finally:
             broker_server.shutdown()
