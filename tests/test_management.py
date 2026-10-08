@@ -1521,6 +1521,20 @@ class WebTransportTests(ManagementCase):
             self.assertIn(self.web_request(path).status, {400, 404})
         self.assertEqual(self.web_request("/", {"Host": "evil.example.com"}).status, 400)
 
+    def test_every_portal_page_route_gets_the_app_shell(self) -> None:
+        # A page the router knows but web doesn't serve breaks on reload, so
+        # check every <Route path> in the portal against web.
+        app = ROOT / "frontend" / "owner-portal" / "src" / "App.tsx"
+        routes = re.findall(r'<Route path="([^"]+)"', app.read_text())
+        self.assertIn("/platform-settings", routes)
+        sample = "11111111-1111-4111-8111-111111111111"
+        for route in routes:
+            path = re.sub(r":[a-z]+", sample, route)
+            with self.subTest(route=route):
+                response = self.web_request(path, {"Sec-Fetch-Mode": "navigate"})
+                self.assertEqual(response.status, 200, path)
+                self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
+
     def test_unknown_page_navigations_get_the_app_shell_with_404(self) -> None:
         navigation = {"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
         for path in (

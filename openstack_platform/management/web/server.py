@@ -24,7 +24,7 @@ from ..config import Config
 
 # Pages a completed sign-in may land on.
 RETURN_PATH = (
-    r"/(?:apps(?:/[a-z0-9/-]+)?|all-apps|people(?:/[a-f0-9-]{36})?|activity|audit|sign-in)"
+    r"/(?:apps(?:/[a-z0-9/-]+)?|all-apps|people(?:/[a-f0-9-]{36})?|activity|audit|platform-settings|sign-in)"
 )
 # Commons sign-in is two top-level navigations, so they answer only with redirects.
 NAVIGATIONS = {"/auth/commons/start", "/auth/commons/callback"}
@@ -149,7 +149,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             )
             return Reply(200, file.read_bytes(), content_type, (("Cache-Control", cache),))
         if re.fullmatch(
-            r"/(?:|sign-in|signin|setup|activate|all-apps|people(?:/[a-f0-9-]{36})?|activity|audit|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|logs|team|deployments(?:/[a-f0-9-]{36})?))?)?)",
+            r"/(?:|sign-in|signin|setup|activate|all-apps|people(?:/[a-f0-9-]{36})?|activity|audit|platform-settings|apps(?:/new|/[a-f0-9-]{36}(?:/(?:configuration|deploy|logs|team|deployments(?:/[a-f0-9-]{36})?))?)?)",
             path,
         ):
             index = self.assets / "index.html"
