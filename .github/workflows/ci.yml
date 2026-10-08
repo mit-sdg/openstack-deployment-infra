@@ -122,82 +122,8 @@ jobs:
           find deploy infra tests -type f \( -name '*.sh' -o -path 'infra/control/bin/*' \) -print0 \
             | xargs -0 shellcheck -e SC1090,SC1091,SC2016
 
-  owner-portal:
-    name: Owner portal frontend and HTTPS smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.14"
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
-        with:
-          version: "0.12.2"
-          enable-cache: true
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
-        with:
-          node-version: "24.19.0"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Pin npm
-        run: npm install --global npm@11.17.0
-
-      - name: Install locked harness and frontend dependencies
-        run: |
-          uv sync --frozen
-          npm --prefix frontend ci
-
-      - name: Check and build frontend
-        run: |
-          npm --prefix frontend/owner-portal run format:check
-          npm --prefix frontend/owner-portal run typecheck
-          npm --prefix frontend/owner-portal test
-          npm --prefix frontend/owner-portal run build
-
-      - name: Install Chromium headless shell
-        working-directory: frontend/owner-portal
-        run: npx playwright install --with-deps --only-shell chromium
-
-      - name: Run production-parity HTTPS smoke
-        run: npm --prefix frontend/owner-portal run smoke
-
-      - name: Build and verify commit-bound management evidence
-        run: |
-          uv run python -m openstack_platform.management_release build \
-            --repository . --commit "$GITHUB_SHA" \
-            --output management-release-evidence --unsigned-development
-          uv run python -m openstack_platform.management_release verify \
-            --repository . --commit "$GITHUB_SHA" \
-            --component-manifest management-release-evidence/release-manifest.json \
-            --manifest management-release-evidence/management-artifacts.json \
-            --allow-unsigned-development
-
-      - name: Upload management development archives and evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: management-release-evidence-${{ github.sha }}
-          path: management-release-evidence
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Collect bounded failure evidence
-        if: failure()
-        run: python3 tests/collect_owner_portal_artifacts.py
-
-      - name: Upload sanitized failure evidence
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: owner-portal-failure-${{ github.run_id }}
-          path: .tmp/owner-portal-playwright/upload
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 3
-
   dashboard-frontend:
-    name: Frontend workspace and committed dashboard freshness
+    name: Frontend checks, HTTPS smoke and dashboard freshness
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -233,9 +159,40 @@ jobs:
           npm --prefix frontend run build
           git diff --exit-code -- openstack_platform/dashboard/static
           npm --prefix frontend run check:freshness
+      - name: Resolve Playwright browser cache version
+        id: playwright
+        run: |
+          version=$(node -p "require('./frontend/node_modules/playwright-core/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=$ImageOS" >> "$GITHUB_OUTPUT"
+      - name: Cache Chromium headless shell
+        id: chromium
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.image }}-playwright-${{ steps.playwright.outputs.version }}
       - name: Install Chromium headless shell
+        if: steps.chromium.outputs.cache-hit != 'true'
         working-directory: frontend
-        run: npx playwright install --with-deps --only-shell chromium
+        run: npx playwright install --only-shell chromium
+      - name: Verify Chromium runtime dependencies
+        working-directory: frontend
+        # Hosted Ubuntu already supplies Chromium's libraries. Validate by
+        # launching the pinned shell, and install OS dependencies only if needed.
+        run: |
+          node --input-type=module <<'JS'
+          import { chromium } from '@playwright/test';
+          import { execFileSync } from 'node:child_process';
+          try {
+            await (await chromium.launch()).close();
+          } catch (error) {
+            console.error(error);
+            execFileSync('npx', ['playwright', 'install-deps', 'chromium'], { stdio: 'inherit' });
+            await (await chromium.launch()).close();
+          }
+          JS
+      - name: Run production-parity owner HTTPS smoke
+        run: npm --prefix frontend/owner-portal run smoke
       - name: Exercise dashboard under production CSP at all four widths
         run: npm --prefix frontend/operator-dashboard run smoke
       - name: Upload synthetic dashboard screenshots
@@ -246,6 +203,39 @@ jobs:
           path: .tmp/dashboard-screenshots/after
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Build and verify commit-bound management evidence
+        run: |
+          uv run python -m openstack_platform.management_release build \
+            --repository . --commit "$GITHUB_SHA" \
+            --output management-release-evidence --unsigned-development
+          uv run python -m openstack_platform.management_release verify \
+            --repository . --commit "$GITHUB_SHA" \
+            --component-manifest management-release-evidence/release-manifest.json \
+            --manifest management-release-evidence/management-artifacts.json \
+            --allow-unsigned-development
+
+      - name: Upload management development archives and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: management-release-evidence-${{ github.sha }}
+          path: management-release-evidence
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Collect bounded failure evidence
+        if: failure()
+        run: python3 tests/collect_owner_portal_artifacts.py
+
+      - name: Upload sanitized failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: owner-portal-failure-${{ github.run_id }}
+          path: .tmp/owner-portal-playwright/upload
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 3
 
   generated-recipes:
     name: Build, start, and health-check generated Bun and Node recipes
