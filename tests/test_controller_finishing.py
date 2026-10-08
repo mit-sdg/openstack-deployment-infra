@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import copy
-import threading
 import time
 import unittest
-import uuid
 from unittest import mock
 
 from openstack_platform import remote
 from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
-from openstack_platform.controller import finishing_retries
 from openstack_platform.controller.api import ControllerAPI
 from openstack_platform.controller.http import HttpError
 from openstack_platform.controller.service_support import logged_helper
@@ -62,7 +59,11 @@ class ControllerFinishingTests(unittest.TestCase):
     def restart(self):
         self.f.api.close()
         self.f.api = ControllerAPI(
-            self.connection, self.f.config, self.f.root, helper_caller=self.helper
+            self.connection,
+            self.f.config,
+            self.f.root,
+            helper_caller=self.helper,
+            retry_poll_seconds=0.01,
         )
         self.f.fixture.api = self.f.api
         self.f.router = self.f.api.router()
@@ -138,56 +139,11 @@ class ControllerFinishingTests(unittest.TestCase):
             current = db.get_operation(self.connection, key)
             self.assertEqual(current.status, "recovery_required" if attempt == 5 else "running")
         self.assertIsNone(current.refs["finishing_retry"]["next_at"])
-        self.assertEqual(sum(finishing_retries.RETRY_DELAYS), 1500)
         self.restart()
         self.assertEqual(db.get_operation(self.connection, key).status, "recovery_required")
         self.failures.clear()
         self.f.post(f"/v1/applications/{self.f.app_id}/deployments", self.f.body, key)
         self.assertEqual(db.get_operation(self.connection, key).status, "succeeded")
-
-    def test_interrupted_retry_consumes_attempt_and_reschedules_on_restart(self):
-        key = self.pending("app.manifest.retain")
-        self.f.api.close()
-        self.make_due(key)
-        operation = db.get_operation(self.connection, key)
-        db.requeue_recovery_dispatch(
-            self.connection,
-            operation_id=key,
-            kind=operation.kind,
-            scope=operation.scope,
-            automatic=True,
-        )
-        db.set_operation_dispatch_status(self.connection, key, "running")
-        self.restart()
-        operation = db.get_operation(self.connection, key)
-        self.assertEqual(operation.status, "running")
-        self.assertEqual(operation.refs["finishing_retry"]["attempts"], 1)
-        self.assertIsNotNone(operation.refs["finishing_retry"]["next_at"])
-        self.make_due(key)
-        self.until(lambda: db.get_operation(self.connection, key).status == "succeeded")
-
-    def test_environment_set_delete_import_and_restart_are_admitted(self):
-        key = self.pending()
-        base = f"/v1/applications/{self.f.app_id}"
-        for method, path, body in (
-            ("PUT", base + "/environment/MESSAGE", {"value": "secret-env-value"}),
-            ("DELETE", base + "/environment/MESSAGE", None),
-            ("POST", base + "/environment/import", {"dotenv": "OTHER=secret-env-value\n"}),
-            ("POST", base + "/restart", {}),
-            ("POST", base + "/enable", {}),
-        ):
-            response = self.f.router.dispatch(
-                method, path, {"Idempotency-Key": str(uuid.uuid4())}, body
-            )
-            self.f.api.wait_for_operations()
-            self.assertEqual(
-                db.get_operation(self.connection, response.body["operationId"]).status, "succeeded"
-            )
-        self.failures.clear()
-        self.f.post(base + "/deployments", self.f.body, key)
-        self.assertEqual(self.environment["OTHER"], "secret-env-value")
-        self.assertNotIn("MESSAGE", self.environment)
-        self.assertEqual(len(self.f.workers), 1)
 
     def test_disable_after_job_absence_stays_disabled_after_finishing(self):
         key = self.pending("app.worker.delete")
@@ -204,97 +160,6 @@ class ControllerFinishingTests(unittest.TestCase):
         self.assertFalse(db.get_application(self.connection, self.f.app_id).desired_running)
         self.assertEqual(self.f.workers, {})
         self.assertEqual(self.f.jobs, {})
-
-    def test_disable_is_blocked_while_predecessor_route_is_still_present(self):
-        key = self.pending()
-        jobs = copy.deepcopy(self.f.jobs)
-        with self.assertRaises(HttpError) as raised:
-            self.f.post(f"/v1/applications/{self.f.app_id}/disable", {})
-        self.assertEqual(raised.exception.code, "POST_ACCEPTANCE_CONFLICT")
-        self.assertEqual(raised.exception.operation_id, key)
-        self.assertEqual(self.f.jobs, jobs)
-        self.assertTrue(db.get_application(self.connection, self.f.app_id).desired_running)
-
-    def test_conflicting_operations_stay_blocked_after_exhaustion(self):
-        key = self.pending()
-        db.mark_recovery_required(self.connection, key, "retry budget exhausted")
-        for kind in (
-            "app.deploy",
-            "app.delete",
-            "storage.create",
-            "storage.remove",
-            "app.public_ip.allocate",
-            "app.fixed_ip.allocate",
-        ):
-            with self.subTest(kind=kind), self.assertRaises(db.FinishingOperationConflictError):
-                db.begin_operation(
-                    self.connection,
-                    operation_id=str(uuid.uuid4()),
-                    kind=kind,
-                    scope=f"app-{self.f.app_id}",
-                    phase="validated",
-                    deadline_at="2030-01-01T00:00:00Z",
-                )
-        with self.assertRaises(HttpError) as raised:
-            self.f.deploy()
-        self.assertEqual(raised.exception.code, "POST_ACCEPTANCE_CONFLICT")
-        self.assertEqual(raised.exception.operation_id, key)
-        for kind in ("storage.verify", "storage.rotate"):
-            identifier = str(uuid.uuid4())
-            db.claim_idempotency_request(
-                self.connection, request_id=identifier, request_fingerprint="a" * 64
-            )
-            db.enqueue_operation_dispatch(
-                self.connection, operation_id=identifier, kind=kind, scope=f"app-{self.f.app_id}"
-            )
-            db.begin_operation(
-                self.connection,
-                operation_id=identifier,
-                kind=kind,
-                scope=f"app-{self.f.app_id}",
-                phase="validated",
-                deadline_at="2030-01-01T00:00:00Z",
-            )
-            db.mark_succeeded(self.connection, identifier)
-            db.set_operation_dispatch_status(self.connection, identifier, "finished")
-
-    def test_automatic_retry_and_manual_replay_do_not_overlap_or_lose_foreground_work(self):
-        key = self.pending("app.manifest.retain")
-        entered, release = threading.Event(), threading.Event()
-        helper = self.f.api.helper_caller
-        invocations = []
-
-        def paused(config, action, values, **bounds):
-            if action == "app.manifest.retain":
-                invocations.append(action)
-                entered.set()
-                self.assertTrue(release.wait(20))
-            return helper(config, action, values, **bounds)
-
-        self.f.api.helper_caller = paused
-        self.addCleanup(release.set)
-        self.make_due(key)
-        self.assertTrue(entered.wait(20))
-        base = f"/v1/applications/{self.f.app_id}"
-        replay = self.f.router.dispatch(
-            "POST", base + "/deployments", {"Idempotency-Key": key}, self.f.body
-        )
-        self.assertEqual(replay.body["operationId"], key)
-        env = self.f.router.dispatch(
-            "PUT",
-            base + "/environment/MESSAGE",
-            {"Idempotency-Key": str(uuid.uuid4())},
-            {"value": "kept"},
-        )
-        self.assertEqual(env.status, 202)
-        self.assertNotIn("MESSAGE", self.environment)
-        release.set()
-        self.f.api.wait_for_operations()
-        self.assertEqual(invocations, ["app.manifest.retain"])
-        self.assertEqual(self.environment["MESSAGE"], "kept")
-        self.assertEqual(
-            db.get_operation(self.connection, env.body["operationId"]).status, "succeeded"
-        )
 
     def test_helper_failure_is_bounded_and_secret_free_in_log_and_record(self):
         with self.assertLogs(

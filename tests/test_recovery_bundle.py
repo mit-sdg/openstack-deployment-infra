@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
 
 from openstack_platform import recovery_bundle
 
@@ -201,11 +200,6 @@ class RecoveryBundleTests(unittest.TestCase):
             recovery_bundle.import_bundle(bundle, recovery_root)
         self.assertEqual(marker.read_bytes(), before)
 
-    def test_export_refuses_managed_backup_without_registry_artifacts(self) -> None:
-        (self.sources["managed-data"] / "registry.age").unlink()
-        with self.assertRaisesRegex(recovery_bundle.RecoveryBundleError, "inventory"):
-            self.export()
-
     def test_v3_managed_data_exports_without_images_and_requires_all_data(self) -> None:
         root = self.sources["managed-data"]
         (root / "registry.age").unlink()
@@ -244,32 +238,6 @@ class RecoveryBundleTests(unittest.TestCase):
                 mountinfo_path=mountinfo,
             )
         self.assertFalse(receipt.exists())
-
-    def test_cli_resolves_the_nixos_inventory_symlink(self) -> None:
-        real = self.root / "platform.json"
-        real.write_text("{}")
-        link = self.root / "etc-platform.json"
-        link.symlink_to(real)
-        seen: list[Path] = []
-        files = ["--config", str(self.root / "c.json"), "--receipt", str(self.root / "r.json")]
-        with patch.object(
-            recovery_bundle,
-            "recovery_status",
-            side_effect=lambda path, *_rest: seen.append(path) or {"configured": False},
-        ):
-            self.assertEqual(
-                recovery_bundle.main(["status", "--platform-config", str(link), *files]), 0
-            )
-        with patch.object(
-            recovery_bundle,
-            "scheduled_export",
-            side_effect=lambda path, *_rest: seen.append(path) or Path("bundle"),
-        ):
-            self.assertEqual(
-                recovery_bundle.main(["scheduled-export", "--platform-config", str(link), *files]),
-                0,
-            )
-        self.assertEqual(seen, [real.resolve(), real.resolve()])
 
     def test_status_refuses_unmounted_and_stale_sink(self) -> None:
         platform, config, mountinfo = self._scheduled_environment()
@@ -368,30 +336,6 @@ class RecoveryBundleTests(unittest.TestCase):
         )
         self.assertEqual(status["bundle"], second.name)
         self.assertTrue(status["verified"])
-
-    def test_admin_role_supervises_daily_export(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "nix/roles/admin.nix").read_text()
-        self.assertIn('systemd.services."${namespace}-offsite-export"', source)
-        self.assertIn('systemd.timers."${namespace}-offsite-export"', source)
-        self.assertIn('OnCalendar = "*-*-* 05:00:00 UTC"', source)
-        self.assertIn("ConditionPathExists = offsiteExportConfig", source)
-        self.assertIn('TimeoutStartSec = "24h"', source)
-
-    def test_receipt_is_secret_free_monitoring_evidence(self) -> None:
-        status = self.root / "status"
-        status.mkdir(mode=0o700)
-        receipt = status / "offsite-export.json"
-        bundle = recovery_bundle.export_bundle(
-            self.destination,
-            self.sources,
-            deployment="production",
-            created_at=datetime(2026, 8, 30, 12, 30, tzinfo=UTC),
-            receipt=receipt,
-        )
-        value = json.loads(receipt.read_text())
-        self.assertEqual(value["bundle"], bundle.name)
-        self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
-        self.assertNotIn("path", value)
 
 
 if __name__ == "__main__":

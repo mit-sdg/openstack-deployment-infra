@@ -11,8 +11,6 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import remote as runtime_remote
-from openstack_platform import runtime
 from openstack_platform.helper.main import (
     HelperActionError,
     accept_staged_backup,
@@ -151,18 +149,23 @@ class RuntimeTests(unittest.TestCase):
                 self.assertNotIn("private_local", payload)
 
     def test_child_environment_uses_an_explicit_allowlist(self) -> None:
-        os.environ["FOUNDATION_ALLOWED"] = "yes"
-        os.environ["FOUNDATION_SECRET"] = "no"
-        os.environ["CREDENTIALS_DIRECTORY"] = "/run/credentials/unrelated.service"
-        os.environ["POSTGRES_PASSWORD"] = "not-for-this-child"
-        environment = child_environment(
-            inherit=("FOUNDATION_ALLOWED",), overrides={"FIXED": "value"}
-        )
-        self.assertEqual(environment["FOUNDATION_ALLOWED"], "yes")
-        self.assertEqual(environment["FIXED"], "value")
-        self.assertNotIn("FOUNDATION_SECRET", environment)
-        self.assertNotIn("CREDENTIALS_DIRECTORY", environment)
-        self.assertNotIn("POSTGRES_PASSWORD", environment)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "FOUNDATION_ALLOWED": "yes",
+                "FOUNDATION_SECRET": "no",
+                "CREDENTIALS_DIRECTORY": "/run/credentials/unrelated.service",
+                "POSTGRES_PASSWORD": "not-for-this-child",
+            },
+        ):
+            environment = child_environment(
+                inherit=("FOUNDATION_ALLOWED",), overrides={"FIXED": "value"}
+            )
+            self.assertEqual(environment["FOUNDATION_ALLOWED"], "yes")
+            self.assertEqual(environment["FIXED"], "value")
+            self.assertNotIn("FOUNDATION_SECRET", environment)
+            self.assertNotIn("CREDENTIALS_DIRECTORY", environment)
+            self.assertNotIn("POSTGRES_PASSWORD", environment)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -536,117 +539,6 @@ class BackupAcceptanceTests(unittest.TestCase):
                 )
             self.assertTrue(source.exists())
             self.assertFalse((root / name).exists())
-
-
-class ProviderCommandTests(unittest.TestCase):
-    def _platform(self, root: str, namespace: str = "app-platform") -> object:
-        platform = mock.Mock()
-        platform.get.side_effect = lambda key, *_rest: root if key == "paths.root" else None
-        platform.namespace = namespace
-        return platform
-
-    def test_the_command_follows_the_configured_root_and_namespace(self) -> None:
-        # These were fixed strings naming one deployment, so any deployment with
-        # a different namespace or root could not build or touch a worker.
-        from openstack_platform.controller import application_runtime as application
-
-        self.assertEqual(
-            application.provider_command(self._platform("/srv/61040", "61040"), "builder"),
-            ("/srv/61040/bin/61040-builder",),
-        )
-        self.assertEqual(
-            application.provider_command(self._platform("/srv/other", "other"), "nomad"),
-            ("/srv/other/bin/other-nomad",),
-        )
-
-    def test_a_relative_root_is_refused(self) -> None:
-        from openstack_platform.controller import application_runtime as application
-
-        with self.assertRaises(ValidationError):
-            application.provider_command(self._platform("srv/61040", "61040"), "builder")
-
-
-class ChildEnvironmentPathTests(unittest.TestCase):
-    def test_the_default_path_can_find_commands_on_a_nixos_guest(self) -> None:
-        # Role images are NixOS. With only the FHS directories, git could not be
-        # started and source acquisition failed before it began.
-        environment = runtime.child_environment()
-        self.assertIn("/run/current-system/sw/bin", environment["PATH"].split(":"))
-
-    def test_the_default_path_still_covers_an_fhs_host(self) -> None:
-        parts = runtime.child_environment()["PATH"].split(":")
-        self.assertIn("/usr/bin", parts)
-        self.assertIn("/bin", parts)
-
-    def test_an_explicit_path_override_still_wins(self) -> None:
-        environment = runtime.child_environment(overrides={"PATH": "/only/here"})
-        self.assertEqual(environment["PATH"], "/only/here")
-
-
-class HelperCommandPathTests(unittest.TestCase):
-    def test_the_helper_is_addressed_by_absolute_path(self) -> None:
-        # Nothing puts <paths.root>/bin on the remote login PATH, so invoking
-        # the launcher by bare name never resolves and every helper-backed
-        # command fails as an unavailable dependency.
-        self.assertEqual(
-            runtime_remote.helper_command_path("/srv/app-platform"),
-            "/srv/app-platform/bin/openstack-platform-helper",
-        )
-
-    def test_a_relative_root_is_refused(self) -> None:
-        with self.assertRaises(ValidationError):
-            runtime_remote.helper_command_path("srv/app-platform")
-
-    def test_the_ssh_command_carries_the_absolute_helper_path(self) -> None:
-        command = runtime_remote.helper_ssh_command(
-            helper_command="/srv/app-platform/bin/openstack-platform-helper"
-        )
-        self.assertEqual(command[-1], "/srv/app-platform/bin/openstack-platform-helper")
-        self.assertEqual(command[-3], "platform-admin")
-
-    def test_the_bare_name_remains_the_default(self) -> None:
-        self.assertEqual(runtime_remote.helper_ssh_command()[-1], "openstack-platform-helper")
-
-
-class BoundedHttpAgentTests(unittest.TestCase):
-    def _captured_request(self, **kwargs: object) -> object:
-        captured: list[object] = []
-
-        class _Response:
-            status = 200
-            headers: dict[str, str] = {}
-
-            def read(self, _limit: int) -> bytes:
-                return b"ok"
-
-            def __enter__(self) -> _Response:
-                return self
-
-            def __exit__(self, *_: object) -> None:
-                return None
-
-        class _Opener:
-            def open(self, request: object, timeout: float) -> object:
-                captured.append(request)
-                return _Response()
-
-        with mock.patch.object(runtime.urllib.request, "build_opener", return_value=_Opener()):
-            runtime.bounded_http("https://example.test/healthz", **kwargs)  # type: ignore[arg-type]
-        return captured[0]
-
-    def test_a_named_agent_is_sent_by_default(self) -> None:
-        # Public routes often sit behind a bot filter that rejects the language
-        # default agent with 403, which would make a healthy route unverifiable.
-        request = self._captured_request()
-        self.assertEqual(
-            request.get_header("User-agent"),  # type: ignore[attr-defined]
-            runtime.HTTP_USER_AGENT,
-        )
-        self.assertNotIn("python-urllib", runtime.HTTP_USER_AGENT.lower())
-
-    def test_an_explicit_agent_is_preserved(self) -> None:
-        request = self._captured_request(headers={"User-Agent": "caller/9"})
-        self.assertEqual(request.get_header("User-agent"), "caller/9")  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

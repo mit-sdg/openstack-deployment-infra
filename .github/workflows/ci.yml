@@ -47,13 +47,24 @@ jobs:
       - name: Install locked Python environment
         run: uv sync --frozen
 
-      - name: Check Python formatting, lint, and types
+      - name: Check Python formatting, lint, types, and tests
         run: |
-          uv lock --check
-          uv run ruff format --check openstack_platform deploy/releases infra tests
-          uv run ruff check openstack_platform deploy/releases infra tests
-          uv run mypy
-          uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
+          # Run independent Python checks alongside the module-isolated suite.
+          (
+            set -e
+            uv lock --check
+            uv run ruff format --check openstack_platform deploy/releases infra tests
+            uv run ruff check openstack_platform deploy/releases infra tests
+            uv run mypy
+            uv run vulture openstack_platform deploy infra tests --min-confidence 80 --sort-by-size
+          ) &
+          checks_pid=$!
+          uv run python tests/run_parallel.py --jobs 4 &
+          tests_pid=$!
+          status=0
+          wait "$checks_pid" || status=$?
+          wait "$tests_pid" || status=$?
+          exit "$status"
 
       - name: Install ShellCheck
         run: tests/install_ci_apt_packages.sh shellcheck
@@ -108,9 +119,6 @@ jobs:
           else
             echo "Integrated entrypoints are not present on this feature branch"
           fi
-
-      - name: Run unit and packaging tests
-        run: uv run python -m unittest discover -s tests -v
 
       - name: Check shell syntax
         run: |

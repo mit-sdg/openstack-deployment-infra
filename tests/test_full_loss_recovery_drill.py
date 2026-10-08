@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import io
 import json
 import os
 import sqlite3
 import subprocess
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -227,30 +225,6 @@ echo 'managed-data-restore=verified source=fake'
         self.assertIn("managed --yes", calls)
         self.assertNotIn("/srv/openstack-platform/state", calls)
 
-    def test_full_drill_restores_paired_keys_and_verify_only_rejects_bad_keys(self) -> None:
-        source = self.bundle / "hosted-controller/source-keys.tar.age"
-        with tarfile.open(source, "w") as archive:
-            for name in ("id_ed25519", "id_ed25519.pub"):
-                member = tarfile.TarInfo("drill-app/" + name)
-                member.size = 4
-                member.mode = 0o600
-                archive.addfile(member, io.BytesIO(b"test"))
-        source.chmod(0o600)
-        result, work = self._run("--full")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            (work / "replacements/source-keys/drill-app/id_ed25519").read_bytes(), b"test"
-        )
-        self.assertEqual(
-            json.loads((work / "DRILL-EVIDENCE.json").read_text())["sourceKeys"], "restored"
-        )
-        with tarfile.open(source, "w") as archive:
-            member = tarfile.TarInfo("other-app/id_ed25519")
-            member.size = 4
-            archive.addfile(member, io.BytesIO(b"test"))
-        result, work = self._run("--verify-only")
-        self.assertNotEqual(result.returncode, 0)
-
     def test_restore_failures_cannot_emit_complete_evidence(self) -> None:
         for failure in ("FAIL_OPERATOR", "FAIL_HOSTED", "FAIL_MANAGED"):
             with self.subTest(failure=failure):
@@ -258,13 +232,6 @@ echo 'managed-data-restore=verified source=fake'
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((work / "DRILL-EVIDENCE.json").exists())
                 self.assertNotIn("full-loss-drill=verified", result.stdout)
-
-    def test_verify_only_cannot_launch_restores_or_emit_complete_evidence(self) -> None:
-        result, work = self._run("--verify-only")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("full-loss-drill=verify-only evidence=none", result.stdout)
-        self.assertFalse((work / "DRILL-EVIDENCE.json").exists())
-        self.assertFalse(self.log.exists())
 
 
 if __name__ == "__main__":

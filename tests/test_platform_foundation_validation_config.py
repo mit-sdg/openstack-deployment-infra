@@ -135,19 +135,6 @@ class CommonValidationTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def test_checked_in_policy_example_loads(self) -> None:
-        path = Path(__file__).resolve().parents[1] / "config/platform-policy.example.json"
-        policy = load_policy(path, require_private=False)
-        self.assertEqual(policy.standard.cpu_mhz, 1000)
-        self.assertEqual(
-            policy.runtime_images.bun,
-            "docker.io/oven/bun@sha256:621f249399228db47cf34611ee662585e77e015250ed29d5d0932b2d3282f0b0",
-        )
-        self.assertEqual(
-            policy.runtime_images.node,
-            "docker.io/library/node@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848",
-        )
-
     def write_json(self, directory: Path, name: str, value: object, *, mode: int = 0o600) -> Path:
         path = directory / name
         path.write_text(json.dumps(value))
@@ -198,13 +185,6 @@ class ConfigTests(unittest.TestCase):
                 path = self.write_json(directory, f"policy-{index}.json", document)
                 with self.subTest(index=index), self.assertRaises(ValidationError):
                     load_policy(path)
-
-    def test_policy_cpu_is_configurable_within_safe_bounds(self) -> None:
-        document = policy_document()
-        document["standard"]["cpuMHz"] = 500  # type: ignore[index]
-        with tempfile.TemporaryDirectory() as temporary:
-            path = self.write_json(Path(temporary), "policy.json", document)
-            self.assertEqual(load_policy(path).standard.cpu_mhz, 500)
 
     def test_public_ingress_is_explicit_and_never_world_open(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -211,6 +211,7 @@ class ControllerAPI:
         observer_helper: Callable[..., Mapping[str, object]] | None = None,
         operation_workers: int = 4,
         operation_capacity: int = 32,
+        retry_poll_seconds: float = 1.0,
     ) -> None:
         self.connection = connection
         self.config = config
@@ -250,6 +251,7 @@ class ControllerAPI:
             connection,
             workers=operation_workers,
             capacity=operation_capacity,
+            retry_poll_seconds=retry_poll_seconds,
             finishing_work=self._finish_operation,
         )
 

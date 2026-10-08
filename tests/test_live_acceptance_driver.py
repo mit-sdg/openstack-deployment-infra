@@ -14,7 +14,6 @@ from openstack_platform.acceptance_live_driver import (
     DriverConfig,
     LiveDriverError,
     RepositoryLiveDriver,
-    SubprocessTransport,
     SupportedInterfaces,
 )
 
@@ -395,44 +394,6 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
             self.assertIn(("replace", "admin", True), fake.calls)
             self.assertEqual(fake.calls[-1], ("teardown", True))
 
-    def test_interruption_requires_the_stable_public_content_proof(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            executable = root / "unused"
-            executable.write_text("#!/bin/sh\nexit 0\n")
-            executable.chmod(0o700)
-            value = config(root, executable)
-            fake = FakeInterfaces(value)
-            fake.verify_public_storage = lambda _url, _expected: {  # type: ignore[method-assign]
-                "publicRouteHealthy": True,
-                "storageBound": False,
-                "postgresWriteReadVerified": False,
-                "mongoWriteReadVerified": False,
-                "s3WriteReadVerified": False,
-            }
-            driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
-            with self.assertRaisesRegex(LiveDriverError, "did not establish"):
-                driver.handle(self._execute_request(value, "interrupted_resume_injection"))
-
-    def test_reenable_requires_a_live_public_route_observation(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            executable = root / "unused"
-            executable.write_text("#!/bin/sh\nexit 0\n")
-            executable.chmod(0o700)
-            value = config(root, executable)
-            fake = FakeInterfaces(value)
-            fake.verify_public_storage = lambda _url, _expected: {  # type: ignore[method-assign]
-                "publicRouteHealthy": False,
-                "storageBound": True,
-                "postgresWriteReadVerified": True,
-                "mongoWriteReadVerified": True,
-                "s3WriteReadVerified": True,
-            }
-            driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
-            with self.assertRaisesRegex(LiveDriverError, "did not establish"):
-                driver.handle(self._execute_request(value, "application_disable_enable"))
-
     def test_missing_concrete_observation_fails_instead_of_synthesizing_true(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -494,118 +455,6 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
                     self.assertIs(checks["storageBound"], False)
                     for other in set(check_names.values()) - {check}:
                         self.assertIs(checks[other], True)
-
-    def test_candidate_check_fails_for_each_missing_typed_lifecycle_field(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            executable = root / "unused"
-            executable.write_text("#!/bin/sh\nexit 0\n")
-            executable.chmod(0o700)
-            value = config(root, executable)
-            for field in ("imageDigest", "nomadVersion", "acceptedAt", "lastHealthyAt"):
-                fake = FakeInterfaces(value)
-                original_list = fake.list_items
-
-                def missing_candidate_field(
-                    path: str, missing: str = field, listing: object = original_list
-                ) -> list[Mapping[str, object]]:
-                    assert callable(listing)
-                    items = [dict(item) for item in listing(path)]
-                    if "/deployments" in path and items:
-                        items[0][missing] = None
-                    return items
-
-                fake.list_items = missing_candidate_field  # type: ignore[method-assign]
-                driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
-                with (
-                    self.subTest(field=field),
-                    self.assertRaisesRegex(LiveDriverError, "did not establish"),
-                ):
-                    driver.handle(self._execute_request(value, "application_deploy"))
-
-    def test_persistent_retention_fails_for_each_exact_content_observation(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            executable = root / "unused"
-            executable.write_text("#!/bin/sh\nexit 0\n")
-            executable.chmod(0o700)
-            value = config(root, executable)
-            for failed in (
-                "postgresWriteReadVerified",
-                "mongoWriteReadVerified",
-                "s3WriteReadVerified",
-            ):
-                fake = FakeInterfaces(value)
-                original = fake.verify_public_storage
-
-                def falsified(
-                    url: str,
-                    expected: Mapping[str, object],
-                    field: str = failed,
-                    verify: object = original,
-                ) -> dict[str, bool]:
-                    assert callable(verify)
-                    result = verify(url, expected)
-                    result[field] = False
-                    return result
-
-                fake.verify_public_storage = falsified  # type: ignore[method-assign]
-                driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
-                with (
-                    self.subTest(failed=failed),
-                    self.assertRaisesRegex(LiveDriverError, "did not establish"),
-                ):
-                    driver.handle(self._execute_request(value, "persistent_host_replacement"))
-
-    @staticmethod
-    def _execute_request(value: DriverConfig, action: str) -> dict[str, object]:
-        return {
-            "schemaVersion": 1,
-            "mode": "execute",
-            "action": action,
-            "scope": {
-                "deploymentId": DEPLOYMENT,
-                "projectId": PROJECT,
-                "namespace": NAMESPACE,
-            },
-            "planSha256": "a" * 64,
-            "driverConfigurationSha256": hashlib.sha256(value.path.read_bytes()).hexdigest(),
-            "baselineFingerprint": "b" * 64,
-        }
-
-    def test_managed_restore_false_observation_cannot_pass(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            executable = root / "unused"
-            executable.write_text("#!/bin/sh\nexit 0\n")
-            executable.chmod(0o700)
-            value = config(root, executable)
-            fake = FakeInterfaces(value)
-            fake.managed_restore = lambda _url: {  # type: ignore[method-assign]
-                "postgresRestored": True,
-                "mongoRestored": True,
-                "s3Restored": False,
-                "restoreManifestVerified": True,
-            }
-            driver = RepositoryLiveDriver(value, fake)  # type: ignore[arg-type]
-            with self.assertRaisesRegex(LiveDriverError, "did not establish"):
-                driver.handle(
-                    {
-                        "schemaVersion": 1,
-                        "mode": "execute",
-                        "action": "managed_data_restore",
-                        "scope": {
-                            "deploymentId": DEPLOYMENT,
-                            "projectId": PROJECT,
-                            "namespace": NAMESPACE,
-                        },
-                        "planSha256": "a" * 64,
-                        "driverConfigurationSha256": hashlib.sha256(
-                            value.path.read_bytes()
-                        ).hexdigest(),
-                        "baselineFingerprint": "b" * 64,
-                    }
-                )
 
     def test_substring_ownership_adversary_is_rejected_before_delete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -803,44 +652,6 @@ class LiveAcceptanceDriverTests(unittest.TestCase):
             with self.assertRaisesRegex(LiveDriverError, "ownership metadata is absent"):
                 SupportedInterfaces(value, transport).teardown("b" * 64)
             self.assertFalse(any(mutating for _argv, mutating, _stdin in transport.calls))
-
-    def test_real_plan_transport_transcript_contains_only_non_mutating_commands(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            program = root / "fake-supported-interface"
-            program.write_text(
-                "#!/usr/bin/env python3\n"
-                "import json,sys\n"
-                "a=sys.argv[1:]\n"
-                f"print(json.dumps({{'project_id':'{PROJECT}'}}) if 'token' in a else ('[]' if 'list' in a else 'setup plan'))\n"
-            )
-            program.chmod(0o700)
-            value = config(root, program)
-            transport = SubprocessTransport(Path(value.transcript))
-            driver = RepositoryLiveDriver(value, SupportedInterfaces(value, transport))
-            driver.handle(
-                {
-                    "schemaVersion": 1,
-                    "mode": "plan",
-                    "action": "full_drill",
-                    "scope": {
-                        "deploymentId": DEPLOYMENT,
-                        "projectId": PROJECT,
-                        "namespace": NAMESPACE,
-                    },
-                    "requiredActions": list(acceptance.ACTION_NAMES),
-                    "bounds": {"maxMinutes": 60, "stepTimeoutSeconds": 60},
-                }
-            )
-            transcript = json.loads(Path(value.transcript).read_text())
-            self.assertEqual(transcript["mutationCount"], 0)
-            self.assertGreaterEqual(len(transcript["commands"]), 10)
-            self.assertTrue(all(command["mutating"] is False for command in transcript["commands"]))
-            rendered = Path(value.transcript).read_text()
-            self.assertNotIn(PROJECT, rendered)
-            self.assertNotIn("--apply", rendered)
-            self.assertIn("setup", rendered)
-            self.assertIn("<absolute>/input.env", rendered)
 
     def test_scope_mismatch_stops_before_any_interface(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

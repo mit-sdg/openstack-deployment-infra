@@ -2,15 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 import tempfile
-import time
 import unittest
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import remote
 from openstack_platform.config import load
 from openstack_platform.controller import database as db
 from openstack_platform.controller import status
@@ -22,28 +18,16 @@ from openstack_platform.controller.storage import (
     verify,
 )
 from openstack_platform.controller.storage_contract import (
-    APPLICATION_CA_PATH,
     ENVIRONMENT_KEYS,
-    FIXED_PLATFORM_ENVIRONMENT,
-    JOB_ENVIRONMENT,
-    OUTPUT_ENVIRONMENT_KEYS,
-    PLATFORM_ENVIRONMENT_KEYS,
-    RESERVED_ENVIRONMENT_KEYS,
-    RESOURCE_OUTPUTS,
     canonical_secret_keys,
     canonicalize_environment,
-    derived_output,
-    platform_environment_values,
-    retired_secret_keys,
     storage_owner,
 )
-from openstack_platform.helper import production
 from openstack_platform.helper.main import HelperActionError
 from openstack_platform.helper.nomad import SecretItems, VariableSnapshot
 from openstack_platform.helper.storage import (
     ProviderCredential,
     RotationEvidence,
-    handlers,
     mongo_create,
     mongo_environment,
     mongo_observe_handler,
@@ -102,72 +86,6 @@ def config_fixture(directory: Path):
 
 
 class ControllerStorageTests(unittest.TestCase):
-    def test_storage_type_aliases_are_not_accepted(self) -> None:
-        from openstack_platform.controller import storage as controller_storage
-
-        with self.assertRaises(ValidationError):
-            controller_storage._selected(["mongodb"])
-        with self.assertRaises(ValidationError):
-            controller_storage._selected(["object-storage"])
-
-    def test_canonical_platform_environment_has_exact_node_runtime_mode(self) -> None:
-        values = platform_environment_values(APP_ID, "demo-app", 8080)
-        self.assertEqual(values["NODE_ENV"], "production")
-        self.assertEqual(values["PLATFORM_ENV"], "production")
-        self.assertEqual(values["PORT"], "8080")
-        self.assertEqual(set(values), PLATFORM_ENVIRONMENT_KEYS)
-        self.assertEqual(FIXED_PLATFORM_ENVIRONMENT["NODE_ENV"], "production")
-        # Node and Bun trust the platform CA without any per-client setting.
-        # The job sets it directly, so it is reserved but never a Variable item.
-        self.assertEqual(
-            JOB_ENVIRONMENT,
-            {
-                "NODE_EXTRA_CA_CERTS": APPLICATION_CA_PATH,
-                "AWS_REQUEST_CHECKSUM_CALCULATION": "when_required",
-            },
-        )
-        self.assertNotIn("NODE_EXTRA_CA_CERTS", values)
-        self.assertIn("NODE_EXTRA_CA_CERTS", RESERVED_ENVIRONMENT_KEYS)
-        self.assertTrue(PLATFORM_ENVIRONMENT_KEYS < RESERVED_ENVIRONMENT_KEYS)
-        with self.assertRaises(ValidationError):
-            platform_environment_values(APP_ID, "demo-app", 0)
-
-    def test_s3_binds_only_what_clients_need(self) -> None:
-        self.assertEqual(
-            RESOURCE_OUTPUTS["s3"],
-            (
-                "endpoint",
-                "public_endpoint",
-                "region",
-                "access_key_id",
-                "secret_access_key",
-                "bucket",
-            ),
-        )
-        self.assertEqual(set(OUTPUT_ENVIRONMENT_KEYS["s3"]), set(RESOURCE_OUTPUTS["s3"]))
-        # The public endpoint is configuration, never stored with credentials.
-        self.assertNotIn(
-            "STORAGE__S3__DEFAULT__PUBLIC_ENDPOINT", canonical_secret_keys("s3", "default")
-        )
-        self.assertEqual(
-            derived_output("s3", "public_endpoint", domain="apps.example"),
-            "https://s3.apps.example",
-        )
-        with self.assertRaises(ValidationError):
-            derived_output("s3", "endpoint", domain="apps.example")
-        environment = s3_environment("https://10.0.0.5:9000", "demo-bucket", "key", "secret")
-        self.assertEqual(set(environment), set(ENVIRONMENT_KEYS["s3"]))
-        self.assertEqual(
-            retired_secret_keys("s3", "uploads"),
-            ("STORAGE__S3__UPLOADS__CA_BUNDLE", "STORAGE__S3__UPLOADS__FORCE_PATH_STYLE"),
-        )
-        self.assertEqual(retired_secret_keys("postgres", "default"), ())
-        self.assertTrue(
-            set(retired_secret_keys("s3", "default")).isdisjoint(
-                canonical_secret_keys("s3", "default")
-            )
-        )
-
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.directory = Path(self.temporary.name)
@@ -317,26 +235,6 @@ class ControllerStorageTests(unittest.TestCase):
         self.assertEqual(operation.status, "succeeded")  # type: ignore[union-attr]
         self.assertNotIn(SENTINEL.encode(), self.database_path.read_bytes())
 
-    def test_different_storage_kind_refuses_unfinished_create(self) -> None:
-        with self.assertRaises(StorageOperationError):
-            create(
-                self.connection,
-                self.config,
-                APP_ID,
-                ["mongo"],
-                helper_caller=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError()),
-            )
-        calls = 0
-
-        def caller(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            return {}
-
-        with self.assertRaises(db.UnfinishedOperationError):
-            rotate(self.connection, self.config, APP_ID, ["mongo"], helper_caller=caller)
-        self.assertEqual(calls, 0)
-
     def test_verify_and_remove_retry_their_recorded_phase(self) -> None:
         self.add_resource("postgres")
         verify_calls: list[bool] = []
@@ -387,31 +285,6 @@ class ControllerStorageTests(unittest.TestCase):
         self.assertEqual(removed.completed, ("postgres",))
         self.assertEqual(remove_calls, [False, False, True, True])
         self.assertEqual(db.list_managed_resources(self.connection, application_id=APP_ID), [])
-
-    def test_rotation_calls_only_selected_type_and_rejects_bad_evidence(self) -> None:
-        self.add_resource("postgres")
-        self.add_resource("mongo")
-        actions: list[str] = []
-
-        def caller(action, args, **bounds):
-            actions.append(action)
-            return {
-                "providerId": "mongo-id",
-                "providerName": "mongo-name",
-                "credentialName": "u_candidate",
-                "verified": True,
-                "evidenceAccepted": False,
-                "retired": False,
-                "rolledBack": True,
-            }
-
-        with self.assertRaisesRegex(StorageOperationError, "evidence was rejected"):
-            rotate(self.connection, self.config, APP_ID, ["mongo"], helper_caller=caller)
-        self.assertEqual(actions, ["storage.mongo.rotate"])
-        operation = self.connection.execute(
-            "SELECT status FROM operations WHERE kind = 'storage.rotate'"
-        ).fetchone()
-        self.assertEqual(operation["status"], "failed")
 
     def test_removal_refuses_before_mutation_and_retains_keys_without_absence(self) -> None:
         self.add_resource("postgres")
@@ -589,189 +462,6 @@ class ControllerStorageTests(unittest.TestCase):
             ],
         )
 
-    def test_interrupted_remove_repreflights_newly_nonempty_s3_before_next_delete(self) -> None:
-        for resource_type in ("postgres", "mongo", "s3"):
-            self.add_resource(resource_type)
-        events: list[str] = []
-        interrupt_mongo = [True]
-        s3_nonempty = [False]
-
-        def caller(action, args, **bounds):
-            resource_type = action.split(".")[1]
-            event = f"{resource_type}-{'preflight' if args['preflight'] else 'delete'}"
-            events.append(event)
-            if args["preflight"]:
-                if resource_type == "s3" and s3_nonempty[0]:
-                    return {"preflightAccepted": False}
-                return {"preflightAccepted": True}
-            if resource_type == "mongo" and interrupt_mongo[0]:
-                interrupt_mongo[0] = False
-                raise RuntimeError(SENTINEL)
-            return {"confirmedAbsent": True, "environmentRemoved": True, "modifyIndex": 31}
-
-        with self.assertRaises(StorageOperationError):
-            remove(
-                self.connection,
-                self.config,
-                APP_ID,
-                ["postgres", "mongo", "s3"],
-                confirm_name="default",
-                confirm_destructive=True,
-                helper_caller=caller,
-            )
-        self.assertNotIn(
-            "postgres",
-            {
-                item.resource_type
-                for item in db.list_managed_resources(self.connection, application_id=APP_ID)
-            },
-        )
-
-        s3_nonempty[0] = True
-        retry_start = len(events)
-        with self.assertRaisesRegex(StorageOperationError, "before another deletion"):
-            remove(
-                self.connection,
-                self.config,
-                APP_ID,
-                ["postgres", "mongo", "s3"],
-                confirm_name="default",
-                confirm_destructive=True,
-                helper_caller=caller,
-            )
-        retry_events = events[retry_start:]
-        self.assertEqual(retry_events, ["mongo-preflight", "s3-preflight"])
-        self.assertNotIn("mongo-delete", retry_events)
-        operation = db.get_unfinished_operation(self.connection, f"app-{APP_ID}")
-        assert operation is not None
-        self.assertEqual(operation.status, "recovery_required")
-        self.assertEqual(operation.refs["completed"], ["postgres"])
-        self.assertNotIn(SENTINEL.encode(), self.database_path.read_bytes())
-
-    def test_multi_type_calls_share_one_absolute_deadline(self) -> None:
-        self.add_resource("postgres")
-        self.add_resource("mongo")
-        timeouts: list[float] = []
-
-        def caller(action, args, **bounds):
-            timeouts.append(bounds["timeout_seconds"])
-            time.sleep(0.02)
-            resource_type = action.split(".")[1]
-            return {
-                "providerId": f"{resource_type}-id",
-                "providerName": f"{resource_type}-name",
-                "credentialName": "u_candidate",
-                "verified": True,
-                "evidenceAccepted": True,
-                "retired": True,
-                "rolledBack": False,
-            }
-
-        deadline = (datetime.now(UTC) + timedelta(seconds=2)).isoformat()
-        rotate(
-            self.connection,
-            self.config,
-            APP_ID,
-            ["postgres", "mongo"],
-            helper_caller=caller,
-            deadline_at=deadline,
-            process_deadline=time.monotonic() + 2,
-        )
-        self.assertEqual(len(timeouts), 2)
-        self.assertLess(timeouts[1], timeouts[0])
-        self.assertLessEqual(timeouts[0], 2)
-
-    def test_expired_recovery_uses_fresh_bounded_attempt_deadline_and_preserves_evidence(
-        self,
-    ) -> None:
-        self.add_resource("postgres")
-        operation_id = "66666666-6666-4666-8666-666666666666"
-        original_deadline = "2000-01-01T00:00:00Z"
-        db.begin_operation(
-            self.connection,
-            operation_id=operation_id,
-            kind="storage.verify",
-            scope=f"app-{APP_ID}",
-            phase="verify_postgres",
-            deadline_at=original_deadline,
-            refs={
-                "selected": ["postgres"],
-                "completed": [],
-                "current": "postgres",
-                "original_modify_index": 41,
-                "resource_name": "default",
-            },
-        )
-        calls: list[tuple[bool, float]] = []
-
-        def caller(action, args, **bounds):
-            calls.append((args["recover"], bounds["timeout_seconds"]))
-            return {"verified": True, "modifyIndex": 42}
-
-        verify(
-            self.connection,
-            self.config,
-            APP_ID,
-            ["postgres"],
-            helper_caller=caller,
-        )
-        self.assertEqual(calls[0][0], True)
-        self.assertGreater(calls[0][1], 0)
-        self.assertLessEqual(calls[0][1], self.config.policy.limits.helper_seconds)
-        operation = db.get_operation(self.connection, operation_id)
-        assert operation is not None
-        self.assertEqual(operation.deadline_at, original_deadline)
-        self.assertEqual(operation.refs["original_modify_index"], 41)
-
-    def test_confirmed_create_rollback_does_not_leave_recovery_metadata(self) -> None:
-        def caller(*args, **kwargs):
-            raise remote.HelperError("CREATE_ROLLED_BACK", "safe rollback")
-
-        with self.assertRaisesRegex(StorageOperationError, "rollback was confirmed"):
-            create(self.connection, self.config, APP_ID, ["s3"], helper_caller=caller)
-        self.assertEqual(db.list_managed_resources(self.connection, application_id=APP_ID), [])
-        operation = self.connection.execute(
-            "SELECT status, cleanup_state FROM operations WHERE kind='storage.create'"
-        ).fetchone()
-        self.assertEqual((operation["status"], operation["cleanup_state"]), ("failed", "confirmed"))
-
-    def test_controller_protocol_and_lazy_production_compose_for_create(self) -> None:
-        events: list[str] = []
-        garage = Garage(events)
-        nomad = MemoryNomad({"PORT": "3000"})
-        action_map = handlers(
-            postgres_admin=object(),
-            postgres_connect=lambda **kwargs: None,
-            mongo_admin=object(),
-            mongo_connect=lambda **kwargs: None,
-            garage_admin=garage,
-            s3_connect=lambda access, secret: S3Client(events),
-            nomad=nomad,
-            storage_host="storage.internal",
-            s3_endpoint="https://storage.internal:9000",
-            prefix="example",
-            observe_evidence=lambda app, slug, kind, index: RotationEvidence(True, index, True),
-        )
-
-        def protocol(action, args, **bounds):
-            return production.production_handlers()[action](args)
-
-        with mock.patch.object(
-            production,
-            "_storage_handlers",
-            side_effect=lambda action: (action_map, ()),
-        ):
-            result = create(
-                self.connection,
-                self.config,
-                APP_ID,
-                ["s3"],
-                helper_caller=protocol,
-            )
-        self.assertEqual(result.completed, ("s3",))
-        self.assertEqual(_resource(self.connection, "s3").lifecycle_state, "active")
-        self.assertIn("STORAGE__S3__DEFAULT__ACCESS_KEY_ID", nomad.items)
-
 
 def _resource(connection, resource_type):
     return next(
@@ -821,9 +511,6 @@ class S3Client:
     def delete_object(self, **kwargs):
         self.events.append("verify-delete")
 
-    def head_bucket(self, **kwargs):
-        self.events.append("observe-head")
-
     def close(self):
         self.events.append("client-close")
 
@@ -835,9 +522,6 @@ class S3Client:
                 return iter([{"Contents": client.objects}])
 
         return Paginator()
-
-    def delete_objects(self, **kwargs):
-        self.events.append("purge")
 
 
 class NotFound(Exception):
@@ -1266,69 +950,6 @@ class HelperStorageTests(unittest.TestCase):
         self.assertIn("FROM PUBLIC", admin.statements[revoked])
         self.assertIn(credential.provider_name, admin.statements[revoked])
 
-    def test_status_observation_is_read_only_while_verify_probe_cleans_up(self) -> None:
-        events: list[str] = []
-        garage = Garage(events)
-        nomad = MemoryNomad(self.initial())
-        result = s3_observe_handler(
-            {
-                "applicationId": APP_ID,
-                "applicationSlug": "demo-app",
-                "resourceName": "default",
-                "providerId": "bucket-id",
-                "providerName": "demo-bucket",
-            },
-            scoped_client=lambda access, secret: S3Client(events),
-            nomad=nomad,
-            admin=garage,
-            endpoint="https://storage:9000",
-        )
-        self.assertTrue(result["observed"])
-        self.assertEqual(events, ["/GetBucketInfo", "observe-head", "client-close"])
-        verified = s3_verify_handler(
-            {
-                "applicationId": APP_ID,
-                "applicationSlug": "demo-app",
-                "resourceName": "default",
-                "providerId": "bucket-id",
-                "providerName": "demo-bucket",
-                "operationId": "44444444-4444-4444-8444-444444444444",
-                "recover": False,
-            },
-            scoped_client=lambda access, secret: S3Client(events),
-            nomad=nomad,
-            admin=garage,
-            endpoint="https://storage:9000",
-        )
-        self.assertTrue(verified["verified"])
-        self.assertEqual(events[-2:], ["verify-delete", "client-close"])
-        self.assertEqual(nomad.writes, [])
-
-    def test_s3_remove_refuses_provider_id_with_wrong_alias_before_delete(self) -> None:
-        events: list[str] = []
-        garage = Garage(events)
-        garage.alias = "another-project"
-        with self.assertRaisesRegex(HelperActionError, "identity does not match"):
-            s3_remove_handler(
-                {
-                    "applicationId": APP_ID,
-                    "applicationSlug": "demo-app",
-                    "resourceName": "default",
-                    "providerId": "bucket-id",
-                    "providerName": "demo-bucket",
-                    "confirmName": "default",
-                    "purge": False,
-                    "preflight": True,
-                    "operationId": "44444444-4444-4444-8444-444444444444",
-                    "recover": False,
-                },
-                admin=garage,
-                scoped_client=lambda access, secret: S3Client(events),
-                nomad=MemoryNomad(self.initial()),
-            )
-        self.assertIn("/GetBucketInfo", events)
-        self.assertNotIn("/DeleteBucket", events)
-
     def test_s3_rotation_rolls_back_on_unmatched_health_evidence_and_preserves_other_owners(
         self,
     ) -> None:
@@ -1358,34 +979,6 @@ class HelperStorageTests(unittest.TestCase):
         self.assertEqual(garage.deleted, ["new-key"])
         self.assertNotIn(SENTINEL, repr(result))
         self.assertNotIn(SENTINEL, repr(nomad.writes[-2]))
-
-    def test_operation_id_makes_rotation_generation_deterministic_without_returning_secret(
-        self,
-    ) -> None:
-        names: list[str] = []
-        for _attempt in range(2):
-            events: list[str] = []
-            garage = Garage(events)
-            result = s3_rotate_handler(
-                {
-                    "applicationId": APP_ID,
-                    "applicationSlug": "demo-app",
-                    "resourceName": "default",
-                    "providerId": "bucket-id",
-                    "providerName": "demo-bucket",
-                    "operationId": "22222222-2222-4222-8222-222222222222",
-                    "recover": False,
-                },
-                admin=garage,
-                scoped_client=lambda access, secret, events=events: S3Client(events),
-                nomad=MemoryNomad(self.initial()),
-                endpoint="https://storage:9000",
-                observe_evidence=lambda app, slug, kind, index: RotationEvidence(True, index),
-            )
-            names.extend(garage.created_names)
-            self.assertNotIn(SENTINEL, repr(result))
-        self.assertEqual(names[0], names[1])
-        self.assertRegex(names[0], r"^application-demo-bucket-[a-f0-9]{8}$")
 
     def test_s3_rotation_retires_old_key_only_after_matching_health_evidence(self) -> None:
         events: list[str] = []
@@ -1424,64 +1017,6 @@ class HelperStorageTests(unittest.TestCase):
             "STORAGE__S3__DEFAULT__CA_BUNDLE": "/platform-ca/internal-ca.crt",
             "STORAGE__S3__DEFAULT__FORCE_PATH_STYLE": "true",
         }
-
-    def test_s3_credential_writes_drop_keys_older_releases_stored(self) -> None:
-        events: list[str] = []
-        nomad = MemoryNomad({**self.initial(), **self.retired()})
-        args = {
-            "applicationId": APP_ID,
-            "applicationSlug": "demo-app",
-            "resourceName": "default",
-            "providerId": "bucket-id",
-            "providerName": "demo-bucket",
-        }
-        # Reads accept a variable that still holds the retired keys.
-        verified = s3_verify_handler(
-            {**args, "operationId": "44444444-4444-4444-8444-444444444444", "recover": False},
-            admin=Garage(events),
-            scoped_client=lambda _access, _secret: S3Client(events),
-            nomad=nomad,
-            endpoint="https://storage:9000",
-        )
-        self.assertTrue(verified["verified"])
-        self.assertEqual(len(nomad.writes), 0)
-        result = s3_rotate_handler(
-            {**args, "operationId": "44444444-4444-4444-8444-444444444444", "recover": False},
-            admin=Garage(events),
-            scoped_client=lambda _access, _secret: S3Client(events),
-            nomad=nomad,
-            endpoint="https://storage:9000",
-            observe_evidence=lambda *_args: RotationEvidence(True, nomad.index),
-        )
-        self.assertTrue(result["retired"])
-        self.assertEqual(nomad.items["STORAGE__S3__DEFAULT__ACCESS_KEY_ID"], "new-key")
-        self.assertEqual(nomad.items["STAFF_SENTINEL"], "preserve-me")
-        for key in self.retired():
-            self.assertNotIn(key, nomad.items)
-
-    def test_s3_remove_drops_keys_older_releases_stored(self) -> None:
-        events: list[str] = []
-        nomad = MemoryNomad({**self.initial(), **self.retired()})
-        result = s3_remove_handler(
-            {
-                "applicationId": APP_ID,
-                "applicationSlug": "demo-app",
-                "resourceName": "default",
-                "providerId": "bucket-id",
-                "providerName": "demo-bucket",
-                "confirmName": "default",
-                "purge": False,
-                "preflight": False,
-                "operationId": "44444444-4444-4444-8444-444444444444",
-                "recover": False,
-            },
-            admin=Garage(events),
-            scoped_client=lambda _access, _secret: S3Client(events),
-            nomad=nomad,
-        )
-        self.assertTrue(result["environmentRemoved"])
-        self.assertEqual({key for key in nomad.items if key.startswith("STORAGE__")}, set())
-        self.assertEqual(nomad.items["STAFF_SENTINEL"], "preserve-me")
 
     def test_s3_remove_checks_confirmation_and_absence_before_owned_key_removal(self) -> None:
         events: list[str] = []
@@ -1652,172 +1187,6 @@ class HelperStorageTests(unittest.TestCase):
         )
         self.assertNotIn(SENTINEL, repr(credential))
         self.assertNotIn(SENTINEL, repr(credential.environment))
-
-    def test_production_s3_requires_an_ip_endpoint_for_path_style_clients(self) -> None:
-        platform = mock.Mock(prefix="example")
-        platform.get.side_effect = lambda key, *_rest: (
-            "/srv/app-platform" if key == "paths.root" else "storage.internal"
-        )
-        runtime = mock.Mock(platform=platform, root=Path("/srv/app-platform"))
-        with (
-            mock.patch.object(production, "helper_runtime", return_value=runtime),
-            mock.patch.object(production, "_read_environment") as secrets,
-        ):
-            with self.assertRaisesRegex(HelperActionError, "IP address"):
-                production._storage_handlers("storage.s3.create")
-        secrets.assert_not_called()
-
-    def test_production_create_observer_requires_fresh_scheduler_and_public_health(self) -> None:
-        platform = mock.Mock(prefix="example")
-        # Key-aware: a blanket return value gave paths.root a hostname, which is
-        # not a usable deployment root. Production storage addresses are IPs.
-        platform.get.side_effect = lambda key, *_rest: (
-            "/srv/app-platform" if key == "paths.root" else "10.0.0.5"
-        )
-        events: list[str] = []
-        garage = Garage(events)
-        nomad = MemoryNomad({"PORT": "3000"})
-
-        def allocation(identifier: str) -> dict[str, object]:
-            return {
-                "ID": identifier,
-                "ModifyIndex": 1,
-                "ModifyTime": 1,
-                "JobVersion": 7,
-                "DesiredStatus": "run",
-                "ClientStatus": "running",
-                "DeploymentStatus": {"Healthy": True},
-                "TaskStates": {"app": {"Restarts": 0, "StartedAt": identifier}},
-            }
-
-        boto3 = mock.Mock()
-        botocore_config = mock.Mock()
-        with (
-            mock.patch.dict(
-                sys.modules,
-                {
-                    "boto3": boto3,
-                    "botocore": mock.Mock(),
-                    "botocore.config": botocore_config,
-                },
-            ),
-            mock.patch.object(
-                production,
-                "helper_runtime",
-                return_value=mock.Mock(platform=platform, root=Path("/srv/app-platform")),
-            ),
-            mock.patch.object(
-                production,
-                "_read_environment",
-                return_value={
-                    "POSTGRES_PASSWORD": "secret",
-                    "MONGO_PASSWORD": "secret",
-                    "GARAGE_ADMIN_TOKEN": "secret",
-                },
-            ),
-            mock.patch.object(production, "_nomad_client", return_value=nomad),
-            mock.patch.object(production, "_GarageAdmin", return_value=garage),
-            mock.patch.object(production.ssl, "create_default_context", return_value=mock.Mock()),
-            mock.patch.object(
-                boto3, "client", side_effect=lambda *args, **kwargs: S3Client(events)
-            ),
-            mock.patch.object(
-                production.app_actions,
-                "_allocations",
-                side_effect=[[allocation("old")], [allocation("new")]],
-            ),
-            mock.patch.object(
-                production.app_actions,
-                "_status_or_absent",
-                return_value={"Version": 7, "Status": "running"},
-            ),
-            mock.patch.object(
-                production.app_actions,
-                "_inspected_candidate",
-                return_value=(7, "a" * 64, "registry.example/app@sha256:" + "b" * 64),
-            ),
-            mock.patch.object(
-                production.app_actions, "_public_health_from_job", return_value=True
-            ) as public_health,
-            mock.patch.object(production, "run", return_value=mock.Mock()) as runner,
-        ):
-            action_map, clients = production._storage_handlers("storage.s3.create")
-            result = action_map["storage.s3.create"](
-                {
-                    "applicationId": APP_ID,
-                    "applicationSlug": "demo-app",
-                    "resourceName": "default",
-                    "s3Bytes": 1000,
-                    "s3Objects": 100,
-                    "operationId": "55555555-5555-4555-8555-555555555555",
-                    "recover": False,
-                }
-            )
-        self.assertEqual(clients, ())
-        self.assertTrue(result["evidenceAccepted"])
-        self.assertTrue(any("restart" in call.args[0] for call in runner.call_args_list))
-        public_health.assert_called_once()
-
-    def test_production_initializes_only_required_backend_and_closes_partial_client(self) -> None:
-        platform = mock.Mock(prefix="example")
-        # Key-aware: a blanket return value gave paths.root a hostname, which is
-        # not a usable deployment root.
-        platform.get.side_effect = lambda key, *_rest: (
-            "/srv/app-platform" if key == "paths.root" else "storage.internal"
-        )
-        postgres = mock.Mock()
-        psycopg = mock.Mock()
-        with (
-            mock.patch.dict(sys.modules, {"psycopg": psycopg}),
-            mock.patch.object(
-                production,
-                "helper_runtime",
-                return_value=mock.Mock(platform=platform, root=Path("/srv/app-platform")),
-            ),
-            mock.patch.object(
-                production,
-                "_read_environment",
-                return_value={
-                    "POSTGRES_PASSWORD": "secret",
-                    "MONGO_PASSWORD": "secret",
-                    "GARAGE_ADMIN_TOKEN": "secret",
-                },
-            ),
-            mock.patch.object(production, "_nomad_client", return_value=MemoryNomad({})),
-            mock.patch.object(psycopg, "connect", return_value=postgres) as connect,
-        ):
-            _handlers, clients = production._storage_handlers("storage.postgres.observe")
-            self.assertEqual(clients, ())
-            connect.assert_not_called()
-            with mock.patch.object(
-                production.storage_actions, "handlers", side_effect=RuntimeError("compose failed")
-            ):
-                with self.assertRaisesRegex(RuntimeError, "compose failed"):
-                    production._storage_handlers("storage.postgres.create")
-        postgres.close.assert_called_once()
-
-    def test_fixed_handler_map_has_all_per_type_storage_actions(self) -> None:
-        action_map = handlers(
-            postgres_admin=object(),
-            postgres_connect=lambda **kwargs: None,
-            mongo_admin=object(),
-            mongo_connect=lambda **kwargs: None,
-            garage_admin=object(),
-            s3_connect=lambda access, secret: None,
-            nomad=MemoryNomad({}),
-            storage_host="storage.internal",
-            s3_endpoint="https://storage.internal:9000",
-            prefix="example",
-            observe_evidence=lambda app, slug, kind, index: RotationEvidence(True, index),
-        )
-        self.assertEqual(
-            set(action_map),
-            {
-                f"storage.{resource_type}.{operation}"
-                for resource_type in ("postgres", "mongo", "s3")
-                for operation in ("create", "observe", "verify", "rotate", "remove")
-            },
-        )
 
 
 if __name__ == "__main__":

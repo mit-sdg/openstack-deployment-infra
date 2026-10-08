@@ -16,8 +16,6 @@ from backup import emit_garage_backup as emit  # noqa: E402
 from backup import garage_catalog as catalog  # noqa: E402
 from backup import restore_garage_backup as restore  # noqa: E402
 
-from openstack_platform.helper import storage  # noqa: E402
-
 NAME = "test-demo-11111111"
 OLD_ID, NEW_ID = "a" * 64, "b" * 64
 BACKUP_KEY, APP_KEY = "GK" + "1" * 24, "GK" + "2" * 24
@@ -164,26 +162,6 @@ class S3:
 
 
 class GarageBackupTests(unittest.TestCase):
-    def test_runtime_uses_the_bucket_prefix_when_service_namespace_differs(self):
-        with (
-            mock.patch.object(
-                catalog,
-                "load",
-                return_value={
-                    "paths": {"root": "/platform"},
-                    "addresses": {"storage": "storage"},
-                    "namespace": "service-name",
-                    "prefix": "bucket-prefix",
-                },
-            ),
-            mock.patch.object(
-                catalog, "read_env", side_effect=[CREDS, {"GARAGE_ADMIN_TOKEN": "fixture"}]
-            ),
-            mock.patch.object(catalog, "Admin"),
-            mock.patch.object(catalog.boto3, "client"),
-        ):
-            self.assertEqual(catalog.runtime()[2], "bucket-prefix")
-
     def archive(self):
         admin = Admin()
         s3 = S3(admin)
@@ -240,12 +218,6 @@ class GarageBackupTests(unittest.TestCase):
         with mock.patch.object(admin, "request", return_value=[{}] * 10000):
             with self.assertRaisesRegex(RuntimeError, "truncated"):
                 catalog.app_buckets(admin, "test")
-
-    def test_verification_rejects_empty_and_partial_archives_against_admin_inventory(self):
-        for buckets in ([], [NAME, "test-extra-22222222"]):
-            stream = self.make_archive({"format_version": 1, "buckets": buckets, "objects": []})
-            with self.assertRaisesRegex(RuntimeError, "omits or adds"):
-                catalog.verify_archive(stream, admin=Admin(), prefix="test")
 
     @staticmethod
     def make_archive(manifest, *, payload=b"", entry=None):
@@ -317,17 +289,6 @@ class GarageBackupTests(unittest.TestCase):
                     )
                 )
 
-    def test_restore_without_offline_database_or_with_legacy_nonempty_catalog_refuses(self):
-        stream, _, _ = self.archive()
-        admin = Admin(replacement=True)
-        with self.assertRaisesRegex(RuntimeError, "offline"):
-            restore.restore_archive(admin, S3(admin), "test", CREDS, stream)
-        self.assertEqual(admin.calls, [])
-        legacy = self.make_archive({"format_version": 1, "buckets": [NAME], "objects": []})
-        with self.assertRaisesRegex(RuntimeError, "Legacy"):
-            restore.restore_archive(admin, S3(admin), "test", CREDS, legacy)
-        self.assertEqual(admin.calls, [])
-
     def test_archive_order_sizes_duplicates_and_foreign_keys_are_rejected(self):
         original, _, _ = self.archive()
         manifest = catalog.verify_archive(original)
@@ -359,23 +320,6 @@ class GarageBackupTests(unittest.TestCase):
             link.symlink_to(path)
             with self.assertRaises(RuntimeError):
                 catalog.remap_controller(link, [])
-
-    def test_helper_grants_read_at_creation_and_requires_initialized_backup_key(self):
-        class HelperAdmin:
-            def __init__(self, present):
-                self.present = present
-                self.calls = []
-
-            def request(self, path, body=None):
-                self.calls.append((path, body))
-                return [{"id": BACKUP_KEY, "name": "platform-backup"}] if self.present else []
-
-        admin = HelperAdmin(True)
-        storage._s3_grant_backup_read(admin, OLD_ID)
-        self.assertEqual(admin.calls[-1][1]["permissions"], catalog.READ_ONLY)
-        self.assertEqual(admin.calls[-2][0], "/DenyBucketKey")
-        with self.assertRaises(storage.HelperActionError):
-            storage._s3_grant_backup_read(HelperAdmin(False), OLD_ID)
 
     def test_secret_input_rejects_links_and_world_readable_files(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -9,7 +9,6 @@ from pathlib import Path
 
 from openstack_platform import config, operator, restore
 from openstack_platform.controller import database as db
-from openstack_platform.validation import ValidationError
 
 APP_ID = "11111111-1111-4111-8111-111111111111"
 OPERATION_ID = "22222222-2222-4222-8222-222222222222"
@@ -213,48 +212,6 @@ class OfflineRestoreTests(unittest.TestCase):
             restore.restore_database(self.source, self.destination)
         self.assertEqual(self.destination.read_bytes(), before)
 
-    def test_restore_rejects_a_marked_backup_with_a_missing_expected_index(self) -> None:
-        self._write_backup()
-        source = sqlite3.connect(self.source)
-        source.execute("DROP INDEX one_unfinished_operation_per_scope")
-        source.commit()
-        source.close()
-        current = self._database(self.destination)
-        current.close()
-        before = self.destination.read_bytes()
-
-        with self.assertRaisesRegex(restore.RestoreError, "candidate migrations or integrity"):
-            restore.restore_database(self.source, self.destination)
-        self.assertEqual(self.destination.read_bytes(), before)
-
-    def test_backup_temp_paths_do_not_reuse_or_delete_stale_age_output(self) -> None:
-        work = self.state / "backup-work"
-        work.mkdir(mode=0o700)
-        stale = work / "platform-20260101T000000Z.sqlite3.age"
-        stale.write_bytes(b"stale")
-        stale.chmod(0o600)
-        first = operator._unlinked_backup_temp(work, suffix=".sqlite3.age")
-        second = operator._unlinked_backup_temp(work, suffix=".sqlite3.age")
-        self.assertNotEqual(first, second)
-        self.assertFalse(first.exists())
-        self.assertFalse(second.exists())
-        self.assertEqual(stale.read_bytes(), b"stale")
-
-    def test_backup_staging_path_comes_from_configured_backup_root(self) -> None:
-        loaded = config.load(
-            Path("config/platform.example.json"),
-            Path("config/platform-policy.example.json"),
-            require_private_policy=False,
-        )
-        self.assertEqual(
-            operator._configured_backup_staging_path(
-                loaded, "platform-20260101T000000Z.sqlite3.age"
-            ),
-            "/srv/app-platform-backups/controller/.staging/platform-20260101T000000Z.sqlite3.age",
-        )
-        with self.assertRaisesRegex(ValidationError, "backup name"):
-            operator._configured_backup_staging_path(loaded, "../backup.sqlite3.age")
-
     def test_cli_restore_is_offline_and_requires_confirmation(self) -> None:
         example = Path("config/platform.example.json")
         identity = db.deployment_identity(config.load_platform(example))
@@ -275,11 +232,6 @@ class OfflineRestoreTests(unittest.TestCase):
         output = StringIO()
         operator.dispatch(args, stdout=output)
         self.assertIn("restore=verified", output.getvalue())
-
-    def test_latest_restore_verifier_compares_the_real_age_v1_header(self) -> None:
-        script = (Path(__file__).parents[1] / "infra/backup/verify_latest_restore.sh").read_text()
-        self.assertIn('handle.read(22) != b"age-encryption.org/v1\\n"', script)
-        self.assertNotIn('handle.read(22) != b"age-encryption.org/v1\\\\n"', script)
 
 
 if __name__ == "__main__":

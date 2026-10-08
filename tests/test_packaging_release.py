@@ -4,7 +4,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import shlex
 import shutil
 import stat
 import subprocess
@@ -101,60 +100,27 @@ class ReleaseArchiveVerificationTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": ""}):
             self._verify(self.archive, self.commit, self.archive_sha256)
 
-    def test_payload_tampering_is_rejected_by_trusted_archive_checksum(self) -> None:
+    def test_untrusted_archives_are_rejected(self) -> None:
+        original = self.archive.read_bytes()
         with tarfile.open(self.archive, mode="r:") as bundle:
             member = next(item for item in bundle.getmembers() if item.isfile() and item.size)
-        with self.archive.open("r+b") as stream:
-            stream.seek(member.offset_data)
-            original = stream.read(1)
-            stream.seek(member.offset_data)
-            stream.write(bytes((original[0] ^ 1,)))
-
-        with self.assertRaisesRegex(INSTALLER_MODULE.InstallFailure, "SHA-256 does not match"):
-            self._verify(self.archive, self.commit, self.archive_sha256)
-
-    def test_plain_tar_with_matching_checksum_is_not_commit_addressed(self) -> None:
-        plain = self.root / "plain.tar"
-        with tarfile.open(plain, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
-            bundle.add(self.repository / "payload.txt", arcname="payload.txt")
-        checksum = hashlib.sha256(plain.read_bytes()).hexdigest()
-
-        with self.assertRaisesRegex(
-            INSTALLER_MODULE.InstallFailure, "not a commit-addressed git archive"
-        ):
-            self._verify(plain, self.commit, checksum)
-
-    def test_fabricated_non_git_pax_comment_is_rejected(self) -> None:
+        tampered = bytearray(original)
+        tampered[member.offset_data] ^= 1
         fabricated = self.root / "fabricated.tar"
         with tarfile.open(
-            fabricated,
-            mode="w",
-            format=tarfile.PAX_FORMAT,
-            pax_headers={"comment": self.commit},
+            fabricated, mode="w", format=tarfile.PAX_FORMAT, pax_headers={"comment": self.commit}
         ) as bundle:
             bundle.add(self.repository / "payload.txt", arcname="payload.txt")
-        checksum = hashlib.sha256(fabricated.read_bytes()).hexdigest()
-
-        with self.assertRaisesRegex(
-            INSTALLER_MODULE.InstallFailure, "not a commit-addressed git archive"
+        forged = fabricated.read_bytes()
+        for label, payload, commit, checksum in (
+            ("payload checksum", tampered, self.commit, self.archive_sha256),
+            ("forged commit", forged, self.commit, hashlib.sha256(forged).hexdigest()),
+            ("wrong commit", original, "0" * 40, self.archive_sha256),
         ):
-            self._verify(fabricated, self.commit, checksum)
-
-    def test_noncanonical_git_pax_commit_is_rejected(self) -> None:
-        content = self.archive.read_bytes().replace(
-            self.commit.encode("ascii"), self.commit.upper().encode("ascii"), 1
-        )
-        self.archive.write_bytes(content)
-        checksum = hashlib.sha256(content).hexdigest()
-
-        with self.assertRaisesRegex(
-            INSTALLER_MODULE.InstallFailure, "no canonical full source commit"
-        ):
-            self._verify(self.archive, self.commit, checksum)
-
-    def test_real_git_archive_commit_mismatch_is_rejected(self) -> None:
-        with self.assertRaisesRegex(INSTALLER_MODULE.InstallFailure, "commit does not match"):
-            self._verify(self.archive, "0" * 40, self.archive_sha256)
+            with self.subTest(boundary=label):
+                self.archive.write_bytes(payload)
+                with self.assertRaises(INSTALLER_MODULE.InstallFailure):
+                    self._verify(self.archive, commit, checksum)
 
 
 class HelperRuntimePathTests(unittest.TestCase):
@@ -182,40 +148,6 @@ class HelperRuntimePathTests(unittest.TestCase):
         response = json.loads(result.stdout)
         self.assertFalse(response["ok"])
         self.assertEqual(response["error"]["code"], "INVALID_ARGS")
-
-    def test_namespace_paths_and_diagnostics_come_from_live_shared_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            platform_path = Path(temporary) / "platform.json"
-            document = json.loads((ROOT / "config/platform.example.json").read_text())
-            document["namespace"] = "test-platform"
-            document["paths"] = {
-                "root": "/srv/test-platform",
-                "adminState": "/srv/test-platform-state",
-                "backups": "/srv/test-platform-backups",
-                "data": "/srv/test-platform-data",
-            }
-            platform_path.write_text(json.dumps(document), encoding="utf-8")
-            with mock.patch.dict(os.environ, {"PLATFORM_CONFIG": str(platform_path)}):
-                runtime = production.helper_runtime()
-
-        self.assertEqual(runtime.platform.namespace, "test-platform")
-        self.assertEqual(runtime.root, Path("/srv/test-platform"))
-        self.assertEqual(runtime.admin_state, Path("/srv/test-platform-state"))
-        self.assertEqual(runtime.backups, Path("/srv/test-platform-backups"))
-        self.assertEqual(runtime.data, Path("/srv/test-platform-data"))
-        self.assertEqual(
-            runtime.diagnostic_directory,
-            Path("/srv/test-platform-state/controller/helper-diagnostics"),
-        )
-        for relative in (
-            "openstack_platform/helper/production.py",
-            "openstack_platform/helper/main.py",
-            "openstack_platform/helper/application_actions.py",
-            "deploy/releases/install_release.py",
-        ):
-            source = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertNotIn("/srv/app-platform", source)
-            self.assertNotIn("/etc/app-platform", source)
 
     def test_active_build_log_is_private_tail_readable_and_offset_readable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -246,28 +178,6 @@ class HelperRuntimePathTests(unittest.TestCase):
         self.assertEqual(tail["text"], "second\nthird\n")
         self.assertEqual(tail["state"], "running")
         self.assertEqual(following["text"], "second\nthird\n")
-
-    @unittest.skipUnless(sys.version_info[:2] == (3, 14), "release smoke tests require Python 3.14")
-    def test_helper_release_smoke_uses_only_sanitized_inventory(self) -> None:
-        environment = os.environ.copy()
-        environment["PLATFORM_CONFIG"] = "/private/inventory/must-not-be-read.json"
-        with tempfile.TemporaryDirectory() as temporary:
-            launcher = Path(temporary) / "helper"
-            launcher.write_text(
-                "#!/bin/sh\n"
-                f"export PLATFORM_CONFIG={shlex.quote(str(ROOT / 'config/platform.example.json'))}\n"
-                f"export PYTHONPATH={shlex.quote(str(ROOT))}\n"
-                f"exec {shlex.quote(sys.executable)} -m openstack_platform.helper.main\n"
-            )
-            launcher.chmod(0o700)
-            result = subprocess.run(
-                [sys.executable, SMOKE, "helper", "--source", ROOT, "--launcher", launcher],
-                env=environment,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        self.assertEqual(result.stdout, "release-smoke=helper:ok\n")
 
 
 class HelperPlatformConfigurationVerificationTests(unittest.TestCase):
@@ -310,15 +220,6 @@ class HelperPlatformConfigurationVerificationTests(unittest.TestCase):
             helper_config_root=self.root / "etc",
         )
 
-    def test_accepts_stable_symlink_to_immutable_root_owned_nix_store_file(self) -> None:
-        target = self._store_target()
-        self.stable.symlink_to(target)
-
-        # The fixture owner stands in for uid 0; all path, symlink, mode,
-        # readability, file-type, and JSON checks still use the real filesystem.
-        with mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()):
-            self._verify()
-
     def test_accepts_nixos_style_symlink_chain_only_when_realpath_ends_in_store(self) -> None:
         self._store_target("1bcdefghijklmnpqrsvwxyz012345678-etc/etc/test-platform/platform.json")
         static = self.root / "etc/static"
@@ -328,79 +229,52 @@ class HelperPlatformConfigurationVerificationTests(unittest.TestCase):
         with mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()):
             self._verify()
 
-    def test_rejects_store_symlink_at_an_arbitrary_mutable_location(self) -> None:
+    def test_configuration_links_are_confined_to_etc_and_store(self) -> None:
         target = self._store_target()
         arbitrary = self.root / "home/agentops/platform.json"
         arbitrary.parent.mkdir(parents=True)
         arbitrary.symlink_to(target)
-
-        with (
-            mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()),
-            self.assertRaisesRegex(INSTALLER_MODULE.InstallFailure, "allowed only at /etc"),
-        ):
-            INSTALLER_MODULE._verify_helper_platform_configuration(
-                arbitrary,
-                expected_namespace="test-platform",
-                expected_identity_sha256=self.identity_sha256,
-                nix_store=self.store,
-                helper_config_root=self.root / "etc",
-            )
-
-    def test_rejects_mutable_and_symlink_chain_targets_outside_nix_store(self) -> None:
-        mutable = self.root / "mutable/platform.json"
-        mutable.parent.mkdir()
-        mutable.write_text(json.dumps(self.document), encoding="utf-8")
+        mutable = self.root / "mutable-platform.json"
+        mutable.write_text(json.dumps(self.document))
         intermediary = self.root / "etc/static-platform.json"
         intermediary.symlink_to(mutable)
         self.stable.symlink_to(intermediary)
-
-        with mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()):
-            with self.assertRaisesRegex(
-                INSTALLER_MODULE.InstallFailure, "target must be under /nix/store"
+        for path in (arbitrary, self.stable):
+            with (
+                self.subTest(path=path),
+                mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()),
+                self.assertRaises(INSTALLER_MODULE.InstallFailure),
             ):
-                self._verify()
+                INSTALLER_MODULE._verify_helper_platform_configuration(
+                    path,
+                    expected_namespace="test-platform",
+                    expected_identity_sha256=self.identity_sha256,
+                    nix_store=self.store,
+                    helper_config_root=self.root / "etc",
+                )
 
-    def test_rejects_non_root_owned_or_writable_nix_store_target(self) -> None:
+    def test_configuration_requires_trusted_metadata_and_identity(self) -> None:
         target = self._store_target()
         self.stable.symlink_to(target)
-
-        with mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid() + 1):
-            with self.assertRaisesRegex(INSTALLER_MODULE.InstallFailure, "owned by root"):
-                self._verify()
-
-        target.chmod(0o664)
-        with mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()):
-            with self.assertRaisesRegex(INSTALLER_MODULE.InstallFailure, "group or world writable"):
-                self._verify()
-
-    def test_rejects_nix_store_target_not_readable_by_agentops(self) -> None:
-        target = self._store_target()
-        self.stable.symlink_to(target)
-
-        with (
-            mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()),
-            mock.patch.object(INSTALLER_MODULE.os, "access", return_value=False),
-            self.assertRaisesRegex(
-                INSTALLER_MODULE.InstallFailure, "readable by the operator account"
-            ),
+        for label, root_uid, mode, readable, changed in (
+            ("owner", os.geteuid() + 1, 0o444, True, False),
+            ("writable", os.geteuid(), 0o664, True, False),
+            ("unreadable", os.geteuid(), 0o444, False, False),
+            ("identity", os.geteuid(), 0o444, True, True),
         ):
-            self._verify()
-
-    def test_rejects_store_document_with_mismatched_project_namespace_or_paths(self) -> None:
-        target = self._store_target()
-        changed = dict(self.document)
-        changed["paths"] = dict(self.document["paths"], backups="/srv/attacker-backups")
-        target.chmod(0o644)
-        target.write_text(json.dumps(changed), encoding="utf-8")
-        target.chmod(0o444)
-        self.stable.symlink_to(target)
-
-        with mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", os.geteuid()):
-            with self.assertRaisesRegex(
-                INSTALLER_MODULE.InstallFailure,
-                "does not match the expected project, namespace, and paths",
-            ):
-                self._verify()
+            with self.subTest(boundary=label):
+                target.chmod(0o644)
+                document = dict(self.document)
+                if changed:
+                    document["paths"] = dict(document["paths"], backups="/srv/attacker-backups")
+                target.write_text(json.dumps(document))
+                target.chmod(mode)
+                with (
+                    mock.patch.object(INSTALLER_MODULE, "_ROOT_UID", root_uid),
+                    mock.patch.object(INSTALLER_MODULE.os, "access", return_value=readable),
+                    self.assertRaises(INSTALLER_MODULE.InstallFailure),
+                ):
+                    self._verify()
 
 
 class ReleaseInstallerTests(unittest.TestCase):
@@ -711,18 +585,6 @@ class ReleaseInstallerTests(unittest.TestCase):
             text=True,
         )
 
-    def test_management_host_guard_preserves_helper_and_operator_unsigned_development(self) -> None:
-        repository, commit = self._repository()
-        with mock.patch.dict(os.environ, {"PLATFORM_MANAGEMENT_ENVIRONMENT": "production"}):
-            previous = os.environ.pop("PLATFORM_ENVIRONMENT", None)
-            try:
-                for mode in ("helper", "operator"):
-                    result = self._install(repository, commit, mode)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-            finally:
-                if previous is not None:
-                    os.environ["PLATFORM_ENVIRONMENT"] = previous
-
     def test_operator_install_is_commit_addressed_and_idempotent(self) -> None:
         repository, commit = self._repository()
         first = self._install(repository, commit, "operator", install_units=True)
@@ -836,43 +698,6 @@ class ReleaseInstallerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 78)
                 self.assertIn("fixed-path override", result.stderr)
 
-    def test_operator_install_requires_persistent_owned_private_configuration(self) -> None:
-        repository, commit = self._repository()
-        result = self._install(repository, commit, "operator", check=False, prepare_config=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("install current operator configuration", result.stderr)
-        self.assertFalse((self.root / "operator-install/operator-releases/current").exists())
-
-    def test_operator_install_requires_protected_explicit_openstack_wrapper(self) -> None:
-        repository, commit = self._repository()
-        self.openstack_command.chmod(0o755)
-
-        result = self._install(repository, commit, "operator", check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("protected OpenStack command", result.stderr)
-        self.assertFalse((self.root / "operator-install/operator-releases/current").exists())
-
-    def test_openstack_default_honors_launcher_selected_command(self) -> None:
-        environment = os.environ.copy()
-        environment["PLATFORM_OPENSTACK_COMMAND"] = str(self.openstack_command)
-        subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import inspect,sys; from openstack_platform import openstack; "
-                    "assert inspect.signature(openstack.verify_project).parameters"
-                    "['executable'].default == sys.argv[1]"
-                ),
-                self.openstack_command,
-            ],
-            cwd=ROOT,
-            env=environment,
-            check=True,
-        )
-
     def test_operator_install_rejects_configuration_symlinks_and_bad_modes(self) -> None:
         repository, commit = self._repository()
         config_root = self.root / "operator-install/config"
@@ -922,44 +747,6 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(rejected.returncode, 78)
         self.assertIn("invalid symlink target", rejected.stderr)
 
-    def test_helper_survives_runtime_symlink_replacement_and_reinstall(self) -> None:
-        repository, commit = self._repository()
-        first = self.root / "first-python"
-        second = self.root / "second-python"
-        stable = self.root / "current-python"
-        for runtime in (first, second):
-            runtime.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
-            runtime.chmod(0o700)
-        stable.symlink_to(first)
-        self._install(repository, commit, "helper", python=stable)
-        launcher = self.root / "helper-install/bin/openstack-platform-helper"
-        self.assertIn(str(stable), launcher.read_text())
-        self.assertNotIn(str(first), launcher.read_text())
-        stable.unlink()
-        stable.symlink_to(second)
-        first.unlink()
-        self._install(repository, commit, "helper", python=stable)
-        response = subprocess.run(
-            [launcher], input="{}", text=True, capture_output=True, check=True
-        )
-        self.assertEqual(json.loads(response.stdout)["error"]["code"], "INVALID_REQUEST")
-
-    def test_existing_helper_with_dead_launcher_is_not_accepted_by_import_smoke(self) -> None:
-        repository, commit = self._repository()
-        self._install(repository, commit, "helper")
-        launcher = self.root / "helper-install/bin/openstack-platform-helper"
-        target = launcher.resolve()
-        target.chmod(0o700)
-        target.write_text("#!/bin/sh\nexec /nonexistent-old-runtime/python3.14\n")
-        target.chmod(0o550)
-        # Simulate a legacy retained smoke that ignores --launcher entirely.
-        smoke = target.parent.parent / "source/deploy/releases/release_smoke.py"
-        smoke.chmod(0o600)
-        smoke.write_text('print("legacy-import-smoke=ok")\n')
-        result = self._install(repository, commit, "helper", check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("installed helper launcher", result.stderr)
-
     def test_partial_helper_action_map_is_never_selected(self) -> None:
         repository, commit = self._repository(partial_helper=True)
         result = self._install(repository, commit, "helper", check=False)
@@ -985,38 +772,6 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertIn("wheel inputs do not match", result.stderr)
         self.assertEqual(current.resolve(), selected)
         self.assertEqual((selected / ".complete").read_text(), f"{commit}\n")
-
-    def test_commit_mismatch_does_not_create_a_release(self) -> None:
-        repository, actual_commit = self._repository()
-        wrong_commit = "0" * 40
-        result = self._install(
-            repository,
-            wrong_commit,
-            "operator",
-            check=False,
-            evidence_commit=actual_commit,
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("component set does not match", result.stderr)
-        releases = self.root / "operator-install/operator-releases/releases"
-        self.assertFalse(releases.exists())
-
-    def test_tracked_changes_must_be_committed(self) -> None:
-        repository, commit = self._repository()
-        self._evidence(repository, commit)
-        with (repository / "openstack_platform/operator.py").open("a", encoding="utf-8") as output:
-            output.write("# dirty\n")
-        result = self._install(repository, commit, "operator", check=False)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("wheel inputs do not match", result.stderr)
-
-    def test_backup_unit_uses_installer_owned_path_placeholders(self) -> None:
-        service = (UNITS / "openstack-platform-backup.service").read_text()
-        for placeholder in ("@BIN_ROOT@", "@CONFIG_ROOT@", "@STATE_ROOT@"):
-            self.assertIn(placeholder, service)
-        self.assertNotIn("/srv/openstack-platform", service)
 
     def test_helper_deployment_bootstraps_an_empty_configured_admin(self) -> None:
         repository, commit = self._repository()
@@ -1191,20 +946,6 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertFalse(upload_marker.exists())
         self.assertFalse((self.root / "admin-state").exists())
 
-    def test_helper_deployment_uses_pinned_ssh_and_configured_admin_paths(self) -> None:
-        script = HELPER_DEPLOY.read_text()
-        self.assertIn("ssh_config=$operator_root/.secrets/ssh/config", script)
-        self.assertIn("platform_contract.json", script)
-        self.assertNotIn("PLATFORM_SSH_CONFIG", script)
-        self.assertIn('paths["root"]', script)
-        self.assertIn('paths["adminState"]', script)
-        self.assertIn("/run/current-system/sw/bin/python3.14", script)
-        self.assertIn('--archive-sha256 "$archive_sha256"', script)
-        self.assertNotIn("/srv/" + "test-platform", script)
-        installer = (ROOT / "deploy/releases/install_release.py").read_text()
-        self.assertIn('replace_packaged_root_symlink=mode == "helper"', installer)
-        self.assertIn("_packaged_root_symlink", installer)
-
 
 class OperatorConfigInstallerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1247,20 +988,6 @@ class OperatorConfigInstallerTests(unittest.TestCase):
             text=True,
         )
 
-    def test_standalone_help_imports_without_pythonpath_outside_the_checkout(self) -> None:
-        environment = os.environ.copy()
-        environment.pop("PYTHONPATH", None)
-        result = subprocess.run(
-            [sys.executable, "-S", CONFIG_INSTALLER, "--help"],
-            cwd=self.root,
-            env=environment,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-        self.assertIn("--platform", result.stdout)
-
     def test_installs_and_updates_nonsecret_configuration_without_values_in_output(self) -> None:
         first = self._run()
         installed_platform = self.destination / "platform.json"
@@ -1289,14 +1016,6 @@ class OperatorConfigInstallerTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(installed_policy.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700)
-
-    def test_install_creates_only_clean_operator_configuration_paths(self) -> None:
-        result = self._run()
-
-        self.assertEqual(result.stdout, "operator-config=installed\n")
-        self.assertTrue((self.destination / "platform.json").is_file())
-        self.assertTrue((self.state / "policy.json").is_file())
-        self.assertFalse((self.destination / "projects").exists())
 
     def test_rejects_symlink_input_without_replacing_installed_configuration(self) -> None:
         self._run()

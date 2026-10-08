@@ -101,8 +101,20 @@ class HostKeyPinTests(unittest.TestCase):
         self.assertNotEqual(self.known_hosts.stat().st_ino, before_inode)
         self.assertEqual(self.known_hosts.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.decoy_known_hosts.read_bytes(), b"decoy unchanged\n")
-        self.assertEqual([call[0] for call in runner.calls], ["ssh", "ssh-keyscan", "ssh"])
         self.assertEqual(output.getvalue(), "")
+
+        # Rotation must revoke a matching wildcard pin as well as an exact pin.
+        self.known_hosts.write_bytes(b"192.0.2.* ssh-ed25519 " + self.old_key + b"\n")
+        host_keys.pin_verified_admin_host_key(
+            ADDRESS,
+            console_fingerprint(self.new_key),
+            ssh_config_path=self.config,
+            command_runner=ConfigAndKeyscanRunner(self.new_key),
+        )
+        self.assertEqual(
+            self.known_hosts.read_bytes(),
+            ADDRESS.encode() + b" ssh-ed25519 " + self.new_key + b"\n",
+        )
 
     def test_unverified_scan_is_rejected_without_update_or_fingerprint_output(self) -> None:
         runner = ConfigAndKeyscanRunner(self.new_key)
@@ -125,22 +137,6 @@ class HostKeyPinTests(unittest.TestCase):
         self.assertNotIn("SHA256", str(caught.exception))
         self.assertNotIn(self.new_key.decode(), str(caught.exception))
         self.assertEqual(output.getvalue(), "")
-
-    def test_matching_wildcard_old_key_is_removed_before_new_pin(self) -> None:
-        self.known_hosts.write_bytes(b"192.0.2.* ssh-ed25519 " + self.old_key + b"\n")
-        runner = ConfigAndKeyscanRunner(self.new_key)
-
-        host_keys.pin_verified_admin_host_key(
-            ADDRESS,
-            console_fingerprint(self.new_key),
-            ssh_config_path=self.config,
-            command_runner=runner,
-        )
-
-        self.assertEqual(
-            self.known_hosts.read_bytes(),
-            ADDRESS.encode() + b" ssh-ed25519 " + self.new_key + b"\n",
-        )
 
     def test_config_with_multiple_known_hosts_files_fails_closed(self) -> None:
         self.config.write_text(

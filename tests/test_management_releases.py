@@ -371,6 +371,7 @@ class ManagementReleaseTests(unittest.TestCase):
 )
 class BuildIntegrationTests(unittest.TestCase):
     def test_actual_vite_build_and_two_archives_on_real_filesystem(self) -> None:
+        (ROOT / ".tmp").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="release-build-", dir=ROOT / ".tmp") as directory:
             repository, commit = clean_repository(ROOT, Path(directory) / "source")
             frontend = repository / "frontend/owner-portal"
@@ -392,7 +393,3 @@ class BuildIntegrationTests(unittest.TestCase):
             self.assertEqual(set(document["archives"]), {"broker", "web"})
             for mode in ("broker", "web"):
                 releases.verify_archive(output / document["archives"][mode]["file"], document, mode)
-            evidence = ROOT / ".tmp/phase1c-built-fixture"
-            if evidence.exists():
-                shutil.rmtree(evidence)
-            shutil.copytree(output, evidence)

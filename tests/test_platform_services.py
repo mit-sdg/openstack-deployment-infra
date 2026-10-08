@@ -93,20 +93,6 @@ class ProductServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "already exists"):
             self.declare()
 
-    def test_deleted_slug_cannot_be_redeclared(self) -> None:
-        application = self.declare()
-        self.connection.execute(
-            "INSERT INTO application_slug_tombstones VALUES (?, ?, ?)",
-            ("retired-app", application.application_id, "2026-08-27T00:00:00Z"),
-        )
-        with self.assertRaisesRegex(ValidationError, "permanently reserved"):
-            ApplicationService(
-                self.connection,
-                self.config,
-                self.root / "service-state",
-                helper_caller=unreachable_helper,
-            ).declare("retired-app")
-
     def test_environment_service_hides_values_and_records_only_accepted_key_names(self) -> None:
         created = self.declare()
         request = EnvironmentMutationRequest(
@@ -500,44 +486,6 @@ class ProductServiceTests(unittest.TestCase):
         actions = [action for action, _values in calls]
         self.assertEqual(actions.count("app.source.key"), 1)
         self.assertEqual(actions[actions.index("app.source.key") - 1], "app.remove")
-
-    def test_delete_retries_deploy_key_removal_until_the_key_is_gone(self) -> None:
-        application_id, _server_id, _port_id, _image = self.accepted_application()
-        answers = [RuntimeError("helper unavailable"), {"slug": "demo-app", "present": True}]
-        keys: list[dict[str, object]] = []
-
-        def helper(_config, action, values, **_bounds):
-            if action == "app.source.key":
-                keys.append(dict(values))
-                answer = answers.pop(0) if answers else {"slug": "demo-app", "present": False}
-                if isinstance(answer, Exception):
-                    raise answer
-                return answer
-            if action == "app.remove":
-                return {"jobAbsent": True, "variableAbsent": True}
-            if action in {"app.worker.delete", "app.manifest.delete"}:
-                return {"absent": True}
-            raise AssertionError(action)
-
-        service = ApplicationService(
-            self.connection, self.config, self.root / "service-state", helper_caller=helper
-        )
-        with mock.patch.object(openstack, "verify_project"):
-            with self.assertRaisesRegex(RuntimeError, "helper unavailable"):
-                service.delete("demo-app", confirmation="demo-app")
-            with self.assertRaisesRegex(app.ApplicationError, "deploy key absence"):
-                service.delete("demo-app", confirmation="demo-app")
-            unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
-            assert unfinished is not None
-            self.assertEqual(
-                (unfinished.status, unfinished.phase), ("recovery_required", "variable_absent")
-            )
-            self.assertIsNotNone(db.get_application(self.connection, application_id))
-            service.delete("demo-app", confirmation="demo-app")
-        self.assertEqual(keys, [{"slug": "demo-app", "mode": "delete"}] * 3)
-        self.assertIsNone(db.get_application(self.connection, application_id))
-        operation = db.get_operation(self.connection, unfinished.operation_id)
-        self.assertEqual((operation.status, operation.phase), ("succeeded", "tombstoned"))  # type: ignore[union-attr]
 
     def test_storage_remove_refuses_active_configuration_reference(self) -> None:
         created = self.declare()

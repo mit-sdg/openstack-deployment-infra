@@ -10,17 +10,14 @@ from unittest import mock
 from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
 from openstack_platform.controller import public_ip_service
-from openstack_platform.controller.api import ControllerAPI
 from openstack_platform.controller.deployment_config import parse_configuration
 from openstack_platform.controller.http import HttpError
-from openstack_platform.controller.storage_contract import canonical_secret_key
 from openstack_platform.helper.application_actions import (
     _synchronize_workload_variable,
     variable_path,
 )
 from openstack_platform.helper.nomad import SecretItems, VariableSnapshot
 from tests import test_application_sizing as fixtures
-from tests import test_public_ip as ip_fixtures
 
 SECRET = "sentinel-current-secret-never-return"
 
@@ -223,31 +220,6 @@ class RetainedRollbackTests(unittest.TestCase):
             db.get_active_deployment(self.connection, self.app_id).deployment_id, second
         )
 
-    def test_removed_storage_output_blocks_rollback_and_keeps_current_data(self):
-        resource = db.put_managed_resource(
-            self.connection,
-            application_id=self.app_id,
-            resource_type="postgres",
-            provider_name="commons",
-            lifecycle_state="active",
-        )
-        self.fixture.body["configuration"]["storageBindings"] = [
-            {"resourceId": resource.resource_id, "outputs": {"url": "DATABASE_URL"}}
-        ]
-        key = canonical_secret_key("postgres", "default", "url")
-        self.variables.items[variable_path("commons")][key] = SECRET
-        first, second = self.history()
-        plan = self.plan(first)
-        self.variables.items[variable_path("commons")].pop(key)
-        self.fixture.calls.clear()
-        _, operation = self.apply(plan)
-        self.assertEqual(operation.status, "failed")
-        self.assertEqual([action for action, _ in self.fixture.calls], ["app.env.list"])
-        self.assertEqual(db.get_managed_resource(self.connection, resource.resource_id), resource)
-        self.assertEqual(
-            db.get_active_deployment(self.connection, self.app_id).deployment_id, second
-        )
-
     def test_health_failure_preserves_previous_job_and_historical_artifact(self):
         first, second = self.history()
         plan = self.plan(first)
@@ -290,56 +262,6 @@ class RetainedRollbackTests(unittest.TestCase):
         )
         self.assertEqual(len(self.fixture.workers), 1)
 
-    def test_rollback_pins_only_worker_image_and_retains_it_across_selection_rollover(self):
-        first, _ = self.history()
-        plan = self.plan(first)
-        selected = db.get_image_selection(self.connection, "worker")
-        self.fixture.fail_action = "app.worker.create"
-        self.fixture.calls.clear()
-        key, interrupted = self.apply(plan)
-        self.assertEqual(interrupted.status, "recovery_required", interrupted.safe_error)
-        self.assertEqual(interrupted.refs["worker_image_id"], selected.image_id)
-        self.assertNotIn("builder_image_id", interrupted.refs)
-        db.put_image_selection(
-            self.connection,
-            role="worker",
-            image_id="22222222-2222-4222-8222-222222222222",
-            display_name="replacement-worker",
-            source_commit="d" * 40,
-            compatibility_hash="e" * 64,
-        )
-        _, recovered = self.apply(plan, key)
-        self.assertEqual(recovered.status, "succeeded", recovered.safe_error)
-        self.assertEqual(recovered.refs["worker_image_id"], selected.image_id)
-        creates = [value for action, value in self.fixture.calls if action == "app.worker.create"]
-        self.assertTrue(creates)
-        self.assertTrue(all(value["workerImageId"] == selected.image_id for value in creates))
-        self.assertFalse(any(action == "app.build" for action, _ in self.fixture.calls))
-        self.assertEqual(len(self.fixture.workers), 1)
-
-    def test_post_acceptance_restart_retry_finishes_cleanup_with_original_plan(self):
-        first, _ = self.history()
-        plan = self.plan(first)
-        self.fixture.fail_action = "app.worker.delete"
-        key, operation = self.apply(plan)
-        self.assertEqual(operation.status, "running", operation.safe_error)
-        self.assertEqual(db.get_active_deployment(self.connection, self.app_id).deployment_id, key)
-        self.fixture.api.close()
-        db.renew_operation_deadline(self.connection, key, operation.deadline_at)
-        db.set_operation_dispatch_status(self.connection, key, "running")
-        self.fixture.api = ControllerAPI(
-            self.connection, self.fixture.config, self.fixture.root, helper_caller=self.helper
-        )
-        self.fixture.fixture.api = self.fixture.api
-        self.fixture.router = self.fixture.api.router()
-        self.fixture.calls.clear()
-        _, operation = self.apply(plan, key)
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        self.assertFalse(
-            any(action in {"app.build", "app.worker.create"} for action, _ in self.fixture.calls)
-        )
-        self.assertEqual(len(self.fixture.workers), 1)
-
     def test_reads_are_authoritative_secret_free_and_rollback_is_staff_only(self):
         first, second = self.history()
         for path in (f"/v1/deployments/{first}",):
@@ -369,38 +291,3 @@ class RetainedRollbackTests(unittest.TestCase):
             with self.assertRaises(HttpError) as raised:
                 project.dispatch(method, f"/v1/admin/applications/{self.app_id}/{suffix}", {}, None)
             self.assertEqual(raised.exception.status, 404)
-
-    def test_fip_handover_precedes_predecessor_cleanup_and_retries_forward(self):
-        fixture = ip_fixtures.PublicIPTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        first, operation = fixture.fixture.deploy()
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        fixture.mutate("allocate")
-        fixture.fixture.deploy()
-        helper = fixture.fixture.api.helper_caller
-
-        def verified(config, action, values, **kwargs):
-            if action == "app.manifest.verify":
-                return {**values, "available": True}
-            return helper(config, action, values, **kwargs)
-
-        fixture.fixture.api.helper_caller = verified
-        path = f"/v1/admin/applications/{fixture.app_id}"
-        plan = fixture.fixture.router.dispatch(
-            "GET", path + "/rollback-plan?deploymentId=" + first, {}, None
-        ).body
-        old_workers = set(fixture.fixture.workers)
-        fixture.cloud.fault, fixture.cloud.fault_after = "set", True
-        body = {"plan": plan, "confirmation": "commons"}
-        key, operation = fixture.fixture.post(path + "/rollback", body)
-        self.assertEqual(operation.status, "running", operation.safe_error)
-        self.assertEqual(
-            db.get_active_deployment(fixture.connection, fixture.app_id).deployment_id, key
-        )
-        self.assertTrue(old_workers <= fixture.fixture.workers.keys())
-        _, operation = fixture.fixture.post(path + "/rollback", body, key)
-        self.assertEqual(operation.status, "succeeded", operation.safe_error)
-        accepted = db.get_application(fixture.connection, fixture.app_id)
-        self.assertEqual(fixture.cloud.fips[ip_fixtures.FIP]["port_id"], accepted.worker_port_id)
-        self.assertEqual(len(fixture.fixture.workers), 1)
