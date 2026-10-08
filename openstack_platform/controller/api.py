@@ -19,15 +19,21 @@ from ..validation import (
     bounded_text,
     commit,
     env_key,
+    flavor_reference,
     repository_url,
     resource_name,
     uuid,
 )
 from . import application_runtime as app
+from . import builder_settings, fixed_ip_service, sizing, status, storage
 from . import database as db
-from . import fixed_ip_service, sizing, status, storage
 from .application_service import ApplicationService
 from .async_operations import AsyncOperationExecutor
+from .builder_settings import (
+    APP_BUILDER_SIZE_KIND,
+    DEFAULT_BUILDER_SIZE_KIND,
+    BuilderSettingsService,
+)
 from .deployment_config import branch_name, parse_configuration
 from .deployment_reads import configuration_snapshot, source_repository
 from .deployment_service import (
@@ -284,8 +290,14 @@ class ControllerAPI:
         }
         routes = (
             ("GET", "/v1/health", self._health),
+            ("GET", "/v1/flavors", self._flavors),
+            ("GET", "/v1/settings/default-builder-size", self._builder_settings),
+            ("PUT", "/v1/settings/default-builder-size", self._select_builder_size),
             ("POST", "/v1/applications", self._create_application),
             ("GET", "/v1/applications/{id}", self._get_application),
+            ("GET", "/v1/applications/{id}/resize-plan", self._resize_plan),
+            ("GET", "/v1/applications/{id}/builder-size", self._application_builder_size),
+            ("PUT", "/v1/applications/{id}/builder-size", self._select_application_builder_size),
             ("POST", "/v1/applications/{id}/enable", self._enable_application),
             ("POST", "/v1/applications/{id}/disable", self._disable_application),
             ("POST", "/v1/applications/{id}/restart", self._restart_application),
@@ -318,6 +330,8 @@ class ControllerAPI:
             ("GET", "/v1/admin/capabilities", self._capabilities),
             ("GET", "/v1/admin/hosts", self._admin_hosts),
             ("GET", "/v1/admin/images", self._admin_images),
+            ("GET", "/v1/admin/settings/default-builder-size", self._builder_settings),
+            ("PUT", "/v1/admin/settings/default-builder-size", self._select_builder_size),
             ("POST", "/v1/admin/images/{role}/selection", self._select_hosted_image),
             ("GET", "/v1/admin/applications", self._admin_applications),
             ("GET", "/v1/admin/applications/{id}/fixed-ip", self._get_fixed_ip),
@@ -760,6 +774,88 @@ class ControllerAPI:
             ),
             kind="app.deploy",
             scope=f"app-{application.application_id}",
+        )
+
+    def _flavors(self, request: Request) -> Response:
+        self._no_query(request)
+        if request.body is not None:
+            raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
+        return Response(
+            200,
+            {
+                "items": [
+                    sizing.flavor_projection(item)
+                    for item in openstack.observe_flavors(self.config.platform)
+                    if item.ram_mib - sizing.reserve(item.ram_mib, sizing.MEMORY_RESERVE_MIB) >= 64
+                ]
+            },
+        )
+
+    def _builder_settings(self, request: Request) -> Response:
+        self._no_query(request)
+        if request.body is not None:
+            raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
+        flavor = openstack.observe_flavor_capacity(
+            self.config.platform, builder_settings.default_flavor(self.connection, self.config)
+        )
+        return Response(200, {"flavor": sizing.flavor_projection(flavor)})
+
+    def _select_builder_size(self, request: Request) -> Response:
+        self._no_query(request)
+        body = self._body(
+            request, allowed={"flavor", "expectedFlavor"}, required={"flavor", "expectedFlavor"}
+        )
+        reference = flavor_reference(body["flavor"])
+        expected = flavor_reference(body["expectedFlavor"])
+        return self._external(
+            request,
+            lambda connection, key: BuilderSettingsService(
+                connection, self.config, self.state_directory
+            ).select(reference, expected, request_id=key),
+            kind=DEFAULT_BUILDER_SIZE_KIND,
+            scope="infrastructure",
+        )
+
+    def _application_builder_size(self, request: Request) -> Response:
+        self._no_query(request)
+        if request.body is not None:
+            raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
+        application_id = self._application(self._path_uuid(request)).application_id
+        selected = db.get_application_builder_flavor(self.connection, application_id)
+        default = openstack.observe_flavor_capacity(
+            self.config.platform, builder_settings.default_flavor(self.connection, self.config)
+        )
+        flavor = (
+            default
+            if selected is None
+            else openstack.observe_flavor_capacity(self.config.platform, selected)
+        )
+        return Response(
+            200,
+            {
+                "flavor": sizing.flavor_projection(flavor),
+                "defaultFlavor": sizing.flavor_projection(default),
+                "useDefault": selected is None,
+            },
+        )
+
+    def _select_application_builder_size(self, request: Request) -> Response:
+        self._no_query(request)
+        body = self._body(
+            request, allowed={"flavor", "expectedFlavor"}, required={"flavor", "expectedFlavor"}
+        )
+        reference = None if body["flavor"] is None else flavor_reference(body["flavor"])
+        expected = (
+            None if body["expectedFlavor"] is None else flavor_reference(body["expectedFlavor"])
+        )
+        application_id = self._application(self._path_uuid(request)).application_id
+        return self._external(
+            request,
+            lambda connection, key: BuilderSettingsService(
+                connection, self.config, self.state_directory
+            ).select(reference, expected, request_id=key, application_id=application_id),
+            kind=APP_BUILDER_SIZE_KIND,
+            scope=f"app-{application_id}",
         )
 
     def _resize_plan(self, request: Request) -> Response:

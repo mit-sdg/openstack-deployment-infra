@@ -44,6 +44,7 @@ from ..validation import (
     bounded_text,
     commit,
     env_key,
+    flavor_reference,
     health_path,
     oci_digest_pin,
     relative_path,
@@ -1061,7 +1062,7 @@ def parse_builder_observation(
             raise ApplicationError("builder server evidence was malformed")
         server_id = _optional_uuid(server["id"], field_name="builder server UUID")
         image_id = _optional_uuid(server["imageId"], field_name="builder image UUID")
-        flavor_name = _provider_name(server["flavorName"], field_name="builder flavor")
+        flavor_name = flavor_reference(server["flavorName"])
         if (
             server_id is None
             or image_id is None
@@ -1146,7 +1147,7 @@ def create_builder(
 ) -> BuilderObservation:
     identifier = uuid(build_id, field="build ID")
     image_id = uuid(selected_image_id, field="selected builder image UUID")
-    flavor = _provider_name(flavor_name, field_name="builder flavor")
+    flavor = flavor_reference(flavor_name)
     command = _fixed_command(builder_command, field_name="builder command")
     _provider_result(
         command_runner,
@@ -1759,8 +1760,6 @@ def create_worker(
     command_runner: Callable[..., Any] = run,
     worker_command: Sequence[str] = (),
 ) -> WorkerObservation:
-    from ..validation import flavor_reference
-
     if flavor_id is not None:
         flavor_id = flavor_reference(flavor_id)
     identifier = uuid(application_id, field="application ID")

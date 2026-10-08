@@ -1418,6 +1418,64 @@ class Flavor:
     disk_gib: int
 
 
+def _flavor_capacity(shown: Mapping[str, Any]) -> Flavor:
+    try:
+        identifier = flavor_reference(_field(shown, "id"))
+        name = flavor_reference(_field(shown, "name"))
+    except ValidationError as error:
+        raise OpenStackError("OpenStack flavor identity was malformed") from error
+    values = [_field(shown, key) for key in ("vcpus", "ram", "disk")]
+    if any(type(value) is not int for value in values):
+        raise OpenStackError("OpenStack flavor capacity was malformed")
+    vcpus, ram, disk = values
+    if not 1 <= vcpus <= 4096 or not 1 <= ram <= 16_777_216 or not 0 <= disk <= 1_048_576:
+        raise OpenStackError("OpenStack flavor capacity was outside safety bounds")
+    return Flavor(identifier, name, vcpus, ram, disk)
+
+
+@_command_deadline("timeout_seconds")
+def observe_flavors(
+    platform: PlatformConfig,
+    *,
+    timeout_seconds: float = 30,
+    command_runner: Runner = runtime.run,
+    executable: str = _DEFAULT_OPENSTACK_EXECUTABLE,
+) -> tuple[Flavor, ...]:
+    """Read the project's available sizes through the same closed capacity projection."""
+    verify_project(
+        platform,
+        timeout_seconds=timeout_seconds,
+        command_runner=command_runner,
+        executable=executable,
+    )
+    shown = _json_command(
+        (
+            "flavor",
+            "list",
+            "--long",
+            "--column",
+            "ID",
+            "--column",
+            "Name",
+            "--column",
+            "VCPUs",
+            "--column",
+            "RAM",
+            "--column",
+            "Disk",
+        ),
+        timeout_seconds=timeout_seconds,
+        command_runner=command_runner,
+        executable=executable,
+    )
+    if not isinstance(shown, list) or any(not isinstance(item, Mapping) for item in shown):
+        raise OpenStackError("OpenStack flavor list was malformed")
+    flavors = tuple(_flavor_capacity(item) for item in shown)
+    if len({item.flavor_id for item in flavors}) != len(flavors):
+        raise OpenStackError("OpenStack flavor list repeated an identity")
+    return flavors
+
+
 @_command_deadline("timeout_seconds")
 def observe_flavor_capacity(
     platform: PlatformConfig,
@@ -1457,20 +1515,10 @@ def observe_flavor_capacity(
     )
     if not isinstance(shown, Mapping):
         raise OpenStackError("OpenStack flavor projection was not an object")
-    try:
-        identifier = flavor_reference(_field(shown, "id"))
-        name = flavor_reference(_field(shown, "name"))
-    except ValidationError as error:
-        raise OpenStackError("OpenStack flavor identity was malformed") from error
-    values = [_field(shown, key) for key in ("vcpus", "ram", "disk")]
-    if any(type(value) is not int for value in values):
-        raise OpenStackError("OpenStack flavor capacity was malformed")
-    vcpus, ram, disk = values
-    if not 1 <= vcpus <= 4096 or not 1 <= ram <= 16_777_216 or not 0 <= disk <= 1_048_576:
-        raise OpenStackError("OpenStack flavor capacity was outside safety bounds")
-    if reference not in {identifier, name}:
+    flavor = _flavor_capacity(shown)
+    if reference not in {flavor.flavor_id, flavor.name}:
         raise OpenStackError("OpenStack flavor reference resolved to a different identity")
-    return Flavor(identifier, name, vcpus, ram, disk)
+    return flavor
 
 
 def observe_flavor(

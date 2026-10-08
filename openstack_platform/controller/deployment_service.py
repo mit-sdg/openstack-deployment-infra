@@ -23,6 +23,7 @@ from ..validation import (
     bounded_text,
     commit,
     env_key,
+    flavor_reference,
     oci_digest_pin,
     relative_path,
     repository_url,
@@ -31,8 +32,8 @@ from ..validation import (
     uuid,
 )
 from . import application_runtime as app
+from . import builder_settings, image_service, rollback, sizing, worker_reuse
 from . import database as db
-from . import image_service, rollback, sizing, worker_reuse
 from .deployment_config import DeploymentConfiguration, branch_name
 from .deployment_reads import source_repository
 from .log_service import STARTUP_LOG_BYTES, startup_log_path
@@ -436,6 +437,11 @@ def _prepare_deployment_build(
             builder_image_id = uuid(
                 refs.get("builder_image_id"), field="recorded builder image UUID"
             )
+            if "builder_flavor" not in refs:
+                refs["builder_flavor"] = builder_settings.effective_flavor(
+                    connection, config, application_id
+                )
+            builder_flavor = flavor_reference(refs["builder_flavor"])
             db.checkpoint_operation(
                 connection,
                 operation.operation_id,
@@ -457,6 +463,7 @@ def _prepare_deployment_build(
                 "configurationRevision": configuration_revision,
                 "configuration": json.loads(configuration.canonical_json()),
                 "builderImageId": builder_image_id,
+                "builderFlavor": builder_flavor,
                 "runtimeImages": {
                     "bun": config.policy.runtime_images.bun,
                     "node": config.policy.runtime_images.node,

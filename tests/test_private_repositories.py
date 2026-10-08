@@ -353,6 +353,7 @@ class BuildSourceFallbackTests(unittest.TestCase):
                 "storageBindings": [],
             },
             "builderImageId": "22222222-2222-4222-8222-222222222222",
+            "builderFlavor": "builder-small",
             "runtimeImages": {
                 "node": "registry.example/node@sha256:" + "a" * 64,
                 "bun": "registry.example/bun@sha256:" + "b" * 64,

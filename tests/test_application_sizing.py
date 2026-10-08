@@ -40,6 +40,7 @@ class ApplicationSizingTests(unittest.TestCase):
                 document={
                     "paths": {"root": "/srv/openstack-platform"},
                     "addresses": {"storage": "storage.internal"},
+                    "flavors": {"builder": "builder-small"},
                 },
             ),
         )

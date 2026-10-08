@@ -1127,6 +1127,45 @@ else:
             )
         self.assertFalse(any(call[1:3] == ("image", "delete") for call in cloud.calls))
 
+    def test_flavor_list_uses_the_same_closed_capacity_projection_as_show(self) -> None:
+        class FlavorCloud(FakeCloud):
+            def __call__(self, argv, **kwargs):
+                if tuple(argv)[1:3] == ("flavor", "list"):
+                    self.calls.append(tuple(argv))
+                    self.assert_safe_call(tuple(argv), kwargs)
+                    return result(
+                        tuple(argv),
+                        [
+                            {
+                                "ID": "4200",
+                                "Name": "example.2c4g",
+                                "VCPUs": 2,
+                                "RAM": 4096,
+                                "Disk": 32,
+                                "providerSecret": "WITHHELD",
+                            }
+                        ],
+                    )
+                return super().__call__(argv, **kwargs)
+
+        cloud = FlavorCloud(self.platform)
+        flavors = openstack.observe_flavors(self.platform, command_runner=cloud)
+        self.assertEqual(flavors, (openstack.Flavor("4200", "example.2c4g", 2, 4096, 32),))
+        self.assertIn("--long", cloud.calls[-1])
+        for shown in (
+            {},
+            [None],
+            [{"ID": "x", "Name": "small", "VCPUs": True, "RAM": 1024, "Disk": 10}],
+            [{"ID": "x", "Name": "small", "VCPUs": 1, "RAM": 1024, "Disk": 10}] * 2,
+        ):
+            with (
+                self.subTest(shown=shown),
+                mock.patch.object(openstack, "_json_command", return_value=shown),
+                mock.patch.object(openstack, "verify_project"),
+                self.assertRaises(openstack.OpenStackError),
+            ):
+                openstack.observe_flavors(self.platform)
+
     def test_worker_flavor_observation_accepts_available_multi_vcpu_flavor(self) -> None:
         class MultiCpuCloud(FakeCloud):
             def __call__(self, argv, **kwargs):

@@ -127,6 +127,7 @@ class BuildFailureCleanupTests(unittest.TestCase):
                 "storageBindings": [],
             },
             "builderImageId": IMAGE,
+            "builderFlavor": "builder-small",
             "runtimeImages": {
                 "node": "registry.example/node@sha256:" + "a" * 64,
                 "bun": "registry.example/bun@sha256:" + "b" * 64,
