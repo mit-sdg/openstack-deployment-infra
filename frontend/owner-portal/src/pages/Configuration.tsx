@@ -31,10 +31,12 @@ import { QueryError } from '../components/Feedback';
 import { RepositoryAccess } from '../components/RepositoryAccess';
 import { StorageSection } from '../components/StorageSection';
 import { AppManagement } from '../components/AppManagement';
+import { BuilderSizeControl } from '../components/BuilderSize';
 import './app-pages.css';
 
 export function ConfigurationPage({ id }: { id: string }) {
   const query = useQuery({ queryKey: ['settings', id], queryFn: () => api.settings(id) });
+  const identity = useQuery({ queryKey: ['app', id], queryFn: () => api.app(id) });
   return (
     <AppFrame id={id} active="Settings">
       {query.isPending ? (
@@ -47,7 +49,17 @@ export function ConfigurationPage({ id }: { id: string }) {
         <QueryError query={query} what="your settings" />
       ) : (
         <>
-          <ConfigurationForm key={id} id={id} initial={query.data} resources />
+          <ConfigurationForm
+            key={id}
+            id={id}
+            initial={query.data}
+            resources
+            buildMachine={
+              identity.data?.access === 'admin' ? (
+                <BuilderSizeControl key={id} id={id} />
+              ) : undefined
+            }
+          />
           <AppManagement id={id} />
         </>
       )}
@@ -83,6 +95,7 @@ export function ConfigurationForm({
   resources = false,
   service = api,
   identityProvider = false,
+  buildMachine,
 }: {
   id: string;
   initial: Settings;
@@ -90,6 +103,7 @@ export function ConfigurationForm({
   service?: ReturnType<typeof resourceApi>;
   /** Managed sign-in app: show information with storage changes. */
   identityProvider?: boolean;
+  buildMachine?: ReactNode;
 }) {
   const formId = useId();
   const environment = useQuery({
@@ -307,6 +321,7 @@ export function ConfigurationForm({
           )}
         </Section>
       </form>
+      {buildMachine}
       {resources && (
         <>
           <RepositoryAccess id={id} service={service} saved={savedSettings.revision > 0} />

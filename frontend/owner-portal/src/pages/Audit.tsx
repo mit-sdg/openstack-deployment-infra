@@ -25,11 +25,11 @@ function When({ value }: { value: string | null }) {
   );
 }
 const auditLabels: Record<string, string> = {
-  default_builder_size_requested: 'Default builder size change started',
-  default_builder_size_succeeded: 'Default builder size changed',
-  default_builder_size_failed: 'Default builder size change failed',
-  default_builder_size_blocked: 'Default builder size change needs attention',
-  app_builder_size: 'Builder size change started',
+  default_builder_size_requested: 'Default build machine change started',
+  default_builder_size_succeeded: 'Default build machine changed',
+  default_builder_size_failed: 'Default build machine change failed',
+  default_builder_size_blocked: 'Default build machine change needs attention',
+  app_builder_size: 'Build machine change started',
   account_invited: 'Account created',
   enrollment_started: 'Setup started',
   enrollment_completed: 'Setup finished',

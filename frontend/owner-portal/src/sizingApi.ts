@@ -34,6 +34,26 @@ const flavors = (v: unknown) => {
 };
 export const sizeLabel = (size: Flavor) =>
   `${size.vcpus} vCPU · ${size.ram_mib / 1024} GB RAM · ${size.disk_gib} GB disk (${size.name})`;
+export const workerSizeLabel = (size: Flavor) =>
+  `${size.vcpus} vCPU · ${size.ram_mib / 1024} GB RAM (${size.name})`;
+export const buildMachineLabel = (size: BuilderSize) =>
+  `${size.flavor.vcpus} vCPU · ${size.flavor.ram_mib / 1024} GB · ${size.useDefault ? 'platform default' : 'set for this app'}`;
+
+export function sizeGroups(sizes: Flavor[]) {
+  const groups = new Map<string, Flavor[]>();
+  for (const size of sizes) {
+    const family = size.name.includes('.') ? size.name.split('.')[0] : 'Other';
+    groups.set(family, [...(groups.get(family) ?? []), size]);
+  }
+  return [...groups]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([family, items]) => ({
+      family,
+      items: items.sort(
+        (a, b) => a.vcpus - b.vcpus || a.ram_mib - b.ram_mib || a.name.localeCompare(b.name),
+      ),
+    }));
+}
 
 export const sizingApi = {
   sizes: (id: string) => request(`/apps/${id}/sizes`, (v) => flavors(record(v).items)),
