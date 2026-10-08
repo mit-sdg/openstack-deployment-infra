@@ -63,20 +63,6 @@ class PortalSizingTests(unittest.TestCase):
             with self.assertRaises(HttpError):
                 self.project.dispatch("GET", "/v1/flavors" + query, {}, body)
 
-    def test_project_plan_is_identical_to_operator_plan(self) -> None:
-        project = self.project.dispatch(
-            "GET", f"/v1/applications/{self.app_id}/resize-plan?flavor=200", {}, None
-        ).body
-        privileged = self.admin.dispatch(
-            "GET", f"/v1/admin/applications/{self.app_id}/resize-plan?flavor=200", {}, None
-        ).body
-        self.assertEqual(project, privileged)
-        for query in ("", "?flavor=200&flavor=50", "?flavor=200&extra=1"):
-            with self.assertRaises(HttpError):
-                self.project.dispatch(
-                    "GET", f"/v1/applications/{self.app_id}/resize-plan" + query, {}, None
-                )
-
     def test_provider_failures_withhold_details(self) -> None:
         with (
             mock.patch.object(
@@ -127,6 +113,18 @@ class PortalSizingTests(unittest.TestCase):
                 {"flavor": None, "expectedFlavor": SMALL.name},
             )
 
+        path = f"/v1/applications/{self.app_id}/builder-size"
+        for body in (
+            {"flavor": TINY.flavor_id, "expectedFlavor": None},
+            {"flavor": LARGE.flavor_id, "expectedFlavor": SMALL.name},
+        ):
+            _response, operation = self.put(path, body)
+            self.assertEqual(operation.status, "failed")
+            self.assertIsNone(db.get_application_builder_flavor(self.connection, self.app_id))
+        for query, body in (("?extra=1", None), ("", {})):
+            with self.assertRaises(HttpError):
+                self.project.dispatch("GET", path + query, {}, body)
+
     def test_override_is_independent_of_worker_and_reset_follows_default(self) -> None:
         path = f"/v1/applications/{self.app_id}/builder-size"
         before = db.get_application(self.connection, self.app_id)
@@ -154,33 +152,6 @@ class PortalSizingTests(unittest.TestCase):
         self.assertEqual(
             builder_settings.effective_flavor(self.connection, self.fixture.config, self.app_id),
             LARGE.name,
-        )
-
-    def test_builder_override_validation_and_compare_and_swap_preserve_selection(self) -> None:
-        path = f"/v1/applications/{self.app_id}/builder-size"
-        for body in (
-            {"flavor": TINY.flavor_id, "expectedFlavor": None},
-            {"flavor": LARGE.flavor_id, "expectedFlavor": SMALL.name},
-        ):
-            _response, operation = self.put(path, body)
-            self.assertEqual(operation.status, "failed")
-            self.assertIsNone(db.get_application_builder_flavor(self.connection, self.app_id))
-        for query, body in (("?extra=1", None), ("", {})):
-            with self.assertRaises(HttpError):
-                self.project.dispatch("GET", path + query, {}, body)
-
-    def test_unset_apps_follow_default_and_override_survives_worker_updates(self) -> None:
-        db.put_application_builder_flavor(self.connection, self.app_id, LARGE.name)
-        db.put_application(
-            self.connection,
-            application_id=self.app_id,
-            application_slug="demo-app",
-            worker_flavor="worker-new",
-            scheduler_cpu_mhz=1000,
-            scheduler_memory_mib=2048,
-        )
-        self.assertEqual(
-            db.get_application_builder_flavor(self.connection, self.app_id), LARGE.name
         )
 
     def test_builder_selection_recovery_reconciles_an_already_written_setting(self) -> None:

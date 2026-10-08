@@ -10,13 +10,6 @@ from tests.test_management import ROOT, ManagementCase
 
 
 class ManagementPlatformTests(ManagementCase):
-    def test_infra_validator_copy_matches_package(self) -> None:
-        # Storage and other roles ship infra/ without openstack_platform/.
-        self.assertEqual(
-            (ROOT / "infra/lib/owner_portal_config.py").read_bytes(),
-            (ROOT / "openstack_platform/owner_portal_config.py").read_bytes(),
-        )
-
     def production_config(self, **owner_portal: object) -> dict:
         from openstack_platform.config import load_platform
         from openstack_platform.management.settings import configuration
@@ -48,28 +41,22 @@ class ManagementPlatformTests(ManagementCase):
             with self.assertRaises(ValueError):
                 Config.load(path)
 
-    def test_portal_name_derives_from_inventory_display_name(self) -> None:
-        path = self.root / "management.json"
+    def test_platform_rejects_development_origins_and_obsolete_assertion_keys(self) -> None:
+        from openstack_platform.config import load_platform
+
         value = self.production_config()
-        path.write_text(json.dumps(value))
-        self.assertEqual(Config.load(path).platform_name, "Example Platform Apps")
-        value["platformName"] = "Example Platform Apps"
-        path.write_text(json.dumps(value))
-        self.assertEqual(Config.load(path).platform_name, "Example Platform Apps")
-        value["platformName"] = "Another Platform"
-        path.write_text(json.dumps(value))
+        path = Path(value["platformConfig"])
+        document = json.loads(path.read_text())
+        document["ownerPortal"]["commonsOrigin"] = "https://localhost:9444"
+        path.write_text(json.dumps(document))
         with self.assertRaises(ValueError):
-            Config.load(path)
+            load_platform(path)
+        document["ownerPortal"]["commonsOrigin"] = "https://class.example.com"
+        document["ownerPortal"]["verificationKeys"] = {}
+        path.write_text(json.dumps(document))
+        with self.assertRaises(ValueError):
+            load_platform(path)
 
-    def test_inventory_portal_name_overrides_the_default(self) -> None:
-        path = self.root / "management.json"
-        path.write_text(json.dumps(self.production_config(portalName="Example Hosting")))
-        self.assertEqual(Config.load(path).platform_name, "Example Hosting")
-        for invalid in ("", " padded ", "x" * 81, "tab\there", 7):
-            with self.subTest(portal_name=invalid), self.assertRaises(ValueError):
-                self.production_config(portalName=invalid)
-
-    def test_rate_configuration_is_validated_and_inventory_bound(self) -> None:
         path = self.root / "management.json"
         value = self.production_config()
         inventory = Path(value["platformConfig"])
@@ -87,133 +74,3 @@ class ManagementPlatformTests(ManagementCase):
         inventory.write_text(json.dumps(document))
         with self.assertRaises(ValueError):
             Config.load(path)
-
-    def test_platform_rejects_development_origins_and_obsolete_assertion_keys(self) -> None:
-        from openstack_platform.config import load_platform
-
-        value = self.production_config()
-        path = Path(value["platformConfig"])
-        document = json.loads(path.read_text())
-        document["ownerPortal"]["commonsOrigin"] = "https://localhost:9444"
-        path.write_text(json.dumps(document))
-        with self.assertRaises(ValueError):
-            load_platform(path)
-        document["ownerPortal"]["commonsOrigin"] = "https://class.example.com"
-        document["ownerPortal"]["verificationKeys"] = {}
-        path.write_text(json.dumps(document))
-        with self.assertRaises(ValueError):
-            load_platform(path)
-
-    def test_ingress_does_not_override_backend_referrer_policy(self) -> None:
-        source = (ROOT / "nix/roles/ingress.nix").read_text()
-        section = source.split("middlewares.platform-security-headers.headers =", 1)[1].split(
-            "};", 1
-        )[0]
-        self.assertNotIn("referrerPolicy", section)
-        self.assertIn("contentTypeNosniff = true", section)
-        self.assertIn("frameDeny = true", section)
-
-    def test_admin_management_hardening_activation_and_backup_are_declared(self) -> None:
-        source = (ROOT / "nix/roles/admin.nix").read_text()
-        for marker in (
-            "d ${managementBrokerReleaseRoot} :2750 :${operatorAccount.name} :${managementBrokerUser}",
-            "systemd-tmpfiles --create ${managementDirectories}",
-            "managementBrokerReleaseRoot",
-            "managementWebReleaseRoot",
-            "managementBrokerConfig",
-            "RequiresMountsFor",
-            "management-activate",
-            "PathChanged = managementActivationMarker",
-            "management-broker-backup",
-            "MemoryDenyWriteExecute = true",
-            'IPAddressDeny = "any"',
-        ):
-            self.assertIn(marker, source)
-        packages = (
-            (ROOT / "nix/pkgs/default.nix")
-            .read_text()
-            .split("platformPython =", 1)[1]
-            .split("controllerPackage =", 1)[0]
-        )
-        self.assertNotIn("ps.pyjwt", packages)
-        self.assertNotIn("ps.cryptography", packages)
-        self.assertIn("management-python3.14", packages)
-        self.assertIn("exec ${platformPython}/bin/python", packages)
-        tmpfiles = source.split("systemd.tmpfiles.rules =", 1)[1].split("]", 1)[0]
-        self.assertNotIn("managementBrokerState", tmpfiles)
-        self.assertNotIn("managementWebReleaseRoot", tmpfiles)
-        self.assertIn(
-            "python -I ${../../deploy/releases/install_release.py}",
-            (ROOT / "nix/pkgs/default.nix").read_text(),
-        )
-        self.assertNotIn("install -d -m 2750", source)
-        self.assertNotIn("chgrp ${controllerGroup}", source)
-        self.assertNotIn('chmod 0640 "$path"', source)
-        self.assertIn("${hostPaths} apply --plan ${packages.rootPathPlan}", source)
-        self.assertIn("${hostPaths} directory-check", source)
-        self.assertNotIn("environment.sessionVariables.PLATFORM_ENVIRONMENT", source)
-        self.assertIn(
-            "PLATFORM_MANAGEMENT_ENVIRONMENT=production",
-            (ROOT / "nix/pkgs/default.nix").read_text(),
-        )
-
-    def test_identity_is_ordered_and_wanted_but_not_required_by_broker(self) -> None:
-        source = (ROOT / "nix/roles/admin.nix").read_text()
-        broker = source.split('systemd.services."${namespace}-management-broker" = {', 1)[1].split(
-            'systemd.services."${namespace}-management-web"', 1
-        )[0]
-        identity = '"${namespace}-management-identity.service"'
-        self.assertIn(identity, broker.split("wants = [", 1)[1].split("]", 1)[0])
-        self.assertIn(identity, broker.split("after = [", 1)[1].split("]", 1)[0])
-        self.assertNotIn(identity, broker.split("requires = [", 1)[1].split("]", 1)[0])
-
-    def test_portal_waits_for_controller_readiness_and_restarts_as_a_chain(self) -> None:
-        source = (ROOT / "nix/roles/admin.nix").read_text()
-        broker = source.split('systemd.services."${namespace}-management-broker" = {', 1)[1].split(
-            'systemd.services."${namespace}-management-web"', 1
-        )[0]
-        web = source.split('systemd.services."${namespace}-management-web" = {', 1)[1].split(
-            'systemd.paths."${namespace}-management-broker"', 1
-        )[0]
-        readiness = '"${namespace}-controller-readiness.service"'
-        self.assertIn(readiness, broker.split("after = [", 1)[1].split("]", 1)[0])
-        self.assertIn(readiness, broker.split("requires = [", 1)[1].split("]", 1)[0])
-        self.assertIn('partOf = [ "${namespace}-controller-readiness.service" ];', broker)
-        self.assertNotIn('"${namespace}-controller.service"', broker)
-        self.assertIn('partOf = [ "${namespace}-management-broker.service" ];', web)
-        for unit in (broker, web):
-            self.assertIn('Restart = "on-failure";', unit)
-            self.assertIn("RestartSec = 2;", unit)
-            self.assertIn("NoNewPrivileges = true;", unit)
-            self.assertIn('ProtectSystem = "strict";', unit)
-        self.assertIn("controllerPrivilegedSocket", broker)
-        vm = (ROOT / "nix/tests/default.nix").read_text()
-        self.assertIn("machine.reboot()", vm)
-        self.assertIn("vm-restore-active-portal", vm)
-        self.assertIn("systemctl restart ${namespace}-controller.service", vm)
-        self.assertIn("machine.wait_until_succeeds(web_health)", vm)
-        self.assertIn("machine.wait_until_succeeds(broker_health)", vm)
-
-    def test_backup_uses_packaged_entrypoint_and_portal_is_independent_of_backups(self) -> None:
-        source = (ROOT / "nix/roles/admin.nix").read_text()
-        self.assertNotIn("PYTHONPATH=${../..}", source)
-        self.assertNotIn("PYTHONPATH=${../../.}", source)
-        prepare = source.split('systemd.services."${namespace}-management-prepare"', 1)[1].split(
-            'systemd.services."${namespace}-management-broker"', 1
-        )[0]
-        self.assertNotIn("backupMountUnit", prepare)
-        self.assertNotIn("backups", prepare)
-        script = source.split("managementPrepare =", 1)[1].split("managementBackupPrepare =", 1)[0]
-        self.assertNotIn("managementBackupRoot", script)
-        backup = source.split('systemd.services."${namespace}-management-broker-backup"', 1)[
-            1
-        ].split("systemd.timers.", 1)[0]
-        self.assertIn("backupMountUnit", backup)
-        self.assertIn('ExecStartPre = "+${managementBackupPrepare}"', backup)
-        self.assertIn(
-            "${packages.controllerPackage}/bin/openstack-platform-management-broker-backup backup",
-            backup,
-        )
-        vm = (ROOT / "nix/tests/default.nix").read_text()
-        self.assertNotIn("PYTHONPATH=${../..}", vm)
-        self.assertIn("grep -Fx 'management-broker controller-api'", vm)

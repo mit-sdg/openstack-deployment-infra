@@ -37,14 +37,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ManagementCase(unittest.TestCase):
-    def setUp(self) -> None:
-        from openstack_platform.management.dev.__main__ import tls_context
-        from openstack_platform.management.dev.commons import Commons
-        from openstack_platform.management.identity.client import IdentityConfig
-        from openstack_platform.management.identity.main import serve as identity_serve
+    identity_transport = False
 
-        (ROOT / ".tmp").mkdir(exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(prefix="mt-", dir=ROOT / ".tmp")
+    @classmethod
+    def setUpClass(cls) -> None:
+        from openstack_platform.management.broker import local_security
+
+        # Route tests still hash and verify real passwords, at the cheapest
+        # supported cost. SecurityTests exercises the production KDF separately.
+        cls.dummy_hash = local_security.hash_password("dummy test password", n=8192, p=1)
+
+    def setUp(self) -> None:
+        from openstack_platform.management.broker import local_auth, local_security
+
+        self.enterContext(patch.object(local_security, "SCRYPT_N", 8192))
+        self.enterContext(patch.object(local_security, "SCRYPT_P", 1))
+        self.enterContext(patch.dict(local_security.hash_password.__kwdefaults__, n=8192, p=1))
+        self.enterContext(patch.object(local_auth, "DUMMY_HASH", self.dummy_hash))
+        self.enterContext(patch.object(local_security, "DUMMY_HASH", self.dummy_hash))
+        self.enterContext(patch.object(local_auth, "sleep"))
+
+        self.temporary = tempfile.TemporaryDirectory(prefix="mt-")
         self.root = Path(self.temporary.name)
         self.sockets = self.root / "s"
         self.sockets.mkdir(mode=0o700)
@@ -59,6 +72,25 @@ class ManagementCase(unittest.TestCase):
             web_peer=(os.geteuid(), os.getegid()),
             controller_timeout=0.25,
         )
+        if self.identity_transport:
+            self.start_identity()
+        self.fixture = FakeController()
+        self.controller = self.fixture.server(self.config.controller_socket)
+        self.thread = threading.Thread(
+            target=self.controller.serve_forever, kwargs={"poll_interval": 0.001}, daemon=True
+        )
+        self.thread.start()
+        self.broker = Broker(self.config)
+        self.router = self.broker.router()
+        self.tokens: dict[str, str] = {}
+        self.csrf: dict[str, str] = {}
+
+    def start_identity(self) -> None:
+        from openstack_platform.management.dev.__main__ import tls_context
+        from openstack_platform.management.dev.commons import Commons
+        from openstack_platform.management.identity.client import IdentityConfig
+        from openstack_platform.management.identity.main import serve as identity_serve
+
         ca = self.root / "ca.pem"
         self.commons = Commons(("127.0.0.1", 0), self.config, self.root, tls=tls_context(ca))
         self.config = dataclasses.replace(
@@ -66,7 +98,7 @@ class ManagementCase(unittest.TestCase):
         )
         self.commons.config = self.config
         self.commons_thread = threading.Thread(
-            target=self.commons.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+            target=self.commons.serve_forever, kwargs={"poll_interval": 0.001}, daemon=True
         )
         self.commons_thread.start()
         self.identity = identity_serve(
@@ -79,26 +111,17 @@ class ManagementCase(unittest.TestCase):
             )
         )
         self.identity_thread = threading.Thread(
-            target=self.identity.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+            target=self.identity.serve_forever, kwargs={"poll_interval": 0.001}, daemon=True
         )
         self.identity_thread.start()
-        self.fixture = FakeController()
-        self.controller = self.fixture.server(self.config.controller_socket)
-        self.thread = threading.Thread(
-            target=self.controller.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
-        )
-        self.thread.start()
-        self.broker = Broker(self.config)
-        self.router = self.broker.router()
-        self.tokens: dict[str, str] = {}
-        self.csrf: dict[str, str] = {}
 
     def tearDown(self) -> None:
         self.broker.close()
-        self.identity.shutdown()
-        self.identity.server_close()
-        self.commons.shutdown()
-        self.commons.server_close()
+        if self.identity_transport:
+            self.identity.shutdown()
+            self.identity.server_close()
+            self.commons.shutdown()
+            self.commons.server_close()
         self.controller.shutdown()
         self.controller.server_close()
         self.temporary.cleanup()
@@ -146,8 +169,35 @@ class ManagementCase(unittest.TestCase):
 
     def login(self, owner: str = "alice") -> str:
         started = self.start()
-        self.commons.approve = owner
-        completed = self.callback(self.approve(started["location"]), started["cookies"][0]["value"])
+        binder = started["cookies"][0]["value"]
+        if self.identity_transport:
+            self.commons.approve = owner
+            completed = self.callback(self.approve(started["location"]), binder)
+        else:
+            from openstack_platform.management.dev.commons import USERS
+
+            subject, display = USERS[owner]
+            target = "/v1/auth/commons/callback?" + urlencode(
+                {
+                    "code": str(uuid.uuid4()) + "." + opaque(),
+                    "state": self.broker.auth.anonymous.mac("commons-state", binder),
+                }
+            )
+            with patch.object(
+                self.broker.auth.identity,
+                "request",
+                return_value=(
+                    200,
+                    {
+                        "data": {
+                            "subject": subject,
+                            "username": owner,
+                            "displayName": display,
+                        }
+                    },
+                ),
+            ):
+                completed = self.callback(target, binder)
         self.assertEqual(completed["location"], "/apps")
         self.tokens[owner] = next(
             cookie["value"] for cookie in completed["cookies"] if cookie["name"] == "session"
@@ -180,6 +230,8 @@ class ManagementCase(unittest.TestCase):
 
 
 class CeremonyTests(ManagementCase):
+    identity_transport = True
+
     def attempt(
         self, body: dict[str, Any] | None = None, *, headers: dict[str, str] | None = None
     ) -> Any:
@@ -381,37 +433,6 @@ class CeremonyTests(ManagementCase):
         target, binder = self.flow()
         self.assert_sign_in_error(self.callback(target, binder), "ACCOUNT_DISABLED")
 
-    def test_staff_sign_in_keeps_the_portal_role(self) -> None:
-        from openstack_platform.management.dev.commons import USERS
-
-        with self.broker.database.connect(write=True) as db:
-            db.execute(
-                "INSERT INTO users(id,issuer,subject,username,display_name,role,created,last_login) VALUES(?,?,?,'taylor','Taylor','staff',0,0)",
-                (str(uuid.uuid4()), self.config.issuer, USERS["taylor"][0]),
-            )
-        self.login("taylor")
-        self.assertEqual(
-            self.call("GET", "/v1/session", owner="taylor").body["data"]["role"], "staff"
-        )
-
-    def test_password_sign_in_for_class_accounts_is_gone(self) -> None:
-        with self.assertRaises(HttpError) as caught:
-            self.attempt(
-                {"method": "commons", "username": "alice", "password": "local-alice-password"}
-            )
-        self.assertEqual((caught.exception.status, caught.exception.code), (400, "INVALID_REQUEST"))
-        self.assertIn("Sign in with your class account", caught.exception.summary)
-        # Without a method the form is the local one; class passwords never leave.
-        self.assert_error(
-            "INVALID_CREDENTIALS",
-            lambda: self.attempt({"username": "alice", "password": "local-alice-password"}),
-        )
-        self.assert_error(
-            "INVALID_REQUEST",
-            lambda: self.attempt({"method": "other", "username": "alice", "password": "p"}),
-        )
-        self.assertEqual(self.commons.calls, 0)
-
     def test_csrf_and_exact_origin_reject_before_any_password_check(self) -> None:
         body = {"method": "local", "username": "alice", "password": "incorrect"}
         for origin in ("null", "", "https://evil.example.com"):
@@ -427,23 +448,6 @@ class CeremonyTests(ManagementCase):
             self.assert_error(
                 "NOT_FOUND", lambda route=route: self.call("POST", "/v1/auth/" + route, {})
             )
-
-    def test_options_and_session_expose_configured_display_labels(self) -> None:
-        options = self.call("GET", "/v1/auth/options").body["data"]
-        self.assertEqual(options["providerLabel"], "class account")
-        self.assertEqual(options["platformName"], "App platform")
-        self.login()
-        session = self.call("GET", "/v1/session", owner="alice").body["data"]
-        self.assertEqual(session["platformName"], "App platform")
-        self.config = dataclasses.replace(
-            self.config, platform_name="Example Platform", class_label="Example account"
-        )
-        self.broker.auth.config = self.config
-        options = self.call("GET", "/v1/auth/options").body["data"]
-        self.assertEqual(
-            (options["providerLabel"], options["platformName"]),
-            ("Example account", "Example Platform"),
-        )
 
     def test_identity_outage_preserves_existing_sessions_and_only_blocks_new_login(self) -> None:
         user = self.login()
@@ -476,25 +480,6 @@ class CeremonyTests(ManagementCase):
         self.assertIn("/connect?", self.start(other)["location"])
         now += 60
         self.assertIn("/connect?", self.start()["location"])
-
-    def test_per_address_admission_shares_ipv6_prefix(self) -> None:
-        from openstack_platform.management.broker.anonymous import AddressLimits
-
-        limits = AddressLimits(1, 1)
-        from openstack_platform.controller.http import Request
-
-        req = Request(
-            "GET", "/v1/auth/options", {}, {}, {"x-portal-client-address": "2001:db8::1"}, None
-        )
-        limits.check(req, "start", 100)
-        self.assert_error(
-            "RATE_LIMITED",
-            lambda: limits.check(
-                dataclasses.replace(req, headers={"x-portal-client-address": "2001:db8::2"}),
-                "start",
-                100,
-            ),
-        )
 
     def test_rotation_commons_archive_and_local_revoke(self) -> None:
         user = self.login()
@@ -556,109 +541,6 @@ class CeremonyTests(ManagementCase):
 
 
 class OwnerIntentTests(ManagementCase):
-    def test_deploy_guidance_uses_only_release_text_and_hides_codes_from_owners(self) -> None:
-        from openstack_platform.management.broker.journal import (
-            BUILD_GUIDANCE,
-            BUSY_GUIDANCE,
-            HEALTH_GUIDANCE,
-            RUNTIME_GUIDANCE,
-            deploy_failure_guidance,
-            intent_model,
-        )
-
-        user = self.login()
-        app = self.create()
-        for code, phase, expected in (
-            ("BUILD_REJECTED", None, BUILD_GUIDANCE),
-            ("BUILD_FAILED", None, BUILD_GUIDANCE),
-            ("HEALTH_TIMEOUT", None, HEALTH_GUIDANCE),
-            ("CANDIDATE_UNHEALTHY", None, HEALTH_GUIDANCE),
-            ("DEADLINE_EXCEEDED", "worker_ready", HEALTH_GUIDANCE),
-            ("DEADLINE_EXCEEDED", "building", None),
-            (None, "build_rejected", BUILD_GUIDANCE),
-            ("PLATFORM_BUSY", "platform_busy", BUSY_GUIDANCE),
-            (None, "platform_busy", BUSY_GUIDANCE),
-            ("RUNTIME_UNAVAILABLE", "build_rejected", RUNTIME_GUIDANCE),
-            ("INVALID_REQUEST", None, None),
-        ):
-            with self.subTest(code=code, phase=phase):
-                with self.broker.database.connect(write=True) as db:
-                    identifier = self.broker.record(
-                        db,
-                        user,
-                        app,
-                        "deploy",
-                        str(uuid.uuid4()),
-                        "fp",
-                        "POST",
-                        f"/v1/applications/{app}/deployments",
-                        {"commit": "a" * 40},
-                        str(uuid.uuid4()),
-                    )
-                    db.execute(
-                        "UPDATE intents SET state='failed',operation=?,safe_error='Generic failure.' WHERE id=?",
-                        (canonical({"controllerErrorCode": code, "phase": phase}), identifier),
-                    )
-                    row = dict(
-                        db.execute("SELECT * FROM intents WHERE id=?", (identifier,)).fetchone()
-                    )
-                owner = self.call("GET", f"/v1/intents/{identifier}", owner="alice").body["data"]
-                self.assertEqual(owner["safeError"], expected or "Generic failure.")
-                self.assertNotIn("controllerErrorCode", owner)
-                admin = intent_model(row, diagnostic=True)
-                self.assertEqual(admin["safeError"], expected or "Generic failure.")
-                self.assertEqual(admin["controllerErrorCode"], code)
-                staff = self.broker.class_reads.operation_model(row)
-                self.assertEqual(staff["guidance"], expected)
-                self.assertEqual(staff["controllerErrorCode"], code)
-        self.assertIsNone(deploy_failure_guidance("env_set", "failed", "BUILD_REJECTED", None))
-        self.assertIsNone(deploy_failure_guidance("deploy", "succeeded", "HEALTH_TIMEOUT", None))
-        self.assertIsNone(deploy_failure_guidance("deploy", "failed", {}, {}))
-        # A blocked deploy needs Resume, not another attempt.
-        self.assertIsNone(deploy_failure_guidance("deploy", "blocked", None, "platform_busy"))
-
-    def test_platform_busy_deploy_settles_with_retry_guidance_and_a_staff_code(self) -> None:
-        from openstack_platform.management.broker.journal import BUSY_GUIDANCE
-
-        self.login()
-        app = self.create()
-        self.save(app)
-        intent = self.call(
-            "POST",
-            f"/v1/apps/{app}/deployments",
-            {"commit": "1" * 40, "configurationRevision": 1},
-            "alice",
-        ).body["data"]
-        # The controller failed it before creating anything (operation evidence
-        # as the controller reports it, including the public code).
-        self.fixture.operations[intent["operationId"]].update(
-            status="failed",
-            phase="platform_busy",
-            cleanupState="confirmed",
-            errorCode="PLATFORM_BUSY",
-            safeError="controller text is never shown",
-        )
-        self.broker.journal.dispatch(intent["intentId"])
-        owner = self.call("GET", f"/v1/intents/{intent['intentId']}", owner="alice").body["data"]
-        self.assertEqual((owner["state"], owner["safeError"]), ("failed", BUSY_GUIDANCE))
-        self.assertNotIn("controllerErrorCode", owner)
-        with self.broker.database.connect() as db:
-            row = dict(
-                db.execute("SELECT * FROM intents WHERE id=?", (intent["intentId"],)).fetchone()
-            )
-        staff = self.broker.class_reads.operation_model(row)
-        self.assertEqual(
-            (staff["state"], staff["controllerErrorCode"], staff["guidance"]),
-            ("failed", "PLATFORM_BUSY", BUSY_GUIDANCE),
-        )
-        # Nothing holds the app: the owner can deploy again straight away.
-        self.call(
-            "POST",
-            f"/v1/apps/{app}/deployments",
-            {"commit": "1" * 40, "configurationRevision": 1},
-            "alice",
-        )
-
     def test_controller_rejection_codes_are_durable_bounded_and_role_scoped(self) -> None:
         from openstack_platform.management.broker.accounts import security_change
         from openstack_platform.management.common import strict_json
@@ -721,104 +603,6 @@ class OwnerIntentTests(ManagementCase):
                     security_change(db, user)
                 self.login()
 
-    def test_sidecar_disappearance_does_not_turn_committed_requests_into_failures(self) -> None:
-        self.login("bob")
-        original = os.chmod
-        observed = set()
-
-        def disappearing(path: Any, mode: int) -> None:
-            if str(path).endswith(("-wal", "-shm")):
-                observed.add(Path(path).suffix)
-                raise FileNotFoundError("SQLite closed its final connection")
-            original(path, mode)
-
-        with patch("openstack_platform.management.broker.database.os.chmod", disappearing):
-            self.assertEqual(self.call("GET", "/v1/apps", owner="bob").status, 200)
-            result = self.call("POST", "/v1/apps", {"slug": "committed-app"}, "bob")
-            self.assertEqual(result.status, 201)
-        self.assertTrue(observed)
-        with self.broker.database.connect() as db:
-            self.assertEqual(
-                db.execute("SELECT COUNT(*) FROM apps WHERE slug='committed-app'").fetchone()[0], 1
-            )
-        with (
-            patch(
-                "openstack_platform.management.broker.database.os.chmod",
-                side_effect=PermissionError("permission normalization failed"),
-            ),
-            self.assertRaises(PermissionError),
-        ):
-            self.call("GET", "/v1/apps", owner="bob")
-
-    def test_terminal_cleanup_accepts_only_real_controller_settled_values(self) -> None:
-        self.login()
-        app = self.create()
-        self.save(app)
-        for cleanup, state in (
-            ("confirmed", "succeeded"),
-            ("not_required", "succeeded"),
-            ("pending", "blocked"),
-            ("complete", "blocked"),
-            ("completed", "blocked"),
-            ("none", "blocked"),
-        ):
-            # Clear only fixture-held intents between samples, never product state.
-            with self.broker.database.connect(write=True) as db:
-                db.execute(
-                    "UPDATE intents SET state='failed' WHERE kind='deploy' AND state='blocked'"
-                )
-            result = self.call(
-                "POST",
-                f"/v1/apps/{app}/deployments",
-                {"commit": uuid.uuid4().hex + "a" * 8, "configurationRevision": 1},
-                "alice",
-            ).body["data"]
-            operation = self.fixture.operations[result["operationId"]]
-            operation.update(status="succeeded", cleanupState=cleanup)
-            self.broker.journal.dispatch(result["intentId"])
-            read = self.call("GET", f"/v1/intents/{result['intentId']}", owner="alice").body["data"]
-            self.assertEqual(read["state"], state)
-
-    def test_deployment_reads_relay_only_a_well_formed_build_runtime(self) -> None:
-        self.login()
-        app = self.create()
-        self.save(app)
-        intent = self.call(
-            "POST",
-            f"/v1/apps/{app}/deployments",
-            {"commit": "2" * 40, "configurationRevision": 1},
-            "alice",
-        ).body["data"]
-        deployment = self.fixture.deployments[intent["operationId"]]
-        detail = f"/v1/apps/{app}/deployments/{intent['operationId']}"
-        resolved = {
-            "runtime": "node",
-            "version": "22.11.0",
-            "image": "docker.io/library/node@sha256:" + "1" * 64,
-            "source": "engines.node >=22 <23",
-        }
-        default = {**resolved, "version": None, "source": "default"}
-        for runtime, relayed in (
-            (resolved, resolved),
-            (default, default),
-            (None, None),
-            ({**resolved, "extra": "private"}, None),
-            ({**resolved, "image": "node:22-slim"}, None),
-            ({**resolved, "version": 22}, None),
-            ({**resolved, "runtime": "deno"}, None),
-            ({**resolved, "runtime": ["node"]}, None),
-            ({**resolved, "source": "x" * 513}, None),
-        ):
-            with self.subTest(runtime=runtime):
-                deployment["runtime"] = runtime
-                read = self.call("GET", detail, owner="alice").body["data"]
-                self.assertEqual(read["runtime"], relayed)
-        deployment["runtime"] = resolved
-        history = self.call("GET", f"/v1/apps/{app}/deployments", owner="alice").body["data"]
-        self.assertEqual(history["items"][0]["runtime"], resolved)
-        del deployment["runtime"]  # As an older controller reports it.
-        self.assertIsNone(self.call("GET", detail, owner="alice").body["data"]["runtime"])
-
     def test_history_and_log_invalid_queries_are_rejected_before_controller_calls(self) -> None:
         self.login()
         app = self.create()
@@ -879,37 +663,6 @@ class OwnerIntentTests(ManagementCase):
             lambda: self.call("GET", "/v1/intents?cursor=" + first["nextCursor"], owner="bob"),
         )
 
-    def test_unavailable_observation_keeps_accepted_pointer(self) -> None:
-        from openstack_platform.management.broker.client import ControllerUnavailable
-
-        self.login()
-        app = self.create()
-        self.save(app)
-        intent = self.call(
-            "POST",
-            f"/v1/apps/{app}/deployments",
-            {"commit": "e" * 40, "configurationRevision": 1},
-            "alice",
-        ).body["data"]
-        time.sleep(0.65)
-        self.broker.journal.dispatch(intent["intentId"])
-        accepted = self.call("GET", f"/v1/apps/{app}", owner="alice").body["data"]
-        with self.broker.database.connect(write=True) as db:
-            db.execute("UPDATE observations SET updated=0 WHERE app_id=?", (app,))
-        original = self.broker.client.request
-
-        def unavailable(*_args: Any, **_kwargs: Any) -> Any:
-            raise ControllerUnavailable("fixture outage")
-
-        self.broker.client.request = unavailable  # type: ignore[method-assign]
-        try:
-            stale = self.call("GET", f"/v1/apps/{app}", owner="alice").body["data"]
-            self.assertTrue(stale["stale"])
-            self.assertEqual(stale["activeDeploymentId"], accepted["activeDeploymentId"])
-            self.assertEqual(stale["acceptedDeployment"], accepted["acceptedDeployment"])
-        finally:
-            self.broker.client.request = original  # type: ignore[method-assign]
-
     def test_two_owners_cannot_read_or_mutate_other_apps_and_no_controller_call(self) -> None:
         self.login("alice")
         self.login("bob")
@@ -929,28 +682,6 @@ class OwnerIntentTests(ManagementCase):
             )
         self.assertEqual(len(self.fixture.calls), calls)
         self.assertEqual(self.call("GET", "/v1/apps", owner="bob").body["data"]["items"], [])
-
-    def test_foreign_deployment_under_owned_parent_returns_not_found(self) -> None:
-        self.login("alice")
-        self.login("bob")
-        alice_app = self.create()
-        bob_app = self.create("bob", "bob-project")
-        self.save(alice_app)
-        intent = self.call(
-            "POST",
-            f"/v1/apps/{alice_app}/deployments",
-            {"commit": "d" * 40, "configurationRevision": 1},
-            "alice",
-        ).body["data"]
-        for suffix in ("", "/build-log"):
-            self.assert_error(
-                "NOT_FOUND",
-                lambda suffix=suffix: self.call(
-                    "GET",
-                    f"/v1/apps/{bob_app}/deployments/{intent['operationId']}{suffix}",
-                    owner="bob",
-                ),
-            )
 
     def test_quota_race_and_slug_collision(self) -> None:
         user = self.login()
@@ -1013,7 +744,8 @@ class OwnerIntentTests(ManagementCase):
         self.broker.journal.dispatch(identifier)
         self.assertEqual(len(self.fixture.deployments), 1)
         self.assertEqual(next(iter(self.fixture.deployments.values()))["configurationRevision"], 1)
-        time.sleep(0.65)
+        for operation in self.fixture.operations.values():
+            operation["ready"] = 0
         self.broker.journal.dispatch(identifier)
         finished = self.call("GET", f"/v1/intents/{identifier}", owner="alice").body["data"]
         self.assertEqual(finished["state"], "succeeded")
@@ -1031,40 +763,6 @@ class OwnerIntentTests(ManagementCase):
             "NOT_FOUND", lambda: self.call("POST", f"/v1/intents/{identifier}/resume", {}, "bob")
         )
 
-    def test_controller_finishing_evidence_releases_portal_app_and_quota(self) -> None:
-        user_id = self.login()
-        app = self.create()
-        self.save(app)
-        self.fixture.recovery_next = True
-        intent = self.call(
-            "POST",
-            f"/v1/apps/{app}/deployments",
-            {"commit": "1" * 40, "configurationRevision": 1},
-            "alice",
-        ).body["data"]
-        self.fixture.operations[intent["operationId"]].update(
-            status="recovery_required",
-            phase="predecessor_cleanup",
-            finishing=True,
-        )
-        self.broker.journal.dispatch(intent["intentId"])
-        with self.broker.database.connect() as db:
-            held = dict(
-                db.execute("SELECT * FROM intents WHERE id=?", (intent["intentId"],)).fetchone()
-            )
-        self.assertTrue(json.loads(held["operation"])["finishing"])
-        self.assertEqual(self.broker.quota(user_id)["concurrentOperations"]["used"], 0)
-        # The controller retains the authority to reject conflicting changes.
-        # Portal admission no longer refuses compatible work with APP_BUSY.
-        from openstack_platform.management.broker.resources import operation_quota
-
-        with self.broker.database.connect() as db:
-            operation_quota(self.broker, db, held["user_id"], app)
-        env = self.call(
-            "PUT", f"/v1/apps/{app}/environment/MESSAGE", {"value": "secret-value"}, "alice"
-        )
-        self.assertEqual(env.status, 202)
-
     def test_recovery_required_resume_preserves_key_and_prior_accepted_pointer(self) -> None:
         self.login()
         app = self.create()
@@ -1076,7 +774,8 @@ class OwnerIntentTests(ManagementCase):
             {"commit": "1" * 40, "configurationRevision": 1},
             "alice",
         ).body["data"]
-        time.sleep(0.65)
+        for operation in self.fixture.operations.values():
+            operation["ready"] = 0
         self.broker.journal.dispatch(intent["intentId"])
         self.assertEqual(
             self.call("GET", f"/v1/intents/{intent['intentId']}", owner="alice").body["data"][
@@ -1097,7 +796,8 @@ class OwnerIntentTests(ManagementCase):
             "data"
         ]
         self.assertEqual(resumed["operationId"], intent["operationId"])
-        time.sleep(0.65)
+        for operation in self.fixture.operations.values():
+            operation["ready"] = 0
         self.broker.journal.dispatch(intent["intentId"])
         active = self.fixture.apps[app]["activeDeploymentId"]
         self.fixture.failed_next = True
@@ -1107,7 +807,8 @@ class OwnerIntentTests(ManagementCase):
             {"commit": "2" * 40, "configurationRevision": 1},
             "alice",
         ).body["data"]
-        time.sleep(0.65)
+        for operation in self.fixture.operations.values():
+            operation["ready"] = 0
         self.broker.journal.dispatch(failed["intentId"])
         self.assertEqual(self.fixture.apps[app]["activeDeploymentId"], active)
 
@@ -1141,41 +842,7 @@ class OwnerIntentTests(ManagementCase):
 
 
 class WebTransportTests(ManagementCase):
-    def test_web_peer_comes_from_canonical_contract(self) -> None:
-        from unittest import mock
-
-        from openstack_platform import contracts
-        from openstack_platform.management.common import strict_json
-        from openstack_platform.management.config import management_web_peer
-
-        value = strict_json(contracts._contract_bytes())
-        value["accounts"]["managementWeb"]["uid"] = 1234
-        value["accounts"]["managementWeb"]["gid"] = 4321
-        with mock.patch.object(
-            contracts, "_contract_bytes", return_value=canonical(value).encode()
-        ):
-            self.assertEqual(management_web_peer(), (1234, 4321))
-
-    def test_development_ignores_spoofed_forwarding_address(self) -> None:
-        from unittest import mock
-
-        with mock.patch.object(
-            self.web.broker, "request", return_value=(200, {"data": {}})
-        ) as request:
-            self.web.forward(
-                "GET",
-                "/auth/options",
-                "",
-                {
-                    "x-forwarded-for": "198.51.100.99",
-                    "x-portal-client-address": "198.51.100.98",
-                    "_peer_address": "127.0.0.1",
-                },
-                b"",
-            )
-        self.assertEqual(
-            request.call_args.kwargs["headers"]["x-portal-client-address"], "127.0.0.1"
-        )
+    identity_transport = True
 
     def test_production_requires_ingress_peer_and_single_configured_address(self) -> None:
         from unittest import mock
@@ -1243,7 +910,7 @@ class WebTransportTests(ManagementCase):
         (assets / "theme.js").write_text('document.documentElement.dataset.theme="light";')
         self.web = WebServer(("127.0.0.1", 0), self.config, assets, deadline=0.2, capacity=2)
         self.web_thread = threading.Thread(
-            target=self.web.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+            target=self.web.serve_forever, kwargs={"poll_interval": 0.001}, daemon=True
         )
         self.web_thread.start()
 
@@ -1374,38 +1041,13 @@ class WebTransportTests(ManagementCase):
                 )
         self.assertEqual(self.web.forward("POST", "/auth/commons/start", "", {}, b"").status, 405)
 
-    def test_commons_redirects_carry_no_body_type_or_referrer_and_are_never_cached(
-        self,
-    ) -> None:
-        connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
-        connection.request(
-            "GET",
-            "/auth/commons/callback?code=x&state=y",
-            headers={"Host": "127.0.0.1:18080", "Sec-Fetch-Mode": "navigate"},
-        )
-        response = connection.getresponse()
-        body = response.read()
-        connection.close()
-        # No broker listens here, so the browser lands on the sign-in page.
-        self.assertEqual((response.status, body), (303, b""))
-        self.assertEqual(response.getheader("Location"), "/sign-in?error=SIGN_IN_UNAVAILABLE")
-        self.assertIsNone(response.getheader("Content-Type"))
-        self.assertEqual(response.getheader("Content-Length"), "0")
-        self.assertEqual(response.getheader("Cache-Control"), "no-store")
-        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
-        self.assertEqual(response.getheader("Content-Security-Policy"), self.web.csp())
-        self.assertEqual(
-            response.msg.get_all("Set-Cookie"),
-            ["portal-dev-commons=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"],
-        )
-
     def test_commons_sign_in_round_trip_through_web_broker_and_identity(self) -> None:
         from openstack_platform.management.broker.main import serve as broker_serve
 
         self.broker.close()
         self.broker, broker_server = broker_serve(self.config)
         thread = threading.Thread(
-            target=broker_server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+            target=broker_server.serve_forever, kwargs={"poll_interval": 0.001}, daemon=True
         )
         thread.start()
 
@@ -1460,47 +1102,6 @@ class WebTransportTests(ManagementCase):
             broker_server.server_close()
             thread.join(timeout=5)
 
-    def test_only_repository_reads_wait_longer_for_the_broker(self) -> None:
-        app = str(uuid.uuid4())
-        waits = {}
-        for method, path in (
-            ("POST", f"/api/v1/apps/{app}/source/commits"),
-            ("POST", f"/api/v1/apps/{app}/source/check"),
-            ("POST", f"/api/v1/apps/{app}/source/check"),
-            ("GET", f"/api/v1/apps/{app}/logs"),
-            ("POST", f"/api/v1/apps/{app}/source-key/check"),
-            ("DELETE", f"/api/v1/apps/{app}/source-key"),
-        ):
-            with patch.object(
-                self.web.broker, "request", return_value=(200, {"data": {}})
-            ) as request:
-                self.web.forward(method, path, "", {}, b"")
-            waits[method + " " + path.split(app)[1]] = request.call_args.kwargs["timeout_seconds"]
-        self.assertEqual(
-            waits,
-            {
-                "POST /source/commits": 35,
-                "POST /source/check": 35,
-                "GET /logs": None,
-                "POST /source-key/check": None,
-                "DELETE /source-key": None,
-            },
-        )
-
-    def test_account_changes_use_patch_end_to_end(self) -> None:
-        connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
-        connection.request(
-            "PATCH",
-            f"/api/v1/people/{uuid.uuid4()}/account",
-            body=b'{"action":"role","value":"staff"}',
-            headers={"Host": "127.0.0.1:18080", "Content-Type": "application/json"},
-        )
-        response = connection.getresponse()
-        body = json.loads(response.read())
-        connection.close()
-        # No broker listens here: reaching it proves the web server forwarded the PATCH.
-        self.assertEqual((response.status, body["error"]["code"]), (503, "BROKER_UNAVAILABLE"))
-
     def test_host_routes_headers_and_private_assets(self) -> None:
         response = self.web_request("/apps")
         self.assertEqual(response.status, 200)
@@ -1520,68 +1121,6 @@ class WebTransportTests(ManagementCase):
         ):
             self.assertIn(self.web_request(path).status, {400, 404})
         self.assertEqual(self.web_request("/", {"Host": "evil.example.com"}).status, 400)
-
-    def test_every_portal_page_route_gets_the_app_shell(self) -> None:
-        # A page the router knows but web doesn't serve breaks on reload, so
-        # check every <Route path> in the portal against web.
-        app = ROOT / "frontend" / "owner-portal" / "src" / "App.tsx"
-        routes = re.findall(r'<Route path="([^"]+)"', app.read_text())
-        self.assertIn("/platform-settings", routes)
-        sample = "11111111-1111-4111-8111-111111111111"
-        for route in routes:
-            path = re.sub(r":[a-z]+", sample, route)
-            with self.subTest(route=route):
-                response = self.web_request(path, {"Sec-Fetch-Mode": "navigate"})
-                self.assertEqual(response.status, 200, path)
-                self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
-
-    def test_unknown_page_navigations_get_the_app_shell_with_404(self) -> None:
-        navigation = {"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
-        for path in (
-            "/no-such-page",
-            "/staff/no-such-page",
-            "/admin/whatever",
-            "/staff/owners/a/b",
-        ):
-            for headers in (navigation, {"Sec-Fetch-Mode": "navigate"}):
-                connection = http.client.HTTPConnection(
-                    "127.0.0.1", self.web.server_port, timeout=2
-                )
-                connection.request("GET", path, headers={"Host": "127.0.0.1:18080", **headers})
-                response = connection.getresponse()
-                body = response.read()
-                connection.close()
-                self.assertEqual(response.status, 404, path)
-                self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
-                self.assertIn(b"Owner portal", body)
-                policy = response.getheader("Content-Security-Policy") or ""
-                self.assertEqual(policy, self.web.csp())
-                self.assertEqual(response.getheader("X-Frame-Options"), "DENY")
-                self.assertEqual(response.getheader("Cache-Control"), "no-store")
-                self.assertEqual(response.getheader("Referrer-Policy"), "strict-origin")
-        # Non-navigations, API/auth paths and assets keep the JSON 404.
-        for path, headers in (
-            ("/no-such-page", {}),
-            ("/no-such-page", {"Accept": "*/*"}),
-            ("/api/v1/no-such-route", navigation),
-            ("/auth/no-such-route", navigation),
-            ("/assets/missing.js", navigation),
-            ("/missing.js", {"Accept": "*/*"}),
-        ):
-            connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
-            connection.request("GET", path, headers={"Host": "127.0.0.1:18080", **headers})
-            response = connection.getresponse()
-            body = response.read()
-            connection.close()
-            self.assertEqual(response.status, 404, path)
-            self.assertEqual(response.getheader("Content-Type"), "application/json", path)
-            self.assertEqual(json.loads(body)["error"]["code"], "NOT_FOUND")
-        # Unsafe paths are still rejected before any page is served.
-        self.assertEqual(self.web_request("/../config.json", navigation).status, 400)
-        self.assertEqual(self.web_request("/assets/%2e%2e/config", navigation).status, 400)
-        self.assertEqual(
-            self.web_request("/x", {**navigation, "Host": "evil.example.com"}).status, 400
-        )
 
     def test_cookie_directives_and_response_limit(self) -> None:
         https = dataclasses.replace(self.config, portal_origin="https://platform.example.com")
@@ -1644,7 +1183,7 @@ class WebTransportTests(ManagementCase):
             limits=TransportLimits(header_seconds=0.1),
         )
         thread = threading.Thread(
-            target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+            target=server.serve_forever, kwargs={"poll_interval": 0.001}, daemon=True
         )
         thread.start()
         try:

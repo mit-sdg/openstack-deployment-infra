@@ -12,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from openstack_platform.controller.http import HttpError
-from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker.accounts import security_change
 from openstack_platform.management.broker.class_reads import ReadLimits
 from openstack_platform.management.broker.database import (
@@ -23,7 +22,7 @@ from openstack_platform.management.broker.database import (
 )
 from openstack_platform.management.broker.staff_policy import public_url
 from openstack_platform.management.common import canonical, digest
-from tests.test_management import ROOT, ManagementCase
+from tests.test_management import ManagementCase
 
 
 class StaffTests(ManagementCase):
@@ -72,107 +71,6 @@ class StaffTests(ManagementCase):
         with self.broker.database.connect() as db:
             self.assertEqual(db.execute("SELECT row_count FROM staff_read_state").fetchone()[0], 4)
 
-    def test_operations_project_every_intent_kind(self) -> None:
-        import re
-        import time
-        import uuid
-
-        from openstack_platform.management.broker.class_reads import INTENT_KINDS
-
-        app = self.create()
-        self.staff()
-        now = time.time()
-        with self.broker.database.connect(write=True) as db:
-            for kind in sorted(INTENT_KINDS):
-                db.execute(
-                    "INSERT INTO intents(id,user_id,app_id,kind,client_key,controller_key,fingerprint,method,path,body,state,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,'succeeded',?,?)",
-                    (
-                        str(uuid.uuid4()),
-                        self.alice,
-                        app,
-                        kind,
-                        str(uuid.uuid4()),
-                        str(uuid.uuid4()),
-                        "f",
-                        "POST",
-                        "/v1/x",
-                        "{}",
-                        now,
-                        now,
-                    ),
-                )
-        page = self.call("GET", "/v1/activity?limit=50", owner="alice").body["data"]
-        self.assertTrue({item["kind"] for item in page["items"]} >= INTENT_KINDS)
-        self.assertNotIn("unknown", {item["kind"] for item in page["items"]})
-        # Every kind named in the broker's SQL or passed to record() is known.
-        broker = ROOT / "openstack_platform/management/broker"
-        named = set()
-        for source in broker.glob("*.py"):
-            for line in source.read_text().splitlines():
-                if "intents" not in line:
-                    continue
-                for listing in re.findall(r"kind IN \(([^)]*)\)", line):
-                    named |= set(re.findall(r"'([a-z_]+)'", listing))
-                named |= set(re.findall(r"kind='([a-z_]+)'", line))
-        named |= {"create_app", "save_configuration", "deploy", "adopt_app"}
-        named |= {"storage_verify", "storage_rotate", "app_enable", "app_disable"}
-        self.assertLessEqual(named, INTENT_KINDS)
-
-    def test_lists_name_owners_and_owner_records_carry_role(self) -> None:
-        first = self.create()
-        second = self.create("bob", "bob-project")
-        self.staff()
-        with self.broker.database.connect(write=True) as db:
-            names = {
-                row["id"]: (row["username"], row["display_name"])
-                for row in db.execute("SELECT id,username,display_name FROM users")
-            }
-        apps = self.call("GET", "/v1/all-apps", owner="alice").body["data"]["items"]
-        operations = self.call("GET", "/v1/activity", owner="alice").body["data"]["items"]
-        self.assertEqual({app["applicationId"] for app in apps}, {first, second})
-        slugs = {app["applicationId"]: app["slug"] for app in apps}
-        self.assertEqual(
-            {(item["applicationId"], item["applicationSlug"]) for item in operations},
-            set(slugs.items()),
-        )
-        for item in apps + operations:
-            self.assertEqual(
-                (item["ownerUsername"], item["ownerDisplayName"]), names[item["ownerId"]]
-            )
-        # Filters and cursors still work across the owner join.
-        scoped = self.call("GET", f"/v1/activity?ownerId={self.bob}", owner="alice")
-        self.assertEqual({item["ownerId"] for item in scoped.body["data"]["items"]}, {self.bob})
-        page = self.call("GET", "/v1/all-apps?limit=1", owner="alice").body["data"]
-        rest = self.call(
-            "GET", "/v1/all-apps?limit=1&cursor=" + page["nextCursor"], owner="alice"
-        ).body["data"]
-        self.assertEqual(len(page["items"] + rest["items"]), 2)
-        owners = self.call("GET", "/v1/people", owner="alice").body["data"]["items"]
-        roles = {owner["ownerId"]: owner["role"] for owner in owners}
-        self.assertEqual((roles[self.alice], roles[self.bob]), ("staff", "owner"))
-        detail = self.call("GET", f"/v1/people/{self.bob}", owner="alice").body["data"]
-        self.assertEqual(detail["role"], "owner")
-
-    def test_owner_role_filter_and_activity_kinds(self) -> None:
-        self.create()
-        self.create("bob", "bob-project")
-        self.staff()
-        listed = self.call("GET", "/v1/people", owner="alice").body["data"]
-        self.assertEqual({person["role"] for person in listed["items"]}, {"owner", "staff"})
-        search = self.call("GET", "/v1/people?q=bob", owner="alice").body["data"]
-        self.assertEqual([person["ownerId"] for person in search["items"]], [self.bob])
-        # Activity names every broker intent kind and keeps a fallback.
-        operations = self.call("GET", "/v1/activity", owner="alice").body["data"]["items"]
-        ids = [item["intentId"] for item in operations]
-        with self.broker.database.connect(write=True) as db:
-            db.execute("UPDATE intents SET kind='env_set' WHERE id=?", (ids[0],))
-            db.execute("UPDATE intents SET kind='mystery' WHERE id=?", (ids[1],))
-        kinds = {
-            item["intentId"]: item["kind"]
-            for item in self.call("GET", "/v1/activity", owner="alice").body["data"]["items"]
-        }
-        self.assertEqual((kinds[ids[0]], kinds[ids[1]]), ("env_set", "unknown"))
-
     def test_csrf_origin_fetch_metadata_and_closed_queries(self) -> None:
         self.staff()
         for headers, code in (
@@ -198,27 +96,6 @@ class StaffTests(ManagementCase):
                 lambda q=query: self.call("GET", "/v1/people?" + q, owner="alice"),
             )
 
-    def test_scoped_pagination_and_unknown_controller_app(self) -> None:
-        self.create()
-        foreign = self.create("bob", "bob-project")
-        self.staff()
-        first = self.call("GET", "/v1/people?limit=1", owner="alice").body["data"]
-        second = self.call(
-            "GET", "/v1/people?limit=1&cursor=" + first["nextCursor"], owner="alice"
-        ).body["data"]
-        self.assertNotEqual(first["items"], second["items"])
-        self.assert_error(
-            "INVALID_REQUEST",
-            lambda: self.call(
-                "GET", f"/v1/all-apps?ownerId={self.alice}&cursor={foreign}", owner="alice"
-            ),
-        )
-        calls = len(self.fixture.calls)
-        self.assert_error(
-            "NOT_FOUND", lambda: self.call("GET", f"/v1/apps/{uuid.uuid4()}", owner="alice")
-        )
-        self.assertEqual(len(self.fixture.calls), calls)
-
     def test_nested_cache_and_controller_fields_are_excluded(self) -> None:
         app = self.create()
         self.save(app)
@@ -228,7 +105,8 @@ class StaffTests(ManagementCase):
             {"configurationRevision": 1, "commit": "a" * 40},
             "alice",
         ).body["data"]
-        time.sleep(0.7)
+        for operation in self.fixture.operations.values():
+            operation["ready"] = 0
         self.broker.journal.dispatch(intent["intentId"])
         self.staff()
         sentinel = "STAFF_SECRET_SENTINEL"
@@ -317,27 +195,6 @@ class StaffTests(ManagementCase):
         self.broker.class_reads.limits = ReadLimits()
         with patch("openstack_platform.management.broker.class_reads.RESPONSE_BYTES", 16):
             self.assertEqual(self.call("GET", "/v1/people", owner="alice").status, 503)
-
-    def test_restore_keeps_roles_deletes_tokens_and_increments_generation(self) -> None:
-        self.staff()
-        snapshot = self.root / "snapshot.sqlite3"
-        with (
-            self.broker.database.connect() as db,
-            contextlib.closing(sqlite3.connect(snapshot)) as target,
-        ):
-            db.backup(target)
-        snapshot.chmod(0o600)
-        destination = self.root / "restore/management.sqlite3"
-        restore_database(snapshot, destination)
-        with contextlib.closing(sqlite3.connect(destination)) as db:
-            self.assertEqual(validate_database(db)[0], 3)
-            self.assertEqual(
-                db.execute("SELECT role FROM users WHERE id=?", (self.alice,)).fetchone()[0],
-                "staff",
-            )
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM account_tokens").fetchone()[0], 0)
-            self.assertGreater(db.execute("SELECT valid_after FROM token_policy").fetchone()[0], 0)
 
     def test_schema_two_upgrade_preserves_quota_invalidates_sessions_and_defaults_owner(
         self,

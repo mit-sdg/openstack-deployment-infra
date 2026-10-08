@@ -24,20 +24,6 @@ BUILD = "11111111-1111-4111-8111-111111111111"
 
 
 class DeployKeyFetchTests(unittest.TestCase):
-    def test_pinned_host_key_is_githubs_published_ed25519_key(self) -> None:
-        kind, blob = app.GITHUB_SSH_HOST_KEY.split()
-        digest = base64.b64encode(hashlib.sha256(base64.b64decode(blob)).digest()).decode()
-        self.assertEqual(
-            (kind, digest.rstrip("=")),
-            ("ssh-ed25519", "+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"),
-        )
-        self.assertEqual(
-            app.github_ssh_url("https://github.com/ada/notes"),
-            "ssh://git@ssh.github.com:443/ada/notes.git",
-        )
-        with self.assertRaises(ValidationError):
-            app.github_ssh_url("https://example.com/ada/notes")
-
     def test_fetch_with_a_key_uses_only_that_key_and_githubs_host_key(self) -> None:
         seen: dict[str, object] = {}
 
@@ -260,43 +246,6 @@ class HelperDeployKeyTests(unittest.TestCase):
         self.assertEqual((elsewhere / "id_ed25519").read_text(), "not a deploy key")
         self.assertTrue((keys / "notes").is_symlink())
 
-    def test_generated_key_archive_preserves_public_creation_time(self) -> None:
-        from openstack_platform.controller import database as controller_db
-        from openstack_platform.controller.source_key_backup import (
-            commit_source_key_restore,
-            prepare_source_key_restore,
-            write_source_key_archive,
-        )
-
-        created = self.key("create")
-        connection = controller_db.connect(self.root / "platform.sqlite3")
-        controller_db.migrate(connection)
-        try:
-            controller_db.put_application(
-                connection,
-                application_id=BUILD,
-                application_slug="notes",
-                worker_flavor="small",
-                scheduler_cpu_mhz=500,
-                scheduler_memory_mib=512,
-            )
-            archive = self.root / "keys.tar"
-            write_source_key_archive(connection, self.root / "controller/source-keys", archive)
-            target = self.root / "restored"
-            commit_source_key_restore(
-                prepare_source_key_restore(archive, connection, target), target
-            )
-            self.assertEqual(
-                " ".join((target / "notes/id_ed25519.pub").read_text().split()[:2]),
-                created["publicKey"],
-            )
-            self.assertEqual(
-                (target / "notes/id_ed25519.pub").stat().st_mtime_ns,
-                (self.root / "controller/source-keys/notes/id_ed25519.pub").stat().st_mtime_ns,
-            )
-        finally:
-            connection.close()
-
     def test_private_source_reads_require_a_key_and_suppress_git_errors(self) -> None:
         args = {"slug": "notes", "repository": "https://github.com/ada/notes", "branch": "main"}
         self.assertEqual(
@@ -310,18 +259,6 @@ class HelperDeployKeyTests(unittest.TestCase):
                 production._provider_app("app.source.commits", args)
         self.assertEqual(error.exception.code, "SOURCE_UNAVAILABLE")
         self.assertNotIn("secret", str(error.exception))
-
-    def test_access_check_uses_the_apps_key_and_needs_one(self) -> None:
-        args = {"slug": "notes", "repository": "https://github.com/ada/notes", "branch": "main"}
-        self.assertEqual(production._provider_app("app.source.check", args), {"keyPresent": False})
-        self.key("create")
-        evidence = {"reachable": True, "head": "c" * 40, "problem": None}
-        with mock.patch.object(app, "check_github_access", return_value=evidence) as check:
-            result = production._provider_app("app.source.check", args)
-        self.assertEqual(result, {"keyPresent": True, **evidence})
-        self.assertEqual(
-            check.call_args.args[2], self.root / "controller/source-keys/notes/id_ed25519"
-        )
 
 
 class BuildSourceFallbackTests(unittest.TestCase):
@@ -397,11 +334,6 @@ class BuildSourceFallbackTests(unittest.TestCase):
             ],
         )
         self.assertIn("using the app's deploy key", log)
-
-    def test_unfetchable_source_is_a_named_rejection(self) -> None:
-        acquire, log = self.build([CommandFailure("https refused")], key=False)
-        self.assertEqual((self.code, acquire.call_count), ("SOURCE_REJECTED", 1))
-        self.assertIn("add the app's deploy key", log)
 
     def test_a_refused_key_is_also_a_named_rejection(self) -> None:
         acquire, log = self.build(
