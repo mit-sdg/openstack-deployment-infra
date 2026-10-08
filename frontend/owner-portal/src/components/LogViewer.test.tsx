@@ -29,12 +29,16 @@ describe('app logs', () => {
     const read = vi.fn((stream: LogStream) =>
       Promise.resolve(
         stream === 'stdout'
-          ? log('stdout', '\x1b[32mListening\x1b[0m on 3000\n')
+          ? log('stdout', '2026-10-07T18:36:05.123Z \x1b[32mListening\x1b[0m on 3000\n')
           : log('stderr', 'Warning: slow query\n'),
       ),
     );
     show(read);
     expect(await screen.findByLabelText('App output')).toHaveTextContent('Listening on 3000');
+    expect(screen.getByTitle('2026-10-07T18:36:05.123Z')).toHaveAttribute(
+      'datetime',
+      '2026-10-07T18:36:05.123Z',
+    );
     expect(screen.getByText(/share them with care/)).toHaveTextContent(/^As of/);
     fireEvent.click(screen.getByRole('radio', { name: 'Errors' }));
     expect(await screen.findByLabelText('App errors')).toHaveTextContent('Warning: slow query');

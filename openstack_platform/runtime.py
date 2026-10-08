@@ -325,7 +325,7 @@ class _Collector:
 
     def read(self, stream: BinaryIO) -> None:
         while True:
-            chunk = stream.read(65_536)
+            chunk = getattr(stream, "read1", stream.read)(65_536)
             if not chunk:
                 return
             remaining = self.maximum - self.size

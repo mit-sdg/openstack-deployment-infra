@@ -1,6 +1,7 @@
-import { CodeBlock, Hint, RelativeTime, Section, SegmentedControl } from '@openstack-platform/ui';
+import { Hint, RelativeTime, Section, SegmentedControl } from '@openstack-platform/ui';
 import { useId, useState } from 'react';
 import type { Configuration, StartupRecord } from '../api';
+import { TimestampedLog } from './TimestampedLog';
 
 /** One plain sentence on why the new version stopped, from its task events. */
 export function startupSummary(record: StartupRecord, configuration: Configuration) {
@@ -25,8 +26,6 @@ export function startupSummary(record: StartupRecord, configuration: Configurati
   return 'Your app didn’t become healthy in time.';
 }
 
-const strip = (text: string) => text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
-
 /** Why a failed deployment's new version stopped, with what it printed. */
 export function StartupRecordSection({
   record,
@@ -39,7 +38,7 @@ export function StartupRecordSection({
   const [stream, setStream] = useState<'stdout' | 'stderr'>(
     record.stderr?.trim() ? 'stderr' : 'stdout',
   );
-  const text = strip((stream === 'stdout' ? record.stdout : record.stderr) ?? '');
+  const text = (stream === 'stdout' ? record.stdout : record.stderr) ?? '';
   const events = (record.events ?? []).filter((event) => event.message);
   return (
     <Section title="Why it stopped">
@@ -57,13 +56,12 @@ export function StartupRecordSection({
             value={stream}
             onChange={setStream}
           />
-          <CodeBlock
+          <TimestampedLog
             label={stream === 'stdout' ? 'Startup output' : 'Startup errors'}
-            variant="log"
+            text={text}
+            empty="Nothing printed."
             end
-          >
-            {text || 'Nothing printed.'}
-          </CodeBlock>
+          />
         </>
       )}
       {events.length > 0 && (

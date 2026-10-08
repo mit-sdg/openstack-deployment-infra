@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 import tempfile
 import unittest
 from collections.abc import Callable, Mapping
@@ -359,6 +360,8 @@ class HelperBuildTests(unittest.TestCase):
 
         def builder(**values: Any) -> app.BuildResult:
             self.recipes.append(values["recipe"])
+            values["build_log_sink"].write(b"builder output\n")
+            values["build_log_sink"].flush()
             return app.BuildResult(
                 BUILD, values["image_name"] + "@sha256:" + "d" * 64, "sha256:" + "d" * 64, True
             )
@@ -396,6 +399,14 @@ class HelperBuildTests(unittest.TestCase):
         (recipe,) = self.recipes
         self.assertTrue(recipe.dockerfile.startswith(f"FROM {image}\n".encode()))
         self.assertEqual(result["recipeHash"], recipe.sha256)
+        self.assertEqual(result["log"], self.log())
+        self.assertTrue(
+            all(
+                re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z ", line)
+                for line in self.log().splitlines()
+            )
+        )
+        self.assertIn("builder output", self.log())
         self.assertIn(f"Using Node.js 22.12.0 ({image}) from engines.node >=22 <23.", self.log())
 
     def test_no_request_builds_the_policy_image_exactly_as_before(self) -> None:

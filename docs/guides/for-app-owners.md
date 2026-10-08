@@ -108,6 +108,8 @@ File keys used through the public endpoint can't contain `//` or `..`. Browser u
 - **Logs** shows the last 500 lines of **Output** or **Errors** from your running app.
 - Under **Team**, **Add by username** gives up to 10 teammates access, except changing the team. They must sign in once first. The app counts only against your limit.
 
+New deployments prefix each output and error line with a UTC timestamp. **Logs**, **Build output**, and **Why it stopped** show these times in your local time, with the UTC value on hover. Use **Show timestamps** to hide the time column; **Copy logs** and **Download logs** keep the UTC timestamps. Apps that print their own timestamps show both. Older images keep their original output until you deploy again; restarting or rolling back to an older image does not add timestamps.
+
 ## Choose a Node.js or Bun version
 
 To choose a version, add one of these to your repository. The first one found wins; otherwise, builds use the platform default:

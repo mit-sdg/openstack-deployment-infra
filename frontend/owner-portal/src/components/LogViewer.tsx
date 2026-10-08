@@ -1,6 +1,5 @@
 import {
   Button,
-  CodeBlock,
   EmptyState,
   Hint,
   LoadError,
@@ -13,6 +12,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useId, useState } from 'react';
 import { ApiError, type LogStream, type RuntimeLog } from '../api';
 import { loadErrorMessage } from './Feedback';
+import { TimestampedLog } from './TimestampedLog';
 
 const streams: { value: LogStream; label: string }[] = [
   { value: 'stdout', label: 'Output' },
@@ -75,9 +75,7 @@ export function LogViewer({
         <EmptyState title="No logs right now">{idle}</EmptyState>
       ) : (
         <>
-          <CodeBlock label={label} variant="log" end>
-            {log.data.text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') || 'Nothing printed yet.'}
-          </CodeBlock>
+          <TimestampedLog label={label} text={log.data.text} empty="Nothing printed yet." end />
           <Hint>
             {log.data.truncated || log.data.text.split('\n').length > log.data.lines
               ? `The last ${log.data.lines} lines, as of `

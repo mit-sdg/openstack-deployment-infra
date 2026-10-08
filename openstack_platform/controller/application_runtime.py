@@ -8,6 +8,7 @@ same paths can be tested without cloud or scheduler access.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import ipaddress
@@ -65,7 +66,7 @@ from .nomad_jobs import nomad_route_marker as nomad_route_marker
 from .nomad_jobs import nomad_route_priority as nomad_route_priority
 from .nomad_jobs import render_nomad_job as render_nomad_job
 
-_RECIPE_GENERATOR_VERSION = 2
+_RECIPE_GENERATOR_VERSION = 3
 _IMAGE_NAME = re.compile(r"[a-z0-9.-]+(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _MAX_BUILD_METADATA = 65_536
@@ -828,11 +829,25 @@ def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe
     lines.append("WORKDIR /app")
     if build is not None:
         lines.append(f"RUN {build}")
+    wrapper = Path(__file__).with_name("log_timestamps.cjs").read_bytes()
+    runtime = "bun" if manifest.runtime == "bun" else "node"
+    wrapper_path = "/platform-log-timestamps.cjs"
+    inject = json.dumps(
+        [
+            runtime,
+            "-e",
+            f"require('node:fs').writeFileSync('{wrapper_path}',Buffer.from('{base64.b64encode(wrapper).decode()}', 'base64'),{{mode:0o444}})",
+        ],
+        separators=(",", ":"),
+    )
+    entrypoint = json.dumps([runtime, wrapper_path], separators=(",", ":"))
     lines.extend(
         (
+            f"RUN {inject}",
             "ENV NODE_ENV=production",
             "USER 65532:65532",
             f"EXPOSE {manifest.port}",
+            f"ENTRYPOINT {entrypoint}",
             f"CMD {start}",
             "",
         )
@@ -841,6 +856,7 @@ def generate_recipe(manifest: Manifest, runtime_images: RuntimeImages) -> Recipe
     identity = json.dumps(
         {
             "generatorVersion": _RECIPE_GENERATOR_VERSION,
+            "logWrapperSha256": hashlib.sha256(wrapper).hexdigest(),
             "runtime": manifest.runtime,
             "runtimeImage": image,
             "packages": list(packages),
