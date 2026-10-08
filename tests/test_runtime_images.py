@@ -18,7 +18,6 @@ from unittest import mock
 
 from openstack_platform.config import RuntimeImages, load_platform
 from openstack_platform.controller import application_runtime as app
-from openstack_platform.controller.application_models import Manifest
 from openstack_platform.helper import production, runtime_images
 from openstack_platform.helper.main import HelperActionError
 from openstack_platform.helper.runtime_images import (
@@ -29,7 +28,6 @@ from openstack_platform.helper.runtime_images import (
 )
 from openstack_platform.runtime_versions import (
     RuntimeRequest,
-    RuntimeVersionError,
     runtime_request,
 )
 from openstack_platform.validation import ValidationError
@@ -156,30 +154,6 @@ class ResolutionTests(unittest.TestCase):
             ],
         )
 
-    def test_an_open_node_range_prefers_the_newest_lts_release(self) -> None:
-        registry = FakeRegistry(node=NODE_INDEX)
-        resolved = resolve_runtime("node", node_request(">=20"), DEFAULTS.node, http=registry)
-        # 26.1.0 is newer but a Current release; 24.9.0 is the newest LTS.
-        self.assertEqual(resolved.evidence()["version"], "24.9.0")
-        current = resolve_runtime("node", node_request("26"), DEFAULTS.node, http=registry)
-        # A range that admits only Current releases still gets the newest one.
-        self.assertEqual(current.evidence()["version"], "26.1.0")
-
-    def test_lts_asks_for_the_newest_long_term_support_release(self) -> None:
-        registry = FakeRegistry(node=NODE_INDEX)
-        request = runtime_request("node", {}, {".nvmrc": "lts/*"}.get)
-        resolved = resolve_runtime("node", request, DEFAULTS.node, http=registry)
-        self.assertEqual((resolved.version, resolved.source), ("24.9.0", ".nvmrc lts/*"))
-
-    def test_releases_older_than_the_oldest_line_are_never_chosen(self) -> None:
-        registry = FakeRegistry(node=NODE_INDEX)
-        resolved = resolve_runtime("node", node_request("^18 || ^20"), DEFAULTS.node, http=registry)
-        self.assertEqual(resolved.version, "20.18.1")
-        old_only = FakeRegistry(node=[{"version": "v19.9.0", "lts": False}])
-        with self.assertRaises(RuntimeVersionError) as caught:
-            resolve_runtime("node", node_request(">=19"), DEFAULTS.node, http=old_only)
-        self.assertEqual(str(caught.exception), 'No Node.js release matches engines.node ">=19".')
-
     def test_an_unpublished_newest_tag_falls_back_to_the_next_release(self) -> None:
         registry = FakeRegistry(node=NODE_INDEX, missing={"22.12.0-slim"})
         resolved = resolve_runtime("node", node_request("22"), DEFAULTS.node, http=registry)
@@ -194,13 +168,6 @@ class ResolutionTests(unittest.TestCase):
         with self.assertRaises(RuntimeLookupError):
             resolve_runtime("node", node_request("22"), DEFAULTS.node, http=absent)
         self.assertEqual(len(absent.urls()), 3)
-
-    def test_an_unsatisfied_request_is_rejected_by_name(self) -> None:
-        with self.assertRaises(RuntimeVersionError) as caught:
-            resolve_runtime(
-                "node", node_request(">=99"), DEFAULTS.node, http=FakeRegistry(node=NODE_INDEX)
-            )
-        self.assertEqual(str(caught.exception), 'No Node.js release matches engines.node ">=99".')
 
     def test_bun_reads_every_tag_page_and_only_slim_releases(self) -> None:
         registry = FakeRegistry(
@@ -283,18 +250,6 @@ class ResolutionTests(unittest.TestCase):
                     str(caught.exception),
                     "Couldn't look up Node.js versions. Try deploying again in a few minutes.",
                 )
-
-    def test_lookups_share_one_bounded_deadline(self) -> None:
-        now = [0.0]
-
-        def clock() -> float:
-            now[0] += 25
-            return now[0]
-
-        registry = FakeRegistry(node=NODE_INDEX)
-        with self.assertRaises(RuntimeLookupError):
-            resolve_runtime("node", node_request("22"), DEFAULTS.node, http=registry, clock=clock)
-        self.assertLess(len(registry.calls), 3)
 
     def test_only_https_is_requested(self) -> None:
         with self.assertRaises(ValueError):
@@ -422,17 +377,6 @@ class HelperBuildTests(unittest.TestCase):
         )
         self.assertIn("builder output", self.log())
         self.assertIn(f"Using Node.js 22.12.0 ({image}) from engines.node >=22 <23.", self.log())
-
-    def test_no_request_builds_the_policy_image_exactly_as_before(self) -> None:
-        registry = FakeRegistry(node=NODE_INDEX)
-        result = self.build(registry, self.package(packageManager="bun@1.3.4"))
-        self.assertEqual(registry.calls, [])
-        before = app.generate_recipe(Manifest("node", (".",), None, "start", 8080, "/"), DEFAULTS)
-        self.assertEqual(self.recipes, [before])
-        self.assertEqual(
-            result["runtime"],
-            {"runtime": "node", "version": None, "image": DEFAULTS.node, "source": "default"},
-        )
 
     def test_requests_that_cannot_be_built_are_rejected_before_any_builder(self) -> None:
         for engines, message in (

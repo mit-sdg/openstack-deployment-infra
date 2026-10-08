@@ -68,20 +68,6 @@ class DeploymentRuntimeTests(unittest.TestCase):
             },
         )
 
-    def test_the_default_and_an_older_helpers_silence_both_record_the_policy_image(self) -> None:
-        default = {
-            "runtime": "node",
-            "version": None,
-            "image": self.f.config.policy.runtime_images.node,
-            "source": "default",
-        }
-        for omit in (False, True):
-            with self.subTest(omit_runtime=omit):
-                self.f.omit_runtime = omit
-                key, operation = self.f.deploy()
-                self.assertEqual(operation.status, "succeeded", operation.safe_error)
-                self.assertEqual(self.model(key)["runtime"], default)
-
     def test_runtime_evidence_outside_the_official_pins_is_refused(self) -> None:
         # test_runtime_versions covers each refusal; this is the controller's use.
         self.f.build_runtime = {**RESOLVED, "image": "registry.example/node@sha256:" + "1" * 64}

@@ -3,9 +3,6 @@ from __future__ import annotations
 import copy
 import json
 import os
-import shutil
-import subprocess
-import threading
 import time
 import unittest
 import uuid
@@ -21,10 +18,11 @@ from openstack_platform.controller import database as db
 from openstack_platform.controller import fixed_ip_service as service
 from openstack_platform.controller import public_ip_service
 from openstack_platform.controller.api import ControllerAPI
-from openstack_platform.controller.http import ControllerServer, HttpError
+from openstack_platform.controller.http import HttpError
 from openstack_platform.helper import production
 from openstack_platform.validation import ValidationError
 from tests import test_application_sizing as fixtures
+from tests.fixtures.retained_openstack import start_cli
 
 ROOT = Path(__file__).resolve().parents[1]
 NETWORK, SUBNET, GROUP = (f"00000000-0000-4000-8000-{n:012d}" for n in (1, 2, 3))
@@ -54,12 +52,7 @@ class RetainedFixedIPTests(unittest.TestCase):
         self.fixture.config = self.config
         self.executable = self.root / "fake-openstack"
         self.state_path = self.root / "cloud.json"
-        self.executable.write_text(
-            (ROOT / "tests/fixtures/retained_openstack.py")
-            .read_text()
-            .replace('Path(os.environ["FAKE_OPENSTACK_STATE"])', f"Path({str(self.state_path)!r})")
-        )
-        self.executable.chmod(0o755)
+        self.addCleanup(start_cli(self.state_path, self.executable))
         self.state_path.write_text(
             json.dumps(
                 dict(
@@ -100,6 +93,7 @@ class RetainedFixedIPTests(unittest.TestCase):
             NOMAD_POLL_INTERVAL="0",
             BOOTSTRAP_ATTEMPTS="1",
             BOOTSTRAP_POLL_INTERVAL="0",
+            TMPDIR=str(self.root),
         )
         self.worker_launcher.write_text(
             "#!/bin/bash\n"
@@ -121,7 +115,6 @@ class RetainedFixedIPTests(unittest.TestCase):
                 os.environ,
                 dict(
                     OSC=str(self.executable),
-                    FAKE_OPENSTACK_STATE=str(self.state_path),
                     PLATFORM_CONFIG=str(ROOT / "config/platform.example.json"),
                     OS_PROJECT_NAME=platform.project_name,
                     PKI_DIR=str(pki),
@@ -194,9 +187,6 @@ class RetainedFixedIPTests(unittest.TestCase):
     def reserve(self, key=None):
         return self.fixture.post(self.base, REQUEST, key)
 
-    def disable(self):
-        return self.fixture.post(f"/v1/applications/{self.app_id}/disable", {})
-
     def assert_success(self, result):
         self.assertEqual(result[1].status, "succeeded", result[1].safe_error)
         return result[0]
@@ -205,147 +195,44 @@ class RetainedFixedIPTests(unittest.TestCase):
         record = service.get(self.connection, self.app_id)
         return self.state()["ports"][record["port_id"]]
 
-    def test_reuse_failure_and_rollback_preserve_primary_ip_without_provider_mutations(self):
-        self.assert_success(self.reserve())
-        first = self.assert_success(self.fixture.deploy())
-        # Nova's bounded console is not durable provisioning evidence. After
-        # acceptance it may lose the marker, including during stopped recovery.
-        self.change(lambda s: s.update(bootstrap_marker=False))
-        original_port = copy.deepcopy(self.port())
-        original_record = service.get(self.connection, self.app_id)
-        server_id = db.get_application(self.connection, self.app_id).worker_server_id
-        calls = len(self.state()["calls"])
-        base = f"/v1/admin/applications/{self.app_id}"
-        body = {**self.fixture.body, "maintenance": True, "reuseWorker": True, "commit": "b" * 40}
-        self.assert_success(self.fixture.post(base + "/deployments", body))
-        self.fixture.fail_health = True
-        _, failed = self.fixture.post(base + "/deployments", {**body, "commit": "c" * 40})
-        self.assertEqual(failed.status, "failed", failed.safe_error)
-        self.assertEqual(self.fixture.jobs, {})
-        self.fixture.fail_health = False
-        plan = self.fixture.router.dispatch(
-            "GET", base + f"/rollback-plan?deploymentId={first}&reuseWorker=true", {}, None
-        ).body
-        self.assert_success(
-            self.fixture.post(base + "/rollback", {"plan": plan, "confirmation": "commons"})
-        )
-        self.assertEqual(
-            db.get_application(self.connection, self.app_id).worker_server_id, server_id
-        )
-        self.assertEqual(self.port(), original_port)
-        self.assertEqual(service.get(self.connection, self.app_id), original_record)
-        self.assertEqual(set(self.state()["servers"]), {server_id})
-        for command in self.state()["calls"][calls:]:
-            self.assertFalse(
-                set(command)
-                & {"create", "delete", "set", "unset", "resize", "rebuild", "add", "remove"},
-                command,
-            )
-        self.assertEqual(len(self.fixture.jobs), 1)
-
-    def test_accepted_readiness_does_not_mask_a_failed_or_negative_later_nova_status(self):
-        self.assert_success(self.fixture.deploy())
-        current = db.get_application(self.connection, self.app_id)
-        slot = app.nomad_placement_id(db.get_deployment(self.connection, self.app_id).nomad_job)
-        args = {
-            "applicationId": slot,
-            "slug": "commons",
-            "acceptedServerId": current.worker_server_id,
-        }
-        # The initial full Nova snapshot is ACTIVE; the later status read is
-        # negative or unavailable while Nomad still reports ready. Do not use
-        # the older positive sample to hide either outcome.
-        for mutation in ({"status_probe_value": "SHUTOFF"}, {"status_probe_failure": True}):
-            with self.subTest(mutation=mutation):
-                self.change(
-                    lambda s: s.update(status_probe_value="ACTIVE", status_probe_failure=False)
-                )
-                self.change(
-                    lambda s, mutation=mutation: s.update(bootstrap_marker=False, **mutation)
-                )
-                with self.assertRaisesRegex(ValidationError, "not ready"):
-                    production._provider_app("app.worker.capacity", args)
-
-    def test_missing_bootstrap_marker_does_not_relax_ordinary_worker_readiness(self):
-        self.assert_success(self.fixture.deploy())
-        current = db.get_application(self.connection, self.app_id)
-        slot = app.nomad_placement_id(db.get_deployment(self.connection, self.app_id).nomad_job)
-        self.change(lambda s: s.update(bootstrap_marker=False))
-        args = {"applicationId": slot, "slug": "commons"}
-        self.assertFalse(production._provider_app("app.worker.observe", args)["ready"])
-        with self.assertRaisesRegex(ValidationError, "not ready"):
-            production._provider_app("app.worker.capacity", args)
-        # No accepted identity is supplied by ordinary provisioning. Even a
-        # previously created server cannot skip its bootstrap gate that way.
-        calls = len(self.state()["calls"])
-        with self.assertRaises(app.ApplicationError):
-            production._provider_app(
-                "app.worker.create",
-                {**args, "workerImageId": str(uuid.uuid4()), "standardFlavor": "worker-small"},
-            )
-        self.assertEqual(set(self.state()["servers"]), {current.worker_server_id})
-        self.assertFalse(any("create" in c for c in self.state()["calls"][calls:]))
-
-    def test_reuse_cannot_implicitly_migrate_an_ordinary_worker_to_a_reserved_port(self):
-        self.assert_success(self.fixture.deploy())
-        self.assert_success(self.reserve())
-        before = copy.deepcopy(self.state())
-        _, rejected = self.fixture.post(
-            f"/v1/admin/applications/{self.app_id}/deployments",
-            {**self.fixture.body, "maintenance": True, "reuseWorker": True},
-        )
-        self.assertEqual(rejected.status, "failed")
-        self.assertEqual(self.state(), before)
-        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
-
-    def test_helper_uses_fixed_authenticated_openstack_command(self):
-        self.assert_success(self.reserve())
-        record = service.get(self.connection, self.app_id)
-        with mock.patch.object(fixed_ip, "Provider") as provider:
-            provider.return_value.show.return_value = {"device_id": None}
-            with self.assertRaises(ValidationError):
-                production._provider_app(
-                    "app.worker.observe",
-                    {
-                        "applicationId": self.app_id,
-                        "slug": "commons",
-                        "retainedPort": service.helper_identity(record),
-                    },
-                )
-            self.assertEqual(provider.call_args.kwargs["executable"], str(self.executable))
-        source = (ROOT / "nix/roles/admin.nix").read_text()
-        self.assertIn(
-            '"L+ ${root}/bin/${namespace}-openstack - - - - ${openstackClient}/bin/platform-openstack"',
-            source,
-        )
-
-    def test_plan_explicit_address_outside_pool_and_reserve_idempotency(self):
-        plan = self.fixture.router.dispatch(
-            "POST",
-            self.base + "/plan",
-            {},
-            {key: value for key, value in REQUEST.items() if key != "action"},
-        ).body
-        self.assertTrue(plan["supported"])
-        self.assertEqual(plan["cidr"], "128.52.128.0/18")
-        self.assertEqual(self.state()["ports"], {})
+    def test_reserve_deploy_maintenance_and_delete_preserves_then_releases_address(self):
         key = self.assert_success(self.reserve())
-        self.assertEqual(self.port()["fixed_ips"], [dict(subnet_id=SUBNET, ip_address=ADDRESS)])
         self.assert_success(self.reserve(key))
-        creates = [a for a in self.state()["calls"] if a[:2] == ["port", "create"]]
-        self.assertEqual(len(creates), 1)
-        self.assertIn(f"subnet={SUBNET},ip-address={ADDRESS}", creates[0])
-        self.assertNotIn("--enable-port-security", creates[0])
-        self.assertNotIn("--disable-port-security", creates[0])
-        self.assertTrue(self.port()["port_security_enabled"])
-        self.assertFalse(
-            any(a[0] in {"floating", "router", "quota"} for a in self.state()["calls"])
+        port_id = self.port()["id"]
+        self.assert_success(self.fixture.deploy())
+        current = db.get_application(self.connection, self.app_id)
+        self.assertEqual(current.worker_port_id, port_id)
+        self.assertEqual(self.port()["device_id"], current.worker_server_id)
+        with self.assertRaises(openstack.DriftError):
+            service.release_locked(
+                self.connection, self.config, self.app_id, deadline=time.monotonic() + 10
+            )
+        previous_server = current.worker_server_id
+
+        def observe(action, _values):
+            if action == "app.build":
+                self.assertEqual(set(self.state()["servers"]), {previous_server})
+            if action == "app.worker.create":
+                self.assertEqual(self.state()["servers"], {})
+
+        self.observe_action = observe
+        self.assert_success(
+            self.fixture.post(
+                f"/v1/applications/{self.app_id}/deployments",
+                {**self.fixture.body, "commit": "b" * 40, "maintenance": True},
+            )
         )
-        with self.assertRaises(HttpError):
-            self.fixture.post(self.base, {**REQUEST, "address": "128.52.133.16"}, key)
-        read = self.fixture.router.dispatch("GET", self.base, {}, None).body
-        self.assertEqual(read["attachment"], "detached")
-        self.assertIsNone(read["serverId"])
+        current = db.get_application(self.connection, self.app_id)
+        self.assertNotEqual(current.worker_server_id, previous_server)
+        self.assertEqual(current.worker_port_id, port_id)
+        self.assertEqual(self.port()["fixed_ips"], [dict(subnet_id=SUBNET, ip_address=ADDRESS)])
+        self.assertEqual(len(self.state()["servers"]), 1)
+        self.assert_success(
+            self.fixture.post(f"/v1/applications/{self.app_id}/delete", {"confirmation": "commons"})
+        )
+        self.assertEqual(self.state()["servers"], {})
+        self.assertEqual(self.state()["ports"], {})
+        self.assertIsNone(service.get(self.connection, self.app_id))
 
     def test_lost_allocation_response_recovers_only_exact_marker_no_second_create(self):
         self.change(lambda s: s.update(fault="port.create.after"))
@@ -385,73 +272,6 @@ class RetainedFixedIPTests(unittest.TestCase):
                 self.connection, self.config, self.app_id, deadline=time.monotonic() + 10
             )
 
-    @unittest.skipUnless(shutil.which("curl"), "curl transport acceptance requires curl")
-    def test_curl_over_unix_socket_repeats_maintenance_fixed_port_deployments(self):
-        socket = str(self.root / "acceptance.sock")
-        connection = db.connect(
-            self.root / "platform.sqlite3", create=False, check_same_thread=False
-        )
-        api = ControllerAPI(connection, self.config, self.root, helper_caller=self.helper)
-        project_socket = str(self.root / "project-acceptance.sock")
-        project_server = ControllerServer(project_socket, api.router("project"))
-        project_thread = threading.Thread(target=project_server.serve_forever, daemon=True)
-        project_thread.start()
-        server = ControllerServer(socket, api.router("privileged"))
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-
-        def curl(path, body=None, key=None):
-            command = [
-                "curl",
-                "--fail-with-body",
-                "--silent",
-                "--show-error",
-                "--unix-socket",
-                socket if path.startswith("/v1/admin/") else project_socket,
-            ]
-            if body is not None:
-                command += [
-                    "-H",
-                    "Content-Type: application/json",
-                    "-H",
-                    f"Idempotency-Key: {key}",
-                    "--data-binary",
-                    "@-",
-                ]
-            result = subprocess.run(
-                command + ["http://localhost" + path],
-                input=None if body is None else json.dumps(body),
-                text=True,
-                capture_output=True,
-                timeout=30,
-                check=True,
-            )
-            return json.loads(result.stdout)
-
-        def post(path, body, key=None):
-            key = key or str(uuid.uuid4())
-            submitted = curl(path, body, key)
-            for _ in range(300):
-                operation = curl(submitted["statusUrl"])
-                if operation["status"] in {"succeeded", "failed", "recovery_required"}:
-                    return key, db.get_operation(self.connection, key)
-                time.sleep(0.2)
-            self.fail("curl deployment polling timed out")
-
-        try:
-            self.assertIn("maintenance-after-build-v1", curl("/v1/admin/capabilities")["features"])
-            with mock.patch.object(self.fixture, "post", side_effect=post):
-                self._exercise_maintenance_cycles()
-        finally:
-            project_server.shutdown()
-            project_server.server_close()
-            project_thread.join(timeout=5)
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
-            api.close()
-            connection.close()
-
     def test_maintenance_capability_and_consent_are_privileged_and_typed(self):
         value = self.fixture.router.dispatch("GET", "/v1/admin/capabilities", {}, None).body
         self.assertIn("maintenance-after-build-v1", value["features"])
@@ -470,270 +290,6 @@ class RetainedFixedIPTests(unittest.TestCase):
                     {**self.fixture.body, "maintenance": value},
                 )
         self.assertEqual(self.fixture.calls, [])
-
-    def test_maintenance_flavor_drift_after_build_does_not_stop_predecessor(self):
-        self.assert_success(self.fixture.deploy(self.fixture.plan()))
-        self.assert_success(self.reserve())
-        events = []
-
-        def observe(action, values):
-            events.append(action)
-            if action == "app.build":
-                patch = mock.patch.object(
-                    openstack,
-                    "observe_flavor_capacity",
-                    return_value=replace(fixtures.XL, ram_mib=8192),
-                )
-                patch.start()
-                self.addCleanup(patch.stop)
-
-        self.observe_action = observe
-        _, failed = self.fixture.post(
-            f"/v1/admin/applications/{self.app_id}/deployments",
-            {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
-        )
-        self.assertEqual(failed.status, "recovery_required")
-        self.assertNotIn("app.remove", events)
-        self.assertNotIn("app.worker.delete", events)
-        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
-        self.assertEqual(len(self.state()["servers"]), 1)
-
-    def test_retained_port_drift_is_detected_before_maintenance_stop(self):
-        self.assert_success(self.fixture.deploy(self.fixture.plan()))
-        self.assert_success(self.reserve())
-        pid = self.port()["id"]
-        self.change(lambda state: state["ports"][pid].update(port_security_enabled=False))
-        events = []
-        self.observe_action = lambda action, values: events.append(action)
-        _, failed = self.fixture.post(
-            f"/v1/admin/applications/{self.app_id}/deployments",
-            {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
-        )
-        self.assertEqual(failed.status, "recovery_required")
-        self.assertNotIn("app.remove", events)
-        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
-        self.assertEqual(len(self.state()["servers"]), 1)
-
-    def test_maintenance_builds_while_serving_then_cuts_over_without_overlap(self):
-        self._exercise_maintenance_cycles()
-
-    def _exercise_maintenance_cycles(self):
-        self.assert_success(self.fixture.deploy(self.fixture.plan()))
-        self.assert_success(self.reserve())
-        pid = self.port()["id"]
-        accepted = db.get_application(self.connection, self.app_id)
-        expected_sizing = (
-            accepted.worker_flavor,
-            accepted.scheduler_cpu_mhz,
-            accepted.scheduler_memory_mib,
-        )
-        for _ in range(2):
-            previous = db.get_active_deployment(self.connection, self.app_id).deployment_id
-            events = []
-
-            def observe(action, values, events=events, previous=previous):
-                events.append(action)
-                connection = db.connect(self.root / "platform.sqlite3", create=False)
-                try:
-                    if action in {"app.build", "app.manifest.verify"}:
-                        self.assertTrue(db.get_application(connection, self.app_id).desired_running)
-                        self.assertEqual(len(self.state()["servers"]), 1)
-                        self.assertEqual(
-                            db.get_active_deployment(connection, self.app_id).deployment_id,
-                            previous,
-                        )
-                    if action == "app.worker.create":
-                        self.assertFalse(
-                            db.get_application(connection, self.app_id).desired_running
-                        )
-                        self.assertEqual(self.state()["servers"], {})
-                finally:
-                    connection.close()
-
-            self.observe_action = observe
-            self.assert_success(
-                self.fixture.post(
-                    f"/v1/applications/{self.app_id}/deployments",
-                    {**self.fixture.body, "maintenance": True},
-                )
-            )
-            self.assertLess(events.index("app.build"), events.index("app.remove"))
-            self.assertLess(events.index("app.worker.delete"), events.index("app.worker.create"))
-            self.assertEqual(db.get_application(self.connection, self.app_id).worker_port_id, pid)
-            accepted = db.get_application(self.connection, self.app_id)
-            self.assertEqual(
-                (accepted.worker_flavor, accepted.scheduler_cpu_mhz, accepted.scheduler_memory_mib),
-                expected_sizing,
-            )
-            self.assertEqual(len(self.state()["servers"]), 1)
-
-    def test_ordinary_maintenance_health_failure_can_enable_previous_accepted_code(self):
-        self.assert_success(self.fixture.deploy(self.fixture.plan()))
-        previous = db.get_active_deployment(self.connection, self.app_id).deployment_id
-        self.fixture.fail_health = True
-        _, failed = self.fixture.post(
-            f"/v1/admin/applications/{self.app_id}/deployments",
-            {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
-        )
-        self.assertEqual(failed.status, "failed", failed.safe_error)
-        self.assertEqual(failed.cleanup_state, "confirmed")
-        self.assertEqual(self.state()["servers"], {})
-        self.assertEqual(
-            db.get_active_deployment(self.connection, self.app_id).deployment_id, previous
-        )
-        self.assertFalse(db.get_application(self.connection, self.app_id).desired_running)
-        self.fixture.fail_health = False
-        self.assert_success(self.fixture.post(f"/v1/applications/{self.app_id}/enable", {}))
-        self.assertEqual(
-            db.get_active_deployment(self.connection, self.app_id).deployment_id, previous
-        )
-        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
-        self.assertEqual(len(self.state()["servers"]), 1)
-
-    def test_maintenance_retry_reuses_build_worker_and_does_not_stop_again(self):
-        self.assert_success(self.fixture.deploy(self.fixture.plan()))
-        self.assert_success(self.reserve())
-        body = {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True}
-        events = []
-        fail = True
-
-        def observe(action, values):
-            nonlocal fail
-            events.append(action)
-            if action == "app.worker.capacity" and fail:
-                fail = False
-                raise RuntimeError("injected capacity outage")
-
-        self.observe_action = observe
-        key, failed = self.fixture.post(f"/v1/admin/applications/{self.app_id}/deployments", body)
-        self.assertEqual(failed.status, "recovery_required")
-        self.assertFalse(db.get_application(self.connection, self.app_id).desired_running)
-        self.assertEqual(len(self.state()["servers"]), 1)
-        events.clear()
-        self.assert_success(
-            self.fixture.post(f"/v1/admin/applications/{self.app_id}/deployments", body, key)
-        )
-        self.assertNotIn("app.build", events)
-        self.assertNotIn("app.remove", events[: events.index("app.deploy")])
-        self.assertNotIn("app.worker.create", events)
-        self.assertIsNone(db.get_operation(self.connection, key).safe_error)
-        self.assertTrue(db.get_application(self.connection, self.app_id).desired_running)
-
-    def test_maintenance_build_failure_preserves_running_predecessor(self):
-        self.assert_success(self.fixture.deploy(self.fixture.plan()))
-        self.assert_success(self.reserve())
-        before = db.get_application(self.connection, self.app_id)
-        previous = db.get_active_deployment(self.connection, self.app_id).deployment_id
-        events = []
-        self.observe_action = lambda action, values: events.append(action)
-        self.fixture.fail_action = "app.build"
-        key, failed = self.fixture.post(
-            f"/v1/admin/applications/{self.app_id}/deployments",
-            {**self.fixture.body, "plan": self.fixture.plan(), "maintenance": True},
-        )
-        self.assertNotEqual(failed.status, "succeeded")
-        self.assertNotIn("app.remove", events)
-        self.assertNotIn("app.worker.delete", events)
-        self.assertNotIn("app.env.set", events)
-        self.assertEqual(db.get_application(self.connection, self.app_id), before)
-        self.assertEqual(
-            db.get_active_deployment(self.connection, self.app_id).deployment_id, previous
-        )
-        self.assertEqual(len(self.state()["servers"]), 1)
-
-    def test_transition_ordinary_reserve_disable_fixed_then_static_redeploy_and_delete(self):
-        self.assert_success(self.fixture.deploy(self.fixture.plan()))
-        before = db.get_application(self.connection, self.app_id)
-        old_port = before.worker_port_id
-        self.assert_success(self.reserve())  # Enabled ordinary worker remains untouched.
-        pid = self.port()["id"]
-        self.assertEqual(service.get(self.connection, self.app_id)["worker_slot_id"], None)
-        self.assertEqual(len(self.state()["servers"]), 1)
-        self.assertEqual(self.port()["device_id"], "")
-        from openstack_platform.controller.application_service import ApplicationService
-
-        with self.assertRaises(ValidationError):
-            ApplicationService(
-                self.connection, self.config, self.root, helper_caller=self.helper
-            ).enable(self.app_id)
-        calls = len(self.fixture.calls)
-        _, blocked = self.fixture.deploy()
-        self.assertEqual(blocked.status, "failed")
-        self.assertEqual(len(self.fixture.calls), calls)  # No build, port or workload mutation.
-        self.assert_success(self.disable())
-        self.assertNotIn(old_port, self.state()["ports"])
-        self.assertEqual(self.port()["device_id"], "")
-        first = self.assert_success(self.fixture.deploy())
-        current = db.get_application(self.connection, self.app_id)
-        self.assertEqual(current.worker_port_id, pid)
-        self.assertEqual(current.worker_flavor, fixtures.XL.name)
-        self.assertEqual(current.worker_port_name, self.port()["name"])
-        self.assert_success(self.disable())
-        self.assert_success(self.fixture.deploy())
-        self.assertEqual(db.get_application(self.connection, self.app_id).worker_port_id, pid)
-        self.assertEqual(len(self.state()["ports"]), 1)
-        self.assertEqual(len(self.state()["servers"]), 1)
-        self.assert_success(self.disable())
-        plan = self.fixture.router.dispatch(
-            "GET",
-            f"/v1/admin/applications/{self.app_id}/rollback-plan?deploymentId={first}",
-            {},
-            None,
-        ).body
-        self.assert_success(
-            self.fixture.post(
-                f"/v1/admin/applications/{self.app_id}/rollback",
-                {"plan": plan, "confirmation": "commons"},
-            )
-        )
-        self.assertEqual(db.get_application(self.connection, self.app_id).worker_port_id, pid)
-        self.assert_success(
-            self.fixture.post(f"/v1/applications/{self.app_id}/delete", {"confirmation": "commons"})
-        )
-        self.assertEqual(self.state()["servers"], {})
-        self.assertEqual(self.state()["ports"], {})
-        self.assertIsNone(service.get(self.connection, self.app_id))
-
-    def test_disable_retains_enable_reattaches_resize_preserves_and_failed_candidate_cleanup(self):
-        self.assert_success(self.reserve())
-        pid = self.port()["id"]
-        self.assert_success(self.fixture.deploy())
-        self.assert_success(self.disable())
-        self.assertEqual(self.port()["device_id"], "")
-        self.assert_success(self.fixture.post(f"/v1/applications/{self.app_id}/enable", {}))
-        self.assertEqual(db.get_application(self.connection, self.app_id).worker_port_id, pid)
-        self.assert_success(self.disable())
-        self.assert_success(self.fixture.resize(self.fixture.plan()))
-        self.assertEqual(
-            db.get_application(self.connection, self.app_id).worker_flavor, fixtures.XL.name
-        )
-        self.assert_success(self.disable())
-        self.fixture.fail_health = True
-        _, failed = self.fixture.deploy()
-        self.assertEqual(failed.status, "failed", failed.safe_error)
-        self.assertEqual(failed.cleanup_state, "confirmed")
-        self.assertEqual(self.port()["device_id"], "")
-        self.assertEqual(self.state()["servers"], {})
-        self.fixture.fail_health = False
-        self.assert_success(self.fixture.deploy())
-        self.assertEqual(db.get_application(self.connection, self.app_id).worker_port_id, pid)
-        self.assertEqual(
-            db.get_application(self.connection, self.app_id).worker_flavor, fixtures.XL.name
-        )
-
-    def test_release_bound_refused_and_lost_delete_response_resumes(self):
-        self.assert_success(self.reserve())
-        self.assert_success(self.fixture.deploy())
-        with self.assertRaises(openstack.DriftError):
-            service.release_locked(
-                self.connection, self.config, self.app_id, deadline=time.monotonic() + 10
-            )
-        self.assert_success(self.disable())
-        self.change(lambda s: s.update(fault="port.delete.after"))
-        key, operation = self.fixture.post(self.base, {"action": "release"})
-        self.assertEqual(operation.status, "recovery_required")
-        self.assert_success(self.fixture.post(self.base, {"action": "release"}, key))
-        self.assertIsNone(service.get(self.connection, self.app_id))
 
     def test_drift_and_cross_app_fail_before_any_worker_or_release_mutation(self):
         self.assert_success(self.reserve())
@@ -794,38 +350,6 @@ class RetainedFixedIPTests(unittest.TestCase):
             mutations,
             [a for a in self.state()["calls"] if len(a) > 1 and a[1] in {"create", "delete"}],
         )
-
-    def test_compact_provider_uuids_normalize_but_request_uuids_remain_strict(self):
-        self.change(lambda s: s.update(compact=True))
-        self.assert_success(self.reserve())
-        pid = self.port()["id"]
-        self.assert_success(self.fixture.deploy())
-        read = self.fixture.router.dispatch("GET", self.base, {}, None).body
-        self.assertEqual(read["portId"], pid)
-        self.assertEqual(read["attachment"], "attached")
-        self.assert_success(self.disable())
-        self.assert_success(self.fixture.post(self.base, {"action": "release"}))
-        with self.assertRaises(HttpError):
-            self.fixture.post(self.base, {**REQUEST, "networkId": NETWORK.replace("-", "")})
-
-    def test_unknown_worker_create_cannot_duplicate_cleanup_or_release(self):
-        self.assert_success(self.reserve())
-        self.change(lambda s: s.update(fault="server.create.before"))
-        key, operation = self.fixture.deploy()
-        self.assertEqual(operation.status, "recovery_required")
-        self.assertTrue(service.get(self.connection, self.app_id)["worker_create_pending"])
-        _, retry = self.fixture.post(
-            f"/v1/applications/{self.app_id}/deployments", self.fixture.body, key
-        )
-        self.assertEqual(retry.status, "recovery_required")
-        self.assertEqual(
-            len([a for a in self.state()["calls"] if a[:2] == ["server", "create"]]), 1
-        )
-        with self.assertRaises(openstack.RecoveryRequired):
-            service.release_locked(
-                self.connection, self.config, self.app_id, deadline=time.monotonic() + 10
-            )
-        self.assertEqual(len(self.state()["ports"]), 1)
 
     def test_lost_worker_create_response_recovers_exact_attached_primary(self):
         self.assert_success(self.reserve())

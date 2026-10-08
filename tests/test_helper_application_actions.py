@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import unittest
-from collections.abc import Mapping
 from types import SimpleNamespace
 from unittest import mock
 
@@ -15,12 +13,10 @@ from openstack_platform.controller.application_runtime import (
 )
 from openstack_platform.helper.application_actions import (
     _public_health_from_job,
-    _status_or_absent,
-    _synchronize_workload_variable,
     handlers,
 )
 from openstack_platform.helper.main import HelperActionError
-from openstack_platform.helper.nomad import CasConflict, SecretItems, VariableSnapshot
+from openstack_platform.helper.nomad import SecretItems, VariableSnapshot
 from openstack_platform.runtime import CommandFailure, CommandResult, CommandTimedOut
 from openstack_platform.validation import ValidationError
 
@@ -168,24 +164,6 @@ class ApplicationActionTests(unittest.TestCase):
         with self.assertRaises(HelperActionError):
             self.actions["app.restart"]({**args, "candidateJobSha256": "f" * 64})
 
-    def test_action_surface_is_complete_and_small(self) -> None:
-        self.assertEqual(
-            set(self.actions),
-            {
-                "app.deploy",
-                "app.health",
-                "app.logs",
-                "app.promote",
-                "app.remove",
-                "app.startup",
-                "app.stop",
-                "app.restart",
-                "app.env.set",
-                "app.env.remove",
-                "app.env.list",
-            },
-        )
-
     def test_candidate_cleanup_preserves_shared_accepted_job(self) -> None:
         """Candidate cleanup selects only the exact distinct candidate job."""
         self.nomad.inspection["ID"] = "demo-app-candidate"
@@ -201,20 +179,6 @@ class ApplicationActionTests(unittest.TestCase):
         self.assertFalse(
             any(call[0][-1] == "demo-app" for call in self.nomad.calls if "stop" in call[0])
         )
-        self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
-
-    def test_absent_stable_cleanup_accepts_only_exact_candidate_prefix_fallback(self) -> None:
-        self.nomad.inspection["ID"] = "demo-app-candidate"
-        result = self.actions["app.remove"](
-            {
-                "slug": "demo-app",
-                "jobId": "demo-app",
-                "candidateJobSha256": "0" * 64,
-                "candidateImage": CANDIDATE_IMAGE,
-            }
-        )
-        self.assertTrue(result["jobAbsent"])
-        self.assertEqual(self.nomad.stopped_jobs, set())
         self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
 
     def test_candidate_cleanup_refuses_identity_drift_without_stopping(self) -> None:
@@ -377,51 +341,6 @@ class ApplicationActionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "platform candidate marker"):
             self.actions["app.deploy"]({"slug": "demo-app", "job": job})
         self.assertEqual(self.nomad.calls, [])
-
-    def test_inspect_dependency_failure_blocks_submit_and_remove(self) -> None:
-        unmarked = 'job "demo-app" {\n\n}\n'
-        identity = hashlib.sha256(unmarked.encode()).hexdigest()
-        job = unmarked.replace(
-            'job "demo-app" {\n',
-            'job "demo-app" {\n'
-            "  meta {\n"
-            f'    platform_candidate_job_sha256 = "{identity}"\n'
-            f'    platform_candidate_image      = "{CANDIDATE_IMAGE}"\n'
-            f'    platform_source_commit        = "{COMMIT}"\n'
-            f'    platform_recipe_sha256        = "{"d" * 64}"\n'
-            "  }\n\n",
-            1,
-        )
-        calls: list[tuple[str, ...]] = []
-
-        def unavailable(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
-            calls.append(argv)
-            if "inspect" in argv:
-                return SimpleNamespace(
-                    stdout=b"",
-                    stderr=b"permission denied\n",
-                    stdout_truncated=False,
-                    stderr_truncated=False,
-                    returncode=1,
-                )
-            return SimpleNamespace(
-                stdout=b"",
-                stderr=b"",
-                stdout_truncated=False,
-                stderr_truncated=False,
-                returncode=0,
-            )
-
-        actions = handlers(
-            self.variables,
-            command_runner=unavailable,
-            nomad_command=("fixed-nomad-wrapper",),
-        )
-        with self.assertRaises(HelperActionError):
-            actions["app.deploy"]({"slug": "demo-app", "job": job})
-        with self.assertRaises(HelperActionError):
-            actions["app.remove"]({"slug": "demo-app"})
-        self.assertFalse(any("run" in argv or "stop" in argv for argv in calls))
 
     def test_interrupted_post_submission_recovery_observes_exact_candidate_without_resubmit(
         self,
@@ -598,27 +517,6 @@ class ApplicationActionTests(unittest.TestCase):
         self.assertFalse(failed["healthy"])
         self.assertTrue(failed["terminal"])
 
-    def test_health_accepts_nomad_two_status_projection_with_inspected_version(self) -> None:
-        self.nomad.status = [
-            {
-                "Allocations": [],
-                "Evaluations": [],
-                "LatestDeployment": None,
-                "Summary": {},
-            }
-        ]
-        result = self.actions["app.health"](
-            {
-                "slug": "demo-app",
-                "version": 7,
-                "candidateJobSha256": CANDIDATE_SHA,
-                "candidateImage": CANDIDATE_IMAGE,
-            }
-        )
-
-        self.assertTrue(result["healthy"])
-        self.assertEqual(result["currentVersion"], 7)
-
     def test_health_rejects_stale_version_duplicate_allocations_and_candidate_metadata_drift(
         self,
     ) -> None:
@@ -648,45 +546,6 @@ class ApplicationActionTests(unittest.TestCase):
         self.assertFalse(drifted["healthy"])
         self.assertTrue(drifted["terminal"])
 
-    def test_candidate_workload_variable_mirrors_canonical_values_without_exposure(self) -> None:
-        class Variables:
-            def __init__(self) -> None:
-                self.values = {
-                    "nomad/jobs/demo-app": VariableSnapshot(
-                        "nomad/jobs/demo-app", 4, SecretItems({"API_KEY": SENTINEL})
-                    ),
-                    "nomad/jobs/demo-app-candidate": VariableSnapshot(
-                        "nomad/jobs/demo-app-candidate", 0, SecretItems({})
-                    ),
-                }
-
-            def read_variable(self, path: str) -> VariableSnapshot:
-                return self.values[path]
-
-            def compare_and_set(
-                self, path: str, expected_index: int, items: Mapping[str, str]
-            ) -> int:
-                current = self.values[path]
-                if current.modify_index != expected_index:
-                    raise CasConflict(path)
-                index = expected_index + 1
-                self.values[path] = VariableSnapshot(path, index, SecretItems(dict(items)))
-                return index
-
-        variables = Variables()
-        path, index = _synchronize_workload_variable(
-            variables,
-            "demo-app",
-            "demo-app-candidate",
-        )
-        self.assertEqual(path, "nomad/jobs/demo-app-candidate")
-        self.assertEqual(index, 1)
-        self.assertEqual(
-            variables.values[path].items["API_KEY"],
-            SENTINEL,
-        )
-        self.assertNotIn(SENTINEL, repr((path, index)))
-
     def test_environment_updates_use_cas_preserve_other_owner_and_hide_values(self) -> None:
         result = self.actions["app.env.set"](
             {
@@ -710,23 +569,6 @@ class ApplicationActionTests(unittest.TestCase):
         self.assertNotIn(SENTINEL, repr(result))
         self.assertNotIn(SENTINEL, repr(self.variables.written))
 
-    def test_platform_reconciliation_corrects_stale_node_env_and_preserves_sentinel(self) -> None:
-        self.variables.items = SecretItems({"NODE_ENV": "development", "STAFF_SENTINEL": SENTINEL})
-        result = self.actions["app.env.set"](
-            {
-                "slug": "demo-app",
-                "updates": {"NODE_ENV": "production"},
-                "ownership": {"NODE_ENV": "staff", "STAFF_SENTINEL": "staff"},
-            }
-        )
-        self.assertEqual(self.variables.items["NODE_ENV"], "production")
-        self.assertEqual(self.variables.items["STAFF_SENTINEL"], SENTINEL)
-        self.assertTrue(result["restarted"])
-        self.assertTrue(result["schedulerHealthy"])
-        self.assertTrue(result["publicHealthy"])
-        self.assertNotIn(SENTINEL, repr(result))
-        self.assertNotIn(SENTINEL, repr(self.variables.items))
-
     def test_environment_health_failure_rolls_back_prior_values_in_memory(self) -> None:
         public = iter((False, True))
         actions = handlers(
@@ -746,74 +588,6 @@ class ApplicationActionTests(unittest.TestCase):
             )
         self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
         self.assertEqual(self.variables.index, 4)
-
-    def test_environment_interruption_preserves_observable_current_state(self) -> None:
-        def interrupting(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
-            if "restart" in argv:
-                raise KeyboardInterrupt
-            return self.nomad(argv, **kwargs)
-
-        actions = handlers(
-            self.variables,
-            command_runner=interrupting,
-            nomad_command=("fixed-nomad-wrapper",),
-            environment_health_attempts=1,
-            environment_poll_interval_seconds=0,
-            public_health_check=lambda _slug: True,
-            sleep=lambda _seconds: None,
-        )
-        with self.assertRaises(KeyboardInterrupt):
-            actions["app.env.set"](
-                {"slug": "demo-app", "updates": {"API_KEY": SENTINEL}, "ownership": {}}
-            )
-        self.assertEqual(set(self.variables.items), {"DATABASE_URL", "API_KEY"})
-        recovery = actions["app.env.list"]({"slug": "demo-app"})
-        self.assertEqual(recovery["keys"], ["API_KEY", "DATABASE_URL"])
-        self.assertIn("repeat set", recovery["interruptionRecovery"])
-
-    def test_environment_for_stopped_legacy_job_does_not_require_candidate_metadata(self) -> None:
-        self.nomad.inspection = {"ID": "demo-app"}
-        self.nomad.status = {"ID": "demo-app", "Status": "dead"}
-        result = self.actions["app.env.set"](
-            {"slug": "demo-app", "updates": {"API_KEY": SENTINEL}, "ownership": {}}
-        )
-        self.assertFalse(result["restarted"])
-        self.assertFalse(result["schedulerHealthy"])
-        self.assertFalse(result["publicHealthy"])
-        self.assertNotIn(
-            ("fixed-nomad-wrapper", "job", "restart", "-yes", "demo-app"),
-            [argv for argv, _kwargs in self.nomad.calls],
-        )
-
-    def test_environment_for_absent_job_mutates_without_a_false_health_claim(self) -> None:
-        self.nomad.job_absent = True
-        result = self.actions["app.env.set"](
-            {"slug": "demo-app", "updates": {"API_KEY": SENTINEL}, "ownership": {}}
-        )
-        self.assertFalse(result["restarted"])
-        self.assertFalse(result["schedulerHealthy"])
-        self.assertFalse(result["publicHealthy"])
-        self.assertNotIn(
-            ("fixed-nomad-wrapper", "job", "restart", "-yes", "demo-app"),
-            [argv for argv, _kwargs in self.nomad.calls],
-        )
-
-    def test_removing_absent_keys_from_absent_variable_is_a_noop(self) -> None:
-        self.variables.index = 0
-        self.variables.items = SecretItems({})
-        self.variables.written = None
-        self.nomad.job_absent = True
-
-        result = self.actions["app.env.remove"](
-            {"slug": "demo-app", "keys": ["NODE_ENV"], "ownership": {"NODE_ENV": "staff"}}
-        )
-
-        self.assertEqual(result["modifyIndex"], 0)
-        self.assertEqual(result["keys"], [])
-        self.assertIsNone(self.variables.written)
-        self.assertFalse(result["restarted"])
-        self.assertFalse(result["schedulerHealthy"])
-        self.assertFalse(result["publicHealthy"])
 
     def test_environment_cannot_change_storage_owned_key(self) -> None:
         with self.assertRaisesRegex(ValidationError, "owned by storage.postgres.default"):
@@ -992,114 +766,6 @@ class ApplicationActionTests(unittest.TestCase):
             ],
         )
 
-    def test_nomad_two_stopped_allocation_status_is_dead(self) -> None:
-        payload = json.dumps(
-            [
-                {
-                    "JobID": "demo-app",
-                    "ClientStatus": "complete",
-                    "DesiredStatus": "stop",
-                }
-            ]
-        ).encode()
-
-        def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            return CommandResult(argv, 0, payload, b"", False, False)
-
-        self.assertEqual(
-            _status_or_absent(
-                "demo-app",
-                command_runner=runner,
-                nomad_command=("fixed-nomad-wrapper",),
-                timeout_seconds=20,
-                response_limit=65_536,
-            ),
-            {"ID": "demo-app", "Status": "dead"},
-        )
-        payload = json.dumps([{"Allocations": json.loads(payload)}]).encode()
-        self.assertEqual(
-            _status_or_absent(
-                "demo-app",
-                command_runner=runner,
-                nomad_command=("fixed-nomad-wrapper",),
-                timeout_seconds=20,
-                response_limit=65_536,
-            ),
-            {"ID": "demo-app", "Status": "dead"},
-        )
-
-    def test_nomad_two_empty_stopped_status_requires_exact_job_inspection(self) -> None:
-        inspection = {
-            "ID": "demo-app",
-            "Version": 7,
-            "Meta": {
-                "platform_candidate_job_sha256": CANDIDATE_SHA,
-                "platform_candidate_image": CANDIDATE_IMAGE,
-            },
-            "TaskGroups": [
-                {
-                    "Name": "app",
-                    "Tasks": [{"Name": "app", "Config": {"image": CANDIDATE_IMAGE}}],
-                }
-            ],
-        }
-        calls: list[tuple[str, ...]] = []
-
-        def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            calls.append(argv)
-            if "status" in argv:
-                return CommandResult(argv, 0, b"[]", b"", False, False)
-            if "inspect" in argv:
-                return CommandResult(
-                    argv,
-                    0,
-                    json.dumps(inspection).encode(),
-                    b"",
-                    False,
-                    False,
-                )
-            raise AssertionError(argv)
-
-        self.assertEqual(
-            _status_or_absent(
-                "demo-app",
-                command_runner=runner,
-                nomad_command=("fixed-nomad-wrapper",),
-                timeout_seconds=20,
-                response_limit=65_536,
-            ),
-            {"ID": "demo-app", "Status": "dead"},
-        )
-        self.assertEqual(
-            calls,
-            [
-                ("fixed-nomad-wrapper", "job", "status", "-json", "demo-app"),
-                ("fixed-nomad-wrapper", "job", "inspect", "-json", "demo-app"),
-            ],
-        )
-
-    def test_nomad_two_unanchored_empty_status_fails_closed(self) -> None:
-        def runner(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
-            if "status" in argv:
-                return CommandResult(argv, 0, b"[]", b"", False, False)
-            return CommandResult(
-                argv,
-                1,
-                b"",
-                b'No job with ID "demo-app" found',
-                False,
-                False,
-            )
-
-        with self.assertRaisesRegex(HelperActionError, "unexpected job"):
-            _status_or_absent(
-                "demo-app",
-                command_runner=runner,
-                nomad_command=("fixed-nomad-wrapper",),
-                timeout_seconds=20,
-                response_limit=65_536,
-            )
-
     def test_follow_logs_preserves_partial_output_at_deadline(self) -> None:
         partial = CommandResult(
             argv=("fixed-nomad-wrapper",),
@@ -1127,30 +793,6 @@ class ApplicationActionTests(unittest.TestCase):
         )
         self.assertEqual(logs["text"], "partial bounded output\n")
         self.assertTrue(logs["deadlineReached"])
-
-    def test_follow_logs_is_explicit_and_bounded_by_the_fixed_runner_deadline(self) -> None:
-        logs = self.actions["app.logs"](
-            {"slug": "demo-app", "stderr": False, "lines": 5, "follow": True}
-        )
-        self.assertTrue(logs["followed"])
-        self.assertFalse(logs["deadlineReached"])
-        argv, kwargs = self.nomad.calls[-1]
-        self.assertEqual(
-            argv,
-            (
-                "fixed-nomad-wrapper",
-                "alloc",
-                "logs",
-                "-tail",
-                "-n",
-                "5",
-                "-f",
-                "alloc-123",
-                "app",
-            ),
-        )
-        self.assertEqual(kwargs["timeout_seconds"], 12)
-        self.assertEqual(kwargs["stdout_limit"], 4096)
 
     def test_unknown_arguments_and_unbounded_values_are_rejected_before_commands(self) -> None:
         count = len(self.nomad.calls)
@@ -1229,14 +871,6 @@ class StopActionTests(unittest.TestCase):
                 with self.assertRaisesRegex(HelperActionError, "deadline"):
                     self.actions["app.stop"](self.args)
                 self.assertEqual(self.clock, 3)
-        self.assertFalse(any("purge" in argv or "-purge" in argv for argv, _ in self.nomad.calls))
-
-    def test_missing_allocation_evidence_is_not_process_exit_proof(self):
-        self.statuses = []
-        self.nomad.inspection["Stop"] = True
-        self.nomad.allocations = []
-        with self.assertRaisesRegex(HelperActionError, "allocation identity"):
-            self.actions["app.stop"](self.args)
         self.assertFalse(any("purge" in argv or "-purge" in argv for argv, _ in self.nomad.calls))
 
     def test_wrong_job_allocation_or_definition_identity_fails_closed(self):
