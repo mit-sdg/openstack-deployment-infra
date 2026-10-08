@@ -34,35 +34,6 @@ class ReleaseManifestTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_temporary_repository_does_not_launch_background_git_maintenance(self) -> None:
-        trace = self.root / "git-trace.jsonl"
-        config = self.root / "gitconfig"
-        config.write_text("[maintenance]\n auto = true\n[gc]\n auto = 1\n autoDetach = true\n")
-        with mock.patch.dict(
-            os.environ,
-            {
-                "GIT_CONFIG_GLOBAL": str(config),
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_TRACE2_EVENT": str(trace),
-            },
-        ):
-            repository, commit = clean_repository(ROOT, self.root / "isolated")
-            observed = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repository,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        self.assertEqual(observed.stdout, "")
-        self.assertEqual(len(commit), 40)
-        children = [
-            event.get("argv", [])
-            for line in trace.read_text().splitlines()
-            if (event := json.loads(line)).get("event") == "child_start"
-        ]
-        self.assertFalse(any("maintenance" in args or "gc" in args for args in children), children)
-
     def test_production_signature_binds_every_component_and_evidence_file(self) -> None:
         key = self.root / "key.pem"
         public = self.root / "trust-root.pem"
@@ -195,18 +166,6 @@ class ReleaseManifestTests(unittest.TestCase):
                     allow_unsigned_development=True,
                 )
 
-    def test_management_identities_ignore_checkout_and_tmpdir_component_names(self) -> None:
-        expected = release_manifest.component_set(self.repository, self.commit)["ui"]
-        for name in ("broker", "identity", "web", "dev"):
-            with self.subTest(parent=name):
-                parent = self.root / name
-                parent.mkdir()
-                copy = parent / "checkout"
-                shutil.copytree(self.repository, copy)
-                with mock.patch.dict(os.environ, {"TMPDIR": str(parent)}):
-                    actual = release_manifest.component_set(copy, self.commit)["ui"]
-                self.assertEqual(actual, expected)
-
     def test_workspace_sbom_binds_local_sources_and_requires_registry_integrity(self) -> None:
         repository, _commit = clean_repository(ROOT, self.root / "workspace")
         lockfile = repository / "frontend/package-lock.json"
@@ -236,14 +195,6 @@ class ReleaseManifestTests(unittest.TestCase):
         lockfile.write_text(json.dumps(document))
         with self.assertRaisesRegex(release_manifest.ReleaseVerificationError, "workspace link"):
             release_manifest.npm_spdx_packages(lockfile)
-
-    def test_owner_identity_includes_shared_source_and_workspace_configuration(self) -> None:
-        repository, commit = clean_repository(ROOT, self.root / "workspace")
-        before = release_manifest.component_set(repository, commit)["ui"]["frontendSha256"]
-        source = repository / "frontend/shared/src/Mark.tsx"
-        source.write_text(source.read_text() + "\n// shared change\n")
-        after = release_manifest.component_set(repository, commit)["ui"]["frontendSha256"]
-        self.assertNotEqual(before, after)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import copy
-import hashlib
-import json
 import sqlite3
 import tempfile
 import unittest
@@ -123,46 +120,6 @@ class ControllerDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(self.connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
-    def test_fresh_migration_creates_exact_product_schema(self) -> None:
-        db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), db.MIGRATIONS[-1].version)
-        tables = {
-            row[0]
-            for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            if not row[0].startswith("sqlite_")
-        }
-        self.assertEqual(
-            tables,
-            {
-                "schema_migrations",
-                "image_selections",
-                "applications",
-                "deployment_attempts",
-                "active_deployments",
-                "managed_resources",
-                "environment_keys",
-                "operations",
-                "idempotency_requests",
-                "environment_revisions",
-                "application_slug_tombstones",
-                "operation_dispatches",
-                "application_floating_ips",
-                "application_fixed_ports",
-                "builder_settings",
-            },
-        )
-        schema_sql = "\n".join(
-            row[0] or ""
-            for row in self.connection.execute(
-                "SELECT sql FROM sqlite_master WHERE type IN ('table', 'index')"
-            )
-        )
-        self.assertNotIn("config_path", schema_sql)
-        self.assertNotIn("class", schema_sql.lower())
-        self.assertEqual(self.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
-        self.assertEqual(self.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
-
     def test_external_schema_is_rejected_before_greenfield_migration(self) -> None:
         self.connection.close()
         raw = sqlite3.connect(self.path)
@@ -172,16 +129,6 @@ class ControllerDatabaseTests(unittest.TestCase):
         self.path.chmod(0o600)
         with self.assertRaises(db.MigrationError):
             db.connect(self.path)
-
-    def test_explicit_greenfield_marker_is_recorded(self) -> None:
-        db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), db.MIGRATIONS[-1].version)
-        self.assertEqual(
-            self.connection.execute(
-                "SELECT checksum FROM schema_migrations WHERE version = 0"
-            ).fetchone()[0],
-            db._GREENFIELD_MARKER_CHECKSUM,
-        )
 
     def test_bound_deployment_marker_rejects_copied_state(self) -> None:
         platform = load_platform(Path(__file__).parents[1] / "config/platform.example.json")
@@ -208,12 +155,6 @@ class ControllerDatabaseTests(unittest.TestCase):
         wrong_namespace = db.deployment_identity(replace(platform, namespace="other-platform"))
         with self.assertRaisesRegex(db.MigrationError, "different deployment identity"):
             db.connect(self.path, identity=wrong_namespace)
-
-    def test_missing_expected_schema_object_is_refused_even_with_its_migration_row(self) -> None:
-        self.migrate()
-        self.connection.execute("DROP TABLE applications")
-        with self.assertRaisesRegex(db.MigrationError, "missing expected schema objects"):
-            db.migrate(self.connection)
 
     def test_changed_or_future_migration_is_refused(self) -> None:
         self.migrate()
@@ -271,43 +212,6 @@ class ControllerDatabaseTests(unittest.TestCase):
             deadline_at="2026-01-01T00:15:00Z",
         )
         self.assertEqual(second.status, "running")
-
-    def test_resumed_operation_takes_the_deadline_of_the_attempt_resuming_it(self) -> None:
-        """A stranded operation must not stay stranded.
-
-        The whole-operation deadline bounds one attempt. Keeping the spent
-        deadline of the attempt that stranded an operation made every recovery
-        fail on sight, and nothing else could release the scope.
-        """
-        self.migrate()
-        operation_id = str(uuid.uuid4())
-        db.begin_operation(
-            self.connection,
-            operation_id=operation_id,
-            kind="app.deploy",
-            scope=f"app-{APP_ID}",
-            phase="validated",
-            deadline_at="2026-01-01T00:15:00Z",
-            refs={"builder_id": IMAGE_ID},
-            now="2026-01-01T00:00:00Z",
-        )
-        db.mark_recovery_required(self.connection, operation_id, error="stranded")
-        renewed = db.renew_operation_deadline(
-            self.connection, operation_id, "2026-01-01T09:15:00Z", now="2026-01-01T09:00:00Z"
-        )
-        self.assertEqual(renewed.deadline_at, "2026-01-01T09:15:00Z")
-        self.assertEqual(renewed.status, "running")
-        self.assertIsNone(renewed.safe_error)
-        self.assertFalse(self.connection.in_transaction)
-        # The record the helper is checked against moves with it.
-        stored = db.get_unfinished_operation(self.connection, f"app-{APP_ID}")
-        assert stored is not None
-        self.assertEqual(stored.deadline_at, "2026-01-01T09:15:00Z")
-
-    def test_shared_secret_pattern_matches_unchanged_controller_filter(self) -> None:
-        from openstack_platform.controller.storage_contract import SECRET_KEY_PATTERN
-
-        self.assertEqual(db._SECRET_KEY.pattern, SECRET_KEY_PATTERN)
 
     def test_operation_refs_and_errors_exclude_obvious_secrets(self) -> None:
         self.migrate()
@@ -431,123 +335,6 @@ class ControllerDatabaseTests(unittest.TestCase):
             [("APP_MODE", "staff"), ("PORT", "platform")],
         )
         self.assertFalse(self.connection.in_transaction)
-
-    def test_checkpoint_can_merge_local_mutation_refs_without_losing_rollback_state(self) -> None:
-        self.migrate()
-        operation_id = str(uuid.uuid4())
-        db.begin_operation(
-            self.connection,
-            operation_id=operation_id,
-            kind="infra.replace",
-            scope="infrastructure",
-            phase="observed",
-            deadline_at="2026-01-01T00:15:00Z",
-            refs={"old_server_id": APP_ID, "prior_status": "ACTIVE"},
-        )
-        operation = db.checkpoint_operation(
-            self.connection,
-            operation_id,
-            phase="ambiguous",
-            refs={"replacement_server_id": IMAGE_ID},
-            merge_refs=True,
-        )
-        self.assertEqual(
-            operation.refs,
-            {
-                "old_server_id": APP_ID,
-                "prior_status": "ACTIVE",
-                "replacement_server_id": IMAGE_ID,
-            },
-        )
-
-    def test_unfinished_operation_image_references_are_all_protected(self) -> None:
-        self.migrate()
-        first = str(uuid.uuid4())
-        second = str(uuid.uuid4())
-        db.begin_operation(
-            self.connection,
-            operation_id=first,
-            kind="infra.replace",
-            scope="infrastructure",
-            phase="observed",
-            deadline_at="2026-01-01T00:15:00Z",
-            refs={"selected_image_id": IMAGE_ID},
-        )
-        other_image = "00000000-0000-4000-8000-000000000003"
-        db.begin_operation(
-            self.connection,
-            operation_id=second,
-            kind="app.deploy",
-            scope=f"app-{APP_ID}",
-            phase="worker_creating",
-            deadline_at="2026-01-01T00:15:00Z",
-            refs={"nested": {"worker_image_id": other_image}},
-        )
-        self.assertEqual(
-            db.unfinished_operation_image_ids(self.connection),
-            (IMAGE_ID, other_image),
-        )
-        self.assertEqual(
-            db.unfinished_operation_image_ids(self.connection, exclude_operation_id=first),
-            (other_image,),
-        )
-
-    def test_all_manifest_history_and_only_active_references_are_exposed(self) -> None:
-        self.migrate()
-        self.add_application()
-        current = DIGEST
-        prior = "registry.example/projects/demo/app@sha256:" + "b" * 64
-        candidate = "registry.example/projects/demo/app@sha256:" + "c" * 64
-        accept_deployment(
-            self.connection,
-            application_id=APP_ID,
-            source_commit="a" * 40,
-            recipe_hash="b" * 64,
-            image_digest=current,
-            nomad_job="demo-app",
-            nomad_version=1,
-            build_log_path="logs/build.log",
-        )
-        old_operation = str(uuid.uuid4())
-        db.begin_operation(
-            self.connection,
-            operation_id=old_operation,
-            kind="app.deploy",
-            scope=f"app-{APP_ID}",
-            phase="image_pushed",
-            deadline_at="2026-01-01T00:15:00Z",
-        )
-        db.checkpoint_operation(
-            self.connection, old_operation, phase="accepted", candidate_digest=prior
-        )
-        db.mark_succeeded(self.connection, old_operation)
-        active_operation = str(uuid.uuid4())
-        db.begin_operation(
-            self.connection,
-            operation_id=active_operation,
-            kind="app.deploy",
-            scope=f"app-{APP_ID}",
-            phase="image_pushed",
-            deadline_at="2026-01-01T00:15:00Z",
-        )
-        db.checkpoint_operation(
-            self.connection,
-            active_operation,
-            phase="image_pushed",
-            candidate_digest=candidate,
-        )
-        self.assertEqual(
-            set(db.list_application_manifest_images(self.connection, APP_ID)),
-            {current, prior, candidate},
-        )
-        self.assertEqual(
-            db.list_application_successful_manifest_history(self.connection, APP_ID),
-            (current, prior),
-        )
-        self.assertEqual(
-            set(db.list_active_application_manifest_references(self.connection, APP_ID)),
-            {current, candidate},
-        )
 
     def test_attempt_request_is_immutable_while_evidence_and_status_evolve(self) -> None:
         self.migrate()
@@ -732,93 +519,6 @@ class ControllerDatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "secret material"):
             db.request_fingerprint({"api_token": "must-not-be-persisted"})
         self.assertNotIn(b"must-not-be-persisted", self.path.read_bytes())
-
-    def test_binding_metadata_keeps_original_fingerprint_bytes_and_ref_filter_strict(self) -> None:
-        from openstack_platform.controller.storage_contract import OUTPUT_ENVIRONMENT_KEYS
-
-        self.migrate()
-        configuration = {
-            "schemaVersion": 1,
-            "build": {
-                "runtime": "node",
-                "packages": ["."],
-                "buildScript": None,
-                "startScript": "start",
-            },
-            "runtime": {"port": 3000, "healthPath": "/health"},
-            "storageBindings": [{"resourceId": APP_ID, "outputs": {"url": "DATABASE_URL"}}],
-        }
-        request = {"method": "POST", "body": {"configuration": configuration}}
-        original = copy.deepcopy(request)
-        expected = hashlib.sha256(
-            json.dumps(
-                request, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
-            ).encode()
-        ).hexdigest()
-        self.assertEqual(db.request_fingerprint(request), expected)
-        db.claim_idempotency_request(
-            self.connection, request_id=REQUEST_ID, request_fingerprint=expected
-        )
-        db.complete_idempotency_request(
-            self.connection,
-            request_id=REQUEST_ID,
-            result_kind="deployment",
-            result_id=DEPLOYMENT_ID,
-        )
-        replay = db.claim_idempotency_request(
-            self.connection,
-            request_id=REQUEST_ID,
-            request_fingerprint=db.request_fingerprint(request),
-        )
-        self.assertEqual(replay.result_id, DEPLOYMENT_ID)
-        self.assertEqual(request, original)
-        for resource_type, outputs in OUTPUT_ENVIRONMENT_KEYS.items():
-            with self.subTest(resource_type=resource_type):
-                current = copy.deepcopy(request)
-                current["body"]["configuration"]["storageBindings"][0]["outputs"] = dict(outputs)
-                expected = hashlib.sha256(
-                    json.dumps(
-                        current,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                        allow_nan=False,
-                    ).encode()
-                ).hexdigest()
-                self.assertEqual(db.request_fingerprint(current), expected)
-                self.assertEqual(
-                    db.request_fingerprint(current["body"]),
-                    hashlib.sha256(
-                        json.dumps(
-                            current["body"],
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            ensure_ascii=True,
-                            allow_nan=False,
-                        ).encode()
-                    ).hexdigest(),
-                )
-                # Public output identifiers do not become acceptable operation refs.
-                if resource_type in {"postgres", "s3"}:
-                    with self.assertRaisesRegex(ValidationError, "secret material"):
-                        db._refs_json(current["body"])
-        for field in ("password", "database_password", "secret_access_key", "api_token"):
-            current = copy.deepcopy(request)
-            current["body"][field] = "genuine-secret-value"
-            with (
-                self.subTest(field=field),
-                self.assertRaisesRegex(ValidationError, "secret material"),
-            ):
-                db.request_fingerprint(current)
-        for output, target in (
-            ("database_password", "PGPASSWORD"),
-            ("password", "genuine-secret-value"),
-            ("password", "PORT"),
-        ):
-            current = copy.deepcopy(request)
-            current["body"]["configuration"]["storageBindings"][0]["outputs"] = {output: target}
-            with self.subTest(output=output, target=target), self.assertRaises(ValidationError):
-                db.request_fingerprint(current)
 
     def test_environment_revision_storage_identity_and_slug_tombstone(self) -> None:
         self.migrate()

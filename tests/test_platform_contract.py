@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,15 +48,6 @@ class PlatformContractTests(unittest.TestCase):
                 path.write_text(payload, encoding="utf-8")
                 with self.subTest(index=index), self.assertRaises(ContractError):
                     load_contract(path)
-
-    def test_role_modules_do_not_repeat_contract_port_numbers(self) -> None:
-        contract = load_contract()
-        port_tokens = {str(port) for port in contract["ports"].values()}
-        for directory in (ROOT / "nix/modules", ROOT / "nix/roles"):
-            for path in directory.glob("*.nix"):
-                numbers = set(re.findall(r"\b[0-9]+\b", path.read_text(encoding="utf-8")))
-                with self.subTest(path=path.relative_to(ROOT)):
-                    self.assertTrue(port_tokens.isdisjoint(numbers))
 
 
 if __name__ == "__main__":

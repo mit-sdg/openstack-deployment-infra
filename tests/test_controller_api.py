@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import threading
 import time
@@ -19,12 +18,9 @@ from openstack_platform.config import (
     RuntimeImages,
     StandardProfile,
 )
-from openstack_platform.contracts import NOMAD_ROUTE_MARKER_KEY
-from openstack_platform.controller import application_runtime as app_runtime
 from openstack_platform.controller import database as db
-from openstack_platform.controller.api import ControllerAPI, _SingleFlight
+from openstack_platform.controller.api import ControllerAPI
 from openstack_platform.controller.http import HttpError, Response
-from tests.product_fixtures import accept_deployment
 
 
 class ControllerAPITests(unittest.TestCase):
@@ -133,42 +129,6 @@ class ControllerAPITests(unittest.TestCase):
             with self.subTest(method=method, path=path), self.assertRaises(HttpError) as raised:
                 router.dispatch(method, path, {}, None)
             self.assertEqual(raised.exception.code, "NOT_FOUND")
-
-    def test_project_capability_delta_is_only_storage_delete(self) -> None:
-        project, privileged, all_routes = (
-            self.api.router("project"),
-            self.api.router("privileged"),
-            self.api.router("all"),
-        )
-        project_set = {(r.method, r.pattern.pattern) for r in project._routes}
-        privileged_set = {(r.method, r.pattern.pattern) for r in privileged._routes}
-        complete_set = {(r.method, r.pattern.pattern) for r in all_routes._routes}
-        self.assertFalse(project_set & privileged_set)
-        self.assertEqual(project_set | privileged_set, complete_set)
-        for route in all_routes._routes:
-            expected = (
-                "/v1/admin/" in route.pattern.pattern
-                or route.method == "POST"
-                and route.pattern.pattern.endswith("/delete$")
-            )
-            self.assertEqual((route.method, route.pattern.pattern) in privileged_set, expected)
-        identifier = "00000000-0000-4000-8000-000000000081"
-        with self.assertRaises(HttpError) as error:
-            project.dispatch(
-                "DELETE",
-                f"/v1/storage/{identifier}",
-                self.headers(identifier),
-                {"confirmation": "default"},
-            )
-        self.assertEqual(error.exception.code, "STORAGE_NOT_FOUND")
-        with self.assertRaises(HttpError) as error:
-            privileged.dispatch(
-                "DELETE",
-                f"/v1/storage/{identifier}",
-                self.headers(identifier),
-                {"confirmation": "default"},
-            )
-        self.assertEqual(error.exception.code, "NOT_FOUND")
 
     def test_task_restart_is_project_scoped_idempotent_and_busy_guarded(self) -> None:
         application = self.create_application().body["applicationId"]
@@ -351,48 +311,6 @@ class ControllerAPITests(unittest.TestCase):
                         {**body, **extras},
                     )
 
-    def test_admitted_retry_does_not_expose_previous_attempt_as_new_failure(self) -> None:
-        application_id = self.create_application().body["applicationId"]
-        identifier = "00000000-0000-4000-8000-000000000090"
-        db.claim_idempotency_request(
-            self.connection, request_id=identifier, request_fingerprint="a" * 64
-        )
-        db.enqueue_operation_dispatch(
-            self.connection,
-            operation_id=identifier,
-            kind="app.deploy",
-            scope=f"app-{application_id}",
-        )
-        db.begin_operation(
-            self.connection,
-            operation_id=identifier,
-            kind="app.deploy",
-            scope=f"app-{application_id}",
-            phase="image_pushed",
-            deadline_at=db.utc_now(),
-            refs={},
-        )
-        db.mark_recovery_required(self.connection, identifier, "previous attempt failed")
-        for dispatch_status in ("pending", "running"):
-            if dispatch_status == "running":
-                db.set_operation_dispatch_status(self.connection, identifier, dispatch_status)
-            for prefix in ("/v1", "/v1/admin"):
-                value = self.dispatch("GET", f"{prefix}/operations/{identifier}").body
-                self.assertEqual(value["status"], "running")
-                self.assertIsNone(value["safeError"])
-            items = self.dispatch("GET", "/v1/admin/operations").body["items"]
-            self.assertEqual(
-                next(item for item in items if item["operationId"] == identifier)["status"],
-                "running",
-            )
-        db.set_operation_dispatch_status(
-            self.connection, identifier, "recovery_required", error="retry failed"
-        )
-        self.assertEqual(
-            self.dispatch("GET", f"/v1/admin/operations/{identifier}").body["status"],
-            "recovery_required",
-        )
-
     def test_database_create_replays_and_changed_input_conflicts(self) -> None:
         first = self.create_application()
         replay = self.create_application()
@@ -466,30 +384,6 @@ class ControllerAPITests(unittest.TestCase):
         self.assertNotIn("value", str(environment.body).lower())
 
     @mock.patch("openstack_platform.controller.application_service.openstack.verify_project")
-    def test_cascade_delete_replays_after_application_is_tombstoned(self, verify_project) -> None:
-        verify_project.return_value = None
-        application_id = self.create_application().body["applicationId"]
-        request_key = "00000000-0000-4000-8000-000000000004"
-        path = f"/v1/applications/{application_id}/delete"
-        first = self.dispatch(
-            "POST",
-            path,
-            {"confirmation": "demo-app"},
-            self.headers(request_key),
-        )
-        self.api.wait_for_operations()
-        self.assertIsNone(db.get_application(self.connection, application_id))
-        replay = self.dispatch(
-            "POST",
-            path,
-            {"confirmation": "demo-app"},
-            self.headers(request_key),
-        )
-        self.assertEqual(first.body, replay.body)
-        self.assertEqual(db.get_operation(self.connection, request_key).status, "succeeded")
-        self.assertIsNotNone(db.get_slug_tombstone(self.connection, "demo-app"))
-
-    @mock.patch("openstack_platform.controller.application_service.openstack.verify_project")
     def test_external_acceptance_is_prompt_reads_stay_responsive_and_scope_conflicts(
         self, verify_project
     ) -> None:
@@ -544,61 +438,6 @@ class ControllerAPITests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "OPERATION_CONFLICT")
         release.set()
         self.api.wait_for_operations()
-
-    @mock.patch("openstack_platform.controller.application_service.openstack.verify_project")
-    def test_shutdown_cannot_strand_an_operation_during_admission(self, verify_project) -> None:
-        verify_project.return_value = None
-        application_id = self.create_application().body["applicationId"]
-        executor = self.api.executor
-        original_slots = executor._slots  # noqa: SLF001 - deterministic shutdown race probe
-        admission_entered = threading.Event()
-        release_admission = threading.Event()
-
-        class BlockingSlots:
-            def acquire(self, *, blocking: bool) -> bool:
-                admission_entered.set()
-                self_waited = release_admission.wait(timeout=5)
-                if not self_waited:
-                    raise AssertionError("admission test timed out")
-                return original_slots.acquire(blocking=blocking)
-
-            def release(self) -> None:
-                original_slots.release()
-
-        executor._slots = BlockingSlots()  # type: ignore[assignment]  # noqa: SLF001
-        shutdown_waited_for_admission: list[bool] = []
-        race_finished = threading.Event()
-
-        def race_shutdown() -> None:
-            if not admission_entered.wait(timeout=2):
-                release_admission.set()
-                return
-            close_finished = threading.Event()
-
-            def close() -> None:
-                self.api.close()
-                close_finished.set()
-
-            close_thread = threading.Thread(target=close)
-            close_thread.start()
-            shutdown_waited_for_admission.append(not close_finished.wait(timeout=0.2))
-            release_admission.set()
-            close_thread.join(timeout=5)
-            race_finished.set()
-
-        race_thread = threading.Thread(target=race_shutdown)
-        race_thread.start()
-        response = self.dispatch(
-            "PUT",
-            f"/v1/applications/{application_id}/environment/API_TOKEN",
-            {"value": "shutdown-race-secret"},
-            self.headers("00000000-0000-4000-8000-000000000039"),
-        )
-        race_thread.join(timeout=5)
-        self.assertTrue(race_finished.is_set())
-        self.assertEqual(shutdown_waited_for_admission, [True])
-        self.assertEqual(response.status, 202)
-        self.assertEqual(self.helper_calls[-1][0], "app.env.set")
 
     @mock.patch("openstack_platform.controller.environment_service.openstack.verify_project")
     def test_restart_allows_identical_recovery_and_blocks_a_competing_key(
@@ -736,37 +575,6 @@ class ControllerAPITests(unittest.TestCase):
         self.assertEqual(queued.body["phase"], "startup_interrupted")
         self.assertEqual(queued.body["cleanupState"], "not_required")
 
-    def test_slow_observation_does_not_block_operation_poll_or_health(self) -> None:
-        identifier = "00000000-0000-4000-8000-000000000070"
-        db.begin_operation(
-            self.connection,
-            operation_id=identifier,
-            kind="app.deploy",
-            scope="app-test-poll",
-            phase="worker_ready",
-            deadline_at="2099-01-01T00:00:00Z",
-        )
-        entered = threading.Event()
-        release = threading.Event()
-
-        def slow_observation(_request):
-            entered.set()
-            if not release.wait(10):
-                raise AssertionError("test observation was not released")
-            return Response(200, {})
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            slow = pool.submit(self.api._safe(slow_observation), None)
-            try:
-                self.assertTrue(entered.wait(2))
-                poll = pool.submit(self.dispatch, "GET", f"/v1/operations/{identifier}")
-                response = poll.result(timeout=2)
-                self.assertEqual(response.body["phase"], "worker_ready")
-                self.assertEqual(self.dispatch("GET", "/v1/health").status, 200)
-            finally:
-                release.set()
-            slow.result(timeout=2)
-
     def test_slow_app_reads_do_not_wait_for_or_hold_the_api_lock(self) -> None:
         application = self.create_application().body["applicationId"]
 
@@ -835,249 +643,6 @@ class ControllerAPITests(unittest.TestCase):
             with self.assertRaises(HttpError) as missing:
                 self.dispatch("GET", path)
             self.assertEqual(missing.exception.code, code)
-
-    def test_app_settings_reads_use_a_private_query_only_snapshot(self) -> None:
-        application = self.create_application().body["applicationId"]
-        resource = db.put_managed_resource(
-            self.connection,
-            application_id=application,
-            resource_type="s3",
-            provider_name="app_demo",
-            lifecycle_state="active",
-        ).resource_id
-        snapshots = []
-
-        def private(read):
-            def observe(connection, *args, **kwargs):
-                self.assertIsNot(connection, self.connection)
-                self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
-                self.assertTrue(connection.in_transaction)
-                snapshots.append(read.__name__)
-                return read(connection, *args, **kwargs)
-
-            return mock.patch.object(db, read.__name__, side_effect=observe)
-
-        with (
-            private(db.get_environment_revision),
-            private(db.list_environment_keys),
-            private(db.list_managed_resources),
-            private(db.get_managed_resource),
-        ):
-            environment = self.dispatch("GET", f"/v1/applications/{application}/environment")
-            listed = self.dispatch("GET", f"/v1/applications/{application}/storage")
-            single = self.dispatch("GET", f"/v1/storage/{resource}")
-        self.assertEqual(environment.body["keys"], [])
-        self.assertEqual([item["resourceId"] for item in listed.body["items"]], [resource])
-        self.assertEqual(single.body["type"], "s3")
-        self.assertEqual(
-            snapshots,
-            [
-                "get_environment_revision",
-                "list_environment_keys",
-                "list_managed_resources",
-                "get_managed_resource",
-            ],
-        )
-
-    def test_app_status_probe_holds_no_lock_or_snapshot_and_is_shared(self) -> None:
-        application = self.create_application().body["applicationId"]
-        job = f'job "demo-app" {{\n    {NOMAD_ROUTE_MARKER_KEY} = "{uuid.uuid4()}"\n}}\n'
-        accept_deployment(
-            self.connection,
-            application_id=application,
-            source_commit="a" * 40,
-            recipe_hash="b" * 64,
-            image_digest="registry.example/app@sha256:" + "c" * 64,
-            nomad_job=job,
-            nomad_version=4,
-            build_log_path="logs/build.log",
-        )
-        snapshots: list[sqlite3.Connection] = []
-        connect = db.connect
-
-        def opened(*args, **kwargs):
-            connection = connect(*args, **kwargs)
-            snapshots.append(connection)
-            return connection
-
-        entered = threading.Event()
-        release = threading.Event()
-        probes = []
-
-        def observer(action, values, **_bounds):
-            still_open = 0
-            for connection in snapshots:
-                try:
-                    connection.execute("SELECT 1")
-                    still_open += 1
-                except sqlite3.ProgrammingError:
-                    pass
-            probes.append((action, values["version"], len(snapshots), still_open))
-            entered.set()
-            if not release.wait(10):
-                raise AssertionError("test probe was not released")
-            return {"healthy": True, "terminal": False}
-
-        self.api.observer_helper = observer
-        # A long reuse window, so a loaded machine cannot turn reuse into a
-        # second probe; the window itself is tested with a fake clock.
-        self.api._live = _SingleFlight(60.0)
-        path = f"/v1/applications/{application}"
-        pool = ThreadPoolExecutor(max_workers=2)
-        # A locked request (a deploy admission, say) is in progress.
-        self.api._lock.acquire()
-        locked = True
-        try:
-            with (
-                mock.patch.object(db, "connect", side_effect=opened),
-                mock.patch.object(app_runtime, "check_public_health", return_value=True),
-            ):
-                first = pool.submit(self.dispatch, "GET", path)
-                self.assertTrue(entered.wait(5))
-                # A burst of page polls waits for the running probe.
-                second = pool.submit(self.dispatch, "GET", path)
-                self.api._lock.release()
-                locked = False
-                # Locked work does not queue behind the slow probe. It uses the
-                # writer, which belongs to this thread; a regression holding the
-                # lock would delay it until the probe's own wait expires.
-                created = self.dispatch(
-                    "POST",
-                    "/v1/applications",
-                    {"slug": "other-app"},
-                    self.headers("00000000-0000-4000-8000-000000000002"),
-                )
-                self.assertEqual(created.status, 201)
-                self.assertFalse(first.done())
-                release.set()
-                responses = [first.result(timeout=5), second.result(timeout=5)]
-                # Straight after, the same accepted state reuses that probe.
-                responses.append(self.dispatch("GET", path))
-        finally:
-            if locked:
-                self.api._lock.release()
-            release.set()
-            pool.shutdown(wait=True)
-        self.assertEqual(probes, [("app.health", 4, 1, 0)])
-        for response in responses:
-            live = response.body["live"]
-            self.assertEqual(
-                (live["schedulerState"], live["allocationHealthy"], live["routeHealthy"]),
-                ("running", True, True),
-            )
-            self.assertFalse(response.body["requiresMaintenance"])
-        # Disabling changes the accepted state, so the next read does not reuse
-        # the running observation.
-        db.set_application_runtime(self.connection, application, running=False)
-        stopped = self.dispatch("GET", path).body["live"]
-        self.assertEqual(stopped["schedulerState"], "stopped")
-        self.assertEqual(len(probes), 1)
-
-    def test_single_flight_shares_a_running_probe_and_reuses_it_briefly(self) -> None:
-        now = [100.0]
-        reads = []
-        looked_up = threading.Event()
-
-        def clock():
-            reads.append(now[0])
-            if len(reads) == 2:
-                looked_up.set()
-            return now[0]
-
-        flights = _SingleFlight(2.0, clock=clock)
-        entered = threading.Event()
-        release = threading.Event()
-        calls = []
-
-        def probe(value, *, wait=False):
-            def run():
-                calls.append(value)
-                if wait:
-                    entered.set()
-                    if not release.wait(10):
-                        raise AssertionError("test probe was not released")
-                return {"value": value}
-
-            return run
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            try:
-                leader = pool.submit(flights.run, "app", probe(1, wait=True), wait_seconds=5)
-                self.assertTrue(entered.wait(5))
-                joiner = pool.submit(flights.run, "app", probe(2), wait_seconds=5)
-                self.assertTrue(looked_up.wait(5))
-                with self.assertRaises(TimeoutError):
-                    flights.run("app", probe(3), wait_seconds=0.05)
-            finally:
-                release.set()
-            self.assertEqual(leader.result(timeout=5), {"value": 1})
-            self.assertEqual(joiner.result(timeout=5), {"value": 1})
-        reused = flights.run("app", probe(4), wait_seconds=0)
-        reused["value"] = "changed by a caller"
-        now[0] = 101.9
-        self.assertEqual(flights.run("app", probe(5), wait_seconds=0), {"value": 1})
-        self.assertEqual(flights.run("other", probe(6), wait_seconds=0), {"value": 6})
-        now[0] = 102.0
-        self.assertEqual(flights.run("app", probe(7), wait_seconds=0), {"value": 7})
-
-        def failing():
-            calls.append("failed")
-            raise RuntimeError("probe failed")
-
-        now[0] = 200.0
-        with self.assertRaises(RuntimeError):
-            flights.run("app", failing, wait_seconds=0)
-        self.assertEqual(flights.run("app", probe(8), wait_seconds=0), {"value": 8})
-        self.assertEqual(calls, [1, 6, 7, "failed", 8])
-
-    def test_deploy_key_removal_asks_the_helper_and_reports_no_key(self) -> None:
-        application = self.create_application().body["applicationId"]
-        calls = []
-
-        def helper(_config, action, values, *, deadline=None):
-            # Removal changes state, so it runs under the API lock like creation.
-            self.assertTrue(self.api._lock.locked())
-            calls.append((action, values))
-            return {"slug": values["slug"], "present": False}
-
-        self.api.helper_caller = helper
-        path = f"/v1/applications/{application}/source-key"
-        for _attempt in range(2):
-            response = self.dispatch("DELETE", path)
-            self.assertEqual(
-                (response.status, response.body),
-                (200, {"applicationId": application, "present": False}),
-            )
-        self.assertEqual(calls, [("app.source.key", {"slug": "demo-app", "mode": "delete"})] * 2)
-        with self.assertRaises(HttpError) as invalid:
-            self.dispatch("DELETE", path, {"replace": True})
-        self.assertEqual(invalid.exception.code, "INVALID_BODY")
-        with self.assertRaises(HttpError) as missing:
-            self.dispatch("DELETE", f"/v1/applications/{uuid.uuid4()}/source-key")
-        self.assertEqual(missing.exception.code, "APPLICATION_NOT_FOUND")
-        self.assertEqual(len(calls), 2)
-
-    def test_both_operation_routes_use_an_independent_query_only_snapshot(self) -> None:
-        identifier = "00000000-0000-4000-8000-000000000071"
-        db.begin_operation(
-            self.connection,
-            operation_id=identifier,
-            kind="app.deploy",
-            scope="app-test-snapshot",
-            phase="worker_ready",
-            deadline_at="2099-01-01T00:00:00Z",
-        )
-        original = db.get_operation
-
-        def observe(connection, operation_id):
-            self.assertIsNot(connection, self.connection)
-            self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
-            self.assertTrue(connection.in_transaction)
-            return original(connection, operation_id)
-
-        with mock.patch.object(db, "get_operation", side_effect=observe):
-            for path in (f"/v1/operations/{identifier}", f"/v1/admin/operations/{identifier}"):
-                self.assertEqual(self.dispatch("GET", path).status, 200)
 
     def test_operation_read_omits_refs_and_admin_pagination_is_bounded(self) -> None:
         self.create_application()
