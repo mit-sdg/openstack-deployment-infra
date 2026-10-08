@@ -23,9 +23,7 @@ from ..common import MANAGEMENT_REQUESTS, canonical, strict_json
 from ..config import Config
 
 # Pages a completed sign-in may land on.
-RETURN_PATH = (
-    r"/(?:apps(?:/[a-z0-9/-]+)?|all-apps|people(?:/[a-f0-9-]{36})?|activity|audit|platform-settings|sign-in)"
-)
+RETURN_PATH = r"/(?:apps(?:/[a-z0-9/-]+)?|all-apps|people(?:/[a-f0-9-]{36})?|activity|audit|platform-settings|sign-in)"
 # Commons sign-in is two top-level navigations, so they answer only with redirects.
 NAVIGATIONS = {"/auth/commons/start", "/auth/commons/callback"}
 
