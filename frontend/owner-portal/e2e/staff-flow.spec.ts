@@ -106,6 +106,54 @@ for (const [layout, viewport] of [
         fullPage: true,
       });
     }
+    async function sizingShot(target: Page, screen: string, cardOnly = false) {
+      await expect(target.locator('.ui-skeleton')).toHaveCount(0);
+      await target.evaluate(() => document.fonts.ready);
+      await mkdir('/tmp/staff-admin-ui-shots', { recursive: true });
+      for (const theme of ['light', 'dark'] as const) {
+        await target.emulateMedia({ colorScheme: theme });
+        expect(
+          await target.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        ).toBe(true);
+        for (const control of await target.getByRole('combobox').all()) {
+          const box = await control.boundingBox();
+          expect(box!.x).toBeGreaterThanOrEqual(0);
+          expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+        }
+        const path = `/tmp/staff-admin-ui-shots/${screen}-${layout}-${theme}.png`;
+        if (cardOnly)
+          await target
+            .getByRole('region', { name: 'Build machine settings', exact: true })
+            .screenshot({ path });
+        else await target.screenshot({ path, fullPage: true });
+      }
+      await target.emulateMedia({ colorScheme: 'light' });
+    }
+    const extraSizes = ['colas', 'lg', 'm1', 's1', 'ups', 'xl'].flatMap((family) =>
+      [1, 2, 4, 8, 16].map((vcpus) => ({
+        flavor_id: `fixture-${family}-${vcpus}`,
+        name: `${family}.${vcpus}c${vcpus * 2}g`,
+        vcpus,
+        ram_mib: vcpus * 2048,
+        disk_gib: vcpus * 20,
+      })),
+    );
+    extraSizes.push(
+      {
+        flavor_id: 'fixture-long-ups',
+        name: 'ups.64c128g-long-flavor-name',
+        vcpus: 64,
+        ram_mib: 131072,
+        disk_gib: 1280,
+      },
+      {
+        flavor_id: 'fixture-long-colas',
+        name: 'colas.48c96g-long-flavor-name',
+        vcpus: 48,
+        ram_mib: 98304,
+        disk_gib: 960,
+      },
+    );
     try {
       for (const context of contexts) {
         await context.route('**/*', (route) => {
@@ -117,6 +165,25 @@ for (const [layout, viewport] of [
                 json: { message: 'Offline fixture' },
                 headers: { 'Access-Control-Allow-Origin': '*' },
               });
+        });
+      }
+      for (const context of contexts) {
+        await context.route('**/api/v1/apps/*/sizes', async (route) => {
+          const response = await route.fetch();
+          const payload = await response.json();
+          await route.fulfill({
+            response,
+            json: { data: { ...payload.data, items: [...payload.data.items, ...extraSizes] } },
+          });
+        });
+        await context.route('**/api/v1/settings/default-builder-size', async (route) => {
+          if (route.request().method() !== 'GET') return route.continue();
+          const response = await route.fetch();
+          const payload = await response.json();
+          await route.fulfill({
+            response,
+            json: { data: { ...payload.data, sizes: [...payload.data.sizes, ...extraSizes] } },
+          });
         });
       }
       await page.bringToFront();
@@ -221,6 +288,69 @@ for (const [layout, viewport] of [
             target.getByRole('button', { name: 'Change owner', exact: true }),
           ).toBeVisible();
       }
+      for (const [role, target] of [
+        ['owner', ownerPage],
+        ['staff', staffPage],
+        ['admin', page],
+      ] as const) {
+        await target.bringToFront();
+        await target.goto(`/apps/${id}/deploy`);
+        await expect(target.getByLabel('Commit SHA')).toBeVisible();
+        await expect(target.getByLabel('Sizing plan')).toHaveCount(0);
+        if (role === 'owner') {
+          await expect(target.getByLabel('Worker size', { exact: true })).toHaveCount(0);
+          await expect(target.getByLabel('Build machine', { exact: true })).toHaveCount(0);
+          await target.goto(`/apps/${id}/configuration`);
+          await expect(target.getByLabel('Build script')).toBeVisible();
+          await expect(target.getByRole('region', { name: 'Build machine settings' })).toHaveCount(
+            0,
+          );
+        } else {
+          const size = target.getByLabel('Worker size', { exact: true });
+          await expect(size).toHaveValue('');
+          await expect(size.locator('option[value="200"]')).toHaveCount(1);
+          await size.selectOption('200');
+          await expect(
+            target.getByText(/Deploying with a new size starts the app on a new worker/),
+          ).toBeVisible();
+          await expect(target.getByText(/The app can use up to/)).toBeVisible();
+          await expect(size.locator('optgroup')).toHaveCount(7);
+          if (role === 'admin') await sizingShot(target, 'deploy-worker-size');
+          await expect(target.getByLabel('Build machine', { exact: true })).toHaveCount(0);
+          await expect(target.getByText(/vCPU · .*GB · platform default/)).toBeVisible();
+          await size.selectOption('');
+          await target.goto(`/apps/${id}/configuration`);
+          const builder = target.getByLabel('Build machine', { exact: true });
+          await expect(builder).toHaveValue('');
+          await builder.selectOption('200');
+          await target.getByRole('button', { name: 'Save', exact: true }).click();
+          await expect(target.getByText('Build machine saved.', { exact: true })).toBeVisible();
+          await expect(builder).toHaveValue('200');
+          if (role === 'admin') await sizingShot(target, 'settings-build-machine', true);
+          await target.getByRole('button', { name: 'Use platform default', exact: true }).click();
+          await target.getByRole('button', { name: 'Save', exact: true }).click();
+          await expect(builder).toHaveValue('');
+          await expect(target.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+        }
+        if (role !== 'admin') {
+          await target.goto('/platform-settings');
+          await expect(
+            target.getByRole('heading', { name: "You don't have access to this page" }),
+          ).toBeVisible();
+        }
+      }
+      await page.bringToFront();
+      await page.goto('/platform-settings');
+      const defaultBuilder = page.getByLabel('Default build machine', { exact: true });
+      await expect(defaultBuilder).toHaveValue('50');
+      await defaultBuilder.selectOption('200');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(page.getByText('Default build machine saved.', { exact: true })).toBeVisible();
+      await expect(defaultBuilder).toHaveValue('200');
+      await sizingShot(page, 'platform-settings');
+      await defaultBuilder.selectOption('50');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
       const members = (await (await ownerPage.request.get(`/api/v1/apps/${id}/members`)).json())
         .data.items;
       expect(members).toHaveLength(1);

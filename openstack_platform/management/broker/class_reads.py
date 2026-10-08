@@ -120,6 +120,8 @@ ROLES = {"owner", "staff", "admin"}
 # portal's activity titles cover exactly this set (owner-portal tests read it).
 INTENT_KINDS = frozenset(
     {
+        "builder_size",
+        "default_builder_size",
         "create_app",
         "save_configuration",
         "deploy",
@@ -407,7 +409,7 @@ class ClassReads:
             ),
         }
         source, columns, model = sources[table]
-        conditions = ["1=1"]
+        conditions = ["a.app_id IS NOT NULL"] if table == "intents" else ["1=1"]
         parameters: list[object] = []
         owner = request.query.get("ownerId", (None,))[0]
         app = request.query.get("applicationId", (None,))[0]

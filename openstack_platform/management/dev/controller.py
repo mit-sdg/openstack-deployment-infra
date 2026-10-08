@@ -23,7 +23,7 @@ from ...controller.http import (
 )
 from ...controller.storage_contract import RESOURCE_OUTPUTS
 from ...runtime_versions import RUNTIME_NAMES
-from ...validation import ValidationError, env_key, slug, uuid
+from ...validation import ValidationError, env_key, flavor_reference, slug, uuid
 from ..common import canonical, digest, strict_json, utc
 
 
@@ -39,6 +39,13 @@ def fake_runtime(configuration: dict[str, Any]) -> dict[str, str | None]:
     }
 
 
+FLAVORS = (
+    {"flavor_id": "100", "name": "worker-small", "vcpus": 1, "ram_mib": 2048, "disk_gib": 20},
+    {"flavor_id": "200", "name": "worker-large", "vcpus": 4, "ram_mib": 16384, "disk_gib": 64},
+    {"flavor_id": "50", "name": "builder-small", "vcpus": 1, "ram_mib": 1024, "disk_gib": 20},
+)
+
+
 class FakeController:
     def __init__(self, state_file: Path | None = None) -> None:
         self.apps: dict[str, dict[str, Any]] = {}
@@ -52,6 +59,8 @@ class FakeController:
         self.drop_next = False
         self.failed_next = False
         self.recovery_next = False
+        self.default_builder_flavor = "builder-small"
+        self.builder_flavors: dict[str, str | None] = {}
         self.source_keys: dict[str, dict[str, str]] = {}
         # None, or the access problem an access check reports.
         self.source_problem: str | None = None
@@ -63,6 +72,8 @@ class FakeController:
             if state_file.is_symlink() or state_file.stat().st_size > 1048576:
                 raise ValueError("invalid fake controller state")
             saved = strict_json(state_file.read_bytes())
+            self.default_builder_flavor = saved.get("defaultBuilderFlavor", "builder-small")
+            self.builder_flavors = saved.get("builderFlavors", {})
             self.environments = saved.get("environments", {})
             self.resources = saved.get("resources", {})
             self.apps, self.deployments, self.operations = (
@@ -121,6 +132,8 @@ class FakeController:
         if self.state_file is None:
             return
         value = {
+            "defaultBuilderFlavor": self.default_builder_flavor,
+            "builderFlavors": self.builder_flavors,
             "apps": self.apps,
             "environments": self.environments,
             "resources": self.resources,
@@ -154,6 +167,12 @@ class FakeController:
         routes = [
             ("POST", "/v1/applications", self.create),
             ("GET", "/v1/applications/{app}", self.app),
+            ("GET", "/v1/flavors", self.flavors),
+            ("GET", "/v1/applications/{app}/resize-plan", self.resize_plan),
+            ("GET", "/v1/applications/{app}/builder-size", self.builder_size),
+            ("PUT", "/v1/applications/{app}/builder-size", self.builder_size),
+            ("GET", "/v1/settings/default-builder-size", self.builder_size),
+            ("PUT", "/v1/settings/default-builder-size", self.builder_size),
             ("POST", "/v1/applications/{app}/deployments", self.deploy),
             ("GET", "/v1/applications/{app}/deployments", self.history),
             ("GET", "/v1/deployments/{deployment}", self.deployment),
@@ -296,6 +315,78 @@ class FakeController:
         if app is None:
             raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
         return Response(200, app.copy())
+
+    @staticmethod
+    def flavor(reference: str) -> dict[str, Any]:
+        reference = flavor_reference(reference)
+        for item in FLAVORS:
+            if reference in {item["name"], item["flavor_id"]}:
+                return dict(item)
+        raise HttpError(400, "INVALID_REQUEST", "Flavor does not exist.")
+
+    def flavors(self, _request: Request) -> Response:
+        return Response(200, {"items": [dict(item) for item in FLAVORS]})
+
+    def resize_plan(self, request: Request) -> Response:
+        self.app(request)
+        app_id = request.path_parameters["app"]
+        app = self.apps[app_id]
+        if set(request.query) != {"flavor"} or len(request.query["flavor"]) != 1:
+            raise HttpError(400, "INVALID_QUERY", "Choose a size.")
+        plan = {
+            "applicationId": app_id,
+            "deploymentId": app["activeDeploymentId"],
+            "activation": "enable-after-healthy-acceptance",
+            "current": {
+                "enabled": app["desiredRunning"],
+                "flavor": app["sizing"]["workerFlavor"],
+                "cpuMHz": app["sizing"]["cpuMHz"],
+                "memoryMiB": app["sizing"]["memoryMiB"],
+            },
+            "flavor": self.flavor(request.query["flavor"][0]),
+            "allocation": "measured-worker-capacity-minus-reserve",
+            "reserve": {"cpuMHzMinimum": 200, "memoryMiBMinimum": 512, "percentMinimum": 10},
+        }
+        return Response(200, {**plan, "fingerprint": digest(canonical(plan))})
+
+    def builder_size(self, request: Request) -> Response:
+        app_id = request.path_parameters.get("app")
+        if app_id is not None:
+            self.app(request)
+        selected = (
+            self.default_builder_flavor if app_id is None else self.builder_flavors.get(app_id)
+        )
+        if request.method == "GET":
+            default = self.flavor(self.default_builder_flavor)
+            value: dict[str, Any] = {
+                "flavor": self.flavor(selected) if selected is not None else default
+            }
+            if app_id is not None:
+                value.update(defaultFlavor=default, useDefault=selected is None)
+            return Response(200, value)
+        replay = self.replay(request)
+        if replay:
+            return replay
+        body = self.body(request, {"flavor", "expectedFlavor"})
+        if body["expectedFlavor"] != selected:
+            raise HttpError(400, "INVALID_REQUEST", "Selection changed.")
+        chosen = body["flavor"]
+        flavor = (
+            self.flavor(chosen) if chosen is not None else self.flavor(self.default_builder_flavor)
+        )
+        if app_id is None:
+            self.default_builder_flavor = flavor["name"]
+        else:
+            self.builder_flavors[app_id] = None if chosen is None else flavor["name"]
+        response = self.resource_operation(
+            request,
+            app_id or "infrastructure",
+            "app.builder-size.set" if app_id else "infra.builder-size.set",
+        )
+        if app_id is None:
+            self.operations[request.idempotency_key()]["scope"] = "infrastructure"
+            self.persist()
+        return response
 
     def deploy(self, request: Request) -> Response:
         replay = self.replay(request)

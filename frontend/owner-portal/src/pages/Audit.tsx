@@ -25,6 +25,11 @@ function When({ value }: { value: string | null }) {
   );
 }
 const auditLabels: Record<string, string> = {
+  default_builder_size_requested: 'Default build machine change started',
+  default_builder_size_succeeded: 'Default build machine changed',
+  default_builder_size_failed: 'Default build machine change failed',
+  default_builder_size_blocked: 'Default build machine change needs attention',
+  app_builder_size: 'Build machine change started',
   account_invited: 'Account created',
   enrollment_started: 'Setup started',
   enrollment_completed: 'Setup finished',
@@ -83,6 +88,8 @@ function auditDetails(row: AdminAudit) {
   if (typeof purpose === 'string') parts.push(purposes[purpose] ?? purpose);
   if (typeof apps === 'number') parts.push(`${apps} apps`);
   if (typeof concurrentOperations === 'number') parts.push(`${concurrentOperations} at a time`);
+  if (typeof row.details.flavor === 'string')
+    parts.push(`${row.details.expectedFlavor ?? 'Platform default'} → ${row.details.flavor}`);
   return parts.join(' · ');
 }
 

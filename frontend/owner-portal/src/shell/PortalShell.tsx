@@ -31,6 +31,11 @@ const destinations: Item[] = [
   { label: 'All apps', href: '/all-apps', active: (path) => path.startsWith('/all-apps') },
   { label: 'People', href: '/people', active: (path) => path.startsWith('/people') },
   { label: 'Activity', href: '/activity', active: (path) => path.startsWith('/activity') },
+  {
+    label: 'Platform settings',
+    href: '/platform-settings',
+    active: (path) => path.startsWith('/platform-settings'),
+  },
   { label: 'Audit log', href: '/audit', active: (path) => path.startsWith('/audit') },
 ];
 
@@ -64,7 +69,11 @@ export function PortalShell({
   const elevated = role === 'staff' || role === 'admin';
   const items = signedIn
     ? destinations.filter(
-        (item, index) => index === 0 || (index === 4 ? role === 'admin' : elevated),
+        (item, index) =>
+          index === 0 ||
+          (item.href === '/audit' || item.href === '/platform-settings'
+            ? role === 'admin'
+            : elevated),
       )
     : [];
   useEffect(() => {

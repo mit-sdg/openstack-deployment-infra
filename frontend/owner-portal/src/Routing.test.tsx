@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { adminApi } from './adminApi';
+import { sizingApi } from './sizingApi';
 import { api, clearCredentials, type Session } from './api';
 
 // Nested staff and admin routes must reach their pages. Page data never
@@ -49,11 +50,27 @@ describe('task routes', () => {
     await waitFor(() => expect(read).toHaveBeenCalledWith(app));
     expect(screen.queryByRole('heading', { name: 'Page not found' })).toBeNull();
   });
-  it.each(['/all-apps', '/people', '/activity', '/audit'])('gates %s for owners', async (path) => {
-    show(path, 'owner');
+  it.each(['/all-apps', '/people', '/activity', '/audit', '/platform-settings'])(
+    'gates %s for owners',
+    async (path) => {
+      show(path, 'owner');
+      expect(
+        await screen.findByRole('heading', { name: "You don't have access to this page" }),
+      ).toBeVisible();
+    },
+  );
+  it('gates platform settings for staff before requesting the default', async () => {
+    const read = vi.spyOn(sizingApi, 'defaultBuilder');
+    show('/platform-settings', 'staff');
     expect(
       await screen.findByRole('heading', { name: "You don't have access to this page" }),
     ).toBeVisible();
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('opens platform settings for admins', async () => {
+    const read = vi.spyOn(sizingApi, 'defaultBuilder').mockImplementation(pending);
+    show('/platform-settings', 'admin');
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
   });
   it('gates audit for staff', async () => {
     const audit = vi.spyOn(adminApi, 'audit');

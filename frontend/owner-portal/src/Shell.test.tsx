@@ -91,6 +91,7 @@ describe('portal shell', () => {
     );
     expect(within(nav).getByRole('link', { name: 'People' })).toBeVisible();
     expect(within(nav).getByRole('link', { name: 'Audit log' })).toBeVisible();
+    expect(within(nav).getByRole('link', { name: 'Platform settings' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Account: Alice Student' }));
     expect(screen.getByText('Admin', { selector: '.ui-badge' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
@@ -108,6 +109,7 @@ describe('portal shell', () => {
       'page',
     );
     expect(within(nav).queryByRole('link', { name: 'Audit log' })).toBeNull();
+    expect(within(nav).queryByRole('link', { name: 'Platform settings' })).toBeNull();
     expect(screen.queryByRole('navigation', { name: 'Admin pages' })).toBeNull();
     await waitFor(() => expect(list).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: 'Account: Alice Student' }));

@@ -295,6 +295,15 @@ class HostedImageTests(unittest.TestCase):
             }
         )
 
+        db.put_application(
+            self.connection,
+            application_id=APP,
+            application_slug="demo-app",
+            worker_flavor="worker-small",
+            scheduler_cpu_mhz=500,
+            scheduler_memory_mib=512,
+        )
+
         def build(_config, action, values, **kwargs):
             self.assertEqual(action, "app.build")
             self.assertEqual(values["builderImageId"], OLD)

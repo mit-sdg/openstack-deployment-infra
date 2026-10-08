@@ -42,7 +42,7 @@ class ControllerAPITests(unittest.TestCase):
             "dc1",
             "region1",
             "network",
-            {"paths": {"root": "/srv/openstack-platform"}},
+            {"paths": {"root": "/srv/openstack-platform"}, "flavors": {"builder": "builder-small"}},
         )
         policy = Policy(
             StandardProfile(  # type: ignore[arg-type]

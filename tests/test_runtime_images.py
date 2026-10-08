@@ -343,6 +343,7 @@ class HelperBuildTests(unittest.TestCase):
                 "storageBindings": [],
             },
             "builderImageId": "22222222-2222-4222-8222-222222222222",
+            "builderFlavor": "builder-small",
             "runtimeImages": {"bun": DEFAULTS.bun, "node": DEFAULTS.node},
             "sourceLimit": 1_048_576,
             "buildLogLimit": 65_536,
@@ -359,6 +360,7 @@ class HelperBuildTests(unittest.TestCase):
             return destination
 
         def builder(**values: Any) -> app.BuildResult:
+            self.assertEqual(values["builder_flavor"], self.arguments["builderFlavor"])
             self.recipes.append(values["recipe"])
             values["build_log_sink"].write(b"builder output\n")
             values["build_log_sink"].flush()
@@ -375,6 +377,18 @@ class HelperBuildTests(unittest.TestCase):
             mock.patch.object(app, "build_with_disposable_builder", side_effect=builder),
         ):
             return production._build_application(self.arguments)
+
+    def test_builder_flavor_argument_replaces_inventory_and_is_required(self) -> None:
+        self.arguments["builderFlavor"] = "chosen.builder-1c1g"
+        self.build(FakeRegistry(node=NODE_INDEX), self.package())
+        for value in (None, "--option", "unsafe value", "$(bad)"):
+            with self.subTest(value=value):
+                self.arguments["builderFlavor"] = value
+                with self.assertRaises(ValidationError):
+                    production._build_application(self.arguments)
+        del self.arguments["builderFlavor"]
+        with self.assertRaises(production.HelperActionError):
+            production._build_application(self.arguments)
 
     def log(self) -> str:
         return (self.root / f"controller/build-logs/notes/{BUILD}.log").read_text()

@@ -84,7 +84,7 @@ export type AppRecord = {
 };
 export type Intent = {
   intentId: string;
-  appId: string;
+  appId: string | null;
   appSlug: string | null;
   commit: string | null;
   createdAt: string;
@@ -248,8 +248,12 @@ const appData = (v: unknown) =>
     desiredRunning: 'boolean',
     stale: 'boolean',
   }) as AppRecord;
-export const intentData = (v: unknown) =>
-  fields(v, { intentId: 'string', appId: 'string', kind: 'string', state: 'string' }) as Intent;
+export const intentData = (v: unknown) => {
+  const data = fields(v, { intentId: 'string', kind: 'string', state: 'string' });
+  if (data.appId !== null && typeof data.appId !== 'string')
+    throw new Error('Invalid service response');
+  return data as Intent;
+};
 const deploymentData = (v: unknown) =>
   fields(v, {
     deploymentId: 'string',
@@ -297,6 +301,7 @@ export async function request<T>(
     path.startsWith('/people') ||
     path.startsWith('/activity') ||
     path.startsWith('/audit') ||
+    path.startsWith('/settings/') ||
     path.startsWith('/apps/') ||
     path.startsWith('/intents/');
   const release =

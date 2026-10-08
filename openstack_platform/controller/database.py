@@ -32,6 +32,7 @@ from ..validation import (
     ValidationError,
     commit,
     env_key,
+    flavor_reference,
     oci_digest_pin,
     sha256_hex,
     slug,
@@ -594,6 +595,21 @@ MIGRATIONS += (
               )
             """,
             "UPDATE operation_dispatches SET finishing = 1 WHERE operation_id IN (SELECT operation_id FROM operations WHERE finishing = 1)",
+        ),
+    ),
+)
+
+MIGRATIONS += (
+    Migration(
+        6,
+        (
+            """
+            CREATE TABLE builder_settings (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                flavor TEXT NOT NULL
+            ) STRICT
+            """,
+            "ALTER TABLE applications ADD COLUMN builder_flavor TEXT",
         ),
     ),
 )
@@ -1738,6 +1754,48 @@ def _finish_operation(
     result = get_operation(connection, operation_id)
     assert result is not None
     return result
+
+
+def get_default_builder_flavor(connection: sqlite3.Connection) -> str | None:
+    row = connection.execute("SELECT flavor FROM builder_settings WHERE singleton = 1").fetchone()
+    return None if row is None else flavor_reference(row["flavor"])
+
+
+def put_default_builder_flavor(connection: sqlite3.Connection, flavor: str) -> None:
+    flavor = flavor_reference(flavor)
+    with transaction(connection):
+        connection.execute(
+            "INSERT INTO builder_settings VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET flavor=excluded.flavor",
+            (flavor,),
+        )
+
+
+def get_application_builder_flavor(
+    connection: sqlite3.Connection, application_id: str
+) -> str | None:
+    row = connection.execute(
+        "SELECT builder_flavor FROM applications WHERE application_id=?", (uuid(application_id),)
+    ).fetchone()
+    if row is None:
+        raise ValidationError("application does not exist")
+    return None if row["builder_flavor"] is None else flavor_reference(row["builder_flavor"])
+
+
+def put_application_builder_flavor(
+    connection: sqlite3.Connection, application_id: str, flavor: str | None
+) -> None:
+    application_id = uuid(application_id)
+    if flavor is not None:
+        flavor = flavor_reference(flavor)
+    with transaction(connection):
+        if (
+            connection.execute(
+                "UPDATE applications SET builder_flavor=?, updated_at=? WHERE application_id=?",
+                (flavor, utc_now(), application_id),
+            ).rowcount
+            != 1
+        ):
+            raise ValidationError("application does not exist")
 
 
 def put_image_selection(

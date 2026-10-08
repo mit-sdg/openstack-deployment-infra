@@ -92,7 +92,7 @@ class ControllerDatabaseTests(unittest.TestCase):
             ),
         )
         db.migrate(self.connection)
-        self.assertEqual(db.schema_version(self.connection), 5)
+        self.assertEqual(db.schema_version(self.connection), db.MIGRATIONS[-1].version)
         self.assertTrue(db.get_operation(self.connection, key).finishing)
         self.assertTrue(db.get_operation_dispatch(self.connection, key).finishing)
         self.assertFalse(db.get_operation(self.connection, REQUEST_ID).finishing)
@@ -148,6 +148,7 @@ class ControllerDatabaseTests(unittest.TestCase):
                 "operation_dispatches",
                 "application_floating_ips",
                 "application_fixed_ports",
+                "builder_settings",
             },
         )
         schema_sql = "\n".join(

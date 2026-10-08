@@ -211,3 +211,11 @@
   gap: var(--ui-card-gap);
   padding: var(--ui-card-padding);
 }
+
+.app-size-select {
+  min-width: 0;
+  max-width: 100%;
+}
+.app-size-select .ui-select__control {
+  text-overflow: ellipsis;
+}

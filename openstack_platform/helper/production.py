@@ -54,6 +54,7 @@ from ..validation import (
     ValidationError,
     bounded_text,
     commit,
+    flavor_reference,
     repository_url,
     slug,
     uuid,
@@ -474,6 +475,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
             "configurationRevision",
             "configuration",
             "builderImageId",
+            "builderFlavor",
             "runtimeImages",
             "sourceLimit",
             "buildLogLimit",
@@ -483,6 +485,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
         action,
     )
     build_id = uuid(args["buildId"], field="build ID")
+    builder_flavor = flavor_reference(args["builderFlavor"])
     app_slug = slug(args["slug"])
     branch_name(args["requestedRef"])
     revision = args["configurationRevision"]
@@ -601,7 +604,7 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                     image_name=f"{platform.get('addresses.storage')}:{REGISTRY_PORT}/projects/{app_slug}/app",
                     prefix=platform.prefix,
                     selected_builder_image_id=args["builderImageId"],
-                    builder_flavor=platform.get("flavors.builder"),
+                    builder_flavor=builder_flavor,
                     known_hosts_directory=Path(directory) / "known-hosts",
                     identity_path=application.builder_identity_path(platform),
                     source_limit=source_limit,

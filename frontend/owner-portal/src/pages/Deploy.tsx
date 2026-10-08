@@ -9,7 +9,6 @@ import {
   Hint,
   Input,
   Select,
-  Textarea,
   KeyValueList,
   PageSkeleton,
   Section,
@@ -28,6 +27,14 @@ import { CommitChecks, CommitProblems, useCommitChecks } from '../components/Com
 import { RecentCommits, useRecentCommits } from '../components/RecentCommits';
 import { recentCommits } from '../utils/github';
 import { useIntentPolling } from '../hooks/useIntentPolling';
+import {
+  buildMachineLabel,
+  sizingApi,
+  workerSizeLabel,
+  type Flavor,
+  type ResizePlan,
+} from '../sizingApi';
+import { SizeOptions } from '../components/SizeOptions';
 
 function Names({ names }: { names: string[] }) {
   return names.length ? (
@@ -56,6 +63,44 @@ function summary(settings: Settings, names: string[]) {
     { label: 'Health check', value: <code>{settings.configuration.runtime.healthPath}</code> },
     { label: 'Environment variables', value: <Names names={names} /> },
   ];
+}
+
+function SizeSummary({
+  plan,
+  current,
+  maintenance,
+}: {
+  plan: ResizePlan;
+  current?: Flavor;
+  maintenance: boolean;
+}) {
+  const memory =
+    plan.flavor.ram_mib -
+    Math.max(
+      plan.reserve.memoryMiBMinimum,
+      Math.ceil((plan.flavor.ram_mib * plan.reserve.percentMinimum) / 100),
+    );
+  return (
+    <Alert tone="info">
+      <KeyValueList
+        items={[
+          { label: 'Now', value: current ? workerSizeLabel(current) : plan.current.flavor },
+          { label: 'After deploy', value: workerSizeLabel(plan.flavor) },
+        ]}
+      />
+      <p>
+        The app can use up to {(memory / 1024).toFixed(1)} GB of memory and most of{' '}
+        {plan.flavor.vcpus} {plan.flavor.vcpus === 1 ? 'vCPU' : 'vCPUs'}; a little is kept for the
+        system.
+      </p>
+      <p>Deploying with a new size starts the app on a new worker.</p>
+      {maintenance && (
+        <p>
+          This app keeps a fixed IP address, so it goes offline briefly while the new worker starts.
+        </p>
+      )}
+    </Alert>
+  );
 }
 
 export function DeployPage({ id }: { id: string }) {
@@ -92,7 +137,28 @@ export function DeployPage({ id }: { id: string }) {
   );
   const [error, setError] = useState<string | null>(null);
   const [maintenance, setMaintenance] = useState(false);
-  const [plan, setPlan] = useState('');
+  const [size, setSize] = useState('');
+  const elevated = identity.data?.access === 'admin';
+  const sizes = useQuery({
+    queryKey: ['sizes', id],
+    queryFn: () => sizingApi.sizes(id),
+    enabled: elevated,
+  });
+  const plan = useQuery({
+    queryKey: ['resize-plan', id, size],
+    queryFn: () => sizingApi.plan(id, size),
+    enabled: elevated && !!size,
+    staleTime: 0,
+  });
+  const sizeReady = !size || (!plan.isFetching && !!plan.data && !plan.error);
+  const currentSize = sizes.data?.find((item) => item.name === identity.data?.sizing?.workerFlavor);
+  const builder = useQuery({
+    queryKey: ['builder-size', id],
+    queryFn: () => sizingApi.builder(id),
+    enabled: elevated,
+  });
+  const usesMaintenance = elevated && (identity.data?.requiresMaintenance === true || maintenance);
+
   const [intentId, setIntentId] = useState<string | null>(null);
   const [review, setReview] = useState(false);
   const [findingLatest, setFindingLatest] = useState(false);
@@ -137,22 +203,15 @@ export function DeployPage({ id }: { id: string }) {
     mutationFn: (key: string) => {
       if (identity.data?.access !== 'admin')
         return api.deploy(id, settings.data!.revision, sha, key);
-      let parsed: unknown;
-      if (plan.trim()) {
-        try {
-          parsed = JSON.parse(plan);
-        } catch {
-          throw new Error('Enter valid JSON in the sizing plan, or leave it empty.');
-        }
-      }
+      if (!sizeReady) throw new Error('Wait for the size details, or keep the current size.');
       return request(`/apps/${id}/deployments`, intentData, {
         method: 'POST',
         key,
         body: {
           configurationRevision: settings.data!.revision,
           commit: sha,
-          maintenance: identity.data.requiresMaintenance || maintenance,
-          ...(parsed ? { plan: parsed } : {}),
+          maintenance: usesMaintenance,
+          ...(size && plan.data ? { plan: plan.data } : {}),
         },
       });
     },
@@ -236,7 +295,7 @@ export function DeployPage({ id }: { id: string }) {
                   <Button
                     type="submit"
                     variant="primary"
-                    disabled={deploy.isPending || findingLatest}
+                    disabled={deploy.isPending || findingLatest || !sizeReady}
                   >
                     Review deployment
                   </Button>
@@ -276,9 +335,12 @@ export function DeployPage({ id }: { id: string }) {
                 {identity.data?.access === 'admin' && (
                   <>
                     {identity.data.requiresMaintenance ? (
-                      <Alert tone="info">
-                        This app keeps a fixed IP address, so deploying it takes it offline briefly.
-                      </Alert>
+                      !size && (
+                        <Alert tone="info">
+                          This app keeps a fixed IP address, so it goes offline briefly while the
+                          new worker starts.
+                        </Alert>
+                      )
                     ) : (
                       <Field
                         label="Deployment method"
@@ -287,26 +349,50 @@ export function DeployPage({ id }: { id: string }) {
                       >
                         <Select
                           value={maintenance ? 'replace' : 'alongside'}
-                          onChange={(event) => setMaintenance(event.target.value === 'replace')}
+                          onChange={(event) => {
+                            setMaintenance(event.target.value === 'replace');
+                            setPendingKey(null);
+                          }}
                         >
                           <option value="alongside">Start alongside the running app</option>
                           <option value="replace">Replace the running app in one step</option>
                         </Select>
                       </Field>
                     )}
-                    <Field
-                      label="Sizing plan"
-                      id="sizing-plan"
-                      optional
-                      hint="Paste a reviewed plan as JSON. Leave empty to keep the current size."
-                    >
-                      <Textarea
-                        rows={3}
-                        value={plan}
-                        onChange={(event) => setPlan(event.target.value)}
-                        spellCheck={false}
-                      />
+                    {sizes.error && <QueryError query={sizes} what="the available sizes" />}
+                    <Field label="Worker size" id="worker-size">
+                      <Select
+                        className="app-size-select"
+                        value={size}
+                        onChange={(event) => {
+                          setSize(event.target.value);
+                          setPendingKey(null);
+                        }}
+                      >
+                        <option value="">
+                          Keep current size
+                          {currentSize
+                            ? ` — ${workerSizeLabel(currentSize)}`
+                            : identity.data.sizing
+                              ? ` — ${identity.data.sizing.workerFlavor}`
+                              : ''}
+                        </option>
+                        <SizeOptions
+                          sizes={sizes.data ?? []}
+                          current={currentSize}
+                          disableCurrent
+                        />
+                      </Select>
                     </Field>
+                    {size && plan.isFetching && <Hint>Checking the selected size…</Hint>}
+                    {size && plan.error && <QueryError query={plan} what="the selected size" />}
+                    {size && plan.data && !plan.isFetching && (
+                      <SizeSummary
+                        plan={plan.data}
+                        current={currentSize}
+                        maintenance={identity.data.requiresMaintenance === true}
+                      />
+                    )}
                   </>
                 )}
                 <CommitChecks
@@ -331,7 +417,15 @@ export function DeployPage({ id }: { id: string }) {
               {environment.error && (
                 <QueryError query={environment} what="your environment variables" />
               )}
-              <KeyValueList items={summary(settings.data, injectedNames)} />
+              {elevated && builder.error && <QueryError query={builder} what="the build machine" />}
+              <KeyValueList
+                items={[
+                  ...summary(settings.data, injectedNames),
+                  ...(elevated && builder.data
+                    ? [{ label: 'Build machine', value: buildMachineLabel(builder.data) }]
+                    : []),
+                ]}
+              />
             </Section>
           </Grid>
         </>
@@ -347,6 +441,7 @@ export function DeployPage({ id }: { id: string }) {
             <Button
               variant="primary"
               loading={deploy.isPending}
+              disabled={!sizeReady}
               onClick={() => {
                 const key = pendingKey ?? crypto.randomUUID();
                 setPendingKey(key);
@@ -373,11 +468,20 @@ export function DeployPage({ id }: { id: string }) {
             ]}
           />
         )}
+        {size && plan.data && (
+          <SizeSummary
+            plan={plan.data}
+            current={currentSize}
+            maintenance={identity.data?.requiresMaintenance === true}
+          />
+        )}
         <CommitProblems checks={checks.data} />
         <Hint>
           This deploy uses your app’s current saved settings and environment variables. Check that
-          this commit is the one you mean: the branch name is only a label. Your app may briefly run
-          both versions while the new one starts.
+          this commit is the one you mean: the branch name is only a label.{' '}
+          {usesMaintenance
+            ? 'The app goes offline briefly while the new worker starts.'
+            : 'Your app may briefly run both versions while the new one starts.'}
         </Hint>
         {needsIdentity && <Alert tone="info">Signing in to this portal depends on this app.</Alert>}
         <ErrorAlert error={deploy.error} />

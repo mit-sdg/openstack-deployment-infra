@@ -96,6 +96,12 @@ export function humanPhase(phase: string) {
 export const activityTitles: Record<string, [done: string, running: string, noun: string]> = {
   create_app: ['App created', 'Creating app', 'App creation'],
   save_configuration: ['Settings saved', 'Saving settings', 'Settings change'],
+  builder_size: ['Build machine saved', 'Saving build machine', 'Build machine change'],
+  default_builder_size: [
+    'Default build machine saved',
+    'Saving default build machine',
+    'Default build machine change',
+  ],
   deploy: ['Deployed', 'Deploying', 'Deployment'],
   env_set: ['Variable set', 'Setting variable', 'Variable change'],
   env_delete: ['Variable deleted', 'Deleting variable', 'Variable deletion'],

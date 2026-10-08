@@ -6,6 +6,8 @@ import { ApiError } from '../api';
  * e.g. "your apps": "Couldn't load your apps. Try again in a minute."
  */
 export function loadErrorMessage(error: unknown, what: string) {
+  if (error instanceof ApiError && error.code === 'SIZING_UNAVAILABLE')
+    return 'Sizes are not available yet. Ask an admin to update the platform.';
   if (error instanceof ApiError && error.status === 404)
     return `Couldn't find ${what}. Check the address, or go back and try again.`;
   if (error instanceof ApiError && error.status === 403)
