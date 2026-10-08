@@ -9,8 +9,10 @@ const repository = path.resolve(
 const scenarios = ["mixed", "healthy", "outage", "empty", "unreachable"];
 export default defineConfig({
   testDir: "./e2e",
-  fullyParallel: false,
-  workers: 1,
+  // Each test owns its browser context and screenshot paths; preview data
+  // is synthetic and read-only, so two workers can share the servers.
+  fullyParallel: true,
+  workers: 2,
   timeout: 30000,
   retries: 0,
   reporter: "list",

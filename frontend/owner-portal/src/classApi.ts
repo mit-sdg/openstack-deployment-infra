@@ -83,6 +83,8 @@ const activity = (v: unknown) =>
     kind: state(
       'create_app',
       'save_configuration',
+      'builder_size',
+      'default_builder_size',
       'deploy',
       'adopt_app',
       'env_set',

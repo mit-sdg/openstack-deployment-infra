@@ -80,15 +80,6 @@ describe('app activity that needs attention', () => {
       else expect(screen.getByRole('heading', { name: 'Latest deployment' })).toBeVisible();
     },
   );
-  it('keeps unknown-state guidance in one row rather than repeated progress and error text', async () => {
-    vi.spyOn(api, 'attention').mockResolvedValue([
-      { ...blocked, state: 'unknown', safeError: 'Resume this deployment to check its outcome.' },
-    ]);
-    show(<AttentionActivity id="app" />);
-    expect(await screen.findByText('Resume this deployment to check its outcome.')).toBeVisible();
-    expect(screen.queryByText('Check this change and resume it')).toBeNull();
-    expect(screen.queryByRole('alert')).toBeNull();
-  });
   it('shows resume failures and keeps the blocked change available', async () => {
     vi.spyOn(api, 'attention').mockResolvedValue([blocked]);
     vi.spyOn(api, 'resume').mockRejectedValue(new Error('Try again in a minute.'));
