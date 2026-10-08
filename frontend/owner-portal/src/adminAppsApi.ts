@@ -6,10 +6,17 @@ import {
   resourceApi,
   runtimeLogData,
   type AppRecord,
-  type ConfirmStorage,
   type Intent,
   type LogStream,
 } from './api';
+export type AppOwner = {
+  userId: string;
+  username: string;
+  displayName: string;
+  role: 'owner' | 'staff' | 'admin';
+  enabled: boolean;
+  status: 'active' | 'pending';
+};
 export type ManagedApp = AppRecord & {
   ownerId: string;
   ownerUsername: string;
@@ -38,6 +45,22 @@ const nullableString = (value: unknown) => {
 };
 const intent = (v: unknown) => fields(v, { intentId: 'string', state: 'string' }) as Intent;
 export const adminAppsApi = {
+  owners: (q: string) =>
+    request('/admin-apps/owners?' + new URLSearchParams({ q, limit: '6' }), (v) =>
+      pageData(
+        v,
+        (item) =>
+          fields(item, {
+            userId: 'string',
+            username: 'string',
+            displayName: 'string',
+            role: 'string',
+            enabled: 'boolean',
+            status: 'string',
+          }) as AppOwner,
+      ),
+    ),
+
   logs: (id: string, stream: LogStream) =>
     request(`/admin-apps/${id}/logs?stream=${stream}`, runtimeLogData),
   list: (cursor?: string) =>
@@ -77,25 +100,19 @@ export const adminAppsApi = {
       body: { slug, ownerId },
       key,
     }),
-  adopt: (
-    applicationId: string,
-    ownerId: string | undefined,
-    key: string,
-    identityProviderConfirmed = false,
-  ) =>
+  adopt: (applicationId: string, ownerId: string | undefined, key: string) =>
     request('/admin-apps/adopt', (v) => fields(v, { applicationId: 'string' }), {
       method: 'POST',
-      body: { applicationId, ...(ownerId ? { ownerId } : {}), identityProviderConfirmed },
+      body: { applicationId, ...(ownerId ? { ownerId } : {}) },
       key,
     }),
-  resources: (confirm?: ConfirmStorage) => resourceApi('/admin-apps', confirm),
+  resources: () => resourceApi('/admin-apps'),
   deploy: (
     id: string,
     configurationRevision: number,
     commit: string,
     maintenance: boolean,
     plan: unknown,
-    identityProviderConfirmed: boolean,
     key: string,
   ) =>
     request(`/admin-apps/${id}/deployments`, intent, {
@@ -105,36 +122,24 @@ export const adminAppsApi = {
         commit,
         maintenance,
         ...(plan ? { plan } : {}),
-        identityProviderConfirmed,
       },
       key,
     }),
-  reassign: (
-    id: string,
-    expectedOwnerId: string,
-    ownerId: string,
-    identityProviderConfirmed = false,
-  ) =>
+  reassign: (id: string, expectedOwnerId: string, ownerId: string) =>
     request(`/admin-apps/${id}/owner`, record, {
       method: 'PUT',
-      body: { ownerId, expectedOwnerId, identityProviderConfirmed },
+      body: { ownerId, expectedOwnerId },
     }),
-  state: (id: string, desiredRunning: boolean, identityProviderConfirmed: boolean, key: string) =>
+  state: (id: string, desiredRunning: boolean, key: string) =>
     request(`/admin-apps/${id}/state`, intent, {
       method: 'POST',
-      body: { desiredRunning, identityProviderConfirmed },
+      body: { desiredRunning },
       key,
     }),
-  deleteStorage: (
-    id: string,
-    resource: string,
-    confirmation: string,
-    identityProviderConfirmed: boolean,
-    key: string,
-  ) =>
+  deleteStorage: (id: string, resource: string, confirmation: string, key: string) =>
     request(`/admin-apps/${id}/storage/${resource}`, intent, {
       method: 'DELETE',
-      body: { confirmation, identityProviderConfirmed },
+      body: { confirmation },
       key,
     }),
 };

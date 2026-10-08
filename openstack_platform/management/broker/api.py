@@ -23,7 +23,7 @@ from .admin_apps import AdminApps
 from .auth import Auth
 from .client import ControllerUnavailable, ProjectClient
 from .database import Database
-from .journal import ADMIN_ONLY_INTENTS, Journal, intent_model
+from .journal import Journal, intent_model
 from .members import Members, activity
 from .runtime_logs import RuntimeLogs
 from .source_keys import SourceKeys
@@ -234,7 +234,7 @@ class Broker:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         admin = request.path.startswith("/v1/admin-apps/")
         user, _sid = self.auth.authenticate(
-            request, kind=self.admin_apps.kind() if admin else None, mutation=mutation
+            request, kind="staff" if admin else None, mutation=mutation
         )
         identifier = checked_uuid(request.path_parameters["app"])
         self.request_actor.set((_sid, identifier))
@@ -268,7 +268,7 @@ class Broker:
             or set(body) - fields - {"identityProviderConfirmed"}
         ):
             raise HttpError(400, "INVALID_REQUEST", "Unexpected mutation fields.")
-        self.admin_apps.identity_consent(app["id"], body)
+        self.admin_apps.validate_identity_field(body)
         return {key: value for key, value in body.items() if key != "identityProviderConfirmed"}
 
     def quota(self, user_id: str) -> dict[str, Any]:
@@ -769,7 +769,7 @@ class Broker:
     def deploy(self, request: Request) -> Response:
         user, app = self.own(request, mutation=True)
         body = (
-            self.admin_apps.deployment_body(request, app, admin=user["role"] == "admin")
+            self.admin_apps.deployment_body(request, app)
             if request.path.startswith("/v1/admin-apps/")
             else self.identity_mutation_body(request, app, {"configurationRevision", "commit"})
         )
@@ -892,16 +892,8 @@ class Broker:
                     410, "APPLICATION_DELETED", "This application was deleted by an administrator."
                 )
             if strict_json(row["body"].encode()).get("_portalAdmin") is True:
-                # App administration: staff may resume all but admin-only kinds.
-                # Origin and CSRF were checked above; the role and step-up are
-                # checked in this transaction (a second connection would wait
-                # on its lock).
-                self.accounts.checked_actor(
-                    db,
-                    _sid,
-                    step_up=row["kind"] == "storage_delete",
-                    kind="admin" if row["kind"] in ADMIN_ONLY_INTENTS else "staff",
-                )
+                # Recheck app authority in the transaction; app actions need no step-up.
+                self.accounts.checked_actor(db, _sid, kind="staff")
             elif (
                 row["kind"] != "create_app"
                 and db.execute(

@@ -1,7 +1,6 @@
 import {
   Alert,
   Button,
-  Checkbox,
   Dialog,
   EmptyState,
   ErrorAlert,
@@ -72,7 +71,6 @@ export function DeployPage({ id }: { id: string }) {
     ]),
   ].sort();
   const identity = useQuery({ queryKey: ['app', id], queryFn: () => api.app(id) });
-  const [identityConfirmed, setIdentityConfirmed] = useState(false);
   const search = new URLSearchParams(useSearch());
   const selected = search.get('commit') ?? '';
   const latest = search.get('latest') === '1';
@@ -140,8 +138,7 @@ export function DeployPage({ id }: { id: string }) {
   const client = useQueryClient();
   const intent = useIntentPolling(intentId);
   const deploy = useMutation({
-    mutationFn: (key: string) =>
-      api.deploy(id, settings.data!.revision, sha, key, identityConfirmed),
+    mutationFn: (key: string) => api.deploy(id, settings.data!.revision, sha, key),
     onSuccess: (result) => {
       setIntentId(result.intentId);
       setReview(false);
@@ -298,7 +295,6 @@ export function DeployPage({ id }: { id: string }) {
             <Button
               variant="primary"
               loading={deploy.isPending}
-              disabled={needsIdentity && !identityConfirmed}
               onClick={() => {
                 const key = pendingKey ?? crypto.randomUUID();
                 setPendingKey(key);
@@ -331,13 +327,7 @@ export function DeployPage({ id }: { id: string }) {
           this commit is the one you mean: the branch name is only a label. Your app may briefly run
           both versions while the new one starts.
         </Hint>
-        {needsIdentity && (
-          <Checkbox
-            label="Signing in to this portal depends on this app. Deploy it anyway."
-            checked={identityConfirmed}
-            onChange={(event) => setIdentityConfirmed(event.target.checked)}
-          />
-        )}
+        {needsIdentity && <Alert tone="info">Signing in to this portal depends on this app.</Alert>}
         <ErrorAlert error={deploy.error} />
       </Dialog>
     </AppFrame>

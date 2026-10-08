@@ -498,7 +498,7 @@ Playwright resets `.tmp/e-accounts-<mode>` before each run. Ports are 9543 (HTTP
 | --- | --- |
 | `e2e/owner-flow.spec.ts` | Two owners signing in through the fake Commons, isolation between them, configuration, deploy and review, build output, recovery after a lost response, sign-out, and CSP, at desktop and phone widths in light and dark |
 | `e2e/resources.spec.ts` | Environment variables, renamed PostgreSQL bindings, the variable names a deploy injects, and credential rotation |
-| `e2e/staff-flow.spec.ts` | Bootstrapping a portal admin with an authenticator, inviting local staff, owner and staff boundaries, adopting a seeded operator app, staff managing another owner's app without admin-only actions, and the audit log |
+| `e2e/staff-flow.spec.ts` | Bootstrapping a portal admin with an authenticator, inviting local staff, owner and staff boundaries, adopting a seeded operator app, staff creating, adopting, reassigning, deploying, and deleting storage without step-up, with account-management boundaries, and the audit log |
 
 Traces and video are off; screenshots go to `.tmp/owner-portal-playwright/screenshots/`. On failure, `tests/collect_owner_portal_artifacts.py` collects fixture screenshots and sanitized diagnostics (method, path, status, error code), limited to 2 MiB per file and 20 MiB total. CI uploads no traces, videos, headers, query strings, or response bodies.
 

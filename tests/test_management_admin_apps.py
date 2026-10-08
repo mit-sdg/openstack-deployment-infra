@@ -110,30 +110,11 @@ class AdminApplicationTests(ManagementCase):
                 )
         self.assertEqual(len(self.fixture.calls), calls)
 
-    def test_staff_pass_every_app_action_except_ownership_and_storage_deletion(self) -> None:
+    def test_staff_pass_every_app_action_without_step_up(self) -> None:
         self.staff()
-        admin_only = {
-            ("POST", "/v1/admin-apps"),
-            ("POST", "/v1/admin-apps/adopt"),
-            ("PUT", "/v1/admin-apps/{app}/owner"),
-            ("DELETE", "/v1/admin-apps/{app}/storage/{resource}"),
-        }
-        self.assertLess(admin_only, {(m, r) for m, r, _path in self.routes()})
-        for method, route, path in self.routes():
+        for method, _route, path in self.routes():
             body = {} if method != "GET" else None
             with self.subTest(path=path, method=method):
-                if (method, route) in admin_only:
-                    calls = len(self.fixture.calls)
-                    self.assert_error(
-                        "ACCESS_DENIED",
-                        lambda method=method, path=path, body=body: self.call(
-                            method, path, body, "taylor"
-                        ),
-                    )
-                    self.assertEqual(len(self.fixture.calls), calls)
-                    continue
-                # Empty bodies fail validation; any answer but a role denial
-                # shows the request got past the staff-or-admin gate.
                 try:
                     self.call(method, path, body, "taylor")
                 except HttpError as error:
@@ -222,44 +203,133 @@ class AdminApplicationTests(ManagementCase):
             "ACCESS_DENIED", lambda: self.call("GET", "/v1/account-audit", owner="taylor")
         )
 
-    def test_staff_cannot_allow_maintenance_or_resize_a_deployment(self) -> None:
+    def test_staff_deploy_retained_ipv4_without_consent(self) -> None:
         self.staff()
         imported = self.adopted()
-        for extra in ({"maintenance": True}, {"plan": {}}):
-            with self.subTest(extra=extra):
-                self.assert_error(
-                    "ADMIN_REQUIRED",
-                    lambda extra=extra: self.call(
-                        "POST",
-                        self.prefix + "/deployments",
-                        {"configurationRevision": 1, "commit": "a" * 40, **extra},
-                        "taylor",
-                    ),
-                )
-        # An app keeping a fixed IP address needs the maintenance outage, so
-        # only an admin can deploy it.
-        self.assert_error(
-            "ADMIN_REQUIRED",
-            lambda: self.call(
-                "POST",
-                f"/v1/admin-apps/{imported}/deployments",
-                {"configurationRevision": 7, "commit": "a" * 40, "identityProviderConfirmed": True},
+        response = self.call(
+            "POST",
+            f"/v1/admin-apps/{imported}/deployments",
+            {"configurationRevision": 7, "commit": "a" * 40, "maintenance": False},
+            "taylor",
+        )
+        self.assertEqual(response.status, 202)
+        self.assertNotIn(self.complete(response, "taylor")["state"], {"blocked", "failed"})
+        with self.broker.database.connect() as db:
+            body = db.execute(
+                "SELECT body FROM intents WHERE id=?", (response.body["data"]["intentId"],)
+            ).fetchone()[0]
+        self.assertIs(strict_json(body.encode())["maintenance"], True)
+
+    def test_staff_create_adopt_reassign_delete_and_audit_without_step_up(self) -> None:
+        staff = self.staff()
+        self.now += 301
+        created = self.call(
+            "POST", "/v1/admin-apps", {"slug": "staff-created", "ownerId": self.owner}, "taylor"
+        )
+        self.assertEqual(created.status, 201)
+        identifier = str(uuid.uuid4())
+        self.fixture.seed_operator_app(identifier, self.config.commons_origin)
+        adopted = self.call(
+            "POST",
+            "/v1/admin-apps/adopt",
+            {"applicationId": identifier, "ownerId": self.owner},
+            "taylor",
+        )
+        self.assertEqual(adopted.status, 201)
+        self.assertEqual(
+            self.call(
+                "PUT",
+                self.prefix + "/owner",
+                {"ownerId": staff, "expectedOwnerId": self.owner},
                 "taylor",
+            ).status,
+            200,
+        )
+        response = self.call("POST", self.prefix + "/storage", {"type": "postgres"}, "taylor")
+        self.assertEqual(self.complete(response, "taylor")["state"], "succeeded")
+        resource = self.call("GET", self.prefix + "/storage", owner="taylor").body["data"]["items"][
+            0
+        ]
+        path = self.prefix + "/storage/" + resource["resourceId"]
+        self.assert_error(
+            "CONFIRMATION_REQUIRED",
+            lambda: self.call(
+                "DELETE",
+                path,
+                {"confirmation": "wrong"},
+                "taylor",
+                headers={"idempotency-key": str(uuid.uuid4())},
             ),
         )
+        removed = self.call(
+            "DELETE",
+            path,
+            {"confirmation": "student-app postgres"},
+            "taylor",
+            headers={"idempotency-key": str(uuid.uuid4())},
+        )
+        self.assertEqual(self.complete(removed, "taylor")["state"], "succeeded")
         with self.broker.database.connect() as db:
-            self.assertEqual(
-                db.execute("SELECT COUNT(*) FROM intents WHERE kind='deploy'").fetchone()[0], 0
+            actions = {
+                row[0]
+                for row in db.execute("SELECT action FROM admin_audit WHERE actor_id=?", (staff,))
+            }
+            self.assertIsNone(
+                db.execute("SELECT 1 FROM local_accounts WHERE user_id=?", (staff,)).fetchone()
             )
-        self.assertFalse(
-            [
-                path
-                for method, path, _body in self.fixture.calls
-                if method == "POST" and path.endswith("/deployments")
-            ]
+        self.assertLessEqual(
+            {"app_create_app", "app_adopted", "app_owner_changed", "app_storage_delete"}, actions
         )
 
-    def test_journal_runs_staff_app_administration_but_not_owners_or_admin_only_kinds(
+    def test_staff_denied_account_management_quotas_audit_and_reauthentication(self) -> None:
+        self.staff()
+        for method, path, body in (
+            ("GET", "/v1/accounts", None),
+            (
+                "POST",
+                "/v1/accounts",
+                {"username": "new-user", "displayName": "New", "role": "owner"},
+            ),
+            ("PATCH", f"/v1/accounts/{self.owner}", {"action": "role", "value": "staff"}),
+            ("PUT", f"/v1/accounts/{self.owner}/quotas", {"apps": 5, "concurrentOperations": 2}),
+            ("GET", "/v1/account-audit", None),
+            ("POST", "/v1/reauthenticate", {"password": "unused", "totp": "123456"}),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assert_error(
+                    "ACCESS_DENIED",
+                    lambda method=method, path=path, body=body: self.call(
+                        method, path, body, "taylor"
+                    ),
+                )
+
+    def test_staff_owner_picker_search_is_scoped_and_bounded(self) -> None:
+        self.staff()
+        response = self.call("GET", "/v1/admin-apps/owners?q=ali&limit=6", owner="taylor")
+        items = response.body["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["userId"], self.owner)
+        self.assertEqual(
+            set(items[0]), {"userId", "username", "displayName", "role", "enabled", "status"}
+        )
+        self.assert_error(
+            "INVALID_FIELD",
+            lambda: self.call("GET", "/v1/admin-apps/owners?q=" + "x" * 65, owner="taylor"),
+        )
+        self.assertEqual(
+            self.call("GET", "/v1/admin-apps/owners?q=%25", owner="taylor").body["data"]["items"],
+            [],
+        )
+        self.assert_error(
+            "INVALID_REQUEST",
+            lambda: self.call("GET", "/v1/admin-apps/owners?role=owner", owner="taylor"),
+        )
+
+    def test_staff_can_supply_reviewed_sizing_plan(self) -> None:
+        self.staff()
+        self.test_admin_config_and_project_deploy_extras_owners_cannot_forge("taylor")
+
+    def test_journal_runs_all_staff_app_kinds_but_blocks_owners(
         self,
     ) -> None:
         staff = self.staff()
@@ -294,9 +364,10 @@ class AdminApplicationTests(ManagementCase):
         review = ("blocked", "Admin review required.")
         for user, kind, blocked in (
             (self.owner, "app_restart", True),
-            (staff, "storage_delete", True),
-            (staff, "create_app", True),
+            (staff, "storage_delete", False),
+            (staff, "create_app", False),
             (staff, "app_restart", False),
+            (staff, "adopt_app", False),
         ):
             with self.subTest(user=user, kind=kind):
                 identifier = intent(user, kind)
@@ -305,22 +376,12 @@ class AdminApplicationTests(ManagementCase):
                     self.assertEqual(state(identifier), review)
                 else:
                     self.assertNotEqual(state(identifier)[0], "blocked")
-        # Staff resume their own blocked app changes, never admin-only kinds.
-        self.assertEqual(
-            self.call(
-                "POST",
-                f"/v1/intents/{intent(staff, 'app_restart', 'blocked')}/resume",
-                {},
-                "taylor",
-            ).status,
-            202,
-        )
-        deletion = intent(staff, "storage_delete", "blocked")
-        self.assert_error(
-            "ACCESS_DENIED",
-            lambda: self.call("POST", f"/v1/intents/{deletion}/resume", {}, "taylor"),
-        )
-        self.assertEqual(state(deletion)[0], "blocked")
+        # Staff resume every app kind without step-up.
+        for kind in ("app_restart", "storage_delete", "create_app", "adopt_app"):
+            identifier = intent(staff, kind, "blocked")
+            self.assertEqual(
+                self.call("POST", f"/v1/intents/{identifier}/resume", {}, "taylor").status, 202
+            )
 
     def test_adoption_unknown_already_owned_idempotency_import_round_trip(self) -> None:
         self.assert_error(
@@ -589,8 +650,10 @@ class AdminApplicationTests(ManagementCase):
             "INVALID_REQUEST",
         )
 
-    def test_admin_config_and_project_deploy_extras_owners_cannot_forge(self) -> None:
-        saved = self.call("GET", self.prefix + "/configuration", owner="admin").body["data"]
+    def test_admin_config_and_project_deploy_extras_owners_cannot_forge(
+        self, actor: str = "admin"
+    ) -> None:
+        saved = self.call("GET", self.prefix + "/configuration", owner=actor).body["data"]
         self.call(
             "PUT",
             self.prefix + "/configuration",
@@ -600,7 +663,7 @@ class AdminApplicationTests(ManagementCase):
                 "branch": "other",
                 "configuration": saved["configuration"],
             },
-            "admin",
+            actor,
         )
         body = {
             "configurationRevision": 2,
@@ -628,7 +691,7 @@ class AdminApplicationTests(ManagementCase):
             },
         }
         body["plan"]["fingerprint"] = digest(canonical(body["plan"]))
-        result = self.call("POST", self.prefix + "/deployments", body, "admin")
+        result = self.call("POST", self.prefix + "/deployments", body, actor)
         with self.broker.database.connect() as db:
             row = db.execute(
                 "SELECT * FROM intents WHERE id=?", (result.body["data"]["intentId"],)
@@ -651,31 +714,24 @@ class AdminApplicationTests(ManagementCase):
                 ),
             )
 
-    def test_retained_ipv4_and_identity_provider_confirmations(self) -> None:
+    def test_retained_ipv4_and_identity_provider_need_no_consent(self) -> None:
         imported = self.adopted()
         route = f"/v1/admin-apps/{imported}"
         detail = self.call("GET", route, owner="admin").body["data"]
         self.assertTrue(detail["requiresMaintenance"])
         self.assertTrue(detail["identityProvider"])
-        body = {"configurationRevision": 7, "commit": "a" * 40}
-        self.assert_error(
-            "IDENTITY_CONFIRMATION_REQUIRED",
-            lambda: self.call("POST", route + "/deployments", body, "admin"),
+        response = self.call(
+            "POST",
+            route + "/deployments",
+            {"configurationRevision": 7, "commit": "a" * 40},
+            "admin",
         )
-        body["identityProviderConfirmed"] = True
-        self.assert_error(
-            "MAINTENANCE_REQUIRED", lambda: self.call("POST", route + "/deployments", body, "admin")
-        )
-        self.assert_error(
-            "IDENTITY_CONFIRMATION_REQUIRED",
-            lambda: self.call("POST", route + "/state", {"desiredRunning": False}, "admin"),
-        )
-        self.assert_error(
-            "IDENTITY_CONFIRMATION_REQUIRED",
-            lambda: self.call("POST", route + "/storage", {"type": "s3"}, "admin"),
-        )
-        body["maintenance"] = True
-        self.assertEqual(self.call("POST", route + "/deployments", body, "admin").status, 202)
+        self.assertEqual(response.status, 202)
+        self.complete(response)
+        response = self.call("POST", route + "/state", {"desiredRunning": False}, "admin")
+        self.assertEqual(response.status, 202)
+        self.complete(response)
+        self.assertEqual(self.call("POST", route + "/storage", {"type": "s3"}, "admin").status, 202)
 
     def test_admin_environment_keeps_hmac_and_no_values_in_db_response_or_audit(self) -> None:
         value = "ADMIN_SECRET_SENTINEL_89214"
@@ -723,25 +779,13 @@ class AdminApplicationTests(ManagementCase):
         )
         self.assertEqual(result.status, 202)
 
-    def test_admin_storage_delete_requires_step_up_and_typed_confirmation_and_audit(self) -> None:
+    def test_admin_storage_delete_needs_typed_confirmation_and_audit_without_step_up(self) -> None:
         result = self.call("POST", self.prefix + "/storage", {"type": "s3"}, "admin")
         self.assertEqual(self.complete(result)["state"], "succeeded")
         storage = self.call("GET", self.prefix + "/storage", owner="admin").body["data"]["items"][0]
         path = self.prefix + "/storage/" + storage["resourceId"]
         key = str(uuid.uuid4())
         self.now += 301
-        self.assert_error(
-            "STEP_UP_REQUIRED",
-            lambda: self.call(
-                "DELETE",
-                path,
-                {"confirmation": "student-app s3"},
-                "admin",
-                headers={"idempotency-key": key},
-            ),
-        )
-        with self.broker.database.connect(write=True) as db:
-            db.execute("UPDATE sessions SET reauthenticated_at=? WHERE kind='admin'", (self.now,))
         self.assert_error(
             "CONFIRMATION_REQUIRED",
             lambda: self.call(
@@ -790,14 +834,7 @@ class AdminApplicationTests(ManagementCase):
         self.assertEqual(
             self.call("POST", f"/v1/intents/{restart}/resume", {}, "admin").status, 202
         )
-        # Resuming a deletion still needs a recent password and code.
         self.now += 301
-        self.assert_error(
-            "STEP_UP_REQUIRED",
-            lambda: self.call("POST", f"/v1/intents/{deletion}/resume", {}, "admin"),
-        )
-        with self.broker.database.connect(write=True) as db:
-            db.execute("UPDATE sessions SET reauthenticated_at=? WHERE kind='admin'", (self.now,))
         self.assertEqual(
             self.call("POST", f"/v1/intents/{deletion}/resume", {}, "admin").status, 202
         )
@@ -924,109 +961,136 @@ class AdminApplicationTests(ManagementCase):
                 1,
             )
 
-    def test_storage_delete_refuses_saved_bindings_and_class_changes_need_consent(self) -> None:
+    def test_storage_delete_refuses_saved_bindings_without_identity_consent(self) -> None:
         app = self.adopted(bindings=True)
         resource = next(
             item for item in self.fixture.resources.values() if item["applicationId"] == app
         )
         path = f"/v1/admin-apps/{app}/storage/{resource['resourceId']}"
-        body = {"confirmation": "operator-class-fixture postgres"}
-        self.assert_error(
-            "IDENTITY_CONFIRMATION_REQUIRED",
-            lambda: self.call(
-                "DELETE", path, body, "admin", headers={"idempotency-key": str(uuid.uuid4())}
-            ),
-        )
-        body["identityProviderConfirmed"] = True
         self.assert_error(
             "STORAGE_BOUND",
             lambda: self.call(
-                "DELETE", path, body, "admin", headers={"idempotency-key": str(uuid.uuid4())}
+                "DELETE",
+                path,
+                {"confirmation": "operator-class-fixture postgres"},
+                "admin",
+                headers={"idempotency-key": str(uuid.uuid4())},
             ),
         )
 
-    def test_adoption_requires_step_up_even_when_owner_is_admin(self) -> None:
+    def test_admin_adoption_and_reassignment_need_no_step_up(self) -> None:
         self.now += 301
         for owner in (None, self.admin_user, self.owner):
-            body = {"applicationId": str(uuid.uuid4()), **({"ownerId": owner} if owner else {})}
+            identifier = str(uuid.uuid4())
+            self.fixture.seed_operator_app(identifier, self.config.commons_origin)
+            self.fixture.apps[identifier]["slug"] += "-" + identifier[:8]
+            body = {"applicationId": identifier, **({"ownerId": owner} if owner else {})}
             with self.subTest(owner=owner):
-                self.assert_error(
-                    "STEP_UP_REQUIRED",
-                    lambda body=body: self.call("POST", "/v1/admin-apps/adopt", body, "admin"),
+                self.assertEqual(
+                    self.call("POST", "/v1/admin-apps/adopt", body, "admin").status, 201
                 )
-
-    def test_identity_confirmation_required_for_adoption_and_reassignment(self) -> None:
-        identifier = str(uuid.uuid4())
-        self.fixture.seed_operator_app(identifier, self.config.commons_origin)
-        body = {"applicationId": identifier, "ownerId": self.owner}
-        self.assert_error(
-            "IDENTITY_CONFIRMATION_REQUIRED",
-            lambda: self.call("POST", "/v1/admin-apps/adopt", body, "admin"),
+        self.assertEqual(
+            self.call(
+                "PUT",
+                self.prefix + "/owner",
+                {"expectedOwnerId": self.owner, "ownerId": self.admin_user},
+                "admin",
+            ).status,
+            200,
         )
-        body["identityProviderConfirmed"] = True
-        self.call("POST", "/v1/admin-apps/adopt", body, "admin")
-        transfer = {"expectedOwnerId": self.owner, "ownerId": self.admin_user}
-        path = f"/v1/admin-apps/{identifier}/owner"
-        self.assert_error(
-            "IDENTITY_CONFIRMATION_REQUIRED", lambda: self.call("PUT", path, transfer, "admin")
-        )
-        transfer["identityProviderConfirmed"] = True
-        self.assertEqual(self.call("PUT", path, transfer, "admin").status, 200)
 
-    def test_identity_confirmation_follows_app_onto_owner_and_staff_routes(self) -> None:
-        staff = self.login("taylor")
-        with self.broker.database.connect(write=True) as db:
-            db.execute("UPDATE users SET role='staff' WHERE id=?", (staff,))
-            security_change(db, staff)
-        self.login("taylor")
+    def test_identity_confirmation_optional_and_ignored_for_adoption_and_reassignment(self) -> None:
+        for confirmation in (None, False, True):
+            identifier = str(uuid.uuid4())
+            self.fixture.seed_operator_app(identifier, self.config.commons_origin)
+            self.fixture.apps[identifier]["slug"] += "-" + identifier[:8]
+            legacy = {} if confirmation is None else {"identityProviderConfirmed": confirmation}
+            body = {"applicationId": identifier, "ownerId": self.owner, **legacy}
+            key = str(uuid.uuid4())
+            self.assertEqual(
+                self.call("POST", "/v1/admin-apps/adopt", body, "admin", key).status, 201
+            )
+            # A legacy field does not change the idempotency fingerprint.
+            self.assertEqual(
+                self.call(
+                    "POST",
+                    "/v1/admin-apps/adopt",
+                    {
+                        "applicationId": identifier,
+                        "ownerId": self.owner,
+                        "identityProviderConfirmed": True,
+                    },
+                    "admin",
+                    key,
+                ).status,
+                200,
+            )
+            self.assertEqual(
+                self.call(
+                    "PUT",
+                    f"/v1/admin-apps/{identifier}/owner",
+                    {"expectedOwnerId": self.owner, "ownerId": self.admin_user, **legacy},
+                    "admin",
+                ).status,
+                200,
+            )
+
+    def test_identity_confirmation_rejects_non_boolean(self) -> None:
+        self.assert_error(
+            "INVALID_FIELD",
+            lambda: self.call(
+                "POST",
+                self.prefix + "/state",
+                {"desiredRunning": False, "identityProviderConfirmed": "yes"},
+                "admin",
+            ),
+        )
+
+    def test_identity_confirmation_optional_and_ignored_on_owner_and_staff_routes(self) -> None:
+        staff = self.staff()
         for account, owner in (("alice", self.owner), ("taylor", staff)):
             identifier = str(uuid.uuid4())
             self.fixture.seed_operator_app(identifier, self.config.commons_origin)
             self.fixture.apps[identifier]["slug"] += "-" + account
+            # Owner deployment behavior is unchanged; this fixture does not require cutover.
+            self.fixture.apps[identifier]["requiresMaintenance"] = False
             self.call(
                 "POST",
                 "/v1/admin-apps/adopt",
-                {"applicationId": identifier, "ownerId": owner, "identityProviderConfirmed": True},
+                {"applicationId": identifier, "ownerId": owner},
                 "admin",
             )
             prefix = f"/v1/apps/{identifier}"
             self.assertTrue(
                 self.call("GET", prefix, owner=account).body["data"]["identityProvider"]
             )
-            for suffix, fields in (
-                ("deployments", {"configurationRevision": 7, "commit": "a" * 40}),
-                ("storage", {"type": "postgres"}),
-            ):
-                with self.subTest(account=account, suffix=suffix):
-                    self.assert_error(
-                        "IDENTITY_CONFIRMATION_REQUIRED",
-                        lambda fields=fields, suffix=suffix, prefix=prefix, account=account: (
-                            self.call("POST", prefix + "/" + suffix, fields, account)
-                        ),
-                    )
-            self.assert_error(
-                "IDENTITY_CONFIRMATION_REQUIRED",
-                lambda prefix=prefix, account=account: self.call(
-                    "POST", prefix + "/state", {"desiredRunning": False}, account
-                ),
-            )
-            storage = self.call(
-                "POST",
-                prefix + "/storage",
-                {"type": "postgres", "identityProviderConfirmed": True},
-                account,
-            ).body["data"]
-            self.broker.journal.dispatch(storage["intentId"])
+            for confirmation in (None, False, True):
+                legacy = {} if confirmation is None else {"identityProviderConfirmed": confirmation}
+                for suffix, fields in (
+                    ("deployments", {"configurationRevision": 7, "commit": "a" * 40}),
+                    ("state", {"desiredRunning": False}),
+                    ("restart", {}),
+                ):
+                    with self.subTest(account=account, confirmation=confirmation, suffix=suffix):
+                        response = self.call(
+                            "POST", prefix + "/" + suffix, {**fields, **legacy}, account
+                        )
+                        self.assertEqual(response.status, 202)
+                        self.complete(response, account)
+            response = self.call("POST", prefix + "/storage", {"type": "postgres"}, account)
+            self.assertEqual(self.complete(response, account)["state"], "succeeded")
             resource = self.call("GET", prefix + "/storage", owner=account).body["data"]["items"][
                 0
             ]["resourceId"]
             for action in ("verify", "rotate"):
-                self.assert_error(
-                    "IDENTITY_CONFIRMATION_REQUIRED",
-                    lambda prefix=prefix, account=account, action=action, resource=resource: (
-                        self.call("POST", prefix + f"/storage/{resource}/{action}", {}, account)
-                    ),
-                )
+                for confirmation in (None, False, True):
+                    legacy = (
+                        {} if confirmation is None else {"identityProviderConfirmed": confirmation}
+                    )
+                    response = self.call(
+                        "POST", prefix + f"/storage/{resource}/{action}", legacy, account
+                    )
+                    self.assertEqual(self.complete(response, account)["state"], "succeeded")
             with self.broker.database.connect() as db:
                 self.assertNotIn("identityProviderConfirmed", "\n".join(db.iterdump()))
 

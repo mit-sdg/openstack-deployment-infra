@@ -101,13 +101,13 @@ These docs explain what the platform is, how to deploy it for a class, and how t
 
 **Owner portal.** The website app owners use, at your domain. It's made of three services on the admin host: `management-web`, `management-broker`, and `management-identity`.
 
-**Portal admin.** The most powerful role in the owner portal. Always a local account with an authenticator app.
+**Portal admin.** The owner portal role with full app management plus accounts, roles, quotas, and the audit log. Always a local account with an authenticator app.
 
 **Release evidence.** Signed files that record exactly which source commit and built artifacts make up a release.
 
 **Role.** One of the five kinds of machine: admin, ingress, storage, worker, builder.
 
-**Staff.** The owner portal role for course staff. Staff can manage every app.
+**Staff.** The owner portal role for course staff. Staff have the same app-management permissions as portal admins, including ownership changes, maintenance and resizing, and storage deletion. Account management, quotas, and the audit log remain admin-only.
 
 **Traefik.** The reverse proxy on the ingress host that routes each hostname to the right app or service.
 

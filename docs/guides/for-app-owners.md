@@ -62,7 +62,7 @@ The platform reserves `PORT`, `NODE_ENV`, `PLATFORM_ENV`, `PLATFORM_PROJECT_ID`,
 
 Each app can have one PostgreSQL database, one MongoDB database, and one S3 bucket.
 
-1. Under **Databases and storage**, select **Add PostgreSQL**, **Add MongoDB**, or **Add S3 storage**, and confirm. Only a portal admin can delete it later, so add only what you need.
+1. Under **Databases and storage**, select **Add PostgreSQL**, **Add MongoDB**, or **Add S3 storage**, and confirm. Only staff or a portal admin can delete it later, so add only what you need.
 2. When it's ready, select **Use default variables**, or **Choose names** to pick your own.
 3. Deploy, so your app receives the variables.
 

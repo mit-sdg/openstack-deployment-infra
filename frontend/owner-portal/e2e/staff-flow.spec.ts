@@ -76,6 +76,7 @@ for (const [layout, viewport, colorScheme] of [
   ['mobile-dark', { width: 390, height: 844 }, 'dark'],
 ] as const) {
   test(`local admin bootstrap, invite and role boundaries · ${layout}`, async ({ browser }) => {
+    test.setTimeout(90000);
     const admin = await browser.newContext({ viewport, colorScheme, ignoreHTTPSErrors: true });
     const staff = await browser.newContext({ ignoreHTTPSErrors: true });
     const owner = await browser.newContext({ ignoreHTTPSErrors: true });
@@ -112,6 +113,16 @@ for (const [layout, viewport, colorScheme] of [
           headers: { 'Access-Control-Allow-Origin': '*' },
         });
       });
+      await staff.route('https://api.github.com/**', (route) =>
+        route.fulfill(
+          route.request().url().includes('/git/trees/')
+            ? { status: 404, json: { message: 'Not Found' } }
+            : {
+                json: [{ sha: 'c'.repeat(40), commit: { message: 'Class app fixture' } }],
+                headers: { 'Access-Control-Allow-Origin': '*' },
+              },
+        ),
+      );
       await page.goto(url);
       await expect(page).toHaveURL(/\/setup$/);
       await page.getByLabel('Username', { exact: true }).fill('admin' + suffix);
@@ -186,18 +197,15 @@ for (const [layout, viewport, colorScheme] of [
         await page.goto(`/admin/apps/${operatorId}`);
       } else {
         expect(known.status()).toBe(404);
-        await page.getByRole('button', { name: 'Adopt app', exact: true }).click();
-        const adopt = page.getByRole('dialog', { name: 'Adopt app', exact: true });
+        await staffPage.goto('/admin/apps');
+        await staffPage.getByRole('button', { name: 'Adopt app', exact: true }).click();
+        const adopt = staffPage.getByRole('dialog', { name: 'Adopt app', exact: true });
         await adopt.getByLabel('App ID', { exact: true }).fill(operatorId);
-        const submit = adopt.getByRole('button', { name: 'Adopt app', exact: true });
-        await submit.click();
-        // The sign-in app is only adopted after explicit consent.
-        const consent = adopt.getByLabel('Adopt the sign-in app', { exact: false });
-        await expect(consent).toBeVisible();
-        await expect(submit).toBeDisabled();
-        await expect(page).toHaveURL(/\/admin\/apps$/);
-        await consent.check();
-        await submit.click();
+        await expect(adopt.getByRole('checkbox')).toHaveCount(0);
+        await adopt.getByRole('button', { name: 'Adopt app', exact: true }).click();
+        await expect(staffPage).toHaveURL(new RegExp(`/admin/apps/${operatorId}$`));
+        await expect(staffPage.getByRole('dialog', { name: 'Confirm it’s you' })).toHaveCount(0);
+        await page.goto(`/admin/apps/${operatorId}`);
       }
       await expect(page).toHaveURL(new RegExp(`/admin/apps/${operatorId}$`));
       try {
@@ -224,35 +232,31 @@ for (const [layout, viewport, colorScheme] of [
       await expect(privateAccess.getByLabel('Deploy key')).toHaveValue(/^ssh-ed25519 /);
       await page.getByRole('button', { name: 'Deploy', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: /^Deploy / });
-      await expect(dialog).toContainText('this app keeps a fixed IP address');
-      await expect(dialog).toContainText('goes offline briefly');
+      await expect(dialog).toContainText('This app keeps a fixed IP address');
+      await expect(dialog).toContainText('takes it offline briefly');
       const deploy = dialog.getByRole('button', { name: 'Deploy', exact: true });
       await dialog.getByRole('radio', { name: 'Class app fixture' }).check();
       await expect(dialog.getByLabel('Commit', { exact: true })).toHaveValue('c'.repeat(40));
       await expect(
         dialog.getByText('This commit has the package.json, scripts and lockfile the build needs.'),
       ).toBeVisible();
-      expect(github).toEqual([
+      expect([...new Set(github)]).toEqual([
         'https://api.github.com/repos/example/class-app/commits?sha=main&per_page=5',
         `https://api.github.com/repos/example/class-app/git/trees/${'c'.repeat(40)}?recursive=1`,
       ]);
-      await expect(deploy).toBeDisabled();
-      await dialog.getByLabel('Allow a brief outage', { exact: false }).check();
-      await expect(deploy).toBeDisabled();
+      await expect(deploy).toBeEnabled();
+      await expect(dialog.getByRole('checkbox')).toHaveCount(0);
       await expect(dialog).toContainText('Leave empty to keep the current size');
-      await expect(dialog).toContainText('This app provides sign-in for the portal');
-      // Staff manage every app like admins, without ownership changes,
-      // storage deletion, outages or resizing.
+      await expect(dialog).toContainText('Signing in to this portal depends on this app.');
+      // Staff have all app actions, without account management.
       await staffPage.getByRole('link', { name: 'Manage apps', exact: true }).click();
       await expect(staffPage.getByRole('heading', { name: 'All apps', exact: true })).toBeVisible();
       await expect(staffPage.getByRole('link', { name: 'Admin', exact: true })).toHaveCount(0);
       await expect(staffPage.getByRole('link', { name: 'Accounts', exact: true })).toHaveCount(0);
-      await expect(staffPage.getByRole('button', { name: 'Adopt app', exact: true })).toHaveCount(
-        0,
-      );
-      await expect(staffPage.getByRole('button', { name: 'Create app', exact: true })).toHaveCount(
-        0,
-      );
+      await expect(staffPage.getByRole('button', { name: 'Adopt app', exact: true })).toBeVisible();
+      await expect(
+        staffPage.getByRole('button', { name: 'Create app', exact: true }),
+      ).toBeVisible();
       // Earlier specs give Alice more apps, so open hers by ID, not by name.
       const foreignSlug = (await (await ownerPage.request.get(`/api/v1/apps/${foreign}`)).json())
         .data.slug as string;
@@ -260,7 +264,7 @@ for (const [layout, viewport, colorScheme] of [
       await expect(
         staffPage.getByRole('heading', { name: foreignSlug, exact: true }),
       ).toBeVisible();
-      await expect(staffPage.getByText('Danger zone', { exact: true })).toHaveCount(0);
+      await expect(staffPage.getByText('Danger zone', { exact: true })).toBeVisible();
       const variable = `STAFF_NOTE_${suffix.toUpperCase()}`;
       await staffPage.getByLabel('Variable name').fill(variable);
       await staffPage.getByLabel('New value').fill('set by staff');
@@ -281,9 +285,73 @@ for (const [layout, viewport, colorScheme] of [
         },
         data: { applicationId: operatorId },
       });
-      expect(adopt.status()).toBe(403);
-      expect((await adopt.json()).error.code).toBe('ACCESS_DENIED');
+      expect(adopt.status()).toBe(409);
+      expect((await adopt.json()).error.code).toBe('ALREADY_OWNED');
+      for (const route of ['/api/v1/accounts', '/api/v1/account-audit']) {
+        expect((await staffPage.request.get(route)).status()).toBe(403);
+      }
       expect((await ownerPage.request.get('/api/v1/admin-apps')).status()).toBe(403);
+      await commons(otherPage, 'bob');
+      await staffPage.goto('/admin/apps');
+      await staffPage.getByRole('button', { name: 'Create app', exact: true }).click();
+      const createAppDialog = staffPage.getByRole('dialog', { name: 'Create app', exact: true });
+      await createAppDialog.getByLabel('App name').fill('staff-created-' + suffix);
+      await createAppDialog.getByLabel('Owner', { exact: true }).fill('taylor');
+      await createAppDialog.getByRole('radio', { name: 'Taylor Instructor', exact: false }).check();
+      await createAppDialog.getByRole('button', { name: 'Create app', exact: true }).click();
+      await expect(staffPage).toHaveURL(/\/admin\/apps\/[a-f0-9-]+$/);
+      await expect(
+        staffPage.getByRole('heading', { name: 'staff-created-' + suffix }),
+      ).toBeVisible();
+      await staffPage.getByRole('button', { name: 'Change owner', exact: true }).click();
+      const transfer = staffPage.getByRole('dialog', { name: 'Change owner', exact: true });
+      await transfer.getByLabel('Owner', { exact: true }).fill('bob');
+      await transfer.getByRole('radio', { name: 'Bob Student', exact: false }).check();
+      await transfer.getByRole('button', { name: 'Change owner', exact: true }).click();
+      await expect(transfer).toBeHidden();
+      await expect(staffPage.getByText('Bob Student', { exact: true }).first()).toBeVisible();
+      await staffPage.getByRole('button', { name: 'Add S3 storage', exact: true }).click();
+      const variables = staffPage.getByRole('dialog', { name: 'S3 storage variables' });
+      await expect(variables).toBeVisible();
+      await variables.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await expect(variables).toBeHidden();
+      await expect(staffPage.getByText('Storage added', { exact: true })).toBeVisible({
+        timeout: 15000,
+      });
+      const remove = staffPage.getByRole('button', { name: 'Delete', exact: true });
+      await expect(remove).toBeEnabled();
+      await remove.click();
+      const deletion = staffPage.getByRole('dialog', { name: 'Delete a database or storage' });
+      await deletion.getByLabel('Database or storage').selectOption({ index: 1 });
+      const purge = deletion.getByRole('button', { name: 'Delete permanently' });
+      await expect(purge).toBeDisabled();
+      await deletion
+        .getByLabel('Type “staff-created-' + suffix + ' s3” to confirm')
+        .fill('staff-created-' + suffix + ' s3');
+      const deleted = staffPage.waitForResponse(
+        (response) =>
+          response.request().method() === 'DELETE' &&
+          new URL(response.url()).pathname.includes('/storage/'),
+      );
+      await purge.click();
+      const deletionResponse = await deleted;
+      const deletionResult = await deletionResponse.json();
+      expect(deletionResult.error, JSON.stringify(deletionResult.error)).toBeUndefined();
+      expect(deletionResponse.status()).toBe(202);
+      await expect(deletion).toBeHidden();
+      await expect(remove).toBeDisabled();
+      await expect(staffPage.getByRole('dialog', { name: 'Confirm it’s you' })).toHaveCount(0);
+      await staffPage.goto(`/admin/apps/${operatorId}`);
+      await staffPage.getByRole('button', { name: 'Deploy', exact: true }).click();
+      const staffDeploy = staffPage.getByRole('dialog', { name: /^Deploy / });
+      await expect(staffDeploy).toContainText('This app keeps a fixed IP address');
+      await expect(staffDeploy).toContainText('Signing in to this portal depends on this app.');
+      await expect(staffDeploy.getByRole('checkbox')).toHaveCount(0);
+      await expect(staffDeploy.getByLabel('Sizing plan')).toBeVisible();
+      await staffDeploy.getByLabel('Commit', { exact: true }).fill('c'.repeat(40));
+      await staffDeploy.getByRole('button', { name: 'Deploy', exact: true }).click();
+      await expect(staffDeploy).toBeHidden();
+      await expect(staffPage.getByText('Deployed', { exact: true }).first()).toBeVisible();
       // Admins see the staff change in their audit log.
       const audit = (
         await (await page.request.get('/api/v1/account-audit', { headers: csrfHeaders })).json()
@@ -293,8 +361,7 @@ for (const [layout, viewport, colorScheme] of [
       );
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       await expect(page.getByLabel('App output')).toContainText('Listening on port 3000');
-      // A class account's role changes through the Accounts page (a PATCH).
-      await commons(otherPage, 'bob');
+      // Bob is already signed in; his role changes through the Accounts page (a PATCH).
       const role = async () =>
         (await (await page.request.get('/api/v1/accounts?q=bob', { headers: csrfHeaders })).json())
           .data.items[0].role as string;
@@ -307,10 +374,7 @@ for (const [layout, viewport, colorScheme] of [
       await expect(page.getByText('Role changed', { exact: true })).toBeVisible();
       expect(await role()).toBe(next);
     } finally {
-      await admin.close();
-      await staff.close();
-      await owner.close();
-      await other.close();
+      await Promise.allSettled([admin.close(), staff.close(), owner.close(), other.close()]);
     }
   });
 }

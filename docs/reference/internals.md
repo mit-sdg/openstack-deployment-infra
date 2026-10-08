@@ -206,7 +206,7 @@ Nomad's healthy deadline is 10 minutes from placement, including image download;
 
 Before removing an unhealthy candidate, `app.startup` reads the newest allocation's status, restart count, last 12 task events, and last 200 stdout and stderr lines (64 KiB each). It gets at most 30 seconds or one third of the remaining deadline; failure never blocks removal. The mode-`0600` record is `startup-logs/<application>/<deployment>.json` under controller state and appears on the portal's failed deployment page.
 
-With `maintenance: true`, the old version serves during build and artifact/storage checks. Under the app lock, the controller journals its job, image, placement, server, and port, then stops it before starting the candidate. Acceptance alone changes the accepted pointer. Retries use the stop checkpoint. Only the operator or a portal admin can request this through their respective interfaces. Cutover interrupts service and prevents concurrent app processes.
+With `maintenance: true`, the old version serves during build and artifact/storage checks. Under the app lock, the controller journals its job, image, placement, server, and port, then stops it before starting the candidate. Acceptance alone changes the accepted pointer. Retries use the stop checkpoint. The operator, staff, or a portal admin can request this through their respective interfaces. Cutover interrupts service and prevents concurrent app processes.
 
 Operator-only `reuseWorker: true` requires `maintenance: true`. The controller pins the accepted worker and its size, rechecking `ACTIVE` state, ownership, attachment, Nomad and Docker health, and capacity. It stops the old job and starts the new image on that worker; no server or IP changes. Failed cutover keeps the accepted pointer but leaves the app stopped with its worker retained. OS or flavor changes require replacement.
 
@@ -365,11 +365,15 @@ Staff and portal admins manage other people's apps only through a separate names
 | Settings, deploys, environment, storage create, verify, rotate, logs, deploy keys, stop, start, restart | Yes | Any app | Any app |
 | App and concurrency limits | Quota (default 2 apps, 1 concurrent change) | None | None |
 | Accounts, roles, quotas, account audit | No | No | Yes |
-| Create an app for another owner | No | No | Yes |
-| Adopt an operator-created app, reassign an owner, delete storage | No | No | Yes, with step-up |
-| Maintenance outage or sizing plan on deploy | No | No (`403 ADMIN_REQUIRED`) | Yes |
+| Create an app for another owner | No | Yes | Yes |
+| Adopt an operator-created app, reassign an owner, delete storage | No | Yes | Yes |
+| Maintenance outage or sizing plan on deploy | No | Yes | Yes |
 
-Each staff or admin mutation is journaled with a server-only marker and written to the admin action audit, so admins see staff changes. All app mutations share one busy scope per app (`409 APP_BUSY`). Teams keep one owner plus members in an `app_members` table; members pass the same app checks as the owner, and only the owner or an admin adds or removes people. An app counts only against its owner's quota.
+The app-owner picker reads only IDs, names, roles, enabled flags, and account status from `/api/v1/admin-apps/owners`, with bounded name search and pagination. It grants no account-management access.
+
+App actions and intent resumption require a staff or admin session, with no step-up. Account-management step-up is unchanged. Storage deletion still requires typed confirmation and refuses saved bindings. For apps with `requiresMaintenance: true`, the broker sets `maintenance: true` on app-administration deploys. Sign-in dependency messages are informational; the broker accepts and ignores an optional boolean `identityProviderConfirmed` for rollout compatibility.
+
+Each staff or admin mutation is journaled with a server-only marker and written to the admin action audit, so admins see staff changes. All app mutations share one busy scope per app (`409 APP_BUSY`). Teams keep one owner plus members in an `app_members` table; members pass the same app checks as the owner, and only the owner, staff, or an admin adds or removes people. An app counts only against its owner's quota.
 
 When the operator deletes an app through the privileged socket, the broker learns of it only from a definitive `404 APPLICATION_NOT_FOUND` on the project read. It then marks its record deleted, stops counting it toward quota, writes one `app_deleted_by_administrator` audit event, and answers further mutations with `410 APPLICATION_DELETED`. Outages never trigger this.
 
