@@ -356,6 +356,18 @@ jobs:
           test "$(printf '%s\n' "$qcow" | wc -l)" -eq 1
           tests/smoke_openstack_image.sh "${{ matrix.role }}" "$qcow"
 
+      - name: Keep the example image out of main's Nix cache
+        if: github.ref == 'refs/heads/main' && matrix.vm && env.BUILD_EXAMPLE_IMAGE == 'true'
+        run: |
+          # The image changes with every commit; its dependencies are what is
+          # worth restoring. Without it each role cache stays near 1.2 GB.
+          while IFS= read -r output; do
+            if [[ -n $(find "$output" -type f -name '*.qcow2' -print -quit) ]]; then
+              # Best effort: a larger cache must never fail the role gate.
+              nix store delete "$output" || echo "::warning::kept $output in the Nix cache"
+            fi
+          done < build-outputs
+
   publication-context:
     name: Detect publishable image changes
     if: >-
