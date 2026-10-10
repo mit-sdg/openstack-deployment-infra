@@ -109,6 +109,20 @@ let
     server.daemon_threads=True
     server.serve_forever()
   '';
+  storageRuntimeDiagnostics = pkgs.writeShellScript "storage-runtime-diagnostics" ''
+    # Capture host paths and dependencies without relying on name resolution.
+    set +e
+    for directory in /run /var/run /run/nscd; do
+      ${pkgs.coreutils}/bin/stat -c '%n type=%F mode=%a owner=%u:%g' "$directory"
+      ${pkgs.coreutils}/bin/readlink -f "$directory"
+      ${pkgs.util-linux}/bin/findmnt -T "$directory" -o TARGET,SOURCE,FSTYPE,OPTIONS
+    done
+    ${pkgs.systemd}/bin/systemctl show nscd.service nss-lookup.target nss-user-lookup.target \
+      sysinit.target systemd-resolved.service ${namespace}-storage-instance-manager.service \
+      -p LoadState -p ActiveState -p Requires -p Wants -p After
+    ${pkgs.systemd}/bin/journalctl -b -u nscd.service --no-pager -n 40
+    exit 0
+  '';
   storageInstanceProbe = pkgs.writeText "storage-instance-probe.py" ''
     import json, socket, ssl, subprocess, sys, urllib.error, urllib.request, uuid
     sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
@@ -124,6 +138,7 @@ let
         faulthandler.dump_traceback(file=sys.stderr,all_threads=True)
         subprocess.run(["nft","list","table","inet","${namespace}".replace("-","_")+"_instances"],check=False)
         subprocess.run(["ss","-tnp"],check=False)
+        subprocess.run(["${storageRuntimeDiagnostics}"],check=False)
         try:
             subprocess.run(["getent","hosts",host],check=False,timeout=5)
         except subprocess.TimeoutExpired:
@@ -1037,8 +1052,11 @@ let
             ''
           else if role == "storage" then
             ''
-              machine.wait_for_unit("nscd.service")
-              machine.succeed("test -S /var/run/nscd/socket && getent hosts ${platform.internalNames.storage}")
+              print(machine.succeed("${storageRuntimeDiagnostics}"))
+              # Both built-in NSS paths work with no daemon or NSS-module proxy.
+              machine.succeed("test $(systemctl show nscd.service -p LoadState --value) = not-found")
+              machine.succeed("getent -s files hosts ${platform.internalNames.storage} && getent hosts ${platform.internalNames.storage} && getent passwd agentops && getent passwd nginx")
+              machine.succeed("systemctl start nss-lookup.target nss-user-lookup.target")
               machine.wait_for_unit("nginx.service")
               machine.succeed("${pkgs.nginx}/bin/nginx -t -c /etc/nginx/nginx.conf")
               machine.succeed("mountpoint -q ${platform.paths.data}")
@@ -1050,6 +1068,9 @@ let
               machine.succeed("systemctl start ${namespace}-storage-instance-manager.service")
               machine.wait_for_open_port(19002)
               machine.succeed("${packages.platformPython}/bin/python ${storageInstanceProbe}")
+              print(machine.succeed("${storageRuntimeDiagnostics}"))
+              machine.succeed("systemctl is-active nss-lookup.target nss-user-lookup.target")
+              machine.succeed("test $(systemctl show nscd.service -p LoadState --value) = not-found")
             ''
           else if role == "worker" then
             ''

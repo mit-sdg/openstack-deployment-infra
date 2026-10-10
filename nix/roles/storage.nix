@@ -100,6 +100,21 @@ let
 in
 {
   networking.hostName = platform.hosts.storage;
+
+  # All storage identities are static /etc/passwd entries and inventory names
+  # live in /etc/hosts. Use glibc's built-in files/DNS lookups directly: nsncd's
+  # legacy /var/run socket must not gate database units or DNS under a sandbox.
+  services.nscd.enable = false;
+  system.nssModules = lib.mkForce [ ];
+  system.nssDatabases = {
+    passwd = lib.mkForce [ "files" ];
+    group = lib.mkForce [ "files" ];
+    shadow = lib.mkForce [ "files" ];
+    hosts = lib.mkForce [
+      "files"
+      "dns"
+    ];
+  };
   networking.nftables.enable = true;
   # Reload only declarative tables; preserve the manager's isolated dynamic table.
   networking.nftables.flushRuleset = false;
@@ -298,12 +313,6 @@ in
   };
 
   systemd.services = lib.mkMerge [
-    {
-      # nsncd listens through /var/run; RuntimeDirectory only exempts /run/nscd
-      # from its strict sandbox. Permit its socket directory at either alias,
-      # including fresh images with a real /var/run directory.
-      nscd.serviceConfig.ReadWritePaths = [ "/var/run/nscd" ];
-    }
     (mkContainerDependencies "${namespace}-postgres")
     (mkContainerDependencies "${namespace}-mongodb")
     (mkContainerDependencies "${namespace}-garage")
@@ -729,7 +738,6 @@ in
   };
 
   systemd.tmpfiles.rules = [
-    "d /var/run/nscd 0755 nscd nscd -"
     # Podman opens /run/libpod/alive.lck even for exec/inspect. Prepare runtime
     # paths before the strict service sandboxes install their writable mounts.
     "d /run/libpod 0751 root root -"

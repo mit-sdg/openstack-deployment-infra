@@ -28,6 +28,11 @@ readiness checkpoint survives an interrupted reply; retrying unchanged limits
 finishes the probe without restarting again. `INSTANCE_NOT_READY` is a 503 response
 and retains the applied reservations for replay. The manager probes outside its
 global lock, so another application's operations can continue during startup.
+The storage host resolves inventory names directly through `/etc/hosts` and
+glibc DNS, and its static identities through `/etc/passwd` and `/etc/group`.
+It disables nsncd and external NSS modules; database startup, backups and restore
+therefore require no name-service daemon socket. The VM test exercises both
+engines with nscd absent and records runtime mounts and lookup-target dependencies.
 
 ## Prepare capacity and releases
 
