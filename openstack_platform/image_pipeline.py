@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -550,16 +551,16 @@ def publish(repository: Path, root: Path, platform: Path, values: dict[str, str]
             ),
         }
     )
-    for role in release.ROLES:
+
+    def publish_role(role: str) -> str:
         record = artifact["roleArtifacts"][role]
-        child.update(
-            {
-                "PLATFORM_ARTIFACT_QCOW2_SHA256": record["qcow2Sha256"],
-                "PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256": record["nixClosureSha256"],
-                "PLATFORM_ARTIFACT_NIX_OUTPUT": record["nixOutput"],
-            }
-        )
-        subprocess.run(
+        role_values = {
+            **child,
+            "PLATFORM_ARTIFACT_QCOW2_SHA256": record["qcow2Sha256"],
+            "PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256": record["nixClosureSha256"],
+            "PLATFORM_ARTIFACT_NIX_OUTPUT": record["nixOutput"],
+        }
+        result = subprocess.run(
             [
                 str(repository / "infra/openstack/publish_nixos_image.sh"),
                 role,
@@ -568,8 +569,43 @@ def publish(repository: Path, root: Path, platform: Path, values: dict[str, str]
                 str(root / role / "path-info.json"),
             ],
             cwd=repository,
-            env=child,
+            env=role_values,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
             check=True,
+        )
+        return result.stdout
+
+    # Roles have distinct names/IDs and no publication dependencies. Keep the
+    # all-role verification barrier above and wait for every upload on failure.
+    # Capture each role's output so concurrent subprocesses cannot interleave it.
+    failures = set()
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {}
+        for role in release.ROLES:
+            print(f"[{role}] publication started", flush=True)
+            futures[executor.submit(publish_role, role)] = role
+        for future in as_completed(futures):
+            role = futures[future]
+            try:
+                output = future.result()
+            except subprocess.CalledProcessError as error:
+                output = error.stdout or ""
+                failures.add(role)
+                output += f"\npublication failed with exit status {error.returncode}\n"
+            except OSError as error:
+                failures.add(role)
+                output = f"publication could not start: {error}\n"
+            for line in output.splitlines():
+                print(f"[{role}] {line}", flush=True)
+            print(
+                f"[{role}] publication {'failed' if role in failures else 'finished'}", flush=True
+            )
+    if failures:
+        raise release.ReleaseVerificationError(
+            "image publication failed for roles: "
+            + ", ".join(role for role in release.ROLES if role in failures)
         )
 
 

@@ -439,6 +439,8 @@ class OpenStackTests(unittest.TestCase):
                 """#!/usr/bin/env python3
 import hashlib, json, os, pathlib, shutil, sys
 args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"] + ".calls", "a") as stream:
+    stream.write(json.dumps(args) + "\\n")
 if args[:2] == ["token", "issue"]:
     print("00000000000040008000000000000000")
 elif args[:2] == ["project", "show"]:
@@ -455,18 +457,21 @@ elif args[:2] == ["image", "show"]:
     }
     if os.environ.get("FAKE_BAD_METADATA"):
         properties = {key: "wrong" for key in properties}
+    properties.update(json.loads(os.environ.get("FAKE_PROPERTY_OVERRIDE", "{}")))
     image_file = created[created.index("--file") + 1]
     digest = hashlib.md5(pathlib.Path(image_file).read_bytes(), usedforsecurity=False).hexdigest()
-    print(json.dumps({
+    projection = {
         "id": "11111111-1111-4111-8111-111111111111",
         "name": "example-nixos-worker",
         "status": "active",
         "owner": "00000000000040008000000000000000",
         "checksum": digest,
-        "os_hash_algo": os.environ.get("FAKE_HASH_ALGO"),
-        "os_hash_value": hashlib.sha512(pathlib.Path(image_file).read_bytes()).hexdigest() if os.environ.get("FAKE_HASH_ALGO") == "sha512" else None,
+        "os_hash_algo": os.environ.get("FAKE_HASH_ALGO") or None,
+        "os_hash_value": hashlib.new(os.environ["FAKE_HASH_ALGO"], pathlib.Path(image_file).read_bytes()).hexdigest() if os.environ.get("FAKE_HASH_ALGO") in ("sha256", "sha512") else None,
         "properties": properties,
-    }))
+    }
+    projection.update(json.loads(os.environ.get("FAKE_IMAGE_OVERRIDE", "{}")))
+    print(json.dumps(projection))
 elif args[:2] == ["image", "save"]:
     created = json.loads(pathlib.Path(os.environ["FAKE_LOG"]).read_text())
     source = created[created.index("--file") + 1]
@@ -537,7 +542,7 @@ else:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             expected_checksum = hashlib.md5(image.read_bytes(), usedforsecurity=False).hexdigest()
             self.assertIn(f"checksum={expected_checksum}", completed.stdout.decode())
-            self.assertIn("sha256=download", completed.stdout.decode())
+            self.assertIn("content_verification=provider-sha512", completed.stdout.decode())
             create = json.loads(log.read_text())
             properties = [
                 create[index + 1] for index, item in enumerate(create) if item == "--property"
@@ -548,6 +553,80 @@ else:
             self.assertIn("hw_qemu_guest_agent=yes", properties)
             retry_environment = {**environment, "FAKE_EXISTING_IMAGE": "1"}
             set_log = log.with_suffix(".set.json")
+            calls_log = Path(str(log) + ".calls")
+
+            def calls():
+                return [json.loads(line) for line in calls_log.read_text().splitlines()]
+
+            self.assertFalse(any(call[:2] == ["image", "save"] for call in calls()))
+            # Existing exact roles require neither upload nor download with
+            # either supported multihash. Only an absent pair may fall back.
+            for algorithm, method in (
+                ("sha512", "provider-sha512"),
+                ("sha256", "provider-sha256"),
+                ("", "download"),
+            ):
+                with self.subTest(algorithm=algorithm):
+                    calls_log.unlink()
+                    retried = subprocess.run(
+                        completed.args,
+                        cwd=ROOT,
+                        env={**retry_environment, "FAKE_HASH_ALGO": algorithm},
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(retried.returncode, 0, retried.stderr.decode())
+                    self.assertIn(f"content_verification={method}", retried.stdout.decode())
+                    self.assertFalse(any(call[:2] == ["image", "create"] for call in calls()))
+                    self.assertEqual(
+                        sum(call[:2] == ["image", "save"] for call in calls()),
+                        int(method == "download"),
+                    )
+                    self.assertFalse(set_log.exists())
+            for override in (
+                {"os_hash_value": "0" * 128},
+                {"os_hash_value": "malformed"},
+                {"os_hash_value": None},
+                {"os_hash_algo": None},
+                {"os_hash_algo": "sha256", "os_hash_value": "0" * 64},
+                {"os_hash_algo": "sha1", "os_hash_value": "0" * 40},
+                {"id": "22222222-2222-4222-8222-222222222222"},
+                {"name": "wrong-name"},
+                {"owner": "22222222-2222-4222-8222-222222222222"},
+                {"status": "killed"},
+                {"checksum": "0" * 32},
+            ):
+                with self.subTest(projection=override):
+                    calls_log.unlink()
+                    refused = subprocess.run(
+                        completed.args,
+                        cwd=ROOT,
+                        env={**retry_environment, "FAKE_IMAGE_OVERRIDE": json.dumps(override)},
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertFalse(any(call[:2] == ["image", "save"] for call in calls()))
+                    self.assertFalse(set_log.exists())
+            for key in (
+                "app_platform_source_commit",
+                "app_platform_qcow2_sha256",
+                "app_platform_nix_closure_sha256",
+                "app_platform_nix_output",
+            ):
+                with self.subTest(property=key):
+                    refused = subprocess.run(
+                        completed.args,
+                        cwd=ROOT,
+                        env={
+                            **retry_environment,
+                            "FAKE_PROPERTY_OVERRIDE": json.dumps({key: "wrong"}),
+                        },
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertFalse(set_log.exists())
             # Unsigned evidence cannot replace an existing evidence digest,
             # even when the QCOW2 identity itself is unchanged.
             unsigned_bytes = artifact_manifest_path.read_bytes()
@@ -595,15 +674,19 @@ else:
                 ).hexdigest(),
             }
             signed_environment.pop("PLATFORM_ALLOW_UNSIGNED_PRODUCTION")
-            refused = subprocess.run(
-                completed.args,
-                cwd=ROOT,
-                env={**signed_environment, "FAKE_BAD_DOWNLOAD": "1"},
-                capture_output=True,
-                check=False,
-            )
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertFalse(set_log.exists(), "failed content gate reached metadata mutation")
+            for failure in (
+                {"FAKE_IMAGE_OVERRIDE": json.dumps({"os_hash_value": "0" * 128})},
+                {"FAKE_HASH_ALGO": "", "FAKE_BAD_DOWNLOAD": "1"},
+            ):
+                refused = subprocess.run(
+                    completed.args,
+                    cwd=ROOT,
+                    env={**signed_environment, **failure},
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertFalse(set_log.exists(), "failed content gate reached metadata mutation")
             promoted = subprocess.run(
                 completed.args,
                 cwd=ROOT,

@@ -146,6 +146,29 @@ except ValueError as error:
 PY
 }
 
+local_checksums=$(python3 - "$image_file" <<'PY'
+import hashlib
+import sys
+
+try:
+    digests = [hashlib.md5(usedforsecurity=False), hashlib.sha256(), hashlib.sha512()]
+    with open(sys.argv[1], "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            for digest in digests:
+                digest.update(chunk)
+except OSError as error:
+    raise SystemExit("could not checksum the image file") from error
+print(*(digest.hexdigest() for digest in digests))
+PY
+)
+read -r local_checksum local_sha256 local_sha512 <<< "$local_checksums"
+[[ $local_checksum =~ ^[0-9a-f]{32}$ && \
+   $local_sha256 == "$PLATFORM_ARTIFACT_QCOW2_SHA256" && \
+   $local_sha512 =~ ^[0-9a-f]{128}$ ]] || {
+  echo "local image checksums do not match verified artifact evidence" >&2
+  exit 2
+}
+
 token_project_id_raw=$("$OSC" token issue -f value -c project_id)
 token_project_id=$(canonical_uuid "$token_project_id_raw") || {
   echo "OpenStack token returned an invalid project UUID" >&2
@@ -185,25 +208,6 @@ rows = json.load(sys.stdin)
 print(next(row["ID"] for row in rows if row.get("Name") == sys.argv[1]))
 ' "$image_name" <<<"$existing_images")
 fi
-
-local_checksum=$(python3 - "$image_file" <<'PY'
-import hashlib
-import sys
-
-try:
-    digest = hashlib.md5(usedforsecurity=False)
-    with open(sys.argv[1], "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-except OSError as error:
-    raise SystemExit("could not checksum the image file") from error
-print(digest.hexdigest())
-PY
-)
-[[ $local_checksum =~ ^[0-9a-f]{32}$ ]] || {
-  echo "could not checksum the image file" >&2
-  exit 2
-}
 
 if [[ $existing_count == 0 ]]; then
   image_id=$("$OSC" image create \
@@ -254,7 +258,7 @@ PY
 done
 verify_observed_image() {
   OBSERVED_IMAGE="$observed" EXPECTED_METADATA="$metadata_output" \
-    EXPECTED_CHECKSUM="$local_checksum" METADATA_KEY="$metadata_key" \
+    EXPECTED_CHECKSUM="$local_checksum" EXPECTED_SHA512="$local_sha512" METADATA_KEY="$metadata_key" \
     ALLOW_REATTESTATION="$1" python3 - "$image_id" "$image_name" "$project_id" <<'PY'
 import json
 import os
@@ -311,15 +315,14 @@ elif (
     observed_hash_algorithm == "sha256"
     and observed_hash_value == os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
 ):
-    method = "provider"
+    method = "provider-sha256"
 elif (
     observed_hash_algorithm == "sha512"
-    and isinstance(observed_hash_value, str)
-    and re.fullmatch(r"[0-9a-f]{128}", observed_hash_value)
+    and observed_hash_value == os.environ["EXPECTED_SHA512"]
 ):
-    # Glance defaults to SHA-512. Keep our independent SHA-256 gate rather
-    # than treating a different provider hash algorithm as a byte mismatch.
-    method = "download"
+    # Both local hashes were computed over the same retained bytes, with
+    # SHA-256 checked against accepted evidence before any provider call.
+    method = "provider-sha512"
 else:
     raise SystemExit("published image provider hash is incomplete or differs")
 print(method, previous_manifest)
@@ -359,7 +362,7 @@ fi
 if [[ -n $previous_manifest ]]; then
   # Only externally signed, already verified evidence can re-attest identical
   # bytes. The name/UUID/QCOW2 remain unchanged, matching immutable guest config.
-  # No mutation occurs until the independent provider/download SHA256 gate above.
+  # No mutation occurs until the independent provider/download content gate above.
   "$OSC" image set \
     --property "${metadata_key}_previous_artifact_manifest_sha256=$previous_manifest" \
     --property "${metadata_key}_artifact_manifest_sha256=$PLATFORM_ARTIFACT_MANIFEST_SHA256" \
@@ -373,4 +376,4 @@ if [[ -n $previous_manifest ]]; then
   }
   echo "signed-reattestation=verified image=$image_id previous_artifact_manifest_sha256=$previous_manifest"
 fi
-echo "published role=$role image=$image_id status=active checksum=$local_checksum sha256=$hash_verification source_commit=$SOURCE_COMMIT"
+echo "published role=$role image=$image_id status=active checksum=$local_checksum content_verification=$hash_verification source_commit=$SOURCE_COMMIT"

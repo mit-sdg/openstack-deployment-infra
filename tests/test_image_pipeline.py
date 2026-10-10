@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -120,6 +122,7 @@ class ImagePipelineTests(unittest.TestCase):
         self.root = downloaded
         real_run = subprocess.run
         published = []
+        simultaneous = threading.Barrier(len(release.ROLES))
 
         def run(arguments, **kwargs):
             if str(arguments[0]).endswith("publish_nixos_image.sh"):
@@ -129,8 +132,19 @@ class ImagePipelineTests(unittest.TestCase):
                     kwargs["env"]["PLATFORM_ARTIFACT_QCOW2_SHA256"],
                     hashlib.sha256(before[role]).hexdigest(),
                 )
+                record = release._load(self.root / "evidence/artifacts/role-artifacts.json")[
+                    "roleArtifacts"
+                ][role]
+                simultaneous.wait(timeout=10)
+                # Check after every worker has started: a shared mutable
+                # environment could silently publish another role's evidence.
+                self.assertEqual(
+                    kwargs["env"]["PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256"],
+                    record["nixClosureSha256"],
+                )
+                self.assertEqual(kwargs["env"]["PLATFORM_ARTIFACT_NIX_OUTPUT"], record["nixOutput"])
                 published.append(role)
-                return subprocess.CompletedProcess(arguments, 0)
+                return subprocess.CompletedProcess(arguments, 0, stdout=f"published {role}\n")
             self.assertEqual(arguments[0], "git")  # no build, QEMU, fetch, or signer
             return real_run(arguments, **kwargs)
 
@@ -142,7 +156,49 @@ class ImagePipelineTests(unittest.TestCase):
                 self.platform,
                 {**self.values, "GITHUB_RUN_ATTEMPT": "2"},
             )
-        self.assertEqual(published, list(release.ROLES))
+        self.assertCountEqual(published, release.ROLES)
+
+    def test_publication_waits_for_all_roles_and_reports_each_failure_with_readable_logs(
+        self,
+    ) -> None:
+        self.prepare()
+        real_run = subprocess.run
+        simultaneous = threading.Barrier(len(release.ROLES))
+        failed = threading.Event()
+        completed = []
+
+        def run(arguments, **kwargs):
+            if not str(arguments[0]).endswith("publish_nixos_image.sh"):
+                return real_run(arguments, **kwargs)
+            role = arguments[1]
+            simultaneous.wait(timeout=10)
+            if role == "admin":
+                failed.set()
+                raise subprocess.CalledProcessError(7, arguments, output="upload rejected\n")
+            self.assertTrue(failed.wait(timeout=10))
+            completed.append(role)
+            if role == "worker":
+                raise OSError("publisher unavailable")
+            return subprocess.CompletedProcess(arguments, 0, stdout="upload\nverified\n")
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(pipeline.subprocess, "run", side_effect=run),
+            mock.patch("sys.stdout", output),
+        ):
+            with self.assertRaisesRegex(release.ReleaseVerificationError, "roles: admin, worker"):
+                pipeline.publish(self.repository, self.root, self.platform, self.values)
+        self.assertCountEqual(completed, [role for role in release.ROLES if role != "admin"])
+        lines = output.getvalue().splitlines()
+        self.assertIn("[admin] upload rejected", lines)
+        self.assertIn("[admin] publication failed with exit status 7", lines)
+        self.assertIn("[worker] publication could not start: publisher unavailable", lines)
+        for role in release.ROLES:
+            self.assertIn(f"[{role}] publication started", lines)
+            if role not in {"admin", "worker"}:
+                self.assertIn(f"[{role}] upload", lines)
+                self.assertIn(f"[{role}] verified", lines)
+                self.assertIn(f"[{role}] publication finished", lines)
 
     def test_paused_publication_retains_real_inventory_for_later_promotion(self) -> None:
         document = json.loads(self.platform.read_text())
