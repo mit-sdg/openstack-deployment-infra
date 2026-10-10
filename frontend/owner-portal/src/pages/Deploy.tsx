@@ -89,9 +89,9 @@ function SizeSummary({
         ]}
       />
       <p>
-        The app can use up to {(memory / 1024).toFixed(1)} GB of memory and most of{' '}
-        {plan.flavor.vcpus} {plan.flavor.vcpus === 1 ? 'vCPU' : 'vCPUs'}; a little is kept for the
-        system.
+        The app can use up to {(memory / 1024).toFixed(1)} GB of memory and{' '}
+        {plan.flavor.vcpus === 1 ? "the worker's 1 vCPU" : `all ${plan.flavor.vcpus} vCPUs`}. The
+        memory limit is set after the worker starts, with room kept for the system.
       </p>
       <p>Deploying with a new size starts the app on a new worker.</p>
       {maintenance && (

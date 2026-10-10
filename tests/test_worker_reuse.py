@@ -127,6 +127,7 @@ class WorkerReuseTests(unittest.TestCase):
         self.initial()
         workers = copy.deepcopy(self.f.workers)
         original = db.get_application(self.connection, self.app_id)
+        self.f.capacity_override = (1300, 1520)
         self.f.body["commit"] = "b" * 40
         db.put_image_selection(
             self.connection,
@@ -218,6 +219,7 @@ class WorkerReuseTests(unittest.TestCase):
         )
         self.no_worker_mutations()
         self.f.fail_health = False
+        self.f.capacity_override = (1300, 1520)
         plan = self.plan(previous)
         self.f.calls.clear()
         key, restored = self.rollback(plan)

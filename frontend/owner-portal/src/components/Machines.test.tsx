@@ -46,9 +46,7 @@ describe('Overview machines', () => {
       const section = await screen.findByRole('region', { name: 'Machines' });
       expect(within(section).getByText('4 vCPU · 16 GB RAM (xl.4core)')).toBeVisible();
       expect(
-        within(section).getByText(
-          'The app can use up to 14.1 GB of memory and all 4 vCPUs (about 2.0 GHz each).',
-        ),
+        within(section).getByText('The app can use up to 14.1 GB of memory and all 4 vCPUs.'),
       ).toBeVisible();
       expect(
         await within(section).findByText(
@@ -71,12 +69,10 @@ describe('Overview machines', () => {
       expect(screen.queryByText('Size', { exact: true })).toBeNull();
     },
   );
-  it('labels total CPU explicitly when flavor capacity is unavailable', async () => {
+  it('shows the memory limit when flavor capacity is unavailable', async () => {
     show({ ...app, sizing: { workerFlavor: 'xl.4core', cpuMHz: 7916, memoryMiB: 14395 } });
-    expect(
-      await screen.findByText('xl.4core · 14.1 GB memory for the app · 7.9 GHz CPU in total'),
-    ).toBeVisible();
-    expect(screen.queryByText(/GHz each|7.916|14395 MB/)).toBeNull();
+    expect(await screen.findByText('xl.4core · 14.1 GB memory limit for the app')).toBeVisible();
+    expect(screen.queryByText(/GHz|7.916|14395 MB/)).toBeNull();
   });
   it.each(['owner', 'member'] as const)(
     'hides machines and avoids the sizing read for %s',

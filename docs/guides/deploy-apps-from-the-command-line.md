@@ -574,12 +574,14 @@ RESIZE_ID=$(jq -er .operationId resize-submitted.json)
 wait_for "$RESIZE_ID" && app_record | jq .sizing
 ```
 
-Success shows updated `workerFlavor`, `cpuMHz`, and `memoryMiB`. Sizing stays pinned across deployments and disable/enable.
+Success shows updated `workerFlavor`, `cpuMHz`, and `memoryMiB`. Every deployment that provisions a fresh worker recalculates the allocation from that worker's measured capacity, even without a size plan. The flavor stays selected until changed. Disable/enable and worker reuse keep the accepted allocation; resumed deployments keep the checkpointed allocation.
 
 <details>
 <summary>How the CPU and memory allocation is computed</summary>
 
-From registered capacity, reserve the largest of 10% rounded up, 200 MHz CPU/512 MiB RAM, or Nomad's reserve. Containers get the remainder. Flavors below 576 MiB RAM and nodes below pinned allocations fail.
+From registered capacity, reserve the largest of 10% rounded up, 200 MHz CPU/512 MiB RAM, or Nomad's reserve. With a size plan, also clamp memory to the flavor's RAM minus the system reserve. Leave another 32 MiB of memory headroom, then round down to a 128 MiB step (minimum 64 MiB). Reserve half the available CPU budget, rounded down to 100 MHz (minimum 100 MHz). This headroom accommodates small memory changes and different hypervisor CPU clocks when an allocation is reused.
+
+`memoryMiB` is a hard container limit. `cpuMHz` is a soft scheduling share: the app can use all of its dedicated worker's vCPUs. Flavors below 576 MiB RAM and nodes below pinned allocations fail; headroom does not permit exceeding measured capacity.
 
 </details>
 

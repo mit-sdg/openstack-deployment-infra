@@ -316,7 +316,7 @@ Setup writes the private app resource policy and backup public key from `config/
 | Key | Value set by setup | Meaning |
 | --- | --- | --- |
 | `standard.workerFlavor` | `PLATFORM_WORKER_FLAVOR` | Standard app worker flavor |
-| `standard.cpuMHz`, `standard.memoryMiB` | `1000`, `2048` | CPU and memory reserved for each app's container |
+| `standard.cpuMHz`, `standard.memoryMiB` | `1000`, `2048` | Initial allocation stored at app creation; fresh-worker deployments replace it with the measured [allocation budget](../guides/deploy-apps-from-the-command-line.md#plan-and-resize) |
 | `standard.postgresConnections` | `10` | Initial connection limit for each app's PostgreSQL database |
 | `standard.postgresMeasuredBytes` | 2 GiB | Initial PostgreSQL size reporting target; not enforced |
 | `standard.mongoMeasuredBytes` | 2 GiB | Initial MongoDB logical data and index size limit; pauses writes when exceeded |

@@ -234,13 +234,13 @@ class ApplicationSizingTests(unittest.TestCase):
             key,
         )
 
-    def test_resize_reuses_artifact_accepts_large_budget_and_persists_on_redeploy(self):
+    def test_resize_reuses_artifact_and_redeploy_remeasures_the_same_flavor(self):
         _, first = self.deploy()
         self.assertEqual(first.status, "succeeded", first.safe_error)
         before = db.get_application(self.connection, self.app_id)
         self.assertEqual(
             (before.worker_flavor, before.scheduler_cpu_mhz, before.scheduler_memory_mib),
-            ("worker-small", 500, 512),
+            ("worker-small", 900, 1408),
         )
         plan = self.plan()
         self.assertEqual(plan["flavor"], sizing.flavor_projection(XL))
@@ -256,38 +256,44 @@ class ApplicationSizingTests(unittest.TestCase):
         accepted = db.get_application(self.connection, self.app_id)
         self.assertEqual(
             (accepted.worker_flavor, accepted.scheduler_cpu_mhz, accepted.scheduler_memory_mib),
-            ("xl.4core", 9000, 14400),
+            ("xl.4core", 4500, 14336),
         )
         deployment = db.get_deployment(self.connection, self.app_id)
-        self.assertRegex(deployment.nomad_job, r"cpu\s*=\s*9000")
+        self.assertRegex(deployment.nomad_job, r"cpu\s*=\s*4500")
         call_count = len(self.calls)
         self.resize(plan, key)
         self.assertEqual(len(self.calls), call_count)
-        # Fresh normal deployment keeps the accepted size, not policy defaults
-        # or newly available excess capacity on a different hypervisor.
+        # A fresh worker keeps the flavor and uses its own measured budget.
         self.capacity_override = (11000, 14500)
         _, redeploy = self.deploy()
         self.assertEqual(redeploy.status, "succeeded", redeploy.safe_error)
         persisted = db.get_application(self.connection, self.app_id)
         self.assertEqual(
             (persisted.worker_flavor, persisted.scheduler_cpu_mhz, persisted.scheduler_memory_mib),
-            ("xl.4core", 9000, 14400),
+            ("xl.4core", 5500, 14464),
         )
         self.assertEqual(len(self.workers), 1)
 
-    def test_ordinary_one_vcpu_deploy_disable_enable_preserves_default_allocation(self):
+    def test_ordinary_deploy_uses_rounded_budget_and_enable_tolerates_lower_capacity(self):
         self.assertEqual(SMALL.vcpus, 1)
         _, deployed = self.deploy()
         self.assertEqual(deployed.status, "succeeded", deployed.safe_error)
-        defaults = self.config.policy.standard
+        deployed_app = db.get_application(self.connection, self.app_id)
+        self.assertEqual(
+            (deployed_app.scheduler_cpu_mhz, deployed_app.scheduler_memory_mib), (900, 1408)
+        )
+        deployment = db.get_deployment(self.connection, self.app_id)
+        self.assertRegex(deployment.nomad_job, r"memory\s*=\s*1408")
+        self.assertNotIn("cpu_hard_limit", deployment.nomad_job)
         _, disabled = self.post(f"/v1/applications/{self.app_id}/disable", {})
         self.assertEqual(disabled.status, "succeeded", disabled.safe_error)
+        self.capacity_override = (1300, 1520)
         _, enabled = self.post(f"/v1/applications/{self.app_id}/enable", {})
         self.assertEqual(enabled.status, "succeeded", enabled.safe_error)
         current = db.get_application(self.connection, self.app_id)
         self.assertEqual(
             (current.worker_flavor, current.scheduler_cpu_mhz, current.scheduler_memory_mib),
-            (defaults.worker_flavor, defaults.cpu_mhz, defaults.memory_mib),
+            ("worker-small", 900, 1408),
         )
         self.assertFalse(any(action == "app.promote" for action, _ in self.calls))
 
@@ -307,7 +313,7 @@ class ApplicationSizingTests(unittest.TestCase):
                 project.dispatch(method, f"/v1/admin/applications/{self.app_id}/{suffix}", {}, None)
             self.assertEqual(error.exception.status, 404)
         before = db.get_application(self.connection, self.app_id)
-        # Ordinary project deploys preserve custom accepted sizing with no plan.
+        # Ordinary project deploys retain the custom flavor without a plan.
         _, operation = self.post(
             f"/v1/applications/{self.app_id}/deployments", {**self.body, "commit": "b" * 40}
         )
@@ -459,12 +465,12 @@ class ApplicationSizingTests(unittest.TestCase):
         current = db.get_application(self.connection, self.app_id)
         self.assertTrue(current.desired_running)
         self.assertEqual(current.worker_flavor, "xl.4core")
-        self.assertEqual((current.scheduler_cpu_mhz, current.scheduler_memory_mib), (9000, 14400))
+        self.assertEqual((current.scheduler_cpu_mhz, current.scheduler_memory_mib), (4500, 14336))
         self.assertFalse(any(action == "app.build" for action, _values in self.calls))
         listed = self.router.dispatch("GET", "/v1/admin/applications", {}, None).body["items"]
         self.assertEqual(
             listed[0]["sizing"],
-            {"workerFlavor": "xl.4core", "cpuMHz": 9000, "memoryMiB": 14400},
+            {"workerFlavor": "xl.4core", "cpuMHz": 4500, "memoryMiB": 14336},
         )
 
     def test_stale_tampered_and_provider_drifted_plans_mutate_nothing(self):
@@ -503,8 +509,31 @@ class ApplicationSizingTests(unittest.TestCase):
             key, operation = self.resize(plan)
         self.assertEqual(operation.status, "recovery_required")
         self.assertEqual(db.get_application(self.connection, self.app_id), prior)
+        self.assertEqual(operation.refs["allocation"], {"cpuMHz": 4500, "memoryMiB": 14336})
+        self.capacity_override = (7000, 14384)
         _, recovered = self.resize(plan, key)
         self.assertEqual(recovered.status, "succeeded", recovered.safe_error)
+        current = db.get_application(self.connection, self.app_id)
+        self.assertEqual((current.scheduler_cpu_mhz, current.scheduler_memory_mib), (4500, 14336))
+
+    def test_plan_clamps_measured_memory_to_flavor_before_rounding(self):
+        self.capacity_override = (10000, 20000)
+        _, operation = self.deploy(self.plan())
+        self.assertEqual(operation.status, "succeeded", operation.safe_error)
+        current = db.get_application(self.connection, self.app_id)
+        self.assertEqual((current.scheduler_cpu_mhz, current.scheduler_memory_mib), (5000, 14592))
+
+    def test_ordinary_deploy_resume_keeps_checkpointed_allocation(self):
+        self.fail_action = "app.deploy"
+        key, operation = self.deploy()
+        self.assertEqual(operation.status, "recovery_required", operation.safe_error)
+        self.assertEqual(operation.refs["allocation"], {"cpuMHz": 900, "memoryMiB": 1408})
+        self.capacity_override = (1300, 1520)
+        _, recovered = self.post(f"/v1/applications/{self.app_id}/deployments", self.body, key)
+        self.assertEqual(recovered.status, "succeeded", recovered.safe_error)
+        current = db.get_application(self.connection, self.app_id)
+        self.assertEqual((current.scheduler_cpu_mhz, current.scheduler_memory_mib), (900, 1408))
+        self.assertEqual(sum(action == "app.worker.create" for action, _ in self.calls), 1)
 
 
 class FlavorCapacityTests(unittest.TestCase):
