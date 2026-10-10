@@ -152,17 +152,19 @@ import sys
 
 try:
     digests = [hashlib.md5(usedforsecurity=False), hashlib.sha256(), hashlib.sha512()]
+    size = 0
     with open(sys.argv[1], "rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
             for digest in digests:
                 digest.update(chunk)
 except OSError as error:
     raise SystemExit("could not checksum the image file") from error
-print(*(digest.hexdigest() for digest in digests))
+print(*(digest.hexdigest() for digest in digests), size)
 PY
 )
-read -r local_checksum local_sha256 local_sha512 <<< "$local_checksums"
-[[ $local_checksum =~ ^[0-9a-f]{32}$ && \
+read -r local_checksum local_sha256 local_sha512 local_size <<< "$local_checksums"
+[[ $local_checksum =~ ^[0-9a-f]{32}$ && $local_size =~ ^[1-9][0-9]*$ && \
    $local_sha256 == "$PLATFORM_ARTIFACT_QCOW2_SHA256" && \
    $local_sha512 =~ ^[0-9a-f]{128}$ ]] || {
   echo "local image checksums do not match verified artifact evidence" >&2
@@ -230,7 +232,7 @@ if value != sys.argv[1]:
 PY
 deadline=$((SECONDS + 900))
 while :; do
-  observed=$("$OSC" image show "$image_id" -f json -c id -c name -c status -c owner -c checksum -c os_hash_algo -c os_hash_value -c properties)
+  observed=$("$OSC" image show "$image_id" -f json -c id -c name -c status -c owner -c checksum -c size -c os_hash_algo -c os_hash_value -c properties)
   observed_status=$(OBSERVED_IMAGE="$observed" python3 - <<'PY'
 import json
 import os
@@ -258,7 +260,8 @@ PY
 done
 verify_observed_image() {
   OBSERVED_IMAGE="$observed" EXPECTED_METADATA="$metadata_output" \
-    EXPECTED_CHECKSUM="$local_checksum" EXPECTED_SHA512="$local_sha512" METADATA_KEY="$metadata_key" \
+    EXPECTED_CHECKSUM="$local_checksum" EXPECTED_SIZE="$local_size" \
+    EXPECTED_SHA512="$local_sha512" METADATA_KEY="$metadata_key" \
     ALLOW_REATTESTATION="$1" python3 - "$image_id" "$image_name" "$project_id" <<'PY'
 import json
 import os
@@ -279,11 +282,16 @@ try:
     observed_name = image["name"]
     observed_status = image["status"]
     observed_checksum = image["checksum"]
+    observed_size = image["size"]
     observed_hash_algorithm = image.get("os_hash_algo")
     observed_hash_value = image.get("os_hash_value")
     properties = image["properties"]
-    if not isinstance(properties, dict) or not isinstance(observed_checksum, str):
-        raise ValueError("properties or checksum is malformed")
+    if (
+        not isinstance(properties, dict)
+        or not isinstance(observed_checksum, str)
+        or type(observed_size) is not int
+    ):
+        raise ValueError("properties, checksum or size is malformed")
 except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
     raise SystemExit("published image projection is malformed") from error
 key_prefix = os.environ["METADATA_KEY"]
@@ -303,6 +311,7 @@ if (
     or observed_owner != project_id
     or not re.fullmatch(r"[0-9a-f]{32}", observed_checksum)
     or observed_checksum != os.environ["EXPECTED_CHECKSUM"]
+    or observed_size != int(os.environ["EXPECTED_SIZE"])
     or any(properties.get(key) != value for key, value in expected.items())
     or properties.get(f"{key_prefix}_qcow2_sha256", "") != os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
     or properties.get(f"{key_prefix}_nix_closure_sha256", "") != os.environ["PLATFORM_ARTIFACT_NIX_CLOSURE_SHA256"]
@@ -310,7 +319,10 @@ if (
 ):
     raise SystemExit("published image identity, owner, active status, checksum, or metadata could not be verified")
 if observed_hash_algorithm is None and observed_hash_value is None:
-    method = "download"
+    # Without a provider multihash, Glance's MD5 and exact size of the stored
+    # bytes still detect transfer or storage corruption of the retained QCOW2,
+    # whose SHA-256 was checked against accepted evidence before upload.
+    method = "provider-md5-size"
 elif (
     observed_hash_algorithm == "sha256"
     and observed_hash_value == os.environ["PLATFORM_ARTIFACT_QCOW2_SHA256"]
@@ -334,40 +346,15 @@ if [[ $signed_evidence == true && $existing_count == 1 ]]; then
 fi
 verification=$(verify_observed_image "$allow_reattestation")
 read -r hash_verification previous_manifest <<< "$verification"
-if [[ $hash_verification == download ]]; then
-  downloaded=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/published-image.XXXXXX.qcow2")
-  trap 'rm -f "$downloaded"' EXIT
-  download_verified=false
-  for attempt in 1 2 3; do
-    rm -f "$downloaded"
-    if "$OSC" image save --file "$downloaded" "$image_id"; then
-      downloaded_sha256=$(sha256sum "$downloaded" | cut -d' ' -f1)
-      [[ $downloaded_sha256 == "$PLATFORM_ARTIFACT_QCOW2_SHA256" ]] || {
-        echo "downloaded published image SHA-256 differs" >&2
-        exit 1
-      }
-      download_verified=true
-      break
-    fi
-    (( attempt < 3 )) || break
-    sleep $((attempt * 10))
-  done
-  [[ $download_verified == true ]] || {
-    echo "published image could not be downloaded for SHA-256 verification" >&2
-    exit 1
-  }
-  rm -f "$downloaded"
-  trap - EXIT
-fi
 if [[ -n $previous_manifest ]]; then
   # Only externally signed, already verified evidence can re-attest identical
   # bytes. The name/UUID/QCOW2 remain unchanged, matching immutable guest config.
-  # No mutation occurs until the independent provider/download content gate above.
+  # No mutation occurs until the provider content gate above.
   "$OSC" image set \
     --property "${metadata_key}_previous_artifact_manifest_sha256=$previous_manifest" \
     --property "${metadata_key}_artifact_manifest_sha256=$PLATFORM_ARTIFACT_MANIFEST_SHA256" \
     "$image_id"
-  observed=$("$OSC" image show "$image_id" -f json -c id -c name -c status -c owner -c checksum -c os_hash_algo -c os_hash_value -c properties)
+  observed=$("$OSC" image show "$image_id" -f json -c id -c name -c status -c owner -c checksum -c size -c os_hash_algo -c os_hash_value -c properties)
   verification=$(verify_observed_image false)
   read -r final_hash remaining_promotion <<< "$verification"
   [[ $final_hash == "$hash_verification" && -z $remaining_promotion ]] || {
