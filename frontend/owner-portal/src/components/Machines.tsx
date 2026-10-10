@@ -30,7 +30,7 @@ export function Machines({ app }: { app: AppRecord }) {
                     {capacity
                       ? workerSizeLabel(capacity)
                       : size
-                        ? `${size.workerFlavor} · ${(size.memoryMiB / 1024).toFixed(1)} GB memory for the app · ${(size.cpuMHz / 1000).toFixed(1)} GHz CPU in total`
+                        ? `${size.workerFlavor} · ${(size.memoryMiB / 1024).toFixed(1)} GB memory limit for the app`
                         : 'Worker details unavailable'}
                   </span>
                   <Link className="ui-link ui-text-sm" href={`/apps/${id}/deploy#worker-size`}>
@@ -40,8 +40,7 @@ export function Machines({ app }: { app: AppRecord }) {
                 {capacity && size && (
                   <Hint>
                     The app can use up to {(size.memoryMiB / 1024).toFixed(1)} GB of memory and{' '}
-                    {capacity.vcpus === 1 ? '1 vCPU' : `all ${capacity.vcpus} vCPUs`} (about{' '}
-                    {(size.cpuMHz / capacity.vcpus / 1000).toFixed(1)} GHz each).
+                    {capacity.vcpus === 1 ? "the worker's 1 vCPU" : `all ${capacity.vcpus} vCPUs`}.
                   </Hint>
                 )}
               </Stack>

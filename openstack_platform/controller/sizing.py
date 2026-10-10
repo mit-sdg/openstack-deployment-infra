@@ -47,6 +47,13 @@ def worker_budget(capacity: Mapping[str, Any], server_id: str, flavor: str) -> t
     return cpu, memory
 
 
+def allocation_budget(cpu: int, memory: int) -> tuple[int, int]:
+    # Same-flavor guests vary: keep 32 MiB before rounding RAM down to 128 MiB.
+    # CPU is a soft share on a dedicated worker; half the budget leaves room
+    # for different hypervisor clocks without limiting the app's CPU usage.
+    return max(100, cpu // 200 * 100), max(64, (memory - 32) // 128 * 128)
+
+
 def flavor_projection(flavor: openstack.Flavor) -> dict[str, Any]:
     return asdict(flavor)
 

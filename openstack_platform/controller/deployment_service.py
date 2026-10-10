@@ -2166,12 +2166,14 @@ class DeploymentService:
                     deadline=selected_deadline,
                 )
                 cpu, memory = sizing.worker_budget(capacity, worker.server_id, spec.worker_flavor)
-                if request.sizing_plan is not None and "allocation" not in refs:
+                if request.sizing_plan is not None:
                     # Do not allocate RAM beyond the reviewed provider flavor even
                     # if a malformed guest observation claims additional capacity.
                     ram = request.sizing_plan["flavor"]["ram_mib"]
                     memory = min(memory, ram - sizing.reserve(ram, sizing.MEMORY_RESERVE_MIB))
-                    spec = replace(spec, cpu_mhz=cpu, memory_mib=memory)
+                if "allocation" not in refs:
+                    allocated_cpu, allocated_memory = sizing.allocation_budget(cpu, memory)
+                    spec = replace(spec, cpu_mhz=allocated_cpu, memory_mib=allocated_memory)
                 if spec.cpu_mhz > cpu or spec.memory_mib > memory:
                     raise app.ApplicationError(
                         "pinned allocation exceeds worker capacity after reserve"

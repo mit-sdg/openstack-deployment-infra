@@ -167,7 +167,11 @@ describe('worker size', () => {
     });
     fireEvent.change(screen.getByLabelText('Worker size'), { target: { value: '200' } });
     await waitFor(() => expect(read).toHaveBeenCalledWith('app', '200'));
-    expect(await screen.findByText(/The app can use up to 7.2 GB/)).toBeVisible();
+    expect(
+      await screen.findByText(
+        /The app can use up to 7.2 GB of memory and all 4 vCPUs\. The memory limit is set after the worker starts/,
+      ),
+    ).toBeVisible();
     expect(screen.getByText(/This app keeps a fixed IP address/)).toBeVisible();
     expect(screen.queryByLabelText('Deployment method')).toBeNull();
     expect(screen.getByText('Now')).toBeVisible();
@@ -200,7 +204,7 @@ describe('worker size', () => {
     await waitFor(() => expect(sizingApi.plan).toHaveBeenCalledWith('app', '200'));
     expect(screen.getByRole('button', { name: 'Review deployment' })).toBeDisabled();
     fireEvent.change(control, { target: { value: '50' } });
-    await screen.findByText(/The app can use up to 0.5 GB/);
+    await screen.findByText(/The app can use up to 0.5 GB of memory and the worker's 1 vCPU\./);
     finish(plan);
     await waitFor(() => expect(screen.getByLabelText('Worker size')).toHaveValue('50'));
     expect(screen.queryByText(/The app can use up to 7.2 GB/)).toBeNull();

@@ -375,7 +375,7 @@ These routes manage optional, app-owned network addresses. [Deploy apps from the
 | `configurationRevision` | The caller's revision number for this configuration |
 | `configuration` | The build and runtime configuration below |
 | `maintenance` | Optional boolean. `true` keeps the old version serving during the build, then stops it before starting the new one (no concurrent processes, but not zero downtime). |
-| `plan` | Optional reviewed sizing plan. Without it, the accepted sizing is kept. |
+| `plan` | Optional reviewed sizing plan selecting a worker flavor and bounding memory by its RAM minus reserve. Without it, the selected flavor is kept. Every fresh-worker deployment recalculates the allocation from measured capacity; resume keeps the checkpointed allocation. See [allocation rules](../guides/deploy-apps-from-the-command-line.md#plan-and-resize). |
 
 ```json
 {

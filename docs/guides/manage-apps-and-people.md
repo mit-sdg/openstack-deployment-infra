@@ -76,7 +76,7 @@ On the app's **Settings** page, under **Danger zone**, select **Change owner**, 
 
 ### Allow an outage or change an app's size
 
-On **Overview** > **Machines**, **Worker** shows the machine's vCPU count and total RAM, followed by the memory available to the app after the system reserve and approximate speed per vCPU. If machine capacity is unavailable, it shows the flavor name, app memory allowance and CPU speed explicitly labelled as a total. Select **Change size** to open **Deploy** at **Worker size**.
+On **Overview** > **Machines**, **Worker** shows the machine's vCPU count and total RAM, followed by the app's memory limit. The app can use all of the worker's vCPUs. If machine capacity is unavailable, it shows the flavor name and app memory limit. Select **Change size** to open **Deploy** at **Worker size**. Every deployment with a fresh worker recalculates the memory limit after leaving room for the system; the size review shows an upper bound until the worker starts.
 
 Staff and portal admins have these deploy options:
 
