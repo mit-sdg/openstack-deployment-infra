@@ -103,6 +103,66 @@ let
     server.daemon_threads=True
     server.serve_forever()
   '';
+  storageInstanceProbe = pkgs.writeText "storage-instance-probe.py" ''
+    import json, ssl, subprocess, sys, urllib.request, uuid
+    sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
+    import psycopg
+    from pymongo import MongoClient
+    from openstack_platform.helper import storage
+    ca="/etc/${namespace}/pki/internal-ca.pem"
+    context=ssl.create_default_context(cafile=ca)
+    def call(action, instance, **values):
+        body=json.dumps({"action":action,"instanceId":instance,**values}).encode()
+        request=urllib.request.Request("https://127.0.0.1:${toString constants.ports.garageRpc}/platform/instances",data=body,headers={"Authorization":"Bearer vm-instance-token","Content-Type":"application/json"})
+        with urllib.request.urlopen(request,context=context,timeout=90) as response:
+            return json.load(response)
+    owner=str(uuid.uuid4())
+    limits={"sizeBytes":2147483648,"connections":10,"memoryBytes":536870912,"cpuMillicores":500}
+    ids=[str(uuid.uuid4()),str(uuid.uuid4())]
+    instances=[call("create",ident,applicationId=owner,type=kind,quotas=limits,allowIps=[],reservations={"databaseBytes":5368709120,"garageBytes":0}) for ident,kind in zip(ids,["postgres","mongo"])]
+    credentials=[call("credentials",ident) for ident in ids]
+    for ident in ids:
+        unit="${namespace}-database@"+ident+".service"
+        result=subprocess.check_output(["systemctl","show",unit,"-p","MemoryMax","-p","MemorySwapMax","-p","CPUWeight","-p","IOWeight","-p","TasksMax","-p","CPUQuotaPerSecUSec"],text=True)
+        properties=dict(line.split("=",1) for line in result.splitlines())
+        assert properties["MemoryMax"] == "536870912"
+        assert properties["MemorySwapMax"] == "0"
+        assert properties["CPUWeight"] == "100" and properties["IOWeight"] == "100"
+        assert properties["TasksMax"] == "256"
+        assert properties["CPUQuotaPerSecUSec"] == "500ms"
+        group=subprocess.check_output(["systemctl","show",unit,"-p","ControlGroup","--value"],text=True).strip()
+        pid=json.loads(subprocess.check_output(["podman","inspect","${namespace}-db-"+ident]))[0]["State"]["Pid"]
+        from pathlib import Path
+        actual=Path("/proc/"+str(pid)+"/cgroup").read_text().strip().split("0::",1)[1]
+        assert actual == group or actual.startswith(group+"/")
+        cgroup=Path("/sys/fs/cgroup"+actual)
+        assert cgroup.joinpath("memory.max").read_text().strip() == "536870912"
+        data="${platform.paths.data}/instances/"+ident+"/data"
+        probe=data+"/quota-enforcement-probe"
+        assigned=subprocess.check_output(["lsattr","-pd",data],text=True).split()[0]
+        assert int(assigned) >= 10000
+        assert subprocess.run(["fallocate","-l","3G",probe],capture_output=True).returncode != 0
+        Path(probe).unlink(missing_ok=True)
+    # Driver server-selection retries provide a bounded startup wait.
+    from openstack_platform.helper.instances import connect_ready
+    pg=connect_ready(lambda: psycopg.connect(host="127.0.0.1",port=credentials[0]["port"],dbname="platform",user="platform_admin",password=credentials[0]["adminPassword"],sslmode="verify-full",sslrootcert=ca,connect_timeout=2,autocommit=True))
+    storage._PORT_CONTEXT.set((credentials[0]["port"],credentials[1]["port"]))
+    postgres=storage.postgres_create(pg,application_id=owner,host="127.0.0.1",connections=10,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()))
+    storage.postgres_verify(lambda **kwargs: psycopg.connect(**kwargs,sslrootcert=ca,connect_timeout=5,autocommit=True),postgres,host="127.0.0.1")
+    assert pg.execute("show max_connections").fetchone()[0] == "15"
+    pg.close()
+    mongo=MongoClient("127.0.0.1",credentials[1]["port"],username="platform_admin",password=credentials[1]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000)
+    connect_ready(lambda: mongo.admin.command("ping"))
+    scoped=storage.mongo_create(mongo,application_id=owner,host="127.0.0.1",measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()))
+    storage.mongo_verify(lambda **kwargs: MongoClient(kwargs["uri"],tlsCAFile=ca,serverSelectionTimeoutMS=5000),scoped,host="127.0.0.1")
+    options=mongo.admin.command("getCmdLineOpts")["parsed"]
+    assert options["net"]["maxIncomingConnections"] == 20
+    assert options["storage"]["wiredTiger"]["engineConfig"]["cacheSizeGB"] == 0.25
+    mongo.close()
+    for ident in ids:
+        call("remove",ident,deleteData=True)
+    print("instance lifecycle, database access and cgroup caps verified")
+  '';
   imageCompatibilityHash = builtins.hashString "sha256" (
     builtins.toJSON {
       format = 1;
@@ -207,7 +267,42 @@ let
       name = "${namespace}-${role}-vm";
 
       nodes.machine =
-        { lib, pkgs, ... }:
+        { lib, pkgs, config, ... }:
+        let
+          # Small cached native images exercise the manager end to end without
+          # fetching the production OCI pins from inside a networkless test VM.
+          dbNss = pkgs.runCommand "vm-db-nss" { } ''
+            mkdir -p "$out/etc"
+            printf 'root:x:0:0:root:/root:/bin/sh\npostgres:x:999:999:postgres:/var/lib/postgresql:/bin/sh\n' > "$out/etc/passwd"
+            printf 'root:x:0:\npostgres:x:999:\n' > "$out/etc/group"
+          '';
+          postgresEntry = pkgs.writeShellScriptBin "vm-postgres-entry" ''
+            set -eu
+            export PATH=${lib.makeBinPath [ pkgs.postgresql pkgs.coreutils pkgs.util-linux ]}
+            export PGDATA=/var/lib/postgresql/data
+            if [ ! -f "$PGDATA/PG_VERSION" ]; then
+              setpriv --reuid=999 --regid=999 --clear-groups initdb -D "$PGDATA" -U platform_admin --pwfile=/run/secrets/admin-password --auth-local=trust --auth-host=scram-sha-256 --locale=C --encoding=UTF8
+              printf 'CREATE DATABASE platform;\n' | setpriv --reuid=999 --regid=999 --clear-groups postgres --single -D "$PGDATA" postgres
+            fi
+            exec setpriv --reuid=999 --regid=999 --clear-groups "$@"
+          '';
+          postgresImage = pkgs.dockerTools.buildLayeredImage {
+            name = "vm-instance-postgres";
+            tag = "latest";
+            contents = [ pkgs.postgresql pkgs.coreutils pkgs.util-linux dbNss postgresEntry ];
+            config.Entrypoint = [ "/bin/vm-postgres-entry" ];
+          };
+          mongoImage = pkgs.dockerTools.buildLayeredImage {
+            name = "vm-instance-mongo";
+            tag = "latest";
+            contents = [ pkgs.mongodb-ce pkgs.mongosh pkgs.coreutils dbNss ];
+            config.Entrypoint = [ "/bin/mongod" ];
+          };
+          instancePlatform = platform // {
+            addresses = platform.addresses // { admin = "127.0.0.1"; storage = "127.0.0.1"; };
+            containers = platform.containers // { postgres = "localhost/vm-instance-postgres:latest"; mongodb = "localhost/vm-instance-mongo:latest"; };
+          };
+        in
         {
           imports = [
             ../modules/common.nix
@@ -217,10 +312,16 @@ let
           _module.args = { inherit constants platform role; };
 
           virtualisation = {
-            memorySize = if role == "storage" then 3072 else 2048;
+            memorySize = if role == "storage" then 4096 else 2048;
+            emptyDiskImages = lib.optionals (role == "storage") [ 1048576 ];
             cores = 2;
+            qemu.options = lib.optionals (role == "storage") [ "-cpu max" ];
           };
 
+          # Use cached native binaries for a startup smoke of the role's exact
+          # arguments; no container image pulls or full provider scenario.
+          nixpkgs.config.allowUnfreePredicate = package: lib.getName package == "mongodb-ce";
+          environment.systemPackages = lib.optionals (role == "storage") [ pkgs.postgresql pkgs.mongodb-ce ];
           security.pki.certificateFiles = lib.optionals (role == "admin") [ "${testPki}/ca.pem" ];
           networking.hosts = lib.mkIf (role == "admin") { "127.0.0.1" = [ "class.example.com" ]; };
           services.cloud-init.settings.datasource_list = lib.mkForce [ "None" ];
@@ -247,10 +348,12 @@ let
             ]
             ++ lib.optionals (role == "storage") [
               {
-                what = "tmpfs";
+                what = "/dev/vdb";
                 where = platform.paths.data;
-                type = "tmpfs";
-                options = "mode=0750";
+                type = "xfs";
+                options = "prjquota";
+                after = [ "vm-storage-format.service" ];
+                requires = [ "vm-storage-format.service" ];
                 wantedBy = [ "multi-user.target" ];
               }
             ];
@@ -390,10 +493,26 @@ let
             })
             (lib.mkIf (role == "storage") {
               "${namespace}-storage-readiness".wantedBy = lib.mkForce [ ];
+              "${namespace}-storage-host-status".wantedBy = lib.mkForce [ ];
               "podman-${namespace}-postgres".wantedBy = lib.mkForce [ ];
               "podman-${namespace}-mongodb".wantedBy = lib.mkForce [ ];
               "podman-${namespace}-garage".wantedBy = lib.mkForce [ ];
               "podman-${namespace}-registry".wantedBy = lib.mkForce [ ];
+
+              "${namespace}-storage-instance-manager" = {
+                wantedBy = lib.mkForce [ ];
+                serviceConfig.ExecStart = lib.mkForce "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/vm-instance-platform.json";
+              };
+              "${namespace}-database@".serviceConfig.ExecStart = lib.mkForce "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/vm-instance-platform.json --run-instance %i";
+              "vm-storage-format" = {
+                after = [ "dev-vdb.device" ];
+                requires = [ "dev-vdb.device" ];
+                serviceConfig.Type = "oneshot";
+                serviceConfig.RemainAfterExit = true;
+                script = ''
+                  ${pkgs.xfsprogs}/bin/mkfs.xfs -f -L ${platform.volumes.data.label} /dev/vdb
+                '';
+              };
             })
           ];
 
@@ -416,6 +535,14 @@ let
                 text = "dGVzdC1ub21hZC1nb3NzaXAta2V5\n";
                 mode = "0600";
               };
+            })
+            (lib.mkIf (role == "storage") {
+              "vm-instance-platform.json".text = builtins.toJSON instancePlatform;
+              "vm-instance-images/postgres.tar".source = postgresImage;
+              "vm-instance-images/mongo.tar".source = mongoImage;
+              "${namespace}/garage.toml" = { text = ''[admin]
+                admin_token = "vm-instance-token"
+              ''; mode = "0600"; };
             })
             (lib.mkIf (role == "worker") {
               "${namespace}/docker-auth.json".text = ''{"auths":{}}'';
@@ -611,6 +738,11 @@ let
               machine.wait_for_unit("nginx.service")
               machine.succeed("${pkgs.nginx}/bin/nginx -t -c /etc/nginx/nginx.conf")
               machine.succeed("mountpoint -q ${platform.paths.data}")
+              machine.succeed("${pkgs.podman}/bin/podman load --input /etc/vm-instance-images/postgres.tar >/dev/null")
+              machine.succeed("${pkgs.podman}/bin/podman load --input /etc/vm-instance-images/mongo.tar >/dev/null")
+              machine.succeed("systemctl start ${namespace}-storage-instance-manager.service")
+              machine.wait_for_open_port(19002)
+              machine.succeed("${packages.platformPython}/bin/python ${storageInstanceProbe}")
             ''
           else if role == "worker" then
             ''

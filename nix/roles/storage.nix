@@ -23,9 +23,21 @@ let
       ];
       sslCertificate = "/etc/${namespace}/pki/storage.pem";
       sslCertificateKey = "/etc/${namespace}/pki/storage-key.pem";
+      # Trust only ingress's appended client address; workers cannot forge it.
+      extraConfig = ''
+        set_real_ip_from ${platform.addresses.ingress};
+        real_ip_header X-Forwarded-For;
+      '';
       locations."/" = {
         proxyPass = "http://127.0.0.1:19000";
         extraConfig = ''
+          limit_req zone=storage_bucket_rate burst=40 nodelay;
+          limit_conn storage_bucket_connections 10;
+          # A peer cannot evade fairness by flooding invented bucket names.
+          limit_req zone=storage_peer_rate burst=40 nodelay;
+          limit_conn storage_peer_connections 10;
+          limit_req_status 429;
+          limit_conn_status 429;
           proxy_http_version 1.1;
           proxy_set_header Host ${host};
           proxy_set_header X-Forwarded-Proto https;
@@ -37,6 +49,11 @@ let
         '';
       };
     };
+  # xl.16core: 16 vCPU / 64 GiB. 100 default 512 MiB DB instances use
+  # 50 GiB; Garage 4 GiB + registry 2 GiB + two legacy 2 GiB servers
+  # leave 4 GiB for the OS, nginx and page cache. Legacy servers remain
+  # solely for migration and are removed in a separate follow-up.
+  packages = import ../pkgs { inherit pkgs platform; };
   data = platform.paths.data;
   infra = ../../infra;
   systemdEscapePath =
@@ -82,6 +99,22 @@ let
 in
 {
   networking.hostName = platform.hosts.storage;
+  networking.nftables.enable = true;
+  # Reload only declarative tables; preserve the manager's isolated dynamic table.
+  networking.nftables.flushRuleset = false;
+  # The manager's earlier nft chain admits only the owning worker/admin IPs.
+  networking.firewall.allowedTCPPortRanges = [ { from = 30000; to = 30999; } ];
+  # Bound host logs outside database projects: 1 GiB persistent history and
+  # 256 MiB volatile logs fit the 4 GiB host-services/page-cache allowance.
+  services.journald.extraConfig = ''
+    SystemMaxUse=1G
+    RuntimeMaxUse=256M
+  '';
+  boot.kernelModules = [ "bfq" ];
+  # BFQ makes cgroup IOWeight effective on the virtual data-volume device.
+  services.udev.extraRules = ''
+    ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="vd[a-z]|sd[a-z]", ATTR{queue/scheduler}="bfq"
+  '';
   networking.firewall.allowedTCPPorts = with constants.ports; [
     ssh
     garageRpc
@@ -136,6 +169,16 @@ in
       ports = [ "${toString ports.postgres}:${toString ports.postgres}" ];
       cmd = [
         "postgres"
+        # Temporary shared source: 100 connections covers the six live apps
+        # and migration. A 512 MiB cache/2 MiB work_mem fits its 2 GiB cap.
+        "-c"
+        "max_connections=100"
+        "-c"
+        "shared_buffers=512MB"
+        "-c"
+        "work_mem=2MB"
+        "-c"
+        "maintenance_work_mem=64MB"
         "-c"
         "ssl=on"
         "-c"
@@ -150,6 +193,10 @@ in
         "hba_file=/run/${namespace}-pg_hba.conf"
       ];
       extraOptions = [
+        # This legacy source is capped at 2 GiB during migration.
+        "--memory=2048m"
+        "--memory-swap=2048m"
+        "--cpus=0.5"
         "--health-cmd=pg_isready -U platform_admin -d platform"
         "--health-interval=30s"
         "--health-start-period=90s"
@@ -171,6 +218,15 @@ in
       ports = [ "${toString ports.mongodb}:${toString ports.mongodb}" ];
       cmd = [
         "mongod"
+        # Temporary source: 0.5 GiB cache leaves 1.5 GiB for the existing
+        # app pools and migration; 800 connections bounds their thread growth.
+        "--wiredTigerCacheSizeGB"
+        "0.5"
+        "--maxConns"
+        "800"
+        # Log operations over 100 ms without the overhead of profiling writes.
+        "--slowms"
+        "100"
         "--bind_ip_all"
         "--tlsMode"
         "requireTLS"
@@ -180,9 +236,25 @@ in
         "/run/${namespace}-pki/internal-ca.pem"
         "--tlsAllowConnectionsWithoutCertificates"
       ];
+      # The pinned image is MongoDB 8.0.29. defaultMaxTimeMS exists in 8.0,
+      # but setClusterParameter is unsupported on this standalone deployment:
+      # https://www.mongodb.com/docs/v8.0/reference/command/setclusterparameter/
+      extraOptions = [
+        "--memory=2048m"
+        "--memory-swap=2048m"
+        "--cpus=0.5"
+        # TLS ping checks mongod readiness without secrets in process arguments.
+        "--health-cmd=mongosh --quiet --tls --tlsCAFile /run/${namespace}-pki/internal-ca.pem --host 127.0.0.1 --tlsAllowInvalidHostnames --eval 'quit(db.runCommand({ping:1}).ok === 1 ? 0 : 1)'"
+        "--health-interval=30s"
+        "--health-start-period=90s"
+        "--health-timeout=5s"
+        "--health-retries=5"
+      ];
     };
     "${namespace}-garage" = {
       image = platform.containers.garage;
+      # 4 GiB gives 50 buckets metadata/cache headroom while bounding S3 memory.
+      extraOptions = [ "--memory=4096m" "--memory-swap=4096m" "--cpus=2" ];
       volumes = [
         "/run/credentials/podman-${namespace}-garage.service/garage-config:/etc/garage.toml:ro"
         "${data}/object-storage:/var/lib/garage"
@@ -199,6 +271,8 @@ in
     };
     "${namespace}-registry" = {
       image = platform.containers.registry;
+      # 2 GiB supports concurrent builder image streams; blobs stay on disk.
+      extraOptions = [ "--memory=2048m" "--memory-swap=2048m" "--cpus=1" ];
       environmentFiles = [ "/run/credentials/podman-${namespace}-registry.service/registry.env" ];
       volumes = [
         "${data}/registry:/var/lib/registry"
@@ -250,10 +324,14 @@ in
         };
       };
       "podman-${namespace}-postgres".serviceConfig = {
+        CPUQuota = "50%";
+        IOWeight = 100;
         ExecStartPre = [ "${credentialGuard} /etc/${namespace}/secrets/postgres-password" ];
         LoadCredential = "postgres-password:/etc/${namespace}/secrets/postgres-password";
       };
       "podman-${namespace}-mongodb".serviceConfig = {
+        CPUQuota = "50%";
+        IOWeight = 100;
         ExecStartPre = [
           "${credentialGuard} /etc/${namespace}/secrets/mongodb-password"
           stageMongoCredential
@@ -267,6 +345,79 @@ in
       "podman-${namespace}-registry".serviceConfig = {
         ExecStartPre = [ "${credentialGuard} /etc/${namespace}/registry.env" ];
         LoadCredential = "registry.env:/etc/${namespace}/registry.env";
+      };
+      "${namespace}-database@" = {
+        description = "Isolated database instance %i";
+        after = [ "${namespace}-storage-instance-manager.service" mountUnit ];
+        requires = [ mountUnit ];
+        wantedBy = [ ];
+        serviceConfig = {
+          ExecStart = "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/${namespace}/platform.json --run-instance %i";
+          Slice = "${namespace}-databases.slice";
+          Restart = "always";
+          # 5 seconds avoids a tight OOM/crash restart loop; only this DB restarts.
+          RestartSec = 5;
+          TimeoutStopSec = 60;
+          KillMode = "control-group";
+          LimitCORE = 0;
+          # Per-instance drop-ins supplied by the manager set MemoryMax,
+          # MemorySwapMax=0, CPUQuota, CPUWeight=100, IOWeight=100, TasksMax=256.
+          # At most 200 messages per 30 seconds per DB prevents log floods.
+          LogRateLimitIntervalSec = 30;
+          LogRateLimitBurst = 200;
+        };
+        path = [ pkgs.podman ];
+      };
+      "${namespace}-storage-instance-manager" = {
+        description = "Authenticated isolated database instance manager";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "cloud-final.service" "nftables.service" mountUnit dataLayoutUnit ];
+        requires = [ "nftables.service" mountUnit dataLayoutUnit ];
+        # pg_dump 17 matches the pinned PostgreSQL 17.11 source image.
+        path = [ pkgs.podman pkgs.systemd pkgs.nftables pkgs.xfsprogs pkgs.coreutils pkgs.postgresql_17 pkgs.mongodb-tools ];
+        serviceConfig = {
+          ExecStart = "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/${namespace}/platform.json";
+          LoadCredential = "garage-config:/etc/${namespace}/garage.toml";
+          Restart = "on-failure";
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          ReadWritePaths = [ data "/run/systemd" "/etc/systemd/system" "-/run/containers" "-/var/lib/containers" ];
+          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_NETLINK" ];
+          # Manager tools may reach only local databases; TLS/bearer requests
+          # arrive through nginx on loopback. No SSH command execution surface.
+          IPAddressDeny = "any";
+          IPAddressAllow = [ "localhost" platform.addresses.storage "10.88.0.0/16" ];
+          # Streaming tools/JSON fit 512 MiB; one core/128 tasks bound control
+          # work inside the 4 GiB host allowance instead of competing with DBs.
+          MemoryMax = "512M";
+          MemorySwapMax = 0;
+          CPUQuota = "100%";
+          TasksMax = 128;
+          LimitCORE = 0;
+        };
+      };
+      "${namespace}-storage-host-status" = {
+        description = "Authenticated read-only storage host metrics";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "cloud-final.service" mountUnit ];
+        requires = [ "cloud-final.service" mountUnit ];
+        path = [ pkgs.podman ];
+        serviceConfig = {
+          ExecStart = "${pkgs.python3}/bin/python3 ${infra}/monitor/storage_host.py --data ${data} --namespace ${namespace}";
+          LoadCredential = "garage-config:/etc/${namespace}/garage.toml";
+          Restart = "on-failure";
+          # Podman inspect and cgroup reads need the host's root namespace.
+          ProtectSystem = "strict";
+          # podman inspect takes local metadata locks; it receives fixed names.
+          ReadWritePaths = [ "-/run/containers" "-/var/lib/containers" ];
+          ProtectHome = true;
+          PrivateTmp = true;
+          NoNewPrivileges = true;
+          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" ];
+          IPAddressDeny = "any";
+          IPAddressAllow = "localhost";
+          LimitCORE = 0;
+        };
       };
       "${namespace}-storage-readiness" = {
         description = "Verify ${platform.displayName} storage services after first boot and reboot";
@@ -365,6 +516,14 @@ in
     }
   ];
 
+  systemd.slices."${namespace}-databases".sliceConfig = {
+    # Twelve of sixteen cores bound aggregate DB load, leaving four for
+    # Garage, the registry, the migration source and host administration.
+    CPUQuota = "1200%";
+    MemoryMax = "50G";
+    MemorySwapMax = 0;
+  };
+
   systemd.timers."${namespace}-registry-gc" = {
     wantedBy = [ "timers.target" ];
     timerConfig = {
@@ -397,9 +556,26 @@ in
     hostnossl all  all   ::/0                      reject
   '';
 
+  # Never allocate a client ephemeral source port in the instance range. This
+  # also protects hosts whose default ephemeral range changes in the future.
+  boot.kernel.sysctl."net.ipv4.ip_local_reserved_ports" = "30000-30999";
+
   services.nginx = {
     enable = true;
     recommendedProxySettings = false;
+    appendHttpConfig = ''
+      # Both internal and public S3 are path-style. Each bucket gets 20 r/s,
+      # a 40-request burst and 10 active requests; malformed paths share an
+      # IP key so they cannot manufacture an unbounded set of bucket budgets.
+      map $uri $storage_bucket {
+        "~^/([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])(?:/|$)" $1;
+        default $remote_addr;
+      }
+      limit_req_zone $storage_bucket zone=storage_bucket_rate:16m rate=20r/s;
+      limit_conn_zone $storage_bucket zone=storage_bucket_connections:16m;
+      limit_req_zone $binary_remote_addr zone=storage_peer_rate:16m rate=20r/s;
+      limit_conn_zone $binary_remote_addr zone=storage_peer_connections:16m;
+    '';
     virtualHosts = {
       # Apps sign Host as <storage IP>:port; this stays the default server.
       "${platform.internalNames.objectStorage}" = garageS3VirtualHost {
@@ -423,6 +599,26 @@ in
         ];
         sslCertificate = "/etc/${namespace}/pki/storage.pem";
         sslCertificateKey = "/etc/${namespace}/pki/storage-key.pem";
+        # Existing trusted TLS channel and Garage admin bearer authentication;
+        # the loopback server exposes one fixed GET and no provider mutations.
+        locations."= /platform/instances" = {
+          proxyPass = "http://127.0.0.1:19002";
+          extraConfig = ''
+            limit_except POST { deny all; }
+            proxy_set_header Authorization $http_authorization;
+            proxy_read_timeout 900s;
+            client_max_body_size 64k;
+          '';
+        };
+        locations."= /platform/host-status" = {
+          proxyPass = "http://127.0.0.1:19001";
+          extraConfig = ''
+            limit_except GET { deny all; }
+            proxy_set_header Authorization $http_authorization;
+            proxy_read_timeout 10s;
+            client_max_body_size 1k;
+          '';
+        };
         locations."/" = {
           proxyPass = "http://127.0.0.1:${toString ports.garageAdminProxy}";
           extraConfig = ''
