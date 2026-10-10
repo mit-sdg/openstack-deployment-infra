@@ -87,7 +87,14 @@ class Native:
                 ]
         client: MongoClient[dict[str, Any]] = MongoClient(self.uri({"port": port}, password))
         try:
-            return sorted(name for name in client.list_database_names() if DATABASE.fullmatch(name))
+            names = set(client.list_database_names())
+            # Mongo stores users in admin, so listDatabases omits a managed DB
+            # before its first collection or after the app drops its last one.
+            users = client.admin.command(
+                "usersInfo", {"forAllDBs": True}, showCredentials=False, showCustomData=False
+            )["users"]
+            names.update(user["db"] for user in users)
+            return sorted(name for name in names if DATABASE.fullmatch(name))
         finally:
             client.close()
 

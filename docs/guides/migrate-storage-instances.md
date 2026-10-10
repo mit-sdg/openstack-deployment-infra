@@ -304,6 +304,8 @@ MongoDB database, including collections absent from the snapshot. Accepted insta
 limits remain authoritative: PostgreSQL role/database connection caps are reapplied,
 and MongoDB write access is reconciled against restored usage and the current size
 limit before worker access opens.
+Mongo backup inventory includes databases with app users and no collections, so a
+new resource or an app that dropped its last collection retains backup coverage.
 
 For a single resource, decrypt the provider archive into the native restore CLI:
 

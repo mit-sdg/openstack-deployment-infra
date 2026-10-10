@@ -467,6 +467,23 @@ class DatabaseBackupsTests(unittest.TestCase):
         for kind in ("postgres", "mongo"):
             exercise(kind)
 
+    def test_mongo_inventory_includes_user_bearing_empty_databases_without_credentials(self):
+        empty, populated = "p_" + "a" * 20, "p_" + "b" * 20
+        client = mock.Mock()
+        client.list_database_names.return_value = ["admin", populated, "unmanaged"]
+        client.admin.command.return_value = {
+            "users": [{"db": "admin"}, {"db": empty}, {"db": populated}]
+        }
+        with mock.patch("openstack_platform.database_backups.MongoClient", return_value=client):
+            self.assertEqual(
+                backup.Native("storage", "ca").databases("mongo", 30001, "private"),
+                [empty, populated],
+            )
+        client.admin.command.assert_called_once_with(
+            "usersInfo", {"forAllDBs": True}, showCredentials=False, showCustomData=False
+        )
+        client.close.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -192,6 +192,18 @@ let
     mongo=MongoClient(host,credentials[1]["port"],username="platform_admin",password=credentials[1]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000)
     connect_ready(lambda: mongo.admin.command("ping"))
     scoped=storage.mongo_create(mongo,application_id=owner,host=host,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()))
+    # A user-bearing DB without any collections must still be backed up and
+    # restored. Native inventory must include it before the first app write.
+    from openstack_platform.database_backups import Native, digest
+    import tempfile
+    native=Native(host,ca)
+    assert native.databases("mongo",credentials[1]["port"],credentials[1]["adminPassword"]) == [scoped.provider_name]
+    with tempfile.TemporaryDirectory(dir="${platform.paths.data}") as empty_backup:
+        from pathlib import Path
+        empty_entry={"type":"mongo","port":credentials[1]["port"],"databases":[scoped.provider_name]}
+        empty_payload=Path(empty_backup)/"empty.archive"
+        native.dump(empty_entry,credentials[1]["adminPassword"],empty_payload)
+        native.restore(empty_entry,credentials[1]["adminPassword"],empty_payload)
     try:
         storage.mongo_verify(connect_app_mongo,scoped,host=host)
     except Exception:
@@ -218,7 +230,6 @@ let
     mongo.close()
     # Use the same native exporters/importers as nightly backup, through the
     # authenticated manager's root credentials and certificate DNS name.
-    from openstack_platform.database_backups import Native, digest
     import socket, tempfile, urllib.parse
     assert socket.gethostbyname(host) == "127.0.0.1"
     native=Native(host,ca)
