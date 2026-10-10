@@ -1531,7 +1531,7 @@ def _lazy_storage(action: str) -> Handler:
         ) = metadata(raw)
         kind, operation = action.split(".")[1:]
         if kind == "mongo" and quotas is not None:
-            storage_actions._MONGO_POOL.set(min(10, quotas["connections"]))
+            storage_actions._MONGO_POOL.set(quotas["connections"])
         if kind == "s3" and operation in {"create", "limits"}:
             _instance_client().call("reserve", resource_id, reservations=reservations)
         if staged is not None and operation == "limits" and args["quotas"] != quotas:

@@ -1323,10 +1323,16 @@ in
     serviceConfig = {
       Type = "oneshot";
       User = operatorAccount.name;
-      Group = controllerGroup;
+      # The privileged controller socket admits only the operator's UID:GID;
+      # receipts still land in the setgid controller-group directory.
+      Group = operatorAccount.name;
       UMask = "0077";
       TimeoutStartSec = 3600;
-      Environment = "DATABASE_BACKUP_TMPDIR=${backups}/${namespace}";
+      Environment = [
+        "DATABASE_BACKUP_TMPDIR=${backups}/${namespace}"
+        # Only server CAs are used; ProtectHome hides libpq's default client-cert path.
+        "PGSSLCERTMODE=disable"
+      ];
       LimitCORE = 0;
       ExecStart = "${resourceBackup} %i";
       NoNewPrivileges = true;
@@ -1336,6 +1342,7 @@ in
       ReadWritePaths = [
         "${backups}/${namespace}"
         "${backups}/${namespace}-migration-receipts"
+        controllerPrivilegedSocket
       ];
     };
   };

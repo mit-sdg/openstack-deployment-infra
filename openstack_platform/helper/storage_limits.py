@@ -155,7 +155,7 @@ def resource_action(
             import urllib.parse
 
             parsed = urllib.parse.urlsplit(environment["MONGODB_URI"])
-            s._MONGO_POOL.set(min(10, quotas["connections"]))
+            s._MONGO_POOL.set(quotas["connections"])
             normalized = s.mongo_environment(
                 host, name, credential.credential_name, urllib.parse.unquote(parsed.password or "")
             )
