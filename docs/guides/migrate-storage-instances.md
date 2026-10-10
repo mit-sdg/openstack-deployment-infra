@@ -6,8 +6,9 @@ migrations 7 and 8 add instance/usage state and the durable worker allowlist cac
 The storage replacement has the accepted host outage; subsequent copies stop one
 app at a time. Budget export + restore + verification + restart: usually seconds
 to minutes for small databases, with a configurable 1800-second deadline **per app**.
-Measure the throwaway rehearsal before scheduling the class app. No live migration
-or Nix/VM validation was performed by the backend worker.
+Measure the throwaway rehearsal before scheduling the class app. Local Nix evaluation checks the configuration; the storage/admin VM tests in CI
+exercise Podman, nftables and the native database tools. No live migration was
+performed by the backend worker.
 
 ## Prepare capacity and releases
 
@@ -58,7 +59,8 @@ export OSC=/srv/openstack-platform/bin/platform-openstack
    These commands are operator rollout actions, not commands run by this worker.
    Preserve all other inventory fields, including worker/builder flavors, addresses,
    namespace/prefix and `internalNames.storage`. The last name must match the
-   storage certificate SAN; new PKI generation includes it explicitly. Verify:
+   storage certificate SAN; new PKI generation includes it explicitly and refuses
+   a reused leaf missing that SAN. This check is a hard prerequisite. Verify:
 
    ```bash
    STORAGE_DNS=$(jq -r .internalNames.storage "$PLATFORM_CONFIG")
@@ -96,7 +98,14 @@ export OSC=/srv/openstack-platform/bin/platform-openstack
    backend support; otherwise perform it while detached during the replacement
    maintenance window. Do not force its state to available. The new image runs
    idempotent `xfs_growfs` after mount and **before** shared services or the manager,
-   so the larger filesystem requires no manual storage-root work. Fifty default
+   so the larger filesystem requires no manual storage-root work. If the volume
+   is extended after boot, rerun growth on the storage recovery console:
+
+   ```bash
+   sudo systemctl restart "$NAMESPACE-storage-growfs.service"
+   ```
+
+   Check `df -h "$DATA"` before continuing. Fifty default
    logical quotas total 450 GiB. Physical admission reserves 300 GiB DB hard caps,
    312.5 GiB S3, and 197 GiB fixed allowances = **809.5 GiB**; 500 GiB is insufficient.
    One TiB's 85% admission/warning boundary is 870.4 GiB. Registry's 100 GiB is a
@@ -169,8 +178,8 @@ export OSC=/srv/openstack-platform/bin/platform-openstack
    New policy fields are optional: `limits.migrationBackupMaxAgeMinutes=60` and
    `limits.migrationAppSeconds=1800` (bounds 1–1440 and 120–7200). For larger apps,
    add them to both operator and hosted-controller policies using the existing
-   protected-policy installation procedure. The per-app deadline covers backup,
-   quiescence, both copies, verification and restart. CLI polling defaults to 7200;
+   protected-policy installation procedure. The per-app deadline starts after the
+   backup gate and covers quiescence, both copies, verification and restart. CLI polling defaults to 7200;
    it is independent of each app's deadline. Existing process/helper defaults can
    remain unchanged.
 
@@ -208,13 +217,43 @@ openstack-platform-storage-migrate --request-id <UUID> \
 ```
 
 Before each resource starts/resumes cutover, a successful source backup within the
-configured age is required; a missing/stale backup is taken automatically. Frozen
+configured age is required. The controller reads only an operator-owned,
+mode-0640 receipt from `<backups>/<namespace>-migration-receipts`; it cannot read
+backup payloads or the age identity. A missing/stale receipt triggers the
+operator-owned `<namespace>-resource-backup@<postgres|mongo>-<database>.service`.
+Polkit allows the controller to start only those validated backup units. Each
+checkpoint dumps exactly that shared resource, age-encrypts it with the existing
+managed-data identity, decrypts/verifies the archive, and publishes a receipt after
+fsync. No Garage export or unrelated instance dump runs in this gate. It has a
+separate one-hour bound while the app keeps serving on an initial migration;
+quiesced replays stay quiesced until completion or abort. The 1800-second app budget
+is refreshed after the gate. Supplemental checkpoints remain private under
+`<backups>/<namespace>/migration-checkpoints` and are pruned after fourteen days,
+including by the nightly job. Nightly complete managed-data sets retain the existing
+offsite export; these local cutover checkpoints supplement them.
+
+To inspect or retry a failed checkpoint on admin (database is the admin-only
+`providerName`, such as `p_<20 hex characters>`):
+
+```bash
+NAMESPACE=<namespace>
+DATABASE=<providerName>
+sudo systemctl start "$NAMESPACE-resource-backup@mongo-$DATABASE.service"
+sudo journalctl -u "$NAMESPACE-resource-backup@mongo-$DATABASE.service" -n 30
+```
+
+Use `postgres` for PostgreSQL. Failed checkpoints alert through existing backup
+health; a successful retry clears that checkpoint's failed status. Frozen
 source backups preserve the original app login/role for restore. An app stops once;
 source logins are frozen; target data is copied, counted and cheaply checksummed,
 sealed, then published. The accepted Nomad job is upgraded with the inventory DNS
 host mapping and resubmitted so new binding values reach stable or candidate workers.
 Stopped/never-deployed apps stay stopped. PostgreSQL extension DDL imports separately as admin;
-app schemas/data/constraints import as the app owner, through the actual app login (all app objects become owned by its owner role).
+app schemas/data/constraints import as the app owner, through the actual app login
+(all app objects become owned by its owner role). Import sessions disable statement,
+lock and idle-in-transaction timeouts; admin temporarily lifts only the unpublished
+login's temp-file cap and restores 256 MiB in `finally`. Publication waits for this
+cleanup. The instance memory/CPU/XFS caps still bound the import.
 Mongo gets a temporary minimum 1 GiB cap and serial restore workers from the separate
 2 GiB maintenance reserve. Disconnected copies cancel their process group; replay
 cleans orphaned copies instead of waiting behind their instance lock.
@@ -278,15 +317,23 @@ starting it. A tracked shared pre-migration resource restores into its current o
 instance; old untracked source copies stay retained in the encrypted archive. Rebuild missing app images after host loss; arbitrary runtime environment
 values still come from escrow, while managed DB binding credentials are in the backup.
 
-A format-4 `--full` loss drill requires one isolated resource of **each** engine and
-records `isolatedDatabases` only after both actual restores succeed. CI's storage
+A format-4 `--full` loss drill compares actual restored-instance counts with the
+managed entries in both catalogs. An absent engine records `no-managed-resources`;
+any present engine must restore all its managed databases. It does not require
+keeping a throwaway PostgreSQL resource. The `isolatedDatabases` evidence records
+both the state and restored-instance count. CI's storage
 VM test also deletes/recreates/restores both engines and checks their app credentials.
 
 A hard-cap crash can require an admin size raise even with minute polling and 50%
 headroom; logical and physical bytes differ. Raising the quota applies before DB
 connection attempts and collectors retain no failed app reservation. Reductions need
-fresh logical usage plus margin and a stopped-instance physical allocation check.
-Memory/connection edits restart that instance; CPU/disk edits apply live. Stops use
+fresh logical usage plus margin. The manager measures physical allocation while
+serving and rejects unsafe reductions before stopping. An admitted reduction stops
+cleanly, rechecks allocation to cover concurrent writes, applies the quota, and starts
+again. Memory/connection edits restart that instance; CPU edits and disk raises apply
+live. The first limits edit or repair of a saved job with an old DNS mapping stops
+that app, publishes the binding, then redeploys with the host mapping once. Interrupted
+redeploys resume from the applied checkpoint without repeating the stop or limit edit. Stops use
 PG fast SIGINT /Mongo SIGTERM, mixed kill mode and a 180-second grace period.
 
 The follow-up removes shared containers, frozen databases/users, legacy listeners and

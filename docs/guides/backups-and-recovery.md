@@ -663,7 +663,7 @@ What you need:
 - An absolute work directory that doesn't exist yet.
 - Both identities and a replacement platform config, each a direct file owned by you with mode `0600`.
 - A replacement config with the same project, namespace, names, addresses, ports, volumes, paths, and domain. Image and release choices may differ. Isolate drill services while preserving that identity.
-- For `--full`: empty PostgreSQL, MongoDB, and Garage targets and a [restore-capable host](#check-and-restore-managed-data). The bundle needs both controller databases, three managed-data archives, an image selection, and an app with an accepted deployment. Include S3 objects and app grants to exercise their recovery. Format-4 full drills additionally require one isolated PostgreSQL and MongoDB resource with sample data; both actual imports must succeed before isolatedDatabases evidence is recorded.
+- For `--full`: empty PostgreSQL, MongoDB, and Garage targets and a [restore-capable host](#check-and-restore-managed-data). The bundle needs both controller databases, three managed-data archives, an image selection, and an app with an accepted deployment. Include S3 objects and app grants to exercise their recovery. Format-4 full drills compare restored-instance counts with each catalog's managed inventory. An engine with no managed resources records `no-managed-resources`; every present engine must restore all its resources before `isolatedDatabases` evidence is recorded. CI also exercises both engines with sample data.
 - The tools the script calls, on your `PATH` or named with these variables:
 
   | Variable | Default command |
