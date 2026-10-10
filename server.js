@@ -15,8 +15,20 @@ let ready = false;
 
 const checksum = (values) => crypto.createHash("sha256").update(values.join("\n")).digest("hex");
 
+function postgresConfig() {
+  // Platform bindings may name the storage host by IP; node-postgres cannot
+  // verify an IP against the certificate, so verify the certificate's DNS name.
+  const url = new URL(process.env.DATABASE_URL);
+  const caFile = url.searchParams.get("sslrootcert");
+  if (!caFile || !net.isIP(url.hostname)) return { connectionString: url.toString() };
+  url.searchParams.delete("sslmode");
+  url.searchParams.delete("sslrootcert");
+  const ca = require("node:fs").readFileSync(caFile, "utf8");
+  return { connectionString: url.toString(), ssl: { ca, servername: process.env.PROBE_PG_NAME || "postgres.61040.internal" } };
+}
+
 async function withPostgres(work) {
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  const client = new Client(postgresConfig());
   await client.connect();
   try {
     return await work(client);
