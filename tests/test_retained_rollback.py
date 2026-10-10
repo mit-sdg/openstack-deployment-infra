@@ -66,7 +66,7 @@ class RetainedRollbackTests(unittest.TestCase):
                 }
             manifest = parse_configuration(values["configuration"]).manifest(resources)
             return {
-                "image": "storage.internal:5000/projects/commons/app@sha256:"
+                "image": "192.0.2.13:5000/projects/commons/app@sha256:"
                 + hashlib.sha256(values["commit"].encode()).hexdigest(),
                 "recipeHash": app.generate_recipe(manifest, config.policy.runtime_images).sha256,
                 "runtime": {

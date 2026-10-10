@@ -73,6 +73,7 @@ class FullLossRecoveryDrillTests(unittest.TestCase):
 
     def _managed_archives(self) -> None:
         managed = self.bundle / "managed-data"
+        (managed / "MANIFEST").write_text("format_version=3\n")
         stream, _, _ = garage_fixtures.GarageBackupTests().archive()
         (managed / "garage.age").write_bytes(stream.getvalue())
         for path in managed.iterdir():

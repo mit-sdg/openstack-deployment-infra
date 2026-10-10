@@ -99,6 +99,13 @@ fi
 managed="$IMPORTED/managed-data"
 "$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/garage.age" | \
   "${SERVICE_CHECK_PYTHON:-python3}" "$GARAGE_VERIFY_SCRIPT" --offline
+if grep -qx 'format_version=4' "$managed/MANIFEST"; then
+  for service in postgres mongodb; do
+    kind=$service; [[ $kind != mongodb ]] || kind=mongo
+    "$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/$service.age" | \
+      "${DATABASE_BACKUP_COMMAND:-openstack-platform-storage-backup}" verify --type "$kind"
+  done
+fi
 echo "recovery archives=verified"
 
 if [[ $MODE == --verify-only ]]; then
@@ -184,10 +191,16 @@ PY
 managed_output="$(PLATFORM_CONFIG="$PLATFORM_CONFIG" AGE_KEY="$MANAGED_IDENTITY" GARAGE_RESTORE_CONTROLLER_DATABASE="$hosted_destination" "$MANAGED_RESTORE_LAUNCHER" --yes "$managed")"
 printf '%s\n' "$managed_output"
 grep -Eq '^managed-data-restore=verified source=' <<<"$managed_output"
+if grep -qx 'format_version=4' "$managed/MANIFEST"; then
+  # A format-4 full-loss rehearsal must prove both isolated engines, not just
+  # SQLite and ciphertext. Seed one isolated resource of each kind beforehand.
+  grep -Eq '^database-restore=verified kind=postgres shared=[0-9]+ isolated=[1-9][0-9]*$' <<<"$managed_output"
+  grep -Eq '^database-restore=verified kind=mongo shared=[0-9]+ isolated=[1-9][0-9]*$' <<<"$managed_output"
+fi
 
-python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" "$scratch/source-keys.tar" <<'PY'
+python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" "$scratch/source-keys.tar" "$managed/MANIFEST" <<'PY'
 import json,os,sys
-path,bundle,counts,broker_path,keys_path=sys.argv[1:]
+path,bundle,counts,broker_path,keys_path,managed_manifest=sys.argv[1:]
 evidence={
  "bundle":bundle,
  "controllerState":{
@@ -201,6 +214,8 @@ evidence={
  "records":json.loads(counts),
  "appImages":"rebuild-by-redeploy",
 }
+if "format_version=4" in open(managed_manifest).read():
+ evidence["isolatedDatabases"]={"postgres":"restored","mongo":"restored"}
 if os.path.isfile(keys_path):
  evidence["sourceKeys"]="restored"
 if os.path.isfile(broker_path):

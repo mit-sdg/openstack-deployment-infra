@@ -262,16 +262,15 @@ does not release capacity. SQLite writer transactions serialize controller admis
 the host manager independently checks durable instance reservations and disk geometry.
 
 Database resources include `isolation` (`shared` or `instance`) and `hardQuotaBytes`
-(null before migration). An instance's XFS hard quota is 125% of size, rounded up to
+(null before migration). An instance's XFS hard quota is 150% of size, rounded up to
 MiB. Each resource has its own container, cgroup, port, credentials, data directory and
 worker allowlist. Legacy shared databases permit soft-size changes and PostgreSQL
-connection reductions; other compute/connection edits require migration and return
-`409 INSTANCE_MIGRATION_REQUIRED`.
+connection reductions. CPU/memory edits set prospective instance caps before migration; shared connection raises and Mongo connection edits require migration (`409 INSTANCE_MIGRATION_REQUIRED`).
 
 `usage` always contains nullable `usedBytes`, `objectCount`, `currentConnections`,
 `instanceMemoryBytes`, `cpuTimeMilliseconds`, and `measuredAt`, plus `stale`.
 CPU time is cumulative and resets when the cgroup restarts. Collection runs every
-300 seconds; samples older than 900 seconds are stale. Failed collection keeps the
+300 seconds, or 60 seconds above 80% of soft size/while blocked/after failure; samples older than 900 seconds are stale. Failed collection keeps the
 last successful values. Reads use SQLite. PostgreSQL reports database bytes and
 backend count; MongoDB reports logical data+index bytes and no per-user connection
 count; S3 reports bytes and objects. Instance counters are null for shared resources.
@@ -291,16 +290,16 @@ Postgres/Mongo connection totals, instance connection/availability projections a
 writeBlockedResources. The host metrics channel is authenticated TLS and never runs
 provider observations on resource-read requests.
 
-`POST /v1/admin/storage/migrate-instances` accepts an empty body and Idempotency-Key,
+`POST /v1/admin/storage/migrate-instances` accepts an empty body or `{applicationIds:[UUID,...]}` (1..50) and Idempotency-Key,
 returns `202` with admin operation polling, and journals `storage.instances.migrate`.
 Run `openstack-platform-storage-migrate` as agentops on the admin VM. Replay its
-printed UUID with `--request-id`; `--timeout` defaults to 900 seconds (1–7200).
+printed UUID with `--request-id` and the same repeatable `--application UUID` selection; `--timeout` defaults to 7200 seconds (1–7200). Without selection all shared resources are included. `limits.migrationAppSeconds` defaults to 1800 per app (120–7200); `limits.migrationBackupMaxAgeMinutes` defaults to 60 (1–1440), with automatic source backup if missing/stale.
 Per-app child journals retain quiescence, verified copies, endpoint publication and
 accepted-job refresh. Old shared data is never deleted by migration. See the
 [migration runbook](../guides/migrate-storage-instances.md).
 
 `openstack-platform-storage-repair` re-applies current PostgreSQL login timeouts and
-resource-row connection limits through the local privileged socket. It prints a UUID
+resource-row connection limits through the local privileged socket. It also upgrades saved Nomad host mappings before replacing old IP-based PostgreSQL bindings with the certificate DNS name. It prints a UUID
 and waits; `--request-id` resumes, `--timeout` defaults to 300 seconds (1–3600).
 The Nix wrappers pin the socket; raw packaged commands require `--socket PATH`.
 
@@ -414,3 +413,18 @@ An app with a retained primary IPv4 (`requiresMaintenance: true`) must be deploy
 - [Internals](internals.md#processes-and-trust-boundaries)
 - [Operator CLI reference](operator-cli.md)
 - [Security](../security.md)
+
+Limits reductions require fresh usage plus 384 MiB PG /128 MiB Mongo headroom:
+400 `USAGE_NOT_FRESH` /`SIZE_BELOW_USAGE`. S3 object reservations total at most
+five million (`OBJECT_BUDGET_EXCEEDED`), including unfinished raises; disk admission
+reserves at least 4 KiB/object. Failed collection retains samples and never owns an
+app operation. `INSTANCE_MANAGER_UNAVAILABLE` is retryable (503 before deployment
+admission); unchanged worker observations reuse verified allowlists.
+
+`POST /v1/admin/storage/abort-migration` is privileged-only, accepts the same optional
+applicationIds selection and returns 202 with admin operation polling. Journal kind
+`storage.instances.abort`, scope `storage-abort`; CLI `--abort --application UUID`.
+It unfreezes checkpointed source roles, restarts the shared accepted job, retains
+source/target data and releases the old reservation. It refuses after publication
+(`MIGRATION_ALREADY_PUBLISHED`); replay the original migration instead. Admin resource
+migrationState can also be `aborted`; resource delete then cleans the retained target.

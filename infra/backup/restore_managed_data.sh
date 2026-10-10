@@ -37,7 +37,7 @@ import re,sys
 root=Path(sys.argv[1])
 expected={
  "created_at": re.compile(r"[0-9]{8}T[0-9]{6}Z"),
- "format_version": re.compile("[23]"),
+ "format_version": re.compile("[234]"),
  "postgres": re.compile("pg_dumpall-clean-if-exists"),
  "mongodb": re.compile("mongodump-archive-gzip"),
  "object_storage": re.compile("garage-s3-catalog-tar-gzip"),
@@ -48,6 +48,9 @@ for line in (root/"MANIFEST").read_text().splitlines():
  if not sep or key in values: raise SystemExit("managed-data manifest is malformed")
  values[key]=value
 archives=["garage.age","mongodb.age","postgres.age"]
+if values.get("format_version")=="4":
+ expected["postgres"]=expected["mongodb"]=re.compile("database-logical-tar-v1")
+ archives.extend(["postgres-catalog.json","mongodb-catalog.json"])
 if values.get("format_version")=="2":
  expected["registry"]=re.compile("distribution-artifacts-tar-gzip")
  archives.append("registry.age")
@@ -56,10 +59,10 @@ if values.keys()!=expected.keys() or any(not expected[k].fullmatch(v) for k,v in
 lines=(root/"SHA256SUMS").read_text().splitlines()
 names=[]
 for line in lines:
- match=re.fullmatch(r"[0-9a-f]{64}  (postgres\.age|mongodb\.age|garage\.age|registry\.age)",line)
+ match=re.fullmatch(r"[0-9a-f]{64}  (postgres\.age|mongodb\.age|garage\.age|registry\.age|postgres-catalog\.json|mongodb-catalog\.json)",line)
  if match is None: raise SystemExit("managed-data checksums are malformed")
  names.append(match.group(1))
-if sorted(names)!=archives:
+if sorted(names)!=sorted(archives):
  raise SystemExit("managed-data checksum inventory is incomplete")
 PY
 (cd "$EVIDENCE" && sha256sum --strict --check SHA256SUMS >/dev/null)
@@ -69,8 +72,19 @@ set -a
 # shellcheck source=/dev/null
 source "$SECRETS_FILE"
 set +a
+if grep -qx 'format_version=4' "$EVIDENCE/MANIFEST"; then
+  DATABASE_BACKUP_COMMAND=${DATABASE_BACKUP_COMMAND:-openstack-platform-storage-backup}
+  DATABASE_RESTORE_CONTROLLER_DATABASE=${DATABASE_RESTORE_CONTROLLER_DATABASE:-${GARAGE_RESTORE_CONTROLLER_DATABASE:?set the offline replacement controller database}}
+  for service in postgres mongodb; do
+    kind=$service; [[ $kind != mongodb ]] || kind=mongo
+    other=postgres; [[ $service != postgres ]] || other=mongodb
+    "$AGE" --decrypt --identity "$AGE_KEY" "$EVIDENCE/$service.age" | \
+      "$DATABASE_BACKUP_COMMAND" restore --type "$kind" --controller-database "$DATABASE_RESTORE_CONTROLLER_DATABASE" --catalog "$EVIDENCE/$other-catalog.json"
+  done
+else
 export PGPASSWORD=$POSTGRES_PASSWORD PGSSLMODE=verify-full PGSSLROOTCERT=/run/internal-ca.pem
 "$AGE" --decrypt --identity "$AGE_KEY" "$EVIDENCE/postgres.age" | \
+  "${DATABASE_BACKUP_COMMAND:-openstack-platform-storage-backup}" filter-sql --type postgres | \
   podman run --rm --network=host -i \
     --env PGPASSWORD --env PGSSLMODE --env PGSSLROOTCERT \
     --volume "$CA_FILE:/run/internal-ca.pem:ro" "$POSTGRES_IMAGE" \
@@ -84,6 +98,8 @@ export MONGODB_URI="mongodb://platform_admin:${MONGO_PASSWORD}@${PLATFORM_STORAG
     --volume "$CA_FILE:/run/internal-ca.pem:ro" "$MONGODB_IMAGE" \
     sh -ec 'exec mongorestore --uri "$MONGODB_URI" --archive --gzip --drop' >/dev/null
 echo "mongodb managed restore=complete"
+
+fi
 
 "$AGE" --decrypt --identity "$AGE_KEY" "$EVIDENCE/garage.age" | \
   "$SERVICE_CHECK_PYTHON" "$GARAGE_RESTORE_SCRIPT"

@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
+import time
 import uuid as uuid_module
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .. import runtime
 from ..config import Config
+from ..instance_contract import MIB, CapacityError
 from ..validation import ValidationError, uuid
 from . import application_runtime as app
 from . import database as db
@@ -23,6 +27,7 @@ LIMITS_KIND = "storage.limits.set"
 COLLECT_KIND = "storage.usage.collect"
 REPAIR_KIND = "storage.postgres.repair"
 COLLECT_SECONDS = 300
+FAST_COLLECT_SECONDS = 60
 STALE_SECONDS = 900
 _LOG = logging.getLogger(__name__)
 
@@ -63,6 +68,23 @@ def usage_model(resource: db.ManagedResource) -> dict[str, object]:
         },
         "stale": stale(resource.usage.get("measuredAt")),
     }
+
+
+def validate_reduction(resource: db.ManagedResource, target: Mapping[str, int]) -> None:
+    if resource.resource_type == "s3" or target["sizeBytes"] >= (
+        resource.measured_target_bytes or 0
+    ):
+        return
+    used = resource.usage.get("usedBytes")
+    if stale(resource.usage.get("measuredAt")) or not isinstance(used, int):
+        raise CapacityError(
+            "USAGE_NOT_FRESH", "a fresh usage sample is required before reducing size"
+        )
+    margin = (384 if resource.resource_type == "postgres" else 128) * MIB
+    if target["sizeBytes"] < used + margin:
+        raise CapacityError(
+            "SIZE_BELOW_USAGE", "size must cover current usage plus database safety headroom"
+        )
 
 
 def block_model(resource: db.ManagedResource) -> dict[str, object]:
@@ -125,6 +147,8 @@ class StorageLimitsService:
         self.config = config
         self.state_directory = state_directory
         self.helper_caller = helper_caller
+        self._next_due: dict[str, float] = {}
+        self._next_host_due = 0.0
 
     def _resource(self, identifier: str) -> db.ManagedResource:
         resource = db.get_managed_resource(self.connection, identifier)
@@ -156,6 +180,9 @@ class StorageLimitsService:
             "workloadJobId": workload_job(self.connection, resource.application_id),
             "retainedWorker": retained_worker(self.connection, resource.application_id),
             "instanceId": resource.instance_id,
+            "stagedInstanceId": resource.resource_id
+            if resource.instance_id is None and resource.migration_state == "aborted"
+            else None,
             "instanceQuotas": quotas(resource) if resource.resource_type != "s3" else None,
             "workerIds": [
                 resource.application_id,
@@ -175,7 +202,6 @@ class StorageLimitsService:
         expected: dict[str, int],
         *,
         request_id: str,
-        collecting: bool = False,
     ) -> None:
         resource = self._resource(resource_id)
         target = validate_quotas(resource.resource_type, target)
@@ -185,21 +211,20 @@ class StorageLimitsService:
             resource.resource_type != "s3"
             and resource.instance_id is None
             and (
-                any(target[name] != accepted[name] for name in ("memoryBytes", "cpuMillicores"))
-                or target["connections"] > accepted["connections"]
+                target["connections"] > accepted["connections"]
                 or resource.resource_type == "mongo"
                 and target["connections"] != accepted["connections"]
             )
         ):
             raise ValidationError(
-                "instance migration is required before changing compute/connection caps"
+                "instance migration is required before increasing shared connection caps"
             )
         request_id = uuid(request_id, field="storage operation ID")
         deadline = operation_deadline(self.config)
         scope = f"app-{resource.application_id}"
-        kind = COLLECT_KIND if collecting else LIMITS_KIND
+        kind = LIMITS_KIND
         intent = {"resource_id": resource_id, "quotas": target, "expected_quotas": expected}
-        with runtime.lock(self.state_directory, scope, wait=not collecting, deadline=deadline):
+        with runtime.lock(self.state_directory, scope, wait=True, deadline=deadline):
             resource = self._resource(resource_id)
             application = db.get_application(self.connection, resource.application_id)
             assert application is not None
@@ -217,6 +242,7 @@ class StorageLimitsService:
                     self.connection, request_id, wall_deadline(deadline)
                 )
             else:
+                validate_reduction(resource, target)
                 if resource.lifecycle_state != "active":
                     raise ValidationError("storage resource must be active")
                 if quotas(resource) != expected:
@@ -241,6 +267,8 @@ class StorageLimitsService:
                     raise db.DatabaseError("accepted storage limits changed during reconciliation")
                 if operation.phase != "applied":
                     db.checkpoint_operation(self.connection, request_id, phase="applying")
+                    if resource.resource_type in {"postgres", "mongo"}:
+                        self.prepare_dns_job(resource.application_id, deadline)
                     result = self._call(
                         resource,
                         "limits",
@@ -268,6 +296,32 @@ class StorageLimitsService:
                     self.connection, request_id, "storage limit assignment requires reconciliation"
                 )
                 raise
+
+    def prepare_dns_job(self, application_id: str, deadline: float) -> None:
+        """Install the inventory host mapping before publishing DNS credentials."""
+        from .nomad_jobs import storage_hosts_job
+
+        deployment = db.get_deployment(self.connection, application_id)
+        application = db.get_application(self.connection, application_id)
+        if deployment is None or application is None:
+            return
+        job = storage_hosts_job(deployment.nomad_job, self.config.platform)
+        if job == deployment.nomad_job:
+            return
+        version = deployment.nomad_version
+        if application.desired_running:
+            result = self.helper_caller(
+                self.config, "app.deploy", {"slug": application.slug, "job": job}, deadline=deadline
+            )
+            new_version = result.get("nomadVersion")
+            if not isinstance(new_version, int) or isinstance(new_version, bool):
+                raise ValidationError("DNS mapping deployment was not confirmed")
+            version = new_version
+        with db.transaction(self.connection):
+            self.connection.execute(
+                "UPDATE deployment_attempts SET nomad_job=?,nomad_job_sha256=?,nomad_version=? WHERE deployment_id=?",
+                (job, hashlib.sha256(job.encode()).hexdigest(), version, deployment.deployment_id),
+            )
 
     def repair_postgres(self, *, request_id: str) -> None:
         deadline = operation_deadline(self.config)
@@ -316,6 +370,7 @@ class StorageLimitsService:
                             resource = self._resource(identifier)
                             if resource.lifecycle_state != "active":
                                 raise ValidationError("PostgreSQL repair requires active resources")
+                            self.prepare_dns_job(resource.application_id, deadline)
                             result = self._call(
                                 resource,
                                 "limits",
@@ -341,53 +396,88 @@ class StorageLimitsService:
                 )
                 raise
 
-    def collect(self) -> None:
-        for resource in db.list_managed_resources(self.connection):
-            if resource.lifecycle_state != "active":
+    def collect(self, *, scheduled: bool = False, _resource_id: str | None = None) -> None:
+        now = time.monotonic()
+        resources = db.list_managed_resources(self.connection)
+        selected = [
+            resource.resource_id
+            for resource in resources
+            if resource.lifecycle_state == "active"
+            and (not scheduled or now >= self._next_due.get(resource.resource_id, 0))
+        ]
+        path = self.connection.execute("PRAGMA database_list").fetchone()[2]
+        if _resource_id is None and len(selected) > 1 and path:
+
+            def sample(identifier: str) -> tuple[str, float]:
+                connection = db.connect(Path(path))
+                try:
+                    worker = StorageLimitsService(
+                        connection,
+                        self.config,
+                        self.state_directory,
+                        helper_caller=self.helper_caller,
+                    )
+                    worker.collect(_resource_id=identifier)
+                    return identifier, worker._next_due.get(identifier, now + FAST_COLLECT_SECONDS)
+                finally:
+                    connection.close()
+
+            # Sixteen bounded provider probes keep 100 resources within a minute
+            # even when many endpoints time out. Each thread owns its SQLite
+            # connection and takes only its app's nonblocking runtime lock.
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                for identifier, due in pool.map(sample, selected):
+                    self._next_due[identifier] = due
+            _resource_id = ""  # only the one host sample remains on this thread
+        for resource in resources:
+            if _resource_id is not None and resource.resource_id != _resource_id:
+                continue
+            if resource.lifecycle_state != "active" or (
+                scheduled and now < self._next_due.get(resource.resource_id, 0)
+            ):
                 continue
             try:
-                if resource.resource_type == "mongo":
+                deadline = time.monotonic() + min(10, self.config.policy.limits.helper_seconds)
+                with runtime.lock(
+                    self.state_directory, f"app-{resource.application_id}", deadline=deadline
+                ):
                     pending = db.get_unfinished_operation(
                         self.connection, f"app-{resource.application_id}"
                     )
-                    if (
-                        pending is not None
-                        and pending.kind == COLLECT_KIND
-                        and pending.refs.get("resource_id") == resource.resource_id
-                    ):
-                        self.select(
-                            resource.resource_id,
-                            pending.refs["quotas"],
-                            pending.refs["expected_quotas"],
-                            request_id=pending.operation_id,
-                            collecting=True,
+                    if pending is not None and pending.kind == COLLECT_KIND:
+                        db.mark_failed(
+                            self.connection,
+                            pending.operation_id,
+                            "collector reconciliation is superseded by a new sample",
+                            cleanup_state="not_required",
                         )
-                    elif pending is None:
-                        self.select(
-                            resource.resource_id,
-                            quotas(resource),
-                            quotas(resource),
-                            request_id=str(uuid_module.uuid4()),
-                            collecting=True,
-                        )
-                else:
-                    deadline = operation_deadline(self.config)
-                    with runtime.lock(
-                        self.state_directory, f"app-{resource.application_id}", deadline=deadline
-                    ):
-                        if (
-                            db.get_unfinished_operation(
-                                self.connection, f"app-{resource.application_id}"
-                            )
-                            is not None
-                        ):
-                            continue
-                        refreshed = self._resource(resource.resource_id)
-                        result = self._call(refreshed, "usage", deadline)
-                        usage, blocked = _usage(result)
-                        db.put_storage_usage(
-                            self.connection, refreshed.resource_id, usage, blocked=blocked
-                        )
+                        pending = None
+                    if pending is not None:
+                        continue
+                    refreshed = self._resource(resource.resource_id)
+                    # Derived role reconciliation is idempotent. It never owns a
+                    # durable app reservation or changes accepted quota values.
+                    mutate = refreshed.resource_type == "mongo"
+                    result = self._call(
+                        refreshed,
+                        "limits" if mutate else "usage",
+                        deadline,
+                        target=quotas(refreshed) if mutate else None,
+                        operation_id=str(uuid_module.uuid4()) if mutate else None,
+                    )
+                    usage, blocked = _usage(result)
+                    db.put_storage_usage(
+                        self.connection, resource.resource_id, usage, blocked=blocked
+                    )
+                    limit = (
+                        refreshed.measured_target_bytes
+                        if refreshed.resource_type != "s3"
+                        else refreshed.s3_bytes
+                    )
+                    near = bool(limit and usage["usedBytes"] * 100 >= limit * 80)
+                    self._next_due[resource.resource_id] = now + (
+                        FAST_COLLECT_SECONDS if near or blocked else COLLECT_SECONDS
+                    )
             except (
                 runtime.LockBusy,
                 db.UnfinishedOperationError,
@@ -395,6 +485,7 @@ class StorageLimitsService:
             ):
                 continue
             except Exception:
+                self._next_due[resource.resource_id] = now + FAST_COLLECT_SECONDS
                 with db.transaction(self.connection):
                     self.connection.execute(
                         "UPDATE managed_resources SET usage_error='collection_failed' WHERE resource_id=?",
@@ -403,6 +494,11 @@ class StorageLimitsService:
                 _LOG.warning(
                     "storage usage collection failed for resource %s", resource.resource_id
                 )
+        if _resource_id not in {None, ""}:
+            return
+        if scheduled and now < self._next_host_due:
+            return
+        self._next_host_due = now + COLLECT_SECONDS
         try:
             result = self.helper_caller(
                 self.config, "storage.host.observe", {}, deadline=operation_deadline(self.config)

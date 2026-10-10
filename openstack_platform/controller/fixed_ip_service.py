@@ -159,10 +159,27 @@ def worker_helper(connection: sqlite3.Connection, caller: HelperCaller) -> Helpe
             removed = {args["applicationId"]} if action == "app.worker.delete" else set()
             if action == "app.worker.delete" and not args.get("single", False):
                 removed.update((instance_owner, *app.deployment_worker_ids(instance_owner)))
+            cached_row = connection.execute(
+                "SELECT record_json FROM storage_worker_allowlists WHERE application_id=?",
+                (instance_owner,),
+            ).fetchone()
+            cached = None if cached_row is None else json.loads(cached_row["record_json"])
+            if (
+                action == "app.worker.observe"
+                and result is not None
+                and cached is not None
+                and cached["instanceIds"] == sorted(instance_ids)
+                and args["applicationId"] in cached["slots"]
+                and cached["slots"][args["applicationId"]] == result.get("address")
+                and (result.get("address") is not None or result.get("absent") is True)
+            ):
+                return
             addresses = []
+            slot_addresses: dict[str, str | None] = {}
             retained = get(connection, instance_owner)
             for identity in (instance_owner, *app.deployment_worker_ids(instance_owner)):
                 if identity in removed:
+                    slot_addresses[identity] = None
                     continue
                 probe_args = {"applicationId": identity, "slug": args["slug"]}
                 if retained is not None and identity == retained["worker_slot_id"]:
@@ -173,6 +190,7 @@ def worker_helper(connection: sqlite3.Connection, caller: HelperCaller) -> Helpe
                     else caller(config, "app.worker.observe", probe_args, deadline=deadline)
                 )
                 address = observed.get("address")
+                slot_addresses[identity] = str(address) if address is not None else None
                 if address is not None:
                     addresses.append(address)
                 elif observed.get("absent") is not True:
@@ -190,8 +208,20 @@ def worker_helper(connection: sqlite3.Connection, caller: HelperCaller) -> Helpe
             )
             if applied.get("applied") is not True:
                 raise app.ApplicationError("instance worker network assignment was not confirmed")
+            with db.transaction(connection):
+                connection.execute(
+                    "INSERT INTO storage_worker_allowlists VALUES (?,?) ON CONFLICT(application_id) DO UPDATE SET record_json=excluded.record_json",
+                    (
+                        instance_owner,
+                        json.dumps(
+                            {"instanceIds": sorted(instance_ids), "slots": slot_addresses},
+                            sort_keys=True,
+                        ),
+                    ),
+                )
 
-        if action == "app.worker.delete":
+        if action in {"app.worker.delete", "app.worker.create"}:
+            # Confirm the manager before creation; revoke before deletion.
             # Revoke from the complete verified slot inventory before destructive
             # provider calls. Replay also removes an IP whose worker is now gone.
             reconcile_network()

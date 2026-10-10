@@ -21,6 +21,7 @@ def repair(
     seconds: int,
     output: Any,
     route: str = "/v1/admin/storage/repair-postgres",
+    body: dict[str, Any] | None = None,
 ) -> None:
     request_id = uuid(request_id, field="request ID")
     deadline = time.monotonic() + seconds
@@ -33,14 +34,18 @@ def repair(
             raise RuntimeError("repair deadline exceeded; retry with the printed request ID")
         connection = UnixConnection(socket_path, min(remaining, 30))
         try:
-            connection.request(
-                method, path, headers={"Idempotency-Key": request_id} if method == "POST" else {}
-            )
+            options: dict[str, Any] = {
+                "headers": {"Idempotency-Key": request_id} if method == "POST" else {}
+            }
+            if method == "POST" and body is not None:
+                options["body"] = json.dumps(body)
+                options["headers"]["Content-Type"] = "application/json"
+            connection.request(method, path, **options)
             response = connection.getresponse()
-            body = response.read(65_537)
-            if len(body) > 65_536 or response.status not in {200, 202}:
+            payload = response.read(65_537)
+            if len(payload) > 65_536 or response.status not in {200, 202}:
                 raise RuntimeError("controller rejected repair; retry with the printed request ID")
-            value = json.loads(body)
+            value = json.loads(payload)
             if not isinstance(value, dict):
                 raise RuntimeError("controller repair response is invalid")
             return value

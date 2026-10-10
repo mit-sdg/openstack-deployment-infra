@@ -328,8 +328,15 @@ def _validate_component(
         archives: tuple[str, ...] = ("postgres.age", "mongodb.age", "garage.age")
         if version == "2" and manifest.get("registry") == "distribution-artifacts-tar-gzip":
             archives += ("registry.age",)
-        elif version != "3" or "registry" in manifest:
+        elif version not in {"3", "4"} or "registry" in manifest:
             _fail("managed-data manifest is not a supported recovery format")
+        if version == "4":
+            archives += ("postgres-catalog.json", "mongodb-catalog.json")
+            if (
+                manifest.get("postgres") != "database-logical-tar-v1"
+                or manifest.get("mongodb") != "database-logical-tar-v1"
+            ):
+                _fail("database backup format is invalid")
         required = {
             "postgres.age",
             "mongodb.age",
@@ -341,7 +348,8 @@ def _validate_component(
             _fail("managed-data evidence does not match its encrypted data inventory")
         expected_sums = ""
         for filename in archives:
-            _age_file(by_name[filename])
+            if filename.endswith(".age"):
+                _age_file(by_name[filename])
             digest = _digest(by_name[filename], maximum=bounds.maximum_file_bytes)
             observed[filename] = digest
             expected_sums += f"{digest}  {filename}\n"

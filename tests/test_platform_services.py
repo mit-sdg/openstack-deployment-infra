@@ -410,7 +410,7 @@ class ProductServiceTests(unittest.TestCase):
             if action == "storage.s3.remove":
                 from openstack_platform.helper.instances import metadata
 
-                ordinary, instance_id, _, workers, resource_id, _, _, _ = metadata(values)
+                ordinary, instance_id, _, workers, resource_id, _, _, _, _ = metadata(values)
                 self.assertEqual(resource_id, resource.resource_id)
                 self.assertIsNone(instance_id)
                 self.assertEqual(len(workers), 3)

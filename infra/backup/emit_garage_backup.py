@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -25,52 +26,63 @@ from backup.garage_catalog import (  # noqa: E402
 def export_archive(admin: Any, s3: Any, prefix: str, key_id: str, stream: BinaryIO) -> None:
     expected = app_buckets(admin, prefix)
     metadata = []
-    objects: list[dict[str, object]] = []
     for bucket in expected:
         backup_grant(admin, bucket["id"], key_id)
         metadata.append(bucket_metadata(admin, bucket, key_id))
-        # An empty bucket still needs a successful read; never trust ListBuckets
-        # from the scoped key to establish the inventory of app buckets.
-        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket["name"]):
-            for summary in page.get("Contents", []):
-                if len(objects) >= MAX_OBJECTS:
-                    raise RuntimeError("Garage backup object inventory exceeds its bound")
-                objects.append(
-                    {
+    manifest = validate_manifest(
+        {
+            "format_version": 3,
+            "buckets": [item["name"] for item in expected],
+            "bucket_metadata": metadata,
+            "objects": [],
+        }
+    )
+
+    def add_json(archive: tarfile.TarFile, name: str, value: Any) -> bytes:
+        payload = json.dumps(value, sort_keys=True).encode() + b"\n"
+        if len(payload) > MAX_MANIFEST_BYTES:
+            raise RuntimeError("Garage backup metadata exceeds its bound")
+        member = tarfile.TarInfo(name)
+        member.size, member.mode = len(payload), 0o600
+        archive.addfile(member, io.BytesIO(payload))
+        return payload
+
+    with tarfile.open(fileobj=stream, mode="w|gz") as archive:
+        add_json(archive, "manifest.json", manifest)
+        index = 0
+        checksum = hashlib.sha256()
+        for bucket in expected:
+            # ListObjectsV2 is ordered by key; the decoder checks monotonicity
+            # without keeping millions of names in RAM. Even empty buckets list.
+            for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket["name"]):
+                for summary in page.get("Contents", []):
+                    if index >= MAX_OBJECTS:
+                        raise RuntimeError("Garage backup object inventory exceeds its bound")
+                    record = {
                         "bucket": bucket["name"],
                         "key": summary["Key"],
                         "size": summary["Size"],
                         "etag": summary.get("ETag", ""),
                     }
-                )
-    manifest = validate_manifest(
-        {
-            "format_version": 2,
-            "buckets": [item["name"] for item in expected],
-            "bucket_metadata": metadata,
-            "objects": objects,
-        }
-    )
-    payload = json.dumps(manifest, sort_keys=True).encode() + b"\n"
-    if len(payload) > MAX_MANIFEST_BYTES:
-        raise RuntimeError("Garage backup manifest exceeds its bound")
-    with tarfile.open(fileobj=stream, mode="w|gz") as archive:
-        member = tarfile.TarInfo("manifest.json")
-        member.size, member.mode = len(payload), 0o600
-        archive.addfile(member, io.BytesIO(payload))
-        for index, record in enumerate(objects):
-            response = s3.get_object(
-                Bucket=record["bucket"], Key=record["key"], IfMatch=record["etag"]
-            )
-            body = response["Body"]
-            try:
-                if response.get("ContentLength") != record["size"]:
-                    raise RuntimeError("Garage object changed during backup")
-                info = tarfile.TarInfo(f"objects/{index:012d}.bin")
-                info.size, info.mode = int(str(record["size"])), 0o600
-                archive.addfile(info, body)
-            finally:
-                body.close()
+                    validate_manifest(
+                        {"format_version": 1, "buckets": [bucket["name"]], "objects": [record]}
+                    )
+                    raw = add_json(archive, f"objects/{index:012d}.json", record)
+                    checksum.update(raw)
+                    response = s3.get_object(
+                        Bucket=record["bucket"], Key=record["key"], IfMatch=record["etag"]
+                    )
+                    body = response["Body"]
+                    try:
+                        if response.get("ContentLength") != record["size"]:
+                            raise RuntimeError("Garage object changed during backup")
+                        info = tarfile.TarInfo(f"objects/{index:012d}.bin")
+                        info.size, info.mode = record["size"], 0o600
+                        archive.addfile(info, body)
+                    finally:
+                        body.close()
+                    index += 1
+        add_json(archive, "objects-complete.json", {"count": index, "sha256": checksum.hexdigest()})
     if app_buckets(admin, prefix) != expected:
         raise RuntimeError("Garage bucket inventory changed during backup; retry")
 

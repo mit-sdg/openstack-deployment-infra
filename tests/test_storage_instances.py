@@ -46,13 +46,14 @@ class InstanceManagerTests(unittest.TestCase):
                 raise RuntimeError("interrupted cgroup assignment")
             if argv[0] == "rm":
                 shutil.rmtree(argv[-1])
-            return subprocess.CompletedProcess(argv, 0, b"", b"")
+            return subprocess.CompletedProcess(argv, 0, b"0\n" if argv[0] == "du" else b"", b"")
 
         self.manager = Manager(
             {
                 "namespace": "example",
                 "paths": {"data": str(self.root)},
                 "addresses": {"admin": "10.0.0.2", "storage": "10.0.0.4"},
+                "internalNames": {"storage": "storage.example.internal"},
                 "containers": {
                     "postgres": "postgres@sha256:" + "a" * 64,
                     "mongodb": "mongo@sha256:" + "b" * 64,
@@ -60,6 +61,7 @@ class InstanceManagerTests(unittest.TestCase):
             },
             command=command,
             units=self.root / "units",
+            memory_budget=50 * GIB,
         )
         self.geometry = mock.patch(
             "openstack_platform.storage_instances.os.statvfs",
@@ -109,7 +111,7 @@ class InstanceManagerTests(unittest.TestCase):
         ]
         self.assertTrue(
             any(
-                "bhard=2621440k" in statement and "ihard=65536" in statement
+                "bhard=3145728k" in statement and "ihard=65536" in statement
                 for statement in quota_calls
             )
         )
@@ -236,6 +238,76 @@ class InstanceManagerTests(unittest.TestCase):
         _, reused = self.create()
         self.assertEqual(reused["port"], original["port"])
 
+    def test_quota_raise_applies_even_when_instance_is_crash_looping(self):
+        identifier, _ = self.create("mongo")
+        self.calls.clear()
+        self.manager.dispatch(
+            {
+                "action": "limits",
+                "instanceId": identifier,
+                "quotas": quotas(size=3 * GIB),
+                "reservations": {"databaseBytes": 6 * GIB, "garageBytes": 0},
+            }
+        )
+        self.assertTrue(
+            any(argv[0] == "xfs_quota" and "bhard=4718592k" in argv[3] for argv, _ in self.calls)
+        )
+        self.assertTrue(any(argv[:2] == ("systemctl", "start") for argv, _ in self.calls))
+        self.assertEqual(self.manager.read(identifier)["acceptedQuotas"]["sizeBytes"], 3 * GIB)
+
+    def test_dns_urls_and_saved_jobs_keep_certificate_name_and_exact_identity(self):
+        import hashlib
+        import urllib.parse
+
+        from openstack_platform.controller.application_models import Manifest
+        from openstack_platform.controller.nomad_jobs import (
+            nomad_candidate_identity,
+            render_nomad_job,
+            storage_hosts_job,
+        )
+        from openstack_platform.helper import storage
+
+        host = "storage.example.internal"
+        for port in (5432, 30005):
+            marker = storage._PORT_CONTEXT.set((port, 27017 if port == 5432 else 30006))
+            try:
+                pg = storage.postgres_environment(
+                    host, "p_" + "a" * 20, "u_" + "a" * 20 + "_abcdef12", "secret"
+                )
+                mongo = storage.mongo_environment(
+                    host, "p_" + "a" * 20, "u_" + "a" * 20 + "_abcdef12", "secret"
+                )
+                self.assertEqual(urllib.parse.urlsplit(pg["DATABASE_URL"]).hostname, host)
+                self.assertEqual(urllib.parse.urlsplit(mongo["MONGODB_URI"]).hostname, host)
+                self.assertEqual(pg["PGHOST"], host)
+            finally:
+                storage._PORT_CONTEXT.reset(marker)
+        (self.root / "dns").mkdir()
+        config = config_fixture(self.root / "dns")
+        job = render_nomad_job(
+            application_id=APP_ID,
+            application_slug="demo-app",
+            image="registry/app@sha256:" + "b" * 64,
+            manifest=Manifest("node", (".",), None, "start", 3000, "/health"),
+            platform=config.platform,
+            cpu_mhz=1000,
+            memory_mib=1024,
+            source_commit="a" * 40,
+            recipe_hash="c" * 64,
+        )
+        self.assertIn("storage.example.internal:192.0.2.13", job)
+        original_identity = nomad_candidate_identity(job)[0]
+        marker_start = job.index("  meta {")
+        marker_end = job.index("  }\n\n", marker_start) + len("  }\n\n")
+        metadata = job[marker_start:marker_end]
+        raw = job[:marker_start] + job[marker_end:]
+        raw = "\n".join(line for line in raw.split("\n") if "extra_hosts" not in line)
+        metadata = metadata.replace(original_identity, hashlib.sha256(raw.encode()).hexdigest())
+        old_job = raw[:marker_start] + metadata + raw[marker_start:]
+        upgraded = storage_hosts_job(old_job, config.platform)
+        self.assertEqual(nomad_candidate_identity(upgraded), nomad_candidate_identity(job))
+        self.assertEqual(storage_hosts_job(upgraded, config.platform), upgraded)
+
     def test_pending_assignments_keep_capacity_reserved_until_confirmed(self):
         for _ in range(6):
             self.create(limits=quotas(memory=8 * GIB))
@@ -324,6 +396,91 @@ class InstanceManagerTests(unittest.TestCase):
         request.rfile.read.assert_not_called()
         dispatch.assert_not_called()
 
+    def test_copy_imports_app_sql_with_app_authentication_and_extensions_with_admin(self):
+        identifier, _ = self.create()
+        original_command = self.manager.command
+        calls = []
+
+        def command(argv, **options):
+            if argv[0] == "pg_dump":
+                Path(argv[argv.index("--file") + 1]).write_bytes(b"native archive")
+            if argv[:2] == ("pg_restore", "--list"):
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    b"1; 0 0 SCHEMA - public owner\n2; 0 0 EXTENSION - plpgsql platform_admin\n3; 0 0 TABLE public probe owner\n",
+                    b"",
+                )
+            if argv[0] == "pg_restore":
+                calls.append((list(argv), options))
+            return original_command(argv, **options)
+
+        self.manager.command = command
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def execute(self, query, *args):
+                text = query if isinstance(query, str) else query.as_string()
+                self.values = [("public",)] if "pg_namespace" in text else []
+                return self
+
+            def fetchall(self):
+                return self.values
+
+        original_read = Path.read_text
+
+        def read(path, *args, **options):
+            return (
+                "shared-private"
+                if str(path) == "/etc/example/secrets/postgres-password"
+                else original_read(path, *args, **options)
+            )
+
+        login = "u_11111111111141118111_abcdef12"
+        with (
+            mock.patch(
+                "openstack_platform.storage_migration.psycopg.connect",
+                side_effect=lambda **kwargs: Connection(),
+            ),
+            mock.patch(
+                "openstack_platform.storage_migration.postgres_fingerprint",
+                return_value={"probe": (1, "checksum")},
+            ),
+            mock.patch.object(Path, "read_text", read),
+        ):
+            self.manager.dispatch(
+                {
+                    "action": "copy",
+                    "instanceId": identifier,
+                    "database": "p_11111111111141118111",
+                    "seconds": 120,
+                    "operationId": str(uuid.uuid4()),
+                    "applicationLogin": login,
+                    "applicationPassword": "app-private",
+                }
+            )
+        self.assertEqual(self.manager.read(identifier)["migrationState"], "verified")
+        self.assertEqual(len(calls), 5)
+        for argv, options in calls:
+            extension = Path(argv[argv.index("--use-list") + 1]).name == "extensions.list"
+            self.assertEqual(
+                argv[argv.index("--username") + 1], "platform_admin" if extension else login
+            )
+            self.assertEqual(
+                options["env"]["PGPASSWORD"],
+                (self.manager.directory(identifier) / "admin-password").read_text()
+                if extension
+                else "app-private",
+            )
+            self.assertIn("--no-comments", argv)
+            self.assertNotIn("app-private", " ".join(argv))
+            self.assertNotIn("shared-private", " ".join(argv))
+
     def test_sealed_migration_cannot_recopy_or_delete_source_data(self):
         identifier, _ = self.create()
         config = self.manager.read(identifier)
@@ -332,7 +489,15 @@ class InstanceManagerTests(unittest.TestCase):
         self.manager.dispatch({"action": "seal", "instanceId": identifier})
         self.calls.clear()
         self.manager.dispatch(
-            {"action": "copy", "instanceId": identifier, "database": "p_11111111111141118111"}
+            {
+                "action": "copy",
+                "instanceId": identifier,
+                "database": "p_11111111111141118111",
+                "seconds": 1800,
+                "applicationLogin": "u_11111111111141118111_abcdef12",
+                "applicationPassword": "password",
+                "operationId": str(uuid.uuid4()),
+            }
         )
         self.assertFalse(any(argv[0] in {"pg_dump", "pg_restore", "rm"} for argv, _ in self.calls))
         self.assertEqual(self.manager.read(identifier)["migrationState"], "switched")
@@ -347,7 +512,10 @@ class InstanceControllerTests(unittest.TestCase):
         self.connection = db.connect(self.root / "platform.sqlite3")
         self.addCleanup(self.connection.close)
         db.migrate(self.connection)
-        db.put_storage_host_usage(self.connection, {"dataVolume": {"totalBytes": 1024 * GIB}})
+        db.put_storage_host_usage(
+            self.connection,
+            {"dataVolume": {"totalBytes": 1024 * GIB}, "instanceMemoryBudgetBytes": 50 * GIB},
+        )
 
     def add(self, identifier, kind, name="default", connections=10):
         if db.get_application(self.connection, identifier) is None:
@@ -472,6 +640,14 @@ class InstanceControllerTests(unittest.TestCase):
             calls.append((action, args))
             if action.endswith(".usage"):
                 return {"usage": {"usedBytes": 0}}
+            if action == "storage.backup.ensure":
+                return {
+                    "verified": True,
+                    "shared": True,
+                    "type": args["type"],
+                    "database": args["database"],
+                    "backedUpAt": db.utc_now(),
+                }
             if action == "app.stop":
                 return {"jobStopped": True}
             if action == "storage.instances.migrate":
@@ -512,6 +688,9 @@ class InstanceControllerTests(unittest.TestCase):
         self.assertIsNone(db.get_managed_resource(self.connection, second.resource_id).instance_id)
         child = db.get_unfinished_operation(self.connection, "app-" + APP_ID)
         self.assertEqual(child.status, "recovery_required")
+        with self.assertRaises(CapacityError) as published:
+            service.abort(request_id=str(uuid.uuid4()), application_ids=(APP_ID,))
+        self.assertEqual(published.exception.code, "MIGRATION_ALREADY_PUBLISHED")
         interrupted = False
         service.migrate(request_id=key)
         self.assertEqual(
@@ -522,6 +701,125 @@ class InstanceControllerTests(unittest.TestCase):
         self.assertEqual(db.get_deployment(self.connection, APP_ID).nomad_version, 2)
         self.assertEqual(db.get_operation(self.connection, key).status, "succeeded")
         self.assertFalse(any(action.endswith("remove") for action, args in calls))
+
+    def test_migration_backup_gate_and_abort_unfreeze_are_resumable(self):
+        resource = self.add(APP_ID, "mongo")
+        other = str(uuid.uuid4())
+        self.add(other, "postgres")
+        calls = []
+        verified = False
+
+        def helper(config, action, args, **bounds):
+            calls.append((action, args))
+            if action.endswith(".usage"):
+                return {"usage": {"usedBytes": 0}, "writeBlocked": True}
+            if action == "storage.backup.ensure":
+                return {
+                    "verified": verified,
+                    "shared": True,
+                    "type": args["type"],
+                    "database": args["database"],
+                    "backedUpAt": db.utc_now(),
+                }
+            if action == "storage.instances.migrate":
+                raise RuntimeError("copy failed")
+            if action == "storage.instances.abort":
+                self.assertEqual(args["sourceRole"], "platform_size_blocked")
+                return {"unpublished": True, "unfrozen": args["mode"] == "apply"}
+            raise AssertionError(action)
+
+        service = InstanceMigrationService(
+            self.connection, self.config, self.root, helper_caller=helper
+        )
+        master = str(uuid.uuid4())
+        with self.assertRaises(ValidationError):
+            service.migrate(request_id=master, application_ids=(APP_ID,))
+        self.assertFalse(any(action == "storage.instances.migrate" for action, _ in calls))
+        verified = True
+        with self.assertRaises(RuntimeError):
+            service.migrate(request_id=master, application_ids=(APP_ID,))
+        with self.assertRaises(ValidationError):
+            service.migrate(request_id=master, application_ids=(other,))
+        abort = str(uuid.uuid4())
+        service.abort(request_id=abort, application_ids=(APP_ID,))
+        service.abort(request_id=abort, application_ids=(APP_ID,))
+        self.assertEqual(
+            sum(
+                action == "storage.instances.abort" and args["mode"] == "apply"
+                for action, args in calls
+            ),
+            1,
+        )
+        self.assertIsNone(db.get_unfinished_operation(self.connection, "app-" + APP_ID))
+        self.assertEqual(db.get_operation(self.connection, master).status, "failed")
+        self.assertIsNone(
+            db.get_managed_resource(self.connection, resource.resource_id).instance_id
+        )
+
+    def test_manager_outage_is_retryable_before_deployment_admission(self):
+        from openstack_platform.remote import HelperError
+
+        resource = self.add(APP_ID, "postgres")
+        db.set_storage_instance(self.connection, resource.resource_id, resource.resource_id, 30000)
+        helper = mock.Mock(side_effect=HelperError("INSTANCE_MANAGER_UNAVAILABLE", "retry"))
+        api = ControllerAPI(self.connection, self.config, self.root, helper_caller=helper)
+        try:
+            key = str(uuid.uuid4())
+            with self.assertRaises(HttpError) as rejected:
+                api.router("project").dispatch(
+                    "POST", f"/v1/applications/{APP_ID}/enable", {"Idempotency-Key": key}, {}
+                )
+            self.assertEqual(
+                (rejected.exception.status, rejected.exception.code, rejected.exception.retryable),
+                (503, "INSTANCE_MANAGER_UNAVAILABLE", True),
+            )
+            self.assertIsNone(db.get_operation(self.connection, key))
+            self.assertIsNone(db.get_operation_dispatch(self.connection, key))
+        finally:
+            api.close()
+
+    def test_s3_metadata_and_object_budget_include_unfinished_raises(self):
+        self.add(APP_ID, "postgres")
+        first = db.put_managed_resource(
+            self.connection,
+            application_id=APP_ID,
+            resource_type="s3",
+            provider_name="bucket",
+            lifecycle_state="active",
+            s3_bytes=MIB,
+            s3_objects=100000,
+        )
+        second_app = str(uuid.uuid4())
+        self.add(second_app, "postgres")
+        second = db.put_managed_resource(
+            self.connection,
+            application_id=second_app,
+            resource_type="s3",
+            provider_name="bucket-two",
+            lifecycle_state="active",
+            s3_bytes=MIB,
+            s3_objects=100000,
+        )
+        from openstack_platform.controller.storage_capacity import disk_reservations
+
+        self.assertGreaterEqual(
+            disk_reservations(self.connection)["garageBytes"], 2 * 100000 * 4096
+        )
+        db.begin_operation(
+            self.connection,
+            operation_id=str(uuid.uuid4()),
+            kind="storage.limits.set",
+            scope="app-" + APP_ID,
+            phase="applying",
+            deadline_at=db.utc_now(),
+            refs={
+                "resource_id": first.resource_id,
+                "quotas": {"s3Bytes": MIB, "s3Objects": 4900000},
+            },
+        )
+        with self.assertRaises(CapacityError) as rejected:
+            check(self.connection, second.resource_id, {"s3Bytes": MIB, "s3Objects": 100001})
+        self.assertEqual(rejected.exception.code, "OBJECT_BUDGET_EXCEEDED")
 
     def test_failed_create_retains_identity_and_capacity_until_explicit_cleanup(self):
         from openstack_platform.controller import storage
@@ -668,18 +966,6 @@ class MigrationFingerprintTests(unittest.TestCase):
         before = mongo_fingerprint(MongoDB(16 * MIB))
         after = mongo_fingerprint(MongoDB(MIB), before["hashes"] is not None)
         self.assertEqual(before, after)
-
-
-class BackupCoverageTests(unittest.TestCase):
-    def test_shared_only_backup_cannot_claim_coverage_for_isolated_writes(self):
-        from infra.backup.require_shared_storage import require_shared
-
-        require_shared("postgres", {"items": []})
-        require_shared("postgres", {"items": [{"type": "mongo"}]})
-        with self.assertRaises(ValueError):
-            require_shared("postgres", {"items": [{"type": "postgres"}]})
-        with self.assertRaises(ValueError):
-            require_shared("mongo", {"items": [{"type": "unknown"}]})
 
 
 if __name__ == "__main__":

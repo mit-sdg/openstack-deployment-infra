@@ -578,7 +578,10 @@ class DeploymentTests(unittest.TestCase):
             datacenter="dc1",
             region="global",
             network="private",
-            document={},
+            document={
+                "internalNames": {"storage": "storage.example.internal"},
+                "addresses": {"storage": "192.0.2.13"},
+            },
         )
 
     def candidate_job(self) -> tuple[str, tuple[str, str]]:

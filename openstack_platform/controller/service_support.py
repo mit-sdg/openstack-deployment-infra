@@ -39,6 +39,9 @@ _HELPER_FAILURE_CODES = frozenset(
         "CONNECTION_BUDGET_EXCEEDED",
         "DISK_BUDGET_EXCEEDED",
         "INSTANCE_OPERATION_FAILED",
+        "INSTANCE_MANAGER_UNAVAILABLE",
+        "MIGRATION_ALREADY_PUBLISHED",
+        "SIZE_BELOW_USAGE",
         "INVALID_INSTANCE_REQUEST",
         "INSTANCE_NOT_READY",
         "DEPENDENCY_UNAVAILABLE",
@@ -124,8 +127,11 @@ def logged_helper(caller: HelperCaller, *, config_shaped: bool = True) -> Helper
                     "app.source.preflight",
                     "backup.accept",
                     "storage.host.observe",
+                    "storage.backup.ensure",
                     "storage.instances.network",
                     "storage.instances.migrate",
+                    "storage.instances.abort",
+                    "storage.instances.available",
                 }
                 or action
                 in {

@@ -125,6 +125,11 @@ def resource_action(
         if row is None:
             raise HelperActionError("PROVIDER_RESPONSE_INVALID", "PostgreSQL usage is unavailable")
         used, connections = _count(row[0]), _count(row[1])
+        if mutate and environment["PGHOST"] != host:
+            normalized = s.postgres_environment(
+                host, name, credential.credential_name, environment["PGPASSWORD"]
+            )
+            s._publish(nomad, application_slug, "postgres", normalized)
     elif resource_type == "mongo":
         s._require_mongo_identity(credential, application_id=application_id, host=host)
         database = admin[name]

@@ -94,6 +94,9 @@ def main() -> int:
         admin_command(NOMAD, "operator", "raft", "list-peers")
         checks["nomad"] = {"ready_clients": len(ready), "raft": "healthy"}
 
+        status_path = BACKUPS / "STATUS.json"
+        if status_path.is_file() and json.loads(status_path.read_text()).get("status") == "failed":
+            raise RuntimeError("latest managed-data backup failed")
         backup_dirs = sorted(path for path in BACKUPS.glob("20??????T??????Z") if path.is_dir())
         if not backup_dirs:
             raise RuntimeError("no encrypted platform backup exists")
@@ -115,6 +118,8 @@ def main() -> int:
         version = manifest.get("format_version")
         if version == "2":
             required.add("registry.age")
+        elif version == "4":
+            required.update({"postgres-catalog.json", "mongodb-catalog.json"})
         elif version != "3":
             raise RuntimeError("latest platform backup format is unsupported")
         if not required <= {path.name for path in latest.iterdir()}:

@@ -1,90 +1,297 @@
 # Migrate shared databases to isolated instances
 
-This rollout moves existing platform PostgreSQL/MongoDB resources to individual
-containers on an xl.16core storage VM (16 vCPU, 64 GiB), retaining the old databases.
-It uses the existing pinned database major versions and controller schema migration 7.
-The storage VM replacement causes the accepted short storage outage; the copy stage
-then stops one app at a time. Copy time depends on bytes, indexes and volume throughput:
-expect export + restore + verification + one application restart, usually seconds to
-minutes for small resources. Measure the first app before estimating the rest.
+This procedure retains the live PostgreSQL 17 and MongoDB 8 data while moving each
+resource into its own instance on `xl.16core` (16 vCPU / 64 GiB). Controller
+migrations 7 and 8 add instance/usage state and the durable worker allowlist cache.
+The storage replacement has the accepted host outage; subsequent copies stop one
+app at a time. Budget export + restore + verification + restart: usually seconds
+to minutes for small databases, with a configurable 1800-second deadline **per app**.
+Measure the throwaway rehearsal before scheduling the class app. No live migration
+or Nix/VM validation was performed by the backend worker.
 
-1. Check that controller foreground/finishing operations are resolved, and take verified
-   controller and managed-data backups. Check current PostgreSQL/MongoDB usage and the
-   old directories' physical size. The temporary source project caps are 32 GiB each;
-   increase the source reservations and rebuild if existing physical allocation exceeds
-   those caps. Raise any resource's soft size before migration if its data plus 384 MiB (PostgreSQL WAL and overhead) or 128 MiB (MongoDB)
-   exceeds the derived hard quota. Legacy limits must fit the new instance bounds.
-   A resource over 14 GiB requires raising the 16 GiB archive reservation first,
-   with corresponding disk admission changes; the default margin leaves export
-   overhead. These checks happen before application quiescence.
-2. Grow the data volume and XFS filesystem. The fifty-app default reservation is
-   759.5 GiB, so use at least 1 TiB; the 85% warning boundary is then 870.4 GiB.
-   The coordinator owns the Cinder resize and inventory update. Confirm the replacement
-   flavor is xl.16core and the mounted filesystem is XFS with project quotas.
-   The 100 GiB registry cap provides about 2 GiB per app across retained images;
-   image bytes have no current policy maximum, so this is a bounded allowance,
-   not a guarantee that fifty arbitrary image histories fit. Monitor and expand
-   the registry reservation with the volume when image usage requires it.
-3. Reconcile foundation security-group ingress: TCP 30000–30999 must be allowed to
-   storage from the worker and admin groups. Replace the storage host with the new image, retaining shared databases. Verify the
-   instance manager and host metrics services, nginx TLS, and both shared sources.
-   The manager runs on loopback and authenticates the existing Garage admin bearer.
-4. Establish and verify recurring managed-volume snapshots covering `instances/`,
-   paired with controller/Nomad state backups, before admitting isolated resources.
-   Existing shared-only logical exporters fail closed once the corresponding type
-   has instances; they do not cover new writes. The old managed-data restore flow
-   needs an instance-aware successor before relying on logical disaster recovery.
-   Install the matching helper release, replace the admin image, and deploy the portal
-   broker/web pair from the same combined revision. The helper launcher uses its durable
-   accepted release; replacing the admin image alone leaves the old helper installed.
-   The portal pair consumes the new four-field database quota model and checks admin
-   authorization on the project-socket limits route.
-5. On the admin VM as agentops, run:
+## Prepare capacity and releases
 
-   ```sh
-   openstack-platform-storage-migrate
+Use a reviewed checkout on the operator host. Set these paths to the existing
+installation, and keep the inventory/policy mode 0600:
+
+```bash
+export PLATFORM_CONFIG=/srv/openstack-platform/config/platform.json
+export PLATFORM_CLI=/srv/openstack-platform/bin/openstack-platform
+export PLATFORM_ROOT=/srv/openstack-platform
+export OSC=/srv/openstack-platform/bin/platform-openstack
+```
+
+1. Verify the new storage and admin VM tests in CI, resolve unfinished foreground
+   and finishing operations, and take hosted-controller/operator backups using
+   [the existing backup procedure](backups-and-recovery.md#verify-backups-and-schedules).
+   Retain both escrowed age identities. Check shared directories on the storage
+   recovery console before the first instance reservation:
+
+   ```bash
+   NAMESPACE=<namespace>
+   DATA=$(jq -r .paths.data "/etc/$NAMESPACE/platform.json")
+   sudo du -sx --block-size=1 -- "$DATA/postgres" "$DATA/mongodb" \
+     "$DATA/registry" "$DATA/object-storage"
    ```
 
-   Save the printed request UUID. The privileged controller operation groups resources
-   by app and records a child app reservation. Each app is quiesced once, its old logins
-   frozen, and its databases copied and checked. Small tables/databases also receive
-   checksums. Only a verified, sealed target is published. The controller resubmits the
-   accepted Nomad job and checks scheduler health; users do not need to edit bindings.
-   A stopped/never-deployed app stays stopped.
-6. If the command times out or reports recovery_required, fix the named dependency or
-   capacity issue and replay the same UUID:
+   PostgreSQL/MongoDB sources must fit their temporary 32 GiB projects, registry
+   its 100 GiB project, and Garage max(125% of bucket byte quotas, 4 KiB/object) +16 GiB overhead. S3 object
+   reservations total at most five million, matching fifty default 100,000-object quotas
+   and the bounded streaming exporter.
+   Leave at least 384 MiB inside each initial cap. The manager refuses the initial
+   assignment if a directory is already too large. Enlarge the corresponding code
+   reservation and volume before rollout if necessary. Source usage must fit each
+   instance's 150% hard quota with 384 MiB PG /128 MiB Mongo headroom. A database
+   over 14 GiB needs a larger migration archive project than the current 16 GiB.
 
-   ```sh
-   openstack-platform-storage-migrate --request-id UUID --timeout 1800
+2. Change the operator inventory and the **complete** production CI inventory:
+
+   ```bash
+   umask 077
+   jq '.flavors.storage="xl.16core" | .volumes.data.sizeGiB=1024 |
+       .volumes.backup.sizeGiB=8192' "$PLATFORM_CONFIG" > "$PLATFORM_CONFIG.new"
+   mv "$PLATFORM_CONFIG.new" "$PLATFORM_CONFIG"
+   gh secret set PLATFORM_CONFIG_JSON --repo mit-sdg/openstack-deployment-infra \
+     --env openstack-images < "$PLATFORM_CONFIG"
    ```
 
-   The command timeout does not extend the controller/helper policy deadline. Set those
-   policy bounds before rollout for unusually large copies. Replays skip switched
-   resources and completed apps. An interrupted app remains quiesced until its replay
-   finishes. Do not manually copy over a sealed target or clear the app reservation.
-7. Verify `/v1/admin/storage` reports instance isolation, instance IDs/ports and switched
-   migration state for every former shared resource. Verify each app's existing binding
-   works, usage samples are fresh, and the operator dashboard shows container caps and
-   no unexpected availability/connection alarms. On the storage host, check a unit's
-   `systemctl show` MemoryMax, MemorySwapMax, CPUQuotaPerSecUSec, CPUWeight, IOWeight and
-   TasksMax, and verify its XFS project quota. Run the final idempotent settings repair:
+   These commands are operator rollout actions, not commands run by this worker.
+   Preserve all other inventory fields, including worker/builder flavors, addresses,
+   namespace/prefix and `internalNames.storage`. The last name must match the
+   storage certificate SAN; new PKI generation includes it explicitly. Verify:
 
-   ```sh
-   openstack-platform-storage-repair
+   ```bash
+   STORAGE_DNS=$(jq -r .internalNames.storage "$PLATFORM_CONFIG")
+   openssl verify -CAfile "$PLATFORM_ROOT/.secrets/setup/pki/internal-ca.pem" \
+     -verify_hostname "$STORAGE_DNS" "$PLATFORM_ROOT/.secrets/setup/pki/storage.pem"
    ```
 
-Old data is untouched by migration and is frozen against application writes. Before
-endpoint publication, the source is the rollback authority. After publication the
-instance may contain new writes, so switching back to the old source can lose data:
-recover/replay the instance operation or use a verified backup instead.
+   If changing that name, regenerate leaf certificates with the existing CA using
+   `infra/pki/generate_internal_pki.sh` in a fresh private directory containing the
+   escrowed CA certificate/key; install the resulting storage leaf/key as the
+   replacement's PKI inputs. Keep the CA unchanged. Standard existing storage names
+   already appear in the SAN; no new secret is required.
 
-A follow-up must remove the shared server containers, their frozen databases/users,
-legacy ports and source quota reservations, and verified migration archives. It must
-also complete instance-aware logical backup/restore and update monitoring to stop
-checking the shared listeners. This rollout deliberately retains them; deleting an isolated resource deletes only its new instance data.
+   Verify the actual flavor and available project quota before replacement:
 
-Order matters: new helpers require the new authenticated manager; new controller/API
-and portal fields ship together; migration requires the new image and helper and
-precedes final repair. An old helper rejects the new actions. An old storage image
-has no manager or instance guardrails. A new portal against an old controller cannot
-read/update the new quota shape. Repair before migration only repairs the old logins.
+   ```bash
+   "$OSC" flavor show xl.16core -c vcpus -c ram -c disk
+   "$OSC" quota show "$(jq -r .projectId "$PLATFORM_CONFIG")"
+   ```
+
+   Require 16 vCPUs /65536 MiB. Replacement retains the old storage VM until
+   acceptance, so storage alone temporarily needs 20 vCPUs /72 GiB with the
+   current 4-vCPU/8-GiB predecessor, plus the other hosts/workers and both boot
+   disks. Cinder quota must cover the 1 TiB data and proposed 8 TiB backup volumes.
+
+3. Extend the existing Cinder data volume before replacing storage:
+
+   ```bash
+   DATA_VOLUME=$(jq -r .volumes.data.name "$PLATFORM_CONFIG")
+   "$OSC" volume set --size 1024 "$DATA_VOLUME"
+   "$OSC" volume show "$DATA_VOLUME" -c size -c status
+   ```
+
+   Wait for size 1024 and the extension to finish. In-use extension needs Cinder
+   backend support; otherwise perform it while detached during the replacement
+   maintenance window. Do not force its state to available. The new image runs
+   idempotent `xfs_growfs` after mount and **before** shared services or the manager,
+   so the larger filesystem requires no manual storage-root work. Fifty default
+   logical quotas total 450 GiB. Physical admission reserves 300 GiB DB hard caps,
+   312.5 GiB S3, and 197 GiB fixed allowances = **809.5 GiB**; 500 GiB is insufficient.
+   One TiB's 85% admission/warning boundary is 870.4 GiB. Registry's 100 GiB is a
+   2 GiB/app allowance; arbitrary image histories have no finite worst case.
+
+   The existing 600 GiB backup volume does not hold fourteen full 450 GiB sets.
+   At full defaults, fourteen sets plus staging need roughly 6.6 TiB before
+   compression; provision at least 8 TiB, and comparable offsite capacity. Extend
+   the existing backup volume with `"$OSC" volume set --size 8192 <backup-volume>`;
+   have its mounted filesystem grown using the existing admin-volume procedure.
+   Automatic growth added here is specifically for the storage **data** filesystem.
+
+4. Apply the existing foundation reconciler from this reviewed checkout:
+
+   ```bash
+   set -a
+   source "$PLATFORM_ROOT/.secrets/openstack.env"
+   set +a
+   export OS_PROJECT_ID=$(jq -r .projectId "$PLATFORM_CONFIG")
+   export OS_PROJECT_NAME=$(jq -r .project "$PLATFORM_CONFIG")
+   "$PLATFORM_ROOT/runtime/python3.14" infra/openstack/apply_foundation.py
+   "$PLATFORM_ROOT/runtime/python3.14" infra/openstack/apply_foundation.py --apply
+   "$OSC" security group rule list "$(jq -r .prefix "$PLATFORM_CONFIG")-storage"
+   ```
+
+   The reconciler adds ingress TCP **30000–30999** to the storage group from the
+   `<prefix>-worker` and `<prefix>-admin` security groups. It retains existing
+   rules/ports and never deletes resources, so this is safe while apps serve.
+   No CIDR opening for student traffic is needed; nftables narrows each allocated
+   port to verified app worker addresses. These ports are also reserved from the
+   host ephemeral allocator.
+
+5. Replace storage using the reviewed image and protected inputs documented in
+   [Replace the storage host](hosts-and-images.md#replace-the-storage-host):
+
+   ```bash
+   export OPERATOR_PUBLIC_KEY="$PLATFORM_ROOT/.secrets/ssh/id_ed25519.pub"
+   export STORAGE_SECRETS_FILE="$PLATFORM_ROOT/.secrets/setup/storage-bootstrap.env"
+   export PKI_DIR="$PLATFORM_ROOT/.secrets/setup/pki"
+   "$PLATFORM_CLI" infra image set storage <NEW_STORAGE_IMAGE_UUID>
+   "$PLATFORM_CLI" infra replace storage --yes
+   ```
+
+   Require successful growth, nginx, authenticated manager and shared DB readiness.
+   Sources remain at 4 cores /8 GiB each. During transition, normal instances admit
+   36 GiB, with 2 GiB maintenance headroom: source + shared + restore caps total
+   at most 60 GiB, leaving 4 GiB for OS/control/cache. Removing the sources later
+   allows raising the normal instance budget to 50 GiB, enough for fifty default
+   pairs; until then admission safely rejects capacity beyond 36 GiB.
+
+6. Replace admin with the matching image, install the accepted helper release,
+   and ship portal broker/web together. Follow
+   [release installation](releases-and-upgrades.md#install-operator-and-helper):
+
+   ```bash
+   commit=<FULL_REVIEWED_COMMIT>
+   export PLATFORM_RELEASE_MANIFEST=/private/releases/$commit/release-manifest.json
+   export PLATFORM_RELEASE_SIGNATURE=/private/releases/$commit/release-manifest.sig
+   export PLATFORM_RELEASE_TRUST_ROOT=/private/release-trust-root.pem
+   deploy/releases/deploy_helper_release.sh "$commit"
+   ```
+
+   The image includes PostgreSQL 17 clients, MongoDB tools, age, Podman, XFS/nft,
+   and the pinned Python dependencies; no apt or ad-hoc Nix installation on admin
+   is needed. Reuse existing storage-bootstrap, Garage admin/backup key, Nomad
+   tokens, CA and managed-data age identity. The manager creates private per-instance
+   admin passwords itself. Replacing admin alone leaves the durable old helper
+   selected; install the matching release before sending new actions.
+
+   New policy fields are optional: `limits.migrationBackupMaxAgeMinutes=60` and
+   `limits.migrationAppSeconds=1800` (bounds 1–1440 and 120–7200). For larger apps,
+   add them to both operator and hosted-controller policies using the existing
+   protected-policy installation procedure. The per-app deadline covers backup,
+   quiescence, both copies, verification and restart. CLI polling defaults to 7200;
+   it is independent of each app's deadline. Existing process/helper defaults can
+   remain unchanged.
+
+## Back up, rehearse and cut over
+
+On admin as agentops, run the new managed backup and the existing actual restore
+check before migration:
+
+```bash
+openstack-platform-managed-backup
+PLATFORM_CONFIG=/etc/<namespace>/platform.json \
+  /srv/openstack-platform/persistent/platform/infra/backup/verify_latest_restore.sh
+```
+
+Require `latest platform restore=verified`, the new format-4 catalogs, and healthy
+backup/offsite status. Every run backs up shared sources **and** accepted isolated
+instances; failed inventory, credentials, native dumps or instance access fail the
+whole set and alert. Encryption, fourteen-day pruning and offsite export are unchanged.
+No recurring manual instance snapshot precondition replaces these logical backups.
+
+Rehearse, then migrate named apps:
+
+```bash
+openstack-platform-storage-migrate --application <REHEARSAL_APP_UUID>
+openstack-platform-storage-migrate --application <CLASS_APP_UUID>
+openstack-platform-storage-migrate
+```
+
+Repeat `--application UUID` for multiple named apps. Save each printed request UUID.
+Replay the same UUID **and the same selection** after an interrupted attempt:
+
+```bash
+openstack-platform-storage-migrate --request-id <UUID> \
+  --application <CLASS_APP_UUID> --timeout 7200
+```
+
+Before each resource starts/resumes cutover, a successful source backup within the
+configured age is required; a missing/stale backup is taken automatically. Frozen
+source backups preserve the original app login/role for restore. An app stops once;
+source logins are frozen; target data is copied, counted and cheaply checksummed,
+sealed, then published. The accepted Nomad job is upgraded with the inventory DNS
+host mapping and resubmitted so new binding values reach stable or candidate workers.
+Stopped/never-deployed apps stay stopped. PostgreSQL extension DDL imports separately as admin;
+app schemas/data/constraints import as the app owner, through the actual app login (all app objects become owned by its owner role).
+Mongo gets a temporary minimum 1 GiB cap and serial restore workers from the separate
+2 GiB maintenance reserve. Disconnected copies cancel their process group; replay
+cleans orphaned copies instead of waiting behind their instance lock.
+
+CPU/memory limits may be raised prospectively on a shared resource before migration
+so a large app can receive its intended instance cap; shared connections still require
+migration before a raise.
+
+Before publication, abort an interrupted app if returning to the shared source is
+necessary:
+
+```bash
+openstack-platform-storage-migrate --abort --application <APP_UUID>
+```
+
+Replay an interrupted abort using its printed UUID and `--abort` plus the same app
+selection. It restores PostgreSQL LOGIN/the checkpointed Mongo role, prevents old
+copy attempts from publishing, restarts the accepted shared job, and releases the
+app reservation. It retains target and source data; a later explicit resource deletion cleans both. A partial abort skips those apps
+when the original master resumes; use a **new** migration intent to migrate them later.
+After publication, abort refuses `MIGRATION_ALREADY_PUBLISHED`: replay the original
+migration. Switching back then would lose writes made to the isolated instance.
+
+After all apps migrate, verify admin resource isolation/ports, working bindings,
+fresh usage and no unexpected connection/availability/memory/disk alarms. Run:
+
+```bash
+openstack-platform-storage-repair
+openstack-platform-managed-backup
+```
+
+Repair reapplies the four role timeouts and current connection caps. It also repairs
+old shared IP-based PostgreSQL bindings after installing the container DNS mapping;
+use it earlier if a shared Node app needs that repair before its own migration.
+Database URLs use the existing certificate DNS name on both shared and isolated ports.
+
+## Recover a resource or a lost storage host
+
+Use [managed-data restore and the full-loss drill](backups-and-recovery.md#check-and-restore-managed-data).
+Format 4 restores users/roles and encrypted owned bindings, provisions missing isolated
+instances at recorded ports, verifies data inventory, remaps the private offline
+controller DB, then verifies current workers before reopening their firewall access.
+Keep the hosted controller stopped while installing/restoring its offline state;
+existing unrelated worker apps can keep serving. A completed identical payload replay
+skips destructive import. Keep the target app stopped until verification succeeds.
+
+For a single resource, decrypt the provider archive into the native restore CLI:
+
+```bash
+age --decrypt --identity /escrow/managed-age-identity.txt /backup/postgres.age | \
+  PLATFORM_CONFIG=/private/replacement-platform.json \
+  openstack-platform-storage-backup restore --type postgres \
+    --resource <RESOURCE_UUID> --controller-database /private/offline-controller.sqlite3 \
+    --catalog /backup/mongodb-catalog.json
+```
+
+Use `mongodb.age`, `--type mongo` and `--catalog /backup/postgres-catalog.json` for MongoDB. The other provider's catalog reserves its archived ports against new shared-resource instance allocation. The controller file must be a direct,
+current-user-owned mode-0600 offline database without SQLite sidecars. Install the
+remapped controller state through its existing supported restore launcher before
+starting it. A tracked shared pre-migration resource restores into its current or a fresh isolated
+instance; old untracked source copies stay retained in the encrypted archive. Rebuild missing app images after host loss; arbitrary runtime environment
+values still come from escrow, while managed DB binding credentials are in the backup.
+
+A format-4 `--full` loss drill requires one isolated resource of **each** engine and
+records `isolatedDatabases` only after both actual restores succeed. CI's storage
+VM test also deletes/recreates/restores both engines and checks their app credentials.
+
+A hard-cap crash can require an admin size raise even with minute polling and 50%
+headroom; logical and physical bytes differ. Raising the quota applies before DB
+connection attempts and collectors retain no failed app reservation. Reductions need
+fresh logical usage plus margin and a stopped-instance physical allocation check.
+Memory/connection edits restart that instance; CPU/disk edits apply live. Stops use
+PG fast SIGINT /Mongo SIGTERM, mixed kill mode and a 180-second grace period.
+
+The follow-up removes shared containers, frozen databases/users, legacy listeners and
+source reservations; adjusts monitoring/backups to absent shared services; and raises
+normal/maintenance instance memory budgets to 50/52 GiB. This rollout retains sources
+and never deletes their data automatically. Order matters: old storage lacks manager
+support; old helpers reject new actions; unmatched portal/controller quota models fail;
+and migration must wait for the new backup/restore coverage and successful rehearsal.

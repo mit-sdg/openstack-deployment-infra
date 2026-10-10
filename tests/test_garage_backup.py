@@ -189,7 +189,7 @@ class GarageBackupTests(unittest.TestCase):
         stream, admin, s3 = self.archive()
         manifest = catalog.verify_archive(stream, admin=admin, prefix="test")
         self.assertEqual(manifest["buckets"], [NAME])
-        self.assertEqual(manifest["objects"][0]["size"], 5)
+        self.assertEqual(manifest["objectCount"], 1)
         self.assertEqual(
             manifest["bucket_metadata"][0]["keys"],
             [{**APP_CREDENTIAL, "permissions": {"read": True, "write": True, "owner": False}}],
@@ -292,6 +292,9 @@ class GarageBackupTests(unittest.TestCase):
     def test_archive_order_sizes_duplicates_and_foreign_keys_are_rejected(self):
         original, _, _ = self.archive()
         manifest = catalog.verify_archive(original)
+        manifest["format_version"] = 2
+        manifest["objects"] = [{"bucket": NAME, "key": "hello", "size": 5}]
+        manifest.pop("objectCount", None)
         for mutate, entry, payload in (
             (lambda m: m["objects"][0].update(size=6), "objects/000000000000.bin", b"hello"),
             (lambda m: None, "../escape", b"hello"),

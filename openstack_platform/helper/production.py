@@ -120,8 +120,11 @@ _PER_RESOURCE_STORAGE_ACTIONS = tuple(
 STORAGE_ACTIONS = (
     *_PER_RESOURCE_STORAGE_ACTIONS,
     "storage.host.observe",
+    "storage.backup.ensure",
     "storage.instances.network",
     "storage.instances.migrate",
+    "storage.instances.abort",
+    "storage.instances.available",
 )
 ACTION_MANIFEST = tuple(sorted(("backup.accept", *APP_ACTIONS, *STORAGE_ACTIONS)))
 
@@ -1019,6 +1022,9 @@ def _storage_handlers(
             raise HelperActionError(
                 "DEPENDENCY_UNAVAILABLE", "S3 endpoint host must be an IP address"
             ) from None
+    if resource_type != "s3":
+        storage_actions._TRUSTED_HOSTS.set((host,))
+        host = platform.get("internalNames.storage")
     ca = str(_nomad_secrets(runtime) / "internal-ca.pem")
     secrets = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
     if instance is not None:
@@ -1293,12 +1299,27 @@ def _storage_host_observe(args: Mapping[str, Any]) -> Mapping[str, Any]:
         for kind in ("postgres", "mongodb", "garage", "registry")
     }
     instance_client = _instance_client()
-    instances = instance_client.call("list")["items"]
+    inventory = instance_client.call("list")
+    instances = inventory["items"]
     for instance in instances:
         names.add(
             f"{runtime.platform.namespace}-db-{uuid(instance['instanceId'], field='instance ID')}"
         )
+    # The two read-only samples can straddle instance creation/deletion. Trust
+    # only the configured namespace plus a canonical UUID for extra containers.
+    for item in raw.get("containers", []):
+        name = item.get("name", "")
+        prefix = f"{runtime.platform.namespace}-db-"
+        if isinstance(name, str) and name.startswith(prefix):
+            uuid(name[len(prefix) :], field="host instance ID")
+            names.add(name)
+    actual_names = {item.get("name") for item in raw.get("containers", [])}
+    for missing in sorted(names - actual_names):
+        raw["containers"].append(
+            {"name": missing, "usedBytes": 0, "limitBytes": 1, "available": False}
+        )
     result = host_projection(raw, names)
+    result["instanceMemoryBudgetBytes"] = inventory["instanceMemoryBudgetBytes"]
     result["postgresConnections"] = {"current": 0, "limit": 100}
     try:
         with psycopg.connect(
@@ -1354,13 +1375,14 @@ def _storage_host_observe(args: Mapping[str, Any]) -> Mapping[str, Any]:
             mongo.close()
     except Exception:
         pass
-    projections = []
-    for instance in instances:
+
+    def probe(instance: Mapping[str, Any]) -> dict[str, Any]:
         identifier = instance["instanceId"]
         kind = instance["type"]
         count = 0
         limit = instance["quotas"]["connections"] + (5 if kind == "postgres" else 10)
         available = False
+        blocked_count = 0
         try:
             credentials = instance_client.call("credentials", identifier)
             if kind == "postgres":
@@ -1394,7 +1416,7 @@ def _storage_host_observe(args: Mapping[str, Any]) -> Mapping[str, Any]:
                 try:
                     count = int(db_mongo.admin.command("serverStatus")["connections"]["current"])
                     users = db_mongo.admin.command("usersInfo", {"forAllDBs": True})["users"]
-                    result["writeBlockedResources"] += sum(
+                    blocked_count = sum(
                         1
                         for user in users
                         if any(
@@ -1406,17 +1428,25 @@ def _storage_host_observe(args: Mapping[str, Any]) -> Mapping[str, Any]:
             available = True
         except Exception:
             pass
-        result[f"{kind}Connections"]["current"] += count
-        result[f"{kind}Connections"]["limit"] += limit
-        projections.append(
-            {
-                "instanceId": identifier,
-                "type": kind,
-                "currentConnections": count if available else None,
-                "connectionLimit": limit,
-                "available": available,
-            }
-        )
+        return {
+            "instanceId": identifier,
+            "type": kind,
+            "currentConnections": count if available else None,
+            "connectionLimit": limit,
+            "available": available,
+            "blockedCount": blocked_count,
+        }
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    projections = []
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        for observed_instance in pool.map(probe, instances):
+            kind = observed_instance["type"]
+            result[f"{kind}Connections"]["current"] += observed_instance["currentConnections"] or 0
+            result[f"{kind}Connections"]["limit"] += observed_instance["connectionLimit"]
+            result["writeBlockedResources"] += observed_instance.pop("blockedCount")
+            projections.append(observed_instance)
     result["instances"] = projections
     result["measuredAt"] = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     return result
@@ -1450,10 +1480,32 @@ def _instance_network(args: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _lazy_storage(action: str) -> Handler:
     def handle(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+        if action == "storage.backup.ensure":
+            _exact_args(raw, {"type", "database", "maxAgeMinutes"}, action)
+            from ..database_backups import ensure_backup
+
+            return ensure_backup(
+                helper_runtime().platform.document,
+                raw["type"],
+                raw["database"],
+                raw["maxAgeMinutes"],
+            )
+        if action == "storage.instances.available":
+            _exact_args(raw, set(), action)
+            return dict(_instance_client().call("ping"))
         if action == "storage.host.observe":
             return _storage_host_observe(raw)
         if action == "storage.instances.network":
             return _instance_network(raw)
+        if action == "storage.instances.abort":
+            from .instance_migration import abort
+
+            return abort(
+                raw,
+                client=_instance_client(),
+                runtime=helper_runtime(),
+                nomad=_nomad_client(helper_runtime()),
+            )
         if action == "storage.instances.migrate":
             from .instance_migration import migrate
 
@@ -1466,14 +1518,26 @@ def _lazy_storage(action: str) -> Handler:
         from .instances import metadata
         from .nomad import WorkloadVariables
 
-        args, identifier, quotas, workers, resource_id, reservations, retained, workload_id = (
-            metadata(raw)
-        )
+        (
+            args,
+            identifier,
+            quotas,
+            workers,
+            resource_id,
+            reservations,
+            retained,
+            workload_id,
+            staged,
+        ) = metadata(raw)
         kind, operation = action.split(".")[1:]
         if kind == "mongo" and quotas is not None:
             storage_actions._MONGO_POOL.set(min(10, quotas["connections"]))
         if kind == "s3" and operation in {"create", "limits"}:
             _instance_client().call("reserve", resource_id, reservations=reservations)
+        if staged is not None and operation == "limits" and args["quotas"] != quotas:
+            _instance_client().call(
+                "limits", staged, quotas=args["quotas"], reservations=reservations
+            )
         client = _instance_client() if identifier is not None else None
         instance = None
         if client is not None:
@@ -1519,6 +1583,13 @@ def _lazy_storage(action: str) -> Handler:
         )
         try:
             result = dict(handlers[action](args))
+            if (
+                staged is not None
+                and operation == "remove"
+                and args["preflight"] is False
+                and result.get("confirmedAbsent") is True
+            ):
+                _instance_client().call("remove", staged, deleteData=True)
             if client is not None:
                 if (
                     operation == "remove"

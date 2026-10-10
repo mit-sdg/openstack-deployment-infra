@@ -447,6 +447,9 @@ def storage_observer(
                         "retainedWorker": None,
                         "workloadJobId": None,
                         "instanceId": resource.instance_id,
+                        "stagedInstanceId": resource.resource_id
+                        if resource.instance_id is None and resource.migration_state == "aborted"
+                        else None,
                         "instanceQuotas": storage_limits.quotas(resource)
                         if resource.resource_type != "s3"
                         else None,

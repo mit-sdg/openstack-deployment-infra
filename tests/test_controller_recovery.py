@@ -44,6 +44,8 @@ class ControllerRecoveryTests(TestCase):
 
     def helper(self, _config, action, values, **kwargs):
         self.calls.append(action)
+        if action == "storage.instances.available":
+            return {"available": True}
         if action == "app.build":
             raise remote.HelperError(
                 "PROVIDER_UNAVAILABLE" if self.generic_failure else self.rejection,
