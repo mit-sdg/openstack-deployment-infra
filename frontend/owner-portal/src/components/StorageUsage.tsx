@@ -26,6 +26,49 @@ const bytes = (value: number) =>
         ? `${numbers.format(Math.round((value / 1024 ** 3) * 10) / 10)} GB`
         : `${numbers.format(Math.round((value / 1024 ** 2) * 10) / 10)} MB`;
 
+function UsageMetric({
+  label,
+  accessibleLabel,
+  used,
+  total,
+  format,
+  unknown = '',
+  blocked = false,
+}: {
+  label: string;
+  accessibleLabel: string;
+  used: number | null;
+  total: number;
+  format: (value: number) => string;
+  unknown?: string;
+  blocked?: boolean;
+}) {
+  const text = used === null ? `${unknown}${format(total)}` : `${format(used)} of ${format(total)}`;
+  const tone =
+    blocked || (used !== null && used >= total)
+      ? 'critical'
+      : used !== null && used >= total * 0.8
+        ? 'warning'
+        : 'neutral';
+  return (
+    <div className="app-storage-metric">
+      <div>
+        {label}: {text}
+      </div>
+      {used !== null && (
+        <progress
+          className="app-storage-meter"
+          data-tone={tone}
+          aria-label={accessibleLabel}
+          aria-valuetext={text}
+          value={Math.min(used, total)}
+          max={total}
+        />
+      )}
+    </div>
+  );
+}
+
 export function StorageUsage({ resource }: { resource: StorageResource }) {
   const { usage, quotas, writeBlock } = resource;
   const size = quotas.s3Bytes ?? quotas.sizeBytes;
@@ -33,63 +76,62 @@ export function StorageUsage({ resource }: { resource: StorageResource }) {
     <Stack gap={2} className="app-storage-usage">
       {size !== undefined && (
         <div>
-          <div>
-            {resource.type === 'postgres' ? 'Size target' : 'Size limit'}:{' '}
-            {usage.usedBytes === null ? bytes(size) : `${bytes(usage.usedBytes)} of ${bytes(size)}`}
-          </div>
-          {usage.usedBytes !== null && (
-            <progress
-              className="app-storage-meter"
-              aria-label={`${resource.label} size usage`}
-              value={Math.min(usage.usedBytes, size)}
-              max={size}
-            />
-          )}
+          <UsageMetric
+            label={resource.type === 'postgres' ? 'Size target' : 'Size limit'}
+            accessibleLabel={`${resource.label} size usage`}
+            used={usage.usedBytes}
+            total={size}
+            format={bytes}
+            blocked={writeBlock.blocked}
+          />
           {resource.type === 'postgres' && (
             <Hint>The size target is for reporting; it does not pause writes.</Hint>
           )}
         </div>
       )}
-      {quotas.s3Objects !== undefined && (
-        <div>
-          Objects:{' '}
-          {usage.objectCount === null
-            ? `Limit ${numbers.format(quotas.s3Objects)}`
-            : `${numbers.format(usage.objectCount)} of ${numbers.format(quotas.s3Objects)}`}
-        </div>
-      )}
-      {quotas.connections !== undefined && (
-        <div>
-          Connections:{' '}
-          {usage.currentConnections === null
-            ? `Limit ${numbers.format(quotas.connections)}`
-            : `${numbers.format(usage.currentConnections)} of ${numbers.format(quotas.connections)}`}
-        </div>
-      )}
-      {quotas.memoryBytes !== undefined && (
-        <div>
-          {resource.isolation === 'shared' ? 'Planned memory limit' : 'Memory limit'}:{' '}
-          {usage.instanceMemoryBytes === null
-            ? bytes(quotas.memoryBytes)
-            : `${bytes(usage.instanceMemoryBytes)} of ${bytes(quotas.memoryBytes)}`}
-        </div>
-      )}
-      {quotas.cpuMillicores !== undefined && (
-        <div>
-          {resource.isolation === 'shared' ? 'Planned CPU limit' : 'CPU limit'}:{' '}
-          {numbers.format(quotas.cpuMillicores / 1000)} cores
-        </div>
-      )}
-      {usage.cpuTimeMilliseconds !== null && (
-        <div>
-          CPU time: {numbers.format(Math.round(usage.cpuTimeMilliseconds / 100) / 10)} seconds total
-        </div>
-      )}
-      {resource.hardQuotaBytes !== null && (
-        <Hint>
-          Disk allowance: {bytes(resource.hardQuotaBytes)}, including database files and overhead.
-        </Hint>
-      )}
+      <Grid columns={2} gap={3} className="app-storage-metrics">
+        {quotas.connections !== undefined && (
+          <UsageMetric
+            label="Connections"
+            accessibleLabel={`${resource.label} connections usage`}
+            used={usage.currentConnections}
+            total={quotas.connections}
+            format={(value) => numbers.format(value)}
+            unknown="up to "
+          />
+        )}
+        {quotas.memoryBytes !== undefined && (
+          <UsageMetric
+            label={resource.isolation === 'shared' ? 'Memory after move' : 'Memory'}
+            accessibleLabel={`${resource.label} memory usage`}
+            used={usage.instanceMemoryBytes}
+            total={quotas.memoryBytes}
+            format={bytes}
+            unknown="up to "
+          />
+        )}
+        {quotas.s3Objects !== undefined && (
+          <UsageMetric
+            label="Objects"
+            accessibleLabel={`${resource.label} objects usage`}
+            used={usage.objectCount}
+            total={quotas.s3Objects}
+            format={(value) => numbers.format(value)}
+            unknown="up to "
+          />
+        )}
+        {quotas.cpuMillicores !== undefined && (
+          <div>
+            {resource.isolation === 'shared' ? 'CPU after move' : 'CPU'}: up to{' '}
+            {numbers.format(quotas.cpuMillicores / 1000)} cores
+          </div>
+        )}
+        {resource.hardQuotaBytes !== null && (
+          <Hint>
+            Disk allowance: {bytes(resource.hardQuotaBytes)}, including database files and overhead.
+          </Hint>
+        )}
+      </Grid>
       {resource.type !== 's3' && resource.isolation === 'shared' && (
         <Hint>
           This database is awaiting its move to a separate instance. Ask an admin before changing
@@ -117,42 +159,7 @@ export function StorageUsage({ resource }: { resource: StorageResource }) {
   );
 }
 
-export function StorageLimitsControl({
-  id,
-  resource,
-  service,
-  disabled,
-}: {
-  id: string;
-  resource: StorageResource;
-  service: ReturnType<typeof resourceApi>;
-  disabled?: boolean;
-}) {
-  const [editing, setEditing] = useState(false);
-  return editing ? (
-    <LimitsForm
-      key={resource.resourceId}
-      id={id}
-      resource={resource}
-      service={service}
-      cancel={() => setEditing(false)}
-    />
-  ) : (
-    <Cluster>
-      <Button
-        size="sm"
-        variant="ghost"
-        disabled={disabled}
-        aria-label={`Edit ${resource.label} limits`}
-        onClick={() => setEditing(true)}
-      >
-        Edit limits
-      </Button>
-    </Cluster>
-  );
-}
-
-function LimitsForm({
+export function StorageLimitsForm({
   id,
   resource,
   service,
@@ -167,6 +174,7 @@ function LimitsForm({
   const [expected] = useState(() => ({ ...resource.quotas }));
   const sizeKey = resource.type === 's3' ? 's3Bytes' : 'sizeBytes';
   const initialSize = expected[sizeKey]!;
+  const minimumSize = resource.type === 's3' ? 1048576 : 1073741824;
   const [unit, setUnit] = useState(initialSize % 1024 ** 3 === 0 ? 'GB' : 'MB');
   const [size, setSize] = useState(
     String(initialSize / (initialSize % 1024 ** 3 === 0 ? 1024 ** 3 : 1024 ** 2)),
@@ -221,6 +229,7 @@ function LimitsForm({
   return (
     <form
       className="app-storage-limits"
+      id={`limits-form-${resource.resourceId}`}
       aria-label={`${resource.label} limits`}
       onSubmit={(event) => {
         event.preventDefault();
@@ -230,10 +239,12 @@ function LimitsForm({
         if (
           !size.trim() ||
           !Number.isSafeInteger(value) ||
-          rawBytes < 1048576 ||
+          rawBytes < minimumSize ||
           rawBytes > 549755813888
         ) {
-          setValidation({ size: 'Choose a size from 1 MB to 500 GB.' });
+          setValidation({
+            size: `Choose a size from ${resource.type === 's3' ? '1 MB' : '1 GB'} to 500 GB.`,
+          });
           return;
         }
         if (
@@ -288,7 +299,7 @@ function LimitsForm({
           >
             <Input
               type="number"
-              min={unit === 'GB' ? 1 / 1024 : 1}
+              min={minimumSize / (unit === 'GB' ? 1024 ** 3 : 1024 ** 2)}
               max={unit === 'GB' ? 500 : 512000}
               step="any"
               value={size}
@@ -353,7 +364,7 @@ function LimitsForm({
           )}
         </Grid>
         <Hint>
-          1 GB = 1,024 MB. Allowed size: 1 MB to 500 GB.{' '}
+          1 GB = 1,024 MB. Allowed size: {resource.type === 's3' ? '1 MB' : '1 GB'} to 500 GB.{' '}
           {resource.type === 'postgres' && 'The size target is not enforced.'}
         </Hint>
         {(!!mutation.error || !!observation.error) && (

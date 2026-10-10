@@ -245,6 +245,7 @@ class AdminApplicationTests(ManagementCase):
             )
         self.assertEqual(len(self.fixture.calls), calls)
         for delta in (
+            {"sizeBytes": 1073741823},
             {"connections": 101},
             {"memoryBytes": 1073741825},
             {"memoryBytes": 8589934593},

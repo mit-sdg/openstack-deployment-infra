@@ -241,7 +241,8 @@
   width: 100%;
   height: var(--ui-space-2);
   margin-block: var(--ui-space-2);
-  accent-color: var(--ui-accent-solid);
+  --app-storage-meter-color: var(--ui-accent-solid);
+  accent-color: var(--app-storage-meter-color);
   appearance: none;
   border: 0;
   border-radius: var(--ui-radius-full);
@@ -252,8 +253,18 @@
   background: var(--ui-surface-subtle);
 }
 .app-storage-meter::-webkit-progress-value {
-  background: var(--ui-accent-solid);
+  background: var(--app-storage-meter-color);
 }
 .app-storage-meter::-moz-progress-bar {
-  background: var(--ui-accent-solid);
+  background: var(--app-storage-meter-color);
+}
+
+.app-storage-meter[data-tone='warning'] {
+  --app-storage-meter-color: var(--ui-warning);
+}
+.app-storage-meter[data-tone='critical'] {
+  --app-storage-meter-color: var(--ui-danger);
+}
+.app-storage-metrics {
+  align-items: start;
 }

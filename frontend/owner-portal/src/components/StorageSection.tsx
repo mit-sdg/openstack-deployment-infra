@@ -26,7 +26,7 @@ import {
 } from '../api';
 import { QueryError } from './Feedback';
 import { Operation, OperationList } from './Operation';
-import { StorageUsage, StorageLimitsControl } from './StorageUsage';
+import { StorageUsage, StorageLimitsForm } from './StorageUsage';
 import { Status } from './Status';
 import '../pages/app-pages.css';
 
@@ -231,6 +231,7 @@ export function StorageSection({
     environment.data?.intents?.some((intent) => !['succeeded', 'failed'].includes(intent.state));
   const [createdType, setCreatedType] = useState<StorageResource['type'] | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const [editingLimits, setEditingLimits] = useState<string | null>(null);
   // Right after adding a resource, open its variables prefilled with defaults.
   useEffect(() => {
     const created = storage.data?.items.find((resource) => resource.type === createdType);
@@ -388,6 +389,27 @@ export function StorageSection({
                           Edit variables
                         </Button>
                       )}
+                      {admin && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          aria-label={`Edit ${resource.label} limits`}
+                          aria-expanded={editingLimits === resource.resourceId}
+                          aria-controls={
+                            editingLimits === resource.resourceId
+                              ? `limits-form-${resource.resourceId}`
+                              : undefined
+                          }
+                          disabled={disabled}
+                          onClick={() =>
+                            setEditingLimits((current) =>
+                              current === resource.resourceId ? null : resource.resourceId,
+                            )
+                          }
+                        >
+                          Edit limits
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         variant="ghost"
@@ -436,12 +458,13 @@ export function StorageSection({
                   }
                 >
                   <StorageUsage resource={resource} />
-                  {admin && (
-                    <StorageLimitsControl
+                  {admin && editingLimits === resource.resourceId && (
+                    <StorageLimitsForm
+                      key={resource.resourceId}
                       id={id}
                       resource={resource}
                       service={service}
-                      disabled={disabled}
+                      cancel={() => setEditingLimits(null)}
                     />
                   )}
                   {!count && (

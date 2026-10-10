@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 QUOTA_BOUNDS = {
     "connections": (1, 100),
-    "sizeBytes": (1048576, 549755813888),
+    "sizeBytes": (1073741824, 549755813888),
     "memoryBytes": (536870912, 8589934592),
     "cpuMillicores": (100, 4000),
     "s3Bytes": (1048576, 549755813888),
