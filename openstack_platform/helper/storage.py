@@ -47,6 +47,24 @@ from .nomad import (
 _RESOURCE_CONTEXT: ContextVar[tuple[str, str]] = ContextVar(
     "storage_resource", default=("mongo", "default")
 )
+_PORT_CONTEXT: ContextVar[tuple[int, int]] = ContextVar(
+    "storage_ports", default=(POSTGRES_PORT, MONGODB_PORT)
+)
+
+
+def postgres_port() -> int:
+    return _PORT_CONTEXT.get()[0]
+
+
+def mongo_port() -> int:
+    return _PORT_CONTEXT.get()[1]
+
+
+_TRUSTED_HOSTS: ContextVar[tuple[str, ...]] = ContextVar("storage_trusted_hosts", default=())
+
+_MONGO_POOL: ContextVar[int] = ContextVar("mongo_pool", default=10)
+
+
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{1,62}")
 
 
@@ -213,11 +231,11 @@ def postgres_environment(
     return SecretItems(
         {
             "DATABASE_URL": (
-                f"postgresql://{user}:{secret}@{host}:{POSTGRES_PORT}/{database}"
+                f"postgresql://{user}:{secret}@{host}:{postgres_port()}/{database}"
                 f"?sslmode=verify-full&sslrootcert={ca}"
             ),
             "PGHOST": host,
-            "PGPORT": str(POSTGRES_PORT),
+            "PGPORT": str(postgres_port()),
             "PGDATABASE": database,
             "PGUSER": username,
             "PGPASSWORD": password,
@@ -257,17 +275,17 @@ def _postgres_creation_evidence(
     credential_name = _credential_name(application_id, generation)
     owner_row = _pg_execute(
         admin,
-        "SELECT rolname, obj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s",
+        "SELECT rolname, shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s",
         (owner,),
     ).fetchone()
     credential_row = _pg_execute(
         admin,
-        "SELECT rolname, obj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s",
+        "SELECT rolname, shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s",
         (credential_name,),
     ).fetchone()
     database_row = _pg_execute(
         admin,
-        "SELECT datname, pg_get_userbyid(datdba), obj_description(oid, 'pg_database') "
+        "SELECT datname, pg_get_userbyid(datdba), shobj_description(oid, 'pg_database') "
         "FROM pg_database WHERE datname=%s",
         (database,),
     ).fetchone()
@@ -364,6 +382,55 @@ def _postgres_remove_created(
         )
 
 
+def postgres_normalize_ownership(admin: Any, database: str, owner: str, *, login: str) -> None:
+    """Keep app objects owned by the stable role across credential generations."""
+    import psycopg
+
+    values = admin.info.get_parameters()
+    values.update(
+        dbname=database,
+        password=admin.info.password,
+        options=values.get("options", "") + " -c statement_timeout=30000 -c lock_timeout=5000",
+    )
+    # REASSIGN OWNED is database-local for app tables/functions/sequences; the
+    # generated logins have no CREATEDB or tablespace privileges. Normalize all
+    # credential generations, including an interrupted retirement, atomically.
+    with psycopg.connect(**values) as connection:
+        members = _pg_execute(
+            connection,
+            "SELECT r.rolname FROM pg_roles r JOIN pg_auth_members m ON m.member=r.oid JOIN pg_roles o ON o.oid=m.roleid WHERE o.rolname=%s",
+            (owner,),
+        ).fetchall()
+        prefix = re.escape(login.rsplit("_", 1)[0])
+        for (member,) in members:
+            if not re.fullmatch(prefix + r"_[a-f0-9]{8}", member):
+                raise HelperActionError(
+                    "IDENTITY_MISMATCH", "PostgreSQL owner membership is invalid"
+                )
+            _pg_execute(
+                connection,
+                f"REASSIGN OWNED BY {_quote_identifier(member)} TO {_quote_identifier(owner)}",
+            )
+
+
+def postgres_role_settings(admin: Any, username: str, connections: int, *, owner: str) -> None:
+    """Shared by create, rotate and the idempotent rollout repair."""
+    role = _quote_identifier(username)
+    _pg_execute(
+        admin, f"ALTER ROLE {role} CONNECTION LIMIT {_positive(connections, 'postgresConnections')}"
+    )
+    for setting, value in (
+        ("statement_timeout", "30s"),
+        ("idle_in_transaction_session_timeout", "60s"),
+        ("lock_timeout", "5s"),
+        ("temp_file_limit", "256MB"),
+        # Session authorization remains the capped login; object ownership uses
+        # the stable NOLOGIN role, so rotations retain data and DDL privileges.
+        ("role", owner),
+    ):
+        _pg_execute(admin, f"ALTER ROLE {role} SET {setting}='{value}'")
+
+
 def postgres_create(
     admin: Any,
     *,
@@ -413,13 +480,7 @@ def postgres_create(
             f"{_sql_literal(_postgres_marker(operation_id, generation, 'credential'))}",
         )
         _pg_execute(admin, f"GRANT {_quote_identifier(owner)} TO {_quote_identifier(username)}")
-        _pg_execute(admin, f"ALTER ROLE {_quote_identifier(username)} SET statement_timeout='30s'")
-        _pg_execute(
-            admin,
-            f"ALTER ROLE {_quote_identifier(username)} SET idle_in_transaction_session_timeout='60s'",
-        )
-        _pg_execute(admin, f"ALTER ROLE {_quote_identifier(username)} SET lock_timeout='5s'")
-        _pg_execute(admin, f"ALTER ROLE {_quote_identifier(username)} SET temp_file_limit='256MB'")
+        postgres_role_settings(admin, username, connections, owner=owner)
         _pg_execute(
             admin,
             f"CREATE DATABASE {_quote_identifier(database)} OWNER {_quote_identifier(owner)} CONNECTION LIMIT {connections}",
@@ -496,12 +557,12 @@ def _require_postgres_identity(
             credential.provider_id != expected_database
             or credential.provider_name != expected_database
             or environment["PGDATABASE"] != expected_database
-            or environment["PGPORT"] != str(POSTGRES_PORT)
+            or environment["PGPORT"] != str(postgres_port())
             or environment["PGUSER"] != credential.credential_name
             or not isinstance(host, str)
             or not host
             or "\x00" in host
-            or environment["PGHOST"] != host
+            or environment["PGHOST"] not in {host, *_TRUSTED_HOSTS.get()}
             or environment["PGSSLMODE"] != "verify-full"
         ):
             raise ValueError
@@ -509,7 +570,7 @@ def _require_postgres_identity(
         if (
             parsed.scheme != "postgresql"
             or parsed.hostname != environment["PGHOST"]
-            or parsed.port != POSTGRES_PORT
+            or parsed.port != postgres_port()
             or urllib.parse.unquote(parsed.path.removeprefix("/")) != expected_database
             or urllib.parse.unquote(parsed.username or "") != credential.credential_name
             or urllib.parse.unquote(parsed.password or "") != environment["PGPASSWORD"]
@@ -579,6 +640,7 @@ def postgres_rotate(
         application_id=application_id,
         host=host,
     )
+    postgres_normalize_ownership(admin, database, owner, login=old_name)
     username = _credential_name(application_id, generation)
     password = password_factory()
     if not password or "\x00" in password or len(password.encode()) > 1_024:
@@ -589,6 +651,7 @@ def postgres_rotate(
         f"CREATE ROLE {_quote_identifier(username)} LOGIN PASSWORD {password_literal} CONNECTION LIMIT {connections}",
     )
     try:
+        postgres_role_settings(admin, username, connections, owner=owner)
         _pg_execute(admin, f"GRANT {_quote_identifier(owner)} TO {_quote_identifier(username)}")
     except Exception:
         _pg_execute(admin, f"DROP ROLE {_quote_identifier(username)}")
@@ -652,8 +715,8 @@ def mongo_environment(
     return SecretItems(
         {
             "MONGODB_URI": (
-                f"mongodb://{user}:{secret}@{host}:{MONGODB_PORT}/{database}"
-                f"?authSource={database}&tls=true&tlsCAFile={ca}"
+                f"mongodb://{user}:{secret}@{host}:{mongo_port()}/{database}"
+                f"?authSource={database}&tls=true&tlsCAFile={ca}&maxPoolSize={_MONGO_POOL.get()}&maxIdleTimeMS=60000"
             )
         }
     )
@@ -863,9 +926,14 @@ def _require_mongo_identity(
         parsed = urllib.parse.urlsplit(environment["MONGODB_URI"])
         if parsed.scheme != "mongodb":
             raise ValueError
-        if not isinstance(host, str) or not host or "\x00" in host or parsed.hostname != host:
+        if (
+            not isinstance(host, str)
+            or not host
+            or "\x00" in host
+            or parsed.hostname not in {host, *_TRUSTED_HOSTS.get()}
+        ):
             raise ValueError
-        if parsed.port != MONGODB_PORT:
+        if parsed.port != mongo_port():
             raise ValueError
         if urllib.parse.unquote(parsed.path.removeprefix("/")) != expected_database:
             raise ValueError
@@ -887,17 +955,34 @@ def mongo_verify(
     credential: ProviderCredential,
     *,
     host: str,
+    write_blocked: bool = False,
 ) -> None:
     _require_mongo_identity(credential, host=host)
     values = credential.environment
     client = scoped_connect(uri=values["MONGODB_URI"])
+    if write_blocked:
+        try:
+            client[credential.provider_name].command("dbStats", scale=1)
+            client[credential.provider_name].list_collection_names()
+        finally:
+            client.close()
+        return
     collection = client[credential.provider_name][f"platform_access_check_{secrets.token_hex(8)}"]
     try:
         inserted = collection.insert_one({"value": 1})
         document = collection.find_one({"_id": inserted.inserted_id})
         if not document or document.get("value") != 1:
             raise RuntimeError("MongoDB scoped verification failed")
-    finally:
+    except Exception:
+        # Cleanup must not replace the original connection/authentication error.
+        try:
+            collection.drop()
+        except Exception:
+            pass
+        finally:
+            client.close()
+        raise
+    else:
         try:
             collection.drop()
         finally:
@@ -911,7 +996,7 @@ def _mongo_old_username(uri: str) -> str:
             parsed.scheme != "mongodb"
             or parsed.username is None
             or parsed.hostname is None
-            or parsed.port != MONGODB_PORT
+            or parsed.port != mongo_port()
             or not parsed.path.startswith("/")
         ):
             raise ValueError
@@ -948,6 +1033,9 @@ def mongo_rotate(
     password = password_factory()
     if not password or "\x00" in password or len(password.encode()) > 1_024:
         raise ValidationError("generated MongoDB credential is malformed")
+    from .storage_limits import mongo_role
+
+    current_role = mongo_role(admin[database], old_name, database)
     custom_data = {_MONGO_OWNER_FIELD: application_id, _MONGO_GENERATION_FIELD: generation}
     if operation_id is not None:
         custom_data[_MONGO_OPERATION_FIELD] = operation_id
@@ -955,7 +1043,7 @@ def mongo_rotate(
         "createUser",
         username,
         pwd=password,
-        roles=[{"role": "readWrite", "db": database}],
+        roles=[{"role": current_role, "db": database}],
         customData=custom_data,
     )
     credential = ProviderCredential(
@@ -995,7 +1083,19 @@ def mongo_remove(
         raise _recovery_required(
             "mongo", "remove", "inspect the deterministic database ownership marker before deletion"
         )
+    if any(
+        not isinstance(user.get("customData"), Mapping)
+        or user["customData"].get(_MONGO_OWNER_FIELD) != application_id
+        for user in users
+    ):
+        raise _recovery_required(
+            "mongo", "remove", "inspect foreign database users before deletion"
+        )
     admin.drop_database(database)
+    # Mongo stores users/roles in admin: dropping data alone leaves the scoped
+    # login active and makes removal's absence check fail on every replay.
+    database_client.command("dropAllUsersFromDatabase")
+    database_client.command("dropAllRolesFromDatabase")
 
 
 def mongo_absent(admin: Any, *, application_id: str) -> bool:
@@ -1916,6 +2016,7 @@ def postgres_create_handler(
                     "postgres", database, database, environment
                 )
                 _require_postgres_identity(credential, application_id=application_id, host=host)
+                reconciled = _publish(nomad, application_slug, "postgres", credential.environment)
                 try:
                     postgres_verify(scoped_connect, credential, host=host)
                     if not _observe_evidence(
@@ -1923,7 +2024,7 @@ def postgres_create_handler(
                         application_id,
                         application_slug,
                         "postgres",
-                        snapshot.modify_index,
+                        reconciled.modify_index,
                     ):
                         raise RuntimeError("create health evidence was rejected")
                 except Exception:
@@ -1945,7 +2046,7 @@ def postgres_create_handler(
                             credential_name=candidate_name,
                         ),
                     )
-                return _result(credential, snapshot, evidence_accepted=True)
+                return _result(credential, reconciled, evidence_accepted=True)
             raise _recovery_required(
                 "postgres", "create", "inspect the fixed database and Nomad owned keys"
             )
@@ -2055,6 +2156,7 @@ def mongo_create_handler(
             ):
                 credential = _credential_from_environment("mongo", database, database, environment)
                 _require_mongo_identity(credential, application_id=application_id, host=host)
+                reconciled = _publish(nomad, application_slug, "mongo", credential.environment)
                 try:
                     mongo_verify(scoped_connect, credential, host=host)
                     if not _observe_evidence(
@@ -2062,7 +2164,7 @@ def mongo_create_handler(
                         application_id,
                         application_slug,
                         "mongo",
-                        snapshot.modify_index,
+                        reconciled.modify_index,
                     ):
                         raise RuntimeError("create health evidence was rejected")
                 except Exception:
@@ -2079,7 +2181,7 @@ def mongo_create_handler(
                         ),
                         provider_absent=lambda: mongo_absent(admin, application_id=application_id),
                     )
-                return _result(credential, snapshot, evidence_accepted=True)
+                return _result(credential, reconciled, evidence_accepted=True)
             raise _recovery_required(
                 "mongo", "create", "inspect the fixed database users and Nomad owned keys"
             )
@@ -2179,6 +2281,7 @@ def s3_create_handler(
                         access_key_id=environment["AWS_ACCESS_KEY_ID"],
                     )
                     _require_s3_endpoint(environment, endpoint)
+                    reconciled = _publish(nomad, application_slug, "s3", credential.environment)
                     try:
                         s3_verify(scoped_client, credential, endpoint=endpoint)
                         if not _observe_evidence(
@@ -2186,7 +2289,7 @@ def s3_create_handler(
                             application_id,
                             application_slug,
                             "s3",
-                            snapshot.modify_index,
+                            reconciled.modify_index,
                         ):
                             raise RuntimeError("create health evidence was rejected")
                     except Exception:
@@ -2207,7 +2310,7 @@ def s3_create_handler(
                                 and not _s3_key_present(admin, credential.credential_name)
                             ),
                         )
-                    return _result(credential, snapshot, evidence_accepted=True)
+                    return _result(credential, reconciled, evidence_accepted=True)
             raise _recovery_required(
                 "s3", "create", "inspect the deterministic bucket and Nomad owned keys"
             )
@@ -2431,6 +2534,7 @@ def mongo_verify_handler(
     scoped_connect: Callable[..., Any],
     nomad: VariableClient,
     host: str,
+    admin: Any,
 ) -> Mapping[str, Any]:
     _operation_args(
         args,
@@ -2445,7 +2549,16 @@ def mongo_verify_handler(
     credential = _credential_from_environment(
         "mongo", str(args["providerId"]), str(args["providerName"]), environment
     )
-    mongo_verify(scoped_connect, credential, host=host)
+    _require_mongo_identity(credential, application_id=application_id, host=host)
+    from .storage_limits import MONGO_BLOCKED_ROLE, mongo_role
+
+    blocked = (
+        mongo_role(
+            admin[credential.provider_name], credential.credential_name, credential.provider_name
+        )
+        == MONGO_BLOCKED_ROLE
+    )
+    mongo_verify(scoped_connect, credential, host=host, write_blocked=blocked)
     return {
         "verified": True,
         "keyNames": list(canonical_secret_keys("mongo", _RESOURCE_CONTEXT.get()[1])),
@@ -2512,6 +2625,7 @@ def postgres_rotate_handler(
         candidate = _credential_from_environment("postgres", provider_name, provider_name, old)
         _require_postgres_identity(candidate, application_id=application_id, host=host)
         postgres_verify(scoped_connect, candidate, host=host)
+        _publish(nomad, application_slug, "postgres", candidate.environment)
         snapshot = nomad.read_variable(variable_path(application_slug))
         if not _observe_evidence(
             observe_evidence, application_id, application_slug, "postgres", snapshot.modify_index
@@ -2550,10 +2664,18 @@ def postgres_rotate_handler(
         generation=generation,
     )
     _require_postgres_identity(candidate, application_id=application_id, host=host)
+    publication_attempted = False
     try:
         postgres_verify(scoped_connect, candidate, host=host)
+        publication_attempted = True
         update = _publish(nomad, application_slug, "postgres", candidate.environment)
     except Exception:
+        if publication_attempted:
+            raise _recovery_required(
+                "postgres",
+                "rotate",
+                "reconcile canonical and workload Variables before retiring credentials",
+            ) from None
         postgres_retire(admin, candidate.credential_name)
         raise
     if not _observe_evidence(
@@ -2612,6 +2734,9 @@ def mongo_rotate_handler(
     users = _mongo_users(admin[provider_name])
     names = [name for item in users if isinstance((name := item.get("user")), str)]
     old_name = _environment_credential_name("mongo", old)
+    from .storage_limits import MONGO_BLOCKED_ROLE, mongo_role
+
+    write_blocked = mongo_role(admin[provider_name], old_name, provider_name) == MONGO_BLOCKED_ROLE
     old_credential = _credential_from_environment(
         "mongo", str(args["providerId"]), str(args["providerName"]), old
     )
@@ -2629,7 +2754,8 @@ def mongo_rotate_handler(
             )
         candidate = _credential_from_environment("mongo", provider_name, provider_name, old)
         _require_mongo_identity(candidate, application_id=application_id, host=host)
-        mongo_verify(scoped_connect, candidate, host=host)
+        mongo_verify(scoped_connect, candidate, host=host, write_blocked=write_blocked)
+        _publish(nomad, application_slug, "mongo", candidate.environment)
         snapshot = nomad.read_variable(variable_path(application_slug))
         if not _observe_evidence(
             observe_evidence, application_id, application_slug, "mongo", snapshot.modify_index
@@ -2679,10 +2805,18 @@ def mongo_rotate_handler(
         operation_id=_operation_id,
     )
     _require_mongo_identity(candidate, application_id=application_id, host=host)
+    publication_attempted = False
     try:
-        mongo_verify(scoped_connect, candidate, host=host)
+        mongo_verify(scoped_connect, candidate, host=host, write_blocked=write_blocked)
+        publication_attempted = True
         update = _publish(nomad, application_slug, "mongo", candidate.environment)
     except Exception:
+        if publication_attempted:
+            raise _recovery_required(
+                "mongo",
+                "rotate",
+                "reconcile canonical and workload Variables before retiring credentials",
+            ) from None
         mongo_retire(admin, candidate.provider_name, candidate.credential_name)
         raise
     if not _observe_evidence(
@@ -2761,6 +2895,7 @@ def s3_rotate_handler(
             )
             candidate = _credential_from_environment("s3", provider_id, provider_name, old)
             s3_verify(scoped_client, candidate, endpoint=endpoint)
+            _publish(nomad, application_slug, "s3", candidate.environment)
             snapshot = nomad.read_variable(variable_path(application_slug))
             if not _observe_evidence(
                 observe_evidence, application_id, application_slug, "s3", snapshot.modify_index
@@ -2803,6 +2938,7 @@ def s3_rotate_handler(
         endpoint=endpoint,
         generation=generation,
     )
+    publication_attempted = False
     try:
         _require_s3_live_identity(
             admin,
@@ -2811,8 +2947,15 @@ def s3_rotate_handler(
             access_key_id=candidate.credential_name,
         )
         s3_verify(scoped_client, candidate, endpoint=endpoint)
+        publication_attempted = True
         update = _publish(nomad, application_slug, "s3", candidate.environment)
     except Exception:
+        if publication_attempted:
+            raise _recovery_required(
+                "s3",
+                "rotate",
+                "reconcile canonical and workload Variables before retiring credentials",
+            ) from None
         s3_retire(admin, candidate.credential_name)
         raise
     if not _observe_evidence(
@@ -2904,11 +3047,7 @@ def postgres_remove_handler(
         postgres_remove(admin, application_id=application_id)
     if not postgres_absent(admin, application_id=application_id):
         raise HelperActionError("ABSENCE_UNCONFIRMED", "PostgreSQL absence could not be confirmed")
-    update = (
-        snapshot
-        if key_state == "absent"
-        else _remove_environment(nomad, application_slug, "postgres")
-    )
+    update = _remove_environment(nomad, application_slug, "postgres")
     return _remove_result("postgres", update)
 
 
@@ -2955,9 +3094,7 @@ def mongo_remove_handler(
         )
     if not mongo_absent(admin, application_id=application_id):
         raise HelperActionError("ABSENCE_UNCONFIRMED", "MongoDB absence could not be confirmed")
-    update = (
-        snapshot if key_state == "absent" else _remove_environment(nomad, application_slug, "mongo")
-    )
+    update = _remove_environment(nomad, application_slug, "mongo")
     return _remove_result("mongo", update)
 
 
@@ -3058,9 +3195,7 @@ def s3_remove_handler(
         and _s3_key_present(admin, environment["AWS_ACCESS_KEY_ID"])
     ):
         raise HelperActionError("ABSENCE_UNCONFIRMED", "S3 access-key absence was not confirmed")
-    update = (
-        snapshot if key_state == "absent" else _remove_environment(nomad, application_slug, "s3")
-    )
+    update = _remove_environment(nomad, application_slug, "s3")
     return _remove_result("s3", update)
 
 
@@ -3079,7 +3214,29 @@ def handlers(
     observe_evidence: EvidenceObserver,
 ) -> dict[str, Handler]:
     """Bind trusted clients into the fixed named-storage protocol actions."""
+    from functools import partial
+
+    from .storage_limits import resource_action
+
+    additional = {
+        f"storage.{kind}.{action}": partial(
+            resource_action,
+            resource_type=kind,
+            mutate=action == "limits",
+            admin=admin,
+            nomad=nomad,
+            host=storage_host,
+            endpoint=s3_endpoint,
+        )
+        for kind, admin in (
+            ("postgres", postgres_admin),
+            ("mongo", mongo_admin),
+            ("s3", garage_admin),
+        )
+        for action in ("limits", "usage")
+    }
     return {
+        **additional,
         "storage.postgres.create": lambda args: postgres_create_handler(
             args,
             admin=postgres_admin,
@@ -3117,7 +3274,7 @@ def handlers(
             args, scoped_connect=mongo_connect, nomad=nomad, host=storage_host
         ),
         "storage.mongo.verify": lambda args: mongo_verify_handler(
-            args, scoped_connect=mongo_connect, nomad=nomad, host=storage_host
+            args, scoped_connect=mongo_connect, nomad=nomad, host=storage_host, admin=mongo_admin
         ),
         "storage.mongo.rotate": lambda args: mongo_rotate_handler(
             args,

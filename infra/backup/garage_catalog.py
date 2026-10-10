@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from lib.platform_config import load
 from lib.platform_contract import CONTRACT
 from lib.tls import internal_ca_context
 
-MAX_OBJECTS = 100_000
+MAX_OBJECTS = 5_000_000
 MAX_MANIFEST_BYTES = 64 * 1024**2
 MAX_OBJECT_BYTES = int(os.environ.get("GARAGE_RESTORE_MAX_OBJECT_BYTES", str(8 * 1024**3)))
 BUCKET = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
@@ -184,7 +185,7 @@ def validate_manifest(value: object) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or type(value.get("format_version")) is not int
-        or value["format_version"] not in (1, 2)
+        or value["format_version"] not in (1, 2, 3)
     ):
         raise RuntimeError("Garage archive format is unsupported")
     buckets, objects = value.get("buckets"), value.get("objects")
@@ -197,6 +198,8 @@ def validate_manifest(value: object) -> dict[str, Any]:
         raise RuntimeError("Garage archive bucket inventory is malformed")
     if not isinstance(objects, list) or len(objects) > MAX_OBJECTS:
         raise RuntimeError("Garage archive object inventory exceeds its bound")
+    if value["format_version"] == 3 and objects:
+        raise RuntimeError("streamed Garage archive must have an empty header object list")
     seen: set[tuple[str, str]] = set()
     for item in objects:
         if not isinstance(item, dict):
@@ -214,7 +217,7 @@ def validate_manifest(value: object) -> dict[str, Any]:
         ):
             raise RuntimeError("Garage object record is unsafe")
         seen.add((bucket, key))
-    if value["format_version"] == 2:
+    if value["format_version"] in (2, 3):
         metadata = value.get("bucket_metadata")
         if not isinstance(metadata, list) or len(metadata) != len(buckets):
             raise RuntimeError("Garage bucket metadata is incomplete")
@@ -289,6 +292,9 @@ def read_manifest(archive: tarfile.TarFile) -> dict[str, Any]:
 
 
 def object_payloads(archive: tarfile.TarFile, manifest: dict[str, Any]) -> Any:
+    if manifest["format_version"] == 3:
+        yield from streamed_payloads(archive, manifest)
+        return
     seen = 0
     while (member := archive.next()) is not None:
         if (
@@ -308,6 +314,60 @@ def object_payloads(archive: tarfile.TarFile, manifest: dict[str, Any]) -> Any:
         raise RuntimeError("Garage archive omitted objects")
 
 
+def streamed_payloads(archive: tarfile.TarFile, manifest: dict[str, Any]) -> Any:
+    """Bound memory independently of the fifty-bucket object population."""
+    count = 0
+    checksum = hashlib.sha256()
+    previous: tuple[str, str] | None = None
+    buckets = set(manifest["buckets"])
+    while (member := archive.next()) is not None:
+        if member.name == "objects-complete.json":
+            if not member.isfile() or not 0 < member.size <= 4096:
+                raise RuntimeError("Garage object completion record is invalid")
+            body = archive.extractfile(member)
+            assert body is not None
+            footer = json.load(body)
+            if (
+                footer != {"count": count, "sha256": checksum.hexdigest()}
+                or archive.next() is not None
+            ):
+                raise RuntimeError("Garage object completion record does not match")
+            manifest["objectCount"] = count
+            return
+        if (
+            count >= MAX_OBJECTS
+            or member.name != f"objects/{count:012d}.json"
+            or not member.isfile()
+            or not 0 < member.size <= 8192
+        ):
+            raise RuntimeError("Garage object record order is invalid")
+        body = archive.extractfile(member)
+        assert body is not None
+        raw = body.read()
+        record = json.loads(raw)
+        # Reuse the existing object bounds without repeatedly scanning grants.
+        validate_manifest({"format_version": 1, "buckets": list(buckets), "objects": [record]})
+        identity = (record["bucket"], record["key"])
+        if previous is not None and identity <= previous:
+            raise RuntimeError("Garage object order or identity is invalid")
+        previous = identity
+        checksum.update(raw)
+        member = archive.next()
+        if (
+            member is None
+            or not member.isfile()
+            or member.name != f"objects/{count:012d}.bin"
+            or member.size != record["size"]
+        ):
+            raise RuntimeError("Garage object payload is invalid")
+        body = archive.extractfile(member)
+        assert body is not None
+        with body:
+            yield record, body
+        count += 1
+    raise RuntimeError("Garage object completion record is absent")
+
+
 def verify_archive(stream: BinaryIO, *, admin: Any = None, prefix: str = "") -> dict[str, Any]:
     with tarfile.open(fileobj=stream, mode="r|gz") as archive:
         manifest = read_manifest(archive)
@@ -315,7 +375,7 @@ def verify_archive(stream: BinaryIO, *, admin: Any = None, prefix: str = "") -> 
             expected = app_buckets(admin, prefix)
             if set(manifest["buckets"]) != {item["name"] for item in expected}:
                 raise RuntimeError("Garage archive omits or adds app buckets")
-            if manifest["format_version"] == 2 and {
+            if manifest["format_version"] in (2, 3) and {
                 (item["id"], item["name"]) for item in manifest["bucket_metadata"]
             } != {(item["id"], item["name"]) for item in expected}:
                 raise RuntimeError("Garage archive bucket identities differ from admin inventory")

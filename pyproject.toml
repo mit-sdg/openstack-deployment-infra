@@ -17,6 +17,10 @@ dependencies = [
 [project.scripts]
 openstack-platform = "openstack_platform.operator:main"
 openstack-platform-helper = "openstack_platform.helper.main:main"
+openstack-platform-storage-backup = "openstack_platform.database_backups:main"
+openstack-platform-storage-manager = "openstack_platform.storage_instances:main"
+openstack-platform-storage-migrate = "openstack_platform.controller.storage_migrate:main"
+openstack-platform-storage-repair = "openstack_platform.controller.storage_repair:main"
 openstack-platform-controller = "openstack_platform.controller.main:main"
 openstack-platform-controller-seed-images = "openstack_platform.controller.seed_images:main"
 openstack-platform-controller-restore = "openstack_platform.restore:main"

@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from .deployment_config import DeploymentConfiguration
@@ -270,6 +270,16 @@ class ManagedResource:
     provider_id: str | None
     provider_name: str
     lifecycle_state: str
+    memory_bytes: int | None
+    cpu_millicores: int | None
+    mongo_connections: int | None
+    instance_id: str | None
+    instance_port: int | None
+    migration_state: str | None
+    usage: dict[str, Any]
+    usage_error: str | None
+    write_blocked: bool
+    blocked_since: str | None
     postgres_connections: int | None
     measured_target_bytes: int | None
     s3_bytes: int | None
@@ -610,6 +620,36 @@ MIGRATIONS += (
             ) STRICT
             """,
             "ALTER TABLE applications ADD COLUMN builder_flavor TEXT",
+        ),
+    ),
+)
+
+MIGRATIONS += (
+    Migration(
+        7,
+        (
+            "ALTER TABLE managed_resources ADD COLUMN usage_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(usage_json))",
+            "ALTER TABLE managed_resources ADD COLUMN usage_error TEXT",
+            "ALTER TABLE managed_resources ADD COLUMN write_blocked INTEGER NOT NULL DEFAULT 0 CHECK (write_blocked IN (0,1))",
+            "ALTER TABLE managed_resources ADD COLUMN blocked_since TEXT",
+            "ALTER TABLE managed_resources ADD COLUMN memory_bytes INTEGER CHECK (memory_bytes > 0)",
+            "ALTER TABLE managed_resources ADD COLUMN cpu_millicores INTEGER CHECK (cpu_millicores > 0)",
+            "ALTER TABLE managed_resources ADD COLUMN mongo_connections INTEGER CHECK (mongo_connections > 0)",
+            "ALTER TABLE managed_resources ADD COLUMN instance_id TEXT",
+            "CREATE UNIQUE INDEX storage_instance_identity ON managed_resources(instance_id) WHERE instance_id IS NOT NULL",
+            "ALTER TABLE managed_resources ADD COLUMN instance_port INTEGER CHECK (instance_port BETWEEN 30000 AND 30999)",
+            "ALTER TABLE managed_resources ADD COLUMN migration_state TEXT",
+            "UPDATE managed_resources SET memory_bytes=536870912, cpu_millicores=500, mongo_connections=CASE WHEN resource_type='mongo' THEN 10 ELSE NULL END WHERE resource_type IN ('postgres','mongo')",
+            "CREATE TABLE storage_host_usage (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), usage_json TEXT NOT NULL CHECK (json_valid(usage_json))) STRICT",
+        ),
+    ),
+)
+
+MIGRATIONS += (
+    Migration(
+        8,
+        (
+            "CREATE TABLE storage_worker_allowlists (application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE, record_json TEXT NOT NULL CHECK (json_valid(record_json))) STRICT",
         ),
     ),
 )
@@ -1426,6 +1466,8 @@ def check_finishing_admission(connection: sqlite3.Connection, scope: str, kind: 
         "app.env.import",
         "storage.verify",
         "storage.rotate",
+        "storage.limits.set",
+        "storage.usage.collect",
         "app.restart",
     }:
         return
@@ -1495,6 +1537,14 @@ def begin_operation(
         existing = get_unfinished_operation(connection, scope)
         if existing is not None:
             raise UnfinishedOperationError(scope, existing.operation_id, existing.kind)
+        if (
+            kind in {"storage.limits.set", "storage.usage.collect"}
+            and refs
+            and ("memoryBytes" in refs.get("quotas", {}) or "s3Bytes" in refs.get("quotas", {}))
+        ):
+            from .storage_capacity import check
+
+            check(connection, refs.get("resource_id"), refs["quotas"])
         connection.execute(
             """
             INSERT INTO operations(
@@ -2529,6 +2579,10 @@ def put_managed_resource(
     provider_id: str | None = None,
     resource_id: str | None = None,
     display_label: str | None = None,
+    memory_bytes: int | None = None,
+    cpu_millicores: int | None = None,
+    mongo_connections: int | None = None,
+    isolated: bool = False,
     postgres_connections: int | None = None,
     measured_target_bytes: int | None = None,
     s3_bytes: int | None = None,
@@ -2560,9 +2614,26 @@ def put_managed_resource(
             if existing is not None
             else supplied_id or str(uuid_module.uuid4())
         )
+        if (isolated or resource_type == "s3") and existing is None:
+            from .storage_capacity import check
+
+            target = (
+                {"s3Bytes": s3_bytes or 0, "s3Objects": s3_objects or 0}
+                if resource_type == "s3"
+                else {
+                    "memoryBytes": memory_bytes or 536870912,
+                    "connections": postgres_connections or mongo_connections or 10,
+                    "sizeBytes": measured_target_bytes or 0,
+                }
+            )
+            check(connection, None, target)
         connection.execute(
             """
-            INSERT INTO managed_resources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO managed_resources
+            (resource_id, application_id, resource_type, resource_name, display_label,
+             provider_id, provider_name, lifecycle_state, postgres_connections,
+             measured_target_bytes, s3_bytes, s3_objects, last_verified_at, created_at, updated_at, memory_bytes, cpu_millicores, mongo_connections, instance_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(application_id, resource_type, resource_name) DO UPDATE SET
               display_label=excluded.display_label,
               provider_id=excluded.provider_id, provider_name=excluded.provider_name,
@@ -2570,6 +2641,8 @@ def put_managed_resource(
               postgres_connections=excluded.postgres_connections,
               measured_target_bytes=excluded.measured_target_bytes,
               s3_bytes=excluded.s3_bytes, s3_objects=excluded.s3_objects,
+              memory_bytes=excluded.memory_bytes, cpu_millicores=excluded.cpu_millicores,
+              mongo_connections=excluded.mongo_connections,
               last_verified_at=excluded.last_verified_at, updated_at=excluded.updated_at
             """,
             (
@@ -2588,6 +2661,10 @@ def put_managed_resource(
                 last_verified_at,
                 timestamp,
                 timestamp,
+                (memory_bytes or 536870912) if resource_type in {"postgres", "mongo"} else None,
+                (cpu_millicores or 500) if resource_type in {"postgres", "mongo"} else None,
+                (mongo_connections or 10) if resource_type == "mongo" else None,
+                identifier if isolated else None,
             ),
         )
     result = get_managed_resource(connection, identifier)
@@ -2607,6 +2684,16 @@ def _managed_resource(row: sqlite3.Row | None) -> ManagedResource | None:
         provider_id=row["provider_id"],
         provider_name=row["provider_name"],
         lifecycle_state=row["lifecycle_state"],
+        memory_bytes=row["memory_bytes"],
+        cpu_millicores=row["cpu_millicores"],
+        mongo_connections=row["mongo_connections"],
+        instance_id=row["instance_id"],
+        instance_port=row["instance_port"],
+        migration_state=row["migration_state"],
+        usage=json.loads(row["usage_json"]),
+        usage_error=row["usage_error"],
+        write_blocked=bool(row["write_blocked"]),
+        blocked_since=row["blocked_since"],
         postgres_connections=row["postgres_connections"],
         measured_target_bytes=row["measured_target_bytes"],
         s3_bytes=row["s3_bytes"],
@@ -2907,3 +2994,81 @@ def backup_database(connection: sqlite3.Connection, destination: str | Path) -> 
             target.close()
         temporary.unlink(missing_ok=True)
     return destination_path
+
+
+def put_storage_usage(
+    connection: sqlite3.Connection,
+    resource_id: str,
+    usage: Mapping[str, Any],
+    *,
+    blocked: bool = False,
+) -> None:
+    timestamp = usage["measuredAt"]
+    with transaction(connection):
+        connection.execute(
+            "UPDATE managed_resources SET usage_json=?, usage_error=NULL, write_blocked=?, "
+            "blocked_since=CASE WHEN ? THEN coalesce(blocked_since, ?) ELSE NULL END WHERE resource_id=?",
+            (json.dumps(dict(usage)), int(blocked), int(blocked), timestamp, resource_id),
+        )
+
+
+def put_storage_host_usage(connection: sqlite3.Connection, usage: Mapping[str, Any]) -> None:
+    with transaction(connection):
+        connection.execute(
+            "INSERT INTO storage_host_usage VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET usage_json=excluded.usage_json",
+            (json.dumps(dict(usage)),),
+        )
+
+
+def get_storage_host_usage(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT usage_json FROM storage_host_usage WHERE singleton=1"
+    ).fetchone()
+    return None if row is None else cast(dict[str, Any], json.loads(row["usage_json"]))
+
+
+def put_storage_limits(
+    connection: sqlite3.Connection,
+    resource_id: str,
+    quotas: Mapping[str, int],
+    usage: Mapping[str, Any],
+    *,
+    blocked: bool,
+) -> None:
+    resource = get_managed_resource(connection, resource_id)
+    if resource is None:
+        raise DatabaseError("resource is absent")
+    with transaction(connection):
+        connection.execute(
+            "UPDATE managed_resources SET postgres_connections=?, mongo_connections=?, measured_target_bytes=?, memory_bytes=?, cpu_millicores=?, s3_bytes=?, s3_objects=?, updated_at=?, usage_json=?, usage_error=NULL, write_blocked=?, blocked_since=CASE WHEN ? THEN coalesce(blocked_since, ?) ELSE NULL END WHERE resource_id=?",
+            (
+                quotas.get("connections") if resource.resource_type == "postgres" else None,
+                quotas.get("connections") if resource.resource_type == "mongo" else None,
+                quotas.get("sizeBytes"),
+                quotas.get("memoryBytes"),
+                quotas.get("cpuMillicores"),
+                quotas.get("s3Bytes"),
+                quotas.get("s3Objects"),
+                utc_now(),
+                json.dumps(dict(usage)),
+                int(blocked),
+                int(blocked),
+                usage["measuredAt"],
+                resource_id,
+            ),
+        )
+
+
+def set_storage_instance(
+    connection: sqlite3.Connection,
+    resource_id: str,
+    instance_id: str,
+    port: int,
+    *,
+    migration_state: str | None = None,
+) -> None:
+    with transaction(connection):
+        connection.execute(
+            "UPDATE managed_resources SET instance_id=?, instance_port=?, migration_state=? WHERE resource_id=?",
+            (uuid(instance_id, field="instance ID"), port, migration_state, resource_id),
+        )

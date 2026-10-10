@@ -134,12 +134,7 @@ def _provider_name(
 
 
 def _standard_storage_args(config: Config, resource_type: str) -> dict[str, int]:
-    """Return only the current fixed policy inputs for a new resource.
-
-    Resource rows are evidence, not a source of sizing authority. In
-    particular, a row must never cause an operation to reuse values from an
-    untrusted or pre-greenfield database.
-    """
+    """Policy defaults used only when creating a new resource."""
     standard = config.policy.standard
     if resource_type == "postgres":
         return {
@@ -257,10 +252,16 @@ def _put_resource(
     existing: db.ManagedResource | None = None,
     verified: bool = False,
 ) -> None:
-    # Sizing is always sourced from the fixed current policy. Existing rows
-    # are retained only as provider-operation evidence and never as an
-    # authority for quotas or connection limits.
-    values = _resource_values(config, resource_type)
+    values = (
+        _resource_values(config, resource_type)
+        if existing is None
+        else {
+            "postgres_connections": existing.postgres_connections,
+            "measured_target_bytes": existing.measured_target_bytes,
+            "s3_bytes": existing.s3_bytes,
+            "s3_objects": existing.s3_objects,
+        }
+    )
     db.put_managed_resource(
         connection,
         application_id=application.application_id,
@@ -269,6 +270,13 @@ def _put_resource(
         provider_id=provider_id,
         provider_name=provider_name,
         lifecycle_state=lifecycle_state,
+        display_label=existing.display_label if existing is not None else None,
+        memory_bytes=existing.memory_bytes if existing is not None else None,
+        cpu_millicores=existing.cpu_millicores if existing is not None else None,
+        mongo_connections=existing.mongo_connections if existing is not None else None,
+        isolated=existing is None
+        and resource_type in {"postgres", "mongo"}
+        and lifecycle_state == "creating",
         postgres_connections=values["postgres_connections"],
         measured_target_bytes=values["measured_target_bytes"],
         s3_bytes=values["s3_bytes"],
@@ -546,7 +554,21 @@ def create(
             ):
                 raise StorageOperationError("storage helper returned mismatched provider identity")
         except Exception as error:
-            if isinstance(error, remote.HelperError) and error.code == "CREATE_ROLLED_BACK":
+            retained = next(
+                (
+                    item
+                    for item in db.list_managed_resources(
+                        connection, application_id=application.application_id
+                    )
+                    if item.resource_type == resource_type and item.resource_name == checked_name
+                ),
+                None,
+            )
+            if (
+                isinstance(error, remote.HelperError)
+                and error.code == "CREATE_ROLLED_BACK"
+                and (retained is None or retained.instance_id is None)
+            ):
                 db.delete_managed_resource(
                     connection,
                     application_id=application.application_id,
@@ -594,6 +616,16 @@ def create(
             owner=storage_owner(resource_type, checked_name),
             keys=canonical_secret_keys(resource_type, checked_name),
         )
+        if result.get("instancePort") is not None:
+            current_resource = _resources(connection, application.application_id)[
+                (resource_type, checked_name)
+            ]
+            db.set_storage_instance(
+                connection,
+                current_resource.resource_id,
+                current_resource.resource_id,
+                result["instancePort"],
+            )
         completed.append(resource_type)
         recovering = False
         resources = _resources(connection, application.application_id)
@@ -799,7 +831,7 @@ def rotate(
             **_mutation_args(operation, recovering=recovering),
         }
         if resource_type == "postgres":
-            args["postgresConnections"] = config.policy.standard.postgres_connections
+            args["postgresConnections"] = resource.postgres_connections
         try:
             result = _call(
                 helper_caller,

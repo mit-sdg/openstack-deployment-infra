@@ -226,7 +226,7 @@ class WebServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 return error_reply(404, "NOT_FOUND")
             target = "/v1" + path
         elif re.fullmatch(
-            r"/api/v1/(?:session|logout|all-apps(?:/adopt)?|people(?:/eligible-owners|/[a-f0-9-]{36}(?:/(?:account|quotas))?)?|activity|audit|reauthenticate|settings/default-builder-size|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate))?)?|/owner|/sizes|/resize-plan|/builder-size|/state|/restart|/logs|/activity|/source-key(?:/check)?|/source/(?:commits|check)|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36}(?:/(?:build-log|startup-log))?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
+            r"/api/v1/(?:session|logout|all-apps(?:/adopt)?|people(?:/eligible-owners|/[a-f0-9-]{36}(?:/(?:account|quotas))?)?|activity|audit|reauthenticate|settings/default-builder-size|apps(?:/[a-f0-9-]{36}(?:/configuration|/environment(?:/[A-Z][A-Z0-9_]{0,127})?|/storage(?:/[a-f0-9-]{36}(?:/(?:verify|rotate|limits))?)?|/owner|/sizes|/resize-plan|/builder-size|/state|/restart|/logs|/activity|/source-key(?:/check)?|/source/(?:commits|check)|/members(?:/[a-f0-9-]{36})?|/deployments(?:/[a-f0-9-]{36}(?:/(?:build-log|startup-log))?)?)?)?|intents(?:/[a-f0-9-]{36}(?:/resume)?)?)",
             path,
         ):
             target = path.removeprefix("/api")

@@ -333,7 +333,7 @@ class ControllerStorageTests(unittest.TestCase):
             ],
         )
 
-    def test_policy_quotas_survive_verify_rotation_and_failure(self) -> None:
+    def test_resource_quotas_survive_verify_rotation_and_failure(self) -> None:
         self.add_resource("postgres")
         db.put_managed_resource(
             self.connection,
@@ -376,9 +376,9 @@ class ControllerStorageTests(unittest.TestCase):
                 helper_caller=rejected_rotation,
             )
         resource = _resource(self.connection, "postgres")
-        self.assertEqual(seen_connections, [10])
-        self.assertEqual(resource.postgres_connections, 10)
-        self.assertEqual(resource.measured_target_bytes, 2_147_483_648)
+        self.assertEqual(seen_connections, [17])
+        self.assertEqual(resource.postgres_connections, 17)
+        self.assertEqual(resource.measured_target_bytes, 3_456_789_012)
         self.assertIsNotNone(resource.last_verified_at)
 
     def test_status_calls_only_non_mutating_observation_action(self) -> None:
@@ -589,6 +589,8 @@ class HelperStorageTests(unittest.TestCase):
                 self.commands.append(name)
                 if name == "usersInfo":
                     return {"users": self.users}
+                if name == "dropAllUsersFromDatabase":
+                    self.users.clear()
                 return {}
 
             def list_collection_names(self):
@@ -608,6 +610,8 @@ class HelperStorageTests(unittest.TestCase):
 
             def drop_database(self, name):
                 self.dropped = True
+                self.names.remove(name)
+                self.database.collections.clear()
 
         existing = MongoAdmin([database], MongoDatabase(collections=["records"]))
         with self.assertRaisesRegex(HelperActionError, "already contains") as unsupported:
@@ -634,6 +638,25 @@ class HelperStorageTests(unittest.TestCase):
                 credential_name="u_foreign",
             )
         self.assertFalse(foreign.dropped)
+        from openstack_platform.contracts import MONGO_OWNER_FIELD
+        from openstack_platform.helper.storage import mongo_absent
+
+        owned = MongoAdmin(
+            [database],
+            MongoDatabase(
+                users=[{"user": "u_owned", "customData": {MONGO_OWNER_FIELD: APP_ID}}],
+                collections=["records"],
+            ),
+        )
+        owned.database.users.append(
+            {"user": "u_foreign", "customData": {MONGO_OWNER_FIELD: "another-app"}}
+        )
+        with self.assertRaisesRegex(HelperActionError, "foreign database users"):
+            mongo_remove(owned, application_id=APP_ID, credential_name="u_owned")
+        self.assertFalse(owned.dropped)
+        owned.database.users.pop()
+        mongo_remove(owned, application_id=APP_ID, credential_name="u_owned")
+        self.assertTrue(mongo_absent(owned, application_id=APP_ID))
 
     def test_rotation_rejects_uri_host_drift_before_provider_mutation(self) -> None:
         database = "p_11111111111141118111"
@@ -731,6 +754,7 @@ class HelperStorageTests(unittest.TestCase):
                 scoped_connect=lambda **kwargs: mongo_calls.append(kwargs),
                 nomad=mongo_nomad,
                 host="trusted.storage",
+                admin=object(),
             )
         self.assertEqual(mongo_calls, [])
 
@@ -1136,6 +1160,7 @@ class HelperStorageTests(unittest.TestCase):
 
             def drop(self):
                 self.dropped = True
+                raise RuntimeError("cleanup connection also failed")
 
         collection = MongoCollection()
         mongo_client = mock.MagicMock()

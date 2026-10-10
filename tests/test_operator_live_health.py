@@ -79,6 +79,7 @@ class HostedOperatorStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = configuration()
         self.model = {
+            "storageHost": None,
             "state": "healthy",
             "accepted": {"infrastructureRoles": 5, "applications": 1, "storageResources": 1},
             "observations": {"available": 5, "unavailable": 0, "unhealthy": 0},

@@ -230,7 +230,7 @@ class Journal:
                 return
             if (
                 strict_json(row["body"].encode()).get("_portalAdmin") is True
-                or row["kind"] == "default_builder_size"
+                or row["kind"] in {"default_builder_size", "storage_limits"}
             ) and row["state"] != "accepted":
                 # A reviewed resume grants app authority without changing the
                 # original actor, controller key, or stored request body.
@@ -246,7 +246,9 @@ class Journal:
                     actor is None
                     or actor["role"]
                     not in (
-                        {"admin"} if row["kind"] == "default_builder_size" else {"staff", "admin"}
+                        {"admin"}
+                        if row["kind"] in {"default_builder_size", "storage_limits"}
+                        else {"staff", "admin"}
                     )
                     or not actor["enabled"]
                     or actor["status"] != "active"
@@ -263,6 +265,8 @@ class Journal:
             intent = dict(row)
         controller_body = strict_json(intent["body"].encode())
         controller_body.pop("_portalAdmin", None)
+        if intent["kind"] == "storage_limits":
+            controller_body.pop("resourceId")
         operation_id = intent["operation_id"]
         state = "accepted" if intent["state"] == "accepted" and operation_id else "unknown"
         operation = (
@@ -311,7 +315,9 @@ class Journal:
                     error = attention_guidance(intent["kind"], state)
                 if state == "failed":
                     error = (
-                        "The controller rejected this operation. Review its status before retrying."
+                        "The limits could not be saved. Reload the current limits and try again."
+                        if intent["kind"] == "storage_limits"
+                        else "The controller rejected this operation. Review its status before retrying."
                     )
                 if state in {"succeeded", "failed"} and result.get("cleanupState") not in {
                     "confirmed",
@@ -335,6 +341,17 @@ class Journal:
                     if result.get("operationId") != intent["controller_key"]:
                         raise ControllerUnavailable("mismatched operation identity")
                     operation_id, state = result["operationId"], "accepted"
+                elif (
+                    status == 503
+                    and intent["kind"] == "storage_limits"
+                    and isinstance(result.get("error"), dict)
+                    and result["error"].get("code") == "INSTANCE_MANAGER_UNAVAILABLE"
+                ):
+                    operation = {"controllerErrorCode": "INSTANCE_MANAGER_UNAVAILABLE"}
+                    state, error = (
+                        "unknown",
+                        "The storage service is temporarily unavailable. This change will retry automatically.",
+                    )
                 elif status in {400, 404, 409, 413, 415, 422}:
                     detail = result.get("error")
                     code = controller_error_code(
@@ -356,6 +373,8 @@ class Journal:
                             else "Sizes are not available yet. Ask an admin to update the platform."
                             if intent["kind"] in {"builder_size", "default_builder_size"}
                             and status == 404
+                            else "The limits could not be saved. Reload the current limits and try again."
+                            if intent["kind"] == "storage_limits"
                             else "The request was rejected. The slug may be unavailable or the input invalid.",
                         )
                 else:
@@ -389,6 +408,21 @@ class Journal:
                     "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
                     (intent["user_id"], intent["app_id"], identifier, state, now),
                 )
+                if intent["kind"] == "storage_limits":
+                    from .accounts import audit
+
+                    audit(
+                        db,
+                        intent["user_id"],
+                        None,
+                        "storage_limits_" + state,
+                        {
+                            "intentId": identifier,
+                            "resourceId": intent["path"].split("/")[3],
+                            **controller_body,
+                        },
+                        now,
+                    )
                 if intent["kind"] == "default_builder_size":
                     from .accounts import audit
 

@@ -98,7 +98,7 @@ The operating system enforces process boundaries independently of request data.
 
 ### Operator host
 
-`openstack-platform` owns setup, infrastructure status, image selection and pruning, persistent-host lifecycle, operator-state backup, and offline restore. It has no app, deployment, environment, or managed-storage mutation commands. Its SQLite state is separate from the hosted controller.
+`openstack-platform` owns setup, infrastructure status, image selection and pruning, persistent-host lifecycle, operator-state backup, and offline restore. It has no app, deployment, environment, or managed-storage mutation commands. The dedicated `openstack-platform-storage-repair` command on the admin VM reapplies PostgreSQL login settings through the privileged controller socket. Its SQLite state is separate from the hosted controller.
 
 The generated `platform-admin` alias in `/srv/openstack-platform/.secrets/ssh/config` pins the admin address, `agentops`, the identity (`IdentitiesOnly yes`), and an ed25519 host key in a private known-hosts file with strict checking. Agent and port forwarding are disabled. Provider calls use the protected `platform-openstack` wrapper; releases carry no cloud credentials.
 
@@ -134,7 +134,7 @@ Implemented actions must exactly match the release-bound [`actions-v1.txt`](../.
 | Environment | `app.env.list`, `app.env.set`, `app.env.remove` |
 | Registry | `app.manifest.retain`, `app.manifest.verify`, `app.manifest.delete` |
 | Source | `app.source.key`, `app.source.check`, `app.source.commits`, `app.source.preflight` |
-| Managed storage | `storage.<type>.create`, `.observe`, `.verify`, `.rotate`, `.remove` for `postgres`, `mongo`, and `s3` |
+| Managed storage | `storage.<type>.create`, `.observe`, `.usage`, `.limits`, `.verify`, `.rotate`, `.remove` for `postgres`, `mongo`, and `s3`; `storage.host.observe` reads authenticated host metrics |
 | Backups | `backup.accept` (called by `openstack-platform backup` over SSH) |
 
 ### Controller sockets
@@ -482,3 +482,95 @@ The URL is a protected runtime input under the existing operator secrets directo
 No health-unit network restriction is relaxed. The existing unit already calls OpenStack and public HTTPS health endpoints and has no `IPAddressDeny` or address-family sandbox. The foundation preserves Neutron's default egress rules, and the common NixOS firewall restricts inbound traffic. Additional operator/provider egress restrictions must permit the configured webhook destination. Both health and the test unit depend on the admin state mount so persistent files cannot silently be written under an unmounted volume. The test unit adds read-only filesystem protection and runs as the same unprivileged operator.
 
 The checker stops after its first failed check. Alerts therefore describe the first missing check from the ordered check list and do not send exception details. It does not query app-operation states. A process killed before notification or a timer that stops running produces no webhook alert; independent host monitoring is required for those failures.
+
+
+## Storage isolation and recovery
+
+Every PostgreSQL/MongoDB resource has an inventory-pinned container, private data
+project, systemd cgroup and TCP port on the 16-vCPU/64-GiB storage host. The helper
+uses the existing TLS administration listener and Garage admin bearer to reach a
+loopback manager. Credentials/configuration live under the managed-data volume.
+Only explicit resource deletion removes instance data; failed creation/migration
+retains identity and reservations. A migration abort retains the target, and later
+resource deletion removes both that target and the shared source.
+
+Systemd directly controls Podman/conmon (`--cgroups=disabled`), with MemoryMax,
+MemorySwapMax=0, CPUQuota, equal CPU/IO weights and TasksMax. The image is read-only;
+bounded tmpfs mounts count toward memory. Crash/OOM restarts affect that instance.
+PostgreSQL stops with fast SIGINT, MongoDB with SIGTERM, both using mixed kill mode
+and a 180-second grace period. CPU/disk edits apply live; memory/connection edits
+restart the instance. Shared resources can change prospective instance CPU/memory
+caps before migration; shared connection raises still require migration.
+
+| Setting | Value and rationale |
+| --- | --- |
+| Default database | 512 MiB, 500 millicores, 10 app connections, policy 2 GiB soft size; fifty paired instances need 50 GiB |
+| Transition admission | 36 GiB normal +2 GiB maintenance; with two 8 GiB sources, Garage 4 GiB and registry 2 GiB, at most 60 GiB leaves 4 GiB for OS/control/cache |
+| After source removal | Follow-up raises normal/maintenance budgets to 50/52 GiB; normal shared services use 6 GiB, leaving 8 GiB host headroom (6 GiB during restore) |
+| Database slice | 12 CPU cores, 38 GiB including maintenance during transition, no swap; bound aggregate demand while preserving shared-service scheduling |
+| Instance weights/tasks | CPUWeight=100, IOWeight=100, TasksMax=256; equal BFQ scheduling and bounded connection/background process counts |
+| PostgreSQL | Instance app cap +5 superuser slots; buffers memory/4 (128 MiB default), work_mem 2 MiB, maintenance memory/16 capped at 64 MiB (32 MiB default), one autovacuum worker |
+| PostgreSQL WAL/role defaults | WAL target max 256 MiB/min 80 MiB; statement 30s, idle transaction 60s, lock 5s, temp files 256 MB; bound normal work/overhead; role settings shared by create/rotate/repair |
+| MongoDB | Instance app cap +10 driver/admin slots, cache memory/4 with 256 MiB minimum, slowms=100; URI pool at most 10, idle timeout 60000 ms; server-wide slots do not reserve privileged access |
+| MongoDB restore | Temporary minimum 1 GiB memory from the separate 2 GiB maintenance pool, one collection/insertion worker; normal cache setting stays bounded |
+| Legacy PostgreSQL | 8 GiB /4 cores, 100 connections, 2 GiB buffers, 2 MiB work and 64 MiB maintenance; six existing apps and dumps remain responsive |
+| Legacy MongoDB | 8 GiB /4 cores, 2 GiB cache, 800 connections, slowms=100; accommodates six historical 100-connection pools plus management |
+| Garage /registry | 4 GiB /2 cores and 2 GiB /1 core, no swap; bound shared object/image services |
+| Manager | 512 MiB, one core, 128 tasks, no swap; bound streaming copy/control work within host headroom |
+| Writable temporary paths | 64 MiB /tmp and 16 MiB PG socket tmpfs, charged within each instance's memory cap |
+| Disk projects | DB hard bytes 150% of soft, rounded to MiB; inode cap max(4096, soft bytes/32768), limiting file-count exhaustion |
+| Fixed disk allowances | Registry 100 GiB, legacy sources 32 GiB each, archives 16 GiB, Garage overhead 16 GiB, metadata 1 GiB; bound shared growth |
+| Logs | Journal 1 GiB persistent /256 MiB runtime; each DB 200 messages/30 s, preventing logs from bypassing data quotas |
+| S3 fairness | Per bucket 200 r/s, burst 1000, 200 connections; internal peers additionally 100 r/s, burst 200, 50 connections; public NATs share only bucket caps, trusted admin backups are exempt |
+| Monitoring | Connections >=80%, volume >=85%, available memory <=10%, container memory >=90%, unavailable instances or any Mongo write block |
+
+The pinned MongoDB 8 standalone deployment cannot apply the defaultMaxTimeMS cluster
+parameter. Per-instance hard CPU/memory caps contain long queries instead. TLS is
+required; PostgreSQL accepts hostssl/scram only. Database URLs use the certificate
+DNS name with inventory-derived host mappings on hosts and in Nomad Docker jobs.
+An nft chain restricts allocated instance ports to verified app worker IPs plus
+admin/storage/loopback, including existing sessions on revocation. Ports 30000–30999
+are reserved from ephemeral allocation. Worker allowlists are durable and unchanged
+observations avoid provider fan-out. Apps without instances do not depend on manager
+network administration.
+
+Resource rows are authoritative. Capacity includes unfinished assignments and
+creating resources: 2000 aggregate app connection slots, and five million S3 object
+reservations. Garage disk reservations use max(125% byte quotas, 4 KiB/object), plus
+16 GiB overhead; its project never shrinks while blocks may await collection.
+Initial shared caps and DB reductions are checked against physical allocation.
+Default fifty-app logical quotas total 450 GiB; physical admission is 809.5 GiB
+including fixed allowances. One TiB gives an approximately 870.4 GiB 85% boundary;
+500 GiB cannot accommodate the defaults. Registry's 100 GiB is a bounded allowance,
+not a guarantee for arbitrary image histories.
+
+Usage reads are SQLite-only. Sixteen bounded provider probes collect every five
+minutes, or each minute above 80% of soft size/while blocked/after a failure.
+Collector errors retain the last sample and a fixed admin-only usageError; they do
+not create a journal/app reservation. Mongo blocks inserts/updates/creation above
+soft size, permits find/delete/drop/list/stats, and releases at <=95%. Role switches
+are atomic; rotation preserves the effective role. Physical/logical size differ,
+so a hard-cap failure can still need an admin size raise, applied before DB access.
+
+Nightly format-4 managed-data sets include per-database shared/isolated native dumps,
+role settings/users, and encrypted owned bindings. Secret-free catalogs describe
+coverage. A failure aborts the entire set and alerts via existing backup health.
+Age encryption, fourteen-day pruning and offsite export remain; payloads/metadata
+are synced before commit. Garage format 3 streams object records and a completion
+digest, bounding memory even at the fifty-app five-million-object default.
+
+Migration verifies a source backup within sixty minutes (configurable), automatically
+taking one if missing, before each resource cutover. The default 1800-second budget
+is per app. Source logins freeze, target copies verify counts/cheap hashes, then seal
+before publication. PostgreSQL extension scripts import separately as admin; all app
+SQL imports through the real app login and owner role, suppressing extension comments.
+Interrupted native tools/verification cancel promptly; replays terminate stale target
+sessions. Source data is retained. See the [migration runbook](../guides/migrate-storage-instances.md)
+for application selection, replay, abort, capacity prerequisites and release order.
+
+Restore creates missing isolated instances, restores owned bindings and an offline
+controller's endpoints/limits, and reconciles current workers before access opens.
+Tracked shared-resource backups also restore into isolated instances; retained old
+source payloads stay in the archive rather than being applied over current data.
+The full-loss drill requires both isolated engines and CI verifies actual fresh-instance
+restore. This replaces the earlier shared-only exporter and manual snapshot requirement.

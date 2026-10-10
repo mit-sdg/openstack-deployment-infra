@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.health_alerts import notify  # noqa: E402
 from lib.http import bounded_request  # noqa: E402
 from lib.platform_config import load  # noqa: E402
+from lib.storage_health import ALARM_CODES  # noqa: E402
 
 CONFIG = load()
 ROOT = Path(CONFIG["paths"]["root"])
@@ -72,7 +73,18 @@ def main() -> int:
                 raise RuntimeError(f"public ingress health response is unexpected for {hostname}")
         checks["public_ingress"] = "healthy"
 
-        admin_command(SERVICE_CHECK_PYTHON, CHECK_SERVICES)
+        try:
+            admin_command(SERVICE_CHECK_PYTHON, CHECK_SERVICES)
+        except subprocess.CalledProcessError as failure:
+            # Preserve only the fixed alarm codes, never arbitrary provider output.
+            prefix = "managed-services=degraded alarms="
+            output = failure.stdout if isinstance(failure.stdout, str) else ""
+            if output.strip().startswith(prefix):
+                codes = output.strip().removeprefix(prefix).split(",")
+                if codes and all(code in ALARM_CODES for code in codes):
+                    checks["managed_services"] = {"state": "degraded", "alarms": codes}
+                    raise RuntimeError("managed storage alarms: " + ",".join(codes)) from None
+            raise
         checks["managed_services"] = "healthy"
 
         nodes = json.loads(admin_command(NOMAD, "node", "status", "-json"))
@@ -82,6 +94,15 @@ def main() -> int:
         admin_command(NOMAD, "operator", "raft", "list-peers")
         checks["nomad"] = {"ready_clients": len(ready), "raft": "healthy"}
 
+        status_path = BACKUPS / "STATUS.json"
+        if status_path.is_file() and json.loads(status_path.read_text()).get("status") == "failed":
+            raise RuntimeError("latest managed-data backup failed")
+        receipts = BACKUPS.parent / (NAMESPACE + "-migration-receipts")
+        if any(
+            json.loads(path.read_text()).get("status") == "failed"
+            for path in receipts.glob("*.status.json")
+        ):
+            raise RuntimeError("pre-migration resource backup failed")
         backup_dirs = sorted(path for path in BACKUPS.glob("20??????T??????Z") if path.is_dir())
         if not backup_dirs:
             raise RuntimeError("no encrypted platform backup exists")
@@ -103,6 +124,8 @@ def main() -> int:
         version = manifest.get("format_version")
         if version == "2":
             required.add("registry.age")
+        elif version == "4":
+            required.update({"postgres-catalog.json", "mongodb-catalog.json"})
         elif version != "3":
             raise RuntimeError("latest platform backup format is unsupported")
         if not required <= {path.name for path in latest.iterdir()}:

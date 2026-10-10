@@ -20,6 +20,7 @@ from .service_support import (
     remaining_seconds,
     wall_deadline,
 )
+from .storage_capacity import helper_metadata
 
 StorageAction = Literal["create", "verify", "rotate", "remove"]
 
@@ -85,6 +86,17 @@ class StorageService:
                     self.config.policy.limits.process_seconds,
                 ),
             )
+            if request.action == "rotate" and any(
+                kind in {"postgres", "mongo"} for kind in selected
+            ):
+                from .storage_limits import StorageLimitsService
+
+                StorageLimitsService(
+                    self.connection,
+                    self.config,
+                    self.state_directory,
+                    helper_caller=self.helper_caller,
+                ).prepare_dns_job(application.application_id, deadline)
             refreshed = db.get_application(self.connection, request.application)
             if refreshed is None or refreshed.application_id != application.application_id:
                 raise ValidationError("application does not exist")
@@ -98,7 +110,23 @@ class StorageService:
             def call_helper(
                 action: str, values: Mapping[str, object], **_bounds: object
             ) -> Mapping[str, object]:
-                return self.helper_caller(self.config, action, values, deadline=deadline)
+                kind = action.split(".")[1]
+                selected_resource = next(
+                    (
+                        item
+                        for item in db.list_managed_resources(
+                            self.connection, application_id=refreshed.application_id
+                        )
+                        if item.resource_type == kind and item.resource_name == checked_name
+                    ),
+                    None,
+                )
+                metadata = helper_metadata(
+                    self.connection, refreshed.application_id, selected_resource
+                )
+                return self.helper_caller(
+                    self.config, action, {**values, **metadata}, deadline=deadline
+                )
 
             if request.action == "create":
                 result = storage.create(

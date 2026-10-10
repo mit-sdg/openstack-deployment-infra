@@ -44,6 +44,65 @@ let
   operatorAccount = constants.accounts.operator;
   platformAdminAccount = constants.accounts.platformAdmin;
   nomadAccount = constants.accounts.nomad;
+  storageMigrate = pkgs.writeShellScriptBin "openstack-platform-storage-migrate" ''
+    exec ${packages.controllerPackage}/bin/openstack-platform-storage-migrate \
+      --socket /run/${namespace}-controller/privileged.sock "$@"
+  '';
+  storageBackup = pkgs.writeShellScriptBin "openstack-platform-storage-backup" ''
+    export PLATFORM_CONFIG="''${PLATFORM_CONFIG:-/etc/${namespace}/platform.json}"
+    export PATH=/run/wrappers/bin:${
+      lib.makeBinPath [
+        pkgs.postgresql_17
+        pkgs.mongodb-tools
+        pkgs.podman
+      ]
+    }:$PATH
+    exec ${packages.controllerPackage}/bin/openstack-platform-storage-backup "$@"
+  '';
+  resourceBackup = pkgs.writeShellScript "${namespace}-resource-backup" ''
+    set -euo pipefail
+    ${credentialGuard} ${operatorRoot}/secrets/backup-age-key.txt ${operatorAccount.name}
+    ${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env
+    export PLATFORM_CONFIG=/etc/${namespace}/platform.json
+    export AGE=${pkgs.age}/bin/age AGE_KEYGEN=${pkgs.age}/bin/age-keygen
+    export AGE_KEY=${operatorRoot}/secrets/backup-age-key.txt
+    export PATH=${
+      lib.makeBinPath [
+        pkgs.postgresql_17
+        pkgs.mongodb-tools
+      ]
+    }:$PATH
+    exec ${packages.controllerPackage}/bin/openstack-platform-storage-backup checkpoint --unit "$1"
+  '';
+  managedBackup = pkgs.writeShellScriptBin "openstack-platform-managed-backup" ''
+    set -euo pipefail
+    ${credentialGuard} ${operatorRoot}/secrets/backup-age-key.txt ${operatorAccount.name}
+    ${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env
+    export PLATFORM_CONFIG=/etc/${namespace}/platform.json
+    export AGE=${pkgs.age}/bin/age AGE_KEYGEN=${pkgs.age}/bin/age-keygen
+    export AGE_KEY=${operatorRoot}/secrets/backup-age-key.txt
+    export BACKUP_ROOT=${backups}/${namespace}
+    export EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh
+    export DATABASE_BACKUP_COMMAND=${packages.controllerPackage}/bin/openstack-platform-storage-backup
+    export GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py
+    export GARAGE_VERIFY_SCRIPT=${infra}/backup/verify_garage_backup.py
+    export SERVICE_CHECK_PYTHON=${packages.python}/bin/python
+    export PATH=${
+      lib.makeBinPath [
+        pkgs.coreutils
+        pkgs.findutils
+        pkgs.util-linux
+        pkgs.postgresql_17
+        pkgs.mongodb-tools
+        packages.python
+      ]
+    }:$PATH
+    exec ${infra}/backup/run_platform_backup.sh "$@"
+  '';
+  storageRepair = pkgs.writeShellScriptBin "openstack-platform-storage-repair" ''
+    exec ${packages.controllerPackage}/bin/openstack-platform-storage-repair \
+      --socket /run/${namespace}-controller/privileged.sock "$@"
+  '';
   controllerRoot = "${state}/controller";
   controllerState = "${controllerRoot}/state";
   controllerPolicy = "${controllerRoot}/policy.json";
@@ -439,6 +498,17 @@ in
 
   virtualisation.podman.enable = true;
 
+  security.polkit.enable = true;
+  security.polkit.extraConfig = ''
+    polkit.addRule(function(action, subject) {
+      if (action.id === "org.freedesktop.systemd1.manage-units" &&
+          subject.user === "${controllerUser}" && action.lookup("verb") === "start" &&
+          /^${namespace}-resource-backup@(postgres|mongo)-p_[a-f0-9]{20}\.service$/.test(action.lookup("unit"))) {
+        return polkit.Result.YES;
+      }
+    });
+  '';
+
   environment.systemPackages = [
     pkgs.git
     packages.nomad
@@ -457,6 +527,10 @@ in
     pinBuilderHostKeyCli
     setupOperatorBridgeCli
     hostedControllerRestore
+    storageRepair
+    storageMigrate
+    storageBackup
+    managedBackup
     managementRestore
   ];
 
@@ -520,6 +594,9 @@ in
     "d ${helperReleaseRoot}/releases 0750 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${helperReleaseRoot}/incoming 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${backups} 0710 ${operatorAccount.name} ${controllerGroup} -"
+    "d ${backups}/${namespace} 0700 ${operatorAccount.name} ${operatorAccount.name} -"
+    # Receipts contain identity/freshness only. No key or payload is shared.
+    "d ${backups}/${namespace}-migration-receipts 2750 ${operatorAccount.name} ${controllerGroup} -"
     "d ${controllerBackupRoot} 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${controllerBackupRoot}/.staging 0700 ${operatorAccount.name} ${operatorAccount.name} -"
     "d ${hostedControllerBackupRoot} :0750 :${controllerUser} :${operatorAccount.name} -"
@@ -1204,6 +1281,7 @@ in
         "PLATFORM_CONFIG=/etc/${namespace}/platform.json"
         "BACKUP_ROOT=${backups}/${namespace}"
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
+        "DATABASE_BACKUP_COMMAND=${packages.controllerPackage}/bin/openstack-platform-storage-backup"
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
         "GARAGE_VERIFY_SCRIPT=${infra}/backup/verify_garage_backup.py"
@@ -1213,6 +1291,8 @@ in
           lib.makeBinPath [
             pkgs.coreutils
             pkgs.findutils
+            pkgs.postgresql_17
+            pkgs.mongodb-tools
             pkgs.podman
             pkgs.util-linux
             packages.python
@@ -1232,6 +1312,29 @@ in
       # Backup tools get a private mode-0600 runtime copy.
       LimitCORE = 0;
       ExecStart = "${infra}/backup/run_platform_backup.sh";
+    };
+  };
+  systemd.services."${namespace}-resource-backup@" = {
+    description = "Encrypted pre-migration checkpoint of one shared database";
+    after = [ backupMountUnit ];
+    requires = [ backupMountUnit ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = operatorAccount.name;
+      Group = controllerGroup;
+      UMask = "0077";
+      TimeoutStartSec = 3600;
+      Environment = "DATABASE_BACKUP_TMPDIR=${backups}/${namespace}";
+      LimitCORE = 0;
+      ExecStart = "${resourceBackup} %i";
+      NoNewPrivileges = true;
+      PrivateTmp = true;
+      ProtectHome = true;
+      ProtectSystem = "strict";
+      ReadWritePaths = [
+        "${backups}/${namespace}"
+        "${backups}/${namespace}-migration-receipts"
+      ];
     };
   };
   systemd.timers."${namespace}-platform-backup" = {

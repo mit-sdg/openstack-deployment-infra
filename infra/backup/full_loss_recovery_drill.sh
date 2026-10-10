@@ -99,6 +99,13 @@ fi
 managed="$IMPORTED/managed-data"
 "$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/garage.age" | \
   "${SERVICE_CHECK_PYTHON:-python3}" "$GARAGE_VERIFY_SCRIPT" --offline
+if grep -qx 'format_version=4' "$managed/MANIFEST"; then
+  for service in postgres mongodb; do
+    kind=$service; [[ $kind != mongodb ]] || kind=mongo
+    "$AGE" --decrypt --identity "$MANAGED_IDENTITY" "$managed/$service.age" | \
+      "${DATABASE_BACKUP_COMMAND:-openstack-platform-storage-backup}" verify --type "$kind"
+  done
+fi
 echo "recovery archives=verified"
 
 if [[ $MODE == --verify-only ]]; then
@@ -184,10 +191,28 @@ PY
 managed_output="$(PLATFORM_CONFIG="$PLATFORM_CONFIG" AGE_KEY="$MANAGED_IDENTITY" GARAGE_RESTORE_CONTROLLER_DATABASE="$hosted_destination" "$MANAGED_RESTORE_LAUNCHER" --yes "$managed")"
 printf '%s\n' "$managed_output"
 grep -Eq '^managed-data-restore=verified source=' <<<"$managed_output"
+database_evidence='{}'
+if grep -qx 'format_version=4' "$managed/MANIFEST"; then
+  database_evidence=$(python3 - "$managed" "$managed_output" <<'PYDATABASES'
+import json,re,sys
+from pathlib import Path
+root=Path(sys.argv[1]); output=sys.argv[2]
+result={}
+for kind,name in (("postgres","postgres"),("mongo","mongodb")):
+ catalog=json.loads((root/(name+"-catalog.json")).read_text())
+ expected=sum(bool(entry["resources"]) for entry in catalog["entries"])
+ matches=re.findall(r"^database-restore=verified kind="+kind+r" shared=(\d+) isolated=(\d+)$",output,re.M)
+ if len(matches)!=1 or matches[0]!=("0",str(expected)):
+  raise SystemExit("isolated restore did not cover the managed "+kind+" inventory")
+ result[kind]={"restoredInstances":expected,"state":"restored" if expected else "no-managed-resources"}
+print(json.dumps(result,sort_keys=True,separators=(",",":")))
+PYDATABASES
+)
+fi
 
-python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" "$scratch/source-keys.tar" <<'PY'
+python3 - "$WORK/DRILL-EVIDENCE.json" "$(basename "$BUNDLE")" "$record_counts" "$WORK/replacements/management-broker/management.sqlite3" "$scratch/source-keys.tar" "$managed/MANIFEST" "$database_evidence" <<'PY'
 import json,os,sys
-path,bundle,counts,broker_path,keys_path=sys.argv[1:]
+path,bundle,counts,broker_path,keys_path,managed_manifest,database_evidence=sys.argv[1:]
 evidence={
  "bundle":bundle,
  "controllerState":{
@@ -201,6 +226,8 @@ evidence={
  "records":json.loads(counts),
  "appImages":"rebuild-by-redeploy",
 }
+if "format_version=4" in open(managed_manifest).read():
+ evidence["isolatedDatabases"]=json.loads(database_evidence)
 if os.path.isfile(keys_path):
  evidence["sourceKeys"]="restored"
 if os.path.isfile(broker_path):

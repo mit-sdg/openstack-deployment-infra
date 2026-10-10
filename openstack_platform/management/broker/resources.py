@@ -193,6 +193,36 @@ def storage_resources(self: Broker, app_id: str) -> list[dict[str, Any]]:
                     "createdAt": utc(item.get("createdAt")),
                     "verifiedAt": utc(item.get("lastVerifiedAt")),
                     "defaultBindings": dict(OUTPUT_ENVIRONMENT_KEYS[item["type"]]),
+                    "quotas": {
+                        key: item["quotas"][key]
+                        for key in item["quotas"]
+                        if key
+                        in {
+                            "sizeBytes",
+                            "connections",
+                            "memoryBytes",
+                            "cpuMillicores",
+                            "s3Bytes",
+                            "s3Objects",
+                        }
+                    },
+                    "usage": {
+                        key: item["usage"][key]
+                        for key in (
+                            "usedBytes",
+                            "objectCount",
+                            "currentConnections",
+                            "instanceMemoryBytes",
+                            "cpuTimeMilliseconds",
+                            "measuredAt",
+                            "stale",
+                        )
+                    },
+                    "isolation": item["isolation"],
+                    "hardQuotaBytes": item["hardQuotaBytes"],
+                    "writeBlock": {
+                        key: item["writeBlock"][key] for key in ("blocked", "reason", "since")
+                    },
                 }
             )
         cursor = page.get("nextCursor")
@@ -324,11 +354,11 @@ def unlimited(db: sqlite3.Connection, user_id: str) -> bool:
 
 def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: str) -> None:
     held = db.execute(
-        "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
+        "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','storage_limits','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
         (user_id,),
     ).fetchall()
     current = db.execute(
-        "SELECT state,kind FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
+        "SELECT state,kind FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','storage_limits','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
         (app_id,),
     ).fetchone()
     if current:

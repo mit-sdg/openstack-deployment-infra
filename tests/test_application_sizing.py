@@ -38,7 +38,8 @@ class ApplicationSizingTests(unittest.TestCase):
                 self.fixture.config.platform,
                 document={
                     "paths": {"root": "/srv/openstack-platform"},
-                    "addresses": {"storage": "storage.internal"},
+                    "addresses": {"storage": "192.0.2.13"},
+                    "internalNames": {"storage": "storage.example.internal"},
                     "flavors": {"builder": "builder-small"},
                 },
             ),
@@ -113,6 +114,8 @@ class ApplicationSizingTests(unittest.TestCase):
         if action == self.fail_action:
             self.fail_action = None
             raise app.ApplicationError("injected helper outage")
+        if action == "storage.instances.available":
+            return {"available": True}
         if action == "app.build":
             manifest = parse_configuration(values["configuration"]).manifest({})
             runtime = self.build_runtime or {
@@ -123,7 +126,7 @@ class ApplicationSizingTests(unittest.TestCase):
             }
             images = replace(config.policy.runtime_images, **{manifest.runtime: runtime["image"]})
             return {
-                "image": "storage.internal:5000/projects/commons/app@sha256:" + "c" * 64,
+                "image": "192.0.2.13:5000/projects/commons/app@sha256:" + "c" * 64,
                 "recipeHash": app.generate_recipe(manifest, images).sha256,
                 **({} if self.omit_runtime else {"runtime": runtime}),
                 "builderAbsent": True,

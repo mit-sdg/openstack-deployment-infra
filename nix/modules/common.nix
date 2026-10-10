@@ -15,6 +15,9 @@ in
 {
   system.stateVersion = "25.11";
 
+  # The storage certificate covers this inventory name. Keep admin tools and
+  # worker containers independent of public DNS and TLS verification against IPs.
+  networking.extraHosts = "${platform.addresses.storage} ${platform.internalNames.storage}";
   networking.useNetworkd = true;
   networking.useDHCP = lib.mkDefault true;
   networking.firewall.enable = true;

@@ -57,13 +57,13 @@
     "backup": {
       "name": "example-backups",
       "label": "example-bak",
-      "sizeGiB": 600,
+      "sizeGiB": 8192,
       "type": "production"
     },
     "data": {
       "name": "example-data",
       "label": "example-data",
-      "sizeGiB": 500,
+      "sizeGiB": 1024,
       "type": "production"
     }
   },
@@ -77,7 +77,7 @@
   "flavors": {
     "admin": "example.2c4g",
     "ingress": "example.2c2g",
-    "storage": "example.4c8g",
+    "storage": "xl.16core",
     "worker": "example.1c2g",
     "builder": "example.4c8g"
   },

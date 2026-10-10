@@ -5,9 +5,7 @@ Every source in this module observes; none mutates:
 * One pinned SSH round trip runs a fixed reader on admin. It sends only ``GET``
   requests to the privileged controller socket's database-backed routes, reads
   the platform-health timer's secret-free snapshot, and asks systemd whether
-  the controller units are active. It deliberately avoids ``/v1/admin/status``
-  and ``/v1/admin/hosts``: those run live provider and helper observations
-  while holding the controller's shared API lock.
+  the controller units are active. The admin status read supplies cached storage-host telemetry.
 * Credential-free HTTPS probes check public ingress and accepted application
   routes with the same contract as deployment acceptance: no redirects, the
   configured health path, and the exact ``X-Platform-Deployment`` marker.
@@ -71,7 +69,7 @@ _RESOURCE_TYPES = frozenset({"postgres", "mongo", "s3"})
 _RESOURCE_STATES = frozenset({"creating", "active", "removing", "recovery_required"})
 _HOST_STATES = frozenset({"active", "building", "error", "missing", "stopped", "unknown"})
 _RUNTIMES = frozenset({"bun", "node"})
-_QUOTA_KEYS = ("postgresConnections", "measuredTargetBytes", "s3Bytes", "s3Objects")
+_QUOTA_KEYS = ("sizeBytes", "connections", "memoryBytes", "cpuMillicores", "s3Bytes", "s3Objects")
 
 # The reader executes with the admin guest's system Python as the operator
 # account already admitted to privileged.sock. Its argv is fixed except for the
@@ -186,6 +184,7 @@ sys.stdout.write(
             "applications": pages("/v1/admin/applications", 10),
             "deployments": pages("/v1/admin/deployments", DEPLOYMENT_PAGES),
             "storage": pages("/v1/admin/storage", 10),
+            "status": get("/v1/admin/status"),
             "operations": pages("/v1/admin/operations", OPERATION_PAGES),
             "units": units(),
             "health": health(),
@@ -254,6 +253,8 @@ class StorageRecord:
     lifecycle_state: str
     quotas: Mapping[str, int]
     last_verified_at: str | None
+    usage: Mapping[str, Any]
+    write_block: Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +296,7 @@ class AdminReads:
     health: HealthReport | None
     health_error: str | None
     section_errors: Mapping[str, str] = field(default_factory=dict)
+    storage_host: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,6 +474,88 @@ def _deployment(value: object) -> DeploymentRecord | None:
     )
 
 
+def storage_usage(value: object) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    return {
+        **{
+            key: _integer(raw.get(key))
+            for key in (
+                "usedBytes",
+                "objectCount",
+                "currentConnections",
+                "instanceMemoryBytes",
+                "cpuTimeMilliseconds",
+            )
+        },
+        "measuredAt": timestamp(raw.get("measuredAt")),
+        "stale": raw.get("stale") is not False,
+    }
+
+
+def storage_write_block(value: object) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    return {
+        "blocked": raw.get("blocked") is True,
+        "reason": "size_limit_exceeded" if raw.get("reason") == "size_limit_exceeded" else None,
+        "since": timestamp(raw.get("since")),
+    }
+
+
+def _storage_host(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    def pair(key: str, first: str, second: str) -> dict[str, int] | None:
+        raw = value.get(key)
+        if not isinstance(raw, Mapping):
+            return None
+        a, b = _integer(raw.get(first)), _integer(raw.get(second))
+        return {first: a, second: b} if a is not None and b is not None else None
+
+    measured = timestamp(value.get("measuredAt"))
+    cpu = _integer(value.get("cpuCount"), minimum=1)
+    load = value.get("loadAverage")
+    memory = pair("memory", "totalBytes", "availableBytes")
+    volume = pair("dataVolume", "totalBytes", "usedBytes")
+    postgres = pair("postgresConnections", "current", "limit")
+    mongo = pair("mongoConnections", "current", "limit")
+    if (
+        measured is None
+        or cpu is None
+        or not isinstance(load, list)
+        or len(load) != 3
+        or any(
+            isinstance(n, bool) or not isinstance(n, (int, float)) or not 0 <= n < 1_000_000
+            for n in load
+        )
+        or memory is None
+        or volume is None
+        or postgres is None
+        or mongo is None
+    ):
+        return None
+    containers = []
+    raw_containers = value.get("containers")
+    for raw in raw_containers if isinstance(raw_containers, list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        name = _match(_DISPLAY_NAME, raw.get("name"))
+        used, limit = _integer(raw.get("usedBytes")), _integer(raw.get("limitBytes"))
+        if name and used is not None and limit is not None:
+            containers.append({"name": name, "usedBytes": used, "limitBytes": limit})
+    return {
+        "measuredAt": measured,
+        "stale": value.get("stale") is not False,
+        "cpuCount": cpu,
+        "loadAverage": load,
+        "memory": memory,
+        "dataVolume": volume,
+        "postgresConnections": postgres,
+        "mongoConnections": mongo,
+        "containers": containers,
+    }
+
+
 def _storage(value: object) -> StorageRecord | None:
     if not isinstance(value, Mapping):
         return None
@@ -503,6 +587,8 @@ def _storage(value: object) -> StorageRecord | None:
         lifecycle_state=state,
         quotas=quotas,
         last_verified_at=timestamp(value.get("lastVerifiedAt")),
+        usage=storage_usage(value.get("usage")),
+        write_block=storage_write_block(value.get("writeBlock")),
     )
 
 
@@ -662,6 +748,18 @@ def parse_admin_reads(payload: bytes) -> AdminReads:
             "InvalidJson": "the platform-health snapshot is malformed",
         }.get(str(name), "the platform-health snapshot could not be read")
 
+    status, status_error = _section(document, "status")
+    if status_error is not None:
+        errors["status"] = status_error
+    storage_host = _storage_host(status.get("storageHost")) if isinstance(status, Mapping) else None
+    if status_error is None and (
+        not isinstance(status, Mapping)
+        or "storageHost" not in status
+        or status["storageHost"] is not None
+        and storage_host is None
+    ):
+        errors["status"] = "the controller returned an unexpected storage host shape"
+
     return AdminReads(
         api_version=api_version,
         features=features,
@@ -676,6 +774,7 @@ def parse_admin_reads(payload: bytes) -> AdminReads:
         health=health,
         health_error=health_error,
         section_errors=errors,
+        storage_host=storage_host,
     )
 
 

@@ -393,14 +393,17 @@ class ControllerSocketSecurityTests(unittest.TestCase):
                 self.assertTrue(accepted.wait(2))
                 while not server._peer_connections:  # noqa: SLF001 - security invariant probe
                     time.sleep(0.01)
-                second = UnixHTTPConnection(path)
-                second.request("GET", "/v1/health")
-                second_response = second.getresponse()
-                self.assertEqual(second_response.status, 503)
-                self.assertEqual(
-                    json.loads(second_response.read())["error"]["code"], "CONNECTION_LIMIT"
-                )
-                second.close()
+                # The over-limit peer is answered and closed before any request
+                # is read, so read the refusal without racing a request write.
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as second:
+                    second.settimeout(5)
+                    second.connect(path)
+                    raw = b""
+                    while chunk := second.recv(65536):
+                        raw += chunk
+                head, _, body = raw.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 503 "), head)
+                self.assertEqual(json.loads(body)["error"]["code"], "CONNECTION_LIMIT")
                 first.close()
                 deadline = time.monotonic() + 2
                 while server._peer_connections and time.monotonic() < deadline:  # noqa: SLF001

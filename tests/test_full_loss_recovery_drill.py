@@ -73,6 +73,7 @@ class FullLossRecoveryDrillTests(unittest.TestCase):
 
     def _managed_archives(self) -> None:
         managed = self.bundle / "managed-data"
+        (managed / "MANIFEST").write_text("format_version=3\n")
         stream, _, _ = garage_fixtures.GarageBackupTests().archive()
         (managed / "garage.age").write_bytes(stream.getvalue())
         for path in managed.iterdir():
@@ -224,6 +225,41 @@ echo 'managed-data-restore=verified source=fake'
         )
         self.assertIn("managed --yes", calls)
         self.assertNotIn("/srv/openstack-platform/state", calls)
+
+    def test_full_loss_with_only_mongo_requires_all_mongo_restores_and_no_postgres(self):
+        managed = self.bundle / "managed-data"
+        (managed / "MANIFEST").write_text("format_version=4\n")
+        (managed / "postgres-catalog.json").write_text(json.dumps({"entries": []}))
+        (managed / "mongodb-catalog.json").write_text(
+            json.dumps({"entries": [{"resources": [{}]}]})
+        )
+        for name in ("postgres", "mongodb"):
+            (managed / (name + ".age")).write_bytes(b"fake")
+        verifier = self._tool("database-verify", "cat >/dev/null\n")
+        source = self.managed.read_text()
+        self.managed.write_text(
+            source
+            + "echo 'database-restore=verified kind=postgres shared=0 isolated=0'\necho 'database-restore=verified kind=mongo shared=0 isolated=1'\n"
+        )
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"DATABASE_BACKUP_COMMAND": str(verifier)}):
+            result, work = self._run("--full")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = json.loads((work / "DRILL-EVIDENCE.json").read_text())["isolatedDatabases"]
+        self.assertEqual(
+            evidence["postgres"], {"restoredInstances": 0, "state": "no-managed-resources"}
+        )
+        self.assertEqual(evidence["mongo"], {"restoredInstances": 1, "state": "restored"})
+        self.managed.write_text(
+            self.managed.read_text().replace(
+                "kind=mongo shared=0 isolated=1", "kind=mongo shared=0 isolated=0"
+            )
+        )
+        with mock.patch.dict(os.environ, {"DATABASE_BACKUP_COMMAND": str(verifier)}):
+            failed, failed_work = self._run("--full", failure="NO_MONGO")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse((failed_work / "DRILL-EVIDENCE.json").exists())
 
     def test_restore_failures_cannot_emit_complete_evidence(self) -> None:
         for failure in ("FAIL_OPERATOR", "FAIL_HOSTED", "FAIL_MANAGED"):

@@ -108,6 +108,7 @@ export const activityTitles: Record<string, [done: string, running: string, noun
   storage_create: ['Storage added', 'Adding storage', 'Storage creation'],
   storage_verify: ['Storage checked', 'Checking storage', 'Storage check'],
   storage_rotate: ['Credentials rotated', 'Rotating credentials', 'Credential rotation'],
+  storage_limits: ['Storage limits saved', 'Saving storage limits', 'Storage limits change'],
   storage_delete: ['Storage deleted', 'Deleting storage', 'Storage deletion'],
   adopt_app: ['App adopted', 'Adopting app', 'App adoption'],
   app_enable: ['App started', 'Starting app', 'App start'],

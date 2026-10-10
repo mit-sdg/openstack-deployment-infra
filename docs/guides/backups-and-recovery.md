@@ -19,7 +19,7 @@ Before you start:
 
 ## How backups work
 
-Restore each set separately: controller records can't replace app data, or vice versa. Backup payloads are encrypted with age; SQLite snapshots and deploy-key archives are staged privately before encryption. Checksums and manifests remain readable. An age *identity* is a private key; a *recipient* is its public key.
+Restore each set separately: controller records can't replace app data, or vice versa. Backup payloads are encrypted with age; SQLite snapshots and deploy-key archives are staged privately before encryption. A failed instance dump fails the entire managed-data set and is visible to backup health via STATUS.json. Retention/pruning and offsite export cover the same complete set. Checksums and manifests remain readable. An age *identity* is a private key; a *recipient* is its public key.
 
 ### The two keys
 
@@ -35,7 +35,7 @@ Keep both private keys outside the platform and operator host, accessible to ano
 
 ### How a set is committed
 
-SQLite and deploy-key sets have an encrypted file, plus `.sha256` and `.manifest` files. Managed-data directories hold `postgres.age`, `mongodb.age`, `garage.age`, `SHA256SUMS`, and `MANIFEST`. The manifest commits a SQLite set; managed-data directories are published after their manifest is written. A missing manifest means an incomplete set. Export and health checks may refuse incomplete evidence. Never finish a set by hand.
+SQLite and deploy-key sets have an encrypted file, plus `.sha256` and `.manifest` files. Managed-data directories hold `postgres.age`, `mongodb.age`, `garage.age`, `postgres-catalog.json`, `mongodb-catalog.json`, `SHA256SUMS`, and `MANIFEST` (format 4). Catalogs omit secrets; DB payloads include encrypted managed binding credentials and role settings/users, covering shared and isolated resources together. The manifest commits a SQLite set; managed-data directories are published after their manifest is written. A missing manifest means an incomplete set. Export and health checks may refuse incomplete evidence. Never finish a set by hand.
 
 ### What is not backed up
 
@@ -637,7 +637,7 @@ It prints `managed-data-restore=verified source=<set>` when done.
 What you need:
 
 - The managed-data identity as a mode `0600` file (`AGE_KEY`).
-- A host laid out like the admin host, such as a replacement admin host. The script finds its tools and credentials under the config's `paths.root`: `bin/age`, `secrets/storage-bootstrap.env` (mode `0600`), and `secrets/nomad-cli/internal-ca.pem`. Override them with the `AGE`, `SECRETS_FILE`, and `CA_FILE` variables, and set `SERVICE_CHECK_PYTHON` to a Python 3 interpreter. It also needs `podman` to run the database clients.
+- A host laid out like the admin host, such as a replacement admin host. The script finds its tools and credentials under the config's `paths.root`: `bin/age`, `secrets/storage-bootstrap.env` (mode `0600`), and `secrets/nomad-cli/internal-ca.pem`. Override them with the `AGE`, `SECRETS_FILE`, and `CA_FILE` variables, and set `SERVICE_CHECK_PYTHON` to a Python 3 interpreter. The matching admin image supplies PostgreSQL 17 clients, MongoDB tools, age, Podman and `openstack-platform-storage-backup`. It needs the authenticated instance manager, storage-bootstrap/Nomad credentials and a private offline controller database. Shared-resource payloads restore into isolated instances too.
 - A replacement hosted-controller database (`GARAGE_RESTORE_CONTROLLER_DATABASE`) whenever the set contains S3 buckets: a private, current-user-owned, mode `0600` copy with no `-wal` or `-shm` files next to it. Garage gives restored buckets new IDs, and the restore writes the new IDs into this database in one transaction after checking each bucket's original name and ID. Keep the controller and its backup stopped, and install the updated database with the [hosted-controller restore](#restore-the-hosted-controller) afterwards.
 
 S3 restore brings back each app's keys with their original IDs and secrets, recreates the apps' read and write grants, and restores the objects. The backup key gets write access only during the restore, and every bucket it touched goes back to read-only before success is reported. If taking that write access away fails, deny write and owner access for the backup key yourself before reopening services.
@@ -663,7 +663,7 @@ What you need:
 - An absolute work directory that doesn't exist yet.
 - Both identities and a replacement platform config, each a direct file owned by you with mode `0600`.
 - A replacement config with the same project, namespace, names, addresses, ports, volumes, paths, and domain. Image and release choices may differ. Isolate drill services while preserving that identity.
-- For `--full`: empty PostgreSQL, MongoDB, and Garage targets and a [restore-capable host](#check-and-restore-managed-data). The bundle needs both controller databases, three managed-data archives, an image selection, and an app with an accepted deployment. Include S3 objects and app grants to exercise their recovery.
+- For `--full`: empty PostgreSQL, MongoDB, and Garage targets and a [restore-capable host](#check-and-restore-managed-data). The bundle needs both controller databases, three managed-data archives, an image selection, and an app with an accepted deployment. Include S3 objects and app grants to exercise their recovery. Format-4 full drills compare restored-instance counts with each catalog's managed inventory. An engine with no managed resources records `no-managed-resources`; every present engine must restore all its resources before `isolatedDatabases` evidence is recorded. CI also exercises both engines with sample data.
 - The tools the script calls, on your `PATH` or named with these variables:
 
   | Variable | Default command |
@@ -767,3 +767,14 @@ Some things to expect:
 - [Hosts and images](hosts-and-images.md)
 - [Security](../security.md)
 - [Internals](../reference/internals.md)
+
+Per-resource restore uses `openstack-platform-storage-backup restore --type postgres|mongo`
+with repeatable `--resource UUID`, a private offline `--controller-database PATH`, and
+`--catalog PATH` pointing to the other provider's verified catalog to reserve its ports.
+The managed-data restore wrapper supplies both catalogs automatically. Restore
+provisions missing isolated instances, reuses recorded ports and current caps, restores
+data/users, updates canonical/candidate owned bindings and controller identity, and
+verifies current worker IPs before reopening access. Identical completed payload replay
+skips destructive import. Keep the app/controller stopped until state installation
+and verification finish. For capacity, encrypted metadata, source backup gating and
+rehearsal commands, see [Migrate storage instances](migrate-storage-instances.md).

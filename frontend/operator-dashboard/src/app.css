@@ -1,3 +1,4 @@
+@import "@openstack-platform/ui/tokens.css";
 @import "@openstack-platform/ui/legacy/tokens.css";
 @import "@openstack-platform/ui/legacy/primitives.css";
 
@@ -2241,4 +2242,86 @@ a:hover {
   stroke: currentColor;
   stroke-width: 1.8;
   stroke-linejoin: round;
+}
+
+.storage-host__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  gap: var(--ui-space-4);
+}
+.storage-host__metrics dt {
+  overflow-wrap: anywhere;
+  color: var(--ui-text-muted);
+}
+.storage-host__metrics dd {
+  margin: 0;
+}
+
+.storage-host__body {
+  padding: var(--ui-card-padding);
+}
+
+@media (max-width: 1023px) {
+  .storage-host__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .storage-host__metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.storage-host__value {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  column-gap: var(--ui-space-2);
+  font-variant-numeric: tabular-nums;
+}
+.storage-host__state {
+  color: var(--ink-2);
+  font-size: var(--ui-text-xs);
+}
+.storage-host__metric {
+  --storage-meter-color: var(--accent);
+}
+.storage-host__metric[data-tone="warning"] {
+  --storage-meter-color: var(--warning);
+}
+.storage-host__metric[data-tone="critical"] {
+  --storage-meter-color: var(--critical);
+}
+.storage-host__metric[data-tone="warning"] .storage-host__state,
+.storage-host__stale {
+  color: var(--ui-warning-text);
+}
+.storage-host__metric[data-tone="critical"] .storage-host__state {
+  color: var(--ui-danger-text);
+}
+.storage-host__meter {
+  display: block;
+  width: 100%;
+  height: var(--ui-space-2);
+  margin-block-start: var(--ui-space-2);
+  border: 0;
+  border-radius: var(--ui-radius-full);
+  overflow: hidden;
+  appearance: none;
+  background: var(--surface-3);
+  accent-color: var(--storage-meter-color);
+}
+.storage-host__meter::-webkit-progress-bar {
+  background: var(--surface-3);
+}
+.storage-host__meter::-webkit-progress-value {
+  background: var(--storage-meter-color);
+}
+.storage-host__meter::-moz-progress-bar {
+  background: var(--storage-meter-color);
+}
+.storage-host__history {
+  margin-block-start: var(--ui-space-4);
+  font-size: var(--ui-text-xs);
 }

@@ -36,6 +36,7 @@ from ..config import Config, PlatformConfig
 from ..contracts import IMAGE_ROLES
 from . import application_runtime as app
 from . import database as db
+from . import storage_limits
 from .storage_contract import RESOURCE_TYPES, canonical_secret_keys
 
 ROLES = tuple(sorted(IMAGE_ROLES))
@@ -441,6 +442,18 @@ def storage_observer(
                         "providerId": resource.provider_id,
                         "providerName": resource.provider_name,
                         "resourceName": resource.resource_name,
+                        "resourceId": resource.resource_id,
+                        "reservations": {},
+                        "retainedWorker": None,
+                        "workloadJobId": None,
+                        "instanceId": resource.instance_id,
+                        "stagedInstanceId": resource.resource_id
+                        if resource.instance_id is None and resource.migration_state == "aborted"
+                        else None,
+                        "instanceQuotas": storage_limits.quotas(resource)
+                        if resource.resource_type != "s3"
+                        else None,
+                        "workerIds": [application_id, *app.deployment_worker_ids(application_id)],
                     },
                     timeout_seconds=config.policy.limits.helper_seconds,
                     request_limit=config.policy.limits.helper_request_bytes,
@@ -639,7 +652,9 @@ def _storage_model(
     if resource.postgres_connections is not None:
         enforcement["connections"] = "hard"
     if resource.measured_target_bytes is not None:
-        enforcement["measuredBytes"] = "report-target"
+        enforcement["measuredBytes"] = (
+            "write-block" if resource.resource_type == "mongo" else "report-target"
+        )
     if resource.s3_bytes is not None:
         enforcement["bytes"] = "hard"
     if resource.s3_objects is not None:
@@ -654,6 +669,8 @@ def _storage_model(
         "lifecycleState": resource.lifecycle_state,
         "quotas": quotas,
         "quotaEnforcement": enforcement,
+        "usage": storage_limits.usage_model(resource),
+        "writeBlock": storage_limits.block_model(resource),
         "lastVerifiedAt": _safe_timestamp(resource.last_verified_at),
         "live": _storage_observation(
             application.application_id, resource.resource_type, resource.resource_name, observer
@@ -789,3 +806,29 @@ def status_show_live(
         observe_application=observers.application,
         observe_storage=observers.storage,
     )
+
+
+def cached_storage_observer(connection: sqlite3.Connection) -> StorageObserver:
+    resources = {
+        (item.application_id, item.resource_type, item.resource_name): item
+        for item in db.list_managed_resources(connection)
+    }
+
+    def observe(
+        application_id: str, resource_type: str, resource_name: str = "default"
+    ) -> StorageObservation:
+        resource = resources[(application_id, resource_type, resource_name)]
+        if storage_limits.stale(resource.usage.get("measuredAt")):
+            raise RuntimeError("storage usage is stale")
+        return StorageObservation(
+            application_id,
+            resource_type,  # type: ignore[arg-type]
+            resource_name,
+            "unhealthy" if resource.write_blocked else "healthy",
+            resource.usage.get("usedBytes"),
+            resource.usage.get("objectCount"),
+            resource.usage.get("currentConnections"),
+            resource.usage.get("measuredAt"),
+        )
+
+    return observe

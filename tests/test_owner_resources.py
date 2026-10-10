@@ -142,6 +142,11 @@ class OwnerResourceContractTests(contracts.RealProjectCase):
                 "createdAt",
                 "verifiedAt",
                 "defaultBindings",
+                "quotas",
+                "usage",
+                "writeBlock",
+                "isolation",
+                "hardQuotaBytes",
             },
         )
         self.assert_error(

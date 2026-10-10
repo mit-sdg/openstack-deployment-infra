@@ -131,6 +131,7 @@ INTENT_KINDS = frozenset(
         "storage_verify",
         "storage_rotate",
         "storage_delete",
+        "storage_limits",
         "adopt_app",
         "app_enable",
         "app_disable",

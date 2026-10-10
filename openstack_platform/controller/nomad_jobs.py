@@ -209,6 +209,7 @@ def render_nomad_job(
       driver = "docker"
       config {{
         image           = "{image_pin}"
+        extra_hosts     = [{json.dumps(platform.get("internalNames.storage") + ":" + platform.get("addresses.storage"))}]
         ports           = ["http"]
         force_pull      = {json.dumps(force_pull)}
         readonly_rootfs = true
@@ -347,3 +348,24 @@ def nomad_candidate_identity(nomad_job: str) -> tuple[str, str]:
     if hashlib.sha256(unmarked_job.encode()).hexdigest() != identity:
         raise ValidationError("Nomad job candidate identity does not match the exact job")
     return identity, oci_digest_pin(image, field="Nomad candidate image")
+
+
+def storage_hosts_job(job: str, platform: PlatformConfig) -> str:
+    """Upgrade a saved, verified job and recompute its exact candidate identity."""
+    nomad_candidate_identity(job)
+    host = platform.get("internalNames.storage") + ":" + platform.get("addresses.storage")
+    if f"        extra_hosts     = [{json.dumps(host)}]" in job:
+        return job
+    marker = _JOB_MARKER_BLOCK.search(job)
+    assert marker is not None
+    raw = job[: marker.start()] + job[marker.end() :]
+    raw = re.sub(r"^        extra_hosts\s*=.*\n", "", raw, flags=re.MULTILINE)
+    raw, count = re.subn(
+        r'(        image           = "[^"\n]+"\n)',
+        lambda m: str(m[0]) + f"        extra_hosts     = [{json.dumps(host)}]\n",
+        raw,
+    )
+    if count != 1:
+        raise ValidationError("saved application Docker configuration is ambiguous")
+    metadata = marker[0].replace(marker[1], hashlib.sha256(raw.encode()).hexdigest(), 1)
+    return raw[: marker.start()] + metadata + raw[marker.start() :]
