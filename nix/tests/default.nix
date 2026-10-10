@@ -443,7 +443,8 @@ let
         install -d -m 0755 "$out"
         # Python 3.13+ verifies with VERIFY_X509_STRICT, which rejects a CA
         # certificate without an explicit keyCertSign key usage.
-        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 2 \
+        # Nix caches this derivation indefinitely; a short validity expires in cached stores.
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 36500 \
           -keyout "$out/ca-key.pem" -out "$out/ca.pem" \
           -subj "/CN=Platform VM Test CA/O=Platform Tests" \
           -addext "basicConstraints=critical,CA:TRUE" \
@@ -463,7 +464,7 @@ let
     extendedKeyUsage=$usage
     subjectAltName=$sans
     EOF
-          openssl x509 -req -sha256 -days 2 \
+          openssl x509 -req -sha256 -days 36500 \
             -in "$out/$name.csr" -CA "$out/ca.pem" -CAkey "$out/ca-key.pem" \
             -CAcreateserial -extfile "$out/$name.ext" -out "$out/$name.pem" \
             >/dev/null 2>&1
