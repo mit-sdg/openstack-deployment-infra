@@ -28,6 +28,7 @@ from openstack_platform.storage_instances import (
     InstanceNotReadyError,
     Manager,
     database_command,
+    firewall_table,
     http_handler,
     peer_disconnected,
     run,
@@ -1385,3 +1386,11 @@ class MigrationFingerprintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirewallTableTests(unittest.TestCase):
+    def test_numeric_namespaces_yield_valid_nft_identifiers(self):
+        # Production namespaces are numeric (e.g. "61040"); nft rejects a
+        # table name that starts with a digit, which kept the manager down.
+        for namespace in ("61040", "app-platform"):
+            self.assertRegex(firewall_table(namespace), r"^[A-Za-z][A-Za-z0-9_]*$")
