@@ -7,6 +7,12 @@ let
   state = platform.paths.adminState;
   backups = platform.paths.backups;
   packages = import ../pkgs { inherit pkgs platform; };
+  # The VM test runs MongoDB natively (no image pulls); only this package is unfree.
+  # runNixOSTest owns each node's nixpkgs, so allow it on a separate import.
+  mongodbPkgs = import pkgs.path {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    config.allowUnfreePredicate = package: lib.getName package == "mongodb-ce";
+  };
   # The one Commons Connect code the fake redeems, issued to the portal's origin
   # with the challenge of this verifier (the RFC 7636 Appendix B example).
   managementRedeemRequest = builtins.toJSON {
@@ -328,7 +334,12 @@ let
       name = "${namespace}-${role}-vm";
 
       nodes.machine =
-        { lib, pkgs, config, ... }:
+        {
+          lib,
+          pkgs,
+          config,
+          ...
+        }:
         let
           # Small cached native images exercise the manager end to end without
           # fetching the production OCI pins from inside a networkless test VM.
@@ -339,7 +350,13 @@ let
           '';
           postgresEntry = pkgs.writeShellScriptBin "vm-postgres-entry" ''
             set -eu
-            export PATH=${lib.makeBinPath [ pkgs.postgresql_17 pkgs.coreutils pkgs.util-linux ]}
+            export PATH=${
+              lib.makeBinPath [
+                pkgs.postgresql_17
+                pkgs.coreutils
+                pkgs.util-linux
+              ]
+            }
             export PGDATA=/var/lib/postgresql/data
             if [ ! -f "$PGDATA/PG_VERSION" ]; then
               setpriv --reuid=999 --regid=999 --clear-groups initdb -D "$PGDATA" -U platform_admin --pwfile=/run/secrets/admin-password --auth-local=trust --auth-host=scram-sha-256 --locale=C --encoding=UTF8
@@ -350,18 +367,35 @@ let
           postgresImage = pkgs.dockerTools.buildLayeredImage {
             name = "vm-instance-postgres";
             tag = "latest";
-            contents = [ pkgs.postgresql_17 pkgs.coreutils pkgs.util-linux dbNss postgresEntry ];
+            contents = [
+              pkgs.postgresql_17
+              pkgs.coreutils
+              pkgs.util-linux
+              dbNss
+              postgresEntry
+            ];
             config.Entrypoint = [ "/bin/vm-postgres-entry" ];
           };
           mongoImage = pkgs.dockerTools.buildLayeredImage {
             name = "vm-instance-mongo";
             tag = "latest";
-            contents = [ pkgs.mongodb-ce pkgs.mongosh pkgs.coreutils dbNss ];
+            contents = [
+              mongodbPkgs.mongodb-ce
+              pkgs.mongosh
+              pkgs.coreutils
+              dbNss
+            ];
             config.Entrypoint = [ "/bin/mongod" ];
           };
           instancePlatform = platform // {
-            addresses = platform.addresses // { admin = "127.0.0.1"; storage = "127.0.0.1"; };
-            containers = platform.containers // { postgres = "localhost/vm-instance-postgres:latest"; mongodb = "localhost/vm-instance-mongo:latest"; };
+            addresses = platform.addresses // {
+              admin = "127.0.0.1";
+              storage = "127.0.0.1";
+            };
+            containers = platform.containers // {
+              postgres = "localhost/vm-instance-postgres:latest";
+              mongodb = "localhost/vm-instance-mongo:latest";
+            };
           };
         in
         {
@@ -381,9 +415,14 @@ let
 
           # Use cached native binaries for a startup smoke of the role's exact
           # arguments; no container image pulls or full provider scenario.
-          nixpkgs.config.allowUnfreePredicate = package: lib.getName package == "mongodb-ce";
-          environment.systemPackages = lib.optionals (role == "storage") [ pkgs.postgresql_17 pkgs.mongodb-ce pkgs.mongodb-tools ];
-          networking.extraHosts = lib.mkIf (role == "storage") (lib.mkForce "127.0.0.1 ${platform.internalNames.storage}");
+          environment.systemPackages = lib.optionals (role == "storage") [
+            pkgs.postgresql_17
+            mongodbPkgs.mongodb-ce
+            pkgs.mongodb-tools
+          ];
+          networking.extraHosts = lib.mkIf (role == "storage") (
+            lib.mkForce "127.0.0.1 ${platform.internalNames.storage}"
+          );
           security.pki.certificateFiles = lib.optionals (role == "admin") [ "${testPki}/ca.pem" ];
           networking.hosts = lib.mkIf (role == "admin") { "127.0.0.1" = [ "class.example.com" ]; };
           services.cloud-init.settings.datasource_list = lib.mkForce [ "None" ];
@@ -565,7 +604,8 @@ let
                 wantedBy = lib.mkForce [ ];
                 serviceConfig.ExecStart = lib.mkForce "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/vm-instance-platform.json";
               };
-              "${namespace}-database@".serviceConfig.ExecStart = lib.mkForce "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/vm-instance-platform.json --run-instance %i";
+              "${namespace}-database@".serviceConfig.ExecStart =
+                lib.mkForce "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/vm-instance-platform.json --run-instance %i";
               "vm-storage-format" = {
                 after = [ "dev-vdb.device" ];
                 requires = [ "dev-vdb.device" ];
@@ -602,9 +642,13 @@ let
               "vm-instance-platform.json".text = builtins.toJSON instancePlatform;
               "vm-instance-images/postgres.tar".source = postgresImage;
               "vm-instance-images/mongo.tar".source = mongoImage;
-              "${namespace}/garage.toml" = { text = ''[admin]
-                admin_token = "vm-instance-token"
-              ''; mode = "0600"; };
+              "${namespace}/garage.toml" = {
+                text = ''
+                  [admin]
+                                  admin_token = "vm-instance-token"
+                '';
+                mode = "0600";
+              };
             })
             (lib.mkIf (role == "worker") {
               "${namespace}/docker-auth.json".text = ''{"auths":{}}'';

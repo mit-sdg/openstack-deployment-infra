@@ -50,7 +50,13 @@ let
   '';
   storageBackup = pkgs.writeShellScriptBin "openstack-platform-storage-backup" ''
     export PLATFORM_CONFIG="''${PLATFORM_CONFIG:-/etc/${namespace}/platform.json}"
-    export PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.postgresql_17 pkgs.mongodb-tools pkgs.podman ]}:$PATH
+    export PATH=/run/wrappers/bin:${
+      lib.makeBinPath [
+        pkgs.postgresql_17
+        pkgs.mongodb-tools
+        pkgs.podman
+      ]
+    }:$PATH
     exec ${packages.controllerPackage}/bin/openstack-platform-storage-backup "$@"
   '';
   managedBackup = pkgs.writeShellScriptBin "openstack-platform-managed-backup" ''
@@ -66,7 +72,16 @@ let
     export GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py
     export GARAGE_VERIFY_SCRIPT=${infra}/backup/verify_garage_backup.py
     export SERVICE_CHECK_PYTHON=${packages.python}/bin/python
-    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.findutils pkgs.util-linux pkgs.postgresql_17 pkgs.mongodb-tools packages.python ]}:$PATH
+    export PATH=${
+      lib.makeBinPath [
+        pkgs.coreutils
+        pkgs.findutils
+        pkgs.util-linux
+        pkgs.postgresql_17
+        pkgs.mongodb-tools
+        packages.python
+      ]
+    }:$PATH
     exec ${infra}/backup/run_platform_backup.sh "$@"
   '';
   storageRepair = pkgs.writeShellScriptBin "openstack-platform-storage-repair" ''

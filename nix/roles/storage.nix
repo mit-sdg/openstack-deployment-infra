@@ -104,7 +104,12 @@ in
   # Reload only declarative tables; preserve the manager's isolated dynamic table.
   networking.nftables.flushRuleset = false;
   # The manager's earlier nft chain admits only the owning worker/admin IPs.
-  networking.firewall.allowedTCPPortRanges = [ { from = 30000; to = 30999; } ];
+  networking.firewall.allowedTCPPortRanges = [
+    {
+      from = 30000;
+      to = 30999;
+    }
+  ];
   # Bound host logs outside database projects: 1 GiB persistent history and
   # 256 MiB volatile logs fit the 4 GiB host-services/page-cache allowance.
   services.journald.extraConfig = ''
@@ -255,7 +260,11 @@ in
     "${namespace}-garage" = {
       image = platform.containers.garage;
       # 4 GiB gives 50 buckets metadata/cache headroom while bounding S3 memory.
-      extraOptions = [ "--memory=4096m" "--memory-swap=4096m" "--cpus=2" ];
+      extraOptions = [
+        "--memory=4096m"
+        "--memory-swap=4096m"
+        "--cpus=2"
+      ];
       volumes = [
         "/run/credentials/podman-${namespace}-garage.service/garage-config:/etc/garage.toml:ro"
         "${data}/object-storage:/var/lib/garage"
@@ -273,7 +282,11 @@ in
     "${namespace}-registry" = {
       image = platform.containers.registry;
       # 2 GiB supports concurrent builder image streams; blobs stay on disk.
-      extraOptions = [ "--memory=2048m" "--memory-swap=2048m" "--cpus=1" ];
+      extraOptions = [
+        "--memory=2048m"
+        "--memory-swap=2048m"
+        "--cpus=1"
+      ];
       environmentFiles = [ "/run/credentials/podman-${namespace}-registry.service/registry.env" ];
       volumes = [
         "${data}/registry:/var/lib/registry"
@@ -303,8 +316,14 @@ in
       };
       "${namespace}-storage-data-layout" = {
         description = "Prepare ${platform.displayName} mounted storage layout";
-        after = [ mountUnit growUnit ];
-        requires = [ mountUnit growUnit ];
+        after = [
+          mountUnit
+          growUnit
+        ];
+        requires = [
+          mountUnit
+          growUnit
+        ];
         before = [
           "podman-${namespace}-postgres.service"
           "podman-${namespace}-mongodb.service"
@@ -360,7 +379,10 @@ in
       };
       "${namespace}-database@" = {
         description = "Isolated database instance %i";
-        after = [ "${namespace}-storage-instance-manager.service" mountUnit ];
+        after = [
+          "${namespace}-storage-instance-manager.service"
+          mountUnit
+        ];
         requires = [ mountUnit ];
         wantedBy = [ ];
         serviceConfig = {
@@ -384,22 +406,55 @@ in
       "${namespace}-storage-instance-manager" = {
         description = "Authenticated isolated database instance manager";
         wantedBy = [ "multi-user.target" ];
-        after = [ "cloud-final.service" "nftables.service" mountUnit dataLayoutUnit ];
-        requires = [ "nftables.service" mountUnit dataLayoutUnit ];
+        after = [
+          "cloud-final.service"
+          "nftables.service"
+          mountUnit
+          dataLayoutUnit
+        ];
+        requires = [
+          "nftables.service"
+          mountUnit
+          dataLayoutUnit
+        ];
         # pg_dump 17 matches the pinned PostgreSQL 17.11 source image.
-        path = [ pkgs.podman pkgs.systemd pkgs.nftables pkgs.xfsprogs pkgs.coreutils pkgs.postgresql_17 pkgs.mongodb-tools ];
+        path = [
+          pkgs.podman
+          pkgs.systemd
+          pkgs.nftables
+          pkgs.xfsprogs
+          pkgs.coreutils
+          pkgs.postgresql_17
+          pkgs.mongodb-tools
+        ];
         serviceConfig = {
           ExecStart = "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/${namespace}/platform.json";
           LoadCredential = "garage-config:/etc/${namespace}/garage.toml";
           Restart = "on-failure";
           ProtectSystem = "strict";
           ProtectHome = true;
-          ReadWritePaths = [ data "/run/systemd" "/etc/systemd/system" "-/run/containers" "-/run/crun" "-/run/runc" "-/var/lib/containers" ];
-          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_NETLINK" ];
+          ReadWritePaths = [
+            data
+            "/run/systemd"
+            "/etc/systemd/system"
+            "-/run/containers"
+            "-/run/crun"
+            "-/run/runc"
+            "-/var/lib/containers"
+          ];
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_NETLINK"
+          ];
           # Manager tools may reach only local databases; TLS/bearer requests
           # arrive through nginx on loopback. No SSH command execution surface.
           IPAddressDeny = "any";
-          IPAddressAllow = [ "localhost" platform.addresses.storage "10.88.0.0/16" ];
+          IPAddressAllow = [
+            "localhost"
+            platform.addresses.storage
+            "10.88.0.0/16"
+          ];
           # Streaming tools/JSON fit 512 MiB; one core/128 tasks bound control
           # work inside the 4 GiB host allowance instead of competing with DBs.
           MemoryMax = "512M";
@@ -412,8 +467,14 @@ in
       "${namespace}-storage-host-status" = {
         description = "Authenticated read-only storage host metrics";
         wantedBy = [ "multi-user.target" ];
-        after = [ "cloud-final.service" mountUnit ];
-        requires = [ "cloud-final.service" mountUnit ];
+        after = [
+          "cloud-final.service"
+          mountUnit
+        ];
+        requires = [
+          "cloud-final.service"
+          mountUnit
+        ];
         path = [ pkgs.podman ];
         serviceConfig = {
           ExecStart = "${pkgs.python3}/bin/python3 ${infra}/monitor/storage_host.py --data ${data} --namespace ${namespace}";
@@ -422,11 +483,19 @@ in
           # Podman inspect and cgroup reads need the host's root namespace.
           ProtectSystem = "strict";
           # podman inspect takes local metadata locks; it receives fixed names.
-          ReadWritePaths = [ "-/run/containers" "-/run/crun" "-/run/runc" "-/var/lib/containers" ];
+          ReadWritePaths = [
+            "-/run/containers"
+            "-/run/crun"
+            "-/run/runc"
+            "-/var/lib/containers"
+          ];
           ProtectHome = true;
           PrivateTmp = true;
           NoNewPrivileges = true;
-          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" ];
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+          ];
           IPAddressDeny = "any";
           IPAddressAllow = "localhost";
           LimitCORE = 0;
