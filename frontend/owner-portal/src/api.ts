@@ -23,17 +23,23 @@ export const configurationGuidance = {
 };
 export type StorageBinding = { resourceId: string; outputs: Record<string, string> };
 export type StorageQuotas = {
-  postgresConnections?: number;
-  measuredTargetBytes?: number;
+  connections?: number;
+  sizeBytes?: number;
+  memoryBytes?: number;
+  cpuMillicores?: number;
   s3Bytes?: number;
   s3Objects?: number;
 };
 export type StorageResource = {
+  isolation: 'instance' | 'shared';
+  hardQuotaBytes: number | null;
   quotas: StorageQuotas;
   usage: {
     usedBytes: number | null;
     objectCount: number | null;
     currentConnections: number | null;
+    instanceMemoryBytes: number | null;
+    cpuTimeMilliseconds: number | null;
     measuredAt: string | null;
     stale: boolean;
   };

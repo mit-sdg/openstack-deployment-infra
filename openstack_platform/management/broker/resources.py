@@ -197,7 +197,14 @@ def storage_resources(self: Broker, app_id: str) -> list[dict[str, Any]]:
                         key: item["quotas"][key]
                         for key in item["quotas"]
                         if key
-                        in {"postgresConnections", "measuredTargetBytes", "s3Bytes", "s3Objects"}
+                        in {
+                            "sizeBytes",
+                            "connections",
+                            "memoryBytes",
+                            "cpuMillicores",
+                            "s3Bytes",
+                            "s3Objects",
+                        }
                     },
                     "usage": {
                         key: item["usage"][key]
@@ -205,10 +212,14 @@ def storage_resources(self: Broker, app_id: str) -> list[dict[str, Any]]:
                             "usedBytes",
                             "objectCount",
                             "currentConnections",
+                            "instanceMemoryBytes",
+                            "cpuTimeMilliseconds",
                             "measuredAt",
                             "stale",
                         )
                     },
+                    "isolation": item["isolation"],
+                    "hardQuotaBytes": item["hardQuotaBytes"],
                     "writeBlock": {
                         key: item["writeBlock"][key] for key in ("blocked", "reason", "since")
                     },

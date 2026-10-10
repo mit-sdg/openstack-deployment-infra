@@ -824,6 +824,18 @@ def _issues(
                     }
                 )
     for application in applications:
+        for resource in application["storage"]:
+            if resource["writeBlock"].get("blocked") is True:
+                issues.append(
+                    {
+                        "tone": "warning",
+                        "scope": "application",
+                        "target": application["id"],
+                        "subject": application["slug"],
+                        "summary": f"{resource['typeLabel']} writes paused",
+                        "detail": "Size limit exceeded. Reads and deletes remain available; deleting enough data restores writes automatically.",
+                    }
+                )
         status = application["status"]
         if status["tone"] not in {"critical", "warning"}:
             continue
@@ -979,7 +991,15 @@ def _summary(
             "applications": {
                 "total": len(visible),
                 "serving": sum(1 for item in visible if item["status"]["key"] == "serving"),
-                "attention": tone_counts["critical"] + tone_counts["warning"],
+                "attention": sum(
+                    1
+                    for item in visible
+                    if item["status"]["tone"] in {"critical", "warning"}
+                    or any(
+                        resource["writeBlock"].get("blocked") is True
+                        for resource in item["storage"]
+                    )
+                ),
                 "changing": tone_counts["info"],
                 "stopped": sum(1 for item in visible if item["status"]["key"] == "stopped"),
             },

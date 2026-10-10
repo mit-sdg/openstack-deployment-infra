@@ -191,10 +191,13 @@ class Fixture:
                 )
             for kind in app.storage:
                 quotas: dict[str, int] = {}
-                if kind == "postgres":
-                    quotas = {"postgresConnections": 10, "measuredTargetBytes": 2_147_483_648}
-                elif kind == "mongo":
-                    quotas = {"measuredTargetBytes": 2_147_483_648}
+                if kind == "postgres" or kind == "mongo":
+                    quotas = {
+                        "connections": 10,
+                        "sizeBytes": 2_147_483_648,
+                        "memoryBytes": 536870912,
+                        "cpuMillicores": 500,
+                    }
                 else:
                     quotas = {"s3Bytes": 5_368_709_120, "s3Objects": 100_000}
                 state = "recovery_required" if behaviour == "recovery" else "active"
@@ -211,6 +214,8 @@ class Fixture:
                             "usedBytes": 1288490188,
                             "objectCount": 12345 if kind == "s3" else None,
                             "currentConnections": 3 if kind == "postgres" else None,
+                            "instanceMemoryBytes": 335544320 if kind != "s3" else None,
+                            "cpuTimeMilliseconds": 12345 if kind != "s3" else None,
                             "measuredAt": _at(now, minutes=3),
                             "stale": False,
                         },

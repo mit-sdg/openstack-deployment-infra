@@ -69,7 +69,7 @@ _RESOURCE_TYPES = frozenset({"postgres", "mongo", "s3"})
 _RESOURCE_STATES = frozenset({"creating", "active", "removing", "recovery_required"})
 _HOST_STATES = frozenset({"active", "building", "error", "missing", "stopped", "unknown"})
 _RUNTIMES = frozenset({"bun", "node"})
-_QUOTA_KEYS = ("postgresConnections", "measuredTargetBytes", "s3Bytes", "s3Objects")
+_QUOTA_KEYS = ("sizeBytes", "connections", "memoryBytes", "cpuMillicores", "s3Bytes", "s3Objects")
 
 # The reader executes with the admin guest's system Python as the operator
 # account already admitted to privileged.sock. Its argv is fixed except for the
@@ -479,7 +479,13 @@ def storage_usage(value: object) -> dict[str, Any]:
     return {
         **{
             key: _integer(raw.get(key))
-            for key in ("usedBytes", "objectCount", "currentConnections")
+            for key in (
+                "usedBytes",
+                "objectCount",
+                "currentConnections",
+                "instanceMemoryBytes",
+                "cpuTimeMilliseconds",
+            )
         },
         "measuredAt": timestamp(raw.get("measuredAt")),
         "stale": raw.get("stale") is not False,

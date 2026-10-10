@@ -34,15 +34,19 @@ const resource: StorageResource = {
   status: 'ready',
   createdAt: '2026-10-01T00:00:00Z',
   verifiedAt: null,
-  quotas: { postgresConnections: 10, measuredTargetBytes: 2147483648 },
+  quotas: { connections: 10, sizeBytes: 2147483648, memoryBytes: 536870912, cpuMillicores: 500 },
   usage: {
     usedBytes: null,
     objectCount: null,
     currentConnections: null,
+    instanceMemoryBytes: null,
+    cpuTimeMilliseconds: null,
     measuredAt: null,
     stale: true,
   },
   writeBlock: { blocked: false, reason: null, since: null },
+  isolation: 'instance',
+  hardQuotaBytes: 2684354560,
   defaultBindings: { url: 'DATABASE_URL', host: 'PGHOST' },
 };
 function wrap(children: React.ReactNode) {
@@ -394,12 +398,19 @@ describe('owner resources', () => {
     mocks();
     vi.mocked(api.storage).mockResolvedValue({
       items: [
-        { ...resource, defaultBindings: { url: 'DATABASE_URL', password: 'PGPASSWORD' } },
+        {
+          ...resource,
+          isolation: 'instance',
+          hardQuotaBytes: 2684354560,
+          defaultBindings: { url: 'DATABASE_URL', password: 'PGPASSWORD' },
+        },
         {
           ...resource,
           resourceId: 'bucket',
           type: 's3',
           label: 'S3',
+          isolation: 'instance',
+          hardQuotaBytes: 2684354560,
           defaultBindings: { secret_access_key: 'AWS_SECRET_ACCESS_KEY' },
         },
       ],

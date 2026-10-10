@@ -138,6 +138,22 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(reads.storage_host["cpuCount"], 4)
         self.assertEqual(reads.storage_host["postgresConnections"], {"current": 42, "limit": 400})
 
+    def test_blocked_storage_appears_in_needs_attention_even_on_a_serving_app(self) -> None:
+        payload = fixture("healthy").admin_payload()
+        resource = next(
+            item for item in payload["storage"]["body"]["items"] if item["type"] == "mongo"
+        )
+        resource["writeBlock"] = {"blocked": True, "reason": "size_limit_exceeded", "since": now()}
+        snapshot = model.build_snapshot(evidence(admin_reads(payload)))
+        application = next(
+            item for item in snapshot["applications"] if item["id"] == resource["applicationId"]
+        )
+        self.assertEqual(application["status"]["key"], "serving")
+        issue = next(item for item in snapshot["issues"] if item["target"] == application["id"])
+        self.assertEqual((issue["scope"], issue["tone"]), ("application", "warning"))
+        self.assertIn("MongoDB", issue["summary"])
+        self.assertEqual(snapshot["summary"]["counts"]["applications"]["attention"], 1)
+
     def test_storage_samples_stay_stale_when_collection_fails_and_host_fields_are_allowlisted(
         self,
     ) -> None:

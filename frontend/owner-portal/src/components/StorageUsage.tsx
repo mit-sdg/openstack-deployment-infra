@@ -28,7 +28,7 @@ const bytes = (value: number) =>
 
 export function StorageUsage({ resource }: { resource: StorageResource }) {
   const { usage, quotas, writeBlock } = resource;
-  const size = quotas.s3Bytes ?? quotas.measuredTargetBytes;
+  const size = quotas.s3Bytes ?? quotas.sizeBytes;
   return (
     <Stack gap={2} className="app-storage-usage">
       {size !== undefined && (
@@ -58,13 +58,43 @@ export function StorageUsage({ resource }: { resource: StorageResource }) {
             : `${numbers.format(usage.objectCount)} of ${numbers.format(quotas.s3Objects)}`}
         </div>
       )}
-      {quotas.postgresConnections !== undefined && (
+      {quotas.connections !== undefined && (
         <div>
           Connections:{' '}
           {usage.currentConnections === null
-            ? `Limit ${numbers.format(quotas.postgresConnections)}`
-            : `${numbers.format(usage.currentConnections)} of ${numbers.format(quotas.postgresConnections)}`}
+            ? `Limit ${numbers.format(quotas.connections)}`
+            : `${numbers.format(usage.currentConnections)} of ${numbers.format(quotas.connections)}`}
         </div>
+      )}
+      {quotas.memoryBytes !== undefined && (
+        <div>
+          {resource.isolation === 'shared' ? 'Planned memory limit' : 'Memory limit'}:{' '}
+          {usage.instanceMemoryBytes === null
+            ? bytes(quotas.memoryBytes)
+            : `${bytes(usage.instanceMemoryBytes)} of ${bytes(quotas.memoryBytes)}`}
+        </div>
+      )}
+      {quotas.cpuMillicores !== undefined && (
+        <div>
+          {resource.isolation === 'shared' ? 'Planned CPU limit' : 'CPU limit'}:{' '}
+          {numbers.format(quotas.cpuMillicores / 1000)} cores
+        </div>
+      )}
+      {usage.cpuTimeMilliseconds !== null && (
+        <div>
+          CPU time: {numbers.format(Math.round(usage.cpuTimeMilliseconds / 100) / 10)} seconds total
+        </div>
+      )}
+      {resource.hardQuotaBytes !== null && (
+        <Hint>
+          Disk allowance: {bytes(resource.hardQuotaBytes)}, including database files and overhead.
+        </Hint>
+      )}
+      {resource.type !== 's3' && resource.isolation === 'shared' && (
+        <Hint>
+          This database is awaiting its move to a separate instance. Ask an admin before changing
+          memory or CPU limits.
+        </Hint>
       )}
       <div className="ui-text-subtle ui-text-sm">
         {usage.measuredAt ? (
@@ -108,15 +138,17 @@ export function StorageLimitsControl({
       cancel={() => setEditing(false)}
     />
   ) : (
-    <Button
-      size="sm"
-      variant="ghost"
-      disabled={disabled}
-      aria-label={`Edit ${resource.label} limits`}
-      onClick={() => setEditing(true)}
-    >
-      Edit limits
-    </Button>
+    <Cluster>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={disabled}
+        aria-label={`Edit ${resource.label} limits`}
+        onClick={() => setEditing(true)}
+      >
+        Edit limits
+      </Button>
+    </Cluster>
   );
 }
 
@@ -133,15 +165,22 @@ function LimitsForm({
 }) {
   const client = useQueryClient();
   const [expected] = useState(() => ({ ...resource.quotas }));
-  const sizeKey = resource.type === 's3' ? 's3Bytes' : 'measuredTargetBytes';
+  const sizeKey = resource.type === 's3' ? 's3Bytes' : 'sizeBytes';
   const initialSize = expected[sizeKey]!;
   const [unit, setUnit] = useState(initialSize % 1024 ** 3 === 0 ? 'GB' : 'MB');
   const [size, setSize] = useState(
     String(initialSize / (initialSize % 1024 ** 3 === 0 ? 1024 ** 3 : 1024 ** 2)),
   );
-  const countKey = resource.type === 'postgres' ? 'postgresConnections' : 's3Objects';
+  const countKey = resource.type === 's3' ? 's3Objects' : 'connections';
   const [count, setCount] = useState(String(expected[countKey] ?? ''));
-  const [validation, setValidation] = useState<{ size?: string; count?: string } | null>(null);
+  const [memory, setMemory] = useState(String((expected.memoryBytes ?? 536870912) / 1048576));
+  const [cpu, setCpu] = useState(String((expected.cpuMillicores ?? 500) / 1000));
+  const [validation, setValidation] = useState<{
+    size?: string;
+    count?: string;
+    memory?: string;
+    cpu?: string;
+  } | null>(null);
   const [intent, setIntent] = useState<Intent | null>(null);
   const pending = useRef<{ body: string; key: string } | null>(null);
   const mutation = useMutation({
@@ -198,24 +237,45 @@ function LimitsForm({
           return;
         }
         if (
-          resource.type !== 'mongo' &&
-          (!count.trim() ||
-            !Number.isSafeInteger(amount) ||
-            amount < 1 ||
-            amount > (resource.type === 'postgres' ? 400 : 100000000))
+          !count.trim() ||
+          !Number.isSafeInteger(amount) ||
+          amount < 1 ||
+          amount > (resource.type === 's3' ? 100000000 : 100)
         ) {
           setValidation({
             count:
-              resource.type === 'postgres'
-                ? 'Choose 1 to 400 connections.'
-                : 'Choose 1 to 100,000,000 objects.',
+              resource.type === 's3'
+                ? 'Choose 1 to 100,000,000 objects.'
+                : 'Choose 1 to 100 connections.',
           });
+          return;
+        }
+        const memoryBytes = Number(memory) * 1048576;
+        const cpuCores = Number(cpu);
+        const cpuMillicores = Math.round(cpuCores * 1000);
+        if (
+          resource.type !== 's3' &&
+          (!memory.trim() ||
+            !Number.isSafeInteger(memoryBytes) ||
+            memoryBytes % 1048576 ||
+            memoryBytes < 536870912 ||
+            memoryBytes > 8589934592)
+        ) {
+          setValidation({ memory: 'Choose 512 to 8,192 MB in whole MB.' });
+          return;
+        }
+        if (
+          resource.type !== 's3' &&
+          (!cpu.trim() || !Number.isSafeInteger(cpuMillicores) || cpuCores < 0.1 || cpuCores > 4)
+        ) {
+          setValidation({ cpu: 'Choose 0.1 to 4 CPU cores, in increments of 0.001.' });
           return;
         }
         setValidation(null);
         mutation.mutate({
           [sizeKey]: value,
-          ...(resource.type === 'mongo' ? {} : { [countKey]: amount }),
+          [countKey]: amount,
+          ...(resource.type === 's3' ? {} : { memoryBytes, cpuMillicores }),
         });
       }}
     >
@@ -250,22 +310,46 @@ function LimitsForm({
               <option value="GB">GB</option>
             </Select>
           </Field>
-          {resource.type !== 'mongo' && (
-            <Field
-              id={`${prefix}-count`}
-              label={resource.type === 'postgres' ? 'Connection limit' : 'Object limit'}
-              error={validation?.count}
-            >
-              <Input
-                type="number"
-                min={1}
-                max={resource.type === 'postgres' ? 400 : 100000000}
-                step={1}
-                disabled={busy}
-                value={count}
-                onChange={(event) => setCount(event.target.value)}
-              />
-            </Field>
+          <Field
+            id={`${prefix}-count`}
+            label={resource.type === 's3' ? 'Object limit' : 'Connection limit'}
+            error={validation?.count}
+          >
+            <Input
+              type="number"
+              min={1}
+              max={resource.type === 's3' ? 100000000 : 100}
+              step={1}
+              disabled={busy}
+              value={count}
+              onChange={(event) => setCount(event.target.value)}
+            />
+          </Field>
+          {resource.type !== 's3' && (
+            <>
+              <Field id={`${prefix}-memory`} label="Memory limit (MB)" error={validation?.memory}>
+                <Input
+                  type="number"
+                  min={512}
+                  max={8192}
+                  step={1}
+                  value={memory}
+                  disabled={busy || resource.isolation === 'shared'}
+                  onChange={(event) => setMemory(event.target.value)}
+                />
+              </Field>
+              <Field id={`${prefix}-cpu`} label="CPU limit (cores)" error={validation?.cpu}>
+                <Input
+                  type="number"
+                  min={0.1}
+                  max={4}
+                  step={0.001}
+                  value={cpu}
+                  disabled={busy || resource.isolation === 'shared'}
+                  onChange={(event) => setCpu(event.target.value)}
+                />
+              </Field>
+            </>
           )}
         </Grid>
         <Hint>

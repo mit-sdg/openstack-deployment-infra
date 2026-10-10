@@ -40,6 +40,8 @@ export type StorageUsage = {
   usedBytes: number | null;
   objectCount: number | null;
   currentConnections: number | null;
+  instanceMemoryBytes: number | null;
+  cpuTimeMilliseconds: number | null;
   measuredAt: string | null;
   stale: boolean;
 };

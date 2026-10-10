@@ -505,6 +505,11 @@ class FakeController:
                         )
                     else:
                         resource["quotas"] = limits["quotas"]
+                        if resource["type"] != "s3":
+                            resource["hardQuotaBytes"] = (
+                                (limits["quotas"]["sizeBytes"] * 5 + 4 * 1048576 - 1)
+                                // (4 * 1048576)
+                            ) * 1048576
                 for resource in self.resources.values():
                     if operation["scope"] == f"app-{resource['applicationId']}":
                         resource.update(lifecycleState="active", lastVerifiedAt=utc(time.time()))
@@ -897,18 +902,25 @@ class FakeController:
             "createdAt": utc(time.time()),
             "updatedAt": utc(time.time()),
             "lastVerifiedAt": None,
-            "quotas": {"postgresConnections": 10, "measuredTargetBytes": 2147483648}
-            if body["type"] == "postgres"
-            else {"measuredTargetBytes": 2147483648}
-            if body["type"] == "mongo"
+            "quotas": {
+                "connections": 10,
+                "sizeBytes": 2147483648,
+                "memoryBytes": 536870912,
+                "cpuMillicores": 500,
+            }
+            if body["type"] in {"postgres", "mongo"}
             else {"s3Bytes": 5368709120, "s3Objects": 100000},
             "usage": {
                 "usedBytes": 1288490188,
                 "objectCount": 12345 if body["type"] == "s3" else None,
                 "currentConnections": 3 if body["type"] == "postgres" else None,
+                "instanceMemoryBytes": 335544320 if body["type"] != "s3" else None,
+                "cpuTimeMilliseconds": 12345 if body["type"] != "s3" else None,
                 "measuredAt": utc(time.time()),
                 "stale": False,
             },
+            "isolation": "instance" if body["type"] != "s3" else "shared",
+            "hardQuotaBytes": 2684354560 if body["type"] != "s3" else None,
             "writeBlock": {"blocked": False, "reason": None, "since": None},
         }
         return self.resource_operation(request, app, "storage.create")

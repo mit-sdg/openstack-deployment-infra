@@ -82,8 +82,17 @@ class AdminApplicationTests(ManagementCase):
                 "applicationId": identifier,
                 "type": "postgres",
                 "name": "default",
-                "quotas": {"postgresConnections": 10, "measuredTargetBytes": 2147483648},
+                "quotas": {
+                    "connections": 10,
+                    "sizeBytes": 2147483648,
+                    "memoryBytes": 536870912,
+                    "cpuMillicores": 500,
+                },
+                "isolation": "instance",
+                "hardQuotaBytes": 2684354560,
                 "usage": {
+                    "instanceMemoryBytes": None,
+                    "cpuTimeMilliseconds": None,
                     "usedBytes": None,
                     "objectCount": None,
                     "currentConnections": None,
@@ -194,15 +203,33 @@ class AdminApplicationTests(ManagementCase):
         identifier = resource["resourceId"]
         provider = self.fixture.resources[identifier]
         provider.update(
-            providerId="private-provider", providerName="private-name", usageError="private-error"
+            providerId="private-provider",
+            providerName="private-name",
+            usageError="private-error",
+            instanceId=str(uuid.uuid4()),
+            instancePort=54321,
+            migrationState="copying",
         )
         provider["usage"]["providerSecret"] = "private-secret"
         owner = self.call("GET", self.prefix + "/storage", owner="alice").body["data"]["items"][0]
         self.assertEqual(owner["quotas"], provider["quotas"])
         self.assertEqual(owner["writeBlock"], provider["writeBlock"])
-        self.assertFalse({"providerId", "providerName", "usageError"} & owner.keys())
+        self.assertFalse(
+            {
+                "providerId",
+                "providerName",
+                "usageError",
+                "instanceId",
+                "instancePort",
+                "migrationState",
+            }
+            & owner.keys()
+        )
         self.assertNotIn("providerSecret", owner["usage"])
-        body = {"quotas": {"measuredTargetBytes": 4294967296}, "expectedQuotas": owner["quotas"]}
+        body = {
+            "quotas": {**owner["quotas"], "sizeBytes": 4294967296},
+            "expectedQuotas": owner["quotas"],
+        }
         path = self.prefix + f"/storage/{identifier}/limits"
         calls = len(self.fixture.calls)
         for headers, code in (
@@ -217,6 +244,22 @@ class AdminApplicationTests(ManagementCase):
                 "ACCESS_DENIED", lambda actor=actor: self.call("PUT", path, body, actor)
             )
         self.assertEqual(len(self.fixture.calls), calls)
+        for delta in (
+            {"connections": 101},
+            {"memoryBytes": 1073741825},
+            {"memoryBytes": 8589934593},
+            {"cpuMillicores": 99},
+            {"cpuMillicores": 4001},
+        ):
+            self.assert_error(
+                "INVALID_REQUEST",
+                lambda delta=delta: self.call(
+                    "PUT",
+                    path,
+                    {"quotas": {**body["quotas"], **delta}, "expectedQuotas": owner["quotas"]},
+                    "admin",
+                ),
+            )
         key = str(uuid.uuid4())
         response = self.call("PUT", path, body, "admin", key)
         intent = response.body["data"]["intentId"]
@@ -259,7 +302,7 @@ class AdminApplicationTests(ManagementCase):
             {"s3Bytes": 1048576.0, "s3Objects": 1},
             {"s3Bytes": 1048576, "s3Objects": 100000001},
             {"s3Bytes": 1048576},
-            {**current, "postgresConnections": 10},
+            {**current, "connections": 10},
         ):
             self.assert_error(
                 "INVALID_REQUEST",

@@ -242,4 +242,18 @@
   height: var(--ui-space-2);
   margin-block: var(--ui-space-2);
   accent-color: var(--ui-accent-solid);
+  appearance: none;
+  border: 0;
+  border-radius: var(--ui-radius-full);
+  overflow: hidden;
+  background: var(--ui-surface-subtle);
+}
+.app-storage-meter::-webkit-progress-bar {
+  background: var(--ui-surface-subtle);
+}
+.app-storage-meter::-webkit-progress-value {
+  background: var(--ui-accent-solid);
+}
+.app-storage-meter::-moz-progress-bar {
+  background: var(--ui-accent-solid);
 }

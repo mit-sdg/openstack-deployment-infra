@@ -53,9 +53,23 @@ class RealProjectCase(ManagementCase):
         storage_model = ControllerAPI._storage_model
 
         def sampled_storage(resource: Any, *, admin: bool = False) -> dict[str, object]:
+            model = storage_model(resource, admin=admin)
+            database = model["type"] != "s3"
             return {
-                **storage_model(resource, admin=admin),
+                **model,
+                "quotas": {
+                    "sizeBytes": 2147483648,
+                    "connections": 10,
+                    "memoryBytes": 536870912,
+                    "cpuMillicores": 500,
+                }
+                if database
+                else model["quotas"],
+                "isolation": "instance" if database else "shared",
+                "hardQuotaBytes": 2684354560 if database else None,
                 "usage": {
+                    "instanceMemoryBytes": None,
+                    "cpuTimeMilliseconds": None,
                     "usedBytes": None,
                     "objectCount": None,
                     "currentConnections": None,

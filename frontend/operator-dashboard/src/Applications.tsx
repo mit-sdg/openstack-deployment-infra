@@ -29,7 +29,9 @@ export const filters: {
     key: "attention",
     label: "Needs attention",
     test: (app) =>
-      !app.deletedAt && ["critical", "warning"].includes(app.status.tone),
+      !app.deletedAt &&
+      (["critical", "warning"].includes(app.status.tone) ||
+        app.storage.some((resource) => resource.writeBlock.blocked)),
   },
   {
     key: "serving",

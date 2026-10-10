@@ -94,11 +94,13 @@ function Identifier({
 }
 function Resource({ resource }: { resource: Storage }) {
   const labels: Record<string, [string, (value: number) => string]> = {
-    postgresConnections: ["Connections", (value) => numberFormat.format(value)],
-    measuredTargetBytes: [
+    connections: ["Connections", (value) => numberFormat.format(value)],
+    sizeBytes: [
       resource.type === "postgres" ? "Size target" : "Size limit",
       formatBytes,
     ],
+    memoryBytes: ["Memory limit", formatBytes],
+    cpuMillicores: ["CPU cores", (value) => numberFormat.format(value / 1000)],
     s3Bytes: ["Size limit", formatBytes],
     s3Objects: ["Objects", (value) => numberFormat.format(value)],
   };
@@ -122,8 +124,26 @@ function Resource({ resource }: { resource: Storage }) {
               Used{" "}
               {resource.usage.usedBytes === null
                 ? "—"
-                : `${formatBytes(resource.usage.usedBytes)}${(resource.quotas.s3Bytes ?? resource.quotas.measuredTargetBytes) ? ` of ${formatBytes(resource.quotas.s3Bytes ?? resource.quotas.measuredTargetBytes)}` : ""}`}
+                : `${formatBytes(resource.usage.usedBytes)}${(resource.quotas.s3Bytes ?? resource.quotas.sizeBytes) ? ` of ${formatBytes(resource.quotas.s3Bytes ?? resource.quotas.sizeBytes)}` : ""}`}
             </span>
+            {resource.usage.instanceMemoryBytes !== null && (
+              <span>
+                {" "}
+                · Memory {formatBytes(
+                  resource.usage.instanceMemoryBytes,
+                )} of {formatBytes(resource.quotas.memoryBytes)}
+              </span>
+            )}
+            {resource.usage.cpuTimeMilliseconds !== null && (
+              <span>
+                {" "}
+                · CPU time{" "}
+                {numberFormat.format(
+                  resource.usage.cpuTimeMilliseconds / 1000,
+                )}{" "}
+                s total
+              </span>
+            )}
             {resource.usage.objectCount !== null && (
               <span>
                 {" "}
@@ -137,8 +157,8 @@ function Resource({ resource }: { resource: Storage }) {
               <span>
                 {" "}
                 · {numberFormat.format(resource.usage.currentConnections)}
-                {resource.quotas.postgresConnections !== undefined &&
-                  ` of ${numberFormat.format(resource.quotas.postgresConnections)}`}{" "}
+                {resource.quotas.connections !== undefined &&
+                  ` of ${numberFormat.format(resource.quotas.connections)}`}{" "}
                 connections
               </span>
             )}{" "}

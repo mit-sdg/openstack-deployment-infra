@@ -16,14 +16,16 @@ if TYPE_CHECKING:
     from .api import Broker
 
 QUOTA_BOUNDS = {
-    "postgresConnections": (1, 400),
-    "measuredTargetBytes": (1048576, 549755813888),
+    "connections": (1, 100),
+    "sizeBytes": (1048576, 549755813888),
+    "memoryBytes": (536870912, 8589934592),
+    "cpuMillicores": (100, 4000),
     "s3Bytes": (1048576, 549755813888),
     "s3Objects": (1, 100000000),
 }
 QUOTA_FIELDS = {
-    "postgres": {"postgresConnections", "measuredTargetBytes"},
-    "mongo": {"measuredTargetBytes"},
+    "postgres": {"sizeBytes", "connections", "memoryBytes", "cpuMillicores"},
+    "mongo": {"sizeBytes", "connections", "memoryBytes", "cpuMillicores"},
     "s3": {"s3Bytes", "s3Objects"},
 }
 
@@ -32,7 +34,12 @@ def quotas(value: object, resource_type: str) -> dict[str, Any]:
     result = object_body(value, QUOTA_FIELDS[resource_type])
     for key, number in result.items():
         low, high = QUOTA_BOUNDS[key]
-        if type(number) is not int or not low <= number <= high:
+        if (
+            type(number) is not int
+            or not low <= number <= high
+            or key == "memoryBytes"
+            and number % 1048576
+        ):
             raise HttpError(
                 400, "INVALID_REQUEST", "Choose storage limits within the allowed range."
             )

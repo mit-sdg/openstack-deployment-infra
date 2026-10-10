@@ -12,12 +12,16 @@ const resource: StorageResource = {
   status: 'ready',
   createdAt: '2026-10-10T12:00:00Z',
   verifiedAt: null,
+  isolation: 'instance',
+  hardQuotaBytes: 2684354560,
   defaultBindings: {},
-  quotas: { measuredTargetBytes: 2147483648 },
+  quotas: { connections: 10, sizeBytes: 2147483648, memoryBytes: 536870912, cpuMillicores: 500 },
   usage: {
     usedBytes: null,
     objectCount: null,
     currentConnections: null,
+    instanceMemoryBytes: null,
+    cpuTimeMilliseconds: null,
     measuredAt: null,
     stale: true,
   },
@@ -82,12 +86,13 @@ describe('storage usage and limits', () => {
     expect(save).not.toHaveBeenCalled();
     expect(screen.getByLabelText('Size limit')).toHaveAttribute('aria-invalid', 'true');
     fireEvent.change(screen.getByLabelText('Size limit'), { target: { value: '1.2' } });
+    fireEvent.change(screen.getByLabelText('CPU limit (cores)'), { target: { value: '1.001' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save limits' }));
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith(
         'app',
         'resource',
-        { measuredTargetBytes: 1288490189 },
+        { connections: 10, sizeBytes: 1288490189, memoryBytes: 536870912, cpuMillicores: 1001 },
         resource.quotas,
         expect.any(String),
       ),
