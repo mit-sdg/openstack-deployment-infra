@@ -26,7 +26,7 @@ from pymongo import MongoClient
 from . import durable
 from .contracts import GARAGE_RPC_PORT
 from .controller.storage_contract import canonical_secret_keys, storage_owner
-from .helper.instances import InstanceClient
+from .helper.instances import InstanceClient, connect_ready
 from .helper.nomad import update_owned_items, variable_path
 from .validation import ValidationError, resource_name, slug, uuid
 
@@ -235,7 +235,10 @@ class Native:
         if entry["type"] == "postgres":
             cleaned = path.parent / "restore.sql"
             filter_postgres(path, cleaned)
-            with psycopg.connect(**self.pg_options(entry, password), autocommit=True) as admin:
+            # A just-created or restarted restore target may still be starting.
+            with connect_ready(
+                lambda: psycopg.connect(**self.pg_options(entry, password), autocommit=True)
+            ) as admin:
                 # Closing the worker firewall does not remove its existing DB
                 # sessions. Finish them before the dump's DROP DATABASE.
                 admin.execute(
@@ -257,6 +260,7 @@ class Native:
             )
         else:
             reset_mongo: MongoClient[dict[str, Any]] = MongoClient(self.uri(entry, password))
+            connect_ready(lambda: reset_mongo.admin.command("ping"))
             with reset_mongo:
                 for database in entry["databases"]:
                     # --drop alone leaves collections absent from the snapshot.
