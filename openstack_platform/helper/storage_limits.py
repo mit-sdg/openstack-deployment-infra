@@ -112,7 +112,11 @@ def resource_action(
     if resource_type == "postgres":
         s._require_postgres_identity(credential, application_id=application_id, host=host)
         if mutate:
-            s.postgres_role_settings(admin, credential.credential_name, quotas["connections"])
+            owner = "o_" + name[2:]
+            s.postgres_normalize_ownership(admin, name, owner, login=credential.credential_name)
+            s.postgres_role_settings(
+                admin, credential.credential_name, quotas["connections"], owner=owner
+            )
             s._pg_execute(
                 admin,
                 f"ALTER DATABASE {s._quote_identifier(name)} CONNECTION LIMIT {quotas['connections']}",

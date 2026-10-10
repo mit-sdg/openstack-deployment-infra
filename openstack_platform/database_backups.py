@@ -323,13 +323,15 @@ class Native:
             from psycopg import sql
 
             from .controller.storage_contract import provider_environment
-            from .helper.storage import postgres_role_settings
+            from .helper.storage import postgres_normalize_ownership, postgres_role_settings
 
             with psycopg.connect(**self.pg_options(entry, password), autocommit=True) as admin:
                 for row in entry["resources"]:
                     login = provider_environment("postgres", row["name"], row["bindings"])["PGUSER"]
                     connections = entry["quotas"]["connections"]
-                    postgres_role_settings(admin, login, connections)
+                    owner = "o_" + row["providerName"][2:]
+                    postgres_normalize_ownership(admin, row["providerName"], owner, login=login)
+                    postgres_role_settings(admin, login, connections, owner=owner)
                     admin.execute(
                         sql.SQL("ALTER DATABASE {} CONNECTION LIMIT {}").format(
                             sql.Identifier(row["providerName"]), sql.Literal(connections)

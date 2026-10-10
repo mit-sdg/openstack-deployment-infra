@@ -589,6 +589,8 @@ class HelperStorageTests(unittest.TestCase):
                 self.commands.append(name)
                 if name == "usersInfo":
                     return {"users": self.users}
+                if name == "dropAllUsersFromDatabase":
+                    self.users.clear()
                 return {}
 
             def list_collection_names(self):
@@ -608,6 +610,8 @@ class HelperStorageTests(unittest.TestCase):
 
             def drop_database(self, name):
                 self.dropped = True
+                self.names.remove(name)
+                self.database.collections.clear()
 
         existing = MongoAdmin([database], MongoDatabase(collections=["records"]))
         with self.assertRaisesRegex(HelperActionError, "already contains") as unsupported:
@@ -634,6 +638,25 @@ class HelperStorageTests(unittest.TestCase):
                 credential_name="u_foreign",
             )
         self.assertFalse(foreign.dropped)
+        from openstack_platform.contracts import MONGO_OWNER_FIELD
+        from openstack_platform.helper.storage import mongo_absent
+
+        owned = MongoAdmin(
+            [database],
+            MongoDatabase(
+                users=[{"user": "u_owned", "customData": {MONGO_OWNER_FIELD: APP_ID}}],
+                collections=["records"],
+            ),
+        )
+        owned.database.users.append(
+            {"user": "u_foreign", "customData": {MONGO_OWNER_FIELD: "another-app"}}
+        )
+        with self.assertRaisesRegex(HelperActionError, "foreign database users"):
+            mongo_remove(owned, application_id=APP_ID, credential_name="u_owned")
+        self.assertFalse(owned.dropped)
+        owned.database.users.pop()
+        mongo_remove(owned, application_id=APP_ID, credential_name="u_owned")
+        self.assertTrue(mongo_absent(owned, application_id=APP_ID))
 
     def test_rotation_rejects_uri_host_drift_before_provider_mutation(self) -> None:
         database = "p_11111111111141118111"

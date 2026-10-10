@@ -382,7 +382,38 @@ def _postgres_remove_created(
         )
 
 
-def postgres_role_settings(admin: Any, username: str, connections: int) -> None:
+def postgres_normalize_ownership(admin: Any, database: str, owner: str, *, login: str) -> None:
+    """Keep app objects owned by the stable role across credential generations."""
+    import psycopg
+
+    values = admin.info.get_parameters()
+    values.update(
+        dbname=database,
+        password=admin.info.password,
+        options=values.get("options", "") + " -c statement_timeout=30000 -c lock_timeout=5000",
+    )
+    # REASSIGN OWNED is database-local for app tables/functions/sequences; the
+    # generated logins have no CREATEDB or tablespace privileges. Normalize all
+    # credential generations, including an interrupted retirement, atomically.
+    with psycopg.connect(**values) as connection:
+        members = _pg_execute(
+            connection,
+            "SELECT r.rolname FROM pg_roles r JOIN pg_auth_members m ON m.member=r.oid JOIN pg_roles o ON o.oid=m.roleid WHERE o.rolname=%s",
+            (owner,),
+        ).fetchall()
+        prefix = re.escape(login.rsplit("_", 1)[0])
+        for (member,) in members:
+            if not re.fullmatch(prefix + r"_[a-f0-9]{8}", member):
+                raise HelperActionError(
+                    "IDENTITY_MISMATCH", "PostgreSQL owner membership is invalid"
+                )
+            _pg_execute(
+                connection,
+                f"REASSIGN OWNED BY {_quote_identifier(member)} TO {_quote_identifier(owner)}",
+            )
+
+
+def postgres_role_settings(admin: Any, username: str, connections: int, *, owner: str) -> None:
     """Shared by create, rotate and the idempotent rollout repair."""
     role = _quote_identifier(username)
     _pg_execute(
@@ -393,6 +424,9 @@ def postgres_role_settings(admin: Any, username: str, connections: int) -> None:
         ("idle_in_transaction_session_timeout", "60s"),
         ("lock_timeout", "5s"),
         ("temp_file_limit", "256MB"),
+        # Session authorization remains the capped login; object ownership uses
+        # the stable NOLOGIN role, so rotations retain data and DDL privileges.
+        ("role", owner),
     ):
         _pg_execute(admin, f"ALTER ROLE {role} SET {setting}='{value}'")
 
@@ -446,7 +480,7 @@ def postgres_create(
             f"{_sql_literal(_postgres_marker(operation_id, generation, 'credential'))}",
         )
         _pg_execute(admin, f"GRANT {_quote_identifier(owner)} TO {_quote_identifier(username)}")
-        postgres_role_settings(admin, username, connections)
+        postgres_role_settings(admin, username, connections, owner=owner)
         _pg_execute(
             admin,
             f"CREATE DATABASE {_quote_identifier(database)} OWNER {_quote_identifier(owner)} CONNECTION LIMIT {connections}",
@@ -606,6 +640,7 @@ def postgres_rotate(
         application_id=application_id,
         host=host,
     )
+    postgres_normalize_ownership(admin, database, owner, login=old_name)
     username = _credential_name(application_id, generation)
     password = password_factory()
     if not password or "\x00" in password or len(password.encode()) > 1_024:
@@ -616,7 +651,7 @@ def postgres_rotate(
         f"CREATE ROLE {_quote_identifier(username)} LOGIN PASSWORD {password_literal} CONNECTION LIMIT {connections}",
     )
     try:
-        postgres_role_settings(admin, username, connections)
+        postgres_role_settings(admin, username, connections, owner=owner)
         _pg_execute(admin, f"GRANT {_quote_identifier(owner)} TO {_quote_identifier(username)}")
     except Exception:
         _pg_execute(admin, f"DROP ROLE {_quote_identifier(username)}")
@@ -1048,7 +1083,19 @@ def mongo_remove(
         raise _recovery_required(
             "mongo", "remove", "inspect the deterministic database ownership marker before deletion"
         )
+    if any(
+        not isinstance(user.get("customData"), Mapping)
+        or user["customData"].get(_MONGO_OWNER_FIELD) != application_id
+        for user in users
+    ):
+        raise _recovery_required(
+            "mongo", "remove", "inspect foreign database users before deletion"
+        )
     admin.drop_database(database)
+    # Mongo stores users/roles in admin: dropping data alone leaves the scoped
+    # login active and makes removal's absence check fail on every replay.
+    database_client.command("dropAllUsersFromDatabase")
+    database_client.command("dropAllRolesFromDatabase")
 
 
 def mongo_absent(admin: Any, *, application_id: str) -> bool:

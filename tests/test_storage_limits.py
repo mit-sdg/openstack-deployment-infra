@@ -50,6 +50,13 @@ def now():
 class Postgres:
     def __init__(self):
         self.statements = []
+        self.info = SimpleNamespace(get_parameters=lambda: {}, password="root-private")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
 
     def execute(self, statement, parameters=()):
         self.statements.append(statement)
@@ -64,6 +71,9 @@ class Postgres:
         if statement.startswith("SELECT pg_database_size"):
             return (0,)
         return None
+
+    def fetchall(self):
+        return [(LOGIN,)]
 
 
 class Mongo:
@@ -109,8 +119,25 @@ class Mongo:
 
 
 class ProviderLimitsTests(unittest.TestCase):
-    def test_create_rotate_and_repair_share_postgres_role_settings(self):
+    def test_ownership_normalization_rejects_other_apps_before_reassigning(self):
+        admin = mock.Mock()
+        admin.info.get_parameters.return_value = {"dbname": "platform"}
+        admin.info.password = "root-private"
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.execute.return_value.fetchall.return_value = [("u_" + "2" * 20 + "_abcdef12",)]
+        with mock.patch("psycopg.connect", return_value=connection):
+            with self.assertRaises(providers.HelperActionError) as rejected:
+                providers.postgres_normalize_ownership(
+                    admin, DATABASE, "o_" + DATABASE[2:], login=LOGIN
+                )
+        self.assertEqual(rejected.exception.code, "IDENTITY_MISMATCH")
+        self.assertEqual(connection.execute.call_count, 1)
+
+    @mock.patch("psycopg.connect")
+    def test_create_rotate_and_repair_share_postgres_role_settings(self, connect):
         admin = Postgres()
+        connect.return_value = admin
         created = providers.postgres_create(
             admin,
             application_id=APP_ID,
@@ -142,7 +169,7 @@ class ProviderLimitsTests(unittest.TestCase):
                 if s.startswith("ALTER ROLE")
             ],
         )
-        self.assertEqual(len(create_settings), 5)
+        self.assertEqual(len(create_settings), 6)
         for setting in (
             "statement_timeout='30s'",
             "idle_in_transaction_session_timeout='60s'",
@@ -189,7 +216,7 @@ class ProviderLimitsTests(unittest.TestCase):
                 s.replace(created.credential_name, "LOGIN")
                 for s in admin.statements
                 if s.startswith("ALTER ROLE")
-            ][:5],
+            ][:6],
         )
 
     def test_mongo_block_hysteresis_unblock_failure_and_rotation(self):
