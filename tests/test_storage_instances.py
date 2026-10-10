@@ -644,6 +644,97 @@ class InstanceControllerTests(unittest.TestCase):
             check(self.connection, resources[24].resource_id, quotas(size=500 * GIB))
         self.assertEqual(disk.exception.code, "DISK_BUDGET_EXCEEDED")
 
+    def test_first_limits_edit_stops_before_binding_update_and_replays_one_redeploy(self):
+        from dataclasses import replace
+
+        from openstack_platform.controller.application_models import Manifest
+        from openstack_platform.controller.nomad_jobs import render_nomad_job, storage_hosts_job
+        from openstack_platform.controller.storage_limits import StorageLimitsService
+
+        resource = self.add(APP_ID, "mongo")
+        application = db.get_application(self.connection, APP_ID)
+        old_platform = replace(
+            self.config.platform,
+            document={
+                **self.config.platform.document,
+                "internalNames": {"storage": "legacy.example.internal"},
+            },
+        )
+        job = render_nomad_job(
+            application_id=APP_ID,
+            application_slug=application.slug,
+            image="registry/app@sha256:" + "b" * 64,
+            manifest=Manifest("node", (".",), None, "start", 3000, "/health"),
+            platform=old_platform,
+            cpu_mhz=1000,
+            memory_mib=1024,
+            source_commit="a" * 40,
+            recipe_hash="c" * 64,
+        )
+        accept_deployment(
+            self.connection,
+            application_id=APP_ID,
+            source_commit="a" * 40,
+            recipe_hash="c" * 64,
+            image_digest="registry/app@sha256:" + "b" * 64,
+            nomad_job=job,
+            nomad_version=1,
+            build_log_path="logs/build.log",
+        )
+        db.set_application_runtime(
+            self.connection,
+            APP_ID,
+            running=True,
+            worker_server_id=str(uuid.uuid4()),
+            worker_server_name="worker",
+            worker_port_id=str(uuid.uuid4()),
+            worker_port_name="worker-v4",
+            nomad_version=1,
+        )
+        calls = []
+        interrupted = True
+
+        def helper(config, action, args, **bounds):
+            calls.append(action)
+            if action == "app.stop":
+                return {"jobStopped": True}
+            if action == "storage.mongo.limits":
+                self.assertEqual(calls[-2], "app.stop")
+                return {
+                    "applied": True,
+                    "writeBlocked": False,
+                    "usage": {
+                        "usedBytes": 0,
+                        "objectCount": None,
+                        "currentConnections": None,
+                        "instanceMemoryBytes": None,
+                        "cpuTimeMilliseconds": None,
+                        "measuredAt": db.utc_now(),
+                    },
+                }
+            if action == "app.deploy":
+                self.assertEqual(args["job"], storage_hosts_job(job, self.config.platform))
+                if interrupted:
+                    raise RuntimeError("lost deploy response")
+                return {"nomadVersion": 2}
+            raise AssertionError(action)
+
+        service = StorageLimitsService(
+            self.connection, self.config, self.root, helper_caller=helper
+        )
+        key = str(uuid.uuid4())
+        with self.assertRaises(RuntimeError):
+            service.select(resource.resource_id, quotas(size=3 * GIB), quotas(), request_id=key)
+        self.assertEqual(calls, ["app.stop", "storage.mongo.limits", "app.deploy"])
+        interrupted = False
+        service.select(resource.resource_id, quotas(size=3 * GIB), quotas(), request_id=key)
+        self.assertEqual(calls, ["app.stop", "storage.mongo.limits", "app.deploy", "app.deploy"])
+        self.assertEqual(
+            db.get_deployment(self.connection, APP_ID).nomad_job,
+            storage_hosts_job(job, self.config.platform),
+        )
+        self.assertEqual(db.get_operation(self.connection, key).status, "succeeded")
+
     def test_migration_replays_only_unswitched_resources_and_refreshes_accepted_job(self):
         first = self.add(APP_ID, "postgres")
         second = self.add(APP_ID, "mongo")

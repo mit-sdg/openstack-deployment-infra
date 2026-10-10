@@ -268,7 +268,7 @@ class StorageLimitsService:
                 if operation.phase != "applied":
                     db.checkpoint_operation(self.connection, request_id, phase="applying")
                     if resource.resource_type in {"postgres", "mongo"}:
-                        self.prepare_dns_job(resource.application_id, deadline)
+                        self.quiesce_dns_job(resource.application_id, deadline)
                     result = self._call(
                         resource,
                         "limits",
@@ -289,6 +289,8 @@ class StorageLimitsService:
                 else:
                     usage = operation.refs["usage"]
                     blocked = operation.refs["write_blocked"]
+                if resource.resource_type in {"postgres", "mongo"}:
+                    self.prepare_dns_job(resource.application_id, deadline)
                 db.put_storage_limits(self.connection, resource_id, target, usage, blocked=blocked)
                 db.mark_succeeded(self.connection, request_id, cleanup_state="not_required")
             except Exception:
@@ -297,8 +299,36 @@ class StorageLimitsService:
                 )
                 raise
 
+    def quiesce_dns_job(self, application_id: str, deadline: float) -> None:
+        """Stop an old job before its binding changes, then redeploy it once."""
+        from .nomad_jobs import storage_hosts_job
+
+        deployment = db.get_deployment(self.connection, application_id)
+        application = db.get_application(self.connection, application_id)
+        if (
+            deployment is None
+            or application is None
+            or not application.desired_running
+            or storage_hosts_job(deployment.nomad_job, self.config.platform) == deployment.nomad_job
+        ):
+            return
+        identity = app.nomad_candidate_identity(deployment.nomad_job)
+        result = self.helper_caller(
+            self.config,
+            "app.stop",
+            {
+                "slug": application.slug,
+                "jobId": app.nomad_job_id(deployment.nomad_job, application.slug),
+                "candidateJobSha256": identity[0],
+                "candidateImage": identity[1],
+            },
+            deadline=deadline,
+        )
+        if result.get("jobStopped") is not True:
+            raise ValidationError("DNS mapping quiescence was not confirmed")
+
     def prepare_dns_job(self, application_id: str, deadline: float) -> None:
-        """Install the inventory host mapping before publishing DNS credentials."""
+        """Redeploy the accepted mapping after binding publication has completed."""
         from .nomad_jobs import storage_hosts_job
 
         deployment = db.get_deployment(self.connection, application_id)
@@ -370,23 +400,32 @@ class StorageLimitsService:
                             resource = self._resource(identifier)
                             if resource.lifecycle_state != "active":
                                 raise ValidationError("PostgreSQL repair requires active resources")
+                            if operation.refs.get("dns_pending_resource") != identifier:
+                                self.quiesce_dns_job(resource.application_id, deadline)
+                                result = self._call(
+                                    resource,
+                                    "limits",
+                                    deadline,
+                                    target=quotas(resource),
+                                    operation_id=request_id,
+                                    recovering=recovering,
+                                )
+                                if result.get("applied") is not True:
+                                    raise ValidationError("PostgreSQL repair was not confirmed")
+                                operation = db.checkpoint_operation(
+                                    self.connection,
+                                    request_id,
+                                    phase="repairing",
+                                    refs={"dns_pending_resource": identifier},
+                                    merge_refs=True,
+                                )
                             self.prepare_dns_job(resource.application_id, deadline)
-                            result = self._call(
-                                resource,
-                                "limits",
-                                deadline,
-                                target=quotas(resource),
-                                operation_id=request_id,
-                                recovering=recovering,
-                            )
-                            if result.get("applied") is not True:
-                                raise ValidationError("PostgreSQL repair was not confirmed")
                     completed.append(identifier)
                     db.checkpoint_operation(
                         self.connection,
                         request_id,
                         phase="repairing",
-                        refs={"completed": completed},
+                        refs={"completed": completed, "dns_pending_resource": None},
                         merge_refs=True,
                     )
                 db.mark_succeeded(self.connection, request_id, cleanup_state="not_required")

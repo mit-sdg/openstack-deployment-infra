@@ -352,6 +352,23 @@ class Manager:
     def unit(self, identifier: str) -> str:
         return f"{self.namespace}-database@{identifier}.service"
 
+    def check_reduction(self, config: dict[str, Any], size: int) -> None:
+        output = self.command(
+            (
+                "du",
+                "--summarize",
+                "--block-size=1",
+                "--",
+                str(self.directory(config["instanceId"]) / "data"),
+            )
+        )
+        physical = int(output.stdout.split()[0])
+        margin = (384 if config["type"] == "postgres" else 128) * MIB
+        if hard_quota(size) < physical + margin:
+            raise CapacityError(
+                "SIZE_BELOW_USAGE", "hard quota would fall below physical data plus headroom"
+            )
+
     def apply(self, config: dict[str, Any], *, restart: bool) -> None:
         identifier = config["instanceId"]
         directory = self.directory(identifier)
@@ -811,24 +828,19 @@ class Manager:
                         raise ValidationError("instance limit fields are invalid")
                     target = validate_limits(args["quotas"])
                     if target["sizeBytes"] < config["quotas"]["sizeBytes"]:
-                        output = self.command(
-                            (
-                                "du",
-                                "--summarize",
-                                "--block-size=1",
-                                "--",
-                                str(self.directory(identifier) / "data"),
-                            )
-                        )
-                        physical = int(output.stdout.split()[0])
-                        margin = (384 if config["type"] == "postgres" else 128) * MIB
-                        if hard_quota(target["sizeBytes"]) < physical + margin:
-                            raise CapacityError(
-                                "SIZE_BELOW_USAGE",
-                                "hard quota would fall below physical data plus headroom",
-                            )
+                        self.check_reduction(config, target["sizeBytes"])
                     self.capacity(identifier, target)
                     self.reserve_disk(args["reservations"])
+                    if target["sizeBytes"] < config["quotas"]["sizeBytes"]:
+                        # Reject mistakes while serving; quiesce only an admitted
+                        # reduction, then account for writes since the live check.
+                        self.command(("systemctl", "stop", self.unit(identifier)))
+                        try:
+                            self.check_reduction(config, target["sizeBytes"])
+                        except Exception:
+                            if config.get("desiredRunning", True):
+                                self.command(("systemctl", "start", self.unit(identifier)))
+                            raise
                     changed = config.get("acceptedQuotas") != target
                     old_reserved = config.get("reservedQuotas", config["quotas"])
                     config["reservedQuotas"] = {
