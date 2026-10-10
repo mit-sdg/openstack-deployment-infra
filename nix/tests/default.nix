@@ -812,6 +812,9 @@ let
               "${namespace}-database@".serviceConfig.ExecStart =
                 lib.mkForce "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/vm-instance-platform.json --run-instance %i";
               "vm-storage-format" = {
+                # Runs before local-fs.target via the data mount; default
+                # dependencies (after basic.target) would form an ordering cycle.
+                unitConfig.DefaultDependencies = false;
                 after = [ "dev-vdb.device" ];
                 requires = [ "dev-vdb.device" ];
                 serviceConfig.Type = "oneshot";
@@ -1053,6 +1056,8 @@ let
           else if role == "storage" then
             ''
               print(machine.succeed("${storageRuntimeDiagnostics}"))
+              # systemd silently drops a job to break an ordering cycle; never accept that.
+              machine.succeed("! journalctl --boot --output=cat | grep -F 'Found ordering cycle'")
               # Both built-in NSS paths work with no daemon or NSS-module proxy.
               machine.succeed("test $(systemctl show nscd.service -p LoadState --value) = not-found")
               machine.succeed("getent -s files hosts ${platform.internalNames.storage} && getent hosts ${platform.internalNames.storage} && getent passwd agentops && getent passwd nginx")
