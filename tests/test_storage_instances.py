@@ -858,7 +858,11 @@ class InstanceControllerTests(unittest.TestCase):
         from dataclasses import replace
 
         from openstack_platform.controller.application_models import Manifest
-        from openstack_platform.controller.nomad_jobs import render_nomad_job, storage_hosts_job
+        from openstack_platform.controller.nomad_jobs import (
+            nomad_candidate_identity,
+            render_nomad_job,
+            storage_hosts_job,
+        )
         from openstack_platform.controller.storage_limits import StorageLimitsService
 
         resource = self.add(APP_ID, "mongo")
@@ -939,9 +943,11 @@ class InstanceControllerTests(unittest.TestCase):
         interrupted = False
         service.select(resource.resource_id, quotas(size=3 * GIB), quotas(), request_id=key)
         self.assertEqual(calls, ["app.stop", "storage.mongo.limits", "app.deploy", "app.deploy"])
+        deployment = db.get_deployment(self.connection, APP_ID)
+        self.assertEqual(deployment.nomad_job, storage_hosts_job(job, self.config.platform))
+        # Health and redeploy checks compare this to the job's embedded identity.
         self.assertEqual(
-            db.get_deployment(self.connection, APP_ID).nomad_job,
-            storage_hosts_job(job, self.config.platform),
+            deployment.nomad_job_sha256, nomad_candidate_identity(deployment.nomad_job)[0]
         )
         self.assertEqual(db.get_operation(self.connection, key).status, "succeeded")
 
@@ -951,15 +957,28 @@ class InstanceControllerTests(unittest.TestCase):
         application = db.get_application(self.connection, APP_ID)
         # The production renderer supplies scoped Variables and restart semantics.
         # Use a real generated job because immutable job identity is a boundary.
+        # Render it for the pre-instance storage name so migration rewrites it.
+        from dataclasses import replace
+
         from openstack_platform.controller.application_models import Manifest
-        from openstack_platform.controller.nomad_jobs import render_nomad_job
+        from openstack_platform.controller.nomad_jobs import (
+            nomad_candidate_identity,
+            render_nomad_job,
+            storage_hosts_job,
+        )
 
         job = render_nomad_job(
             application_id=APP_ID,
             application_slug=application.slug,
             image="registry/app@sha256:" + "b" * 64,
             manifest=Manifest("node", (".",), None, "start", 3000, "/health"),
-            platform=self.config.platform,
+            platform=replace(
+                self.config.platform,
+                document={
+                    **self.config.platform.document,
+                    "internalNames": {"storage": "legacy.example.internal"},
+                },
+            ),
             cpu_mhz=1000,
             memory_mib=1024,
             source_commit="a" * 40,
@@ -1050,7 +1069,12 @@ class InstanceControllerTests(unittest.TestCase):
             ["postgres", "mongo", "mongo"],
         )
         self.assertEqual(sum(action == "app.stop" for action, args in calls), 1)
-        self.assertEqual(db.get_deployment(self.connection, APP_ID).nomad_version, 2)
+        deployment = db.get_deployment(self.connection, APP_ID)
+        self.assertEqual(deployment.nomad_version, 2)
+        self.assertEqual(deployment.nomad_job, storage_hosts_job(job, self.config.platform))
+        self.assertEqual(
+            deployment.nomad_job_sha256, nomad_candidate_identity(deployment.nomad_job)[0]
+        )
         self.assertEqual(db.get_operation(self.connection, key).status, "succeeded")
         self.assertFalse(any(action.endswith("remove") for action, args in calls))
 

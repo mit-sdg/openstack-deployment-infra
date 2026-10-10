@@ -677,7 +677,10 @@ class Context:
                             ),
                         )
                     if self.platform is not None:
-                        from .controller.nomad_jobs import storage_hosts_job
+                        from .controller.nomad_jobs import (
+                            nomad_candidate_identity,
+                            storage_hosts_job,
+                        )
 
                         deployment = db.get_deployment(connection, current.application_id)
                         if deployment is not None:
@@ -687,7 +690,7 @@ class Context:
                                     "UPDATE deployment_attempts SET nomad_job=?,nomad_job_sha256=? WHERE deployment_id=?",
                                     (
                                         job,
-                                        hashlib.sha256(job.encode()).hexdigest(),
+                                        nomad_candidate_identity(job)[0],
                                         deployment.deployment_id,
                                     ),
                                 )

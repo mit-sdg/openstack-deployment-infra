@@ -312,8 +312,6 @@ class InstanceMigrationService:
                         merge_refs=True,
                     )
                 if deployment is not None:
-                    import hashlib
-
                     from .nomad_jobs import storage_hosts_job
 
                     job = storage_hosts_job(deployment.nomad_job, self.config.platform)
@@ -323,7 +321,7 @@ class InstanceMigrationService:
                             deployment.deployment_id,
                             status="succeeded",
                             nomad_job=job,
-                            nomad_job_sha256=hashlib.sha256(job.encode()).hexdigest(),
+                            nomad_job_sha256=app.nomad_candidate_identity(job)[0],
                         )
                         deployment = db.get_deployment(self.connection, identifier)
                         assert deployment is not None
