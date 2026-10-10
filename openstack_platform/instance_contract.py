@@ -10,7 +10,10 @@ DEFAULT_MEMORY = 512 * MIB
 DEFAULT_CPU = 500
 DEFAULT_CONNECTIONS = 10
 MEMORY_BUDGET = 50 * GIB
+TRANSITION_MEMORY_BUDGET = 36 * GIB
+MAINTENANCE_MEMORY = 2 * GIB
 CONNECTION_BUDGET = 2000
+S3_OBJECT_BUDGET = 5_000_000
 CPU_WEIGHT = 100
 IO_WEIGHT = 100
 TASKS_MAX = 256
@@ -45,4 +48,10 @@ def validate_limits(value: object) -> dict[str, int]:
 
 
 def hard_quota(size: int) -> int:
-    return (((size * 5 + 3) // 4 + MIB - 1) // MIB) * MIB
+    return (((size * 3 + 1) // 2 + MIB - 1) // MIB) * MIB
+
+
+def garage_reservation(size: int, objects: int = 0) -> int:
+    # Four KiB/object budgets key/index metadata even for zero-byte objects.
+    physical = max((size * 5 + 3) // 4, objects * 4096)
+    return ((physical + MIB - 1) // MIB) * MIB

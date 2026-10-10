@@ -60,6 +60,8 @@ def mongo_port() -> int:
     return _PORT_CONTEXT.get()[1]
 
 
+_TRUSTED_HOSTS: ContextVar[tuple[str, ...]] = ContextVar("storage_trusted_hosts", default=())
+
 _MONGO_POOL: ContextVar[int] = ContextVar("mongo_pool", default=10)
 
 
@@ -273,17 +275,17 @@ def _postgres_creation_evidence(
     credential_name = _credential_name(application_id, generation)
     owner_row = _pg_execute(
         admin,
-        "SELECT rolname, obj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s",
+        "SELECT rolname, shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s",
         (owner,),
     ).fetchone()
     credential_row = _pg_execute(
         admin,
-        "SELECT rolname, obj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s",
+        "SELECT rolname, shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s",
         (credential_name,),
     ).fetchone()
     database_row = _pg_execute(
         admin,
-        "SELECT datname, pg_get_userbyid(datdba), obj_description(oid, 'pg_database') "
+        "SELECT datname, pg_get_userbyid(datdba), shobj_description(oid, 'pg_database') "
         "FROM pg_database WHERE datname=%s",
         (database,),
     ).fetchone()
@@ -526,7 +528,7 @@ def _require_postgres_identity(
             or not isinstance(host, str)
             or not host
             or "\x00" in host
-            or environment["PGHOST"] != host
+            or environment["PGHOST"] not in {host, *_TRUSTED_HOSTS.get()}
             or environment["PGSSLMODE"] != "verify-full"
         ):
             raise ValueError
@@ -889,7 +891,12 @@ def _require_mongo_identity(
         parsed = urllib.parse.urlsplit(environment["MONGODB_URI"])
         if parsed.scheme != "mongodb":
             raise ValueError
-        if not isinstance(host, str) or not host or "\x00" in host or parsed.hostname != host:
+        if (
+            not isinstance(host, str)
+            or not host
+            or "\x00" in host
+            or parsed.hostname not in {host, *_TRUSTED_HOSTS.get()}
+        ):
             raise ValueError
         if parsed.port != mongo_port():
             raise ValueError

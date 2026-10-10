@@ -81,7 +81,7 @@ issue_cert nomad-ingress client.global.nomad clientAuth \
 issue_cert nomad-worker client.global.nomad clientAuth \
   "DNS:client.global.nomad,DNS:${PLATFORM_PREFIX}-worker"
 issue_cert storage "storage.${PLATFORM_PREFIX}.internal" serverAuth \
-  "DNS:storage.${PLATFORM_PREFIX}.internal,DNS:postgres.${PLATFORM_PREFIX}.internal,DNS:mongo.${PLATFORM_PREFIX}.internal,DNS:s3.${PLATFORM_PREFIX}.internal,DNS:registry.${PLATFORM_PREFIX}.internal,DNS:${PLATFORM_STORAGE_HOST},IP:${PLATFORM_STORAGE_IP}"
+  "DNS:storage.${PLATFORM_PREFIX}.internal,DNS:${PLATFORM_STORAGE_INTERNAL_NAME},DNS:postgres.${PLATFORM_PREFIX}.internal,DNS:mongo.${PLATFORM_PREFIX}.internal,DNS:s3.${PLATFORM_PREFIX}.internal,DNS:registry.${PLATFORM_PREFIX}.internal,DNS:${PLATFORM_STORAGE_HOST},IP:${PLATFORM_STORAGE_IP}"
 
 chmod 0644 "$OUTPUT_DIR"/*.pem
 chmod 0600 "$OUTPUT_DIR"/*-key.pem

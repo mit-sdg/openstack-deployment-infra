@@ -22,7 +22,7 @@ from ..installation import (
 from . import database as db
 from .api import ControllerAPI
 from .http import ControllerServer, PeerPolicy
-from .storage_limits import COLLECT_SECONDS, StorageLimitsService
+from .storage_limits import FAST_COLLECT_SECONDS, StorageLimitsService
 
 _DEFAULT_PLATFORM = Path(os.environ.get("PLATFORM_CONFIG", str(DEFAULT_CONTROLLER_INVENTORY)))
 _DEFAULT_STATE = DEFAULT_CONTROLLER_STATE
@@ -149,10 +149,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 while not stopping.is_set():
                     try:
-                        collector.collect()
+                        collector.collect(scheduled=True)
                     except Exception:
                         logging.getLogger(__name__).warning("storage usage collection cycle failed")
-                    stopping.wait(COLLECT_SECONDS)
+                    stopping.wait(FAST_COLLECT_SECONDS)
 
         threads = [threading.Thread(target=collect_usage, name="controller-storage-usage")] + [
             threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2})

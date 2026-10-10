@@ -15,12 +15,16 @@ import json
 import logging
 import os
 import secrets
+import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -30,9 +34,11 @@ from .instance_contract import (
     CONNECTION_BUDGET,
     CPU_WEIGHT,
     IO_WEIGHT,
+    MAINTENANCE_MEMORY,
     MEMORY_BUDGET,
     MIB,
     TASKS_MAX,
+    TRANSITION_MEMORY_BUDGET,
     CapacityError,
     hard_quota,
     validate_limits,
@@ -45,14 +51,50 @@ PORT_MAX = 30999
 Run = Callable[..., Any]
 
 
+_COPY_CANCEL: ContextVar[Callable[[], bool] | None] = ContextVar("copy_cancel", default=None)
+
+
 def run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
+    cancel = _COPY_CANCEL.get()
+    if cancel is None or argv[0] not in {"pg_dump", "pg_restore", "mongodump", "mongorestore"}:
+        return subprocess.run(
+            tuple(argv),
+            check=kwargs.pop("check", True),
+            capture_output=True,
+            timeout=kwargs.pop("timeout", 60),
+            **kwargs,
+        )
+    checked = kwargs.pop("check", True)
+    deadline = time.monotonic() + kwargs.pop("timeout", 60)
+    process = subprocess.Popen(
         tuple(argv),
-        check=kwargs.pop("check", True),
-        capture_output=True,
-        timeout=kwargs.pop("timeout", 60),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
         **kwargs,
     )
+    try:
+        while True:
+            if cancel() or time.monotonic() >= deadline:
+                raise TimeoutError("instance copy cancelled or deadline expired")
+            try:
+                out, err = process.communicate(
+                    timeout=min(1, max(0.01, deadline - time.monotonic()))
+                )
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if checked and process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, argv)
+        return subprocess.CompletedProcess(argv, process.returncode, out, err)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
 
 
 def unit_limits(quotas: Mapping[str, int]) -> str:
@@ -87,6 +129,7 @@ def database_command(config: Mapping[str, Any], namespace: str) -> list[str]:
             "ssl_key_file": f"{pki}/storage-key.pem",
             "ssl_ca_file": f"{pki}/internal-ca.pem",
             "ssl_min_protocol_version": "TLSv1.2",
+            "hba_file": f"{pki}/pg_hba.conf",
         }
         return [
             "postgres",
@@ -111,6 +154,11 @@ def database_command(config: Mapping[str, Any], namespace: str) -> list[str]:
         "--tlsCAFile",
         f"{pki}/internal-ca.pem",
         "--tlsAllowConnectionsWithoutCertificates",
+        *(
+            ["--setParameter", "enableLocalhostAuthBypass=false"]
+            if config.get("adminInitialized")
+            else []
+        ),
     ]
 
 
@@ -121,6 +169,7 @@ class Manager:
         *,
         command: Run = run,
         units: Path = Path("/run/systemd/system"),
+        memory_budget: int = TRANSITION_MEMORY_BUDGET,
     ):
         self.platform = platform
         self.namespace = str(platform["namespace"])
@@ -129,6 +178,9 @@ class Manager:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.command = command
         self.units = units
+        self.memory_budget = memory_budget
+        self.copies: dict[str, tuple[threading.Event, threading.Event, Callable[[], bool]]] = {}
+        self.copy_lock = threading.Lock()
 
     def directory(self, identifier: str) -> Path:
         return self.root / uuid(identifier, field="instance ID")
@@ -184,22 +236,20 @@ class Manager:
             maximum_bytes=65536,
         )
 
-    def capacity(self, identifier: str, target: dict[str, int]) -> None:
+    def capacity(
+        self, identifier: str, target: dict[str, int], *, maintenance: bool = False
+    ) -> None:
         others = [item for item in self.configs() if item["instanceId"] != identifier]
-        if (
-            sum(
-                max(
-                    item["quotas"]["memoryBytes"],
-                    item.get("acceptedQuotas", item["quotas"])["memoryBytes"],
-                    item.get("reservedQuotas", item["quotas"])["memoryBytes"],
-                )
-                for item in others
+        if sum(
+            max(
+                item["quotas"]["memoryBytes"],
+                item.get("acceptedQuotas", item["quotas"])["memoryBytes"],
+                item.get("reservedQuotas", item["quotas"])["memoryBytes"],
             )
-            + target["memoryBytes"]
-            > MEMORY_BUDGET
-        ):
+            for item in others
+        ) + target["memoryBytes"] > self.memory_budget + (MAINTENANCE_MEMORY if maintenance else 0):
             raise CapacityError(
-                "MEMORY_BUDGET_EXCEEDED", "instance memory caps exceed the 50 GiB host budget"
+                "MEMORY_BUDGET_EXCEEDED", "instance memory caps exceed the configured host budget"
             )
         if (
             sum(
@@ -248,13 +298,27 @@ class Manager:
             mode=0o600,
             maximum_bytes=65536,
         )
-        for name, project, size in (
+        projects = (
             ("object-storage", 9001, garage),
             ("registry", 9002, 100 * GIB),
             ("postgres", 9003, 32 * GIB),
             ("mongodb", 9004, 32 * GIB),
             ("instance-migrations", 9005, 16 * GIB),
-        ):
+        )
+        if not initialized:
+            # Check every live shared directory before assigning any project
+            # cap. A capacity mistake must not crash un-migrated applications.
+            for name, _project, size in projects:
+                directory = self.data / name
+                directory.mkdir(mode=0o700, exist_ok=True)
+                output = self.command(("du", "--summarize", "--block-size=1", "--", str(directory)))
+                used = int(output.stdout.split()[0])
+                if used + 384 * MIB > size:
+                    raise CapacityError(
+                        "DISK_BUDGET_EXCEEDED",
+                        "shared directory exceeds initial project cap; enlarge its reservation before rollout",
+                    )
+        for name, project, size in projects:
             directory = self.data / name
             directory.mkdir(mode=0o700, exist_ok=True)
             if not initialized:
@@ -309,6 +373,12 @@ class Manager:
                     str(pki / name),
                 )
             )
+        durable.atomic_write(
+            pki / "pg_hba.conf",
+            b"local all all trust\nhostssl all all 0.0.0.0/0 scram-sha-256\nhostssl all all ::/0 scram-sha-256\nhostnossl all all 0.0.0.0/0 reject\nhostnossl all all ::/0 reject\n",
+            mode=0o644,
+            maximum_bytes=65536,
+        )
         self.command(("chown", "999:999", str(data)))
         # project -s recursively assigns project IDs and enables inheritance;
         # -p makes the durable config the path registry, independent of /etc/projects.
@@ -337,13 +407,35 @@ class Manager:
         dropin.mkdir(parents=True, exist_ok=True)
         durable.atomic_write(
             dropin / "limits.conf",
-            unit_limits(config["quotas"]).encode(),
+            unit_limits(
+                {
+                    **config["quotas"],
+                    "memoryBytes": max(
+                        config["quotas"]["memoryBytes"], config.get("restoreMemoryBytes", 0)
+                    ),
+                }
+            ).encode(),
+            mode=0o644,
+            maximum_bytes=65536,
+        )
+        durable.atomic_write(
+            dropin / "shutdown.conf",
+            (
+                "[Service]\nKillMode=mixed\nKillSignal="
+                + ("SIGINT" if config["type"] == "postgres" else "SIGTERM")
+                + "\nTimeoutStopSec=180\n"
+            ).encode(),
             mode=0o644,
             maximum_bytes=65536,
         )
         self.firewall()
         self.command(("systemctl", "daemon-reload"))
-        limits = config["quotas"]
+        limits = {
+            **config["quotas"],
+            "memoryBytes": max(
+                config["quotas"]["memoryBytes"], config.get("restoreMemoryBytes", 0)
+            ),
+        }
         self.command(
             (
                 "systemctl",
@@ -390,7 +482,17 @@ class Manager:
             # must close its access immediately. Reserved ports cannot be client
             # ephemeral ports; unrelated host replies never enter these rules.
             rules.append(f"tcp dport {{ {', '.join(map(str, ports))} }} drop")
-        rules.append("} }")
+        rules.append("}")
+        fresh = [
+            config["port"]
+            for config in self.configs()
+            if config["type"] == "mongo" and not config.get("adminInitialized")
+        ]
+        if fresh:
+            rules.append("chain bootstrap { type filter hook output priority -50; policy accept;")
+            rules.append(f"tcp dport {{ {', '.join(map(str, fresh))} }} meta skuid != 0 drop")
+            rules.append("}")
+        rules.append("}")
         # Create the table once, then atomically replace its chains. The manager
         # lock serializes all callers; nft -f is an atomic kernel transaction.
         self.command(("nft", "add", "table", "inet", table), check=False)
@@ -433,33 +535,153 @@ class Manager:
         self.command(("systemctl", "revert", self.unit(identifier)))
         return {"confirmedAbsent": True}
 
-    def dispatch(self, args: Mapping[str, Any]) -> dict[str, Any]:
-        if args.get("action") == "list":
+    def dispatch(
+        self, args: Mapping[str, Any], *, disconnected: Callable[[], bool] = lambda: False
+    ) -> dict[str, Any]:
+        if args.get("action") == "ping":
+            if set(args) != {"action"}:
+                raise ValidationError("instance ping fields are invalid")
+            return {"available": True}
+        if args.get("action") in {"list", "backup-inventory"}:
             return self._dispatch(args)
         identifier = uuid(args.get("instanceId"), field="instance ID")
+        with self.copy_lock:
+            active = self.copies.get(identifier)
+        if active is not None:
+            cancel, done, gone = active
+            if args.get("action") == "cancel-copy" or gone():
+                cancel.set()
+                if not done.wait(10):
+                    raise CapacityError(
+                        "INSTANCE_COPY_IN_PROGRESS", "copy cancellation is pending; retry"
+                    )
+            elif args.get("action") not in {"observe", "credentials"}:
+                raise CapacityError(
+                    "INSTANCE_COPY_IN_PROGRESS", "instance copy is active; retry or abort"
+                )
+        if args.get("action") == "cancel-copy":
+            if set(args) != {"action", "instanceId"}:
+                raise ValidationError("copy cancellation fields are invalid")
+            return {"cancelled": True}
+        if args.get("action") in {"observe", "credentials"}:
+            return self._dispatch(args)
         with self.instance_locked(identifier):
             if args.get("action") == "remove":
                 return self.remove(identifier, args)
+            if args.get("action") == "restore-begin":
+                if (
+                    set(args) != {"action", "instanceId", "backupSha256"}
+                    or not isinstance(args["backupSha256"], str)
+                    or len(args["backupSha256"]) != 64
+                ):
+                    raise ValidationError("restore checkpoint fields are invalid")
+                with self.locked():
+                    config = self.read(identifier)
+                    if config.get("restoredBackupSha256") == args["backupSha256"]:
+                        return {"alreadyRestored": True}
+                    if not config.get("restorePending"):
+                        config["pendingAllowIps"] = config["allowIps"]
+                    config["allowIps"] = []
+                    config["restorePending"] = args["backupSha256"]
+                    limits = dict(config["quotas"])
+                    if config["type"] == "mongo":
+                        limits["memoryBytes"] = max(limits["memoryBytes"], 1024**3)
+                    self.capacity(identifier, limits, maintenance=True)
+                    config["restoreMemoryBytes"] = limits["memoryBytes"]
+                    config["reservedQuotas"] = {
+                        **config["reservedQuotas"],
+                        "memoryBytes": limits["memoryBytes"],
+                    }
+                    self.save(config)
+                    self.firewall()
+                self.command(
+                    (
+                        "systemctl",
+                        "set-property",
+                        "--runtime",
+                        self.unit(identifier),
+                        f"MemoryMax={limits['memoryBytes']}",
+                    )
+                )
+                return {"alreadyRestored": False}
+            if args.get("action") == "restore-finish":
+                if set(args) != {"action", "instanceId", "migrationState"} or args[
+                    "migrationState"
+                ] not in {None, "switched"}:
+                    raise ValidationError("restore completion fields are invalid")
+                with self.locked():
+                    config = self.read(identifier)
+                    if not config.get("restorePending"):
+                        raise ValidationError("restore checkpoint is absent")
+                    # Keep the restore lease and closed worker firewall until
+                    # the normal memory cap is confirmed. A lost response is
+                    # replayable and never advertises an unfinished restore.
+                    completed_hash = config["restorePending"]
+                self.command(
+                    (
+                        "systemctl",
+                        "set-property",
+                        "--runtime",
+                        self.unit(identifier),
+                        f"MemoryMax={config['quotas']['memoryBytes']}",
+                    )
+                )
+                with self.locked():
+                    config["restoredBackupSha256"] = completed_hash
+                    config.pop("restorePending")
+                    config.pop("restoreMemoryBytes", None)
+                    config["reservedQuotas"] = config["acceptedQuotas"]
+                    config["allowIps"] = config.pop("pendingAllowIps", [])
+                    config["migrationState"] = args["migrationState"]
+                    self.save(config)
+                    self.firewall()
+                return self.observe(config)
             if args.get("action") == "copy":
                 from .storage_migration import copy_instance
 
                 config = self.read(identifier)
                 # Long copies serialize only this resource. Other apps' network,
                 # lifecycle and usage calls retain access to the global lock.
-                copy_instance(self, config, args)
-                return self.observe(config)
-            return self._dispatch(args)
+                cancel, done = threading.Event(), threading.Event()
+                with self.copy_lock:
+                    self.copies[identifier] = (cancel, done, disconnected)
+                marker = _COPY_CANCEL.set(lambda: cancel.is_set() or disconnected())
+                try:
+                    copy_instance(self, config, args)
+                    return self.observe(config)
+                finally:
+                    _COPY_CANCEL.reset(marker)
+                    with self.copy_lock:
+                        self.copies.pop(identifier, None)
+                    done.set()
+            result = self._dispatch(args)
+            if args.get("action") in {"create", "restore-create"}:
+                config = self.read(identifier)
+                if config["type"] == "mongo":
+                    self.bootstrap_mongo(config)
+            return result
 
     def _dispatch(self, args: Mapping[str, Any]) -> dict[str, Any]:
         action = args.get("action")
-        if action == "list":
+        if action in {"list", "backup-inventory"}:
             if set(args) != {"action"}:
                 raise ValidationError("instance list fields are invalid")
             with self.locked():
-                return {"items": [self.observe(config) for config in self.configs()]}
+                return {
+                    "items": [
+                        (
+                            {**self.observe(config), "applicationId": config["applicationId"]}
+                            if action == "backup-inventory"
+                            else self.observe(config)
+                        )
+                        for config in self.configs()
+                    ],
+                    "instanceMemoryBudgetBytes": self.memory_budget,
+                }
         identifier = uuid(args.get("instanceId"), field="instance ID")
         if action not in {
             "create",
+            "restore-create",
             "start",
             "stop",
             "limits",
@@ -469,6 +691,7 @@ class Manager:
             "seal",
             "freeze",
             "reserve",
+            "abort-copy",
         }:
             raise ValidationError("instance action is invalid")
         with self.locked():
@@ -477,8 +700,8 @@ class Manager:
                     raise ValidationError("disk reservation fields are invalid")
                 self.reserve_disk(args["reservations"])
                 return {"reserved": True}
-            if action == "create":
-                if set(args) != {
+            if action in {"create", "restore-create"}:
+                required = {
                     "action",
                     "instanceId",
                     "applicationId",
@@ -486,7 +709,17 @@ class Manager:
                     "quotas",
                     "allowIps",
                     "reservations",
-                } or args["type"] not in {"postgres", "mongo"}:
+                }
+                if action == "restore-create":
+                    required.add("port")
+                    port = args.get("port")
+                    if (
+                        not isinstance(port, int)
+                        or isinstance(port, bool)
+                        or not PORT_MIN <= port <= PORT_MAX
+                    ):
+                        raise ValidationError("restore port is invalid")
+                if set(args) != required or args["type"] not in {"postgres", "mongo"}:
                     raise ValidationError("instance create fields are invalid")
                 if (
                     self.deleting_record(identifier).exists()
@@ -504,7 +737,8 @@ class Manager:
                     if (
                         config["applicationId"] != owner
                         or config["type"] != args["type"]
-                        or config["quotas"] != target
+                        or (action == "create" and config["quotas"] != target)
+                        or (action == "restore-create" and config["port"] != args["port"])
                     ):
                         raise ValidationError(
                             "instance creation intent conflicts with durable identity"
@@ -515,10 +749,20 @@ class Manager:
                         json.loads(path.read_text())["port"]
                         for path in self.root.glob("*.deleting.json")
                     )
-                    port = next(
-                        (value for value in range(PORT_MIN, PORT_MAX + 1) if value not in occupied),
-                        None,
+                    port = (
+                        args["port"]
+                        if action == "restore-create"
+                        else next(
+                            (
+                                value
+                                for value in range(PORT_MIN, PORT_MAX + 1)
+                                if value not in occupied
+                            ),
+                            None,
+                        )
                     )
+                    if port in occupied:
+                        raise ValidationError("restore port belongs to another instance") from None
                     if port is None:
                         raise ValidationError("instance ports are exhausted") from None
                     config = {
@@ -549,11 +793,12 @@ class Manager:
                         secret, secrets.token_urlsafe(32).encode(), mode=0o400, maximum_bytes=65536
                     )
                     self.command(("chown", "999:999", str(secret)))
-                config["allowIps"] = self.addresses(args["allowIps"])
+                if action == "create":
+                    config["desiredRunning"] = True
+                if action == "create" or not config.get("allowIps"):
+                    config["allowIps"] = self.addresses(args["allowIps"])
                 self.save(config)
                 self.apply(config, restart=False)
-                if config["type"] == "mongo":
-                    self.bootstrap_mongo(config)
             else:
                 try:
                     config = self.read(identifier)
@@ -565,8 +810,38 @@ class Manager:
                     if set(args) != {"action", "instanceId", "quotas", "reservations"}:
                         raise ValidationError("instance limit fields are invalid")
                     target = validate_limits(args["quotas"])
-                    self.capacity(identifier, target)
-                    self.reserve_disk(args["reservations"])
+                    if target["sizeBytes"] < config["quotas"]["sizeBytes"]:
+                        self.command(("systemctl", "stop", self.unit(identifier)))
+                        try:
+                            output = self.command(
+                                (
+                                    "du",
+                                    "--summarize",
+                                    "--block-size=1",
+                                    "--",
+                                    str(self.directory(identifier) / "data"),
+                                )
+                            )
+                            physical = int(output.stdout.split()[0])
+                            margin = (384 if config["type"] == "postgres" else 128) * MIB
+                            if hard_quota(target["sizeBytes"]) < physical + margin:
+                                raise CapacityError(
+                                    "SIZE_BELOW_USAGE",
+                                    "hard quota would fall below physical data plus headroom",
+                                )
+                        except Exception:
+                            if config.get("desiredRunning", True):
+                                self.command(("systemctl", "start", self.unit(identifier)))
+                            raise
+                    try:
+                        self.capacity(identifier, target)
+                        self.reserve_disk(args["reservations"])
+                    except Exception:
+                        if target["sizeBytes"] < config["quotas"]["sizeBytes"] and config.get(
+                            "desiredRunning", True
+                        ):
+                            self.command(("systemctl", "start", self.unit(identifier)))
+                        raise
                     changed = config.get("acceptedQuotas") != target
                     old_reserved = config.get("reservedQuotas", config["quotas"])
                     config["reservedQuotas"] = {
@@ -595,8 +870,9 @@ class Manager:
                     if config["applicationId"] != args["applicationId"]:
                         raise ValidationError("instance network owner does not match")
                     supplied = set(self.addresses(args["addresses"]))
-                    previous = set(config["allowIps"])
-                    config["allowIps"] = sorted(
+                    field = "pendingAllowIps" if config.get("restorePending") else "allowIps"
+                    previous = set(config[field])
+                    config[field] = sorted(
                         supplied
                         if args["mode"] == "replace"
                         else previous | supplied
@@ -628,8 +904,24 @@ class Manager:
                     if config.get("sourceRole") is None:
                         config["sourceRole"] = args["sourceRole"]
                         self.save(config)
+                elif action == "abort-copy":
+                    if set(args) != {"action", "instanceId", "operationId"}:
+                        raise ValidationError("abort checkpoint fields are invalid")
+                    config["abortedOperationId"] = uuid(args["operationId"], field="operation ID")
+                    config["migrationState"] = "aborted"
+                    config["allowIps"] = []
+                    self.save(config)
+                    self.firewall()
                 elif action == "seal":
-                    if set(args) != {"action", "instanceId"}:
+                    if (
+                        args.get("operationId") is not None
+                        and config.get("abortedOperationId") == args["operationId"]
+                    ):
+                        raise ValidationError("migration was aborted; start a fresh intent")
+                    if set(args) not in (
+                        {"action", "instanceId"},
+                        {"action", "instanceId", "operationId"},
+                    ):
                         raise ValidationError("instance seal fields are invalid")
                     if config.get("migrationState") not in {"verified", "switched"}:
                         raise ValidationError("instance copy has not been verified")
@@ -641,9 +933,16 @@ class Manager:
 
     @staticmethod
     def addresses(values: Any) -> list[str]:
-        if not isinstance(values, list) or len(values) > 8:
+        if (
+            not isinstance(values, list)
+            or len(values) > 8
+            or any(not isinstance(value, str) for value in values)
+        ):
             raise ValidationError("instance allowlist is invalid")
-        return sorted({str(ipaddress.ip_address(value)) for value in values})
+        try:
+            return sorted({str(ipaddress.ip_address(value)) for value in values})
+        except ValueError:
+            raise ValidationError("instance allowlist address is invalid") from None
 
     def observe(self, config: dict[str, Any]) -> dict[str, Any]:
         result = {key: config[key] for key in ("instanceId", "port", "quotas", "migrationState")}
@@ -673,8 +972,7 @@ class Manager:
             for config in self.configs():
                 try:
                     self.apply(config, restart=False)
-                    if config["type"] == "mongo" and config.get("desiredRunning", True):
-                        self.bootstrap_mongo(config)
+
                 except Exception:
                     logging.warning(
                         "instance %s restore requires reconciliation", config["instanceId"]
@@ -723,7 +1021,9 @@ class Manager:
                     ) from None
                 time.sleep(0.25)
         config["adminInitialized"] = True
-        self.save(config)
+        with self.locked():
+            self.save(config)
+            self.firewall()
 
     def launch(self, identifier: str) -> None:
         config = self.read(identifier)
@@ -808,7 +1108,18 @@ def http_handler(manager: Manager, token: str) -> type[BaseHTTPRequestHandler]:
                 args = json.loads(self.rfile.read(int(length)))
                 if not isinstance(args, dict):
                     raise ValidationError("instance request must be an object")
-                result = manager.dispatch(args)
+
+                def disconnected() -> bool:
+                    try:
+                        return bool(
+                            self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+                        )
+                    except BlockingIOError:
+                        return False
+                    except OSError:
+                        return True
+
+                result = manager.dispatch(args, disconnected=disconnected)
                 status = 200
             except (ValidationError, FileNotFoundError) as error:
                 result = {
@@ -847,17 +1158,26 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--run-instance")
+    parser.add_argument("--memory-budget-bytes", type=int, default=TRANSITION_MEMORY_BUDGET)
     args = parser.parse_args()
-    manager = Manager(json.loads(args.config.read_text()))
+    if not 1 <= args.memory_budget_bytes <= MEMORY_BUDGET:
+        parser.error("memory budget exceeds the host allowance")
+    manager = Manager(json.loads(args.config.read_text()), memory_budget=args.memory_budget_bytes)
     if args.run_instance:
         manager.launch(uuid(args.run_instance, field="instance ID"))
         return 0
-    config = tomllib.loads(
+    garage_config = tomllib.loads(
         (Path(os.environ["CREDENTIALS_DIRECTORY"]) / "garage-config").read_text()
     )
     manager.restore()
+    for config in manager.configs():
+        if config["type"] == "mongo" and config.get("desiredRunning", True):
+            try:
+                manager.bootstrap_mongo(config)
+            except Exception:
+                logging.warning("Mongo bootstrap requires reconciliation")
     server = ThreadingHTTPServer(
-        ("127.0.0.1", 19002), http_handler(manager, config["admin"]["admin_token"])
+        ("127.0.0.1", 19002), http_handler(manager, garage_config["admin"]["admin_token"])
     )
     server.daemon_threads = True
     server.serve_forever()

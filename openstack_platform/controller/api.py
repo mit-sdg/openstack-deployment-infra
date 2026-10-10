@@ -103,7 +103,11 @@ class LocalHelperTransport:
         *,
         deadline: float | None = None,
     ) -> Mapping[str, object]:
-        timeout = float(config.policy.limits.helper_seconds)
+        timeout = float(
+            config.policy.limits.migration_app_seconds
+            if action.startswith("storage.instances.") or action == "storage.backup.ensure"
+            else config.policy.limits.helper_seconds
+        )
         if deadline is not None:
             timeout = min(timeout, deadline - time.monotonic())
         if timeout <= 0:
@@ -357,6 +361,7 @@ class ControllerAPI:
             ("GET", "/v1/admin/storage", self._admin_storage),
             ("POST", "/v1/admin/storage/repair-postgres", self._repair_postgres),
             ("POST", "/v1/admin/storage/migrate-instances", self._migrate_instances),
+            ("POST", "/v1/admin/storage/abort-migration", self._abort_instances),
             ("GET", "/v1/admin/operations", self._admin_operations),
         )
         for method, path, handler in routes:
@@ -447,7 +452,13 @@ class ControllerAPI:
                         retryable=True,
                     ) from None
                 except remote.HelperError as error:
-                    raise HttpError(502, error.code, error.message) from None
+                    retryable = error.code in {
+                        "INSTANCE_MANAGER_UNAVAILABLE",
+                        "INSTANCE_COPY_IN_PROGRESS",
+                    }
+                    raise HttpError(
+                        503 if retryable else 502, error.code, error.message, retryable=retryable
+                    ) from None
                 except db.DatabaseError:
                     raise HttpError(
                         409, "STATE_CONFLICT", "controller state prevented the request"
@@ -610,6 +621,34 @@ class ControllerAPI:
                     work=execute,
                 )
             return self._operation_response(claimed.result_id, admin=admin)
+        if (
+            kind in {"app.deploy", "app.enable"}
+            and scope.startswith("app-")
+            and any(
+                resource.instance_id is not None
+                for resource in db.list_managed_resources(self.connection, application_id=scope[4:])
+            )
+        ):
+            # Before accepting a long operation, return a retryable dependency
+            # failure if instance network administration is unavailable.
+            try:
+                available = self.helper_caller(
+                    self.config, "storage.instances.available", {}, deadline=time.monotonic() + 10
+                )
+            except Exception:
+                raise HttpError(
+                    503,
+                    "INSTANCE_MANAGER_UNAVAILABLE",
+                    "storage instance manager is unavailable; retry",
+                    retryable=True,
+                ) from None
+            if available.get("available") is not True:
+                raise HttpError(
+                    503,
+                    "INSTANCE_MANAGER_UNAVAILABLE",
+                    "storage instance manager is unavailable; retry",
+                    retryable=True,
+                )
         self.executor.submit(
             self.connection,
             operation_id=claimed.request_id,
@@ -1436,13 +1475,13 @@ class ControllerAPI:
             from .storage_capacity import check
 
             check(self.connection, resource.resource_id, target)
+            storage_limits.validate_reduction(resource, target)
             accepted = storage_limits.quotas(resource)
             if (
                 resource.resource_type != "s3"
                 and resource.instance_id is None
                 and (
-                    any(target[key] != accepted[key] for key in ("memoryBytes", "cpuMillicores"))
-                    or target["connections"] > accepted["connections"]
+                    target["connections"] > accepted["connections"]
                     or resource.resource_type == "mongo"
                     and target["connections"] != accepted["connections"]
                 )
@@ -1450,7 +1489,7 @@ class ControllerAPI:
                 raise HttpError(
                     409,
                     "INSTANCE_MIGRATION_REQUIRED",
-                    "migrate this resource before changing instance compute or increasing shared connection caps",
+                    "migrate this resource before increasing shared connection caps",
                 )
         return self._external(
             request,
@@ -1464,14 +1503,38 @@ class ControllerAPI:
 
     def _migrate_instances(self, request: Request) -> Response:
         self._no_query(request)
-        self._body(request, allowed=set(), allow_absent=True)
+        body = self._body(request, allowed={"applicationIds"}, allow_absent=True)
+        selected = body.get("applicationIds")
+        if selected is not None:
+            if not isinstance(selected, list) or not 1 <= len(selected) <= 50:
+                raise HttpError(400, "INVALID_REQUEST", "applicationIds must contain 1..50 UUIDs")
+            selected = tuple(sorted({uuid(value, field="application ID") for value in selected}))
+            for identifier in selected:
+                self._application(identifier)
         return self._external(
             request,
             lambda connection, key: InstanceMigrationService(
                 connection, self.config, self.state_directory, helper_caller=self.helper_caller
-            ).migrate(request_id=key),
+            ).migrate(request_id=key, application_ids=selected),
             kind=MIGRATE_KIND,
             scope="infrastructure",
+        )
+
+    def _abort_instances(self, request: Request) -> Response:
+        self._no_query(request)
+        body = self._body(request, allowed={"applicationIds"}, allow_absent=True)
+        selected = body.get("applicationIds")
+        if selected is not None:
+            if not isinstance(selected, list) or not 1 <= len(selected) <= 50:
+                raise HttpError(400, "INVALID_REQUEST", "applicationIds must contain 1..50 UUIDs")
+            selected = tuple(sorted({uuid(value, field="application ID") for value in selected}))
+        return self._external(
+            request,
+            lambda connection, key: InstanceMigrationService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).abort(request_id=key, application_ids=selected),
+            kind="storage.instances.abort",
+            scope="storage-abort",
         )
 
     def _repair_postgres(self, request: Request) -> Response:

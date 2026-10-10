@@ -204,7 +204,10 @@ class ApplicationActionTests(unittest.TestCase):
             datacenter="dc1",
             region="global",
             network="private",
-            document={},
+            document={
+                "internalNames": {"storage": "storage.example.internal"},
+                "addresses": {"storage": "192.0.2.13"},
+            },
         )
         image = "registry.example/projects/demo-app/app@sha256:" + "e" * 64
         common = {
@@ -354,7 +357,10 @@ class ApplicationActionTests(unittest.TestCase):
             datacenter="dc1",
             region="global",
             network="private",
-            document={},
+            document={
+                "internalNames": {"storage": "storage.example.internal"},
+                "addresses": {"storage": "192.0.2.13"},
+            },
         )
         image = "registry.example/projects/demo-app/app@sha256:" + "a" * 64
         job = render_nomad_job(

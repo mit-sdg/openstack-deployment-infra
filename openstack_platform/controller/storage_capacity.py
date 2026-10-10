@@ -6,16 +6,16 @@ import json
 import sqlite3
 from typing import Any
 
-from ..instance_contract import CONNECTION_BUDGET, MEMORY_BUDGET, CapacityError
+from ..instance_contract import CONNECTION_BUDGET, MEMORY_BUDGET, S3_OBJECT_BUDGET, CapacityError
 
 
 def check(connection: sqlite3.Connection, resource_id: str | None, target: dict[str, int]) -> None:
-    from ..instance_contract import GIB, hard_quota
+    from ..instance_contract import GIB, garage_reservation, hard_quota
 
     if "sizeBytes" in target or "s3Bytes" in target:
         reserved = disk_reservations(connection)
         row = connection.execute(
-            "SELECT measured_target_bytes,s3_bytes FROM managed_resources WHERE resource_id=?",
+            "SELECT measured_target_bytes,s3_bytes,s3_objects FROM managed_resources WHERE resource_id=?",
             (resource_id,),
         ).fetchone()
         field = "sizeBytes" if "sizeBytes" in target else "s3Bytes"
@@ -24,7 +24,13 @@ def check(connection: sqlite3.Connection, resource_id: str | None, target: dict[
             if row
             else 0
         )
-        increase = hard_quota(target[field]) - hard_quota(current or 0)
+        reserve = hard_quota if field == "sizeBytes" else garage_reservation
+        increase = (
+            garage_reservation(target[field], target.get("s3Objects", 0))
+            - garage_reservation(current or 0, row["s3_objects"] or 0 if row else 0)
+            if field == "s3Bytes"
+            else reserve(target[field]) - reserve(current or 0)
+        )
         if increase > 0:
             host = connection.execute(
                 "SELECT usage_json FROM storage_host_usage WHERE singleton=1"
@@ -43,6 +49,28 @@ def check(connection: sqlite3.Connection, resource_id: str | None, target: dict[
                     "hard disk reservations exceed 85% of the data volume; grow the volume before admitting this limit",
                 )
     if "s3Bytes" in target:
+        objects = {
+            row["resource_id"]: int(row["s3_objects"] or 0)
+            for row in connection.execute(
+                "SELECT resource_id,s3_objects FROM managed_resources WHERE resource_type='s3'"
+            )
+        }
+        for row in connection.execute(
+            "SELECT refs_json FROM operations WHERE kind='storage.limits.set' AND status IN ('running','recovery_required')"
+        ):
+            intent = json.loads(row["refs_json"])
+            if intent.get("resource_id") in objects:
+                objects[intent["resource_id"]] = max(
+                    objects[intent["resource_id"]], intent.get("quotas", {}).get("s3Objects", 0)
+                )
+        previous_objects = objects.get(resource_id or "new", 0)
+        requested = target.get("s3Objects", previous_objects)
+        objects[resource_id or "new"] = max(previous_objects, requested)
+        if requested > previous_objects and sum(objects.values()) > S3_OBJECT_BUDGET:
+            raise CapacityError(
+                "OBJECT_BUDGET_EXCEEDED",
+                "S3 object reservations exceed the five-million-object backup/metadata budget",
+            )
         return
     resources: dict[str, dict[str, int]] = {
         row["resource_id"]: {
@@ -75,10 +103,22 @@ def check(connection: sqlite3.Connection, resource_id: str | None, target: dict[
         resources[resource_id or "new"] = {
             name: target[name] for name in ("memoryBytes", "connections")
         }
-    if sum(item["memoryBytes"] for item in resources.values()) > MEMORY_BUDGET:
+    from ..instance_contract import TRANSITION_MEMORY_BUDGET
+
+    host = connection.execute(
+        "SELECT usage_json FROM storage_host_usage WHERE singleton=1"
+    ).fetchone()
+    budget = (
+        json.loads(host["usage_json"]).get("instanceMemoryBudgetBytes", TRANSITION_MEMORY_BUDGET)
+        if host
+        else TRANSITION_MEMORY_BUDGET
+    )
+    if not isinstance(budget, int) or not 0 < budget <= MEMORY_BUDGET:
+        raise CapacityError("MEMORY_BUDGET_EXCEEDED", "storage memory budget is unavailable")
+    if sum(item["memoryBytes"] for item in resources.values()) > budget:
         raise CapacityError(
             "MEMORY_BUDGET_EXCEEDED",
-            "instance memory reservations exceed the 50 GiB storage budget",
+            "instance memory reservations exceed the configured storage memory budget",
         )
     if sum(item["connections"] for item in resources.values()) > CONNECTION_BUDGET:
         raise CapacityError(
@@ -87,12 +127,13 @@ def check(connection: sqlite3.Connection, resource_id: str | None, target: dict[
 
 
 def disk_reservations(connection: sqlite3.Connection) -> dict[str, int]:
-    from ..instance_contract import hard_quota
+    from ..instance_contract import garage_reservation, hard_quota
 
     values = {
         row["resource_id"]: {
             "sizeBytes": int(row["measured_target_bytes"] or 0),
             "s3Bytes": int(row["s3_bytes"] or 0),
+            "s3Objects": int(row["s3_objects"] or 0),
         }
         for row in connection.execute("SELECT * FROM managed_resources")
     }
@@ -101,13 +142,15 @@ def disk_reservations(connection: sqlite3.Connection) -> dict[str, int]:
     ):
         refs = json.loads(row["refs_json"])
         if refs.get("resource_id") in values:
-            for key in ("sizeBytes", "s3Bytes"):
+            for key in ("sizeBytes", "s3Bytes", "s3Objects"):
                 values[refs["resource_id"]][key] = max(
                     values[refs["resource_id"]][key], refs.get("quotas", {}).get(key, 0)
                 )
     return {
         "databaseBytes": sum(hard_quota(item["sizeBytes"]) for item in values.values()),
-        "garageBytes": sum(hard_quota(item["s3Bytes"]) for item in values.values()),
+        "garageBytes": sum(
+            garage_reservation(item["s3Bytes"], item["s3Objects"]) for item in values.values()
+        ),
     }
 
 
@@ -142,6 +185,11 @@ def helper_metadata(
 
     return {
         "resourceId": None if resource is None else resource.resource_id,
+        "stagedInstanceId": resource.resource_id
+        if resource is not None
+        and resource.instance_id is None
+        and resource.migration_state == "aborted"
+        else None,
         "reservations": disk_reservations(connection),
         "workloadJobId": workload_job(connection, application_id),
         "retainedWorker": retained_worker(connection, application_id),

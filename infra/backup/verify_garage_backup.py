@@ -25,7 +25,7 @@ def main() -> int:
             finally:
                 s3.close()
         print(
-            f"garage-archive=verified buckets={len(manifest['buckets'])} objects={len(manifest['objects'])}"
+            f"garage-archive=verified buckets={len(manifest['buckets'])} objects={manifest.get('objectCount', len(manifest['objects']))}"
         )
         return 0
     except Exception:

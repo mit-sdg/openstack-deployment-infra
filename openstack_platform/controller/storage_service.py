@@ -86,6 +86,17 @@ class StorageService:
                     self.config.policy.limits.process_seconds,
                 ),
             )
+            if request.action == "rotate" and any(
+                kind in {"postgres", "mongo"} for kind in selected
+            ):
+                from .storage_limits import StorageLimitsService
+
+                StorageLimitsService(
+                    self.connection,
+                    self.config,
+                    self.state_directory,
+                    helper_caller=self.helper_caller,
+                ).prepare_dns_job(application.application_id, deadline)
             refreshed = db.get_application(self.connection, request.application)
             if refreshed is None or refreshed.application_id != application.application_id:
                 raise ValidationError("application does not exist")

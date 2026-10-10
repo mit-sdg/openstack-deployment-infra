@@ -40,7 +40,11 @@ fi
 """,
         )
         self._tool("age-keygen", "echo age1fixture\n")
-        self._tool("emit", 'echo "$1 fixture data"\n')
+        self._tool(
+            "emit",
+            'echo "$1 fixture data"\nif [[ $1 != garage ]]; then echo "{}" > "$DATABASE_BACKUP_CATALOG_DIR/$1-catalog.json"; fi\n',
+        )
+        self._tool("database", "cat >/dev/null\n")
         self._tool("verify.py", "cat >/dev/null\n")
         self._tool("podman", "cat >/dev/null\n")
         self.environment = {
@@ -53,6 +57,8 @@ fi
             "AGE_KEYGEN": str(self.bin / "age-keygen"),
             "GARAGE_VERIFY_SCRIPT": str(self.bin / "verify.py"),
             "EMIT_SCRIPT": str(self.bin / "emit"),
+            "DATABASE_BACKUP_COMMAND": str(self.bin / "database"),
+            "DATABASE_RESTORE_CONTROLLER_DATABASE": str(self.root / "restored.sqlite3"),
             "SECRETS_FILE": str(self.secrets),
             "SERVICE_CHECK_PYTHON": str(self.bin / "podman"),
             "MANAGED_RESTORE_LOCK": str(self.root / "restore.lock"),
@@ -81,9 +87,17 @@ fi
         evidence = self.backup()
         self.assertEqual(
             {path.name for path in evidence.iterdir()},
-            {"MANIFEST", "SHA256SUMS", "postgres.age", "mongodb.age", "garage.age"},
+            {
+                "MANIFEST",
+                "SHA256SUMS",
+                "postgres.age",
+                "mongodb.age",
+                "garage.age",
+                "postgres-catalog.json",
+                "mongodb-catalog.json",
+            },
         )
-        self.assertIn("format_version=3", (evidence / "MANIFEST").read_text())
+        self.assertIn("format_version=4", (evidence / "MANIFEST").read_text())
         result = self.run_script("restore_managed_data.sh", "--yes", str(evidence))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("managed-data-restore=verified", result.stdout)
@@ -92,13 +106,22 @@ fi
         evidence = self.backup()
         manifest = evidence / "MANIFEST"
         manifest.write_text(
-            manifest.read_text().replace("format_version=3", "format_version=2")
+            manifest.read_text()
+            .replace("format_version=4", "format_version=2")
+            .replace("postgres=database-logical-tar-v1", "postgres=pg_dumpall-clean-if-exists")
+            .replace("mongodb=database-logical-tar-v1", "mongodb=mongodump-archive-gzip")
             + "registry=distribution-artifacts-tar-gzip\n"
         )
         payload = b"age-encryption.org/v1\nlegacy image fixture"
         (evidence / "registry.age").write_bytes(payload)
         sums = evidence / "SHA256SUMS"
-        sums.write_text(sums.read_text() + f"{hashlib.sha256(payload).hexdigest()}  registry.age\n")
+        sums.write_text(
+            "\n".join(
+                line for line in sums.read_text().splitlines() if not line.endswith("catalog.json")
+            )
+            + "\n"
+            + f"{hashlib.sha256(payload).hexdigest()}  registry.age\n"
+        )
         result = self.run_script("restore_managed_data.sh", "--yes", str(evidence))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("legacy registry.age skipped", result.stdout)

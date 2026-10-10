@@ -28,6 +28,7 @@ def migrate(args: Mapping[str, Any], *, client: Any, runtime: Any, nomad: Any) -
             "quotas",
             "operationId",
             "recover",
+            "copySeconds",
             "type",
             "workerIds",
             "reservations",
@@ -41,7 +42,8 @@ def migrate(args: Mapping[str, Any], *, client: Any, runtime: Any, nomad: Any) -
     identifier = uuid(args["instanceId"], field="instance ID")
     application_id, app_slug = s._common(args, kind)
     database = s._require_fixed_provider(args, application_id, kind)
-    host = runtime.platform.get("addresses.storage")
+    s._TRUSTED_HOSTS.set((runtime.platform.get("addresses.storage"),))
+    host = runtime.platform.get("internalNames.storage")
     ca = str(runtime.root / "secrets/nomad-cli/internal-ca.pem")
     from .production import _provider_app, _read_environment
 
@@ -54,13 +56,20 @@ def migrate(args: Mapping[str, Any], *, client: Any, runtime: Any, nomad: Any) -
         observed = _provider_app("app.worker.observe", {"applicationId": worker, "slug": app_slug})
         if observed.get("address"):
             addresses.append(observed["address"])
+    existing = client.call("credentials", identifier)
+    if existing.get("absent") is not True:
+        staged = client.call("observe", identifier)
+        if staged["migrationState"] == "aborted" and staged["quotas"] != args["quotas"]:
+            client.call(
+                "limits", identifier, quotas=args["quotas"], reservations=args["reservations"]
+            )
     client.call(
         "create",
         identifier,
         applicationId=application_id,
         type=kind,
         quotas=args["quotas"],
-        allowIps=addresses,
+        allowIps=[],
         reservations=args["reservations"],
     )
     target_info = client.call("credentials", identifier)
@@ -74,6 +83,9 @@ def migrate(args: Mapping[str, Any], *, client: Any, runtime: Any, nomad: Any) -
     if already_published:
         if observed["migrationState"] != "switched":
             raise ValueError("instance publication has no durable seal")
+        client.call(
+            "allow", identifier, applicationId=application_id, addresses=addresses, mode="replace"
+        )
         return {"instancePort": target_info["port"], "verified": True, "published": True}
     s._PORT_CONTEXT.set((POSTGRES_PORT, MONGODB_PORT))
     credential = s._credential_from_environment(kind, database, database, environment)
@@ -187,7 +199,19 @@ def migrate(args: Mapping[str, Any], *, client: Any, runtime: Any, nomad: Any) -
             source_mongo.close()
             target_mongo.close()
     if observed["migrationState"] not in {"verified", "switched"}:
-        client.call("copy", identifier, database=database)
+        client.call(
+            "copy",
+            identifier,
+            database=database,
+            seconds=args["copySeconds"],
+            operationId=args["operationId"],
+            applicationLogin=credential.credential_name,
+            applicationPassword=environment["PGPASSWORD"]
+            if kind == "postgres"
+            else urllib.parse.unquote(
+                urllib.parse.urlsplit(environment["MONGODB_URI"]).password or ""
+            ),
+        )
     if kind == "mongo":
         target_mongo = MongoClient(
             host,
@@ -211,7 +235,10 @@ def migrate(args: Mapping[str, Any], *, client: Any, runtime: Any, nomad: Any) -
         finally:
             target_mongo.close()
     # Seal BEFORE publication; no retry may erase a database an app can see.
-    client.call("seal", identifier)
+    client.call("seal", identifier, operationId=args["operationId"])
+    client.call(
+        "allow", identifier, applicationId=application_id, addresses=addresses, mode="replace"
+    )
     update = s._publish(nomad, app_slug, kind, new_environment)
     return {
         "instancePort": target_info["port"],
@@ -219,3 +246,94 @@ def migrate(args: Mapping[str, Any], *, client: Any, runtime: Any, nomad: Any) -
         "published": True,
         "modifyIndex": update.modify_index,
     }
+
+
+def abort(args: Mapping[str, Any], *, client: Any, runtime: Any, nomad: Any) -> Mapping[str, Any]:
+    s._exact(
+        args,
+        {
+            "applicationId",
+            "applicationSlug",
+            "resourceName",
+            "type",
+            "providerId",
+            "providerName",
+            "instanceId",
+            "operationId",
+            "sourceRole",
+            "mode",
+        },
+        "storage.instances.abort",
+    )
+    kind = args["type"]
+    if kind not in {"postgres", "mongo"} or args["mode"] not in {"check", "apply"}:
+        raise ValueError("abort request is invalid")
+    application_id, app_slug = s._common(args, kind)
+    database = s._require_fixed_provider(args, application_id, kind)
+    environment = s._owned_environment(nomad, app_slug, kind)
+    port = (
+        int(environment["PGPORT"])
+        if kind == "postgres"
+        else urllib.parse.urlsplit(environment["MONGODB_URI"]).port
+    )
+    if port != (POSTGRES_PORT if kind == "postgres" else MONGODB_PORT):
+        from .main import HelperActionError
+
+        raise HelperActionError(
+            "MIGRATION_ALREADY_PUBLISHED",
+            "endpoint is published; replay migration instead of aborting",
+        )
+    s._PORT_CONTEXT.set((POSTGRES_PORT, MONGODB_PORT))
+    host = runtime.platform.get("internalNames.storage")
+    s._TRUSTED_HOSTS.set((runtime.platform.get("addresses.storage"),))
+    credential = s._credential_from_environment(kind, database, database, environment)
+    if kind == "postgres":
+        s._require_postgres_identity(credential, application_id=application_id, host=host)
+    else:
+        s._require_mongo_identity(credential, application_id=application_id, host=host)
+    if args["mode"] == "check":
+        return {"unpublished": True}
+    info = client.call("credentials", args["instanceId"])
+    if info.get("absent") is not True:
+        client.call("cancel-copy", args["instanceId"])
+        client.call("abort-copy", args["instanceId"], operationId=args["operationId"])
+    from .production import _read_environment
+
+    bootstrap = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
+    ca = str(runtime.root / "secrets/nomad-cli/internal-ca.pem")
+    if kind == "postgres":
+        with psycopg.connect(
+            host=host,
+            port=POSTGRES_PORT,
+            dbname="platform",
+            user="platform_admin",
+            password=bootstrap["POSTGRES_PASSWORD"],
+            sslmode="verify-full",
+            sslrootcert=ca,
+            connect_timeout=10,
+            autocommit=True,
+        ) as connection:
+            s._pg_execute(
+                connection, f"ALTER ROLE {s._quote_identifier(credential.credential_name)} LOGIN"
+            )
+    else:
+        role = args["sourceRole"]
+        if role not in {"readWrite", MONGO_BLOCKED_ROLE}:
+            raise ValueError("checkpointed source role is invalid")
+        connection_mongo: MongoClient[dict[str, Any]] = MongoClient(
+            host,
+            MONGODB_PORT,
+            username="platform_admin",
+            password=bootstrap["MONGO_PASSWORD"],
+            authSource="admin",
+            tls=True,
+            tlsCAFile=ca,
+            serverSelectionTimeoutMS=10000,
+        )
+        try:
+            connection_mongo[database].command(
+                "updateUser", credential.credential_name, roles=[{"role": role, "db": database}]
+            )
+        finally:
+            connection_mongo.close()
+    return {"unfrozen": True, "unpublished": True}

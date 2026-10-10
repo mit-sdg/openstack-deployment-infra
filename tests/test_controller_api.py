@@ -38,7 +38,12 @@ class ControllerAPITests(unittest.TestCase):
             "dc1",
             "region1",
             "network",
-            {"paths": {"root": "/srv/openstack-platform"}, "flavors": {"builder": "builder-small"}},
+            {
+                "paths": {"root": "/srv/openstack-platform"},
+                "flavors": {"builder": "builder-small"},
+                "internalNames": {"storage": "storage.example.internal"},
+                "addresses": {"storage": "192.0.2.13"},
+            },
         )
         policy = Policy(
             StandardProfile(  # type: ignore[arg-type]

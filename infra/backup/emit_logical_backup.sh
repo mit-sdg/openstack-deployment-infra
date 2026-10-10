@@ -20,32 +20,16 @@ set -a
 . "$SECRETS_FILE"
 set +a
 
-if [[ $SERVICE == postgres || $SERVICE == mongodb ]]; then
-  kind=$SERVICE
-  [[ $kind != mongodb ]] || kind=mongo
-  "$SERVICE_CHECK_PYTHON" "$SCRIPT_DIR/require_shared_storage.py" \
-    "$STORAGE_HOST" "$PLATFORM_GARAGE_RPC_PORT" "$CA_FILE" "$kind"
-fi
-
+DATABASE_BACKUP_COMMAND=${DATABASE_BACKUP_COMMAND:-openstack-platform-storage-backup}
 case "$SERVICE" in
-  postgres)
-    export PGPASSWORD=$POSTGRES_PASSWORD
-    export PGSSLMODE=verify-full
-    export PGSSLROOTCERT=/run/internal-ca.pem
-    exec podman run --rm --network=host \
-      --env PGPASSWORD --env PGSSLMODE --env PGSSLROOTCERT \
-      --volume "$CA_FILE:/run/internal-ca.pem:ro" \
-      "$POSTGRES_IMAGE" \
-      pg_dumpall --clean --if-exists \
-        --host="$STORAGE_HOST" --port="$PLATFORM_POSTGRES_PORT" --username=platform_admin
-    ;;
-  mongodb)
-    export MONGODB_URI="mongodb://platform_admin:${MONGO_PASSWORD}@${STORAGE_HOST}:${PLATFORM_MONGODB_PORT}/?authSource=admin&tls=true&tlsCAFile=/run/internal-ca.pem"
-    exec podman run --rm --network=host \
-      --env MONGODB_URI \
-      --volume "$CA_FILE:/run/internal-ca.pem:ro" \
-      "$MONGODB_IMAGE" \
-      sh -ec 'exec mongodump --uri "$MONGODB_URI" --archive --gzip'
+  postgres|mongodb)
+    kind=$SERVICE
+    [[ $kind != mongodb ]] || kind=mongo
+    catalog_arguments=()
+    if [[ -n ${DATABASE_BACKUP_CATALOG_DIR:-} ]]; then
+      catalog_arguments=(--catalog "$DATABASE_BACKUP_CATALOG_DIR/$SERVICE-catalog.json")
+    fi
+    exec "$DATABASE_BACKUP_COMMAND" emit --type "$kind" "${catalog_arguments[@]}"
     ;;
   garage)
     exec "$SERVICE_CHECK_PYTHON" "$GARAGE_EMIT_SCRIPT"

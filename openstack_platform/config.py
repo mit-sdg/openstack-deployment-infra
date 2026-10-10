@@ -60,6 +60,8 @@ _LIMIT_NAMES = {
     "processSeconds": (900, 1, 7_200),
     "helperSeconds": (900, 1, 7_200),
     "pollIntervalSeconds": (2, 1, 30),
+    "migrationBackupMaxAgeMinutes": (60, 1, 1440),
+    "migrationAppSeconds": (1800, 120, 7200),
 }
 
 
@@ -119,6 +121,8 @@ class Limits:
     process_seconds: int
     helper_seconds: int
     poll_interval_seconds: int
+    migration_backup_max_age_minutes: int = 60
+    migration_app_seconds: int = 1800
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +436,8 @@ def load_policy(path: str | Path, *, require_private: bool = True) -> Policy:
         process_seconds=limit_values["processSeconds"],
         helper_seconds=limit_values["helperSeconds"],
         poll_interval_seconds=limit_values["pollIntervalSeconds"],
+        migration_backup_max_age_minutes=limit_values["migrationBackupMaxAgeMinutes"],
+        migration_app_seconds=limit_values["migrationAppSeconds"],
     )
     return Policy(
         standard=profile,

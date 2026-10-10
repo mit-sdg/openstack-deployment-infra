@@ -25,7 +25,10 @@ app.worker.create
 app.worker.delete
 app.worker.observe
 backup.accept
+storage.backup.ensure
 storage.host.observe
+storage.instances.abort
+storage.instances.available
 storage.instances.migrate
 storage.instances.network
 storage.mongo.create

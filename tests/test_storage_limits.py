@@ -332,6 +332,7 @@ class ControllerLimitsTests(unittest.TestCase):
                     "reservations",
                     "retainedWorker",
                     "workloadJobId",
+                    "stagedInstanceId",
                 }
             }
             result = resource_action(
@@ -385,6 +386,69 @@ class ControllerLimitsTests(unittest.TestCase):
         self.assertEqual(failed.usage, usage)
         self.assertEqual(failed.usage_error, "collection_failed")
         self.assertTrue(limits.usage_model(failed)["stale"])
+
+    def test_failed_collector_releases_scope_and_admin_can_recover_crash_loop(self):
+        self.service.collect()
+        sample = db.get_managed_resource(self.connection, self.resource.resource_id).usage
+        self.lose_response = True
+        self.service.collect()
+        self.assertIsNone(db.get_unfinished_operation(self.connection, "app-" + APP_ID))
+        self.assertEqual(
+            db.get_managed_resource(self.connection, self.resource.resource_id).usage, sample
+        )
+        deployment = str(uuid.uuid4())
+        db.begin_operation(
+            self.connection,
+            operation_id=deployment,
+            kind="app.deploy",
+            scope="app-" + APP_ID,
+            phase="validated",
+            deadline_at=db.utc_now(),
+        )
+        db.mark_failed(self.connection, deployment, "fixture", cleanup_state="not_required")
+        self.lose_response = False
+        self.service.select(
+            self.resource.resource_id, db_quotas(3 * GIB), db_quotas(), request_id=str(uuid.uuid4())
+        )
+        self.assertEqual(
+            db.get_managed_resource(
+                self.connection, self.resource.resource_id
+            ).measured_target_bytes,
+            3 * GIB,
+        )
+
+    def test_size_reduction_requires_fresh_usage_and_margin_before_any_assignment(self):
+        self.service.collect()
+        self.connection.execute(
+            "UPDATE managed_resources SET measured_target_bytes=? WHERE resource_id=?",
+            (3 * GIB, self.resource.resource_id),
+        )
+        with self.assertRaises(ValidationError) as denied:
+            self.service.select(
+                self.resource.resource_id,
+                db_quotas(GIB),
+                db_quotas(3 * GIB),
+                request_id=str(uuid.uuid4()),
+            )
+        self.assertEqual(denied.exception.code, "SIZE_BELOW_USAGE")
+        usage = dict(db.get_managed_resource(self.connection, self.resource.resource_id).usage)
+        usage["measuredAt"] = (datetime.now(UTC) - timedelta(minutes=20)).isoformat()
+        db.put_storage_usage(self.connection, self.resource.resource_id, usage)
+        with self.assertRaises(ValidationError) as stale:
+            self.service.select(
+                self.resource.resource_id,
+                db_quotas(GIB),
+                db_quotas(3 * GIB),
+                request_id=str(uuid.uuid4()),
+            )
+        self.assertEqual(stale.exception.code, "USAGE_NOT_FRESH")
+
+    def test_near_limit_collection_runs_every_minute(self):
+        with mock.patch(
+            "openstack_platform.controller.storage_limits.time.monotonic", return_value=1000
+        ):
+            self.service.collect(scheduled=True)
+        self.assertEqual(self.service._next_due[self.resource.resource_id], 1060)
 
     def test_lost_provider_response_replays_intent_without_accepting_limits_early(self):
         key = str(uuid.uuid4())

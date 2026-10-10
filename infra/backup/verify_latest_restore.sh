@@ -17,6 +17,7 @@ AGE=${AGE:-$PLATFORM_ROOT/bin/age}
 AGE_KEY=${AGE_KEY:-$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt}
 PG_RESTORE_CONTAINER=${PG_RESTORE_CONTAINER:-$PLATFORM_NAMESPACE-pg-restore-test}
 MONGO_RESTORE_CONTAINER=${MONGO_RESTORE_CONTAINER:-$PLATFORM_NAMESPACE-mongo-restore-test}
+PG_RESTORE_USER=postgres
 export PG_RESTORE_CONTAINER MONGO_RESTORE_CONTAINER
 latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '20??????T??????Z' | sort | tail -1)
 [[ -n $latest ]] || { echo "no backup to restore" >&2; exit 1; }
@@ -42,6 +43,9 @@ archives = ["postgres.age", "mongodb.age", "garage.age"]
 if values.get("format_version") == "2":
     expected["registry"] = "distribution-artifacts-tar-gzip"
     archives.append("registry.age")
+elif values.get("format_version") == "4":
+    expected["postgres"] = expected["mongodb"] = "database-logical-tar-v1"
+    archives.extend(["postgres-catalog.json", "mongodb-catalog.json"])
 elif values.get("format_version") != "3":
     raise SystemExit("backup format is unsupported")
 if values != expected:
@@ -49,13 +53,14 @@ if values != expected:
 checksum_lines = (root / "SHA256SUMS").read_text().splitlines()
 checksum_names = []
 for line in checksum_lines:
-    match = re.fullmatch(r"[0-9a-f]{64}  (postgres\.age|mongodb\.age|garage\.age|registry\.age)", line)
+    match = re.fullmatch(r"[0-9a-f]{64}  (postgres\.age|mongodb\.age|garage\.age|registry\.age|postgres-catalog\.json|mongodb-catalog\.json)", line)
     if match is None:
         raise SystemExit("backup checksums are malformed")
     checksum_names.append(match.group(1))
 if sorted(checksum_names) != sorted(archives):
     raise SystemExit("backup checksum inventory does not match")
 for name in archives:
+    if not name.endswith(".age"): continue
     with (root / name).open("rb") as handle:
         if handle.read(22) != b"age-encryption.org/v1\n":
             raise SystemExit(f"{name} is not age v1 ciphertext")
@@ -75,14 +80,21 @@ remote_cleanup() {
 trap remote_cleanup EXIT
 remote_cleanup
 
-admin_shell 'podman run -d --name $PG_RESTORE_CONTAINER -e POSTGRES_PASSWORD=restore-test-only "$POSTGRES_IMAGE" >/dev/null'
+if grep -qx 'format_version=4' "$latest/MANIFEST"; then PG_RESTORE_USER=platform_admin; fi
+export PG_RESTORE_USER
+admin_shell 'podman run -d --name $PG_RESTORE_CONTAINER -e POSTGRES_PASSWORD=restore-test-only -e POSTGRES_USER=$PG_RESTORE_USER "$POSTGRES_IMAGE" >/dev/null'
 for _ in $(seq 1 30); do
-  admin_shell 'podman exec $PG_RESTORE_CONTAINER pg_isready -U postgres >/dev/null 2>&1' && break
+  admin_shell 'podman exec $PG_RESTORE_CONTAINER pg_isready -U $PG_RESTORE_USER >/dev/null 2>&1' && break
   sleep 2
 done
+if grep -qx 'format_version=4' "$latest/MANIFEST"; then
+  "$AGE" --decrypt --identity "$AGE_KEY" "$latest/postgres.age" | \
+    "${DATABASE_BACKUP_COMMAND:-openstack-platform-storage-backup}" verify --type postgres --restore-container "$PG_RESTORE_CONTAINER"
+else
 "$AGE" --decrypt --identity "$AGE_KEY" "$latest/postgres.age" | \
-  admin_shell 'podman exec -i $PG_RESTORE_CONTAINER psql -v ON_ERROR_STOP=1 -U postgres -d postgres >/dev/null'
-admin_shell 'test "$(podman exec $PG_RESTORE_CONTAINER psql -At -U postgres -d postgres -c "SELECT count(*) FROM pg_database WHERE datname='"'"'platform'"'"'")" = 1'
+  admin_shell 'podman exec -i $PG_RESTORE_CONTAINER psql -v ON_ERROR_STOP=1 -U $PG_RESTORE_USER -d postgres >/dev/null'
+admin_shell 'test "$(podman exec $PG_RESTORE_CONTAINER psql -At -U $PG_RESTORE_USER -d postgres -c "SELECT count(*) FROM pg_database WHERE datname='"'"'platform'"'"'")" = 1'
+fi
 echo "postgres restore=verified"
 
 admin_shell 'podman run -d --name $MONGO_RESTORE_CONTAINER "$MONGODB_IMAGE" >/dev/null'
@@ -90,9 +102,14 @@ for _ in $(seq 1 30); do
   admin_shell 'podman exec $MONGO_RESTORE_CONTAINER mongosh --quiet --eval '"'"'db.adminCommand("ping")'"'"' >/dev/null 2>&1' && break
   sleep 2
 done
+if grep -qx 'format_version=4' "$latest/MANIFEST"; then
+  "$AGE" --decrypt --identity "$AGE_KEY" "$latest/mongodb.age" | \
+    "${DATABASE_BACKUP_COMMAND:-openstack-platform-storage-backup}" verify --type mongo --restore-container "$MONGO_RESTORE_CONTAINER"
+else
 "$AGE" --decrypt --identity "$AGE_KEY" "$latest/mongodb.age" | \
   admin_shell 'podman exec -i $MONGO_RESTORE_CONTAINER mongorestore --archive --gzip --drop >/dev/null'
 admin_shell 'podman exec $MONGO_RESTORE_CONTAINER mongosh --quiet --eval '"'"'if (db.getSiblingDB("admin").getCollectionNames().length < 1) quit(1)'"'"''
+fi
 echo "mongodb restore=verified"
 
 "$AGE" --decrypt --identity "$AGE_KEY" "$latest/garage.age" | \

@@ -645,6 +645,15 @@ MIGRATIONS += (
     ),
 )
 
+MIGRATIONS += (
+    Migration(
+        8,
+        (
+            "CREATE TABLE storage_worker_allowlists (application_id TEXT PRIMARY KEY REFERENCES applications(application_id) ON DELETE CASCADE, record_json TEXT NOT NULL CHECK (json_valid(record_json))) STRICT",
+        ),
+    ),
+)
+
 _BOOTSTRAP = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -2609,7 +2618,7 @@ def put_managed_resource(
             from .storage_capacity import check
 
             target = (
-                {"s3Bytes": s3_bytes or 0}
+                {"s3Bytes": s3_bytes or 0, "s3Objects": s3_objects or 0}
                 if resource_type == "s3"
                 else {
                     "memoryBytes": memory_bytes or 536870912,
