@@ -228,6 +228,13 @@ class Native:
         if entry["type"] == "postgres":
             cleaned = path.parent / "restore.sql"
             filter_postgres(path, cleaned)
+            with psycopg.connect(**self.pg_options(entry, password), autocommit=True) as admin:
+                # Closing the worker firewall does not remove its existing DB
+                # sessions. Finish them before the dump's DROP DATABASE.
+                admin.execute(
+                    "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE datname=ANY(%s) AND pid<>pg_backend_pid()",
+                    (entry["databases"],),
+                )
             self.execute(
                 [
                     "psql",
@@ -242,6 +249,12 @@ class Native:
                 stdout=subprocess.DEVNULL,
             )
         else:
+            reset_mongo: MongoClient[dict[str, Any]] = MongoClient(self.uri(entry, password))
+            with reset_mongo:
+                for database in entry["databases"]:
+                    # --drop alone leaves collections absent from the snapshot.
+                    # Database users/roles live in admin and survive this reset.
+                    reset_mongo[database].command("dropDatabase", maxTimeMS=300000)
             self.execute(
                 [
                     "mongorestore",
@@ -260,6 +273,7 @@ class Native:
             )
         if entry["type"] == "mongo" and entry.get("resources"):
             from .controller.storage_contract import provider_environment
+            from .helper.storage_limits import mongo_reconcile
 
             client: MongoClient[dict[str, Any]] = MongoClient(self.uri(entry, password))
             try:
@@ -276,8 +290,34 @@ class Native:
                     client[row["providerName"]].command(
                         "updateUser", name, roles=[{"role": role, "db": row["providerName"]}]
                     )
+                    if entry.get("quotas"):
+                        database = client[row["providerName"]]
+                        stats = database.command("dbStats", scale=1)
+                        mongo_reconcile(
+                            database,
+                            name,
+                            row["providerName"],
+                            used=int(stats["dataSize"] + stats["indexSize"]),
+                            limit=entry["quotas"]["sizeBytes"],
+                        )
             finally:
                 client.close()
+        elif entry["type"] == "postgres" and entry.get("resources") and entry.get("quotas"):
+            from psycopg import sql
+
+            from .controller.storage_contract import provider_environment
+            from .helper.storage import postgres_role_settings
+
+            with psycopg.connect(**self.pg_options(entry, password), autocommit=True) as admin:
+                for row in entry["resources"]:
+                    login = provider_environment("postgres", row["name"], row["bindings"])["PGUSER"]
+                    connections = entry["quotas"]["connections"]
+                    postgres_role_settings(admin, login, connections)
+                    admin.execute(
+                        sql.SQL("ALTER DATABASE {} CONNECTION LIMIT {}").format(
+                            sql.Identifier(row["providerName"]), sql.Literal(connections)
+                        )
+                    )
         if not set(entry["databases"]) <= set(
             self.databases(entry["type"], entry["port"], password)
         ):

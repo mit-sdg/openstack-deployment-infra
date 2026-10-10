@@ -299,6 +299,11 @@ controller DB, then verifies current workers before reopening their firewall acc
 Keep the hosted controller stopped while installing/restoring its offline state;
 existing unrelated worker apps can keep serving. A completed identical payload replay
 skips destructive import. Keep the target app stopped until verification succeeds.
+Restore terminates existing target PostgreSQL sessions and replaces the target
+MongoDB database, including collections absent from the snapshot. Accepted instance
+limits remain authoritative: PostgreSQL role/database connection caps are reapplied,
+and MongoDB write access is reconciled against restored usage and the current size
+limit before worker access opens.
 
 For a single resource, decrypt the provider archive into the native restore CLI:
 
@@ -322,7 +327,8 @@ managed entries in both catalogs. An absent engine records `no-managed-resources
 any present engine must restore all its managed databases. It does not require
 keeping a throwaway PostgreSQL resource. The `isolatedDatabases` evidence records
 both the state and restored-instance count. CI's storage
-VM test also deletes/recreates/restores both engines and checks their app credentials.
+VM test also deletes/recreates/restores both engines, changes their limits, copies
+both shared sources and checks app credentials, data and stale-target cleanup.
 
 A hard-cap crash can require an admin size raise even with minute polling and 50%
 headroom; logical and physical bytes differ. Raising the quota applies before DB

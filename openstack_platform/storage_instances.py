@@ -506,6 +506,7 @@ class Manager:
         # The normal Nix firewall opens this port range; this earlier chain drops
         # every connection except a resource's allowlist and fixed administration.
         table = self.namespace.replace("-", "_") + "_instances"
+        configs = self.configs()  # One locked snapshot for ingress and bootstrap.
         fixed = [
             self.platform["addresses"]["admin"],
             self.platform["addresses"]["storage"],
@@ -514,7 +515,7 @@ class Manager:
         rules = [
             f"table inet {table} {{ chain ingress {{ type filter hook input priority -50; policy accept;"
         ]
-        for config in self.configs():
+        for config in configs:
             addresses = [
                 str(ipaddress.ip_address(value)) for value in [*fixed, *config["allowIps"]]
             ]
@@ -525,27 +526,28 @@ class Manager:
                     rules.append(
                         f"tcp dport {config['port']} {family} saddr {{ {', '.join(values)} }} accept"
                     )
-        ports = sorted({config["port"] for config in self.configs()})
+        ports = sorted({config["port"] for config in configs})
         if ports:
             # Apply the allowlist to established sessions too: revoking a worker
             # must close its access immediately. Reserved ports cannot be client
             # ephemeral ports; unrelated host replies never enter these rules.
-            rules.append(f"tcp dport {{ {', '.join(map(str, ports))} }} drop")
+            rules.append(f"tcp dport {{ {', '.join(map(str, ports))} }} counter drop")
         rules.append("}")
         fresh = [
             config["port"]
-            for config in self.configs()
+            for config in configs
             if config["type"] == "mongo" and not config.get("adminInitialized")
         ]
+        rules.append("chain bootstrap { type filter hook output priority -50; policy accept;")
         if fresh:
-            rules.append("chain bootstrap { type filter hook output priority -50; policy accept;")
-            rules.append(f"tcp dport {{ {', '.join(map(str, fresh))} }} meta skuid != 0 drop")
-            rules.append("}")
+            rules.append(
+                f"tcp dport {{ {', '.join(map(str, fresh))} }} meta skuid != 0 counter drop"
+            )
         rules.append("}")
-        # Create the table once, then atomically replace its chains. The manager
-        # lock serializes all callers; nft -f is an atomic kernel transaction.
-        self.command(("nft", "add", "table", "inet", table), check=False)
-        script = f"flush table inet {table}\n" + "\n".join(rules)
+        rules.append("}")
+        # Add is idempotent (unlike create). First installation and every update
+        # use one kernel transaction, including clearing the bootstrap gate.
+        script = f"add table inet {table}\nflush table inet {table}\n" + "\n".join(rules)
         self.command(("nft", "-f", "-"), input=script.encode())
 
     @contextmanager

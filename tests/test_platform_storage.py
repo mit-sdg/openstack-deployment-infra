@@ -1137,6 +1137,7 @@ class HelperStorageTests(unittest.TestCase):
 
             def drop(self):
                 self.dropped = True
+                raise RuntimeError("cleanup connection also failed")
 
         collection = MongoCollection()
         mongo_client = mock.MagicMock()

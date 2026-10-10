@@ -124,7 +124,7 @@ class InstanceManagerTests(unittest.TestCase):
             values["input"].decode() for argv, values in self.calls if argv == ("nft", "-f", "-")
         )
         self.assertIn("10.0.0.8", firewall)
-        self.assertIn(f"tcp dport {{ {p['port']} }} drop", firewall)
+        self.assertIn(f"tcp dport {{ {p['port']} }} counter drop", firewall)
         self.assertNotIn("30000-60000", firewall)
         self.assertNotIn("established", firewall)
         pg_command = database_command(self.manager.read(pg), "example")
@@ -184,6 +184,21 @@ class InstanceManagerTests(unittest.TestCase):
         clients[2].admin.command.side_effect = ConnectionFailure("lost authentication reply")
         factory = mock.Mock(side_effect=clients)
         self.manager.mongo_connect = factory
+        command = self.manager.command
+        bootstrap_gates = []
+
+        def apply(argv, **options):
+            if argv[0] == "nft":
+                self.assertEqual(tuple(argv), ("nft", "-f", "-"))
+                configs = self.manager.configs()
+                fresh = [item for item in configs if not item.get("adminInitialized")]
+                script = options["input"].decode()
+                gated = "meta skuid != 0" in script
+                self.assertEqual(gated, bool(fresh))
+                bootstrap_gates.append(gated)
+            return command(argv, **options)
+
+        self.manager.command = apply
         with (
             mock.patch("openstack_platform.storage_instances.time.sleep"),
             self.assertLogs(level="WARNING"),
@@ -191,6 +206,7 @@ class InstanceManagerTests(unittest.TestCase):
             identifier, result = self.create("mongo")
         config = self.manager.read(identifier)
         self.assertTrue(config["adminInitialized"])
+        self.assertEqual(bootstrap_gates, [True, False])
         password = (self.manager.directory(identifier) / "admin-password").read_text()
         for call in factory.call_args_list:
             self.assertEqual(call.kwargs["host"], "127.0.0.1")
@@ -1154,6 +1170,36 @@ class InstanceControllerTests(unittest.TestCase):
 
 
 class MigrationFingerprintTests(unittest.TestCase):
+    def test_disconnected_copy_cancels_only_its_tagged_mongo_operations(self):
+        from openstack_platform.storage_instances import _COPY_CANCEL
+        from openstack_platform.storage_migration import driver_guard
+
+        client = mock.Mock()
+
+        def command(value, *args, **options):
+            if value == {"currentOp": 1, "command.comment": "this-copy", "maxTimeMS": 1000}:
+                return {"inprog": [{"opid": 7}]}
+            if value == "killOp":
+                self.assertEqual(options["op"], 7)
+                return {"ok": 1}
+            raise ValueError("unfiltered operation inventory")
+
+        client.admin.command.side_effect = command
+        marker = _COPY_CANCEL.set(lambda: True)
+        try:
+            with (
+                mock.patch("openstack_platform.storage_migration.threading.Event") as event,
+                mock.patch("openstack_platform.storage_migration.threading.Thread") as thread,
+            ):
+                event.return_value.wait.return_value = False
+                thread.side_effect = lambda *, target, daemon: mock.Mock(start=target)
+                with self.assertRaises(TimeoutError):
+                    with driver_guard(float("inf"), mongo=(client,), comment="this-copy"):
+                        self.fail("disconnected copy continued")
+        finally:
+            _COPY_CANCEL.reset(marker)
+        client.admin.command.assert_any_call("killOp", op=7, maxTimeMS=1000)
+
     def test_target_checksum_selection_uses_source_even_after_compaction(self):
         class PostgreSQL:
             def __init__(self, size):

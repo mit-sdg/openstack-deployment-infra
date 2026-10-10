@@ -363,6 +363,110 @@ class DatabaseBackupsTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), source.read_bytes().split(b"\n", 1)[1])
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)
 
+    def test_native_restore_replaces_target_data_and_reapplies_current_limits(self):
+        database = "p_" + "a" * 20
+        login = "u_" + "a" * 20 + "_abcdef12"
+
+        def exercise(kind):
+            with self.subTest(kind=kind):
+                reset = False
+                imported = False
+                state = {"role": "readWrite", "connections": 10, "databaseConnections": 10}
+                admin = mock.MagicMock()
+                admin.__enter__.return_value = admin
+
+                def postgres(query, parameters=None):
+                    nonlocal reset
+                    text = query if isinstance(query, str) else query.as_string()
+                    if "pg_terminate_backend" in text:
+                        self.assertEqual(parameters, ([database],))
+                        reset = True
+                    elif "CONNECTION LIMIT" in text:
+                        self.assertTrue(imported)
+                        field = (
+                            "connections"
+                            if text.startswith("ALTER ROLE")
+                            else "databaseConnections"
+                        )
+                        state[field] = int(text.rsplit(" ", 1)[-1])
+                    return admin
+
+                admin.execute.side_effect = postgres
+                mongo = mock.MagicMock()
+                mongo.__enter__.return_value = mongo
+                target = mongo[database]
+
+                def mongodb(command, *args, **options):
+                    nonlocal reset
+                    if command == "dropDatabase":
+                        reset = True
+                    elif command == "updateUser":
+                        self.assertTrue(imported)
+                        state["role"] = options["roles"][0]["role"]
+                    elif command == "usersInfo":
+                        return {
+                            "users": [
+                                {"user": login, "roles": [{"role": state["role"], "db": database}]}
+                            ]
+                        }
+                    elif command == "dbStats":
+                        return {"dataSize": 42, "indexSize": 0}
+                    return {"ok": 1}
+
+                target.command.side_effect = mongodb
+
+                def restore(argv, **options):
+                    nonlocal imported
+                    self.assertTrue(reset)
+                    imported = True
+
+                environment = (
+                    storage.postgres_environment(
+                        "storage.example.internal", database, login, "app-private"
+                    )
+                    if kind == "postgres"
+                    else storage.mongo_environment(
+                        "storage.example.internal", database, login, "app-private"
+                    )
+                )
+                entry = {
+                    "type": kind,
+                    "port": 30000,
+                    "databases": [database],
+                    "quotas": {**self.quotas, "connections": 20},
+                    "resources": [
+                        {
+                            "name": "default",
+                            "providerName": database,
+                            "bindings": dict(
+                                canonicalize_environment(kind, "default", environment)
+                            ),
+                            "writeBlock": {"blocked": True},
+                        }
+                    ],
+                }
+                payload = self.root / (kind + ".dump")
+                payload.write_bytes(b"snapshot")
+                native = backup.Native("storage.example.internal", "ca.pem", execute=restore)
+                native.databases = mock.Mock(return_value=[database])
+                with (
+                    mock.patch(
+                        "openstack_platform.database_backups.psycopg.connect", return_value=admin
+                    ),
+                    mock.patch(
+                        "openstack_platform.database_backups.MongoClient", return_value=mongo
+                    ),
+                ):
+                    native.restore(entry, "root-private", payload)
+                self.assertTrue(imported)
+                if kind == "postgres":
+                    self.assertEqual((state["connections"], state["databaseConnections"]), (20, 20))
+                else:
+                    self.assertEqual(state["role"], "readWrite")
+
+        for kind in ("postgres", "mongo"):
+            exercise(kind)
+
 
 if __name__ == "__main__":
     unittest.main()

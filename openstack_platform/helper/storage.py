@@ -938,7 +938,16 @@ def mongo_verify(
         document = collection.find_one({"_id": inserted.inserted_id})
         if not document or document.get("value") != 1:
             raise RuntimeError("MongoDB scoped verification failed")
-    finally:
+    except Exception:
+        # Cleanup must not replace the original connection/authentication error.
+        try:
+            collection.drop()
+        except Exception:
+            pass
+        finally:
+            client.close()
+        raise
+    else:
         try:
             collection.drop()
         finally:

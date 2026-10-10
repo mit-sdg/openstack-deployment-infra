@@ -65,7 +65,7 @@ def driver_guard(
             for client in mongo:
                 try:
                     for operation in client.admin.command(
-                        "currentOp", {"command.comment": comment}, maxTimeMS=1000
+                        {"currentOp": 1, "command.comment": comment, "maxTimeMS": 1000}
                     ).get("inprog", []):
                         client.admin.command("killOp", op=operation["opid"], maxTimeMS=1000)
                 except Exception:
@@ -250,7 +250,7 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
                     (name,),
                 )
                 schemas = target.execute(
-                    "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname<>'information_schema'"
+                    "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname !~ '^pg_' AND nspname<>'information_schema'"
                 ).fetchall()
                 for (schema,) in schemas:
                     target.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
@@ -317,7 +317,7 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
                     # Extension configuration tables can require data import rights;
                     # keep their ownership with admin while granting the app owner.
                     for (schema,) in target.execute(
-                        "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname<>'information_schema'"
+                        "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname !~ '^pg_' AND nspname<>'information_schema'"
                     ).fetchall():
                         target.execute(
                             sql.SQL(
@@ -375,6 +375,15 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
                 ),
                 timeout=max(1, deadline - time.monotonic()),
             )
+            # --drop removes only collections present in the archive. Discard
+            # all unpublished target data on replay, including stale namespaces.
+            # dropDatabase preserves its users and custom roles in admin.
+            cleanup_mongo: MongoClient[dict[str, Any]] = MongoClient(target_uri)
+            with cleanup_mongo:
+                cleanup_mongo[name].command(
+                    "dropDatabase",
+                    maxTimeMS=max(1, int((deadline - time.monotonic()) * 1000)),
+                )
             manager.command(
                 (
                     "mongorestore",
