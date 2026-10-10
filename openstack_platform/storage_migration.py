@@ -199,6 +199,7 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
         manager.command(
             (
                 "pg_dump",
+                "--no-password",
                 "--format=custom",
                 "--no-owner",
                 "--no-acl",
@@ -227,6 +228,7 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
         )
         restore = [
             "pg_restore",
+            "--no-password",
             "--no-owner",
             "--no-acl",
             "--single-transaction",
@@ -263,7 +265,8 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
                     )
                 )
         listed = manager.command(
-            ("pg_restore", "--list", str(archive)), timeout=max(1, deadline - time.monotonic())
+            ("pg_restore", "--list", "--no-password", str(archive)),
+            timeout=max(1, deadline - time.monotonic()),
         ).stdout
         if len(listed) > 16 * MIB:
             raise ValidationError("migration object inventory exceeded its bound")
@@ -387,6 +390,7 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
             manager.command(
                 (
                     "mongorestore",
+                    "--stopOnError",
                     "--config",
                     str(files[1]),
                     "--numParallelCollections=1",

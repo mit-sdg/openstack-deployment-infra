@@ -54,6 +54,7 @@ def digest(path: Path) -> str:
 
 
 def command(argv: Sequence[str], **options: Any) -> subprocess.CompletedProcess[bytes]:
+    options.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.run(
         tuple(argv), check=True, stderr=subprocess.DEVNULL, timeout=3600, **options
     )
@@ -206,6 +207,7 @@ class Native:
                 self.execute(
                     [
                         "pg_dump",
+                        "--no-password",
                         "--create",
                         "--clean",
                         "--if-exists",
@@ -250,6 +252,7 @@ class Native:
             self.execute(
                 [
                     "psql",
+                    "--no-password",
                     "-X",
                     "--set=ON_ERROR_STOP=1",
                     *args,
@@ -271,6 +274,7 @@ class Native:
             self.execute(
                 [
                     "mongorestore",
+                    "--stopOnError",
                     *args,
                     "--db",
                     entry["databases"][0],
@@ -1329,6 +1333,7 @@ def main() -> int:
                                 "-i",
                                 args.restore_container,
                                 "psql",
+                                "--no-password",
                                 "-X",
                                 "-v",
                                 "ON_ERROR_STOP=1",
@@ -1347,6 +1352,7 @@ def main() -> int:
                                 "exec",
                                 args.restore_container,
                                 "psql",
+                                "--no-password",
                                 "-At",
                                 "-U",
                                 "platform_admin",
@@ -1366,6 +1372,7 @@ def main() -> int:
                                 "-i",
                                 args.restore_container,
                                 "mongorestore",
+                                "--stopOnError",
                                 "--db",
                                 entry["databases"][0],
                                 "--restoreDbUsersAndRoles",

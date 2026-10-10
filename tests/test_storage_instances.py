@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
+import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -20,7 +23,13 @@ from openstack_platform.controller.storage_capacity import check
 from openstack_platform.controller.storage_instances import InstanceMigrationService
 from openstack_platform.helper.nomad import SecretItems, VariableSnapshot, WorkloadVariables
 from openstack_platform.instance_contract import GIB, MIB, CapacityError
-from openstack_platform.storage_instances import Manager, database_command, http_handler
+from openstack_platform.storage_instances import (
+    Manager,
+    database_command,
+    http_handler,
+    peer_disconnected,
+    run,
+)
 from openstack_platform.storage_migration import mongo_fingerprint, postgres_fingerprint
 from openstack_platform.validation import ValidationError
 from tests.product_fixtures import accept_deployment
@@ -89,6 +98,40 @@ class InstanceManagerTests(unittest.TestCase):
             }
         )
         return identifier, result
+
+    def test_idle_timeout_socket_is_connected_until_peer_closes(self):
+        reader, writer = socket.socketpair()
+        self.addCleanup(reader.close)
+        self.addCleanup(writer.close)
+        reader.settimeout(0.001)
+        self.assertFalse(peer_disconnected(reader))
+        writer.sendall(b"next request")
+        self.assertFalse(peer_disconnected(reader))
+        self.assertEqual(reader.recv(128), b"next request")
+        writer.close()
+        self.assertTrue(peer_disconnected(reader))
+
+    def test_database_tools_have_no_prompt_and_bounded_concurrent_output(self):
+        program = self.root / "pg_restore"
+        program.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys\n"
+            "assert sys.stdin.buffer.read() == b''\n"
+            "os.write(2, b'password authentication failed\\n' + b'e' * (2 * 1024**2))\n"
+            "os.write(1, b'o' * (17 * 1024**2) if sys.argv[1] == 'overflow' else b'done')\n"
+            "sys.exit(3 if sys.argv[1] == 'error' else 0)\n"
+        )
+        program.chmod(0o700)
+        environment = {**os.environ, "PATH": str(self.root) + ":" + os.environ["PATH"]}
+        result = run(("pg_restore", "ok"), env=environment)
+        self.assertEqual(result.stdout, b"done")
+        self.assertEqual(len(result.stderr), 65536)
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            run(("pg_restore", "error"), env=environment)
+        self.assertEqual(failure.exception.output, b"done")
+        self.assertEqual(len(failure.exception.stderr), 65536)
+        with self.assertRaisesRegex(ValidationError, "output exceeded"):
+            run(("pg_restore", "overflow"), env=environment)
 
     def test_lifecycle_applies_cgroups_xfs_network_and_preserves_data_until_delete(self):
         pg, p = self.create()

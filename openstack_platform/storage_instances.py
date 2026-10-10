@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import secrets
+import select
+import selectors
 import signal
 import socket
 import subprocess
@@ -84,7 +86,9 @@ def command_failure_reason(error: subprocess.CalledProcessError) -> str:
 
 def run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
     cancel = _COPY_CANCEL.get()
-    if cancel is None or argv[0] not in {"pg_dump", "pg_restore", "mongodump", "mongorestore"}:
+    if argv[0] not in {"pg_dump", "pg_restore", "mongodump", "mongorestore"}:
+        if "input" not in kwargs:
+            kwargs.setdefault("stdin", subprocess.DEVNULL)
         return subprocess.run(
             tuple(argv),
             check=kwargs.pop("check", True),
@@ -94,6 +98,7 @@ def run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes
         )
     checked = kwargs.pop("check", True)
     deadline = time.monotonic() + kwargs.pop("timeout", 60)
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
     process = subprocess.Popen(
         tuple(argv),
         stdout=subprocess.PIPE,
@@ -101,28 +106,64 @@ def run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes
         start_new_session=True,
         **kwargs,
     )
+    # Drain both pipes concurrently. Inventory output has a strict 16 MiB
+    # bound; retain only 64 KiB of diagnostics, even if an importer logs errors
+    # for every document. No growing communicate() buffer or pipe deadlock.
+    output, errors = bytearray(), bytearray()
     try:
-        while True:
-            if cancel() or time.monotonic() >= deadline:
+        with selectors.DefaultSelector() as selector:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    selector.register(stream, selectors.EVENT_READ)
+            while selector.get_map():
+                if (cancel is not None and cancel()) or time.monotonic() >= deadline:
+                    raise TimeoutError("instance copy cancelled or deadline expired")
+                for key, _events in selector.select(min(0.25, max(0, deadline - time.monotonic()))):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.fileobj is process.stdout:
+                        if len(output) + len(chunk) > 16 * MIB:
+                            raise ValidationError("database tool output exceeded its bound")
+                        output.extend(chunk)
+                    elif len(errors) < 65536:
+                        errors.extend(chunk[: 65536 - len(errors)])
+            if (cancel is not None and cancel()) or time.monotonic() >= deadline:
                 raise TimeoutError("instance copy cancelled or deadline expired")
-            try:
-                out, err = process.communicate(
-                    timeout=min(1, max(0.01, deadline - time.monotonic()))
-                )
-                break
-            except subprocess.TimeoutExpired:
-                continue
+            process.wait(timeout=max(0.01, deadline - time.monotonic()))
         if checked and process.returncode:
-            raise subprocess.CalledProcessError(process.returncode, argv)
-        return subprocess.CompletedProcess(argv, process.returncode, out, err)
+            raise subprocess.CalledProcessError(
+                process.returncode, argv, output=bytes(output), stderr=bytes(errors)
+            )
+        return subprocess.CompletedProcess(argv, process.returncode, bytes(output), bytes(errors))
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
             try:
-                process.communicate(timeout=5)
+                process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+                process.wait()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def peer_disconnected(connection: socket.socket) -> bool:
+    # MSG_DONTWAIT does not bypass Python's settimeout() readiness wait.
+    # Check readiness without waiting before peeking at this idle HTTP socket.
+    try:
+        readable, _, failed = select.select([connection], [], [connection], 0)
+        if failed:
+            return True
+        if not readable:
+            return False
+        return connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
 
 
 def unit_limits(quotas: Mapping[str, int]) -> str:
@@ -1177,14 +1218,7 @@ def http_handler(manager: Manager, token: str) -> type[BaseHTTPRequestHandler]:
                     raise ValidationError("instance request must be an object")
 
                 def disconnected() -> bool:
-                    try:
-                        return bool(
-                            self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
-                        )
-                    except BlockingIOError:
-                        return False
-                    except OSError:
-                        return True
+                    return peer_disconnected(self.connection)
 
                 result = manager.dispatch(args, disconnected=disconnected)
                 status = 200
