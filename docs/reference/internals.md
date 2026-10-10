@@ -511,7 +511,7 @@ caps before migration; shared connection raises still require migration.
 | Instance weights/tasks | CPUWeight=100, IOWeight=100, TasksMax=256; equal BFQ scheduling and bounded connection/background process counts |
 | PostgreSQL | Instance app cap +5 superuser slots; buffers memory/4 (128 MiB default), work_mem 2 MiB, maintenance memory/16 capped at 64 MiB (32 MiB default), one autovacuum worker |
 | PostgreSQL WAL/role defaults | WAL target max 256 MiB/min 80 MiB; statement 30s, idle transaction 60s, lock 5s, temp files 256 MB; bound normal work/overhead; role settings shared by create/rotate/repair |
-| MongoDB | Instance app cap +10 driver/admin slots, cache memory/4 with 256 MiB minimum, slowms=100; URI pool at most 10, idle timeout 60000 ms; server-wide slots do not reserve privileged access |
+| MongoDB | Instance app cap +10 driver/admin slots, cache memory/4 with 256 MiB minimum, slowms=100; URI pool equals the app connection cap, idle timeout 60000 ms; server-wide slots do not reserve privileged access |
 | MongoDB restore | Temporary minimum 1 GiB memory from the separate 2 GiB maintenance pool, one collection/insertion worker; normal cache setting stays bounded |
 | Legacy PostgreSQL | 8 GiB /4 cores, 100 connections, 2 GiB buffers, 2 MiB work and 64 MiB maintenance; six existing apps and dumps remain responsive |
 | Legacy MongoDB | 8 GiB /4 cores, 2 GiB cache, 800 connections, slowms=100; accommodates six historical 100-connection pools plus management |
