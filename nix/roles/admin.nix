@@ -1408,6 +1408,8 @@ in
             openstackClient
             nomadCli
             packages.python
+            # The helper launcher used by the storage-service check needs coreutils.
+            pkgs.coreutils
           ]
         }"
       ];

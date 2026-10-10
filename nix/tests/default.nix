@@ -136,7 +136,7 @@ let
         import faulthandler
         print("storage probe failed uid="+str(__import__("os").geteuid())+" host="+host,file=sys.stderr,flush=True)
         faulthandler.dump_traceback(file=sys.stderr,all_threads=True)
-        subprocess.run(["nft","list","table","inet","${namespace}".replace("-","_")+"_instances"],check=False)
+        subprocess.run(["nft","list","table","inet","platform_"+"${namespace}".replace("-","_")+"_instances"],check=False)
         subprocess.run(["ss","-tnp"],check=False)
         subprocess.run(["${storageRuntimeDiagnostics}"],check=False)
         try:

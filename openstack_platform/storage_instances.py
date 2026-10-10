@@ -55,6 +55,13 @@ ENDPOINT = "/platform/instances"
 PORT_MIN = 30000
 PORT_MAX = 30999
 POSTGRES_SOCKET_DIRECTORY = "/var/run/postgresql"
+
+
+def firewall_table(namespace: str) -> str:
+    # nft identifiers must start with a letter; live namespaces may be numeric.
+    return "platform_" + namespace.replace("-", "_") + "_instances"
+
+
 Run = Callable[..., Any]
 
 
@@ -555,7 +562,7 @@ class Manager:
     def firewall(self) -> None:
         # The normal Nix firewall opens this port range; this earlier chain drops
         # every connection except a resource's allowlist and fixed administration.
-        table = self.namespace.replace("-", "_") + "_instances"
+        table = firewall_table(self.namespace)
         configs = self.configs()  # One locked snapshot for ingress and bootstrap.
         fixed = [
             self.platform["addresses"]["admin"],
