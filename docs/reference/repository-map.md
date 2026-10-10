@@ -557,6 +557,9 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 - `tests/fixtures/apps/node/package-lock.json` — locked dependencies for the Node.js fixture app.
 - `tests/fixtures/apps/node/package.json` — the Node.js fixture app's start script and metadata.
 - `tests/fixtures/apps/node/server.js` — the Node.js fixture app: an HTTP server with a readiness endpoint.
+- `tests/fixtures/apps/storage-probe/package-lock.json` — locked dependencies for the storage rehearsal probe.
+- `tests/fixtures/apps/storage-probe/package.json` — the storage rehearsal probe's start script and database drivers.
+- `tests/fixtures/apps/storage-probe/server.js` — the storage rehearsal probe: seeds PostgreSQL and MongoDB through platform bindings and reports counts, checksums and write status for migration checks.
 - `tests/fixtures/openstack/glance_quota_formatter_outputs.json` — recorded Glance quota outputs, including unknown and unlimited values.
 - `tests/fixtures/openstack/neutron_security_group_tenant_only.json` — a sanitized older Neutron response that names the owner only as a tenant.
 - `tests/fixtures/openstack/provider_uuid_outputs.json` — compact and canonical UUID forms printed by different OpenStack tools.
