@@ -565,7 +565,7 @@ jobs:
       - name: Install publication tools only
         if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
         run: tests/install_ci_apt_packages.sh python3-openstackclient
-      - name: Publish the verified retained bytes in role order without rebuilding
+      - name: Publish the verified retained bytes concurrently without rebuilding
         if: env.OPENSTACK_PUBLISH_ENABLED == 'true'
         env:
           OS_AUTH_TYPE: password

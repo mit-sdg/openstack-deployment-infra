@@ -287,11 +287,13 @@ Sign retained CI bytes and their build run externally, then rerun only publicati
 
 6. Require `production-evidence-<run-id>-<attempt>` to record `production-ed25519`, original QCOW2 hashes, inventory hash, and build context. Role logs must end with `published role=<role> image=<uuid> status=active ...`.
 
-   Previously unsigned images also require `signed-reattestation=verified`. After signature, source, closure, metadata, and SHA-256 checks, publication updates `<namespace>_artifact_manifest_sha256`, saves its former value in `<namespace>_previous_artifact_manifest_sha256`, and re-reads to confirm (namespace dashes become underscores). Unsigned evidence cannot update this metadata. IDs, names, and bytes stay unchanged; setup can reuse the ID. Keep original unsigned and subsequent signed evidence.
+   Previously unsigned images also require `signed-reattestation=verified`. After signature, source, closure, metadata, and content checks, publication updates `<namespace>_artifact_manifest_sha256`, saves its former value in `<namespace>_previous_artifact_manifest_sha256`, and re-reads to confirm (namespace dashes become underscores). Unsigned evidence cannot update this metadata. IDs, names, and bytes stay unchanged; setup can reuse the ID. Keep original unsigned and subsequent signed evidence.
 
 On inventory, commit, or role-hash differences, stop and investigate; never edit records or sign rebuilt substitutes. Expired artifacts require a new reviewed run and signatures for its fresh images.
 
 After partial uploads or a signed metadata update whose final check failed, rerun the same job to verify/reuse exact matches and finish. It does not rebuild, rename, or replace bytes. Never downgrade evidence with an unsigned manifest.
+
+Publication verifies all five retained roles before contacting the provider, then publishes up to five roles concurrently. Each role has an independent image name and evidence; logs are prefixed with its role and printed together on completion. Any failure fails the job after all roles finish. The provider lock still serializes CI publication runs. Content verification compares Glance's SHA-256 or SHA-512 multihash with a local digest of the retained QCOW2, whose SHA-256 must match the accepted evidence; MD5 and all identity and metadata checks also remain required. Logs report `content_verification=provider-sha256`, `provider-sha512`, or `download`. Only an absent provider multihash permits download verification; a mismatching, malformed, or unsupported multihash fails. Exact images from the same commit are reused; images from another commit retain their commit-specific names and source provenance.
 
 ### Temporarily disable production signing
 
