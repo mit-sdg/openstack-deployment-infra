@@ -1056,7 +1056,8 @@ let
               # Both built-in NSS paths work with no daemon or NSS-module proxy.
               machine.succeed("test $(systemctl show nscd.service -p LoadState --value) = not-found")
               machine.succeed("getent -s files hosts ${platform.internalNames.storage} && getent hosts ${platform.internalNames.storage} && getent passwd agentops && getent passwd nginx")
-              machine.succeed("systemctl start nss-lookup.target nss-user-lookup.target")
+              # Passive NSS targets refuse manual starts; they must just never fail.
+              machine.fail("systemctl is-failed --quiet nss-lookup.target nss-user-lookup.target")
               machine.wait_for_unit("nginx.service")
               machine.succeed("${pkgs.nginx}/bin/nginx -t -c /etc/nginx/nginx.conf")
               machine.succeed("mountpoint -q ${platform.paths.data}")
@@ -1069,7 +1070,7 @@ let
               machine.wait_for_open_port(19002)
               machine.succeed("${packages.platformPython}/bin/python ${storageInstanceProbe}")
               print(machine.succeed("${storageRuntimeDiagnostics}"))
-              machine.succeed("systemctl is-active nss-lookup.target nss-user-lookup.target")
+              machine.fail("systemctl is-failed --quiet nss-lookup.target nss-user-lookup.target")
               machine.succeed("test $(systemctl show nscd.service -p LoadState --value) = not-found")
             ''
           else if role == "worker" then
