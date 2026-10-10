@@ -1,6 +1,6 @@
 # Configuration reference
 
-Look up setup values, generated inventory, and operator configuration here. Follow [Deploy the platform](../guides/deploy-the-platform.md) for setup steps.
+Use this page to look up setup inputs, inventory fields, and operator policy. It is for operators installing or changing a deployment. Follow [Deploy the platform](../guides/deploy-the-platform.md) for setup steps.
 
 ## Configuration at a glance
 
@@ -54,6 +54,7 @@ Setup authenticates and stores the `OS_*` values it uses, except `OS_TOKEN`.
 | `OS_USER_DOMAIN_NAME` | No | `Default` | The user's Keystone domain |
 | `OS_PROJECT_DOMAIN_NAME` | No | `Default` | The project's Keystone domain |
 | `OS_PROJECT_ID` | No | Taken from the login | Must match the authenticated project UUID. Skips a project lookup restricted credentials may be unable to make. Preserve provider spelling. |
+| `OS_TENANT_ID` | No | | Legacy alternative to `OS_PROJECT_ID`; setup checks it when `OS_PROJECT_ID` is absent. |
 | `OS_REGION_NAME` | No | | Selects one image service region; required for ambiguous catalogs. |
 | `OS_INTERFACE` | No | `public` | Which endpoint interface to use |
 | `OS_IDENTITY_API_VERSION` | No | `3` | Identity API version |
@@ -69,12 +70,14 @@ All four values are prompted for when omitted.
 
 | Variable | Default | Rules | Use |
 | --- | --- | --- | --- |
-| `PLATFORM_PREFIX` | Lowercase project slug, hyphens for punctuation, cut to 32 characters | 2–32 lowercase letters, digits, hyphens; alphanumeric ends | OpenStack resource prefix |
+| `PLATFORM_PREFIX` | Lowercase project slug, hyphens for punctuation, cut to 32 characters; short slugs get an `app-` prefix | 2–32 lowercase letters, digits, hyphens; alphanumeric ends | OpenStack resource prefix |
 | `PLATFORM_NAMESPACE` | Prefix | 3–32 lowercase letters, digits, hyphens; alphanumeric ends | Units, paths, metadata keys, sockets |
 | `PLATFORM_DISPLAY_NAME` | Project name | 1–40 letters, digits, spaces, `.`, `_`, `-`; alphanumeric start, no trailing space | Portal brand and internal CA name |
 | `PLATFORM_ORGANIZATION` | Display name | 1–64 characters, same rules | Certificate organization |
 
 `setup check` doesn't validate display name or organization; apply does before cloud mutations. Set both explicitly if your project name doesn't qualify.
+
+All setup inputs are strings in the environment file. The integer and JSON fields below are parsed from those strings.
 
 ### Domain and hostnames
 
@@ -260,8 +263,50 @@ Copied unchanged from the example file:
 | `versions`, `checksums` | Pinned Nomad, Traefik, and BuildKit versions and their download SHA-256 |
 | `containers` | Digest-pinned PostgreSQL, MongoDB, Garage, registry, and `cloudflared` images |
 | `ownerPortal` | Owner portal settings, with the portal turned off. See [The owner portal section](#the-owner-portal-section). |
+| `healthAlerts` | Health notifications, disabled in the template. See [Health alerts](#health-alerts). |
 
 Role images embed this inventory. Give the maintainer your non-secret setup values, project UUID, and commit before they build deployment evidence.
+
+### Inventory types and validation
+
+The inventory loader supplies no defaults for required fields. Only `staticIngressRoutes`, `ownerPortal`, and `healthAlerts` are optional at the top level. Unknown top-level keys are refused. `openstack_platform/config.py` requires a direct regular JSON file of at most 1048576 bytes and rejects duplicate keys. The installed launcher also enforces ownership and permissions.
+
+These checks are enforced by the Python package loader:
+
+| Field | Type | Validation |
+| --- | --- | --- |
+| `project`, `datacenter`, `region`, `network` | String | 1–128 ASCII letters, digits, spaces, `.`, `_`, `-`; starts with a letter or digit. |
+| `projectId` | String | Canonical lowercase UUID. |
+| `prefix` | String | 2–32 lowercase letters, digits and hyphens; alphanumeric ends. |
+| `namespace` | String | 3–32 lowercase letters, digits and hyphens; alphanumeric ends. |
+| `domain` | String | Lowercase dotted DNS name, at most 253 characters; labels at most 63 characters, alphanumeric ends, final label starts with a letter. |
+| `hosts`, `ports`, `paths` | Object | Required nested keys listed below; no further value-type checks in this loader. |
+| `publicIngress` | Object | Exactly `mode` and `providerCidrs`; string mode `tunnel` or `direct`; array of distinct canonical non-default IPv4 CIDRs. Tunnel requires an empty array; direct requires a non-empty array. |
+| `ownerPortal`, `healthAlerts` | Object | Validated using their field tables on this page. |
+
+The infra loader (`infra/lib/platform_config.py`) additionally checks `displayName` (1–40 characters), `organization` (1–64), and `project` (1–128). These strings start with an ASCII letter or digit, contain only letters, digits, spaces, `.`, `_`, `-`, and cannot end in a space. It also requires `pki.internalCaFile` to be a plain filename of 1–127 letters, digits, dots, underscores or hyphens, starting with a letter or digit and ending in `.pem`.
+
+The remaining fields have the generated types below. The loaders check required paths, but do not fully validate every nested type or range; setup and consuming services apply further checks. Do not treat the example inventory as loader defaults.
+
+| Fields | Generated type and value |
+| --- | --- |
+| `displayName`, `organization` | Strings from the setup name inputs. |
+| `recoveryDomains` | Array of two hostname strings from setup. Loaders require indices 0 and 1; setup requires exactly two entries. |
+| `staticIngressRoutes` | Object, `{}` by default in setup. Each named route has string `hostname` and `origin` fields; setup validates only the outer object. |
+| `internalNames.storage`, `internalNames.objectStorage` | Strings: `storage.<prefix>.internal`, `s3.<prefix>.internal`, unless overridden. |
+| `pki.internalCaFile` | String: `<namespace>-internal-ca.pem`. |
+| `operatorCidr` | CIDR string from setup; setup rejects host bits. |
+| `metadataAddress` | String: `169.254.169.254` from the template. |
+| `addresses.admin`, `addresses.ingress`, `addresses.storage` | IPv4 strings from setup. |
+| `hosts.admin`, `hosts.ingress`, `hosts.storage` | Strings: `<prefix>-<role>-01`. |
+| `ports.admin`, `ports.ingress`, `ports.storage` | Strings: `<prefix>-admin-public-v4`, `<prefix>-ingress-public-v4`, `<prefix>-storage-service-v4`. |
+| `volumes.adminState`, `volumes.backup`, `volumes.data` | Objects with string `name`, string `label` (at most 12 bytes), integer `sizeGiB` (1–16384 in setup), and string `type`. Loaders require `name`, `label`, `sizeGiB` on all three, but require `type` only on `data`. Setup writes the same type to all three. |
+| `images.admin`, `images.ingress`, `images.storage`, `images.worker`, `images.builder` | Image-name strings: `<prefix>-nixos-<role>-<commit prefix>`. The prefix is eight characters. |
+| `flavors.admin`, `flavors.ingress`, `flavors.storage`, `flavors.worker`, `flavors.builder` | Flavor-name strings selected in setup. |
+| `versions.nomad`, `versions.traefik`, `versions.buildkit` | Strings copied from the template: `2.0.5`, `3.7.10`, `0.32.2`. |
+| `checksums.nomadLinuxAmd64Zip`, `checksums.traefikLinuxAmd64TarGz`, `checksums.buildkitLinuxAmd64TarGz` | Download SHA-256 strings copied from the template. |
+| `containers.postgres`, `containers.mongodb`, `containers.garage`, `containers.registry`, `containers.cloudflared` | OCI digest-pin strings copied from the template. |
+| `paths.root`, `paths.adminState`, `paths.backups`, `paths.data` | Absolute path strings: `/srv/<namespace>`, `/srv/<namespace>-state`, `/srv/<namespace>-backups`, `/srv/<namespace>-data`. |
 
 ### Fields that define the deployment's identity
 
@@ -275,19 +320,21 @@ Images, flavors, versions, checksums, and containers are excluded for upgrades. 
 
 `ownerPortal` starts disabled. See [Open the owner portal](../guides/open-the-portal.md) to enable sign-in and quotas.
 
-| Field | Default | Limits | Meaning |
+| Field | Type | Default | Limits and meaning |
 | --- | --- | --- | --- |
-| `enabled` | `false` | | Whether the portal is on |
-| `commonsOrigin` | `https://class.example.com` in setup template | Public HTTPS origin, no path | Set to your Commons site; required when enabled, including local-account deployments. |
-| `identityEgressCidrs` | `[]` | Up to 64 ranges, no `/0` | Identity egress allowlist; empty uses Cloudflare ranges. |
-| `classLabel` | `class account` | 1 to 80 characters | Completes the button text "Sign in with your `<classLabel>`" |
-| `portalName` | "`<displayName>` Apps" | 1 to 80 characters | The portal's brand name |
-| `appLimit` | `2` | 1 to 1000 | Default number of apps per owner |
-| `concurrencyLimit` | `1` | 1 to 16 | Concurrent changes per owner |
-| `absoluteSeconds` | `28800` (8 hours) | 60 to 86400 | Maximum owner session length |
-| `idleSeconds` | `1800` (30 minutes) | 60 to 86400, at most `absoluteSeconds` | Owner session idle timeout |
-| `anonymousOptionsPerMinute` | `600` | 1 to 100000 | Anonymous options requests per client address/minute |
-| `anonymousStartsPerMinute` | `400` | 1 to 100000 | Commons sign-in starts per client address/minute |
+| `enabled` | Boolean | `false` when `ownerPortal` is omitted | Required when the object is supplied. Whether the portal is on. |
+| `commonsOrigin` | String | No validator default; `https://class.example.com` in template | At most 256 characters; dotted HTTPS origin without path, query, fragment or credentials; `localhost`, names ending `.localhost`, and non-global IP literals are refused. Optional port 1–65535. Required unless the object is exactly `{"enabled": false}`, including local-account deployments. |
+| `identityEgressCidrs` | Array of strings | `[]` | Up to 64 distinct IPv4 or IPv6 CIDRs, no host bits or `/0`. Empty uses the contract's Cloudflare ranges. |
+| `classLabel` | String | `class account` | 1–80 characters, no characters below U+0020. Completes "Sign in with your `<classLabel>`". |
+| `portalName` | String | "`<displayName>` Apps" in the portal | 1–80 characters, no surrounding whitespace or characters below U+0020. The portal's brand name. |
+| `appLimit` | Integer | `2` | 1–1000 apps per owner. |
+| `concurrencyLimit` | Integer | `1` | 1–16 concurrent changes per owner. |
+| `absoluteSeconds` | Integer | `28800` | 60–86400 seconds; maximum session length. |
+| `idleSeconds` | Integer | `1800` | 60–86400 seconds, at most `absoluteSeconds`; session idle timeout. |
+| `anonymousOptionsPerMinute` | Integer | `600` | 1–100000 anonymous options requests per client address/minute. |
+| `anonymousStartsPerMinute` | Integer | `400` | 1–100000 Commons sign-in starts per client address/minute. |
+
+Unknown fields are refused. Integers cannot be booleans. The defaults for labels and limits are applied when the object contains more than just `enabled: false`.
 
 ### Read or validate an inventory
 
@@ -313,23 +360,30 @@ Setup writes the private app resource policy and backup public key from `config/
 | Admin host (operator staging copy) | `<paths.root>/persistent/policy.json` |
 | Admin host (active controller policy) | `<paths.adminState>/controller/policy.json`, owned by `platform-controller` |
 
-| Key | Value set by setup | Meaning |
-| --- | --- | --- |
-| `standard.workerFlavor` | `PLATFORM_WORKER_FLAVOR` | Standard app worker flavor |
-| `standard.cpuMHz`, `standard.memoryMiB` | `1000`, `2048` | Initial allocation stored at app creation; fresh-worker deployments replace it with the measured [allocation budget](../guides/deploy-apps-from-the-command-line.md#plan-and-resize) |
-| `standard.postgresConnections` | `10` | Initial connection limit for each app's PostgreSQL database |
-| `standard.postgresMeasuredBytes` | 2 GiB | Initial PostgreSQL size reporting target; not enforced |
-| `standard.mongoMeasuredBytes` | 2 GiB | Initial MongoDB logical data and index size limit; pauses writes when exceeded |
-| `standard.s3Bytes`, `standard.s3Objects` | 5 GiB, `100000` | Initial quota for each app's S3 bucket |
-| `runtimeImages.node`, `runtimeImages.bun` | `PLATFORM_NODE_RUNTIME_IMAGE`, `PLATFORM_BUN_RUNTIME_IMAGE` | Default app runtime images |
-| `backupAgeRecipient` | Generated | Public key for `.secrets/setup/backup-age-identity.txt` under the operator root |
+All top-level fields except `limits` are required. Both `standard` and `runtimeImages` require every listed field. Unknown fields and duplicate JSON keys are refused. Values shown under **Setup value** come from the template or setup; the loader does not supply defaults for required fields.
+
+| Field | Type | Setup value | Allowed values and meaning |
+| --- | --- | --- | --- |
+| `standard.workerFlavor` | String | `PLATFORM_WORKER_FLAVOR` | 1–128 ASCII letters, digits, spaces, `.`, `_`, `-`, starting with a letter or digit; initial worker flavor. Provider lookup applies further flavor-reference validation. |
+| `standard.cpuMHz` | Integer | `1000` | 100–1000000 MHz; initial scheduler CPU share. |
+| `standard.memoryMiB` | Integer | `2048` | 1–1048576 MiB; initial scheduler memory limit. |
+| `standard.postgresConnections` | Integer | `10` | 1–10000; initial PostgreSQL app connection cap. New database limit edits accept 1–100 connections. |
+| `standard.postgresMeasuredBytes` | Integer | `2147483648` (2 GiB) | 1–9223372036854775807 bytes; initial PostgreSQL size limit. Instances enforce a hard XFS quota at 150% of this limit. |
+| `standard.mongoMeasuredBytes` | Integer | `2147483648` (2 GiB) | 1–9223372036854775807 bytes; initial MongoDB logical data-plus-index limit. Writes pause above the limit and resume at or below 95%; instances also have a 150% hard XFS quota. |
+| `standard.s3Bytes` | Integer | `5368709120` (5 GiB) | 1–9223372036854775807 bytes; initial bucket byte quota. |
+| `standard.s3Objects` | Integer | `100000` | 1–9223372036854775807 objects; initial bucket object quota. |
+| `runtimeImages.node` | String | `PLATFORM_NODE_RUNTIME_IMAGE`, or the digest above | At most 512 characters; image reference with a repository path and lowercase `@sha256:<64 hex characters>`. |
+| `runtimeImages.bun` | String | `PLATFORM_BUN_RUNTIME_IMAGE`, or the digest above | Same digest-pin rules as `node`. |
+| `backupAgeRecipient` | String | Generated | Age X25519 recipient: `age1` followed by 58 characters from the age encoding alphabet. Public key for `.secrets/setup/backup-age-identity.txt` under the operator root. |
+
+Every integer rejects booleans. Fresh-worker deployments replace the initial CPU and memory allocation with the measured [allocation budget](../guides/deploy-apps-from-the-command-line.md#plan-and-resize). Storage admission also checks host capacity; loader ranges alone do not guarantee that a resource can be created. See [managed-storage limits](controller-api.md#managed-storage).
 
 Operator copies must be operator-owned with no group or other access. Setup writes mode `0600`; the installed CLI requires that exact mode.
 
 <details>
 <summary>Optional <code>limits</code> block</summary>
 
-Optional `limits` overrides these defaults. Setup omits it.
+Optional `limits` overrides these defaults. Each field is an integer; booleans are refused. Omitted fields use their individual defaults. Setup preserves the template’s two migration limits.
 
 | Key | Default | Allowed range |
 | --- | ---: | --- |
@@ -345,8 +399,10 @@ Optional `limits` overrides these defaults. Setup omits it.
 | `processSeconds` | 900 | 1 to 7,200 |
 | `helperSeconds` | 900 | 1 to 7,200 |
 | `pollIntervalSeconds` | 2 | 1 to 30 |
+| `migrationBackupMaxAgeMinutes` | 60 | 1 to 1440 |
+| `migrationAppSeconds` | 1800 | 120 to 7200 |
 
-`processSeconds` is also the operator tool's whole-command time limit.
+Names ending in `Bytes` are byte limits; names ending in `Seconds` are time limits or intervals in seconds. `processSeconds` bounds each ordinary operator command; setup, offline restore, and the long-running dashboard use separate lifetimes. `migrationBackupMaxAgeMinutes` is the maximum source-backup age before migration; `migrationAppSeconds` bounds migration work per app.
 
 </details>
 
@@ -362,6 +418,7 @@ Ports from the contract, useful when reading security group rules:
 | --- | ---: | --- |
 | `ssh` | 22 | SSH |
 | `http` | 80 | Traefik public entry point |
+| `https` | 443 | HTTPS service traffic |
 | `application`, `managementWeb` | 8080 | App containers on workers, and the portal's web service on admin |
 | `traefikHealth` | 8082 | Traefik's local health endpoint |
 | `nomadHttp`, `nomadRpc`, `nomadSerf` | 4646, 4647, 4648 | Nomad |
@@ -369,6 +426,7 @@ Ports from the contract, useful when reading security group rules:
 | `mongodb` | 27017 | MongoDB |
 | `garageS3` | 9000 | Garage S3 API |
 | `garageRpc` | 3903 | Garage cluster RPC |
+| `garageAdminProxy` | 13903 | Garage administrative proxy |
 | `registry` | 5000 | Private image registry |
 
 Also fixed: operator root `/srv/openstack-platform`, `platform.json`, `policy.json`, SSH alias `platform-admin`, account `agentops`.

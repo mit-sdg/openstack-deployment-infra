@@ -41,7 +41,7 @@ export PLATFORM_DOMAIN="$(/srv/openstack-platform/runtime/python3.14 -c \
   'import json,os; print(json.load(open(os.environ["PLATFORM_CONFIG"]))["domain"])')"
 ```
 
-The values come from the installed inventory (the deployment's private description of itself). `PLATFORM_ROOT`, `PLATFORM_BACKUPS`, and `PLATFORM_ADMIN_STATE` are paths on the admin host, used in commands sent over SSH.
+The values come from the installed inventory (the deployment's private description of itself). `PLATFORM_ROOT`, `PLATFORM_BACKUPS`, and `PLATFORM_ADMIN_STATE` are paths on the admin host, used in commands sent over SSH. A **namespace** prefixes this deployment's units and directories.
 
 | Variable | What it holds |
 | --- | --- |
@@ -96,6 +96,8 @@ Run these checks whenever you sit down to work on the platform, and before and a
    | `UNAVAILABLE` | Observations that could not be made | `0` |
    | `UNHEALTHY` | Observations that answered with a problem | `0` |
 
+   Per-app observations combine the controller's `app.health` check of the Nomad allocation with a public request to the deployment's health path. A passing route must include the accepted deployment's `X-Platform-Deployment` marker. A 2xx response from another deployment does not pass.
+
    `status` asks the controller on the admin host for these numbers. If the controller can't be reached, the command fails with `unavailable: hosted controller status is unavailable` instead of guessing. `STATE` is `degraded` if any role lacks a selected image, any observation is unavailable or unhealthy, or any operation is unfinished.
 
 2. List the roles and their images:
@@ -147,15 +149,15 @@ Run these checks whenever you sit down to work on the platform, and before and a
    | --- | --- |
    | `openstack` | The three persistent servers and every worker are `ACTIVE` in OpenStack |
    | `public_ingress` | `https://<domain>/healthz` and `https://wildcard-health.<domain>/healthz` both answer `OK` |
-   | `managed_services` | PostgreSQL, MongoDB, Garage, and the image registry respond |
+   | `managed_services` | Shared fallback databases, Garage, and the registry respond; database instances and storage capacity have no alarms |
    | `nomad` | Nomad reports at least one ready client per worker, and its Raft peer query succeeds |
-   | `backup` | The newest managed-data backup is complete and less than 36 hours old |
+   | `backup` | The newest managed-data backup is complete and at most 36 hours old; no backup or pre-migration checkpoint is marked failed |
    | `offsite_recovery` | The newest off-site export is verified and recent enough |
 
-   If a check fails, `error` contains the exception type and detail. The first missing entry in `checks` identifies the failed check; later checks didn't run.
+   If a check fails, `error` contains the exception type and detail. A storage alarm also records `checks.managed_services.state` as `degraded` with fixed alarm codes. Otherwise, the first missing entry in the ordered table identifies the failed check. Later checks did not run.
 
 > [!NOTE]
-> Until you configure an off-site export, the `offsite_recovery` check always fails, so the snapshot reports `"healthy": false` even when everything else passes. Set it up with [Export recovery evidence off site](backups-and-recovery.md#export-recovery-evidence-off-site).
+> As verified on 2026-10-10, off-site export is not configured on the production deployment. Until you configure an off-site export, the `offsite_recovery` check fails, so the snapshot reports `"healthy": false` even when the earlier checks pass. Export requires a separate filesystem mounted on admin. Remount it after every admin replacement. Set it up with [Export recovery evidence off site](backups-and-recovery.md#export-recovery-evidence-off-site).
 
 If anything isn't healthy, go to [Troubleshooting](troubleshooting.md). An observation that is unavailable doesn't erase what the platform has accepted. Find out which dependency is missing before you change anything, and never edit a database or cloud resource to make status look healthy.
 
@@ -214,7 +216,7 @@ Platform health recovered: app-platform; 2026-10-07T12:15:00+00:00; all checks p
 
 Ongoing failures repeat at most every four hours. A passing run resets the consecutive-failure count. Alert counts, incident state, and attempt times persist at `$PLATFORM_ADMIN_STATE/operator/status/health-alerts.json`. Delivery errors do not change the health check's exit status. Failed failure-alert attempts also wait for the repeat interval; failed recovery attempts retry on passing runs after five minutes. Delivery is best effort: a receiver can accept a message before the sender times out, so a later retry can duplicate it.
 
-The current checker stops at the first failed check and does not inspect app-operation states. Messages identify that check; raw errors, app-operation references, credentials, and provider output are excluded. Use the snapshot and troubleshooting tools to investigate the cause.
+The current checker stops at the first failed check and does not inspect app-operation states. Messages identify the first missing check. If `managed_services` recorded degraded alarms, the message can name the next check instead; use the snapshot's `error` and alarm codes to locate the cause. Raw errors, app-operation references, credentials, and provider output are excluded. Use the snapshot and troubleshooting tools to investigate the cause.
 
 To disable alerts, omit `healthAlerts` or set `enabled` to `false` in the inventory for the next admin image. To stop delivery immediately, remove the remote webhook file; the timer continues checking health. Keep or rotate the local copy according to your secret-handling policy.
 
@@ -267,7 +269,7 @@ The dashboard listens only on a private Unix socket on the operator host, by def
 
    Then open `http://localhost:8470`. Any free local port works.
 
-4. Check the view. The first collection can take up to a minute. After that the overview shows `Checked` with a time, the footer shows recent times for all four sources, and the role and app counts match `$PLATFORM_CLI status`.
+4. Check the view. The first collection can take more than a minute when a dependency is slow. After that the overview shows `Checked` with a time, the footer shows recent times for all four sources, and the role and app counts match `$PLATFORM_CLI status`.
 
 To stop the dashboard:
 
@@ -368,11 +370,13 @@ At the start and end of each term, and before any large change:
 
 ## Teardown boundary
 
-Tearing down means permanently deleting the deployment's cloud resources: servers, volumes, ports, images, and security groups. The platform's tooling deliberately does not do this. The operator CLI has no teardown command for the deployment or for apps, so no single command can destroy everything by mistake.
+Tearing down means permanently deleting the deployment's cloud resources: servers, volumes, ports, images, and security groups. The operator CLI has no deployment teardown command. App deletion is a separate supported operation in the portal and controller API.
+
+A portal admin can use **Delete app** after recent re-authentication and typing the exact app slug. The portal calls the broker at `POST /v1/apps/{app}/delete`; the controller exposes `POST /v1/applications/{id}/delete` on both project and privileged sockets (see the [Controller API](../reference/controller-api.md)). Deletion removes the worker, every database instance and its data, the bucket and objects, environment variables, deploy key, and members. Recovery requires platform backups.
 
 If you need to retire a deployment, treat it as a separate, explicitly authorized project. Before any cloud resource is deleted:
 
-1. Confirm that no apps or managed storage remain. `$PLATFORM_CLI status` must show `0` under both `APPS` and `STORAGE`; anything else is a stop condition. Apps are deleted through the controller's privileged deletion route (see the [Controller API](../reference/controller-api.md)), which also removes their storage.
+1. Confirm that no apps or managed storage remain. `$PLATFORM_CLI status` must show `0` under both `APPS` and `STORAGE`; anything else is a stop condition.
 2. Keep and verify every backup set, both backup identities, the off-site bundle names, and the evidence from a complete-loss drill.
 3. Stop the scheduled jobs: the operator's `openstack-platform-backup.timer`, and on the admin host `<namespace>-hosted-controller-backup.timer`, `<namespace>-management-broker-backup.timer`, `<namespace>-platform-backup.timer`, and `<namespace>-offsite-export.timer`.
 4. Write down any resources in the project that don't belong to the deployment, so they stay out of scope.

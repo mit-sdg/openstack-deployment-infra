@@ -1,11 +1,265 @@
 # Releases and upgrades
 
-Use this guide to prepare signed releases and upgrade a platform. It assumes you are a maintainer or an advanced operator. [Automated setup](deploy-the-platform.md) handles first deployment; [Hosts and images](hosts-and-images.md) covers rollout to running hosts.
+Use this guide to roll out a reviewed release to a running platform or produce its signed evidence. Operators should start with the ordered checklist below; maintainers can use the build and publication sections. [Automated setup](deploy-the-platform.md) handles first deployment.
 
 ## Page map
 
 - Maintainers: [evidence and trust](#what-a-release-is), [produce a release](#producing-a-release), [live acceptance](#run-disposable-live-acceptance), [sign-off](#sign-off-a-release).
-- Operators: [install and upgrade](#installing-and-upgrading), [database migrations](#database-migrations), [portal](#upgrade-the-owner-portal), [backup formats](#upgrade-backup-formats).
+- Operators: [rollout checklist](#roll-out-a-release), [install and upgrade](#installing-and-upgrading), [database migrations](#database-migrations), [portal](#upgrade-the-owner-portal), [backup formats](#upgrade-backup-formats).
+
+## Roll out a release
+
+Use this order for an existing platform: backups → admin image → helper → all five hosted image selections → seed and controller restart → portal pair → operator CLI. Controller code ships in the admin image; replacing admin does not update the helper retained on its state volume. Hosted image selections and operator selections are separate records.
+
+Before starting, require:
+
+- a clean checkout at the full reviewed commit, verified release evidence, and published, live-tested Glance IDs for all five roles;
+- the existing operator runtime, inventory, policy, pinned SSH bridge, and protected admin first-boot inputs;
+- the shell variables and `recovery` function from [Run the platform](run-the-platform.md#set-up-your-shell);
+- the candidate admin's [root-path preflight files](hosts-and-images.md#preflight-controller-paths-before-an-admin-image-upgrade), a verified portal pair, and pre-upgrade backups/keys sufficient for schema recovery.
+
+On the operator host, record the release and selected images in a private change record. Replace each placeholder with its reviewed value:
+
+```bash
+commit=<FULL_REVIEWED_COMMIT>
+export PLATFORM_RELEASE_MANIFEST=/private/releases/$commit/release-manifest.json
+export PLATFORM_RELEASE_SIGNATURE=/private/releases/$commit/release-manifest.sig
+export PLATFORM_RELEASE_TRUST_ROOT=/private/release-trust-root.pem
+export NEW_ADMIN_IMAGE=<ADMIN_GLANCE_UUID>
+export NEW_INGRESS_IMAGE=<INGRESS_GLANCE_UUID>
+export NEW_STORAGE_IMAGE=<STORAGE_GLANCE_UUID>
+export NEW_WORKER_IMAGE=<WORKER_GLANCE_UUID>
+export NEW_BUILDER_IMAGE=<BUILDER_GLANCE_UUID>
+test "$(git rev-parse HEAD)" = "$commit"
+```
+
+Keep changes paused through the final checks. The observed production admin replacement takes about eight minutes and each hosted selection about 2.5 minutes; these are planning estimates, not deadlines. Existing apps keep serving during admin replacement, but the controller and portal are briefly unavailable.
+
+0. **Check operations and take backups.** On admin as `agentops`, read every page of operations:
+
+   ```bash
+   NS=<namespace>
+   SOCKET="/run/$NS-controller/privileged.sock"
+   curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+     'http://localhost/v1/admin/operations?limit=100' > operations.json
+   jq '.items[] | select(.status == "running" or .status == "recovery_required")
+     | {operationId, kind, status, phase, finishing}' operations.json
+   jq -r '.nextCursor // empty' operations.json
+   ```
+
+   Follow a printed cursor with `&cursor=<UUID>` and repeat. This includes queued dispatches and finishing work. On the operator host, check its separate infrastructure journal without opening it for writes:
+
+   ```bash
+   /srv/openstack-platform/runtime/python3.14 - <<'PY'
+   import sqlite3
+   connection = sqlite3.connect(
+       "file:/srv/openstack-platform/state/platform.sqlite3?mode=ro", uri=True)
+   try:
+       rows = connection.execute(
+           "SELECT operation_id, kind, status, phase FROM operations "
+           "WHERE status IN ('running','recovery_required')").fetchall()
+       for row in rows:
+           print(*row)
+       dispatches = connection.execute(
+           "SELECT operation_id, kind, status FROM operation_dispatches "
+           "WHERE status IN ('pending','running','recovery_required')").fetchall()
+       for row in dispatches:
+           print("dispatch", *row)
+       if rows or dispatches:
+           raise SystemExit("resolve operator operations before rollout")
+   finally:
+       connection.close()
+   PY
+   $PLATFORM_CLI backup
+   recovery sudo systemctl start "$PLATFORM_NAMESPACE-hosted-controller-backup.service"
+   recovery sudo systemctl start "$PLATFORM_NAMESPACE-management-broker-backup.service"
+   ```
+
+   Verify the committed controller/deploy-key, operator, and broker sets with [Verify backups and schedules](backups-and-recovery.md#verify-backups-and-schedules). Keep a protected copy of `$PLATFORM_ADMIN_STATE/operator/image-selections.json` and record current hosted/operator selections before changing them.
+
+   **Success:** no in-flight or recovery-required operation remains; all required backups have their manifests and checksums. **Failure:** finish or recover the recorded operation, or repair and rerun the failed backup. Do not continue on a skipped backup unit or an incomplete set.
+
+1. **Preflight and replace admin.** Place both reviewed candidate preflight files in the root-controlled `/run/root-path-review` directory through the recovery console. From the operator host, run:
+
+   ```bash
+   recovery sudo python3.14 -I -B /run/root-path-review/host_paths.py preflight \
+     --plan /run/root-path-review/controller-path-plan.json
+   ```
+
+   Require `root-path-preflight=ok refusals=0`. Then, on the operator host:
+
+   ```bash
+   export OPERATOR_PUBLIC_KEY=/srv/openstack-platform/.secrets/ssh/id_ed25519.pub
+   export ADMIN_SECRETS_FILE=/srv/openstack-platform/.secrets/setup/admin-bootstrap.env
+   export PKI_DIR=/srv/openstack-platform/.secrets/setup/pki
+   $PLATFORM_CLI infra image set admin "$NEW_ADMIN_IMAGE"
+   $PLATFORM_CLI infra replace admin --yes
+   $PLATFORM_CLI infra list
+   ssh -F "$SSH_CONFIG" platform-admin -- systemctl is-active \
+     "$PLATFORM_NAMESPACE-controller.service" \
+     "$PLATFORM_NAMESPACE-controller-readiness.service"
+   ```
+
+   **Success:** replacement reports `exactIdentityVerified: true`, admin is active on the new ID, and controller/readiness both print `active`. The unchanged seed must remain usable until step 4. Replacement readiness checks Nomad; check controller readiness explicitly.
+
+   **Failure:** repair only preflight's refused paths and rerun before replacing. For an interrupted replacement, retry `$PLATFORM_CLI infra replace admin --yes` with the same state and inventory; [replacement recovery](hosts-and-images.md#retry-an-interrupted-replacement) restores the old host before acceptance or finishes cleanup after acceptance. If the old controller rejects a schema migrated by the new image, keep changes paused and use [schema recovery](#database-migrations). Host rollback alone cannot downgrade SQLite.
+
+2. **Install the matching helper.** From the clean release checkout on the operator host:
+
+   ```bash
+   deploy/releases/deploy_helper_release.sh "$commit"
+   ```
+
+   **Success:** `helper-release=<commit>:verified`. The script validates the live inventory and tests the installed launcher with an invalid request. **Failure:** correct the reported evidence, inventory, ownership, or runtime problem and rerun the same command. A failure before selection leaves the old helper selected; a failed probe after selection can leave the new helper selected. Keep changes paused until the verified result appears; do not edit retained release files.
+
+3. **Move all five hosted image selections.** On admin, read `GET /v1/admin/images` and record each current ID. For each role in `admin`, `ingress`, `storage`, `worker`, `builder`, run this sequence with that role's reviewed new/current IDs:
+
+   ```bash
+   NS=<namespace>
+   SOCKET="/run/$NS-controller/privileged.sock"
+   curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+     http://localhost/v1/admin/images
+   role=<ROLE>
+   new=<NEW_ROLE_IMAGE_UUID>
+   expected=<CURRENT_ROLE_IMAGE_UUID>
+   REQUEST_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+   printf '%s\n' "$REQUEST_ID"
+   body=$(jq -cn --arg image "$new" --arg expected "$expected" \
+     '{imageId: $image, expectedImageId: $expected}')
+   curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+     -H 'Content-Type: application/json' -H "Idempotency-Key: $REQUEST_ID" \
+     --data "$body" "http://localhost/v1/admin/images/$role/selection"
+   curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+     "http://localhost/v1/admin/operations/$REQUEST_ID"
+   ```
+
+   Poll the operation until `status: succeeded`, then re-read selections. Repeat with a fresh request ID for the next role. **Success:** every role has its exact reviewed ID and the display name baked into the new admin inventory. HTTP 202 means admitted, not completed. Persistent selections do not replace ingress or storage.
+
+   **Failure:** a `failed` selection changed nothing; re-read the current ID and validate the candidate before submitting a new request. For a lost response or `recovery_required`, replay the identical body and request ID. Retain all five request records until the seed is refreshed; do not edit SQLite or refresh a partial seed.
+
+4. **Refresh the seed and restart the controller.** As `agentops` on admin, validate all five display names against the baked inventory before replacing the seed:
+
+   ```bash
+   (
+     set -euo pipefail
+     umask 077
+     STATE=$(jq -r .paths.adminState "/etc/$NS/platform.json")
+     seed="$STATE/operator/image-selections.json"
+     test -f "$seed" && test ! -L "$seed"
+     test "$(stat -c '%u:%a' "$seed")" = "$(id -u):600"
+     temporary=$(mktemp "${seed}.XXXXXX")
+     trap 'rm -f -- "$temporary"' EXIT
+     curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+       http://localhost/v1/admin/images |
+       jq --exit-status --slurpfile guest "/etc/$NS/platform.json" '
+         if (.items | map(.role) | sort) != (["admin","ingress","storage","worker","builder"] | sort)
+           or any(.items[]; .displayName != $guest[0].images[.role])
+         then error("selected roles do not match the baked inventory")
+         else {schemaVersion: 1, projectId: $guest[0].projectId, namespace: $guest[0].namespace,
+           images: (.items | map({key: .role, value: {imageId, displayName, sourceCommit, compatibilityHash}}) | from_entries)}
+         end' > "$temporary"
+     sync -f "$temporary"
+     mv -T "$temporary" "$seed"
+     sync -f "$seed"
+   )
+   ```
+
+   Then use root through the operator host's recovery function:
+
+   ```bash
+   recovery sudo systemctl restart "$PLATFORM_NAMESPACE-controller.service"
+   recovery sudo systemctl restart "$PLATFORM_NAMESPACE-controller-readiness.service"
+   recovery sudo systemctl show -p Result "$PLATFORM_NAMESPACE-controller-prepare.service"
+   ssh -F "$SSH_CONFIG" platform-admin -- systemctl is-active \
+     "$PLATFORM_NAMESPACE-controller.service" \
+     "$PLATFORM_NAMESPACE-controller-readiness.service"
+   ```
+
+   **Success:** prepare reports `Result=success`, controller/readiness are both `active`, and `GET /v1/admin/images` still reports the five reviewed IDs. **Failure:** a validation error leaves the seed unchanged; finish or correct hosted selections first. If a premature seed refresh blocks startup, restore the protected seed copy with its original owner/mode and restart. Inspect prepare/readiness journals before proceeding; do not run the seed program against SQLite by hand.
+
+5. **Install the portal broker and web pair.** Use the [verified pair](#build-and-sign-the-portal-release) from the same commit. On the operator host, calculate the deployment identity and transfer its evidence:
+
+   ```bash
+   uv run python -c 'import sys; from openstack_platform.config import load_platform, platform_config_identity; print(platform_config_identity(load_platform(sys.argv[1])))' \
+     /srv/openstack-platform/config/platform.json
+   scp -F "$SSH_CONFIG" -r /private/portal/"$commit" "platform-admin:portal-$commit"
+   scp -F "$SSH_CONFIG" /private/release-trust-root.pem "platform-admin:portal-$commit/"
+   ```
+
+   Before switching the pair, stop the broker backup timer/service from the operator host:
+
+   ```bash
+   recovery sudo systemctl stop \
+     "$PLATFORM_NAMESPACE-management-broker-backup.timer" \
+     "$PLATFORM_NAMESPACE-management-broker-backup.service"
+   ```
+
+   On admin as `agentops`, fill in the printed identity and install both halves:
+
+   ```bash
+   commit=<FULL_REVIEWED_COMMIT>
+   NS=<namespace>
+   IDENTITY=<DEPLOYMENT_IDENTITY_SHA256>
+   evidence="$HOME/portal-$commit"
+   chmod -R go-rwx "$evidence"
+   (
+     set -euo pipefail
+     for mode in broker web; do
+       hash=$(jq -er --arg mode "$mode" '.archives[$mode].sha256' \
+         "$evidence/management-artifacts.json")
+       openstack-platform-install-release --mode "$mode" \
+         --archive "$evidence/$mode-$commit.tar" --archive-sha256 "$hash" \
+         --commit "$commit" --platform-config "/etc/$NS/platform.json" \
+         --expected-platform-namespace "$NS" \
+         --expected-platform-identity-sha256 "$IDENTITY" \
+         --release-manifest "$evidence/release-manifest.json" \
+         --release-signature "$evidence/release-manifest.sig" \
+         --release-trust-root "$evidence/release-trust-root.pem" \
+         --management-manifest "$evidence/management-artifacts.json" \
+         --management-signature "$evidence/management-artifacts.sig"
+     done
+   )
+   ```
+
+   Root activation waits for the pair. Check from the operator host:
+
+   ```bash
+   ssh -F "$SSH_CONFIG" platform-admin -- systemctl show \
+     "$PLATFORM_NAMESPACE-management-activate.service" -p Result
+   ssh -F "$SSH_CONFIG" platform-admin -- systemctl is-active \
+     "$PLATFORM_NAMESPACE-management-broker.service" \
+     "$PLATFORM_NAMESPACE-management-web.service"
+   recovery sudo systemctl start "$PLATFORM_NAMESPACE-management-broker-backup.timer"
+   recovery sudo systemctl start "$PLATFORM_NAMESPACE-management-broker-backup.service"
+   ```
+
+   **Success:** activation reports `Result=success`, both units are `active`, the active paths name the new pair, and portal sign-in and app/status pages work. Take a fresh broker backup. **Failure:** inspect activation logs and fix the reported evidence, configuration, or compatibility problem before retrying. One staged half leaves the old active pair serving. For a failure after switching, use [retained-pair reactivation](open-the-portal.md#roll-back-to-a-retained-portal-pair) only when compatible with the current broker schema; otherwise restore the pre-upgrade broker backup with compatible code.
+
+6. **Install the operator release last and verify the rollout.** On the operator host at the release checkout:
+
+   ```bash
+   /srv/openstack-platform/runtime/python3.14 deploy/releases/install_release.py \
+     --mode operator --source "$PWD" --commit "$commit" \
+     --release-manifest "$PLATFORM_RELEASE_MANIFEST" \
+     --release-signature "$PLATFORM_RELEASE_SIGNATURE" \
+     --release-trust-root "$PLATFORM_RELEASE_TRUST_ROOT" \
+     --python /srv/openstack-platform/runtime/python3.14 \
+     --uv /srv/openstack-platform/bin/uv \
+     --install-user-units --enable-backup-timer
+   $PLATFORM_CLI infra image set ingress "$NEW_INGRESS_IMAGE"
+   $PLATFORM_CLI infra image set storage "$NEW_STORAGE_IMAGE"
+   $PLATFORM_CLI infra image set worker "$NEW_WORKER_IMAGE"
+   $PLATFORM_CLI infra image set builder "$NEW_BUILDER_IMAGE"
+   $PLATFORM_CLI infra list
+   $PLATFORM_CLI status
+   systemctl --user is-enabled openstack-platform-backup.timer
+   ```
+
+   **Success:** `installed=operator commit=<commit> release=<path>`, all operator selections match the release, the timer is enabled, expected app health is available, and the portal works. Recording ingress/storage IDs does not replace those running hosts. If those hosts also need upgrading, follow their [replacement procedures](hosts-and-images.md#replace-a-persistent-host), including the storage backup and ingress connector-token prerequisites.
+
+   **Failure:** correct installer errors and retry the same release. Verification/smoke failures before selection leave the old complete release selected; later launcher or user-unit failures can occur after selection. Check `operator-releases/current/.complete` and timer state before retrying. Selecting an older executable cannot undo database migrations or cloud changes.
+
+After admin replacement, re-create any configured off-site mount and [verify backups and schedules](backups-and-recovery.md#verify-backups-and-schedules). Production currently has no off-site export, so `offsite_recovery` remains a known failing check until configured. Resume app changes only after the final role, controller, and portal checks pass.
 
 ## What a release is
 
@@ -57,7 +311,7 @@ From a clean checkout at the exact release commit, generate the component manife
 
 ### Check frontend freshness first
 
-Before signing or publishing changes under `frontend/`, require **Frontend workspace and committed dashboard freshness** (`dashboard-frontend`) at that commit. The manifest hashes committed `openstack_platform/dashboard/static/` bytes; freshness checks that they match the sources. With Node 24.19.0 and npm 11.17.0, the job installs the locked workspace, runs all checks, rebuilds, compares committed files and untracked output, and browser-tests the production content security policy. It also gates publication. Review source and generated output.
+Before signing or publishing changes under `frontend/`, require **Frontend checks, HTTPS smoke and dashboard freshness** (`dashboard-frontend`) at that commit. The manifest hashes committed `openstack_platform/dashboard/static/` bytes; freshness checks that they match the sources. With Node 24.19.0 and npm 11.17.0, the job installs the locked workspace, runs all checks, rebuilds, compares committed files and untracked output, and browser-tests the production content security policy. It also gates publication. Review source and generated output.
 
 ### Generate the component manifest
 
@@ -212,7 +466,9 @@ Publication starts on an authorized `main` dispatch with `publish=true`, or a `m
 
 1. Five role runners build the run's exact commit in parallel (`max-parallel: 5`, `fail-fast: false`) with protected inventory and project ID, then QEMU-boot a QCOW2 copy. Uncompressed `production-role-<run-id>-<role>` artifacts retain the QCOW2, closure JSON, source/run record, full inventory SHA-256 (without inventory), and build and QEMU logs for 30 days. Failure logs use `production-logs-<run-id>-<attempt>-<role>`. Builders receive no OpenStack passwords, bootstrap credentials, private certificates, or signing keys.
 2. `publish-images` ("Verify and publish retained production images") requires static checks, generated recipe tests, Nix evaluation, package tests, all five role VM tests and builds, and frontend freshness. It verifies that run's five artifacts, then uploads `production-evidence-<run-id>-<attempt>` before OpenStack calls. Keep this evidence (manifests, SBOMs, provenance, and `publication.json` binding CI results and every retained file's SHA-256) and the role artifacts; receipts cannot replace images.
-3. Publication is serialized (`openstack-images-provider`) and never rebuilds. It verifies content, closure, commit, metadata, owner, and status; uploads; waits for active status; and checks provider checksums: a Glance SHA-256 or SHA-512 multihash when the provider reports one, otherwise Glance's MD5 and exact size. Same-name images are reused only after all metadata and byte checks; ambiguous or mismatched images fail without replacement.
+3. CI publication runs are serialized (`openstack-images-provider`). Within one run, all five roles are verified before the first provider call, then uploaded concurrently without rebuilding. Each upload verifies content, closure, commit, metadata, owner, and status; uploads; waits for active status; and checks provider checksums: a Glance SHA-256 or SHA-512 multihash when the provider reports one, otherwise Glance's MD5 and exact size. Same-name images are reused only after all metadata and byte checks; ambiguous or mismatched images fail without replacement.
+
+On the production cloud verified on 2026-10-10, Glance supplies no SHA-256/SHA-512 multihash, so successful publication reports `content_verification=provider-md5-size`. Publication never downloads images back. The observed publish job took about 8.6 minutes.
 
 All modes use inventory role names suffixed with the commit's first eight characters (setup: `<prefix>-nixos-<role>-<commit8>`). Publication checks the entire inventory hash, including names. Images embed it at `/etc/<namespace>/platform.json`; hosted-controller seeds require exact names. Signing mode cannot change names, configuration, or bytes.
 
@@ -377,17 +633,19 @@ Record Glance ID, provider checksum, QCOW2 SHA-256, source commit, and artifact-
 
 ## Installing and upgrading
 
-Choose [image rollout](#accept-an-image), [manual installation](#install-releases-outside-automated-setup), [portal upgrades](#upgrade-the-owner-portal), or [backup updates](#upgrade-backup-formats).
+Use the [ordered rollout checklist](#roll-out-a-release) for a running platform. Use [image acceptance](#accept-an-image), [manual installation](#install-releases-outside-automated-setup), [portal upgrades](#upgrade-the-owner-portal), or [backup updates](#upgrade-backup-formats).
 
 ## Accept an image
 
-Live-test the candidate in its role, then select its exact Glance ID. [Hosts and images](hosts-and-images.md#candidates-and-accepted-images) gives checks, selection commands, and replacement steps; follow its [rollout order](hosts-and-images.md#roll-out-new-role-images).
+Live-test the candidate in its role, then select its exact Glance ID. [Hosts and images](hosts-and-images.md#candidates-and-accepted-images) gives checks, selection commands, and replacement steps; use the [release rollout checklist](#roll-out-a-release) for the order of an existing-platform upgrade.
 
 ## Install releases outside automated setup
 
 Use manual installation for reviewed standalone updates or recovery (admin replacement or operator-host rebuild). Setup installs matching releases initially. Run as the unprivileged `/srv/openstack-platform` owner from a clean checkout at the full release commit with generated, verified evidence. Admin must already provide Python 3.14 and helper runtime libraries; its image does. Releases never contain or replace the protected `platform-admin` SSH alias or `platform-openstack` credential wrapper (setup loads `/srv/openstack-platform/.secrets/openstack.env`).
 
 ### Bootstrap the stable runtime
+
+For a running-platform upgrade, complete the [rollout checklist](#roll-out-a-release) in order. The installation commands below also support operator-host recovery.
 
 Once per operator host, bootstrap shared pinned Python and uv under `/srv/openstack-platform`. The script verifies uv SHA-256, refuses root or sudo, links `age`, creates `/srv/openstack-platform/.secrets/ssh/id_ed25519` if absent, and creates a missing `platform-openstack` wrapper (`PLATFORM_OPENSTACK_CLI` selects its underlying CLI).
 
@@ -441,7 +699,19 @@ test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config \
 
 ### Install operator and helper
 
-1. Install the operator CLI on the operator host. Use the same commit for admin's fixed controller helper:
+1. Deploy the matching helper release through the bridge:
+
+   ```bash
+   commit=$(git rev-parse HEAD)
+   export PLATFORM_RELEASE_MANIFEST=/private/releases/"$commit"/release-manifest.json
+   export PLATFORM_RELEASE_SIGNATURE=/private/releases/"$commit"/release-manifest.sig
+   export PLATFORM_RELEASE_TRUST_ROOT=/private/release-trust-root.pem
+   deploy/releases/deploy_helper_release.sh "$commit"
+   ```
+
+   The script checks deployment inventories, transfers the commit archive over pinned SSH, verifies its digest, Git marker, and full production action list, switches atomically, and requires `INVALID_REQUEST` for an invalid probe. Admin needs no Git, sudo, or preinstalled installer. Expect `helper-release=<commit>:verified`.
+
+2. Install the operator CLI on the operator host at that same commit:
 
    ```bash
    commit=$(git rev-parse HEAD)
@@ -460,17 +730,6 @@ test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config \
 
    Before `.complete` and atomic `current` selection, the installer verifies signature, component hashes, canonical commit archive, runtime, lockfile, configuration, and entrypoint smoke tests. Expect `installed=operator commit=<commit> release=<path>`; `/srv/openstack-platform/bin` launchers select only complete releases.
 
-2. Deploy the helper release through the bridge:
-
-   ```bash
-   export PLATFORM_RELEASE_MANIFEST=/private/releases/"$commit"/release-manifest.json
-   export PLATFORM_RELEASE_SIGNATURE=/private/releases/"$commit"/release-manifest.sig
-   export PLATFORM_RELEASE_TRUST_ROOT=/private/release-trust-root.pem
-   deploy/releases/deploy_helper_release.sh "$commit"
-   ```
-
-   The script checks deployment inventories, transfers the commit archive over pinned SSH, verifies its digest, Git marker, and full production action list, switches atomically, and requires `INVALID_REQUEST` for an invalid probe. Admin needs no Git, sudo, or preinstalled installer. Expect `helper-release=<commit>:verified`.
-
 3. Verify the selection and schedules:
 
    ```bash
@@ -480,7 +739,7 @@ test "$(ssh -F /srv/openstack-platform/.secrets/ssh/config \
    systemctl --user is-enabled openstack-platform-backup.timer
    ```
 
-Failed installs keep the previous complete selection. Selecting older releases restores neither databases nor OpenStack state. For unsigned production, replace installer signature and trust-root options with `--allow-unsigned-production`. For helper deployment, set `PLATFORM_ALLOW_UNSIGNED_PRODUCTION=I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES` and omit signature and trust-root variables.
+Verification and smoke-test failures before selection keep the previous complete release selected. Launcher or user-unit installation can fail after `current` switches; inspect the selected `.complete` and retry the same verified installer before using it. Selecting older releases restores neither databases nor OpenStack state. For unsigned production, replace installer signature and trust-root options with `--allow-unsigned-production`. For helper deployment, set `PLATFORM_ALLOW_UNSIGNED_PRODUCTION=I_ACCEPT_UNSIGNED_PRODUCTION_IMAGES` and omit signature and trust-root variables.
 
 <details>
 <summary>How the helper launcher survives admin image changes</summary>
@@ -501,9 +760,9 @@ python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["components"]["c
 If the schema version increases:
 
 1. Pause app changes, and take and verify hosted-controller and operator-state backups. See [Backups and recovery](backups-and-recovery.md).
-2. Install the matching operator and helper releases.
-3. Let each database migrate once: the operator's on its first command, the hosted one when the new admin image's controller starts.
-4. Start the controller and check its API before you replace any other role image.
+2. Follow the [rollout checklist](#roll-out-a-release): new admin/controller first, matching helper next, then selections, seed, portal, and operator.
+3. The hosted database migrates when the new controller opens it. The operator database migrates on its first command with new code.
+4. Check controller/readiness and the API before replacing storage or ingress.
 
 Older executables must accept the active schema. After a migrated controller accepts changes, rollback requires stopping it, restoring pre-upgrade backups, and selecting old releases and role images. Database restoration and OpenStack recovery remain separate.
 
@@ -618,7 +877,13 @@ PY
 
 ### Install a matched pair
 
-1. Pause portal deployments and other changes, announce maintenance, prevent backups during switching, and take verified broker and hosted-controller backups. See [Backups and recovery](backups-and-recovery.md).
+1. Pause portal deployments and other changes, announce maintenance, and take verified broker and hosted-controller backups. See [Backups and recovery](backups-and-recovery.md). Then stop the broker backup timer and any active run through the recovery console:
+
+   ```bash
+   recovery sudo systemctl stop \
+     "$PLATFORM_NAMESPACE-management-broker-backup.timer" \
+     "$PLATFORM_NAMESPACE-management-broker-backup.service"
+   ```
 
 2. Compute deployment identity from the operator-host release checkout. Inventory mismatches are refused.
 
@@ -666,7 +931,14 @@ PY
    systemctl is-active "$NS-management-broker.service" "$NS-management-web.service"
    ```
 
-   Require `<commit>-...` paths under `management-broker-releases/releases/` and `management-web-releases/releases/`, `Result=success`, and two `active` results. Sign in, check functionality, take a fresh broker backup, and reopen changes.
+   Require `<commit>-...` paths under `management-broker-releases/releases/` and `management-web-releases/releases/`, `Result=success`, and two `active` results. Sign in and check functionality. From the operator host, restore the schedule and take a fresh broker backup:
+
+   ```bash
+   recovery sudo systemctl start "$PLATFORM_NAMESPACE-management-broker-backup.timer"
+   recovery sudo systemctl start "$PLATFORM_NAMESPACE-management-broker-backup.service"
+   ```
+
+   Reopen changes only after the remaining rollout checks pass.
 
 If paths stay unchanged, inspect the activation result and logs (`journalctl -u "$NS-management-activate.service"`); fix evidence, ownership, configuration, or compatibility before retrying activation.
 
@@ -704,11 +976,13 @@ Backup services, restore tools, and monitoring ship in admin images; replace adm
 
 ### Managed-data backup format 3
 
-- Adopt format 3 through admin replacement; backups require a mounted backup volume. Keep and verify readable format-2 sets.
-- Format 3 contains PostgreSQL, MongoDB, and Garage S3 data, excluding app images. After full restore, rebuild from accepted commits and settings before reopening apps; see [Backups and recovery](backups-and-recovery.md).
+This heading also covers the current format 4. Formats 2 and 3 remain readable for recovery.
+
+- Adopt the current tools through admin replacement; backups require a mounted backup volume. Keep and verify readable older sets.
+- Format 4 adds logical database archives and non-secret catalogs for both shared and isolated resources, including encrypted owned binding credentials. Format 3 contains shared PostgreSQL, MongoDB, and Garage S3 data. Both exclude app images. After full restore, rebuild from accepted commits and settings before reopening apps; see [Backups and recovery](backups-and-recovery.md).
 - Backup read-only keys are granted on new buckets and added to existing buckets during backup.
 
-After admin replacement, run and restore-check a fresh managed-data backup; retain it before relying on S3 full-loss recovery. Garage archives use catalog format 2; `RESTORE-MANIFEST` uses format 1. Garage's image stays unchanged; backup uses its existing admin API.
+After admin replacement, run and restore-check a fresh format-4 managed-data backup; retain it before relying on full-loss recovery. A format-4 restore requires a private offline replacement controller database even when there are no S3 buckets. Garage archives now use streaming catalog format 3. Readers accept catalog formats 1–3, but format 1 lacks app keys/grants needed for bucket restore. `RESTORE-MANIFEST` uses format 1. Backup uses Garage's existing admin API.
 
 ## Run disposable live acceptance
 

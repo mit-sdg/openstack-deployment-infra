@@ -1,345 +1,180 @@
 # Migrate shared databases to isolated instances
 
-This procedure retains the live PostgreSQL 17 and MongoDB 8 data while moving each
-resource into its own instance on `xl.16core` (16 vCPU / 64 GiB). Controller
-migrations 7 and 8 add instance/usage state and the durable worker allowlist cache.
-The storage replacement has the accepted host outage; subsequent copies stop one
-app at a time. Budget export + restore + verification + restart: usually seconds
-to minutes for small databases, with a configurable 1800-second deadline **per app**.
-Measure the throwaway rehearsal before scheduling the class app. Local Nix evaluation checks the configuration; the storage/admin VM tests in CI
-exercise Podman, nftables and the native database tools. No live migration was
-performed by the backend worker.
+This is the **one-time migration** from shared PostgreSQL and MongoDB servers to one database server per resource. It was completed for all live apps in production by 2026-10-10. New resources already use isolated instances; do not repeat this procedure as routine maintenance.
 
-For the local database regression check, with rootless Podman and idle loopback
-ports 5432, 27017, 30000 and 30001, run:
+An operator still needs it when an older installation has shared database resources, or when recovery leaves a tracked resource on a shared server. Check the controller's storage inventory first. The shared production servers still run with sealed fallback copies; this procedure retains those copies. Removing shared servers is a separate future change.
 
-```bash
-uv run python tests/run_storage_databases.py
-```
-
-It creates and removes four throwaway PostgreSQL 17/MongoDB 8 containers and runs
-native backups/restores, rotation with existing data, block/unblock permissions,
-authenticated migration copy/abort/replay, limits, collector caching, privileged
-repair and deletion. It adapts TLS and host lifecycle for local execution;
-the storage VM test additionally verifies TLS, systemd, cgroups, quotas and firewall.
-Instance create/start and running-instance limit changes return after a new
-authenticated TLS connection succeeds through the final firewall rules. A pending
-readiness checkpoint survives an interrupted reply; retrying unchanged limits
-finishes the probe without restarting again. `INSTANCE_NOT_READY` is a 503 response
-and retains the applied reservations for replay. The manager probes outside its
-global lock, so another application's operations can continue during startup.
-The storage host resolves inventory names directly through `/etc/hosts` and
-glibc DNS, and its static identities through `/etc/passwd` and `/etc/group`.
-It disables nsncd and external NSS modules; database startup, backups and restore
-therefore require no name-service daemon socket. The VM test exercises both
-engines with nscd absent and records runtime mounts and lookup-target dependencies.
+Each isolated resource runs in a Podman container under `<namespace>-database@<instance-id>.service` on storage. The instance has its own CPU, memory, connection, and XFS disk quota, plus a firewall allowlist for its app's workers. S3 continues to use one shared Garage service with a separate bucket and restricted key per app; S3 is not part of this migration.
 
 ## Prepare capacity and releases
 
-Use a reviewed checkout on the operator host. Set these paths to the existing
-installation, and keep the inventory/policy mode 0600:
+Run operator commands from a reviewed checkout on the operator host. Admin commands run as `agentops`; root commands use the recovery console. Set the shell variables and `recovery` function from [Run the platform](run-the-platform.md#set-up-your-shell).
 
-```bash
-export PLATFORM_CONFIG=/srv/openstack-platform/config/platform.json
-export PLATFORM_CLI=/srv/openstack-platform/bin/openstack-platform
-export PLATFORM_ROOT=/srv/openstack-platform
-export OSC=/srv/openstack-platform/bin/platform-openstack
-```
+1. Pause app changes and resolve unfinished foreground and finishing operations. Follow the [release checklist](releases-and-upgrades.md#roll-out-a-release) for the operation checks. Keep both escrowed age identities and take fresh hosted-controller, operator-state, and portal backups using [Verify backups and schedules](backups-and-recovery.md#verify-backups-and-schedules).
 
-1. Verify the new storage and admin VM tests in CI, resolve unfinished foreground
-   and finishing operations, and take hosted-controller/operator backups using
-   [the existing backup procedure](backups-and-recovery.md#verify-backups-and-schedules).
-   Retain both escrowed age identities. Check shared directories on the storage
-   recovery console before the first instance reservation:
+   **Success:** no unfinished operation remains and each required backup has its checksum and manifest. If a backup or operation check fails, resolve it before replacing hosts or migrating data.
+
+2. Check whether any PostgreSQL or MongoDB resource still needs migration. Run on admin:
 
    ```bash
-   NAMESPACE=<namespace>
-   DATA=$(jq -r .paths.data "/etc/$NAMESPACE/platform.json")
+   NS=<namespace>
+   SOCKET="/run/$NS-controller/privileged.sock"
+   curl --fail-with-body --silent --show-error --unix-socket "$SOCKET" \
+     'http://localhost/v1/admin/storage?limit=100' > storage.json
+   jq '.items[] | select((.type == "postgres" or .type == "mongo") and .isolation == "shared")
+     | {applicationId, resourceId, type, providerName, lifecycleState, migrationState, quotas, usage}' \
+     storage.json
+   jq -r '.nextCursor // empty' storage.json
+   ```
+
+   If `nextCursor` prints an ID, fetch the next page with `&cursor=<that ID>` and repeat. **Success:** you have an exact list of shared resources and their apps. If no database resource is shared, no migration is needed. S3's `shared` isolation is expected.
+
+3. Confirm storage capacity before reserving instances. On the storage recovery console:
+
+   ```bash
+   NS=<namespace>
+   DATA=$(jq -r .paths.data "/etc/$NS/platform.json")
    sudo du -sx --block-size=1 -- "$DATA/postgres" "$DATA/mongodb" \
      "$DATA/registry" "$DATA/object-storage"
+   df -h "$DATA"
    ```
 
-   PostgreSQL/MongoDB sources must fit their temporary 32 GiB projects, registry
-   its 100 GiB project, and Garage max(125% of bucket byte quotas, 4 KiB/object) +16 GiB overhead. S3 object
-   reservations total at most five million, matching fifty default 100,000-object quotas
-   and the bounded streaming exporter.
-   Leave at least 384 MiB inside each initial cap. The manager refuses the initial
-   assignment if a directory is already too large. Enlarge the corresponding code
-   reservation and volume before rollout if necessary. Source usage must fit each
-   instance's 150% hard quota with 384 MiB PG /128 MiB Mongo headroom. A database
-   over 14 GiB needs a larger migration archive project than the current 16 GiB.
+   The current manager reserves 32 GiB each for shared PostgreSQL and MongoDB, 100 GiB for registry, and 16 GiB for migration archives. Initial shared-directory assignment requires another 384 MiB of free room within each fixed cap. Garage reservation is the larger of 125% of bucket byte quotas and 4 KiB per reserved object, plus 16 GiB overhead. Total disk reservations must fit within 85% of the data filesystem.
 
-2. Change the operator inventory and the **complete** production CI inventory:
+   Each database's hard quota is 150% of its logical size limit, rounded up to a whole MiB. Migration requires source usage plus 384 MiB for PostgreSQL or 128 MiB for MongoDB to fit that quota. A resource over 14 GiB is refused until the 16 GiB migration archive reservation is increased in reviewed code. The instance memory budget remains 36 GiB while shared servers are retained, with 2 GiB of separate maintenance headroom.
+
+   **Success:** source sizes, instance caps, archive space, memory, and total reservations fit. If they do not, raise the affected resource limit or provision capacity before migration. Use [host resizing and replacement](hosts-and-images.md#resize-a-persistent-host) for infrastructure changes. Changing inventory volume sizes alone does not extend Cinder volumes.
+
+4. Confirm compatible storage/admin images, the matching helper, and a matched portal pair are installed. The storage image must provide the instance manager, database units, XFS project quotas, and instance firewall. The admin image must provide format-4 backups and the migration commands. Follow [Releases and upgrades](releases-and-upgrades.md#roll-out-a-release) and [Replace the storage host](hosts-and-images.md#replace-the-storage-host) when these are absent.
+
+   The foundation needs TCP 30000–30999 from worker and admin security groups to storage. From the reviewed operator checkout, with the protected OpenStack environment loaded:
 
    ```bash
-   umask 077
-   jq '.flavors.storage="xl.16core" | .volumes.data.sizeGiB=1024 |
-       .volumes.backup.sizeGiB=8192' "$PLATFORM_CONFIG" > "$PLATFORM_CONFIG.new"
-   mv "$PLATFORM_CONFIG.new" "$PLATFORM_CONFIG"
-   gh secret set PLATFORM_CONFIG_JSON --repo mit-sdg/openstack-deployment-infra \
-     --env openstack-images < "$PLATFORM_CONFIG"
-   ```
-
-   These commands are operator rollout actions, not commands run by this worker.
-   Preserve all other inventory fields, including worker/builder flavors, addresses,
-   namespace/prefix and `internalNames.storage`. The last name must match the
-   storage certificate SAN; new PKI generation includes it explicitly and refuses
-   a reused leaf missing that SAN. This check is a hard prerequisite. Verify:
-
-   ```bash
-   STORAGE_DNS=$(jq -r .internalNames.storage "$PLATFORM_CONFIG")
-   openssl verify -CAfile "$PLATFORM_ROOT/.secrets/setup/pki/internal-ca.pem" \
-     -verify_hostname "$STORAGE_DNS" "$PLATFORM_ROOT/.secrets/setup/pki/storage.pem"
-   ```
-
-   If changing that name, regenerate leaf certificates with the existing CA using
-   `infra/pki/generate_internal_pki.sh` in a fresh private directory containing the
-   escrowed CA certificate/key; install the resulting storage leaf/key as the
-   replacement's PKI inputs. Keep the CA unchanged. Standard existing storage names
-   already appear in the SAN; no new secret is required.
-
-   Verify the actual flavor and available project quota before replacement:
-
-   ```bash
-   "$OSC" flavor show xl.16core -c vcpus -c ram -c disk
-   "$OSC" quota show "$(jq -r .projectId "$PLATFORM_CONFIG")"
-   ```
-
-   Require 16 vCPUs /65536 MiB. Replacement retains the old storage VM until
-   acceptance, so storage alone temporarily needs 20 vCPUs /72 GiB with the
-   current 4-vCPU/8-GiB predecessor, plus the other hosts/workers and both boot
-   disks. Cinder quota must cover the 1 TiB data and proposed 8 TiB backup volumes.
-
-3. Extend the existing Cinder data volume before replacing storage:
-
-   ```bash
-   DATA_VOLUME=$(jq -r .volumes.data.name "$PLATFORM_CONFIG")
-   "$OSC" volume set --size 1024 "$DATA_VOLUME"
-   "$OSC" volume show "$DATA_VOLUME" -c size -c status
-   ```
-
-   Wait for size 1024 and the extension to finish. In-use extension needs Cinder
-   backend support; otherwise perform it while detached during the replacement
-   maintenance window. Do not force its state to available. The new image runs
-   idempotent `xfs_growfs` after mount and **before** shared services or the manager,
-   so the larger filesystem requires no manual storage-root work. If the volume
-   is extended after boot, rerun growth on the storage recovery console:
-
-   ```bash
-   sudo systemctl restart "$NAMESPACE-storage-growfs.service"
-   ```
-
-   Check `df -h "$DATA"` before continuing. Fifty default
-   logical quotas total 450 GiB. Physical admission reserves 300 GiB DB hard caps,
-   312.5 GiB S3, and 197 GiB fixed allowances = **809.5 GiB**; 500 GiB is insufficient.
-   One TiB's 85% admission/warning boundary is 870.4 GiB. Registry's 100 GiB is a
-   2 GiB/app allowance; arbitrary image histories have no finite worst case.
-
-   The existing 600 GiB backup volume does not hold fourteen full 450 GiB sets.
-   At full defaults, fourteen sets plus staging need roughly 6.6 TiB before
-   compression; provision at least 8 TiB, and comparable offsite capacity. Extend
-   the existing backup volume with `"$OSC" volume set --size 8192 <backup-volume>`;
-   have its mounted filesystem grown using the existing admin-volume procedure.
-   Automatic growth added here is specifically for the storage **data** filesystem.
-
-4. Apply the existing foundation reconciler from this reviewed checkout:
-
-   ```bash
+   export OSC=/srv/openstack-platform/bin/platform-openstack
    set -a
-   source "$PLATFORM_ROOT/.secrets/openstack.env"
+   source /srv/openstack-platform/.secrets/openstack.env
    set +a
    export OS_PROJECT_ID=$(jq -r .projectId "$PLATFORM_CONFIG")
    export OS_PROJECT_NAME=$(jq -r .project "$PLATFORM_CONFIG")
-   "$PLATFORM_ROOT/runtime/python3.14" infra/openstack/apply_foundation.py
-   "$PLATFORM_ROOT/runtime/python3.14" infra/openstack/apply_foundation.py --apply
+   /srv/openstack-platform/runtime/python3.14 infra/openstack/apply_foundation.py
+   /srv/openstack-platform/runtime/python3.14 infra/openstack/apply_foundation.py --apply
    "$OSC" security group rule list "$(jq -r .prefix "$PLATFORM_CONFIG")-storage"
    ```
 
-   The reconciler adds ingress TCP **30000–30999** to the storage group from the
-   `<prefix>-worker` and `<prefix>-admin` security groups. It retains existing
-   rules/ports and never deletes resources, so this is safe while apps serve.
-   No CIDR opening for student traffic is needed; nftables narrows each allocated
-   port to verified app worker addresses. These ports are also reserved from the
-   host ephemeral allocator.
+   Review the plan before `--apply`. The reconciler adds rules without deleting existing resources; per-instance nftables rules restrict each database port further. Do not open the range to arbitrary client addresses.
 
-5. Replace storage using the reviewed image and protected inputs documented in
-   [Replace the storage host](hosts-and-images.md#replace-the-storage-host):
+   Verify the storage certificate's DNS name on the operator host:
 
    ```bash
-   export OPERATOR_PUBLIC_KEY="$PLATFORM_ROOT/.secrets/ssh/id_ed25519.pub"
-   export STORAGE_SECRETS_FILE="$PLATFORM_ROOT/.secrets/setup/storage-bootstrap.env"
-   export PKI_DIR="$PLATFORM_ROOT/.secrets/setup/pki"
-   "$PLATFORM_CLI" infra image set storage <NEW_STORAGE_IMAGE_UUID>
-   "$PLATFORM_CLI" infra replace storage --yes
+   STORAGE_DNS=$(jq -r .internalNames.storage "$PLATFORM_CONFIG")
+   openssl verify -CAfile /srv/openstack-platform/.secrets/setup/pki/internal-ca.pem \
+     -verify_hostname "$STORAGE_DNS" \
+     /srv/openstack-platform/.secrets/setup/pki/storage.pem
    ```
 
-   Require successful growth, nginx, authenticated manager and shared DB readiness.
-   Sources remain at 4 cores /8 GiB each. During transition, normal instances admit
-   36 GiB, with 2 GiB maintenance headroom: source + shared + restore caps total
-   at most 60 GiB, leaving 4 GiB for OS/control/cache. Removing the sources later
-   allows raising the normal instance budget to 50 GiB, enough for fifty default
-   pairs; until then admission safely rejects capacity beyond 36 GiB.
+   **Success:** the security-group rules exist, the certificate prints `OK`, and role readiness passes. If the certificate lacks the inventory name, install a reviewed replacement leaf signed by the existing CA before continuing. Do not change the CA to bypass verification.
 
-6. Replace admin with the matching image, install the accepted helper release,
-   and ship portal broker/web together. Follow
-   [release installation](releases-and-upgrades.md#install-operator-and-helper):
+5. Check the controller policy's migration limits:
 
-   ```bash
-   commit=<FULL_REVIEWED_COMMIT>
-   export PLATFORM_RELEASE_MANIFEST=/private/releases/$commit/release-manifest.json
-   export PLATFORM_RELEASE_SIGNATURE=/private/releases/$commit/release-manifest.sig
-   export PLATFORM_RELEASE_TRUST_ROOT=/private/release-trust-root.pem
-   deploy/releases/deploy_helper_release.sh "$commit"
-   ```
+   | Field under `limits` | Default | Accepted range |
+   | --- | --- | --- |
+   | `migrationBackupMaxAgeMinutes` | 60 minutes | 1–1440 minutes |
+   | `migrationAppSeconds` | 1800 seconds per app | 120–7200 seconds |
 
-   The image includes PostgreSQL 17 clients, MongoDB tools, age, Podman, XFS/nft,
-   and the pinned Python dependencies; no apt or ad-hoc Nix installation on admin
-   is needed. Reuse existing storage-bootstrap, Garage admin/backup key, Nomad
-   tokens, CA and managed-data age identity. The manager creates private per-instance
-   admin passwords itself. Replacing admin alone leaves the durable old helper
-   selected; install the matching release before sending new actions.
-
-   New policy fields are optional: `limits.migrationBackupMaxAgeMinutes=60` and
-   `limits.migrationAppSeconds=1800` (bounds 1–1440 and 120–7200). For larger apps,
-   add them to both operator and hosted-controller policies using the existing
-   protected-policy installation procedure. The per-app deadline starts after the
-   backup gate and covers quiescence, both copies, verification and restart. CLI polling defaults to 7200;
-   it is independent of each app's deadline. Existing process/helper defaults can
-   remain unchanged.
+   These fields are optional. If changed, install them in operator and hosted-controller policy through the protected configuration procedure. The app deadline starts after the backup gate and covers stopping, copying, verifying, and restarting the app. CLI polling has its own `--timeout`, default and maximum 7200 seconds. Measure a rehearsal before setting a maintenance window; elapsed time is not proof of completion.
 
 ## Back up, rehearse and cut over
 
-On admin as agentops, run the new managed backup and the existing actual restore
-check before migration:
+1. On admin as `agentops`, take a complete managed-data backup and test its restore:
+
+   ```bash
+   mountpoint "$(jq -r .paths.backups "/etc/$NS/platform.json")"
+   openstack-platform-managed-backup
+   PLATFORM_CONFIG="$(readlink -f "/etc/$NS/platform.json")" \
+     /srv/openstack-platform/infra/backup/verify_latest_restore.sh
+   ```
+
+   **Success:** the backup prints `platform backup complete: <directory>`; its `MANIFEST` says `format_version=4` and it has both database catalogs. The restore check ends with `latest platform restore=verified evidence=<directory>/RESTORE-MANIFEST`.
+
+   The backup covers shared sources and accepted instances. Failed inventory, credentials, or dumps fail the entire set. If either command fails, inspect the error and fix the backup before proceeding. Off-site export needs a separate mounted filesystem; [production has not configured it](backups-and-recovery.md#export-recovery-evidence-off-site). Local migration checkpoints do not replace an off-site complete set.
+
+2. Rehearse with a disposable app that has representative shared database data:
+
+   ```bash
+   openstack-platform-storage-migrate --application <REHEARSAL_APP_UUID>
+   ```
+
+   Save the printed `Instance migration request-id=<UUID>` before the command completes. **Success:** `Instance migration completed`, instance isolation in the storage inventory, correct app data, and working public app health. If rehearsal fails, use the replay or abort procedure below before migrating other apps.
+
+3. Migrate a reviewed app selection:
+
+   ```bash
+   openstack-platform-storage-migrate --application <APP_UUID>
+   ```
+
+   Repeat `--application UUID` to select several apps. Omit it only when you intend to migrate all eligible apps:
+
+   ```bash
+   openstack-platform-storage-migrate
+   ```
+
+   The controller stops one running app at a time. It freezes source logins, copies and verifies data, publishes new binding values, and resubmits the accepted Nomad job with the storage DNS mapping. Stopped or never-deployed apps stay stopped. **Success:** `Instance migration completed`; verify each resource and app as in step 2.
+
+   If the command loses its response, times out, or reports reconciliation is needed, fix the cause and replay the **same request ID and app selection**:
+
+   ```bash
+   openstack-platform-storage-migrate --request-id <ORIGINAL_REQUEST_UUID> \
+     --application <APP_UUID> --timeout 7200
+   ```
+
+   Preserve an omitted or repeated `--application` selection exactly. Do not create a new migration intent to work around a stopped app or an unfinished operation.
+
+4. Before publication, an interrupted migration can be aborted:
+
+   ```bash
+   openstack-platform-storage-migrate --abort --application <APP_UUID>
+   ```
+
+   Save the abort's printed request ID. If interrupted, repeat `--abort`, the same ID, and the same selection. Abort restores source login permissions and the accepted shared job, releases the app reservation, and retains source and target data. Aborted apps need a new migration intent later; the original master skips them on replay.
+
+   **Rollback boundary:** after any selected endpoint is published, abort refuses `MIGRATION_ALREADY_PUBLISHED`. Replay the original migration instead. Switching the app back to the sealed source would lose writes made to the instance.
+
+5. Verify all pages of the storage inventory again. Every migrated PostgreSQL/MongoDB resource must have `isolation: instance`, an `instanceId`, and an `instancePort`. Test app reads/writes and public health; check fresh usage and database memory, connection, disk, and availability alarms. Then run on admin:
+
+   ```bash
+   openstack-platform-storage-repair
+   openstack-platform-managed-backup
+   ```
+
+   **Success:** `PostgreSQL repair completed` and a new committed format-4 backup. Repair reapplies PostgreSQL role timeouts and connection caps, normalizes object ownership, and repairs old shared IP-based bindings. If repair is interrupted, replay its printed ID with `--request-id <UUID>`. Run the restore check again before relying on the new backup.
+
+### The backup gate and a failed checkpoint
+
+Before each resource starts or resumes cutover, the controller requires a successful source backup within `migrationBackupMaxAgeMinutes`. It reads an operator-owned mode-0640 receipt from `$PLATFORM_BACKUPS/<namespace>-migration-receipts`; it cannot read ciphertext or the managed-data key.
+
+A missing or stale receipt starts `<namespace>-resource-backup@<postgres|mongo>-<providerName>.service` through a restricted polkit rule. That unit dumps only the selected shared resource, encrypts and verifies the archive, and publishes the receipt after syncing it. The unit has a 3600-second timeout. An initial migration keeps the app serving during this gate; an already stopped replay stays stopped.
+
+Inspect or retry a failed gate from the admin recovery console:
 
 ```bash
-openstack-platform-managed-backup
-PLATFORM_CONFIG=/etc/<namespace>/platform.json \
-  /srv/openstack-platform/persistent/platform/infra/backup/verify_latest_restore.sh
-```
-
-Require `latest platform restore=verified`, the new format-4 catalogs, and healthy
-backup/offsite status. Every run backs up shared sources **and** accepted isolated
-instances; failed inventory, credentials, native dumps or instance access fail the
-whole set and alert. Encryption, fourteen-day pruning and offsite export are unchanged.
-No recurring manual instance snapshot precondition replaces these logical backups.
-
-Rehearse, then migrate named apps:
-
-```bash
-openstack-platform-storage-migrate --application <REHEARSAL_APP_UUID>
-openstack-platform-storage-migrate --application <CLASS_APP_UUID>
-openstack-platform-storage-migrate
-```
-
-Repeat `--application UUID` for multiple named apps. Save each printed request UUID.
-Replay the same UUID **and the same selection** after an interrupted attempt:
-
-```bash
-openstack-platform-storage-migrate --request-id <UUID> \
-  --application <CLASS_APP_UUID> --timeout 7200
-```
-
-Before each resource starts/resumes cutover, a successful source backup within the
-configured age is required. The controller reads only an operator-owned,
-mode-0640 receipt from `<backups>/<namespace>-migration-receipts`; it cannot read
-backup payloads or the age identity. A missing/stale receipt triggers the
-operator-owned `<namespace>-resource-backup@<postgres|mongo>-<database>.service`.
-Polkit allows the controller to start only those validated backup units. Each
-checkpoint dumps exactly that shared resource, age-encrypts it with the existing
-managed-data identity, decrypts/verifies the archive, and publishes a receipt after
-fsync. No Garage export or unrelated instance dump runs in this gate. It has a
-separate one-hour bound while the app keeps serving on an initial migration;
-quiesced replays stay quiesced until completion or abort. The 1800-second app budget
-is refreshed after the gate. Supplemental checkpoints remain private under
-`<backups>/<namespace>/migration-checkpoints` and are pruned after fourteen days,
-including by the nightly job. Nightly complete managed-data sets retain the existing
-offsite export; these local cutover checkpoints supplement them.
-
-To inspect or retry a failed checkpoint on admin (database is the admin-only
-`providerName`, such as `p_<20 hex characters>`):
-
-```bash
-NAMESPACE=<namespace>
+NS=<namespace>
 DATABASE=<providerName>
-sudo systemctl start "$NAMESPACE-resource-backup@mongo-$DATABASE.service"
-sudo journalctl -u "$NAMESPACE-resource-backup@mongo-$DATABASE.service" -n 30
+sudo systemctl start "$NS-resource-backup@mongo-$DATABASE.service"
+sudo journalctl -u "$NS-resource-backup@mongo-$DATABASE.service" -n 30 --no-pager
 ```
 
-Use `postgres` for PostgreSQL. Failed checkpoints alert through existing backup
-health; a successful retry clears that checkpoint's failed status. Frozen
-source backups preserve the original app login/role for restore. An app stops once;
-source logins are frozen; target data is copied, counted and cheaply checksummed,
-sealed, then published. The accepted Nomad job is upgraded with the inventory DNS
-host mapping and resubmitted so new binding values reach stable or candidate workers.
-Stopped/never-deployed apps stay stopped. PostgreSQL extension DDL imports separately as admin;
-app schemas/data/constraints import as the app owner, through the actual app login
-(all app objects become owned by its owner role). Import sessions disable statement,
-lock and idle-in-transaction timeouts; admin temporarily lifts only the unpublished
-login's temp-file cap and restores 256 MiB in `finally`. Publication waits for this
-cleanup. The instance memory/CPU/XFS caps still bound the import.
-Mongo gets a temporary minimum 1 GiB cap and serial restore workers from the separate
-2 GiB maintenance reserve. Disconnected copies cancel their process group; replay
-cleans orphaned copies instead of waiting behind their instance lock.
+Use `postgres` for PostgreSQL. The provider name is admin-only and has the form `p_<20 lowercase hex characters>`. **Success:** the unit exits successfully and the receipt/status files record verification and success. A successful retry clears the failed checkpoint status; then replay the migration intent.
 
-CPU/memory limits may be raised prospectively on a shared resource before migration
-so a large app can receive its intended instance cap; shared connections still require
-migration before a raise.
-
-Before publication, abort an interrupted app if returning to the shared source is
-necessary:
-
-```bash
-openstack-platform-storage-migrate --abort --application <APP_UUID>
-```
-
-Replay an interrupted abort using its printed UUID and `--abort` plus the same app
-selection. It restores PostgreSQL LOGIN/the checkpointed Mongo role, prevents old
-copy attempts from publishing, restarts the accepted shared job, and releases the
-app reservation. It retains target and source data; a later explicit resource deletion cleans both. A partial abort skips those apps
-when the original master resumes; use a **new** migration intent to migrate them later.
-After publication, abort refuses `MIGRATION_ALREADY_PUBLISHED`: replay the original
-migration. Switching back then would lose writes made to the isolated instance.
-
-After all apps migrate, verify admin resource isolation/ports, working bindings,
-fresh usage and no unexpected connection/availability/memory/disk alarms. Run:
-
-```bash
-openstack-platform-storage-repair
-openstack-platform-managed-backup
-```
-
-Repair reapplies the four role timeouts and current connection caps. It also repairs
-old shared IP-based PostgreSQL bindings after installing the container DNS mapping;
-use it earlier if a shared Node app needs that repair before its own migration.
-Database URLs use the existing certificate DNS name on both shared and isolated ports.
+Checkpoint ciphertext stays private under `$PLATFORM_BACKUPS/<namespace>/migration-checkpoints/<type>-<providerName>/`. It receives age-based pruning after 14 days, both during checkpoint creation and during nightly managed-data backups. These checkpoints are not included in the complete managed-data off-site bundle.
 
 ## Recover a resource or a lost storage host
 
-Use [managed-data restore and the full-loss drill](backups-and-recovery.md#check-and-restore-managed-data).
-Format 4 restores users/roles and encrypted owned bindings, provisions missing isolated
-instances at recorded ports, verifies data inventory, remaps the private offline
-controller DB, then verifies current workers before reopening their firewall access.
-Keep the hosted controller stopped while installing/restoring its offline state;
-existing unrelated worker apps can keep serving. A completed identical payload replay
-skips destructive import. Keep the target app stopped until verification succeeds.
-Restore terminates existing target PostgreSQL sessions and replaces the target
-MongoDB database, including collections absent from the snapshot. Accepted instance
-limits remain authoritative: PostgreSQL role/database connection caps are reapplied,
-and MongoDB write access is reconciled against restored usage and the current size
-limit before worker access opens.
-Mongo backup inventory includes databases with app users and no collections, so a
-new resource or an app that dropped its last collection retains backup coverage.
-PostgreSQL sessions authenticate as the capped login (`session_user`) and use the
-stable NOLOGIN owner (`current_user`) for object creation. Rotation, repair and
-restore reassign older login-owned objects to that owner within the resource's
-database before applying the shared role settings. This keeps tables, functions
-and DDL access available after credential rotation. Run the existing one-time
-PostgreSQL repair after rollout to normalize current resources.
+Use [managed-data restore and the full-loss drill](backups-and-recovery.md#check-and-restore-managed-data) for data recovery. A format-4 restore can move a tracked shared resource directly into an instance; run the migration only if the restored controller still tracks a shared endpoint.
 
-For a single resource, decrypt the provider archive into the native restore CLI:
+For one resource, use a [restore-capable admin host](backups-and-recovery.md#check-and-restore-managed-data). Verify the set's `SHA256SUMS` before using its provider archive and the other provider's catalog:
 
 ```bash
+set -o pipefail
 age --decrypt --identity /escrow/managed-age-identity.txt /backup/postgres.age | \
   PLATFORM_CONFIG=/private/replacement-platform.json \
   openstack-platform-storage-backup restore --type postgres \
@@ -347,36 +182,8 @@ age --decrypt --identity /escrow/managed-age-identity.txt /backup/postgres.age |
     --catalog /backup/mongodb-catalog.json
 ```
 
-Use `mongodb.age`, `--type mongo` and `--catalog /backup/postgres-catalog.json` for MongoDB. The other provider's catalog reserves its archived ports against new shared-resource instance allocation. The controller file must be a direct,
-current-user-owned mode-0600 offline database without SQLite sidecars. Install the
-remapped controller state through its existing supported restore launcher before
-starting it. A tracked shared pre-migration resource restores into its current or a fresh isolated
-instance; old untracked source copies stay retained in the encrypted archive. Rebuild missing app images after host loss; arbitrary runtime environment
-values still come from escrow, while managed DB binding credentials are in the backup.
+For MongoDB, use `mongodb.age`, `--type mongo`, and `--catalog /backup/postgres-catalog.json`. The other provider's verified catalog reserves its archived ports against allocation. The offline controller must be a direct, current-user-owned mode-0600 file without SQLite sidecars.
 
-A format-4 `--full` loss drill compares actual restored-instance counts with the
-managed entries in both catalogs. An absent engine records `no-managed-resources`;
-any present engine must restore all its managed databases. It does not require
-keeping a throwaway PostgreSQL resource. The `isolatedDatabases` evidence records
-both the state and restored-instance count. CI's storage
-VM test also deletes/recreates/restores both engines, changes their limits, copies
-both shared sources and checks app credentials, data and stale-target cleanup.
+Restore can terminate PostgreSQL sessions and replace MongoDB contents. Keep the target app and hosted controller stopped until data verification and offline state installation finish. **Success:** `database-restore=verified kind=<type> shared=<n> isolated=<n>`, correct data inventory, restored bindings, and verified worker access. The supported [hosted-controller restore](backups-and-recovery.md#restore-the-hosted-controller) installs the remapped controller database.
 
-A hard-cap crash can require an admin size raise even with minute polling and 50%
-headroom; logical and physical bytes differ. Raising the quota applies before DB
-connection attempts and collectors retain no failed app reservation. Reductions need
-fresh logical usage plus margin. The manager measures physical allocation while
-serving and rejects unsafe reductions before stopping. An admitted reduction stops
-cleanly, rechecks allocation to cover concurrent writes, applies the quota, and starts
-again. Memory/connection edits restart that instance; CPU edits and disk raises apply
-live. The first limits edit or repair of a saved job with an old DNS mapping stops
-that app, publishes the binding, then redeploys with the host mapping once. Interrupted
-redeploys resume from the applied checkpoint without repeating the stop or limit edit. Stops use
-PG fast SIGINT /Mongo SIGTERM, mixed kill mode and a 180-second grace period.
-
-The follow-up removes shared containers, frozen databases/users, legacy listeners and
-source reservations; adjusts monitoring/backups to absent shared services; and raises
-normal/maintenance instance memory budgets to 50/52 GiB. This rollout retains sources
-and never deletes their data automatically. Order matters: old storage lacks manager
-support; old helpers reject new actions; unmatched portal/controller quota models fail;
-and migration must wait for the new backup/restore coverage and successful rehearsal.
+If restore fails, keep the targets isolated, fix the stated credential, inventory, or capacity problem, and replay the same payload. A completed identical payload skips destructive import. Rebuild missing app images and recover arbitrary runtime environment values from escrow; the managed backup contains database binding credentials.

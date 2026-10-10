@@ -150,7 +150,7 @@ Setup reads literal `KEY='value'` assignments, without running shell code or exp
    "${EDITOR:?set EDITOR}" "$PRIVATE/setup.env"
    ```
 
-The editor opens the file with its six evidence paths. Replace every placeholder and example name and address below. Keep the evidence paths already written; don't paste them twice.
+The editor opens the file with its six evidence paths. Add the settings below, replacing every placeholder, example name, and example address. Keep the evidence paths already written.
 
 ```bash
 # OpenStack login: an application credential for this project
@@ -190,13 +190,6 @@ PLATFORM_ADMIN_STATE_GIB='32'
 PLATFORM_DATA_GIB='500'
 PLATFORM_BACKUP_GIB='600'
 
-# Release evidence (added by the command above)
-PLATFORM_RELEASE_MANIFEST='/home/<you>/platform-private/releases/<FULL_COMMIT>/release-manifest.json'
-PLATFORM_RELEASE_SIGNATURE='/home/<you>/platform-private/releases/<FULL_COMMIT>/release-manifest.sig'
-PLATFORM_RELEASE_TRUST_ROOT='/home/<you>/platform-private/release-trust-root.pem'
-PLATFORM_ARTIFACT_MANIFEST='/home/<you>/platform-private/releases/<FULL_COMMIT>/artifacts/role-artifacts.json'
-PLATFORM_ARTIFACT_SIGNATURE='/home/<you>/platform-private/releases/<FULL_COMMIT>/artifacts/role-artifacts.sig'
-PLATFORM_ARTIFACT_TRUST_ROOT='/home/<you>/platform-private/release-trust-root.pem'
 ```
 
 `PLATFORM_OPERATOR_CIDR` must match the source address the admin host sees from your operator host (`/32` for one IPv4 address).
@@ -212,7 +205,7 @@ OS_PROJECT_DOMAIN_NAME='Default'
 
 You can omit `OS_PASSWORD` to have setup prompt for it securely without terminal echo.
 
-Use single quotes and a regular file you own, mode `0600`. Duplicate keys are rejected; unquoted expansions are ignored. Save inventory settings explicitly: prompt answers aren't saved, and reruns need identical inputs. Avoid a shell loaded with another project's `OS_*` values. Horizon OpenRC files are accepted after setting mode `0600`. See [Configuration](../reference/configuration.md#setup-file).
+Use single quotes and a regular file you own, mode `0600`. Duplicate keys are rejected. Setup ignores unquoted shell expansions. Quoted values remain literal; setup does not expand them. Save inventory settings explicitly: prompt answers aren't saved, and reruns need identical inputs. Avoid a shell loaded with another project's `OS_*` values. Horizon OpenRC files are accepted after setting mode `0600`. See [Configuration](../reference/configuration.md#setup-file).
 
 ## 5. Set up public ingress
 
@@ -328,7 +321,7 @@ uv run openstack-platform setup \
 
 Omit `--cloudflare-token-file` in direct mode or to leave ingress pending.
 
-Setup rechecks the release, builds tooling, saves inventory and secrets, and creates security groups and ports. It builds, verifies, smoke-boots, and uploads images; boots admin, storage, and ingress with their volumes and credentials; and installs the pinned operator runtime, SSH bridge, CLI, helper, and backup timer. It checks controller sockets, accepts five images, and requires healthy status. With a token, it also checks public health.
+Setup rechecks the release, builds tooling, saves inventory and secrets, and creates security groups and ports. It builds, verifies, smoke-boots, and uploads images; boots admin, storage, and ingress with their volumes and credentials; and installs the pinned operator runtime, SSH bridge, CLI, helper, and backup timer. It checks controller sockets, accepts five images, and requires healthy CLI status. The separate five-minute health snapshot also checks backups and off-site recovery; CLI success does not prove those checks pass. With a token, it also checks public health.
 
 Builds and uploads can be quiet. Progress includes `created security group`, `qcow-config-drive-smoke=passed`, and `operator-config=installed`. Success ends with these lines (project values vary):
 
@@ -408,7 +401,7 @@ If setup fails with an `error:` line, do not manually delete partially created r
 
    Expect `OK`. This checks DNS, TLS, forwarding, and Traefik. Configure pending ingress first. See [Public health fails](troubleshooting.md#public-health-fails).
 
-6. Before going live, run and restore-check each backup set with [Backups and recovery](backups-and-recovery.md). The portal is still off; enable it next.
+6. Before going live, run and restore-check each backup set with [Backups and recovery](backups-and-recovery.md). Configure off-site export to a separate mounted filesystem on admin. Without it, the health snapshot fails `offsite_recovery`. The portal is still off; enable it next.
 
 For file locations created by setup on the operator host, see [Configuration](../reference/configuration.md#files-setup-creates-on-the-operator-host).
 

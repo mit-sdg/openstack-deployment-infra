@@ -1,6 +1,6 @@
 # Manage apps and people
 
-Use the owner portal to manage apps across the class and help people finish blocked changes. Staff and portal admins share app controls. Deleting an entire app, account controls and the audit log require a portal admin.
+Use the portal to manage apps across the class and help people finish blocked changes. This guide is for staff and portal admins. Staff share the app controls; whole-app deletion, storage-limit changes, account controls, platform settings, and the audit log require an admin.
 
 ## Choose a destination
 
@@ -11,12 +11,19 @@ Use the owner portal to manage apps across the class and help people finish bloc
 | **People** | `/people` | Staff and portal admins | Everyone, including owners, staff, admins and accounts awaiting setup; each person’s apps and activity |
 | **Activity** | `/activity` | Staff and portal admins | Class-wide changes, with blocked and unknown changes at the top |
 | **Audit log** | `/audit` | Portal admins | Account changes and app-management actions |
+| **Platform settings** | `/platform-settings` | Portal admins | The default build machine |
 
-A portal admin lands on **People** after signing in. Other accounts land on **My apps**. There are no role-named navigation sections. Retired portal and broker URLs are removed; update bookmarks to these destinations.
+A portal admin lands on **People** after signing in. Other accounts land on **My apps**.
 
 ## Open and manage an app
 
-Open **All apps**, search by app name, owner name or username, and select the app. Use **Status** to filter the full catalog, including **Needs attention**. An app appears after it is created in the portal or adopted. Lists contain 25 apps per page. **Status** shows blocked or unknown changes directly below the app state only when there is a change to attend to. Hover over the app state to see when it was last checked. The list refreshes automatically; observations older than ten minutes show **Unknown** while a new check runs.
+1. Open **All apps**.
+2. Search by app name, owner name, or username. Use **Status** to filter the full catalog, including **Needs attention**.
+3. Select the app to open **Overview**.
+
+An app appears after it is created in the portal or adopted. Its slug is the permanent app name in its URL. Lists contain 25 apps per page.
+
+The **Status** column shows blocked or unknown changes below the app state. Hover over the app state to see when it was last checked. The list refreshes automatically; observations older than ten minutes show **Unknown** while a new check runs.
 
 Staff and portal admins open the same app pages as owners without joining the team:
 
@@ -29,13 +36,17 @@ Staff and portal admins open the same app pages as owners without joining the te
 
 The optional **Build script** has no default. Leave it empty when the app has no build step. Environment values stay write-only for everyone. See [Deploy an app](for-app-owners.md) for the shared controls.
 
-Staff and admins have no app or concurrency limit. Creating an app for another person uses that owner’s app limit. Every app still accepts one change at a time. Storage limits are editable only by portal admins. Staff and admin app changes appear under their usernames in **Audit log**; their reads go into a separate private read log.
+Staff and admins have no app or concurrency limit. Creating an app for another person uses that owner's app limit. Each app permits only one foreground infrastructure change at a time: that change must settle before another starts. Accepted deployment cleanup can continue in the background while compatible changes proceed.
+
+Only portal admins can edit storage limits. Staff and admin app changes appear under their usernames in **Audit log**; their reads go into a separate private read log.
 
 ## Resume a change that needs attention
 
 **Needs attention** means a change is blocked; **Unknown** means its outcome has not been confirmed. Both offer **Resume** when the change can be replayed. Find the same status and action on **Overview**, deployment lists and details, **All apps**, **Activity**, or the person’s apps and activity under **People**.
 
-Select **Resume** to continue the original request with its original commit, settings and request keys. Wait for it to finish before starting another change. Staff and admins can resume anyone’s app change without a password or authenticator confirmation; owners and teammates can resume changes on their apps. The audit log records who resumed it.
+Select **Resume** to continue the original request with its original commit, settings and request keys. Before acceptance, finish the blocking change before starting another infrastructure change. After acceptance, cleanup retries automatically and compatible changes can proceed.
+
+Staff and admins can resume ordinary app changes without re-authentication. Owners and teammates can resume ordinary changes on their apps; changes admitted through staff controls require staff or an admin. Only admins can resume storage-limit and default-build-machine changes. Whole-app deletion also requires recent re-authentication. The audit log records staff and admin Resume actions.
 
 An unfinished environment edit requires the person who started it to enter the same value again in **Settings** > **Environment variables**. It has no generic Resume action because values are not stored for replay.
 
@@ -71,24 +82,55 @@ Deleting an app permanently removes the running app and worker, every database a
 2. Read the removal notice and type the exact app slug. Select **Delete permanently**.
 3. Confirm your password and a fresh authenticator code if you have not re-authenticated in the last five minutes.
 4. Watch the deletion progress in the dialog. If it needs attention, an admin can select **Resume** after re-authentication; it keeps the original controller key and resumes cleanup. Refreshing or closing the page does not cancel an admitted deletion. Find pending deletion in class **Activity**.
-5. When **App deleted** appears, select **Done**. The app disappears from app lists. Its tombstone and operation/audit history remain.
+5. When **The app and its data have been deleted.** appears, select **Done**. The app disappears from app lists. Its tombstone and operation/audit history remain.
 
-Owners, teammates and staff cannot admit or resume whole-app deletion. Deletion holds the app's busy scope until it settles. No manual removal of storage bindings is needed for this cascade operation.
+Owners, teammates and staff cannot admit or resume whole-app deletion. Deletion blocks other infrastructure changes until it settles. You do not need to remove storage bindings before whole-app deletion.
+
+The portal calls broker `POST /v1/apps/{app}/delete` with the exact slug as `confirmation` and an idempotency key. The broker forwards the request to controller `POST /v1/applications/{id}/delete` on the project socket. The controller also exposes that route on the privileged socket for operators.
 
 ### Delete a database or storage
 
 > [!WARNING]
 > Deleting storage destroys the database or bucket and all its data, even if the bucket isn't empty. Recovery requires the operator and a managed-data backup; changes since the backup are lost.
 
-1. Under **Databases and storage** in the app's settings, open **Edit variables** for the resource. Remove every variable, select **Save variables**, and deploy so the running app stops using it. Saved settings that still connect to the resource block deletion (`STORAGE_BOUND`).
-2. Make sure a recent managed-data backup exists ([Backups and recovery](backups-and-recovery.md)).
-3. In **Settings** > **Danger zone**, select **Delete**. Choose it under **Database or storage**.
-4. Type the app's name, a space, and the storage type, for example `my-app postgres` (the types are `postgres`, `mongo`, and `s3`). Select **Delete permanently**.
-5. Check the app’s **Overview** activity until it shows success, then check that the storage is gone from **Databases and storage**.
+1. Check that a recent managed-data backup exists ([Backups and recovery](backups-and-recovery.md)). Plan an outage if the running app uses this resource.
+2. For an app using the resource, select **Stop app** on **Overview** and wait for it to stop. Prepare the code to run without the resource.
+3. Under **Settings** > **Databases and storage**, open **Edit variables** for the resource. Remove every variable and select **Save variables**. Saved bindings block deletion (`STORAGE_BOUND`). Do not deploy yet: a deployment must bind every active resource.
+4. In **Settings** > **Danger zone**, select **Delete**. Choose the resource under **Database or storage**.
+5. Type the app's name, a space, and the storage type, for example `my-app postgres` (the types are `postgres`, `mongo`, and `s3`). Select **Delete permanently**.
+6. Check **Overview** activity until it shows success. Check that the resource is gone from **Databases and storage**, then deploy the prepared commit with the saved settings.
+
+### Edit storage limits (portal admins only)
+
+Owners, teammates, staff, and admins can read usage and limits on **Settings** > **Databases and storage**. Only admins see **Edit limits**. Usage is a recorded measurement, with its update time; it may be stale or not measured yet. CPU shows a cap, not live CPU usage.
+
+1. Select **Edit limits** beside the resource.
+2. Enter the limits, then select **Save limits**. The portal submits the previous limits with the new values so a concurrent edit cannot be silently overwritten.
+3. Wait for **Limits saved.** If the change fails, read its message before retrying.
+
+| Limit | Allowed range | Effect |
+| --- | --- | --- |
+| PostgreSQL **Size target** | 1–500 GB | Reports database size; exceeding it does not pause writes. |
+| MongoDB **Size limit** | 1–500 GB | Pauses writes above the limit. Reads and deletes continue; writes resume at or below 95%. |
+| Database **Connection limit** | 1–100 | Caps app connections; changing it restarts that database instance. |
+| Database **Memory limit (MB)** | 512–8,192, in whole MB | Hard memory cap, with no swap; changing it restarts that database instance. |
+| Database **CPU limit (cores)** | 0.1–4, in increments of 0.001 | CPU quota for that database instance. |
+| S3 **Size limit** | 1 MB–500 GB | Bucket byte quota. |
+| S3 **Object limit** | 1–100,000,000 | Bucket object quota. |
+
+The portal uses binary units: 1 GB = 1,024 MB and 1 MB = 1,048,576 bytes. Each database has its own server and hard disk allowance of 150% of its size target or limit, rounded up to a whole MB. The allowance includes database files and overhead. S3 uses a shared Garage service with a separate bucket and bucket-scoped key for each app.
+
+MongoDB accepts the selected connection limit plus ten for overhead; the app's URI sets `maxPoolSize` to the limit. PostgreSQL sets its server connection maximum to the limit plus five reserved administrator connections. Keep application connection pools within the selected limit.
+
+Lowering a database size needs fresh usage and room above that usage: 384 MB for PostgreSQL or 128 MB for MongoDB. The instance manager also checks the files on disk. Lowering a database size can briefly stop the instance while the disk allowance is checked. Host memory, connection, object, and disk budgets can refuse a change even within these ranges. Follow the portal's error message or ask an operator to add capacity.
+
+If a resource shows **Memory after move** and **CPU after move**, it is still on a shared database server. Those caps apply after migration to its own instance. Ask an operator to migrate it before raising connection limits ([Migrate storage instances](migrate-storage-instances.md)).
 
 ### Allow an outage or change an app's size
 
-On **Overview** > **Machines**, **Worker** shows the machine's vCPU count and total RAM, followed by the app's memory limit. The app can use all of the worker's vCPUs. If machine capacity is unavailable, it shows the flavor name and app memory limit. Select **Change size** to open **Deploy** at **Worker size**. Every deployment with a fresh worker recalculates the memory limit after leaving room for the system; the size review shows an upper bound until the worker starts.
+On **Overview** > **Machines**, **Worker** shows the machine's vCPU count and total RAM, followed by the app's memory limit. If machine capacity is unavailable, it shows the flavor name and app memory limit. A flavor is an OpenStack VM size. Select **Change size** to open **Deploy** at **Worker size**.
+
+Each app has a dedicated worker VM (virtual machine). Replacing it for a deploy, resize, or upgrade discards its local files. Fresh-worker deployments calculate the hard memory limit from measured capacity after leaving room for the system. The size review shows an upper bound until the worker starts. CPU is a soft scheduling share; the app can use all the worker's vCPUs (virtual CPUs).
 
 Staff and portal admins have these deploy options:
 
@@ -97,9 +139,14 @@ Staff and portal admins have these deploy options:
 
 ### Change the build machine
 
-On **Overview** > **Machines**, **Build machine** shows its capacity and flavor, with **platform default** or **set for this app**. Select **Change** to open the app's **Settings** page at the **Build machine** card. Choose a size and select **Save**. The state says **Uses the platform default** or **Set for this app**. To reset an app-specific choice, select **Use platform default**, then **Save**. **Build machine saved.** confirms success; pending or failed changes show their activity. The **Deploy** page shows the effective build machine in its read-only **Settings** summary.
+1. On **Overview** > **Machines**, find **Build machine**. It shows capacity and flavor, with **platform default** or **set for this app**.
+2. Select **Change** to open **Settings** at the **Build machine** card.
+3. Choose a size and select **Save**. To reset an app-specific choice, select **Use platform default**, then **Save**.
+4. Wait for **Build machine saved.** Pending or failed changes show their activity.
 
-Each deploy builds the app on a temporary machine of this size. A bigger machine builds faster and handles heavy builds such as Next.js; a smaller one lets more builds run at once. If a build runs out of memory, choose a bigger machine. Build machines need at least 1 vCPU and 1 GB RAM.
+The state says **Uses the platform default** or **Set for this app**. **Deploy** shows the effective build machine in its read-only **Settings** summary.
+
+Each deploy builds the app on a temporary machine of this size. If a build runs out of memory, choose a machine with more RAM. A larger machine consumes more cloud quota while building. Build machines need at least 1 vCPU and 1 GB RAM.
 
 Saving a build machine applies to builds that start afterwards. It keeps the worker, needs no sizing plan or maintenance, and does not change a build already started. Owners cannot read or change build machines.
 
@@ -145,7 +192,7 @@ Owners' default limits come from the inventory (`appLimit` and `concurrencyLimit
 | Field | Range | What it limits |
 | --- | --- | --- |
 | **Apps** | 0 to 1000 | How many apps the owner may have. Stopped apps count. |
-| **Changes at a time** | 0 to 16 | How many changes (deploys, storage, variables, starts, stops, and restarts) the owner may have in progress at once. |
+| **Changes at a time** | 0 to 16 | How many foreground changes this account may start at once: deploys, storage, variables, starts, stops, and restarts. Teammate changes use the teammate's concurrency limit. Accepted deployment cleanup does not count. |
 
 Select **Save limits**. Lowering a limit blocks new apps or changes once that limit is reached; setting it to 0 blocks all new ones. Existing apps and changes in progress remain. Apps a portal admin created for the owner count too.
 
@@ -154,10 +201,10 @@ Staff and portal admins have no limits, so their accounts show no **Limits** sec
 <details>
 <summary>When someone can't sign in with a local account</summary>
 
-The portal shows the same message for a wrong username, password, or code, and for a temporary block, so it doesn't reveal which accounts exist. The blocks it applies:
+The portal shows the same credentials error for a wrong username, password, or code, and for the hourly account blocks. Short per-address blocks can instead show a wait message. The blocks it applies:
 
-- Five failed attempts for one username from one address block that pair for a minute, even with the right password.
-- Twenty wrong passwords for one account within an hour, from anywhere, block password sign-in for that account until those failures are an hour old. A browser where the person signed in successfully in the last 90 days has its own allowance, so they can usually still sign in from their own computer.
+- Five failed attempts for one username from one address block that pair for the rest of its 60-second window, even with the right password.
+- Twenty wrong passwords for one account within an hour, from anywhere, block password sign-in for that account until those failures are an hour old. A recognized browser has a separate allowance of 20 failures per hour. Its recognition cookie lasts up to 90 days; changing account access or credentials invalidates it.
 - Wrong authenticator codes (after a correct password) start a 30-second wait that doubles with each failure, up to an hour, and allow at most ten failures an hour.
 
 To help someone who is blocked, wait for the window to pass, or send **Reset password** or **Reset authenticator**. Restarting the broker clears the short per-address blocks but not the hourly password and code limits.

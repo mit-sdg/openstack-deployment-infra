@@ -8,7 +8,7 @@ You'll need an OpenStack project, an x86_64 Linux operator host, a domain with a
 
 ## Is it a good fit?
 
-Students deploy Node.js or Bun apps from GitHub, each at its own HTTPS address with optional PostgreSQL, MongoDB, and S3 storage. They use the owner portal at your domain, without SSH, cloud, or database administrator access.
+Students deploy Node.js or Bun apps from GitHub, each at its own HTTPS address with optional PostgreSQL, MongoDB, and S3 storage. They use 6.1040 Apps through the portal at your domain. They do not need SSH, OpenStack credentials, or database administrator access.
 
 It doesn't accept Dockerfiles or arbitrary build commands, support custom domains or multiple instances of one app, or give students shell access. See [What it doesn't do](../how-it-works.md#what-it-doesnt-do).
 
@@ -47,7 +47,7 @@ Images and servers carry deployment metadata that the platform checks before reu
 
 After setup, the platform creates more machines on its own:
 
-- one **worker** server and port for each app, replaced on every deploy;
+- one dedicated **worker** server and port for each app; replacement loses its local disk;
 - one **builder** server and port for each build, deleted when the build ends.
 
 ### What each role does
@@ -56,9 +56,15 @@ After setup, the platform creates more machines on its own:
 | --- | --- | --- |
 | `admin` | Permanent | Runs the controller, the owner portal, Nomad, monitoring, and backups. |
 | `ingress` | Permanent | Runs Traefik, which routes each public hostname to the right app or service. Stores no data. |
-| `storage` | Permanent | Runs PostgreSQL, MongoDB, Garage (S3), and the private image registry. |
-| `worker` | One per app | Runs one app. No SSH, no permanent disk. |
+| `storage` | Permanent | Runs a separate PostgreSQL or MongoDB server for each database resource, shared Garage (S3), and the private image registry. |
+| `worker` | One per app | Runs one app. No SSH or durable local disk. |
 | `builder` | One per build | Builds one app image from one commit, then is deleted. |
+
+Each database resource runs in its own Podman container under a `<namespace>-database@<id>.service` unit on storage. Each instance has CPU, memory, connection, and disk limits. Its firewall limits app traffic to that app's worker addresses and also admits platform administration. Garage is shared: each app gets a bucket, a bucket-scoped key, and byte and object quotas.
+
+Treat workers as disposable. Resize, replacement deployment, or an OS image upgrade can replace the VM and erase its local disk. Store durable app data in the managed databases or S3.
+
+On a fresh worker, the controller measures capacity after the OS reserve. It subtracts another 32 MiB and rounds memory down to 128 MiB for the app's hard memory limit. Nomad assigns roughly half the measured CPU budget as a soft share; the app can use all worker vCPUs. See [Manage apps and people](manage-apps-and-people.md).
 
 ### Volumes and their default sizes
 
@@ -136,7 +142,7 @@ Setup stores your project credential on the operator host and copies it to the a
 
 ### Quotas
 
-The setup check stops if quota is short or unknown. At minimum flavor sizes and default volume sizes, it needs:
+The setup check stops if quota is short or unknown, unless you explicitly acknowledge a provider without Glance quota reporting as described below. At minimum flavor sizes and default volume sizes, it needs:
 
 | Resource | Setup needs |
 | --- | --- |
@@ -147,12 +153,12 @@ The setup check stops if quota is short or unknown. At minimum flavor sizes and 
 | Volume storage | The sum of the three volumes: 1,132 GiB at the defaults |
 | Ports | 5 |
 | Security groups | 5 |
-| Security group rules | 32 |
+| Security group rules | 32 in the setup quota calculation |
 | Keypairs | 1 |
 | Images | 5 |
 | Image storage | The total size of the five images, which the release evidence records |
 
-Allow headroom for your class: each app adds a worker and port; each deploy temporarily adds a builder and a second worker until traffic switches. See [Setup check failures](troubleshooting.md#the-setup-check-doesnt-say-ready).
+Direct mode adds one ingress rule per provider CIDR, so allow extra security-group-rule quota beyond the fixed setup calculation. Allow headroom for your class: each app adds a worker and port; a deployment that replaces its worker temporarily adds a builder and a second worker until traffic switches. See [Setup check failures](troubleshooting.md#the-setup-check-doesnt-say-ready).
 
 ### Flavors
 
@@ -253,7 +259,7 @@ Setup builds all five images with Nix unless matching images for this release an
 Plan for a long run:
 
 - Initial Nix downloads and builds can be lengthy. Most subprocess commands have a two-hour timeout; some checks have shorter limits.
-- Each image is boot-tested in QEMU with 2 vCPUs and 3 GiB of memory, and must finish booting within about six minutes.
+- Each image gets a QEMU config-drive smoke test with 2 vCPUs and 3 GiB of memory. Cloud-init must print the smoke marker within about six minutes; this is not a live service acceptance test.
 - Setup then uploads the five images and waits for each permanent host to report ready.
 
 Run setup in `tmux` or `screen`. If interrupted, rerun the same command to resume.
@@ -280,7 +286,7 @@ OpenStack:
 
 Names and domain:
 
-- [ ] A prefix and namespace (lowercase letters, digits, hyphens)
+- [ ] A prefix (2–32 characters) and namespace (3–32 characters), using lowercase letters, digits, or hyphens; start and end with a letter or digit
 - [ ] A display name (up to 40 characters) and an organization name
 - [ ] A base domain, and an HTTPS provider that covers `<domain>`, `*.<domain>`, and the two extra hostnames
 - [ ] An ingress mode: a Cloudflare tunnel and its token, or your provider's IPv4 ranges for direct mode

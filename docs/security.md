@@ -1,6 +1,6 @@
 # Security
 
-This page explains how the platform limits what each part can do, and what it leaves to you. Read it before you deploy, and again before you change a boundary in the code. The [internals reference](reference/internals.md) has the exact mechanisms.
+This page explains the platform's trust boundaries and the operator's responsibilities. Read it before deploying or changing access between components. The [glossary](README.md#glossary) defines the security terms; the [internals reference](reference/internals.md) describes the mechanisms.
 
 ## The idea
 
@@ -16,20 +16,46 @@ The platform separates web traffic, sign-in, authorization, and cloud operations
 - **Each app sees only its own secrets.** Environment variables and database credentials are injected through Nomad Variables scoped to one app. The controller stores no values, and controller and portal APIs never return them after saving. App code can read its injected values.
 - **Private repositories use per-app deploy keys.** The portal creates a read-only key for one repository. It grants no access to anything else.
 
+### Managed storage
+
+Each app's PostgreSQL or MongoDB resource runs in a separate database server on the storage host. Its Podman container has systemd CPU and memory limits, no swap, connection caps, and an XFS project quota on its files. Per-instance nftables rules allow that app's worker IPs and fixed administration addresses. Other apps do not receive its credentials or network access.
+
+These are per-instance limits on a shared host, not separate storage VMs. A host or volume failure affects all instances. MongoDB's sampled logical-size limit blocks writes above the limit and allows reads and deletes; writes resume at 95% or less. The hard filesystem quota is 150% of the logical limit, rounded up to a MiB. PostgreSQL reports logical size and has the same physical quota. Changing an instance's memory or connection limits restarts it.
+
+S3 buckets share one Garage service. Each app receives an access key limited to its bucket, with byte and object quotas. [How it works](how-it-works.md#where-data-lives) explains where data and credentials live.
+
 ### The owner portal
 
 - **The website has limited access.** `management-web` serves pages and forwards requests. It can't reach the controller, the identity service, or the portal database.
 - **One service owns accounts and decisions.** `management-broker` owns users, sessions, ownership, quotas, and the audit log. It has no network access and is the only portal service that can talk to the controller.
-- **Sign-in never touches Commons passwords.** With Sign in with Commons, the browser approves the portal on Commons, and `management-identity` exchanges a single-use code with Commons server to server. Each code is bound with PKCE to the sign-in that asked for it, so a code copied from an address bar or log can't be redeemed. Code redemption uses only the configured Commons origin; network access is limited to allowlisted addresses. Codes are never stored or logged.
-- **Sessions are server-side and short.** Session cookies are opaque, `Secure`, `HttpOnly`, and bound to the portal's origin. Changes require a matching `Origin` and a CSRF token. By default, owner sessions expire after 8 hours or 30 minutes idle. Staff sessions are capped at 1 hour or 10 minutes idle; portal admins at 1 hour or 15 minutes. Configuration can shorten these limits.
+- **Sign-in never touches Commons passwords.** The browser approves sign-in on Commons, and `management-identity` exchanges a single-use code with Commons server to server. PKCE binds the code to the initiating sign-in; a copied code alone cannot be redeemed. Redemption uses only the configured Commons origin, with network access limited to allowlisted addresses. Codes are not persisted or logged.
+- **Production sessions are server-side.** Session cookies are opaque, `Secure`, and `HttpOnly`, with the `__Host-` prefix. Authenticated changes require a matching `Origin` and a session-bound CSRF token. The local HTTP development harness uses different cookie names and omits `Secure`.
 - **The most powerful accounts are local.** Portal admins are local accounts with an authenticator app (TOTP). A Commons account can never become a portal admin. The first admin is created from a single-use setup link, so no password ever sits in configuration.
-- **Dangerous actions need more.** Staff and portal admins delete storage by typing the app and storage names to confirm. Deleting an entire app is admin-only and requires exact-slug confirmation plus re-entering the password and a fresh authenticator code within the last five minutes, including manual resume. Other shared app actions need no password or authenticator confirmation. Creating or changing accounts remains admin-only and requires re-entering the password and a fresh authenticator code within the last five minutes. Staff reads of student data are recorded in the audit log.
+- **Sensitive admin actions require recent re-authentication.** This is called step-up: the local password and a fresh authenticator code must have been checked within the last five minutes. The table below distinguishes it from typing a deletion confirmation. Staff metadata reads are audited.
+
+| Account role | Maximum session lifetime | Idle timeout |
+| --- | --- | --- |
+| Owner (default) | 8 hours | 30 minutes |
+| Staff | 1 hour | 10 minutes |
+| Portal admin | 1 hour | 15 minutes |
+
+Configuration can shorten the session limits.
+
+| Action | Portal authority | Extra check |
+| --- | --- | --- |
+| Delete storage | Staff or admin | Type the app slug and resource type; no step-up |
+| Delete an entire app, including manual resume | Admin only | Type the exact app slug and have current step-up |
+| Create or change accounts | Admin only | Current step-up |
+| Other shared app management | Staff or admin | No password or authenticator confirmation |
+
+App deletion removes the worker, database instances and their data, bucket and objects, environment values, deploy key, and memberships. It has no undo operation. Recovery requires backups and separately escrowed secrets. See [Manage apps and people](guides/manage-apps-and-people.md) before using it.
 
 ### The controller and the cloud
 
-- **No network API.** The controller listens on two local Unix sockets. The operating system identifies the connecting process (`SO_PEERCRED`) before any request is read. The portal broker gets ordinary operations; only the operator's account gets administrator reads and destructive operations.
+- **No network API.** The controller listens on two local Unix sockets. Linux identifies the connecting process (`SO_PEERCRED`) before any request is read. The hosted project socket permits only the broker's exact user/group IDs; the privileged socket permits only the operator account's exact IDs. The broker's sandbox also hides the privileged socket.
+- **Portal roles are enforced by the broker.** A portal admin still uses `project.sock`, not `privileged.sock`. App deletion (`POST /v1/applications/{id}/delete`) exists on both sockets. On the project path, the broker checks the portal admin role, step-up, and exact slug. Platform-wide `/v1/admin/...` routes are available only on the privileged socket. The controller trusts the admitted broker for portal-user authorization; it does not authenticate each browser user.
 - **No broad credentials in the web-facing process.** The controller calls a fixed helper that accepts one strict request type and runs only allowlisted actions. Input can't choose an executable, a host, a credential, or a shell command.
-- **Exact identity before any change.** Setup and the operator tools refuse to act unless the OpenStack project's ID and name match your private inventory. Existing resources are checked by ID, metadata, network, address, image, flavor, and attachment before they're reused. A matching name alone is never enough, and an ambiguous result stops for recovery.
+- **Recorded identity before reuse.** Setup and operator tools check the OpenStack project ID and name against the inventory. Resource reuse checks the recorded IDs, ownership metadata, and expected configuration or attachments. A matching name alone is insufficient; ambiguous evidence stops for recovery.
 - **Unknown outcomes stay unknown.** If a cloud call's result is uncertain, the operation is journaled and resumed later with exact evidence. It isn't retried blindly or marked as done.
 
 ### Images and releases
@@ -46,6 +72,7 @@ The platform separates web traffic, sign-in, authorization, and cloud operations
 
 - **Separate, encrypted sets.** Controller state, portal state, deploy keys, operator state, and app data are backed up separately and encrypted. The controller escrow key stays off the admin host. The managed-data key also lives on the admin host for restore checks. Keep off-site escrow copies of both.
 - **Restores check before they replace.** Restore tools check the relevant deployment identity, schema, integrity, and manifest before replacing state.
+- **Backups have gaps.** The image registry and Nomad Variable values are not backed up. Rebuild images from Git and escrow secret values you cannot regenerate. Off-site export needs a mounted filesystem on admin, re-mounted after replacement; local encrypted backups alone do not provide off-site recovery.
 
 ## What's still your job
 
