@@ -25,6 +25,21 @@ from .validation import ValidationError
 
 
 @contextmanager
+def postgres_import_settings(values: dict[str, Any], login: str) -> Iterator[None]:
+    """Lift only the unpublished login's temp cap; restore its normal cap on failure."""
+    with psycopg.connect(**values, autocommit=True) as admin:
+        admin.execute(
+            sql.SQL("ALTER ROLE {} SET temp_file_limit = '-1'").format(sql.Identifier(login))
+        )
+        try:
+            yield
+        finally:
+            admin.execute(
+                sql.SQL("ALTER ROLE {} SET temp_file_limit = '256MB'").format(sql.Identifier(login))
+            )
+
+
+@contextmanager
 def driver_guard(
     deadline: float,
     *,
@@ -267,47 +282,22 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
             lists[label] = path
         application_restore = [part for part in restore]
         application_restore[application_restore.index("--username") + 1] = args["applicationLogin"]
-        app_env = {**base, "PGPASSWORD": args["applicationPassword"]}
-        # Authenticate as the real app login, rather than connecting as root and
-        # SET ROLE: user-defined defaults/functions cannot regain root authority.
-        manager.command(
-            [
-                *application_restore,
-                "--use-list",
-                str(lists["schemas"]),
-                "--role",
-                "o_" + name[2:],
-                str(archive),
-            ],
-            env=app_env,
-            timeout=max(1, deadline - time.monotonic()),
-        )
-        # Only fixed image extension scripts run as admin, before app functions
-        # exist. Suppress ownership-sensitive comments such as plpgsql's.
-        manager.command(
-            [*restore, "--use-list", str(lists["extensions"]), str(archive)],
-            env={**base, "PGPASSWORD": new_password},
-            timeout=max(1, deadline - time.monotonic()),
-        )
-        with psycopg.connect(**values, port=config["port"], password=new_password) as target:
-            with driver_guard(deadline, postgres=(target,)):
-                # Extension configuration tables can require data import rights;
-                # keep their ownership with admin while granting the app owner.
-                for (schema,) in target.execute(
-                    "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname<>'information_schema'"
-                ).fetchall():
-                    target.execute(
-                        sql.SQL(
-                            "GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA {} TO {}"
-                        ).format(sql.Identifier(schema), sql.Identifier("o_" + name[2:]))
-                    )
-        for section in ("pre-data", "data", "post-data"):
+        app_env = {
+            **base,
+            "PGPASSWORD": args["applicationPassword"],
+            "PGOPTIONS": base["PGOPTIONS"] + " -c statement_timeout=0 -c lock_timeout=0"
+            " -c idle_in_transaction_session_timeout=0",
+        }
+        with postgres_import_settings(
+            {**values, "port": config["port"], "password": new_password}, args["applicationLogin"]
+        ):
+            # Authenticate as the real app login, rather than connecting as root and
+            # SET ROLE: user-defined defaults/functions cannot regain root authority.
             manager.command(
                 [
                     *application_restore,
                     "--use-list",
-                    str(lists["objects"]),
-                    "--section=" + section,
+                    str(lists["schemas"]),
                     "--role",
                     "o_" + name[2:],
                     str(archive),
@@ -315,6 +305,39 @@ def _copy_instance(manager: Any, config: dict[str, Any], args: Mapping[str, Any]
                 env=app_env,
                 timeout=max(1, deadline - time.monotonic()),
             )
+            # Only fixed image extension scripts run as admin, before app functions
+            # exist. Suppress ownership-sensitive comments such as plpgsql's.
+            manager.command(
+                [*restore, "--use-list", str(lists["extensions"]), str(archive)],
+                env={**base, "PGPASSWORD": new_password},
+                timeout=max(1, deadline - time.monotonic()),
+            )
+            with psycopg.connect(**values, port=config["port"], password=new_password) as target:
+                with driver_guard(deadline, postgres=(target,)):
+                    # Extension configuration tables can require data import rights;
+                    # keep their ownership with admin while granting the app owner.
+                    for (schema,) in target.execute(
+                        "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname<>'information_schema'"
+                    ).fetchall():
+                        target.execute(
+                            sql.SQL(
+                                "GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA {} TO {}"
+                            ).format(sql.Identifier(schema), sql.Identifier("o_" + name[2:]))
+                        )
+            for section in ("pre-data", "data", "post-data"):
+                manager.command(
+                    [
+                        *application_restore,
+                        "--use-list",
+                        str(lists["objects"]),
+                        "--section=" + section,
+                        "--role",
+                        "o_" + name[2:],
+                        str(archive),
+                    ],
+                    env=app_env,
+                    timeout=max(1, deadline - time.monotonic()),
+                )
         with (
             psycopg.connect(**values, port=5432, password=old_password) as source,
             psycopg.connect(**values, port=config["port"], password=new_password) as target,

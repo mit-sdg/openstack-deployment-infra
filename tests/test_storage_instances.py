@@ -506,6 +506,31 @@ class InstanceManagerTests(unittest.TestCase):
             self.assertIn("--no-comments", argv)
             self.assertNotIn("app-private", " ".join(argv))
             self.assertNotIn("shared-private", " ".join(argv))
+            if not extension:
+                for setting in (
+                    "statement_timeout=0",
+                    "lock_timeout=0",
+                    "idle_in_transaction_session_timeout=0",
+                ):
+                    self.assertIn(setting, options["env"]["PGOPTIONS"])
+
+    def test_failed_postgres_import_restores_the_login_temp_limit(self):
+        from openstack_platform.storage_migration import postgres_import_settings
+
+        admin = mock.MagicMock()
+        admin.__enter__.return_value = admin
+        with mock.patch("openstack_platform.storage_migration.psycopg.connect", return_value=admin):
+            with self.assertRaisesRegex(RuntimeError, "import failed"):
+                with postgres_import_settings({}, "app_login"):
+                    raise RuntimeError("import failed")
+        statements = [call.args[0].as_string() for call in admin.execute.call_args_list]
+        self.assertEqual(
+            statements,
+            [
+                "ALTER ROLE \"app_login\" SET temp_file_limit = '-1'",
+                "ALTER ROLE \"app_login\" SET temp_file_limit = '256MB'",
+            ],
+        )
 
     def test_sealed_migration_cannot_recopy_or_delete_source_data(self):
         identifier, _ = self.create()
