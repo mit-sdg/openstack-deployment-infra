@@ -130,7 +130,8 @@ class Native:
                 suffix = database[2:]
                 with psycopg.connect(**self.pg_options(entry, password)) as connection:
                     roles = connection.execute(
-                        "SELECT rolname, rolcanlogin, rolconnlimit, rolpassword, rolconfig, shobj_description(oid,'pg_authid') FROM pg_authid WHERE rolname=%s OR oid IN (SELECT member FROM pg_auth_members WHERE roleid=(SELECT oid FROM pg_roles WHERE rolname=%s)) ORDER BY rolname",
+                        # pg_authid holds password hashes; role settings live only in pg_roles.
+                        "SELECT a.rolname, a.rolcanlogin, a.rolconnlimit, a.rolpassword, r.rolconfig, shobj_description(a.oid,'pg_authid') FROM pg_authid a JOIN pg_roles r ON r.oid=a.oid WHERE a.rolname=%s OR a.oid IN (SELECT member FROM pg_auth_members WHERE roleid=(SELECT oid FROM pg_roles WHERE rolname=%s)) ORDER BY a.rolname",
                         ("o_" + suffix, "o_" + suffix),
                     ).fetchall()
                     from .controller.storage_contract import provider_environment
