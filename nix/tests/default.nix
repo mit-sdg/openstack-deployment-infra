@@ -110,26 +110,40 @@ let
     server.serve_forever()
   '';
   storageInstanceProbe = pkgs.writeText "storage-instance-probe.py" ''
-    import json, ssl, subprocess, sys, urllib.request, uuid
+    import json, ssl, subprocess, sys, urllib.error, urllib.request, uuid
     sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
     import psycopg
     from pymongo import MongoClient
     from openstack_platform.helper import storage
     ca="/etc/${namespace}/pki/internal-ca.pem"
+    host="${platform.internalNames.storage}"
+    import urllib.parse
+    def connect_app_mongo(*, uri):
+        parsed=urllib.parse.urlsplit(uri)
+        query=[(k,v) for k,v in urllib.parse.parse_qsl(parsed.query) if k.lower() != "tlscafile"]
+        safe_uri=urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query)))
+        return MongoClient(safe_uri,tlsCAFile=ca,serverSelectionTimeoutMS=5000)
     context=ssl.create_default_context(cafile=ca)
     def call(action, instance, **values):
         body=json.dumps({"action":action,"instanceId":instance,**values}).encode()
         request=urllib.request.Request("https://127.0.0.1:${toString constants.ports.garageRpc}/platform/instances",data=body,headers={"Authorization":"Bearer vm-instance-token","Content-Type":"application/json"})
-        with urllib.request.urlopen(request,context=context,timeout=90) as response:
-            return json.load(response)
+        try:
+            with urllib.request.urlopen(request,context=context,timeout=150) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            print("instance action="+action+" HTTP="+str(error.code)+" response="+error.read(65536).decode(errors="replace"),file=sys.stderr,flush=True)
+            raise
     import os
     geometry=os.statvfs("${platform.paths.data}")
     assert geometry.f_blocks*geometry.f_frsize > 900*1024**3
     owner=str(uuid.uuid4())
     limits={"sizeBytes":2147483648,"connections":10,"memoryBytes":536870912,"cpuMillicores":500}
     ids=[str(uuid.uuid4()),str(uuid.uuid4())]
-    instances=[call("create",ident,applicationId=owner,type=kind,quotas=limits,allowIps=[],reservations={"databaseBytes":5368709120,"garageBytes":0}) for ident,kind in zip(ids,["postgres","mongo"])]
+    instances=[call("create",ident,applicationId=owner,type=kind,quotas=limits,allowIps=[],reservations={"databaseBytes":6442450944,"garageBytes":0}) for ident,kind in zip(ids,["postgres","mongo"])]
     credentials=[call("credentials",ident) for ident in ids]
+    from openstack_platform.helper.instances import connect_ready
+    ready=connect_ready(lambda: psycopg.connect(host=host,port=credentials[0]["port"],dbname="platform",user="platform_admin",password=credentials[0]["adminPassword"],sslmode="verify-full",sslrootcert=ca,connect_timeout=2))
+    ready.close()
     for ident in ids:
         subprocess.run(["${pkgs.openssl}/bin/openssl","verify","-CAfile",ca,"-verify_hostname","${platform.internalNames.storage}","${platform.paths.data}/instances/"+ident+"/pki/storage.pem"],check=True)
         unit="${namespace}-database@"+ident+".service"
@@ -151,22 +165,24 @@ let
         probe=data+"/quota-enforcement-probe"
         assigned=subprocess.check_output(["lsattr","-pd",data],text=True).split()[0]
         assert int(assigned) >= 10000
+        call("stop",ident)
         assert subprocess.run(["fallocate","-l","4G",probe],capture_output=True).returncode != 0
         Path(probe).unlink(missing_ok=True)
+        call("start",ident)
     # Driver server-selection retries provide a bounded startup wait.
     from openstack_platform.helper.instances import connect_ready
-    pg=connect_ready(lambda: psycopg.connect(host="127.0.0.1",port=credentials[0]["port"],dbname="platform",user="platform_admin",password=credentials[0]["adminPassword"],sslmode="verify-full",sslrootcert=ca,connect_timeout=2,autocommit=True))
+    pg=connect_ready(lambda: psycopg.connect(host=host,port=credentials[0]["port"],dbname="platform",user="platform_admin",password=credentials[0]["adminPassword"],sslmode="verify-full",sslrootcert=ca,connect_timeout=2,autocommit=True))
     storage._PORT_CONTEXT.set((credentials[0]["port"],credentials[1]["port"]))
     pg_operation=str(uuid.uuid4())
-    postgres=storage.postgres_create(pg,application_id=owner,host="127.0.0.1",connections=10,measured_target_bytes=2147483648,generation="abcdef12",operation_id=pg_operation)
+    postgres=storage.postgres_create(pg,application_id=owner,host=host,connections=10,measured_target_bytes=2147483648,generation="abcdef12",operation_id=pg_operation)
     assert storage._postgres_creation_evidence(pg,application_id=owner,operation_id=pg_operation,generation="abcdef12")[0] == postgres.provider_name
-    storage.postgres_verify(lambda **kwargs: psycopg.connect(**kwargs,sslrootcert=ca,connect_timeout=5,autocommit=True),postgres,host="127.0.0.1")
+    storage.postgres_verify(lambda **kwargs: psycopg.connect(**kwargs,sslrootcert=ca,connect_timeout=5,autocommit=True),postgres,host=host)
     assert pg.execute("show max_connections").fetchone()[0] == "15"
     pg.close()
-    mongo=MongoClient("127.0.0.1",credentials[1]["port"],username="platform_admin",password=credentials[1]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000)
+    mongo=MongoClient(host,credentials[1]["port"],username="platform_admin",password=credentials[1]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000)
     connect_ready(lambda: mongo.admin.command("ping"))
-    scoped=storage.mongo_create(mongo,application_id=owner,host="127.0.0.1",measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()))
-    storage.mongo_verify(lambda **kwargs: MongoClient(kwargs["uri"],tlsCAFile=ca,serverSelectionTimeoutMS=5000),scoped,host="127.0.0.1")
+    scoped=storage.mongo_create(mongo,application_id=owner,host=host,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()))
+    storage.mongo_verify(connect_app_mongo,scoped,host=host)
     options=mongo.admin.command("getCmdLineOpts")["parsed"]
     assert options["net"]["maxIncomingConnections"] == 20
     assert options["storage"]["wiredTiger"]["engineConfig"]["cacheSizeGB"] == 0.25
@@ -175,15 +191,35 @@ let
     # authenticated manager's root credentials and certificate DNS name.
     from openstack_platform.database_backups import Native, digest
     import socket, tempfile, urllib.parse
-    host="${platform.internalNames.storage}"
     assert socket.gethostbyname(host) == "127.0.0.1"
     native=Native(host,ca)
     with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca,autocommit=True) as app_pg:
         app_pg.execute("CREATE TABLE backup_probe(value integer)")
         app_pg.execute("INSERT INTO backup_probe VALUES (42)")
     dbname=scoped.provider_name
-    app_mongo=MongoClient(scoped.environment["MONGODB_URI"],tlsCAFile=ca)
+    app_mongo=connect_app_mongo(uri=scoped.environment["MONGODB_URI"])
     app_mongo[dbname].backup_probe.insert_one({"value":42})
+    # Exercise the actual friendly block: find/delete remain authorized, while
+    # insert is denied; raising the soft limit restores readWrite atomically.
+    from openstack_platform.helper.storage_limits import mongo_reconcile
+    from pymongo.errors import OperationFailure
+    import urllib.parse
+    login=urllib.parse.unquote(urllib.parse.urlsplit(scoped.environment["MONGODB_URI"]).username)
+    admin_mongo=MongoClient(host,credentials[1]["port"],username="platform_admin",password=credentials[1]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=5000)
+    stats=admin_mongo[dbname].command("dbStats",scale=1)
+    assert stats["dataSize"]+stats["indexSize"] > 0
+    assert mongo_reconcile(admin_mongo[dbname],login,dbname,used=2,limit=1)
+    try:
+        app_mongo[dbname].backup_probe.insert_one({"value":43})
+    except OperationFailure as error:
+        assert error.code == 13
+    else:
+        raise AssertionError("blocked Mongo user could insert")
+    assert app_mongo[dbname].backup_probe.find_one()["value"] == 42
+    assert app_mongo[dbname].backup_probe.delete_one({"value":42}).deleted_count == 1
+    assert not mongo_reconcile(admin_mongo[dbname],login,dbname,used=0,limit=1)
+    app_mongo[dbname].backup_probe.insert_one({"value":42})
+    admin_mongo.close()
     app_mongo.close()
     with tempfile.TemporaryDirectory(dir="${platform.paths.data}") as temporary:
         for index,kind in enumerate(["postgres","mongo"]):
@@ -199,7 +235,7 @@ let
             call("restore-finish",ids[index],migrationState=None)
     with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca) as app_pg:
         assert app_pg.execute("SELECT value FROM backup_probe").fetchone()[0] == 42
-    app_mongo=MongoClient(scoped.environment["MONGODB_URI"],tlsCAFile=ca)
+    app_mongo=connect_app_mongo(uri=scoped.environment["MONGODB_URI"])
     assert app_mongo[dbname].backup_probe.find_one()["value"] == 42
     app_mongo.close()
     # Rehearse the real manager copy through nginx, including an admin-owned
@@ -209,9 +245,9 @@ let
     source_secret.write_text("vm-shared-password")
     source_secret.chmod(0o400); os.chown(source_secret,999,999)
     fixture=json.loads(Path("/etc/vm-instance-platform.json").read_text())
-    from openstack_platform.storage_instances import database_command
+    from openstack_platform.storage_instances import database_command, POSTGRES_SOCKET_DIRECTORY
     source_limits={**limits,"memoryBytes":8589934592,"connections":95}
-    subprocess.run(["podman","run","-d","--name","vm-shared-postgres","--network=host","--cgroups=disabled","--volume","${platform.paths.data}/postgres:/var/lib/postgresql/data","--volume",str(source_secret)+":/run/secrets/admin-password:ro","--volume","${platform.paths.data}/instances/"+ids[0]+"/pki:/run/${namespace}-pki:ro",fixture["containers"]["postgres"],*database_command({"type":"postgres","port":5432,"quotas":source_limits},"${namespace}")],check=True,stdout=subprocess.DEVNULL)
+    subprocess.run(["podman","run","-d","--name","vm-shared-postgres","--network=host","--cgroups=disabled","--tmpfs="+POSTGRES_SOCKET_DIRECTORY+":rw,size=16m,mode=1777","--volume","${platform.paths.data}/postgres:/var/lib/postgresql/data","--volume",str(source_secret)+":/run/secrets/admin-password:ro","--volume","${platform.paths.data}/instances/"+ids[0]+"/pki:/run/${namespace}-pki:ro",fixture["containers"]["postgres"],*database_command({"type":"postgres","port":5432,"quotas":source_limits},"${namespace}")],check=True,stdout=subprocess.DEVNULL)
     source=connect_ready(lambda: psycopg.connect(host=host,port=5432,dbname="platform",user="platform_admin",password="vm-shared-password",sslmode="verify-full",sslrootcert=ca,autocommit=True))
     storage._PORT_CONTEXT.set((5432,credentials[1]["port"]))
     storage.postgres_create(source,application_id=owner,host=host,connections=10,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()),password_factory=lambda:postgres.environment["PGPASSWORD"] )
@@ -450,6 +486,7 @@ let
           # Use cached native binaries for a startup smoke of the role's exact
           # arguments; no container image pulls or full provider scenario.
           environment.systemPackages = lib.optionals (role == "storage") [
+            pkgs.e2fsprogs # lsattr -p verifies the XFS project assignment.
             pkgs.postgresql_17
             mongodbPkgs.mongodb-ce
             pkgs.mongodb-tools

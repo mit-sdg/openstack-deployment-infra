@@ -55,6 +55,30 @@ Run = Callable[..., Any]
 _COPY_CANCEL: ContextVar[Callable[[], bool] | None] = ContextVar("copy_cancel", default=None)
 
 
+def command_failure_reason(error: subprocess.CalledProcessError) -> str:
+    """Classify provider output without journaling commands, credentials or JS."""
+    output = b""
+    for value in (error.stdout, error.stderr):
+        if isinstance(value, str):
+            value = value.encode()
+        if isinstance(value, bytes):
+            output += value[:65536].lower()
+    for needle, reason in (
+        (b"read-only file system", "read_only_filesystem"),
+        (b"permission denied", "permission_denied"),
+        (b"eacces", "permission_denied"),
+        (b"cannot find module", "runtime_dependency_missing"),
+        (b"no such file or directory", "required_path_missing"),
+        (b"authentication failed", "authentication_failed"),
+        (b"certificate", "tls_certificate_error"),
+        (b"connection refused", "connection_refused"),
+        (b"unknown option", "unsupported_option"),
+    ):
+        if needle in output:
+            return reason
+    return "command_exit_nonzero"
+
+
 def run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
     cancel = _COPY_CANCEL.get()
     if cancel is None or argv[0] not in {"pg_dump", "pg_restore", "mongodump", "mongorestore"}:
@@ -993,6 +1017,7 @@ class Manager:
             "if(!a.auth('platform_admin',p)) throw Error('admin authentication failed');"
         )
         deadline = time.monotonic() + 60
+        logged_failure = False
         while True:
             try:
                 self.command(
@@ -1001,10 +1026,13 @@ class Manager:
                         "exec",
                         "--user",
                         "0:0",
+                        "--env",
+                        "HOME=/tmp",
                         "--interactive",
                         f"{self.namespace}-db-{config['instanceId']}",
                         "mongosh",
                         "--quiet",
+                        "--norc",
                         "--host",
                         "127.0.0.1",
                         "--port",
@@ -1018,8 +1046,17 @@ class Manager:
                     timeout=10,
                 )
                 break
-            except subprocess.CalledProcessError:
-                if time.monotonic() >= deadline:
+            except subprocess.CalledProcessError as error:
+                expired = time.monotonic() >= deadline
+                if not logged_failure or expired:
+                    logging.warning(
+                        "Mongo bootstrap instance=%s exit=%d reason=%s",
+                        config["instanceId"],
+                        error.returncode,
+                        command_failure_reason(error),
+                    )
+                    logged_failure = True
+                if expired:
                     raise ValidationError(
                         "MongoDB admin initialization requires reconciliation"
                     ) from None
@@ -1093,6 +1130,14 @@ def http_handler(manager: Manager, token: str) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         timeout = 10
 
+        def send_error(
+            self, code: int, message: str | None = None, explain: str | None = None
+        ) -> None:
+            # Authentication/framing failures precede JSON parsing. Never log
+            # request headers, URI, payloads or caller-supplied reason strings.
+            logging.warning("storage instance HTTP rejection status=%d code=HTTP_%d", code, code)
+            super().send_error(code, message, explain)
+
         def do_POST(self) -> None:
             if self.path != ENDPOINT:
                 self.send_error(404)
@@ -1127,7 +1172,7 @@ def http_handler(manager: Manager, token: str) -> type[BaseHTTPRequestHandler]:
 
                 result = manager.dispatch(args, disconnected=disconnected)
                 status = 200
-            except (ValidationError, FileNotFoundError) as error:
+            except (ValidationError, FileNotFoundError, json.JSONDecodeError) as error:
                 result = {
                     "error": {
                         "code": error.code
@@ -1135,11 +1180,19 @@ def http_handler(manager: Manager, token: str) -> type[BaseHTTPRequestHandler]:
                         else "INVALID_INSTANCE_REQUEST",
                         "summary": str(error)
                         if isinstance(error, ValidationError)
+                        else "instance request must be valid JSON"
+                        if isinstance(error, json.JSONDecodeError)
                         else "instance is absent",
                     }
                 }
                 status = 400
-            except Exception:
+                logging.warning(
+                    "storage instance request rejected status=%d code=%s reason=%s",
+                    status,
+                    result["error"]["code"],
+                    type(error).__name__,
+                )
+            except Exception as error:
                 result = {
                     "error": {
                         "code": "INSTANCE_OPERATION_FAILED",
@@ -1147,6 +1200,17 @@ def http_handler(manager: Manager, token: str) -> type[BaseHTTPRequestHandler]:
                     }
                 }
                 status = 503
+                reason = (
+                    command_failure_reason(error)
+                    if isinstance(error, subprocess.CalledProcessError)
+                    else type(error).__name__
+                )
+                logging.warning(
+                    "storage instance request failed status=%d code=%s reason=%s",
+                    status,
+                    result["error"]["code"],
+                    reason,
+                )
             body = json.dumps(result).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")

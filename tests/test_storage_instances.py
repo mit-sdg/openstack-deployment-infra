@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import shutil
 import subprocess
 import tempfile
@@ -177,6 +179,8 @@ class InstanceManagerTests(unittest.TestCase):
         self.assertTrue(config["adminInitialized"])
         bootstrap = next((argv, kw) for argv, kw in self.calls if argv[:2] == ("podman", "exec"))
         self.assertEqual(bootstrap[0][bootstrap[0].index("--user") + 1], "0:0")
+        self.assertIn("HOME=/tmp", bootstrap[0])
+        self.assertIn("--norc", bootstrap[0])
         self.assertEqual(bootstrap[0][bootstrap[0].index("--port") + 1], str(result["port"]))
         password = (self.manager.directory(identifier) / "admin-password").read_text()
         self.assertNotIn(password, " ".join(bootstrap[0]))
@@ -421,6 +425,48 @@ class InstanceManagerTests(unittest.TestCase):
         request.send_error.assert_called_once_with(403)
         request.rfile.read.assert_not_called()
         dispatch.assert_not_called()
+
+    def test_http_errors_log_safe_codes_without_commands_or_credentials(self):
+        for error, expected_status, code in (
+            (
+                CapacityError("MEMORY_BUDGET_EXCEEDED", "private-provider-detail"),
+                400,
+                "MEMORY_BUDGET_EXCEEDED",
+            ),
+            (
+                subprocess.CalledProcessError(
+                    125,
+                    ["podman", "private-provider-detail"],
+                    stderr=b"read-only file system: private-provider-detail",
+                ),
+                503,
+                "INSTANCE_OPERATION_FAILED",
+            ),
+        ):
+            with self.subTest(code=code):
+                payload = json.dumps(
+                    {"action": "create", "secret": "private-provider-detail"}
+                ).encode()
+                request = mock.Mock(
+                    path="/platform/instances",
+                    headers={
+                        "Authorization": "Bearer admin-token",
+                        "Content-Length": str(len(payload)),
+                    },
+                    rfile=io.BytesIO(payload),
+                    wfile=io.BytesIO(),
+                )
+                with (
+                    mock.patch.object(self.manager, "dispatch", side_effect=error),
+                    self.assertLogs(level="WARNING") as logs,
+                ):
+                    http_handler(self.manager, "admin-token").do_POST(request)
+                request.send_response.assert_called_once_with(expected_status)
+                self.assertEqual(json.loads(request.wfile.getvalue())["error"]["code"], code)
+                self.assertIn(code, " ".join(logs.output))
+                self.assertNotIn("private-provider-detail", " ".join(logs.output))
+                if expected_status == 503:
+                    self.assertIn("read_only_filesystem", " ".join(logs.output))
 
     def test_copy_imports_app_sql_with_app_authentication_and_extensions_with_admin(self):
         identifier, _ = self.create()

@@ -433,10 +433,12 @@ in
           Restart = "on-failure";
           ProtectSystem = "strict";
           ProtectHome = true;
+          PrivateTmp = true;
           ReadWritePaths = [
             data
             "/run/systemd"
             "/etc/systemd/system"
+            "/run/libpod"
             "-/run/containers"
             "-/run/crun"
             "-/run/runc"
@@ -484,6 +486,7 @@ in
           ProtectSystem = "strict";
           # podman inspect takes local metadata locks; it receives fixed names.
           ReadWritePaths = [
+            "/run/libpod"
             "-/run/containers"
             "-/run/crun"
             "-/run/runc"
@@ -723,6 +726,11 @@ in
   };
 
   systemd.tmpfiles.rules = [
+    # Podman opens /run/libpod/alive.lck even for exec/inspect. Prepare runtime
+    # paths before the strict service sandboxes install their writable mounts.
+    "d /run/libpod 0751 root root -"
+    "d /run/crun 0700 root root -"
+    "d /run/runc 0700 root root -"
     "z /etc/${namespace} 0750 root storage-service -"
     "z /etc/${namespace}/pki 0750 root storage-service -"
   ];
