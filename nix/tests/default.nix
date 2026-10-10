@@ -268,7 +268,7 @@ let
             credentials[index]=replacement
     with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca) as app_pg:
         assert app_pg.execute("SELECT value FROM backup_probe").fetchone()[0] == 42
-        assert app_pg.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname=current_user").fetchone()[0] == 20
+        assert app_pg.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname=session_user").fetchone()[0] == 20
     app_mongo=connect_app_mongo(uri=scoped.environment["MONGODB_URI"])
     assert app_mongo[dbname].backup_probe.find_one()["value"] == 42
     app_mongo.close()
@@ -1024,6 +1024,8 @@ let
             ''
           else if role == "storage" then
             ''
+              machine.wait_for_unit("nscd.service")
+              machine.succeed("test -S /var/run/nscd/socket && getent hosts ${platform.internalNames.storage}")
               machine.wait_for_unit("nginx.service")
               machine.succeed("${pkgs.nginx}/bin/nginx -t -c /etc/nginx/nginx.conf")
               machine.succeed("mountpoint -q ${platform.paths.data}")

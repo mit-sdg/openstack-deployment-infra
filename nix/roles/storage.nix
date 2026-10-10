@@ -298,6 +298,12 @@ in
   };
 
   systemd.services = lib.mkMerge [
+    {
+      # nsncd listens through /var/run; RuntimeDirectory only exempts /run/nscd
+      # from its strict sandbox. Permit its socket directory at either alias,
+      # including fresh images with a real /var/run directory.
+      nscd.serviceConfig.ReadWritePaths = [ "/var/run/nscd" ];
+    }
     (mkContainerDependencies "${namespace}-postgres")
     (mkContainerDependencies "${namespace}-mongodb")
     (mkContainerDependencies "${namespace}-garage")
@@ -723,6 +729,7 @@ in
   };
 
   systemd.tmpfiles.rules = [
+    "d /var/run/nscd 0755 nscd nscd -"
     # Podman opens /run/libpod/alive.lck even for exec/inspect. Prepare runtime
     # paths before the strict service sandboxes install their writable mounts.
     "d /run/libpod 0751 root root -"
