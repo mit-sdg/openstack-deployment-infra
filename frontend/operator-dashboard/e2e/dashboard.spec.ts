@@ -5,6 +5,11 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const screenshots = path.resolve("../../.tmp/dashboard-screenshots/after");
+test.afterEach(async ({ page }) => {
+  // Snapshot polling can start another route.fetch after the final assertion.
+  // Drain active handlers before fixture teardown disposes their request context.
+  await page.unrouteAll({ behavior: "wait" });
+});
 function withoutConditional(headers: Record<string, string>) {
   return Object.fromEntries(
     Object.entries(headers).filter(
@@ -29,6 +34,24 @@ async function expectStatCaptionsToFit(page: Page) {
       `Stat caption: ${caption.text}`,
     ).toBeLessThanOrEqual(caption.clientWidth + 1);
   }
+}
+async function requestManualRefresh(page: Page) {
+  // A reload can observe another test's refresh on the shared preview server.
+  // Busy clicks intentionally only show a notice: they never emit a POST.
+  await expect(
+    page.getByRole("heading", { name: "Disruption detected" }),
+  ).toBeVisible();
+  const button = page.getByRole("button", { name: "Refresh now" });
+  await expect(button).toHaveAttribute("aria-busy", "false");
+  const [request] = await Promise.all([
+    page.waitForRequest(
+      (request) =>
+        request.method() === "POST" && request.url().endsWith("/api/refresh"),
+      { timeout: 5000 },
+    ),
+    button.click(),
+  ]);
+  return request;
 }
 async function monitor(page: Page, origin = "http://127.0.0.1:8480") {
   const violations: string[] = [],
@@ -62,17 +85,16 @@ async function monitor(page: Page, origin = "http://127.0.0.1:8480") {
 }
 for (const width of [320, 390, 768, 1440])
   for (const colorScheme of ["light", "dark"] as const) {
-    test(`${width}px ${colorScheme}: operator sections, interactions and CSP`, async ({
-      browser,
-    }) => {
-      await mkdir(screenshots, { recursive: true });
-      const context = await browser.newContext({
-        viewport: { width, height: 1000 },
-        colorScheme,
-      });
-      const page = await context.newPage();
-      const check = await monitor(page);
-      try {
+    test.describe(`${width}px ${colorScheme}`, () => {
+      test.use({ viewport: { width, height: 1000 }, colorScheme });
+      test("operator sections, interactions and CSP", async ({
+        page,
+      }, info) => {
+        const captureDirectory = info.repeatEachIndex
+          ? path.join(screenshots, `repeat-${info.repeatEachIndex}`)
+          : screenshots;
+        await mkdir(captureDirectory, { recursive: true });
+        const check = await monitor(page);
         const response = await page.goto("http://127.0.0.1:8480");
         expect(response?.headers()["content-security-policy"]).toBe(
           "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
@@ -105,7 +127,7 @@ for (const width of [320, 390, 768, 1440])
           await page.locator("[style],style,script:not([src])").count(),
         ).toBe(0);
         await page.screenshot({
-          path: path.join(screenshots, `${width}-${colorScheme}.png`),
+          path: path.join(captureDirectory, `${width}-${colorScheme}.png`),
           fullPage: true,
         });
         const search = page.getByRole("searchbox");
@@ -158,13 +180,9 @@ for (const width of [320, 390, 768, 1440])
         );
         await page.getByRole("button", { name: "Color theme: dark" }).click();
         await expect(page.locator("html")).not.toHaveAttribute("data-theme");
-        const refreshRequest = page.waitForRequest(
-          (request) =>
-            request.method() === "POST" &&
-            request.url().endsWith("/api/refresh"),
-        );
-        await page.getByRole("button", { name: "Refresh now" }).click();
-        const request = await refreshRequest;
+        const request =
+          await test.step("Refresh after the reloaded snapshot is idle", () =>
+            requestManualRefresh(page));
         expect(request.headers()["x-dashboard-refresh"]).toBe("1");
         expect(request.postData()).toBeNull();
         await expect(
@@ -232,7 +250,7 @@ for (const width of [320, 390, 768, 1440])
         await expectStatCaptionsToFit(page);
         await page.screenshot({
           path: path.join(
-            screenshots,
+            captureDirectory,
             `${width}-${colorScheme}-offsite-failed.png`,
           ),
           fullPage: true,
@@ -254,11 +272,46 @@ for (const width of [320, 390, 768, 1440])
         expect(await page.locator("img[onerror]").count()).toBe(0);
         await page.keyboard.press("Escape");
         check();
-      } finally {
-        await context.close();
-      }
+      });
     });
   }
+test("manual refresh after reload waits for an in-progress snapshot to settle", async ({
+  page,
+}) => {
+  const check = await monitor(page);
+  let busy = false;
+  let posts = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/refresh"))
+      posts++;
+  });
+  await page.route("**/api/snapshot", async (route) => {
+    const response = await route.fetch({
+      headers: withoutConditional(route.request().headers()),
+    });
+    const data = await response.json();
+    if (data.state === "ready") data.refresh.inProgress = busy;
+    await route.fulfill({ response, json: data });
+  });
+  await page.goto("http://127.0.0.1:8480");
+  await expect(
+    page.getByRole("heading", { name: "Disruption detected" }),
+  ).toBeVisible();
+  busy = true;
+  await page.reload();
+  const refresh = page.getByRole("button", { name: "Refresh now" });
+  await expect(refresh).toHaveAttribute("aria-busy", "true");
+  await refresh.click();
+  await expect(
+    page.getByText("A refresh is already running", { exact: true }),
+  ).toBeVisible();
+  expect(posts).toBe(0);
+  busy = false;
+  const request = await requestManualRefresh(page);
+  expect(request.headers()["x-dashboard-refresh"]).toBe("1");
+  expect(posts).toBe(1);
+  check();
+});
 for (const [scenario, port] of [
   ["healthy", 8481],
   ["outage", 8482],
