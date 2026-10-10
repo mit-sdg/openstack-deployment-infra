@@ -437,7 +437,7 @@ class OpenStackTests(unittest.TestCase):
             worker_artifact = artifact_manifest["roleArtifacts"]["worker"]
             fake.write_text(
                 """#!/usr/bin/env python3
-import hashlib, json, os, pathlib, shutil, sys
+import hashlib, json, os, pathlib, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"] + ".calls", "a") as stream:
     stream.write(json.dumps(args) + "\\n")
@@ -466,19 +466,13 @@ elif args[:2] == ["image", "show"]:
         "status": "active",
         "owner": "00000000000040008000000000000000",
         "checksum": digest,
+        "size": len(pathlib.Path(image_file).read_bytes()),
         "os_hash_algo": os.environ.get("FAKE_HASH_ALGO") or None,
         "os_hash_value": hashlib.new(os.environ["FAKE_HASH_ALGO"], pathlib.Path(image_file).read_bytes()).hexdigest() if os.environ.get("FAKE_HASH_ALGO") in ("sha256", "sha512") else None,
         "properties": properties,
     }
     projection.update(json.loads(os.environ.get("FAKE_IMAGE_OVERRIDE", "{}")))
     print(json.dumps(projection))
-elif args[:2] == ["image", "save"]:
-    created = json.loads(pathlib.Path(os.environ["FAKE_LOG"]).read_text())
-    source = created[created.index("--file") + 1]
-    destination = args[args.index("--file") + 1]
-    shutil.copyfile(source, destination)
-    if os.environ.get("FAKE_BAD_DOWNLOAD"):
-        pathlib.Path(destination).write_bytes(b"wrong provider bytes")
 elif args[:2] == ["image", "set"]:
     path = pathlib.Path(os.environ["FAKE_LOG"])
     path.with_suffix(".set.json").write_text(json.dumps(args))
@@ -559,12 +553,12 @@ else:
                 return [json.loads(line) for line in calls_log.read_text().splitlines()]
 
             self.assertFalse(any(call[:2] == ["image", "save"] for call in calls()))
-            # Existing exact roles require neither upload nor download with
-            # either supported multihash. Only an absent pair may fall back.
+            # Existing exact roles never upload or download. An absent multihash
+            # pair falls back to Glance's MD5 and exact size.
             for algorithm, method in (
                 ("sha512", "provider-sha512"),
                 ("sha256", "provider-sha256"),
-                ("", "download"),
+                ("", "provider-md5-size"),
             ):
                 with self.subTest(algorithm=algorithm):
                     calls_log.unlink()
@@ -578,10 +572,7 @@ else:
                     self.assertEqual(retried.returncode, 0, retried.stderr.decode())
                     self.assertIn(f"content_verification={method}", retried.stdout.decode())
                     self.assertFalse(any(call[:2] == ["image", "create"] for call in calls()))
-                    self.assertEqual(
-                        sum(call[:2] == ["image", "save"] for call in calls()),
-                        int(method == "download"),
-                    )
+                    self.assertFalse(any(call[:2] == ["image", "save"] for call in calls()))
                     self.assertFalse(set_log.exists())
             for override in (
                 {"os_hash_value": "0" * 128},
@@ -595,6 +586,8 @@ else:
                 {"owner": "22222222-2222-4222-8222-222222222222"},
                 {"status": "killed"},
                 {"checksum": "0" * 32},
+                {"size": 1},
+                {"size": "4"},
             ):
                 with self.subTest(projection=override):
                     calls_log.unlink()
@@ -676,7 +669,7 @@ else:
             signed_environment.pop("PLATFORM_ALLOW_UNSIGNED_PRODUCTION")
             for failure in (
                 {"FAKE_IMAGE_OVERRIDE": json.dumps({"os_hash_value": "0" * 128})},
-                {"FAKE_HASH_ALGO": "", "FAKE_BAD_DOWNLOAD": "1"},
+                {"FAKE_HASH_ALGO": "", "FAKE_IMAGE_OVERRIDE": json.dumps({"size": 1})},
             ):
                 refused = subprocess.run(
                     completed.args,

@@ -212,7 +212,7 @@ Publication starts on an authorized `main` dispatch with `publish=true`, or a `m
 
 1. Five role runners build the run's exact commit in parallel (`max-parallel: 5`, `fail-fast: false`) with protected inventory and project ID, then QEMU-boot a QCOW2 copy. Uncompressed `production-role-<run-id>-<role>` artifacts retain the QCOW2, closure JSON, source/run record, full inventory SHA-256 (without inventory), and build and QEMU logs for 30 days. Failure logs use `production-logs-<run-id>-<attempt>-<role>`. Builders receive no OpenStack passwords, bootstrap credentials, private certificates, or signing keys.
 2. `publish-images` ("Verify and publish retained production images") requires static checks, generated recipe tests, Nix evaluation, package tests, all five role VM tests and builds, and frontend freshness. It verifies that run's five artifacts, then uploads `production-evidence-<run-id>-<attempt>` before OpenStack calls. Keep this evidence (manifests, SBOMs, provenance, and `publication.json` binding CI results and every retained file's SHA-256) and the role artifacts; receipts cannot replace images.
-3. Publication is serialized (`openstack-images-provider`) and never rebuilds. It verifies content, closure, commit, metadata, owner, and status; uploads; waits for active status; and checks provider checksums. Without provider SHA-256 (including SHA-512 defaults), it downloads and SHA-256-checks bytes, up to three attempts. Same-name images are reused only after all metadata and byte checks; ambiguous or mismatched images fail without replacement.
+3. Publication is serialized (`openstack-images-provider`) and never rebuilds. It verifies content, closure, commit, metadata, owner, and status; uploads; waits for active status; and checks provider checksums: a Glance SHA-256 or SHA-512 multihash when the provider reports one, otherwise Glance's MD5 and exact size. Same-name images are reused only after all metadata and byte checks; ambiguous or mismatched images fail without replacement.
 
 All modes use inventory role names suffixed with the commit's first eight characters (setup: `<prefix>-nixos-<role>-<commit8>`). Publication checks the entire inventory hash, including names. Images embed it at `/etc/<namespace>/platform.json`; hosted-controller seeds require exact names. Signing mode cannot change names, configuration, or bytes.
 
@@ -293,7 +293,7 @@ On inventory, commit, or role-hash differences, stop and investigate; never edit
 
 After partial uploads or a signed metadata update whose final check failed, rerun the same job to verify/reuse exact matches and finish. It does not rebuild, rename, or replace bytes. Never downgrade evidence with an unsigned manifest.
 
-Publication verifies all five retained roles before contacting the provider, then publishes up to five roles concurrently. Each role has an independent image name and evidence; logs are prefixed with its role and printed together on completion. Any failure fails the job after all roles finish. The provider lock still serializes CI publication runs. Content verification compares Glance's SHA-256 or SHA-512 multihash with a local digest of the retained QCOW2, whose SHA-256 must match the accepted evidence; MD5 and all identity and metadata checks also remain required. Logs report `content_verification=provider-sha256`, `provider-sha512`, or `download`. Only an absent provider multihash permits download verification; a mismatching, malformed, or unsupported multihash fails. Exact images from the same commit are reused; images from another commit retain their commit-specific names and source provenance.
+Publication verifies all five retained roles before contacting the provider, then publishes up to five roles concurrently. Each role has an independent image name and evidence; logs are prefixed with its role and printed together on completion. Any failure fails the job after all roles finish. The provider lock still serializes CI publication runs. Content verification compares Glance's SHA-256 or SHA-512 multihash with a local digest of the retained QCOW2, whose SHA-256 must match the accepted evidence; MD5, exact size and all identity and metadata checks also remain required. Logs report `content_verification=provider-sha256`, `provider-sha512`, or `provider-md5-size`. Only an absent provider multihash permits the MD5-and-size check; a mismatching, malformed, or unsupported multihash fails. Publication never downloads images back. Exact images from the same commit are reused; images from another commit retain their commit-specific names and source provenance.
 
 ### Temporarily disable production signing
 
@@ -371,7 +371,7 @@ Development publication requires a manual dispatch in protected `openstack-image
    infra/openstack/publish_nixos_image.sh "$role" "$qcow2" "$output" "$path_info"
    ```
 
-   You should see `published role=<role> image=<uuid> status=active checksum=<md5> sha256=<provider|download> source_commit=<commit>`.
+   You should see `published role=<role> image=<uuid> status=active checksum=<md5> content_verification=<provider-sha256|provider-sha512|provider-md5-size> source_commit=<commit>`.
 
 Record Glance ID, provider checksum, QCOW2 SHA-256, source commit, and artifact-manifest SHA-256.
 
