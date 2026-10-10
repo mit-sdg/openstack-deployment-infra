@@ -116,6 +116,9 @@ let
         request=urllib.request.Request("https://127.0.0.1:${toString constants.ports.garageRpc}/platform/instances",data=body,headers={"Authorization":"Bearer vm-instance-token","Content-Type":"application/json"})
         with urllib.request.urlopen(request,context=context,timeout=90) as response:
             return json.load(response)
+    import os
+    geometry=os.statvfs("${platform.paths.data}")
+    assert geometry.f_blocks*geometry.f_frsize > 900*1024**3
     owner=str(uuid.uuid4())
     limits={"sizeBytes":2147483648,"connections":10,"memoryBytes":536870912,"cpuMillicores":500}
     ids=[str(uuid.uuid4()),str(uuid.uuid4())]
@@ -141,13 +144,15 @@ let
         probe=data+"/quota-enforcement-probe"
         assigned=subprocess.check_output(["lsattr","-pd",data],text=True).split()[0]
         assert int(assigned) >= 10000
-        assert subprocess.run(["fallocate","-l","3G",probe],capture_output=True).returncode != 0
+        assert subprocess.run(["fallocate","-l","4G",probe],capture_output=True).returncode != 0
         Path(probe).unlink(missing_ok=True)
     # Driver server-selection retries provide a bounded startup wait.
     from openstack_platform.helper.instances import connect_ready
     pg=connect_ready(lambda: psycopg.connect(host="127.0.0.1",port=credentials[0]["port"],dbname="platform",user="platform_admin",password=credentials[0]["adminPassword"],sslmode="verify-full",sslrootcert=ca,connect_timeout=2,autocommit=True))
     storage._PORT_CONTEXT.set((credentials[0]["port"],credentials[1]["port"]))
-    postgres=storage.postgres_create(pg,application_id=owner,host="127.0.0.1",connections=10,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()))
+    pg_operation=str(uuid.uuid4())
+    postgres=storage.postgres_create(pg,application_id=owner,host="127.0.0.1",connections=10,measured_target_bytes=2147483648,generation="abcdef12",operation_id=pg_operation)
+    assert storage._postgres_creation_evidence(pg,application_id=owner,operation_id=pg_operation,generation="abcdef12")[0] == postgres.provider_name
     storage.postgres_verify(lambda **kwargs: psycopg.connect(**kwargs,sslrootcert=ca,connect_timeout=5,autocommit=True),postgres,host="127.0.0.1")
     assert pg.execute("show max_connections").fetchone()[0] == "15"
     pg.close()
@@ -159,9 +164,65 @@ let
     assert options["net"]["maxIncomingConnections"] == 20
     assert options["storage"]["wiredTiger"]["engineConfig"]["cacheSizeGB"] == 0.25
     mongo.close()
+    # Use the same native exporters/importers as nightly backup, through the
+    # authenticated manager's root credentials and certificate DNS name.
+    from openstack_platform.database_backups import Native, digest
+    import socket, tempfile, urllib.parse
+    host="${platform.internalNames.storage}"
+    assert socket.gethostbyname(host) == "127.0.0.1"
+    native=Native(host,ca)
+    with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca,autocommit=True) as app_pg:
+        app_pg.execute("CREATE TABLE backup_probe(value integer)")
+        app_pg.execute("INSERT INTO backup_probe VALUES (42)")
+    dbname=scoped.provider_name
+    app_mongo=MongoClient(scoped.environment["MONGODB_URI"],tlsCAFile=ca)
+    app_mongo[dbname].backup_probe.insert_one({"value":42})
+    app_mongo.close()
+    with tempfile.TemporaryDirectory(dir="${platform.paths.data}") as temporary:
+        for index,kind in enumerate(["postgres","mongo"]):
+            entry={"type":kind,"port":credentials[index]["port"],"databases":[postgres.provider_name if index==0 else dbname]}
+            payload=Path(temporary)/kind
+            native.dump(entry,credentials[index]["adminPassword"],payload)
+            # Explicit delete/recreate models an entirely lost isolated instance.
+            call("remove",ids[index],deleteData=True)
+            call("restore-create",ids[index],applicationId=owner,type=kind,quotas=limits,port=entry["port"],allowIps=[],reservations={"databaseBytes":6442450944,"garageBytes":0})
+            call("restore-begin",ids[index],backupSha256=digest(payload))
+            replacement=call("credentials",ids[index])
+            native.restore(entry,replacement["adminPassword"],payload)
+            call("restore-finish",ids[index],migrationState=None)
+    with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca) as app_pg:
+        assert app_pg.execute("SELECT value FROM backup_probe").fetchone()[0] == 42
+    app_mongo=MongoClient(scoped.environment["MONGODB_URI"],tlsCAFile=ca)
+    assert app_mongo[dbname].backup_probe.find_one()["value"] == 42
+    app_mongo.close()
+    # Rehearse the real manager copy through nginx, including an admin-owned
+    # extension comment and an app function that rejects admin restore sessions.
+    source_secret=Path("/etc/${namespace}/secrets/postgres-password")
+    source_secret.parent.mkdir(parents=True,exist_ok=True)
+    source_secret.write_text("vm-shared-password")
+    source_secret.chmod(0o400); os.chown(source_secret,999,999)
+    fixture=json.loads(Path("/etc/vm-instance-platform.json").read_text())
+    from openstack_platform.storage_instances import database_command
+    source_limits={**limits,"memoryBytes":8589934592,"connections":95}
+    subprocess.run(["podman","run","-d","--name","vm-shared-postgres","--network=host","--cgroups=disabled","--volume","${platform.paths.data}/postgres:/var/lib/postgresql/data","--volume",str(source_secret)+":/run/secrets/admin-password:ro","--volume","${platform.paths.data}/instances/"+ids[0]+"/pki:/run/${namespace}-pki:ro",fixture["containers"]["postgres"],*database_command({"type":"postgres","port":5432,"quotas":source_limits},"${namespace}")],check=True,stdout=subprocess.DEVNULL)
+    source=connect_ready(lambda: psycopg.connect(host=host,port=5432,dbname="platform",user="platform_admin",password="vm-shared-password",sslmode="verify-full",sslrootcert=ca,autocommit=True))
+    storage._PORT_CONTEXT.set((5432,credentials[1]["port"]))
+    storage.postgres_create(source,application_id=owner,host=host,connections=10,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()),password_factory=lambda:postgres.environment["PGPASSWORD"] )
+    source.close()
+    with psycopg.connect(host=host,port=5432,dbname=postgres.provider_name,user="platform_admin",password="vm-shared-password",sslmode="verify-full",sslrootcert=ca,autocommit=True) as source:
+        source.execute("COMMENT ON EXTENSION plpgsql IS 'owner-sensitive comment'")
+    with psycopg.connect(host=host,port=5432,dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca,autocommit=True) as source_app:
+        source_app.execute("CREATE FUNCTION public.restore_guard() RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$ BEGIN IF session_user='platform_admin' THEN RAISE EXCEPTION 'admin restore session'; END IF; RETURN true; END $$")
+        source_app.execute("CREATE TABLE public.guarded(value integer CHECK(public.restore_guard()))")
+        source_app.execute("INSERT INTO public.guarded VALUES(42)")
+    call("copy",ids[0],database=postgres.provider_name,seconds=120,operationId=str(uuid.uuid4()),applicationLogin=postgres.credential_name,applicationPassword=postgres.environment["PGPASSWORD"])
+    with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca) as target:
+        assert target.execute("SELECT value FROM public.guarded").fetchone()[0] == 42
+        assert target.execute("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='guarded'").fetchone()[0] == "o_"+postgres.provider_name[2:]
+    subprocess.run(["podman","rm","-f","vm-shared-postgres"],check=True,stdout=subprocess.DEVNULL)
     for ident in ids:
         call("remove",ident,deleteData=True)
-    print("instance lifecycle, database access and cgroup caps verified")
+    print("instance lifecycle, authenticated copy, backup/restore and cgroup caps verified")
   '';
   imageCompatibilityHash = builtins.hashString "sha256" (
     builtins.toJSON {
@@ -278,7 +339,7 @@ let
           '';
           postgresEntry = pkgs.writeShellScriptBin "vm-postgres-entry" ''
             set -eu
-            export PATH=${lib.makeBinPath [ pkgs.postgresql pkgs.coreutils pkgs.util-linux ]}
+            export PATH=${lib.makeBinPath [ pkgs.postgresql_17 pkgs.coreutils pkgs.util-linux ]}
             export PGDATA=/var/lib/postgresql/data
             if [ ! -f "$PGDATA/PG_VERSION" ]; then
               setpriv --reuid=999 --regid=999 --clear-groups initdb -D "$PGDATA" -U platform_admin --pwfile=/run/secrets/admin-password --auth-local=trust --auth-host=scram-sha-256 --locale=C --encoding=UTF8
@@ -289,7 +350,7 @@ let
           postgresImage = pkgs.dockerTools.buildLayeredImage {
             name = "vm-instance-postgres";
             tag = "latest";
-            contents = [ pkgs.postgresql pkgs.coreutils pkgs.util-linux dbNss postgresEntry ];
+            contents = [ pkgs.postgresql_17 pkgs.coreutils pkgs.util-linux dbNss postgresEntry ];
             config.Entrypoint = [ "/bin/vm-postgres-entry" ];
           };
           mongoImage = pkgs.dockerTools.buildLayeredImage {
@@ -321,7 +382,8 @@ let
           # Use cached native binaries for a startup smoke of the role's exact
           # arguments; no container image pulls or full provider scenario.
           nixpkgs.config.allowUnfreePredicate = package: lib.getName package == "mongodb-ce";
-          environment.systemPackages = lib.optionals (role == "storage") [ pkgs.postgresql pkgs.mongodb-ce ];
+          environment.systemPackages = lib.optionals (role == "storage") [ pkgs.postgresql_17 pkgs.mongodb-ce pkgs.mongodb-tools ];
+          networking.extraHosts = lib.mkIf (role == "storage") (lib.mkForce "127.0.0.1 ${platform.internalNames.storage}");
           security.pki.certificateFiles = lib.optionals (role == "admin") [ "${testPki}/ca.pem" ];
           networking.hosts = lib.mkIf (role == "admin") { "127.0.0.1" = [ "class.example.com" ]; };
           services.cloud-init.settings.datasource_list = lib.mkForce [ "None" ];
@@ -510,7 +572,7 @@ let
                 serviceConfig.Type = "oneshot";
                 serviceConfig.RemainAfterExit = true;
                 script = ''
-                  ${pkgs.xfsprogs}/bin/mkfs.xfs -f -L ${platform.volumes.data.label} /dev/vdb
+                  ${pkgs.xfsprogs}/bin/mkfs.xfs -f -d size=32g -L ${platform.volumes.data.label} /dev/vdb
                 '';
               };
             })
@@ -571,6 +633,7 @@ let
       testScript = ''
         machine.start(allow_reboot=True)
         machine.wait_for_unit("multi-user.target")
+        machine.succeed("getent hosts ${platform.internalNames.storage}")
         machine.wait_for_unit("cloud-final.service")
         machine.succeed("python3 -c 'import json; json.load(open(\"/etc/${namespace}/platform.json\"))'")
 

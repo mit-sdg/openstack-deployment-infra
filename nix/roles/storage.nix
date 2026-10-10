@@ -31,11 +31,10 @@ let
       locations."/" = {
         proxyPass = "http://127.0.0.1:19000";
         extraConfig = ''
-          limit_req zone=storage_bucket_rate burst=40 nodelay;
-          limit_conn storage_bucket_connections 10;
+          limit_req zone=storage_bucket_rate burst=1000 nodelay;
+          limit_conn storage_bucket_connections 200;
           # A peer cannot evade fairness by flooding invented bucket names.
-          limit_req zone=storage_peer_rate burst=40 nodelay;
-          limit_conn storage_peer_connections 10;
+          ${lib.optionalString default "limit_req zone=storage_peer_rate burst=200 nodelay; limit_conn storage_peer_connections 50;"}
           limit_req_status 429;
           limit_conn_status 429;
           proxy_http_version 1.1;
@@ -43,16 +42,17 @@ let
           proxy_set_header X-Forwarded-Proto https;
           proxy_request_buffering off;
           proxy_buffering off;
-          proxy_read_timeout 900s;
+          proxy_read_timeout 7200s;
           proxy_send_timeout 900s;
           client_max_body_size 0;
         '';
       };
     };
   # xl.16core: 16 vCPU / 64 GiB. 100 default 512 MiB DB instances use
-  # 50 GiB; Garage 4 GiB + registry 2 GiB + two legacy 2 GiB servers
-  # leave 4 GiB for the OS, nginx and page cache. Legacy servers remain
-  # solely for migration and are removed in a separate follow-up.
+  # 50 GiB after source removal. During migration admit 36 GiB + a separate
+  # 2 GiB restore reserve, with two legacy 8 GiB sources + Garage 4 GiB +
+  # registry 2 GiB: at most 60 GiB, leaving 4 GiB for OS/nginx/page cache.
+  # The follow-up removes sources and raises admission/slice to 50/52 GiB.
   packages = import ../pkgs { inherit pkgs platform; };
   data = platform.paths.data;
   infra = ../../infra;
@@ -60,6 +60,7 @@ let
     path: lib.replaceStrings [ "-" "/" ] [ "\\x2d" "-" ] (lib.removePrefix "/" path);
   mountUnit = "${systemdEscapePath data}.mount";
   dataLayoutUnit = "${namespace}-storage-data-layout.service";
+  growUnit = "${namespace}-storage-growfs.service";
   credentialGuard = pkgs.writeShellScript "${namespace}-storage-credential-guard" ''
     set -euo pipefail
     path=$1
@@ -170,11 +171,11 @@ in
       cmd = [
         "postgres"
         # Temporary shared source: 100 connections covers the six live apps
-        # and migration. A 512 MiB cache/2 MiB work_mem fits its 2 GiB cap.
+        # and dumps. Buffers 2 GiB + 2 MiB work_mem fits its 8 GiB cap.
         "-c"
         "max_connections=100"
         "-c"
-        "shared_buffers=512MB"
+        "shared_buffers=2048MB"
         "-c"
         "work_mem=2MB"
         "-c"
@@ -193,10 +194,10 @@ in
         "hba_file=/run/${namespace}-pg_hba.conf"
       ];
       extraOptions = [
-        # This legacy source is capped at 2 GiB during migration.
-        "--memory=2048m"
-        "--memory-swap=2048m"
-        "--cpus=0.5"
+        # Four cores / 8 GiB serves existing apps while dumps run.
+        "--memory=8192m"
+        "--memory-swap=8192m"
+        "--cpus=4"
         "--health-cmd=pg_isready -U platform_admin -d platform"
         "--health-interval=30s"
         "--health-start-period=90s"
@@ -218,10 +219,10 @@ in
       ports = [ "${toString ports.mongodb}:${toString ports.mongodb}" ];
       cmd = [
         "mongod"
-        # Temporary source: 0.5 GiB cache leaves 1.5 GiB for the existing
+        # Temporary source: 2 GiB cache leaves 6 GiB for the existing
         # app pools and migration; 800 connections bounds their thread growth.
         "--wiredTigerCacheSizeGB"
-        "0.5"
+        "2"
         "--maxConns"
         "800"
         # Log operations over 100 ms without the overhead of profiling writes.
@@ -240,9 +241,9 @@ in
       # but setClusterParameter is unsupported on this standalone deployment:
       # https://www.mongodb.com/docs/v8.0/reference/command/setclusterparameter/
       extraOptions = [
-        "--memory=2048m"
-        "--memory-swap=2048m"
-        "--cpus=0.5"
+        "--memory=8192m"
+        "--memory-swap=8192m"
+        "--cpus=4"
         # TLS ping checks mongod readiness without secrets in process arguments.
         "--health-cmd=mongosh --quiet --tls --tlsCAFile /run/${namespace}-pki/internal-ca.pem --host 127.0.0.1 --tlsAllowInvalidHostnames --eval 'quit(db.runCommand({ping:1}).ok === 1 ? 0 : 1)'"
         "--health-interval=30s"
@@ -289,10 +290,21 @@ in
     (mkContainerDependencies "${namespace}-garage")
     (mkContainerDependencies "${namespace}-registry")
     {
-      "${namespace}-storage-data-layout" = {
-        description = "Prepare ${platform.displayName} mounted storage layout";
+      "${namespace}-storage-growfs" = {
+        description = "Grow mounted storage XFS to the attached Cinder volume";
         after = [ mountUnit ];
         requires = [ mountUnit ];
+        before = [ dataLayoutUnit ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${pkgs.xfsprogs}/bin/xfs_growfs ${data}";
+        };
+      };
+      "${namespace}-storage-data-layout" = {
+        description = "Prepare ${platform.displayName} mounted storage layout";
+        after = [ mountUnit growUnit ];
+        requires = [ mountUnit growUnit ];
         before = [
           "podman-${namespace}-postgres.service"
           "podman-${namespace}-mongodb.service"
@@ -324,13 +336,13 @@ in
         };
       };
       "podman-${namespace}-postgres".serviceConfig = {
-        CPUQuota = "50%";
+        CPUQuota = "400%";
         IOWeight = 100;
         ExecStartPre = [ "${credentialGuard} /etc/${namespace}/secrets/postgres-password" ];
         LoadCredential = "postgres-password:/etc/${namespace}/secrets/postgres-password";
       };
       "podman-${namespace}-mongodb".serviceConfig = {
-        CPUQuota = "50%";
+        CPUQuota = "400%";
         IOWeight = 100;
         ExecStartPre = [
           "${credentialGuard} /etc/${namespace}/secrets/mongodb-password"
@@ -357,8 +369,9 @@ in
           Restart = "always";
           # 5 seconds avoids a tight OOM/crash restart loop; only this DB restarts.
           RestartSec = 5;
-          TimeoutStopSec = 60;
-          KillMode = "control-group";
+          TimeoutStopSec = 180;
+          KillSignal = "SIGINT";
+          KillMode = "mixed";
           LimitCORE = 0;
           # Per-instance drop-ins supplied by the manager set MemoryMax,
           # MemorySwapMax=0, CPUQuota, CPUWeight=100, IOWeight=100, TasksMax=256.
@@ -381,7 +394,7 @@ in
           Restart = "on-failure";
           ProtectSystem = "strict";
           ProtectHome = true;
-          ReadWritePaths = [ data "/run/systemd" "/etc/systemd/system" "-/run/containers" "-/var/lib/containers" ];
+          ReadWritePaths = [ data "/run/systemd" "/etc/systemd/system" "-/run/containers" "-/run/crun" "-/run/runc" "-/var/lib/containers" ];
           RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_NETLINK" ];
           # Manager tools may reach only local databases; TLS/bearer requests
           # arrive through nginx on loopback. No SSH command execution surface.
@@ -409,7 +422,7 @@ in
           # Podman inspect and cgroup reads need the host's root namespace.
           ProtectSystem = "strict";
           # podman inspect takes local metadata locks; it receives fixed names.
-          ReadWritePaths = [ "-/run/containers" "-/var/lib/containers" ];
+          ReadWritePaths = [ "-/run/containers" "-/run/crun" "-/run/runc" "-/var/lib/containers" ];
           ProtectHome = true;
           PrivateTmp = true;
           NoNewPrivileges = true;
@@ -520,7 +533,7 @@ in
     # Twelve of sixteen cores bound aggregate DB load, leaving four for
     # Garage, the registry, the migration source and host administration.
     CPUQuota = "1200%";
-    MemoryMax = "50G";
+    MemoryMax = "38G";
     MemorySwapMax = 0;
   };
 
@@ -564,17 +577,25 @@ in
     enable = true;
     recommendedProxySettings = false;
     appendHttpConfig = ''
-      # Both internal and public S3 are path-style. Each bucket gets 20 r/s,
-      # a 40-request burst and 10 active requests; malformed paths share an
-      # IP key so they cannot manufacture an unbounded set of bucket budgets.
+      # 200 r/s + 1000 burst + 200 requests per bucket accommodates a class
+      # loading normal browser assets. Public NAT peers share only bucket caps.
+      # Trusted admin logical backups bypass these student fairness budgets.
       map $uri $storage_bucket {
         "~^/([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])(?:/|$)" $1;
         default $remote_addr;
       }
-      limit_req_zone $storage_bucket zone=storage_bucket_rate:16m rate=20r/s;
-      limit_conn_zone $storage_bucket zone=storage_bucket_connections:16m;
-      limit_req_zone $binary_remote_addr zone=storage_peer_rate:16m rate=20r/s;
-      limit_conn_zone $binary_remote_addr zone=storage_peer_connections:16m;
+      map $remote_addr $storage_bucket_key {
+        ${platform.addresses.admin} "";
+        default $storage_bucket;
+      }
+      map $remote_addr $storage_peer_key {
+        ${platform.addresses.admin} "";
+        default $binary_remote_addr;
+      }
+      limit_req_zone $storage_bucket_key zone=storage_bucket_rate:16m rate=200r/s;
+      limit_conn_zone $storage_bucket_key zone=storage_bucket_connections:16m;
+      limit_req_zone $storage_peer_key zone=storage_peer_rate:16m rate=100r/s;
+      limit_conn_zone $storage_peer_key zone=storage_peer_connections:16m;
     '';
     virtualHosts = {
       # Apps sign Host as <storage IP>:port; this stays the default server.
@@ -606,7 +627,7 @@ in
           extraConfig = ''
             limit_except POST { deny all; }
             proxy_set_header Authorization $http_authorization;
-            proxy_read_timeout 900s;
+            proxy_read_timeout 7200s;
             client_max_body_size 64k;
           '';
         };

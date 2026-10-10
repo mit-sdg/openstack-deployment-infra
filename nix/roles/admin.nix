@@ -48,6 +48,27 @@ let
     exec ${packages.controllerPackage}/bin/openstack-platform-storage-migrate \
       --socket /run/${namespace}-controller/privileged.sock "$@"
   '';
+  storageBackup = pkgs.writeShellScriptBin "openstack-platform-storage-backup" ''
+    export PLATFORM_CONFIG="''${PLATFORM_CONFIG:-/etc/${namespace}/platform.json}"
+    export PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.postgresql_17 pkgs.mongodb-tools pkgs.podman ]}:$PATH
+    exec ${packages.controllerPackage}/bin/openstack-platform-storage-backup "$@"
+  '';
+  managedBackup = pkgs.writeShellScriptBin "openstack-platform-managed-backup" ''
+    set -euo pipefail
+    ${credentialGuard} ${operatorRoot}/secrets/backup-age-key.txt ${operatorAccount.name}
+    ${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env
+    export PLATFORM_CONFIG=/etc/${namespace}/platform.json
+    export AGE=${pkgs.age}/bin/age AGE_KEYGEN=${pkgs.age}/bin/age-keygen
+    export AGE_KEY=${operatorRoot}/secrets/backup-age-key.txt
+    export BACKUP_ROOT=${backups}/${namespace}
+    export EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh
+    export DATABASE_BACKUP_COMMAND=${packages.controllerPackage}/bin/openstack-platform-storage-backup
+    export GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py
+    export GARAGE_VERIFY_SCRIPT=${infra}/backup/verify_garage_backup.py
+    export SERVICE_CHECK_PYTHON=${packages.python}/bin/python
+    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.findutils pkgs.util-linux pkgs.postgresql_17 pkgs.mongodb-tools packages.python ]}:$PATH
+    exec ${infra}/backup/run_platform_backup.sh "$@"
+  '';
   storageRepair = pkgs.writeShellScriptBin "openstack-platform-storage-repair" ''
     exec ${packages.controllerPackage}/bin/openstack-platform-storage-repair \
       --socket /run/${namespace}-controller/privileged.sock "$@"
@@ -467,6 +488,8 @@ in
     hostedControllerRestore
     storageRepair
     storageMigrate
+    storageBackup
+    managedBackup
     managementRestore
   ];
 
@@ -1214,6 +1237,7 @@ in
         "PLATFORM_CONFIG=/etc/${namespace}/platform.json"
         "BACKUP_ROOT=${backups}/${namespace}"
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
+        "DATABASE_BACKUP_COMMAND=${packages.controllerPackage}/bin/openstack-platform-storage-backup"
         "SERVICE_CHECK_PYTHON=${packages.python}/bin/python"
         "GARAGE_EMIT_SCRIPT=${infra}/backup/emit_garage_backup.py"
         "GARAGE_VERIFY_SCRIPT=${infra}/backup/verify_garage_backup.py"
@@ -1223,6 +1247,8 @@ in
           lib.makeBinPath [
             pkgs.coreutils
             pkgs.findutils
+            pkgs.postgresql_17
+            pkgs.mongodb-tools
             pkgs.podman
             pkgs.util-linux
             packages.python
