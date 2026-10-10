@@ -397,6 +397,9 @@ let
             name = "vm-instance-postgres";
             tag = "latest";
             contents = [
+              # initdb checks postgres -V through libc popen(), which requires
+              # /bin/sh even though the entrypoint has a store-path shebang.
+              pkgs.dockerTools.binSh
               pkgs.postgresql_17
               pkgs.coreutils
               pkgs.util-linux
@@ -885,6 +888,9 @@ let
               machine.succeed("${pkgs.nginx}/bin/nginx -t -c /etc/nginx/nginx.conf")
               machine.succeed("mountpoint -q ${platform.paths.data}")
               machine.succeed("${pkgs.podman}/bin/podman load --input /etc/vm-instance-images/postgres.tar >/dev/null")
+              # Check the image's shell/ELF execution under a read-only rootfs
+              # before initdb's shell-based version probe obscures the cause.
+              machine.succeed("${pkgs.podman}/bin/podman run --rm --read-only --network=none --cgroups=disabled --user=999:999 --entrypoint=/bin/sh localhost/vm-instance-postgres:latest -ec 'exec /bin/postgres -V'")
               machine.succeed("${pkgs.podman}/bin/podman load --input /etc/vm-instance-images/mongo.tar >/dev/null")
               machine.succeed("systemctl start ${namespace}-storage-instance-manager.service")
               machine.wait_for_open_port(19002)
