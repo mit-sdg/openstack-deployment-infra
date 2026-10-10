@@ -65,7 +65,12 @@ def environment(self: Broker, request: Request) -> Response:
     data = environment_metadata(self, app["id"])
     with self.database.connect() as db:
         data["intents"] = [
-            intent_model(row, diagnostic=user["role"] in {"staff", "admin"}, viewer=user["id"])
+            intent_model(
+                row,
+                diagnostic=user["role"] in {"staff", "admin"},
+                viewer=user["id"],
+                admin=user["role"] == "admin",
+            )
             for row in db.execute(
                 "SELECT * FROM intents WHERE app_id=? AND kind IN ('env_set','env_delete') AND state NOT IN ('succeeded','failed') ORDER BY created",
                 (app["id"],),
@@ -238,7 +243,10 @@ def storage(self: Broker, request: Request) -> Response:
         progress = [
             {
                 **intent_model(
-                    row, diagnostic=user["role"] in {"staff", "admin"}, viewer=user["id"]
+                    row,
+                    diagnostic=user["role"] in {"staff", "admin"},
+                    viewer=user["id"],
+                    admin=user["role"] == "admin",
                 ),
                 "type": strict_json(row["body"].encode()).get("type"),
             }
@@ -354,11 +362,11 @@ def unlimited(db: sqlite3.Connection, user_id: str) -> bool:
 
 def operation_quota(self: Broker, db: sqlite3.Connection, user_id: str, app_id: str) -> None:
     held = db.execute(
-        "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','storage_limits','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
+        "SELECT app_id FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','storage_limits','env_set','env_delete','app_enable','app_disable','app_restart','app_delete') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
         (user_id,),
     ).fetchall()
     current = db.execute(
-        "SELECT state,kind FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','storage_limits','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
+        "SELECT state,kind FROM intents WHERE app_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','storage_limits','env_set','env_delete','app_enable','app_disable','app_restart','app_delete') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
         (app_id,),
     ).fetchone()
     if current:

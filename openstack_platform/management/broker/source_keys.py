@@ -173,7 +173,12 @@ class SourceKeys:
                 )
                 shared = self.check_model(result, settings["branch"])
                 with self.lock:
-                    self.checked[app["id"]] = (self.clock(), target, shared)
+                    with self.broker.database.connect() as db:
+                        ready = db.execute(
+                            "SELECT 1 FROM apps WHERE id=? AND lifecycle='ready'", (app["id"],)
+                        ).fetchone()
+                    if ready:
+                        self.checked[app["id"]] = (self.clock(), target, shared)
             return Response(200, {"data": shared})
         finally:
             self.checking.release()
@@ -264,7 +269,12 @@ class SourceKeys:
                     ],
                 }
                 with self.lock:
-                    self.checked[app["id"]] = (self.clock(), target, shared)
+                    with self.broker.database.connect() as db:
+                        ready = db.execute(
+                            "SELECT 1 FROM apps WHERE id=? AND lifecycle='ready'", (app["id"],)
+                        ).fetchone()
+                    if ready:
+                        self.checked[app["id"]] = (self.clock(), target, shared)
             return Response(200, {"data": shared})
         finally:
             self.checking.release()

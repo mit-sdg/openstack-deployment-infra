@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from openstack_platform.controller.http import HttpError
 from openstack_platform.management.broker import bootstrap
 from openstack_platform.management.broker.accounts import security_change
+from openstack_platform.management.broker.client import ControllerUnavailable
 from openstack_platform.management.broker.sizing import FlavorCache
 from openstack_platform.management.common import canonical, digest, strict_json
 from openstack_platform.management.web.server import WebServer
@@ -467,7 +468,7 @@ class AdminApplicationTests(ManagementCase):
             for method, _route, path in self.routes():
                 with self.subTest(actor=actor, path=path, method=method):
                     body = {} if method != "GET" else None
-                    if actor == "alice":
+                    if actor == "alice" or actor == "taylor" and _route.endswith("/delete"):
                         self.assert_error(
                             "ACCESS_DENIED",
                             lambda method=method, path=path, body=body, actor=actor: self.call(
@@ -759,6 +760,208 @@ class AdminApplicationTests(ManagementCase):
             ),
         )
         self.assertEqual(result.status, 202)
+
+    def delete_app(self, key: str | None = None, confirmation: str = "student-app") -> Any:
+        return self.call(
+            "POST", self.prefix + "/delete", {"confirmation": confirmation}, "admin", key
+        )
+
+    def test_app_delete_role_confirmation_step_up_and_replay_cleanup(self) -> None:
+        self.staff()
+        self.login("bob")
+        self.call("POST", self.prefix + "/members", {"username": "bob"}, "alice")
+        for role in ("alice", "bob", "taylor"):
+            with self.assertRaises(HttpError) as raised:
+                self.call("POST", self.prefix + "/delete", {"confirmation": "student-app"}, role)
+            self.assertIn(raised.exception.status, {403, 404})
+        self.now += 301
+        self.assert_error("STEP_UP_REQUIRED", self.delete_app)
+        with self.broker.database.connect(write=True) as db:
+            db.execute(
+                "UPDATE sessions SET reauthenticated_at=? WHERE user_id=?",
+                (self.now, self.admin_user),
+            )
+        for confirmation in ("student", "student-app ", None):
+            self.assert_error(
+                "CONFIRMATION_REQUIRED",
+                lambda confirmation=confirmation: self.delete_app(confirmation=confirmation),
+            )
+        for kind in ("postgres", "mongo", "s3"):
+            self.assertEqual(
+                self.complete(self.call("POST", self.prefix + "/storage", {"type": kind}, "admin"))[
+                    "state"
+                ],
+                "succeeded",
+            )
+        self.call("POST", self.prefix + "/source-key", {}, "admin")
+        self.complete(
+            self.call("PUT", self.prefix + "/environment/TOKEN", {"value": "secret"}, "alice"),
+            "alice",
+        )
+        self.broker.runtime_logs.shared[(self.app_id, "stdout")] = (
+            time.monotonic(),
+            {"text": "old"},
+        )
+        self.broker.source_keys.checked[self.app_id] = (
+            time.monotonic(),
+            "target",
+            {"present": True},
+        )
+        key = str(uuid.uuid4())
+        started = self.delete_app(key)
+        identifier = started.body["data"]["intentId"]
+        self.assertEqual(self.complete(started)["state"], "succeeded")
+        self.assertEqual(self.delete_app(key).body["data"]["intentId"], identifier)
+        self.assert_error("IDEMPOTENCY_CONFLICT", lambda: self.delete_app(key, "other"))
+        self.assertEqual(self.call("GET", "/v1/all-apps", owner="admin").body["data"]["items"], [])
+        self.assertEqual(self.call("GET", "/v1/apps", owner="alice").body["data"]["items"], [])
+        self.assert_error(
+            "APPLICATION_DELETED", lambda: self.call("GET", self.prefix, owner="admin")
+        )
+        with self.broker.database.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT lifecycle FROM apps WHERE id=?", (self.app_id,)).fetchone()[0],
+                "deleted",
+            )
+            for table in ("app_members", "configurations", "observations"):
+                self.assertEqual(
+                    db.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE app_id=?", (self.app_id,)
+                    ).fetchone()[0],
+                    0,
+                )
+            actions = [row[0] for row in db.execute("SELECT action FROM admin_audit")]
+            self.assertEqual(actions.count("app_app_delete"), 1)
+            self.assertEqual(actions.count("app_delete_succeeded"), 1)
+        self.assertFalse(
+            any(
+                resource["applicationId"] == self.app_id
+                for resource in self.fixture.resources.values()
+            )
+        )
+        self.assertNotIn(self.app_id, self.fixture.source_keys)
+        self.assertNotIn(self.app_id, self.fixture.environments)
+        self.assertNotIn(self.app_id, self.broker.source_keys.checked)
+        self.assertNotIn((self.app_id, "stdout"), self.broker.runtime_logs.shared)
+
+    def test_app_delete_recovery_requires_admin_step_up_and_keeps_controller_key(self) -> None:
+        self.staff()
+        self.fixture.recovery_next = True
+        started = self.delete_app()
+        blocked = self.complete(started)
+        self.assertEqual(blocked["state"], "blocked")
+        intent = blocked["intentId"]
+        path = f"/v1/intents/{intent}/resume"
+        for role in ("alice", "taylor"):
+            with self.assertRaises(HttpError) as raised:
+                self.call("POST", path, {}, role)
+            self.assertIn(raised.exception.status, {403, 404})
+            visible = self.call("GET", f"/v1/intents/{intent}", owner=role).body["data"]
+            self.assertFalse(visible["canResume"])
+        self.now += 301
+        self.assert_error("STEP_UP_REQUIRED", lambda: self.call("POST", path, {}, "admin"))
+        with self.broker.database.connect(write=True) as db:
+            db.execute(
+                "UPDATE sessions SET reauthenticated_at=? WHERE user_id=?",
+                (self.now, self.admin_user),
+            )
+        resumed = self.call("POST", path, {}, "admin")
+        self.assertEqual(self.complete(resumed)["state"], "succeeded")
+        delete_calls = [call for call in self.fixture.calls if call[1].endswith("/delete")]
+        self.assertEqual(len(delete_calls), 2)
+        self.assertEqual(delete_calls[0][2], delete_calls[1][2])
+
+    def test_deleted_app_cannot_regain_members_settings_or_observations_from_stale_requests(
+        self,
+    ) -> None:
+        self.login("bob")
+        with self.broker.database.connect() as db:
+            app = dict(db.execute("SELECT * FROM apps WHERE id=?", (self.app_id,)).fetchone())
+            user = dict(db.execute("SELECT * FROM users WHERE id=?", (self.owner,)).fetchone())
+        app["access"] = "owner"
+        settings = self.call("GET", self.prefix + "/configuration", owner="alice").body["data"]
+        original = self.broker.client.request
+
+        def retired_observation(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+            result = original(method, path, *args, **kwargs)
+            if path == f"/v1/applications/{self.app_id}":
+                self.broker.journal.observe_deleted(self.app_id, missing=True)
+            return result
+
+        with patch.object(self.broker.client, "request", side_effect=retired_observation):
+            self.broker.app_model(app, cache_seconds=0)
+        with patch.object(self.broker, "own", return_value=(user, app)):
+            self.assert_error(
+                "APPLICATION_DELETED",
+                lambda: self.call("POST", self.prefix + "/members", {"username": "bob"}, "alice"),
+            )
+            body = {
+                "expectedRevision": settings["revision"],
+                **{key: settings[key] for key in ("repository", "branch", "configuration")},
+            }
+            self.assert_error(
+                "APPLICATION_DELETED",
+                lambda: self.call("PUT", self.prefix + "/configuration", body, "alice"),
+            )
+        with self.broker.database.connect() as db:
+            for table in ("app_members", "configurations", "observations"):
+                self.assertEqual(
+                    db.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE app_id=?", (self.app_id,)
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_app_delete_rechecks_admin_role_before_admission_and_background_dispatch(self) -> None:
+        original = self.broker.client.request
+
+        def revoke_on_read(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+            result = original(method, path, *args, **kwargs)
+            if path.endswith("/environment"):
+                with self.broker.database.connect(write=True) as db:
+                    db.execute("UPDATE users SET role='staff' WHERE id=?", (self.admin_user,))
+            return result
+
+        with (
+            patch.object(self.broker.client, "request", side_effect=revoke_on_read),
+            self.assertRaises(HttpError),
+        ):
+            self.delete_app()
+        self.assertFalse(any(call[1].endswith("/delete") for call in self.fixture.calls))
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE users SET role='admin' WHERE id=?", (self.admin_user,))
+        with patch.object(self.broker.journal, "dispatch"):
+            started = self.delete_app()
+        with self.broker.database.connect(write=True) as db:
+            db.execute("UPDATE users SET role='staff' WHERE id=?", (self.admin_user,))
+        self.broker.journal.dispatch(started.body["data"]["intentId"])
+        with self.broker.database.connect() as db:
+            state = db.execute(
+                "SELECT state FROM intents WHERE id=?", (started.body["data"]["intentId"],)
+            ).fetchone()[0]
+        self.assertEqual(state, "blocked")
+        self.assertFalse(any(call[1].endswith("/delete") for call in self.fixture.calls))
+
+    def test_app_delete_unknown_admission_retries_same_key_and_blocks_other_mutations(self) -> None:
+        original = self.broker.client.request
+
+        def lose_admission(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+            result = original(method, path, *args, **kwargs)
+            if method == "POST" and path.endswith("/delete"):
+                raise ControllerUnavailable("lost response after admission")
+            return result
+
+        with patch.object(self.broker.client, "request", side_effect=lose_admission):
+            started = self.delete_app()
+        self.assertEqual(started.body["data"]["state"], "unknown")
+        self.assert_error(
+            "APP_BUSY", lambda: self.call("POST", self.prefix + "/restart", {}, "admin")
+        )
+        self.broker.journal.dispatch(started.body["data"]["intentId"])
+        self.assertEqual(self.complete(started)["state"], "succeeded")
+        delete_calls = [call for call in self.fixture.calls if call[1].endswith("/delete")]
+        self.assertEqual(len(delete_calls), 2)
+        self.assertEqual(delete_calls[0][2], delete_calls[1][2])
 
     def test_admin_storage_delete_needs_typed_confirmation_and_audit_without_step_up(self) -> None:
         result = self.call("POST", self.prefix + "/storage", {"type": "s3"}, "admin")

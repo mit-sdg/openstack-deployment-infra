@@ -107,7 +107,7 @@ These docs explain what the platform is, how to deploy it for a class, and how t
 
 **Role.** One of the five kinds of machine: admin, ingress, storage, worker, builder.
 
-**Staff.** The owner portal role for course staff. Staff have the same app-management permissions as portal admins, including ownership changes, maintenance and resizing, and storage deletion. Account management, quotas, and the audit log remain admin-only.
+**Staff.** The owner portal role for course staff. Staff have the same app-management permissions as portal admins, including ownership changes, maintenance and resizing, and storage deletion. Deleting an entire app, account management, quotas, and the audit log remain admin-only.
 
 **Traefik.** The reverse proxy on the ingress host that routes each hostname to the right app or service.
 

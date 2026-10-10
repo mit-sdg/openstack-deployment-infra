@@ -89,9 +89,17 @@ class Broker:
         self.runtime_logs = RuntimeLogs(self)
         self.source_keys = SourceKeys(self)
         self.members = Members(self)
+        self.journal.on_deleted = self.forget_app
         self.request_actor: ContextVar[tuple[str, str | None] | None] = ContextVar(
             "app_request_actor", default=None
         )
+
+    def forget_app(self, app_id: str) -> None:
+        with self.source_keys.lock:
+            self.source_keys.checked.pop(app_id, None)
+        with self.runtime_logs.lock:
+            for key in [key for key in self.runtime_logs.shared if key[0] == app_id]:
+                del self.runtime_logs.shared[key]
 
     def close(self) -> None:
         self.app_management.close()
@@ -174,6 +182,7 @@ class Broker:
                     if route.startswith("/v1/all-apps") or route in {
                         "/v1/people/eligible-owners",
                         "/v1/apps/{app}/owner",
+                        "/v1/apps/{app}/delete",
                         "/v1/apps/{app}/storage/{resource}",
                         "/v1/apps/{app}/sizes",
                         "/v1/apps/{app}/resize-plan",
@@ -288,6 +297,16 @@ class Broker:
             raise HttpError(400, "INVALID_REQUEST", "Unexpected mutation fields.")
         return body
 
+    @staticmethod
+    def check_app_not_deleted(db: sqlite3.Connection, app_id: str) -> None:
+        row = db.execute("SELECT lifecycle FROM apps WHERE id=?", (app_id,)).fetchone()
+        if row is None:
+            raise HttpError(404, "NOT_FOUND", "Application not found.")
+        if row[0] == "deleted":
+            raise HttpError(
+                410, "APPLICATION_DELETED", "This application was deleted by an administrator."
+            )
+
     def quota(self, user_id: str) -> dict[str, Any]:
         with self.database.connect() as db:
             unlimited = resources.unlimited(db, user_id)
@@ -297,7 +316,7 @@ class Broker:
                 (user_id,),
             ).fetchall()
             held = db.execute(
-                "SELECT COUNT(*) FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
+                "SELECT COUNT(*) FROM intents WHERE user_id=? AND kind IN ('deploy','storage_create','storage_verify','storage_rotate','storage_delete','env_set','env_delete','app_enable','app_disable','app_restart','app_delete') AND state NOT IN ('succeeded','failed') AND NOT (kind IN ('deploy','app_enable') AND state IN ('accepted','blocked') AND COALESCE(json_extract(operation, '$.finishing'),0)=1)",
                 (user_id,),
             ).fetchone()[0]
         return {
@@ -442,8 +461,8 @@ class Broker:
                 )
                 with self.database.connect(write=True) as db:
                     db.execute(
-                        "INSERT INTO observations VALUES(?,?,?) ON CONFLICT(app_id) DO UPDATE SET body=excluded.body,updated=excluded.updated",
-                        (app["id"], canonical(result), time.time()),
+                        "INSERT INTO observations SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM apps WHERE id=? AND lifecycle='ready') ON CONFLICT(app_id) DO UPDATE SET body=excluded.body,updated=excluded.updated",
+                        (app["id"], canonical(result), time.time(), app["id"]),
                     )
             except (ControllerUnavailable, ValidationError):
                 pass
@@ -599,6 +618,8 @@ class Broker:
         self.app_management.check(db)
         context = self.request_actor.get()
         if context is not None:
+            if context[1] is not None:
+                self.check_app_not_deleted(db, context[1])
             actor = self.auth.session_row(db, context[0], self.auth.clock())
             if (
                 self.app_management.context.get() is None
@@ -758,6 +779,7 @@ class Broker:
             digest(canonical({"path": request.path, "body": body})),
         )
         with self.database.connect(write=True) as db:
+            self.check_app_not_deleted(db, app["id"])
             existing = self.existing(db, user["id"], key, fingerprint)
             if existing is None:
                 self.validate_bindings(db, app["id"], configuration)
@@ -881,6 +903,7 @@ class Broker:
                 row,
                 diagnostic=actor is not None and actor[0] in {"staff", "admin"},
                 viewer=user,
+                admin=actor is not None and actor[0] == "admin",
             )
             app = db.execute(
                 "SELECT slug FROM apps WHERE id=?" + ("" if privileged else " AND " + ACCESS),
@@ -902,7 +925,10 @@ class Broker:
         page["items"] = [
             {
                 **intent_model(
-                    row, diagnostic=user["role"] in {"staff", "admin"}, viewer=user["id"]
+                    row,
+                    diagnostic=user["role"] in {"staff", "admin"},
+                    viewer=user["id"],
+                    admin=user["role"] == "admin",
                 ),
                 "appSlug": slugs.get(row["app_id"]),
             }
@@ -945,8 +971,8 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
-            if row["kind"] in {"default_builder_size", "storage_limits"}:
-                self.accounts.checked_actor(db, _sid)
+            if row["kind"] in {"default_builder_size", "storage_limits", "app_delete"}:
+                self.accounts.checked_actor(db, _sid, step_up=row["kind"] == "app_delete")
             app_state = db.execute(
                 "SELECT lifecycle FROM apps WHERE id=?", (row["app_id"],)
             ).fetchone()

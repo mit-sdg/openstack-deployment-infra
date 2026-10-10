@@ -114,6 +114,7 @@ export const activityTitles: Record<string, [done: string, running: string, noun
   app_enable: ['App started', 'Starting app', 'App start'],
   app_disable: ['App stopped', 'Stopping app', 'App stop'],
   app_restart: ['App restarted', 'Restarting app', 'App restart'],
+  app_delete: ['App deleted', 'Deleting app', 'App deletion'],
 };
 const otherChange: [string, string, string] = ['Change made', 'Making change', 'Change'];
 export function activityTitle(kind: string, state: string) {

@@ -141,7 +141,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/hooks/useAppDestination.ts` — keeps the task navigation and app back link consistent with personal or class access.
 - `frontend/owner-portal/src/hooks/useClassReads.tsx` — class read polling, hidden-tab pause, idle expiry and sequential refresh.
 - `frontend/owner-portal/src/classApi.ts` — typed, cancellable People and Activity metadata reads.
-- `frontend/owner-portal/src/appManagementApi.ts` — typed class app catalog, adoption, ownership and storage deletion requests.
+- `frontend/owner-portal/src/appManagementApi.ts` — typed class app catalog, adoption, ownership, storage deletion and app deletion requests.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory query cache.
 - `frontend/owner-portal/src/App.tsx` — sign-in, setup, task destinations and shared app routes.
 - `frontend/owner-portal/src/api.ts` — typed requests, response checks, settings validation, and CSRF retries.
@@ -183,6 +183,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 
 #### Components
 
+- `frontend/owner-portal/src/components/DeleteApp.tsx` — admin-only app deletion confirmation, step-up, intent progress and result.
 - `frontend/owner-portal/src/components/AccountControls.tsx` — admin-only account creation, roles, limits, access and recovery controls on People.
 - `frontend/owner-portal/src/components/DeploymentStatus.tsx` — deployment status joined with the original change and shared Resume action.
 - `frontend/owner-portal/src/components/ClassRecords.tsx` — shared pagers, loading states and class activity adapters.

@@ -136,6 +136,7 @@ INTENT_KINDS = frozenset(
         "app_enable",
         "app_disable",
         "app_restart",
+        "app_delete",
     }
 )
 
@@ -478,7 +479,13 @@ class ClassReads:
         return result
 
     def operations(self, request: Request) -> dict[str, Any]:
-        return self.local_page(request, "intents")
+        page = self.local_page(request, "intents")
+        user, _sid = self.broker.auth.authenticate(request, kind="staff", touch=False)
+        if user["role"] != "admin":
+            for item in page["items"]:
+                if item["kind"] == "app_delete":
+                    item["canResume"] = False
+        return page
 
     @classmethod
     def activity_model(cls, row: dict[str, Any]) -> dict[str, Any]:

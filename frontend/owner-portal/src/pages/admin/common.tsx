@@ -101,7 +101,7 @@ export function useStepUp() {
       }}
     />
   );
-  return { run, dialog };
+  return { run, dialog, prompting: !!waiter };
 }
 
 function StepUpDialog({

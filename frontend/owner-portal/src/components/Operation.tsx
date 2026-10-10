@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { Link } from 'wouter';
 import { api, type Intent } from '../api';
 import { activityTitle, humanPhase, short } from '../utils/presentation';
+import { useStepUp, shown } from '../pages/admin/common';
 import { Status } from './Status';
 
 const finished = ['succeeded', 'failed', 'blocked', 'unknown'];
@@ -108,8 +109,12 @@ export function OperationStatus({
   quiet?: 'text' | 'hidden';
 }) {
   const client = useQueryClient();
+  const step = useStepUp();
   const resume = useMutation({
-    mutationFn: () => api.resume(intent.intentId),
+    mutationFn: () =>
+      intent.kind === 'app_delete'
+        ? step.run(() => api.resume(intent.intentId))
+        : api.resume(intent.intentId),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ['intents'] });
       client.invalidateQueries({ queryKey: ['activity', intent.appId] });
@@ -133,7 +138,8 @@ export function OperationStatus({
           Resume
         </Button>
       )}
-      <ErrorAlert error={resume.error} />
+      <ErrorAlert error={shown(resume.error)} />
+      {step.dialog}
     </span>
   );
 }

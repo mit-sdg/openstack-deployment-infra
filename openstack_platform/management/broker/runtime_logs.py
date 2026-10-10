@@ -83,7 +83,12 @@ class RuntimeLogs:
             if result is None:
                 result = self.fetch(app, stream)
                 with self.lock:
-                    self.shared[key] = (self.clock(), result)
+                    with self.broker.database.connect() as db:
+                        ready = db.execute(
+                            "SELECT 1 FROM apps WHERE id=? AND lifecycle='ready'", (app["id"],)
+                        ).fetchone()
+                    if ready:
+                        self.shared[key] = (self.clock(), result)
             return result
         finally:
             self.reading.release()

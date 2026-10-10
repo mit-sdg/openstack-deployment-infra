@@ -78,6 +78,12 @@ export const appManagementApi = {
     }),
   reassign: (id: string, expectedOwnerId: string, ownerId: string) =>
     request(`/apps/${id}/owner`, record, { method: 'PUT', body: { ownerId, expectedOwnerId } }),
+  deleteApp: (id: string, confirmation: string, key: string) =>
+    request(`/apps/${id}/delete`, intentData, {
+      method: 'POST',
+      body: { confirmation },
+      key,
+    }),
   deleteStorage: (id: string, resource: string, confirmation: string, key: string) =>
     request(`/apps/${id}/storage/${resource}`, intentData, {
       method: 'DELETE',

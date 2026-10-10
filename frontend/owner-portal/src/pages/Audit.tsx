@@ -56,6 +56,10 @@ const auditLabels: Record<string, string> = {
   app_env_set: 'Environment variable set',
   app_env_delete: 'Environment variable deleted',
   app_configuration: 'Settings saved',
+  app_app_delete: 'App deletion started',
+  app_delete_succeeded: 'App deleted',
+  app_delete_blocked: 'App deletion needs attention',
+  app_delete_failed: 'App deletion failed',
 };
 
 const purposes: Record<string, string> = {

@@ -297,7 +297,7 @@ class ControllerAPI:
     def router(self, capability: Literal["all", "project", "privileged"] = "all") -> Router:
         """Build a route set for one host-enforced socket capability."""
         router = Router()
-        destructive = {
+        shared = {
             ("POST", "/v1/applications/{id}/delete"),
         }
         routes = (
@@ -367,11 +367,13 @@ class ControllerAPI:
             ("GET", "/v1/admin/operations", self._admin_operations),
         )
         for method, path, handler in routes:
-            is_privileged = path.startswith("/v1/admin/") or (method, path) in destructive
+            is_privileged = path.startswith("/v1/admin/")
             if capability == "project" and is_privileged:
                 continue
-            if capability == "privileged" and not is_privileged:
+            if capability == "privileged" and not is_privileged and (method, path) not in shared:
                 continue
+            if capability == "project" and handler == self._delete_application:
+                handler = self._delete_project_application
             router.add(method, path, self._safe(handler))
         return router
 
@@ -758,12 +760,16 @@ class ControllerAPI:
             scope=f"app-{application.application_id}",
         )
 
-    def _delete_application(self, request: Request) -> Response:
+    def _delete_project_application(self, request: Request) -> Response:
+        # The host authenticates the broker process; the broker checks the admin role.
+        return self._delete_application(request, admin=False)
+
+    def _delete_application(self, request: Request, *, admin: bool = True) -> Response:
         self._no_query(request)
         body = self._body(request, allowed={"confirmation"}, required={"confirmation"})
         claimed = self._claim(request)
         if claimed.result_id is not None and not self._is_recovery_result(claimed):
-            return self._operation_response(claimed.result_id, admin=True)
+            return self._operation_response(claimed.result_id, admin=admin)
         application = self._application(self._path_uuid(request))
         return self._external(
             request,
@@ -777,7 +783,7 @@ class ControllerAPI:
             kind="app.delete",
             scope=f"app-{application.application_id}",
             claimed=claimed,
-            admin=True,
+            admin=admin,
         )
 
     def _create_deployment(self, request: Request) -> Response:

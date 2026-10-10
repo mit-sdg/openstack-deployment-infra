@@ -14,6 +14,7 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type AppRecord, type StorageResource } from '../api';
 import { appManagementApi } from '../appManagementApi';
+import { DeleteApp } from './DeleteApp';
 import { OwnerPicker, friendly, shown } from '../pages/admin/common';
 const storageNames = { postgres: 'PostgreSQL', mongo: 'MongoDB', s3: 'S3 storage' };
 function SignInInfo() {
@@ -69,6 +70,7 @@ export function AppManagement({ id }: { id: string }) {
             }
           />
         </List>
+        <DeleteApp app={data} />
       </Section>
       <OwnerDialog
         open={action === 'owner'}
