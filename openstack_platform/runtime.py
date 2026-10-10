@@ -486,6 +486,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class HttpStatusFailure(RuntimeFailure):
+    """A bounded failed response, available only to fixed protocol decoders."""
+
+    def __init__(self, status: int, body: bytes):
+        super().__init__(f"HTTP request failed with status {status}")
+        self.status = status
+        self.body = body
+
+
 HTTP_USER_AGENT = "openstack-platform-health/1"
 
 
@@ -527,7 +536,7 @@ def bounded_http(
                 body=body,
             )
     except urllib.error.HTTPError as error:
-        error.read(min(response_limit, 65_536))
-        raise RuntimeFailure(f"HTTP request failed with status {error.code}") from None
+        body = error.read(min(response_limit, 65_536))
+        raise HttpStatusFailure(error.code, body) from None
     except (urllib.error.URLError, TimeoutError) as error:
         raise RuntimeFailure(f"HTTP request failed: {error.__class__.__name__}") from None

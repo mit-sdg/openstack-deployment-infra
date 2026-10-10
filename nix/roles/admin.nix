@@ -44,6 +44,14 @@ let
   operatorAccount = constants.accounts.operator;
   platformAdminAccount = constants.accounts.platformAdmin;
   nomadAccount = constants.accounts.nomad;
+  storageMigrate = pkgs.writeShellScriptBin "openstack-platform-storage-migrate" ''
+    exec ${packages.controllerPackage}/bin/openstack-platform-storage-migrate \
+      --socket /run/${namespace}-controller/privileged.sock "$@"
+  '';
+  storageRepair = pkgs.writeShellScriptBin "openstack-platform-storage-repair" ''
+    exec ${packages.controllerPackage}/bin/openstack-platform-storage-repair \
+      --socket /run/${namespace}-controller/privileged.sock "$@"
+  '';
   controllerRoot = "${state}/controller";
   controllerState = "${controllerRoot}/state";
   controllerPolicy = "${controllerRoot}/policy.json";
@@ -457,6 +465,8 @@ in
     pinBuilderHostKeyCli
     setupOperatorBridgeCli
     hostedControllerRestore
+    storageRepair
+    storageMigrate
     managementRestore
   ];
 

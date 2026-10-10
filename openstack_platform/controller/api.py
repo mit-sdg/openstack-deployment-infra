@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from .. import openstack, remote
 from ..config import Config
+from ..instance_contract import CapacityError, hard_quota
 from ..runtime import safe_summary
 from ..validation import (
     ValidationError,
@@ -25,7 +26,7 @@ from ..validation import (
     uuid,
 )
 from . import application_runtime as app
-from . import builder_settings, fixed_ip_service, sizing, status, storage
+from . import builder_settings, fixed_ip_service, sizing, status, storage, storage_limits
 from . import database as db
 from .application_service import ApplicationService
 from .async_operations import AsyncOperationExecutor
@@ -46,6 +47,9 @@ from .http import HttpError, Request, Response, Router
 from .image_service import IMAGE_SELECTION_KIND, ImageSelectionService, hosted_role
 from .log_service import LogService
 from .service_support import ServiceDeadlineError, logged_helper, operation_deadline, wall_deadline
+from .storage_contract import validate_expected_quotas, validate_quotas
+from .storage_instances import MIGRATE_KIND, InstanceMigrationService
+from .storage_limits import StorageLimitsService
 from .storage_service import StorageMutationRequest, StorageService
 
 API_VERSION = 1
@@ -323,6 +327,7 @@ class ControllerAPI:
             ("POST", "/v1/applications/{id}/storage", self._create_storage),
             ("GET", "/v1/applications/{id}/storage", self._list_storage),
             ("GET", "/v1/storage/{id}", self._get_storage),
+            ("PUT", "/v1/storage/{id}/limits", self._storage_limits),
             ("PATCH", "/v1/storage/{id}/label", self._label_storage),
             ("POST", "/v1/storage/{id}/verify", self._verify_storage),
             ("POST", "/v1/storage/{id}/rotate", self._rotate_storage),
@@ -350,6 +355,8 @@ class ControllerAPI:
             ("GET", "/v1/admin/operations/{id}", self._get_operation),
             ("GET", "/v1/admin/deployments", self._admin_deployments),
             ("GET", "/v1/admin/storage", self._admin_storage),
+            ("POST", "/v1/admin/storage/repair-postgres", self._repair_postgres),
+            ("POST", "/v1/admin/storage/migrate-instances", self._migrate_instances),
             ("GET", "/v1/admin/operations", self._admin_operations),
         )
         for method, path, handler in routes:
@@ -394,6 +401,8 @@ class ControllerAPI:
                     return handler(request)
                 except HttpError:
                     raise
+                except CapacityError as error:
+                    raise HttpError(400, error.code, str(error)) from None
                 except ValidationError as error:
                     raise HttpError(400, "INVALID_REQUEST", safe_summary(error)) from None
                 except db.DispatchQueueFullError:
@@ -1367,6 +1376,20 @@ class ControllerAPI:
         application = self._application(self._path_uuid(request))
         resource_type = self._resource_type(body["type"])
         machine_name = resource_name(body.get("name", "default"))
+        claimed = self._claim(request)
+        if claimed.result_id is None and resource_type != "s3":
+            from .storage_capacity import check
+
+            check(
+                self.connection,
+                None,
+                {
+                    "memoryBytes": 536870912,
+                    "connections": self.config.policy.standard.postgres_connections
+                    if resource_type == "postgres"
+                    else 10,
+                },
+            )
         return self._external(
             request,
             lambda connection, key: StorageService(
@@ -1380,6 +1403,7 @@ class ControllerAPI:
                     request_id=key,
                 )
             ),
+            claimed=claimed,
             kind="storage.create",
             scope=f"app-{application.application_id}",
         )
@@ -1398,6 +1422,69 @@ class ControllerAPI:
         with self._snapshot() as connection:
             resource = self._resource(self._path_uuid(request), connection)
         return Response(200, self._storage_model(resource))
+
+    def _storage_limits(self, request: Request) -> Response:
+        self._no_query(request)
+        body = self._body(
+            request, allowed={"quotas", "expectedQuotas"}, required={"quotas", "expectedQuotas"}
+        )
+        resource = self._resource(self._path_uuid(request))
+        target = validate_quotas(resource.resource_type, body["quotas"])
+        expected = validate_expected_quotas(resource.resource_type, body["expectedQuotas"])
+        claimed = self._claim(request)
+        if claimed.result_id is None:
+            from .storage_capacity import check
+
+            check(self.connection, resource.resource_id, target)
+            accepted = storage_limits.quotas(resource)
+            if (
+                resource.resource_type != "s3"
+                and resource.instance_id is None
+                and (
+                    any(target[key] != accepted[key] for key in ("memoryBytes", "cpuMillicores"))
+                    or target["connections"] > accepted["connections"]
+                    or resource.resource_type == "mongo"
+                    and target["connections"] != accepted["connections"]
+                )
+            ):
+                raise HttpError(
+                    409,
+                    "INSTANCE_MIGRATION_REQUIRED",
+                    "migrate this resource before changing instance compute or increasing shared connection caps",
+                )
+        return self._external(
+            request,
+            lambda connection, key: StorageLimitsService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).select(resource.resource_id, target, expected, request_id=key),
+            claimed=claimed,
+            kind=storage_limits.LIMITS_KIND,
+            scope=f"app-{resource.application_id}",
+        )
+
+    def _migrate_instances(self, request: Request) -> Response:
+        self._no_query(request)
+        self._body(request, allowed=set(), allow_absent=True)
+        return self._external(
+            request,
+            lambda connection, key: InstanceMigrationService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).migrate(request_id=key),
+            kind=MIGRATE_KIND,
+            scope="infrastructure",
+        )
+
+    def _repair_postgres(self, request: Request) -> Response:
+        self._no_query(request)
+        self._body(request, allowed=set(), allow_absent=True)
+        return self._external(
+            request,
+            lambda connection, key: StorageLimitsService(
+                connection, self.config, self.state_directory, helper_caller=self.helper_caller
+            ).repair_postgres(request_id=key),
+            kind=storage_limits.REPAIR_KIND,
+            scope="infrastructure",
+        )
 
     def _label_storage(self, request: Request) -> Response:
         self._no_query(request)
@@ -1621,12 +1708,15 @@ class ControllerAPI:
         )
         return Response(
             200,
-            status.status_show(
-                self.connection,
-                observe_infrastructure=observers.infrastructure,
-                observe_application=observers.application,
-                observe_storage=observers.storage,
-            ),
+            {
+                **status.status_show(
+                    self.connection,
+                    observe_infrastructure=observers.infrastructure,
+                    observe_application=observers.application,
+                    observe_storage=status.cached_storage_observer(self.connection),
+                ),
+                "storageHost": storage_limits.host_model(self.connection),
+            },
         )
 
     def _admin_hosts(self, request: Request) -> Response:
@@ -1807,15 +1897,7 @@ class ControllerAPI:
 
     @staticmethod
     def _storage_model(resource: db.ManagedResource, *, admin: bool = False) -> dict[str, object]:
-        quotas: dict[str, object] = {}
-        for key, value in (
-            ("postgresConnections", resource.postgres_connections),
-            ("measuredTargetBytes", resource.measured_target_bytes),
-            ("s3Bytes", resource.s3_bytes),
-            ("s3Objects", resource.s3_objects),
-        ):
-            if value is not None:
-                quotas[key] = value
+        quotas = storage_limits.quotas(resource)
         result: dict[str, object] = {
             "resourceId": resource.resource_id,
             "applicationId": resource.application_id,
@@ -1824,6 +1906,12 @@ class ControllerAPI:
             "displayLabel": resource.display_label,
             "lifecycleState": resource.lifecycle_state,
             "quotas": quotas,
+            "usage": storage_limits.usage_model(resource),
+            "isolation": "instance" if resource.instance_id else "shared",
+            "hardQuotaBytes": hard_quota(resource.measured_target_bytes or 0)
+            if resource.instance_id
+            else None,
+            "writeBlock": storage_limits.block_model(resource),
             "lastVerifiedAt": resource.last_verified_at,
             "createdAt": resource.created_at,
             "updatedAt": resource.updated_at,
@@ -1831,6 +1919,12 @@ class ControllerAPI:
         if admin:
             result["providerId"] = resource.provider_id
             result["providerName"] = resource.provider_name
+            result["usageError"] = resource.usage_error
+            result.update(
+                instanceId=resource.instance_id,
+                instancePort=resource.instance_port,
+                migrationState=resource.migration_state,
+            )
         return result
 
     @staticmethod

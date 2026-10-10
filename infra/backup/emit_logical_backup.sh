@@ -20,6 +20,13 @@ set -a
 . "$SECRETS_FILE"
 set +a
 
+if [[ $SERVICE == postgres || $SERVICE == mongodb ]]; then
+  kind=$SERVICE
+  [[ $kind != mongodb ]] || kind=mongo
+  "$SERVICE_CHECK_PYTHON" "$SCRIPT_DIR/require_shared_storage.py" \
+    "$STORAGE_HOST" "$PLATFORM_GARAGE_RPC_PORT" "$CA_FILE" "$kind"
+fi
+
 case "$SERVICE" in
   postgres)
     export PGPASSWORD=$POSTGRES_PASSWORD

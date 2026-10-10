@@ -98,7 +98,7 @@ The operating system enforces process boundaries independently of request data.
 
 ### Operator host
 
-`openstack-platform` owns setup, infrastructure status, image selection and pruning, persistent-host lifecycle, operator-state backup, and offline restore. It has no app, deployment, environment, or managed-storage mutation commands. Its SQLite state is separate from the hosted controller.
+`openstack-platform` owns setup, infrastructure status, image selection and pruning, persistent-host lifecycle, operator-state backup, and offline restore. It has no app, deployment, environment, or managed-storage mutation commands. The dedicated `openstack-platform-storage-repair` command on the admin VM reapplies PostgreSQL login settings through the privileged controller socket. Its SQLite state is separate from the hosted controller.
 
 The generated `platform-admin` alias in `/srv/openstack-platform/.secrets/ssh/config` pins the admin address, `agentops`, the identity (`IdentitiesOnly yes`), and an ed25519 host key in a private known-hosts file with strict checking. Agent and port forwarding are disabled. Provider calls use the protected `platform-openstack` wrapper; releases carry no cloud credentials.
 
@@ -134,7 +134,7 @@ Implemented actions must exactly match the release-bound [`actions-v1.txt`](../.
 | Environment | `app.env.list`, `app.env.set`, `app.env.remove` |
 | Registry | `app.manifest.retain`, `app.manifest.verify`, `app.manifest.delete` |
 | Source | `app.source.key`, `app.source.check`, `app.source.commits`, `app.source.preflight` |
-| Managed storage | `storage.<type>.create`, `.observe`, `.verify`, `.rotate`, `.remove` for `postgres`, `mongo`, and `s3` |
+| Managed storage | `storage.<type>.create`, `.observe`, `.usage`, `.limits`, `.verify`, `.rotate`, `.remove` for `postgres`, `mongo`, and `s3`; `storage.host.observe` reads authenticated host metrics |
 | Backups | `backup.accept` (called by `openstack-platform backup` over SSH) |
 
 ### Controller sockets
@@ -482,3 +482,90 @@ The URL is a protected runtime input under the existing operator secrets directo
 No health-unit network restriction is relaxed. The existing unit already calls OpenStack and public HTTPS health endpoints and has no `IPAddressDeny` or address-family sandbox. The foundation preserves Neutron's default egress rules, and the common NixOS firewall restricts inbound traffic. Additional operator/provider egress restrictions must permit the configured webhook destination. Both health and the test unit depend on the admin state mount so persistent files cannot silently be written under an unmounted volume. The test unit adds read-only filesystem protection and runs as the same unprivileged operator.
 
 The checker stops after its first failed check. Alerts therefore describe the first missing check from the ordered check list and do not send exception details. It does not query app-operation states. A process killed before notification or a timer that stops running produces no webhook alert; independent host monitoring is required for those failures.
+
+
+### Isolated database instances
+
+Every new PostgreSQL and MongoDB resource runs in a separate container on the
+16 vCPU / 64 GiB storage VM. The helper reaches a loopback instance manager through
+the existing TLS storage administration listener and Garage admin bearer token.
+The manager accepts fixed actions and UUIDs, uses inventory-pinned images, allocates
+ports and XFS project IDs, and persists desired assignments before applying them.
+Configuration and credentials are private under the data volume; deleting a resource
+is the only lifecycle action that removes its instance data.
+
+Each systemd template instance applies MemoryMax, MemorySwapMax=0, CPUQuota,
+CPUWeight=100, IOWeight=100 and TasksMax=256. Podman uses `--cgroups=disabled`;
+the database and conmon inherit the unit's cgroup and systemd applies the caps directly.
+The image filesystem is read-only; temporary files use 64 MiB `/tmp` and 16 MiB
+socket tmpfs mounts charged to that cap. Logs go to bounded journald storage.
+A 5-second restart delay confines crashes/OOMs to that
+resource. The database slice caps aggregate CPU at 12 cores; four of sixteen remain
+for shared services and host work. BFQ makes I/O weights effective on the data device.
+The defaults are 512 MiB and half a core per database: fifty apps with both database
+types reserve 50 GiB. Garage uses 4 GiB, registry 2 GiB, and the two temporary shared
+migration sources 2 GiB each, leaving 4 GiB for host services and cache. Larger
+instance limits consume the same admission budget; CPU caps are weighted shares,
+not dedicated core reservations.
+
+PostgreSQL instance max_connections is the app cap plus five superuser slots;
+shared_buffers uses a quarter of memory, work_mem is 2 MiB, and maintenance work
+uses at most 64 MiB with one autovacuum worker. Mongo maxConns is the app cap plus
+ten management/driver slots; its cache uses a quarter of memory with a 256 MiB
+minimum. Mongo binding URIs carry maxPoolSize capped at ten and maxIdleTimeMS=60000.
+Logical Mongo size blocking permits deletion and drop operations, with 5% hysteresis.
+A separate hard XFS project quota adds 25% physical headroom and an inode bound.
+Logical/physical size differ, and a fast burst can reach the hard quota between
+samples; the affected instance remains isolated.
+
+An early nftables input chain admits only the resource's current/candidate worker
+addresses, the admin/storage host and loopback. Ordinary firewall rules open the
+reserved 30000–30999 port range after this filter, outside client port allocation.
+Worker lifecycle helpers replace the full verified slot allowlist; deletion revokes
+access before removing the worker, so interruption cannot leave an obsolete IP. Database logins
+remain scoped independently of these network rules. Garage remains shared, with
+nginx bucket and client-IP request/connection limits on public/internal S3 routes;
+registry access remains restricted to builders.
+
+Admission reserves accepted and unfinished limits, so provider ambiguity cannot
+silently overcommit. The memory budget is 50 GiB and the application connection
+budget 2000. Disk admission uses database hard quotas, 125% of S3 quotas, registry
+100 GiB, shared sources 64 GiB, migration archives 16 GiB, Garage overhead 16 GiB and
+metadata 1 GiB, within 85% of volume capacity. Fifty apps' default logical targets
+are 450 GiB; their full disk reservation is 759.5 GiB. A 1 TiB volume accommodates
+that reservation below its 870.4 GiB warning boundary; the original 500 GiB volume
+does not. Garage's shared project reservation grows conservatively while deleted
+blocks await garbage collection.
+
+The fixed settings are justified for the 16-core/64-GiB host:
+
+| Setting | Value and reason |
+| --- | --- |
+| Database default | 512 MiB, 500 millicores, 10 connections, policy 2 GiB soft size; 100 instances fit 50 GiB, with burst CPU shared fairly |
+| Database aggregate | 50 GiB, no swap, 12 cores and 2000 app connection slots; bound memory/process pressure and leave shared-service headroom |
+| Weights/tasks | CPUWeight=100, IOWeight=100, TasksMax=256; equal scheduling and a bounded connection/background-thread population |
+| PostgreSQL | App cap +5 reserved superuser connections; buffers memory/4 (128 MiB default), work 2 MiB, maintenance memory/16 capped at 64 MiB (32 MiB default), one autovacuum worker |
+| PostgreSQL WAL/timeouts | WAL 256 MiB maximum target/80 MiB minimum; statement 30s, idle transaction 60s, lock 5s, temp files 256 MB; bound ordinary work and quota overhead |
+| MongoDB | App cap +10 management slots; cache memory/4 with 256 MiB minimum; slowms=100; URI pool at most 10 and idle timeout 60000 ms |
+| Temporary shared PostgreSQL | 2 GiB, half a core, 100 connections, 512 MiB buffers, 2 MiB work and 64 MiB maintenance; sufficient for the six-app migration footprint |
+| Temporary shared MongoDB | 2 GiB, half a core, 512 MiB cache and 800 connections; accommodates six old default driver pools plus management until migration |
+| Garage/registry | 4 GiB/2 cores and 2 GiB/1 core, respectively, with no swap; retain shared object/image streaming capacity without consuming instance memory |
+| Instance manager | 512 MiB, one core, 128 tasks, no swap; bound streaming copy/control work inside host headroom |
+| Database writable paths | Read-only image plus data project; 64 MiB temporary and 16 MiB socket tmpfs, charged inside the memory cap |
+| Disk projects | Hard bytes ceil(125% soft), rounded MiB; inode cap max(4096, soft bytes/32768), limiting file-count exhaustion |
+| Shared disk reservations | Registry 100 GiB, legacy sources 32 GiB each, archives 16 GiB, Garage overhead 16 GiB, metadata 1 GiB; prevent unbounded shared growth |
+| S3 fairness | 20 requests/s, burst 40 and 10 active connections per bucket and client IP; four 16 MiB nginx zones bound rate-accounting memory |
+| Recovery/health | Instance restart 5s, stop timeout 60s; Mongo health interval 30s, startup grace 90s, probe 5s, five failures; avoid tight restart loops and premature startup failures |
+| Logs | Per-unit 200 messages/30s; journald 1 GiB persistent/256 MiB runtime; bound logs outside data quotas |
+| Network/control | Reserved ports 30000–30999; JSON at most 64 KiB; local manager/status ports 19002/19001 behind authenticated TLS; limit allocation and input surface |
+| Collection/alarms | Usage every 300s, stale at 900s; connections 80%, disk 85%, container memory 90%, host free memory 10%, any blocked resource; retain recovery headroom |
+
+Migration retains the shared services and source data. It stops one exact accepted
+job, freezes its old database login, exports/imports data and verifies counts plus
+small-data checksums. It seals the verified target before publishing credentials,
+so replay cannot erase a database that may already be serving an app. Binding
+variables are mirrored into the accepted job's scoped Nomad Variable, whose template
+restarts on changes; migration explicitly resubmits and health-checks the accepted
+job and records its new version. Stopped apps remain stopped. Removing the old shared
+services, frozen users/data and migration archives is a separate follow-up after
+verification and backup.

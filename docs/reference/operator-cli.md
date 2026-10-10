@@ -279,3 +279,25 @@ These launchers are installed alongside `openstack-platform`. The guides linked 
 - [Backups and recovery](../guides/backups-and-recovery.md)
 - [Controller API](controller-api.md)
 - [Internals](internals.md)
+
+
+## PostgreSQL rollout repair
+
+`openstack-platform-storage-repair` is a separate local command installed on the
+admin VM. Run it as agentops after the storage host replacement, admin image and
+matching helper release, and portal pair are installed. It calls the local privileged
+controller socket, prints a request UUID, and waits for the controller operation.
+
+```sh
+openstack-platform-storage-repair
+# Reconcile an interrupted run using its printed UUID:
+openstack-platform-storage-repair --request-id UUID
+```
+
+The command reapplies the current resource-row connection limits to each database
+and current login, together with PostgreSQL statement, idle-transaction, lock and
+temporary-file settings. It does not rotate credentials. The assignments are
+idempotent; retrying an interrupted request resumes from completed resources.
+`--timeout` defaults to 300 seconds and accepts 1–3600 seconds. The raw packaged
+entrypoint requires `--socket PATH`; the Nix wrapper supplies the deployment's
+privileged socket.

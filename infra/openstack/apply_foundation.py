@@ -182,6 +182,12 @@ def ensure_security_groups(conn: Any, apply: bool) -> dict[str, Any]:
     expanded[storage].append(
         Rule("ingress", "tcp", REGISTRY_PORT, REGISTRY_PORT, remote_group=groups[builder].id)
     )
+    # Each database instance has a reserved port; the host applies per-app IP
+    # allowlists inside this security-group boundary.
+    for source in (worker, admin):
+        expanded[storage].append(
+            Rule("ingress", "tcp", 30000, 30999, remote_group=groups[source].id)
+        )
     # Public ingress proxies s3.<domain> to Garage for presigned URLs.
     expanded[storage].append(
         Rule("ingress", "tcp", GARAGE_S3_PORT, GARAGE_S3_PORT, remote_group=groups[ingress].id)

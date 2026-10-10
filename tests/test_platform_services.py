@@ -408,6 +408,13 @@ class ProductServiceTests(unittest.TestCase):
             nonlocal fail_once
             calls.append((action, dict(values)))
             if action == "storage.s3.remove":
+                from openstack_platform.helper.instances import metadata
+
+                ordinary, instance_id, _, workers, resource_id, _, _, _ = metadata(values)
+                self.assertEqual(resource_id, resource.resource_id)
+                self.assertIsNone(instance_id)
+                self.assertEqual(len(workers), 3)
+                self.assertTrue(ordinary["purge"])
                 self.assertTrue(values["purge"])
                 if values["preflight"]:
                     return {"preflightAccepted": True}

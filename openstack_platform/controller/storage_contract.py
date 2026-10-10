@@ -234,3 +234,51 @@ def platform_environment_values(
         "PLATFORM_PROJECT_SLUG": checked_slug,
         "PORT": str(application_port),
     }
+
+
+# Shared legacy services remain only for migration. Instance budgets are in
+# instance_contract and are reserved across PostgreSQL and MongoDB together.
+POSTGRES_GLOBAL_CONNECTIONS = 100
+MONGO_GLOBAL_CONNECTIONS = 100
+MAX_STORAGE_BYTES = 500 * 1024**3
+MIN_STORAGE_BYTES = 1024**2
+
+
+def validate_quotas(resource_type: str, value: object) -> dict[str, int]:
+    if resource_type in {"postgres", "mongo"}:
+        from ..instance_contract import validate_limits
+
+        return validate_limits(value)
+    if (
+        resource_type != "s3"
+        or not isinstance(value, dict)
+        or set(value) != {"s3Bytes", "s3Objects"}
+    ):
+        raise ValidationError("quotas must contain exactly the resource's applicable fields")
+    result: dict[str, int] = {}
+    for name, number in value.items():
+        lower, upper = (
+            (1, 100_000_000) if name == "s3Objects" else (MIN_STORAGE_BYTES, MAX_STORAGE_BYTES)
+        )
+        if isinstance(number, bool) or not isinstance(number, int) or not lower <= number <= upper:
+            raise ValidationError(f"{name} must be an integer from {lower} through {upper}")
+        result[name] = number
+    return result
+
+
+def validate_expected_quotas(resource_type: str, value: object) -> dict[str, int]:
+    fields = (
+        {"s3Bytes", "s3Objects"}
+        if resource_type == "s3"
+        else {"sizeBytes", "connections", "memoryBytes", "cpuMillicores"}
+    )
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or any(
+            isinstance(number, bool) or not isinstance(number, int) or not 0 < number <= 2**63 - 1
+            for number in value.values()
+        )
+    ):
+        raise ValidationError("expectedQuotas must be the complete accepted integer quota snapshot")
+    return dict(value)

@@ -313,3 +313,34 @@ class NomadClient:
         if isinstance(index, bool) or not isinstance(index, int) or index <= expected_index:
             raise NomadError("Nomad returned an invalid Variable ModifyIndex")
         return index
+
+
+class WorkloadVariables:
+    """Mirror canonical writes into the accepted job's scoped Variable.
+
+    A failure after canonical publication is ambiguous. Callers must retain
+    credentials until replay reconciles both paths, rather than retiring them.
+    """
+
+    def __init__(self, client: VariableClient, application_slug: str, job_id: str | None):
+        self.client = client
+        self.canonical = variable_path(application_slug)
+        self.workload = None if job_id is None else variable_path(job_id)
+
+    def read_variable(self, path: str) -> VariableSnapshot:
+        return self.client.read_variable(path)
+
+    def compare_and_set(self, path: str, expected_index: int, items: Mapping[str, str]) -> int:
+        index = self.client.compare_and_set(path, expected_index, items)
+        if path == self.canonical and self.workload is not None and self.workload != path:
+            for attempt in range(3):
+                target = self.client.read_variable(self.workload)
+                if dict(target.items) == dict(items):
+                    break
+                try:
+                    self.client.compare_and_set(self.workload, target.modify_index, items)
+                    break
+                except CasConflict:
+                    if attempt == 2:
+                        raise
+        return index

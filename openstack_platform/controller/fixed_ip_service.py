@@ -133,7 +133,71 @@ def worker_helper(connection: sqlite3.Connection, caller: HelperCaller) -> Helpe
             if action == "app.worker.create":
                 selected["worker_create_pending"] = True
                 _save(connection, selected)
+        instance_owner = None
+        instance_ids = []
+        if action in {"app.worker.create", "app.worker.observe", "app.worker.delete"}:
+            slot = args["applicationId"]
+            for owner_app in db.list_applications(connection):
+                if slot in {
+                    owner_app.application_id,
+                    *app.deployment_worker_ids(owner_app.application_id),
+                }:
+                    instance_owner = owner_app.application_id
+                    instance_ids = [
+                        item.instance_id
+                        for item in db.list_managed_resources(
+                            connection, application_id=instance_owner
+                        )
+                        if item.instance_id is not None
+                    ]
+                    break
+
+        def reconcile_network(result: Any = None) -> None:
+            if not instance_ids:
+                return
+            assert instance_owner is not None
+            removed = {args["applicationId"]} if action == "app.worker.delete" else set()
+            if action == "app.worker.delete" and not args.get("single", False):
+                removed.update((instance_owner, *app.deployment_worker_ids(instance_owner)))
+            addresses = []
+            retained = get(connection, instance_owner)
+            for identity in (instance_owner, *app.deployment_worker_ids(instance_owner)):
+                if identity in removed:
+                    continue
+                probe_args = {"applicationId": identity, "slug": args["slug"]}
+                if retained is not None and identity == retained["worker_slot_id"]:
+                    probe_args["retainedPort"] = helper_identity(retained)
+                observed = (
+                    result
+                    if identity == args["applicationId"] and result is not None
+                    else caller(config, "app.worker.observe", probe_args, deadline=deadline)
+                )
+                address = observed.get("address")
+                if address is not None:
+                    addresses.append(address)
+                elif observed.get("absent") is not True:
+                    raise app.ApplicationError("worker address observation was not confirmed")
+            applied = caller(
+                config,
+                "storage.instances.network",
+                {
+                    "applicationId": instance_owner,
+                    "instanceIds": instance_ids,
+                    "addresses": addresses,
+                    "mode": "replace",
+                },
+                deadline=deadline,
+            )
+            if applied.get("applied") is not True:
+                raise app.ApplicationError("instance worker network assignment was not confirmed")
+
+        if action == "app.worker.delete":
+            # Revoke from the complete verified slot inventory before destructive
+            # provider calls. Replay also removes an IP whose worker is now gone.
+            reconcile_network()
         result = caller(config, action, args, deadline=deadline)
+        if action in {"app.worker.create", "app.worker.observe"}:
+            reconcile_network(result)
         if selected is not None and selected["worker_create_pending"]:
             if result.get("serverId") is None or result.get("portId") != selected["port_id"]:
                 raise openstack.RecoveryRequired(

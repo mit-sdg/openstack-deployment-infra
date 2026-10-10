@@ -115,9 +115,14 @@ _PROVIDER_APP_ACTIONS = frozenset(
 _PER_RESOURCE_STORAGE_ACTIONS = tuple(
     f"storage.{resource_type}.{operation}"
     for resource_type in ("mongo", "postgres", "s3")
-    for operation in ("create", "observe", "remove", "rotate", "verify")
+    for operation in ("create", "observe", "remove", "rotate", "verify", "limits", "usage")
 )
-STORAGE_ACTIONS = _PER_RESOURCE_STORAGE_ACTIONS
+STORAGE_ACTIONS = (
+    *_PER_RESOURCE_STORAGE_ACTIONS,
+    "storage.host.observe",
+    "storage.instances.network",
+    "storage.instances.migrate",
+)
 ACTION_MANIFEST = tuple(sorted(("backup.accept", *APP_ACTIONS, *STORAGE_ACTIONS)))
 
 
@@ -269,7 +274,7 @@ def _operation_deadline(value: object) -> tuple[str, float]:
 
 
 def _worker_result(observed: application.WorkerObservation) -> Mapping[str, Any]:
-    return {
+    result = {
         "applicationId": observed.application_id,
         "slug": observed.application_slug,
         "serverId": observed.server_id,
@@ -281,6 +286,10 @@ def _worker_result(observed: application.WorkerObservation) -> Mapping[str, Any]
         "ready": observed.ready,
         "absent": observed.absent,
     }
+
+    if observed.address is not None:
+        result["address"] = observed.address
+    return result
 
 
 def _build_log_paths(runtime: HelperRuntime, app_slug: str, build_id: str) -> tuple[Path, Path]:
@@ -985,7 +994,13 @@ class _GarageAdmin:
             raise RuntimeError("Garage response was malformed JSON") from error
 
 
-def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]:
+def _storage_handlers(
+    action: str,
+    instance: Mapping[str, Any] | None = None,
+    *,
+    workload_id: str | None = None,
+    application_slug: str = "bootstrap",
+) -> tuple[dict[str, Handler], tuple[Any, ...]]:
     parts = action.split(".")
     if len(parts) != 3 or parts[0] != "storage" or action not in _PER_RESOURCE_STORAGE_ACTIONS:
         raise HelperActionError("UNKNOWN_ACTION", "storage helper action is not registered")
@@ -1006,7 +1021,17 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
             ) from None
     ca = str(_nomad_secrets(runtime) / "internal-ca.pem")
     secrets = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
-    nomad = _nomad_client(runtime)
+    if instance is not None:
+        if resource_type == "postgres":
+            secrets["POSTGRES_PASSWORD"] = instance["adminPassword"]
+            storage_actions._PORT_CONTEXT.set((instance["port"], MONGODB_PORT))
+        else:
+            secrets["MONGO_PASSWORD"] = instance["adminPassword"]
+            storage_actions._PORT_CONTEXT.set((POSTGRES_PORT, instance["port"]))
+    from .instances import connect_ready
+    from .nomad import WorkloadVariables
+
+    nomad = WorkloadVariables(_nomad_client(runtime), application_slug, workload_id)
     clients: list[Any] = []
     postgres: Any = None
     mongo: Any = None
@@ -1034,17 +1059,19 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
                 return psycopg.connect(**kwargs)
 
             postgres_connect = connect_postgres
-            if operation in {"create", "remove", "rotate"}:
-                postgres = psycopg.connect(
-                    host=host,
-                    port=POSTGRES_PORT,
-                    dbname="platform",
-                    user="platform_admin",
-                    password=secrets["POSTGRES_PASSWORD"],
-                    sslmode="verify-full",
-                    sslrootcert=ca,
-                    connect_timeout=10,
-                    autocommit=True,
+            if operation in {"create", "remove", "rotate", "limits", "usage", "verify"}:
+                postgres = connect_ready(
+                    lambda: psycopg.connect(
+                        host=host,
+                        port=storage_actions.postgres_port(),
+                        dbname="platform",
+                        user="platform_admin",
+                        password=secrets["POSTGRES_PASSWORD"],
+                        sslmode="verify-full",
+                        sslrootcert=ca,
+                        connect_timeout=10,
+                        autocommit=True,
+                    )
                 )
                 clients.append(postgres)
         elif resource_type == "mongo":
@@ -1065,10 +1092,10 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
                 return MongoClient(safe_uri, tlsCAFile=ca, serverSelectionTimeoutMS=10_000)
 
             mongo_connect = connect_mongo
-            if operation in {"create", "remove", "rotate"}:
+            if operation in {"create", "remove", "rotate", "limits", "usage", "verify"}:
                 mongo = MongoClient(
                     host,
-                    MONGODB_PORT,
+                    storage_actions.mongo_port(),
                     username="platform_admin",
                     password=secrets["MONGO_PASSWORD"],
                     authSource="admin",
@@ -1076,6 +1103,8 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
                     tlsCAFile=ca,
                     serverSelectionTimeoutMS=10_000,
                 )
+                if instance is not None:
+                    connect_ready(lambda: mongo.admin.command("ping"))
                 clients.append(mongo)
         else:
             try:
@@ -1098,7 +1127,7 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
                 )
 
             s3_connect = connect_s3
-            if operation in {"create", "observe", "remove", "rotate", "verify"}:
+            if operation in {"create", "observe", "remove", "rotate", "verify", "limits", "usage"}:
                 context = ssl.create_default_context(cafile=ca)
                 garage = _GarageAdmin(
                     f"https://{host}:{GARAGE_RPC_PORT}/v2", secrets["GARAGE_ADMIN_TOKEN"], context
@@ -1112,8 +1141,15 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
             _resource_type: str,
             modify_index: int,
         ) -> storage_actions.RotationEvidence:
+            if workload_id is None:
+                current = nomad.read_variable(f"nomad/jobs/{application_slug}")
+                return storage_actions.RotationEvidence(
+                    current.modify_index == modify_index,
+                    current.modify_index,
+                    public_healthy=current.modify_index == modify_index,
+                )
             status = app_actions._status_or_absent(
-                application_slug,
+                workload_id,
                 command_runner=run,
                 nomad_command=nomad_command,
                 timeout_seconds=20,
@@ -1129,7 +1165,7 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
                     observed, current.modify_index, public_healthy=observed
                 )
             baseline = app_actions._allocations(
-                application_slug,
+                workload_id,
                 command_runner=run,
                 nomad_command=nomad_command,
                 timeout_seconds=20,
@@ -1137,14 +1173,14 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
             )
             baseline_tokens = {app_actions._allocation_token(item) for item in baseline}
             run(
-                (*nomad_command, "job", "restart", "-yes", application_slug),
+                (*nomad_command, "job", "restart", "-yes", workload_id),
                 timeout_seconds=30,
                 stdout_limit=65_536,
                 stderr_limit=65_536,
             )
             for attempt in range(60):
                 current_job = app_actions._inspected_candidate(
-                    application_slug,
+                    workload_id,
                     command_runner=run,
                     nomad_command=nomad_command,
                     timeout_seconds=20,
@@ -1153,7 +1189,7 @@ def _storage_handlers(action: str) -> tuple[dict[str, Handler], tuple[Any, ...]]
                 if current_job is not None:
                     version = current_job[0]
                     allocations = app_actions._allocations(
-                        application_slug,
+                        workload_id,
                         command_runner=run,
                         nomad_command=nomad_command,
                         timeout_seconds=20,
@@ -1232,15 +1268,279 @@ def _lazy_app(action: str) -> Handler:
     return handle
 
 
-def _lazy_storage(action: str) -> Handler:
-    def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
-        handlers, clients = _storage_handlers(action)
+def _storage_host_observe(args: Mapping[str, Any]) -> Mapping[str, Any]:
+    if args:
+        raise HelperActionError("INVALID_ARGS", "host observation arguments must be empty")
+    import psycopg
+    from pymongo import MongoClient
+
+    from .storage_limits import MONGO_BLOCKED_ROLE, host_projection
+
+    runtime = helper_runtime()
+    host = runtime.platform.get("addresses.storage")
+    ca = str(_nomad_secrets(runtime) / "internal-ca.pem")
+    secrets = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
+    response = bounded_http(
+        f"https://{host}:{GARAGE_RPC_PORT}/platform/host-status",
+        headers={"Authorization": f"Bearer {secrets['GARAGE_ADMIN_TOKEN']}"},
+        ssl_context=ssl.create_default_context(cafile=ca),
+        timeout_seconds=10,
+        response_limit=65_536,
+    )
+    raw = json.loads(response.body)
+    names = {
+        f"{runtime.platform.namespace}-{kind}"
+        for kind in ("postgres", "mongodb", "garage", "registry")
+    }
+    instance_client = _instance_client()
+    instances = instance_client.call("list")["items"]
+    for instance in instances:
+        names.add(
+            f"{runtime.platform.namespace}-db-{uuid(instance['instanceId'], field='instance ID')}"
+        )
+    result = host_projection(raw, names)
+    result["postgresConnections"] = {"current": 0, "limit": 100}
+    try:
+        with psycopg.connect(
+            host=host,
+            port=POSTGRES_PORT,
+            dbname="platform",
+            user="platform_admin",
+            password=secrets["POSTGRES_PASSWORD"],
+            sslmode="verify-full",
+            sslrootcert=ca,
+            connect_timeout=8,
+            options="-c statement_timeout=5000",
+        ) as postgres:
+            row = postgres.execute(
+                "SELECT (SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend'), current_setting('max_connections')::int"
+            ).fetchone()
+            if row is None:
+                raise HelperActionError(
+                    "PROVIDER_RESPONSE_INVALID", "PostgreSQL connections unavailable"
+                )
+            result["postgresConnections"] = {"current": row[0], "limit": row[1]}
+    except Exception:
+        pass
+    result["mongoConnections"] = {"current": 0, "limit": 800}
+    result["writeBlockedResources"] = 0
+    try:
+        mongo: MongoClient[dict[str, Any]] = MongoClient(
+            host,
+            MONGODB_PORT,
+            username="platform_admin",
+            password=secrets["MONGO_PASSWORD"],
+            authSource="admin",
+            tls=True,
+            tlsCAFile=ca,
+            serverSelectionTimeoutMS=8_000,
+            socketTimeoutMS=8_000,
+        )
         try:
-            return handlers[action](args)
+            connections = mongo.admin.command("serverStatus")["connections"]
+            result["mongoConnections"] = {
+                "current": connections["current"],
+                "limit": connections["current"] + connections["available"],
+            }
+            users = mongo.admin.command("usersInfo", {"forAllDBs": True})["users"]
+            result["writeBlockedResources"] = len(
+                {
+                    user["db"]
+                    for user in users
+                    if any(role.get("role") == MONGO_BLOCKED_ROLE for role in user.get("roles", []))
+                }
+            )
         finally:
-            for client in clients:
+            mongo.close()
+    except Exception:
+        pass
+    projections = []
+    for instance in instances:
+        identifier = instance["instanceId"]
+        kind = instance["type"]
+        count = 0
+        limit = instance["quotas"]["connections"] + (5 if kind == "postgres" else 10)
+        available = False
+        try:
+            credentials = instance_client.call("credentials", identifier)
+            if kind == "postgres":
+                with psycopg.connect(
+                    host=host,
+                    port=credentials["port"],
+                    dbname="platform",
+                    user="platform_admin",
+                    password=credentials["adminPassword"],
+                    sslmode="verify-full",
+                    sslrootcert=ca,
+                    connect_timeout=3,
+                    options="-c statement_timeout=3000",
+                ) as db_client:
+                    row = db_client.execute(
+                        "SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend'"
+                    ).fetchone()
+                    count = int(row[0]) if row is not None else 0
+            else:
+                db_mongo: MongoClient[dict[str, Any]] = MongoClient(
+                    host,
+                    credentials["port"],
+                    username="platform_admin",
+                    password=credentials["adminPassword"],
+                    authSource="admin",
+                    tls=True,
+                    tlsCAFile=ca,
+                    serverSelectionTimeoutMS=3000,
+                    socketTimeoutMS=3000,
+                )
                 try:
-                    client.close()
+                    count = int(db_mongo.admin.command("serverStatus")["connections"]["current"])
+                    users = db_mongo.admin.command("usersInfo", {"forAllDBs": True})["users"]
+                    result["writeBlockedResources"] += sum(
+                        1
+                        for user in users
+                        if any(
+                            role.get("role") == MONGO_BLOCKED_ROLE for role in user.get("roles", [])
+                        )
+                    )
+                finally:
+                    db_mongo.close()
+            available = True
+        except Exception:
+            pass
+        result[f"{kind}Connections"]["current"] += count
+        result[f"{kind}Connections"]["limit"] += limit
+        projections.append(
+            {
+                "instanceId": identifier,
+                "type": kind,
+                "currentConnections": count if available else None,
+                "connectionLimit": limit,
+                "available": available,
+            }
+        )
+    result["instances"] = projections
+    result["measuredAt"] = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return result
+
+
+def _instance_client() -> Any:
+    from .instances import InstanceClient
+
+    runtime = helper_runtime()
+    secrets = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
+    ca = str(_nomad_secrets(runtime) / "internal-ca.pem")
+    return InstanceClient(
+        f"https://{runtime.platform.get('addresses.storage')}:{GARAGE_RPC_PORT}",
+        secrets["GARAGE_ADMIN_TOKEN"],
+        ssl.create_default_context(cafile=ca),
+    )
+
+
+def _instance_network(args: Mapping[str, Any]) -> Mapping[str, Any]:
+    _exact_args(
+        args, {"applicationId", "instanceIds", "addresses", "mode"}, "storage.instances.network"
+    )
+    owner = uuid(args["applicationId"], field="application ID")
+    client = _instance_client()
+    for identifier in args["instanceIds"]:
+        client.call(
+            "allow", identifier, applicationId=owner, addresses=args["addresses"], mode=args["mode"]
+        )
+    return {"applied": True}
+
+
+def _lazy_storage(action: str) -> Handler:
+    def handle(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+        if action == "storage.host.observe":
+            return _storage_host_observe(raw)
+        if action == "storage.instances.network":
+            return _instance_network(raw)
+        if action == "storage.instances.migrate":
+            from .instance_migration import migrate
+
+            return migrate(
+                raw,
+                client=_instance_client(),
+                runtime=helper_runtime(),
+                nomad=_nomad_client(helper_runtime()),
+            )
+        from .instances import metadata
+        from .nomad import WorkloadVariables
+
+        args, identifier, quotas, workers, resource_id, reservations, retained, workload_id = (
+            metadata(raw)
+        )
+        kind, operation = action.split(".")[1:]
+        if kind == "mongo" and quotas is not None:
+            storage_actions._MONGO_POOL.set(min(10, quotas["connections"]))
+        if kind == "s3" and operation in {"create", "limits"}:
+            _instance_client().call("reserve", resource_id, reservations=reservations)
+        client = _instance_client() if identifier is not None else None
+        instance = None
+        if client is not None:
+            if operation == "create":
+                addresses = []
+                for worker in workers:
+                    if retained is not None and worker == retained["slotId"]:
+                        addresses.append(retained["address"])
+                        continue
+                    observed = _provider_app(
+                        "app.worker.observe",
+                        {"applicationId": worker, "slug": args["applicationSlug"]},
+                    )
+                    if observed.get("address") is not None:
+                        addresses.append(observed["address"])
+                client.call(
+                    "create",
+                    identifier,
+                    applicationId=args["applicationId"],
+                    type=kind,
+                    quotas=quotas,
+                    allowIps=addresses,
+                    reservations=reservations,
+                )
+            elif operation == "limits" and args["quotas"] != quotas:
+                client.call("limits", identifier, quotas=args["quotas"], reservations=reservations)
+            instance = client.call("credentials", identifier)
+            if instance.get("absent") is True and operation == "remove":
+                storage_actions._common(args, kind)
+                if args["preflight"]:
+                    return {"preflightAccepted": True}
+                update = storage_actions._remove_environment(
+                    WorkloadVariables(
+                        _nomad_client(helper_runtime()), args["applicationSlug"], workload_id
+                    ),
+                    args["applicationSlug"],
+                    kind,
+                )
+                client.call("remove", identifier, deleteData=True)
+                return storage_actions._remove_result(kind, update)
+        handlers, clients = _storage_handlers(
+            action, instance, workload_id=workload_id, application_slug=args["applicationSlug"]
+        )
+        try:
+            result = dict(handlers[action](args))
+            if client is not None:
+                if (
+                    operation == "remove"
+                    and args["preflight"] is False
+                    and result.get("confirmedAbsent") is True
+                ):
+                    client.call("remove", identifier, deleteData=True)
+                else:
+                    observed = client.call("observe", identifier)
+                    result["instancePort"] = observed["port"]
+                    if isinstance(result.get("usage"), dict):
+                        result["usage"].update(
+                            {
+                                key: observed[key]
+                                for key in ("instanceMemoryBytes", "cpuTimeMilliseconds")
+                            }
+                        )
+            return result
+        finally:
+            for backend in clients:
+                try:
+                    backend.close()
                 except Exception:
                     pass
 
