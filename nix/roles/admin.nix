@@ -59,11 +59,13 @@ let
     }:$PATH
     exec ${packages.controllerPackage}/bin/openstack-platform-storage-backup "$@"
   '';
+  # Backup tooling loads the helper runtime, which refuses the /etc symlink;
+  # pass the regular root-owned store file it points to, as the helper launcher does.
   resourceBackup = pkgs.writeShellScript "${namespace}-resource-backup" ''
     set -euo pipefail
     ${credentialGuard} ${operatorRoot}/secrets/backup-age-key.txt ${operatorAccount.name}
     ${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env
-    export PLATFORM_CONFIG=/etc/${namespace}/platform.json
+    export PLATFORM_CONFIG=${platformJson}
     export AGE=${pkgs.age}/bin/age AGE_KEYGEN=${pkgs.age}/bin/age-keygen
     export AGE_KEY=${operatorRoot}/secrets/backup-age-key.txt
     export PATH=${
@@ -78,7 +80,7 @@ let
     set -euo pipefail
     ${credentialGuard} ${operatorRoot}/secrets/backup-age-key.txt ${operatorAccount.name}
     ${storageBootstrapCredentialGuard} ${root}/secrets/storage-bootstrap.env
-    export PLATFORM_CONFIG=/etc/${namespace}/platform.json
+    export PLATFORM_CONFIG=${platformJson}
     export AGE=${pkgs.age}/bin/age AGE_KEYGEN=${pkgs.age}/bin/age-keygen
     export AGE_KEY=${operatorRoot}/secrets/backup-age-key.txt
     export BACKUP_ROOT=${backups}/${namespace}
@@ -1278,7 +1280,7 @@ in
         "AGE=${pkgs.age}/bin/age"
         "AGE_KEYGEN=${pkgs.age}/bin/age-keygen"
         "AGE_KEY=${operatorRoot}/secrets/backup-age-key.txt"
-        "PLATFORM_CONFIG=/etc/${namespace}/platform.json"
+        "PLATFORM_CONFIG=${platformJson}"
         "BACKUP_ROOT=${backups}/${namespace}"
         "EMIT_SCRIPT=${infra}/backup/emit_logical_backup.sh"
         "DATABASE_BACKUP_COMMAND=${packages.controllerPackage}/bin/openstack-platform-storage-backup"
