@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.health_alerts import notify  # noqa: E402
 from lib.http import bounded_request  # noqa: E402
 from lib.platform_config import load  # noqa: E402
+from lib.storage_health import ALARM_CODES  # noqa: E402
 
 CONFIG = load()
 ROOT = Path(CONFIG["paths"]["root"])
@@ -72,7 +73,18 @@ def main() -> int:
                 raise RuntimeError(f"public ingress health response is unexpected for {hostname}")
         checks["public_ingress"] = "healthy"
 
-        admin_command(SERVICE_CHECK_PYTHON, CHECK_SERVICES)
+        try:
+            admin_command(SERVICE_CHECK_PYTHON, CHECK_SERVICES)
+        except subprocess.CalledProcessError as failure:
+            # Preserve only the fixed alarm codes, never arbitrary provider output.
+            prefix = "managed-services=degraded alarms="
+            output = failure.stdout if isinstance(failure.stdout, str) else ""
+            if output.strip().startswith(prefix):
+                codes = output.strip().removeprefix(prefix).split(",")
+                if codes and all(code in ALARM_CODES for code in codes):
+                    checks["managed_services"] = {"state": "degraded", "alarms": codes}
+                    raise RuntimeError("managed storage alarms: " + ",".join(codes)) from None
+            raise
         checks["managed_services"] = "healthy"
 
         nodes = json.loads(admin_command(NOMAD, "node", "status", "-json"))

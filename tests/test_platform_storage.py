@@ -333,7 +333,7 @@ class ControllerStorageTests(unittest.TestCase):
             ],
         )
 
-    def test_policy_quotas_survive_verify_rotation_and_failure(self) -> None:
+    def test_resource_quotas_survive_verify_rotation_and_failure(self) -> None:
         self.add_resource("postgres")
         db.put_managed_resource(
             self.connection,
@@ -376,9 +376,9 @@ class ControllerStorageTests(unittest.TestCase):
                 helper_caller=rejected_rotation,
             )
         resource = _resource(self.connection, "postgres")
-        self.assertEqual(seen_connections, [10])
-        self.assertEqual(resource.postgres_connections, 10)
-        self.assertEqual(resource.measured_target_bytes, 2_147_483_648)
+        self.assertEqual(seen_connections, [17])
+        self.assertEqual(resource.postgres_connections, 17)
+        self.assertEqual(resource.measured_target_bytes, 3_456_789_012)
         self.assertIsNotNone(resource.last_verified_at)
 
     def test_status_calls_only_non_mutating_observation_action(self) -> None:
@@ -731,6 +731,7 @@ class HelperStorageTests(unittest.TestCase):
                 scoped_connect=lambda **kwargs: mongo_calls.append(kwargs),
                 nomad=mongo_nomad,
                 host="trusted.storage",
+                admin=object(),
             )
         self.assertEqual(mongo_calls, [])
 

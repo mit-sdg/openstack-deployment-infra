@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import base64
+import json
+import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.http import bounded_json  # noqa: E402
 from lib.platform_config import load  # noqa: E402
 from lib.platform_contract import CONTRACT  # noqa: E402
+from lib.storage_health import alarms  # noqa: E402
 from lib.tls import internal_ca_context  # noqa: E402
 
 CONFIG = load()
@@ -44,9 +48,15 @@ def main() -> int:
         sslmode="verify-full",
         sslrootcert=CA,
         connect_timeout=8,
+        options="-c statement_timeout=5000",
     ) as connection:
         if connection.execute("SELECT 1").fetchone() != (1,):
             raise RuntimeError("PostgreSQL query failed")
+        row = connection.execute(
+            "SELECT (SELECT count(*) FROM pg_stat_activity), current_setting('max_connections')::int"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("PostgreSQL connections unavailable")
     mongo: MongoClient[dict[str, Any]] = MongoClient(
         HOST,
         PORTS["mongodb"],
@@ -56,6 +66,7 @@ def main() -> int:
         tls=True,
         tlsCAFile=CA,
         serverSelectionTimeoutMS=8_000,
+        socketTimeoutMS=8_000,
     )
     try:
         if mongo.admin.command("ping")["ok"] != 1.0:
@@ -82,6 +93,29 @@ def main() -> int:
     )
     if registry != {}:
         raise RuntimeError("registry health failed")
+    # The helper performs the authenticated host/instance observations and
+    # emits only the fixed secret-free metrics projection.
+    request = {
+        "version": 1,
+        "requestId": str(uuid.uuid4()),
+        "action": "storage.host.observe",
+        "args": {},
+    }
+    observed = subprocess.run(
+        [str(ROOT / "bin/openstack-platform-helper")],
+        input=json.dumps(request).encode(),
+        capture_output=True,
+        check=True,
+        timeout=40,
+    )
+    response = json.loads(observed.stdout)
+    if response.get("ok") is not True or not isinstance(response.get("result"), dict):
+        raise RuntimeError("storage host/instance metrics unavailable")
+    host = response["result"]
+    alerts = alarms(host)
+    if alerts:
+        print("managed-services=degraded alarms=" + ",".join(alerts))
+        return 1
     print("managed-services=healthy")
     return 0
 

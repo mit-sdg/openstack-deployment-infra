@@ -22,6 +22,7 @@ from .service_support import (
     remaining_seconds,
     wall_deadline,
 )
+from .storage_capacity import helper_metadata
 from .storage_contract import storage_owner
 
 _RESERVED_APPLICATION_SLUGS = {"admin", "api", "auth", "status", "www"}
@@ -594,6 +595,7 @@ class ApplicationService:
                 ):
                     resource = resources[0]
                     common: dict[str, object] = {
+                        **helper_metadata(self.connection, current.application_id, resource),
                         "applicationId": current.application_id,
                         "applicationSlug": current.slug,
                         "resourceName": resource.resource_name,

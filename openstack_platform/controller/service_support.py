@@ -35,6 +35,12 @@ _HELPER_FAILURE_CODES = frozenset(
         "CONFIRMATION_REQUIRED",
         "CREATE_ROLLED_BACK",
         "DEADLINE_EXPIRED",
+        "MEMORY_BUDGET_EXCEEDED",
+        "CONNECTION_BUDGET_EXCEEDED",
+        "DISK_BUDGET_EXCEEDED",
+        "INSTANCE_OPERATION_FAILED",
+        "INVALID_INSTANCE_REQUEST",
+        "INSTANCE_NOT_READY",
         "DEPENDENCY_UNAVAILABLE",
         "ENVIRONMENT_CONFLICT",
         "ENVIRONMENT_HEALTH_FAILED",
@@ -117,12 +123,23 @@ def logged_helper(caller: HelperCaller, *, config_shaped: bool = True) -> Helper
                     "app.source.commits",
                     "app.source.preflight",
                     "backup.accept",
+                    "storage.host.observe",
+                    "storage.instances.network",
+                    "storage.instances.migrate",
                 }
                 or action
                 in {
                     f"storage.{kind}.{verb}"
                     for kind in ("postgres", "mongo", "s3")
-                    for verb in ("create", "observe", "verify", "rotate", "remove")
+                    for verb in (
+                        "create",
+                        "observe",
+                        "verify",
+                        "rotate",
+                        "remove",
+                        "limits",
+                        "usage",
+                    )
                 }
             )
             error_class = "Exception"

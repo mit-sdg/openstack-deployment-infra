@@ -334,9 +334,13 @@ def _hosted_status(config: Config) -> dict[str, Any]:
     if result.stdout_truncated or result.stderr_truncated:
         raise remote.ProtocolError("hosted controller status exceeded its limit")
     value = remote._json_object(result.stdout, maximum_bytes=65_536, name="hosted status")
-    if set(value) != {"state", "accepted", "observations", "operations"} or value.get(
-        "state"
-    ) not in ("healthy", "degraded"):
+    if set(value) != {
+        "state",
+        "accepted",
+        "observations",
+        "operations",
+        "storageHost",
+    } or value.get("state") not in ("healthy", "degraded"):
         raise remote.ProtocolError("hosted controller status is malformed")
     fields = {
         "accepted": {"infrastructureRoles", "applications", "storageResources"},
