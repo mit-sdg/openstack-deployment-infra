@@ -104,8 +104,10 @@ class LocalHelperTransport:
         deadline: float | None = None,
     ) -> Mapping[str, object]:
         timeout = float(
-            config.policy.limits.migration_app_seconds
-            if action.startswith("storage.instances.") or action == "storage.backup.ensure"
+            3600
+            if action == "storage.backup.ensure"
+            else config.policy.limits.migration_app_seconds
+            if action.startswith("storage.instances.")
             else config.policy.limits.helper_seconds
         )
         if deadline is not None:

@@ -753,6 +753,40 @@ class InstanceControllerTests(unittest.TestCase):
         self.assertEqual(db.get_operation(self.connection, key).status, "succeeded")
         self.assertFalse(any(action.endswith("remove") for action, args in calls))
 
+    def test_resource_backup_has_its_own_deadline_before_the_app_copy_budget(self):
+        resource = self.add(APP_ID, "postgres")
+        now = [1000.0]
+
+        def helper(config, action, args, **bounds):
+            if action.endswith(".usage"):
+                return {"usage": {"usedBytes": 0}}
+            if action == "storage.backup.ensure":
+                self.assertEqual(bounds["deadline"], now[0] + 3600)
+                now[0] += 1900  # Longer than the default app budget; no sleeping.
+                return {
+                    "verified": True,
+                    "shared": True,
+                    "type": "postgres",
+                    "database": resource.provider_name,
+                    "backedUpAt": db.utc_now(),
+                }
+            if action == "storage.instances.migrate":
+                self.assertEqual(bounds["deadline"], now[0] + 1800)
+                self.assertEqual(args["copySeconds"], 1800)
+                return {"verified": True, "published": True, "instancePort": 30000}
+            raise AssertionError(action)
+
+        key = str(uuid.uuid4())
+        service = InstanceMigrationService(
+            self.connection, self.config, self.root, helper_caller=helper
+        )
+        with mock.patch(
+            "openstack_platform.controller.storage_instances.time.monotonic",
+            side_effect=lambda: now[0],
+        ):
+            service.migrate(request_id=key, application_ids=(APP_ID,))
+        self.assertEqual(db.get_operation(self.connection, key).status, "succeeded")
+
     def test_migration_backup_gate_and_abort_unfreeze_are_resumable(self):
         resource = self.add(APP_ID, "mongo")
         other = str(uuid.uuid4())

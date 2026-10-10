@@ -100,4 +100,8 @@ trap - EXIT
 write_status succeeded
 find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '20??????T??????Z' \
   -mtime "+$RETENTION_DAYS" -exec rm -rf -- {} +
+if [[ -d $BACKUP_ROOT/migration-checkpoints ]]; then
+  find "$BACKUP_ROOT/migration-checkpoints" -mindepth 2 -maxdepth 2 -type f -name '*.age' \
+    -mtime "+$RETENTION_DAYS" -delete
+fi
 echo "platform backup complete: $final"

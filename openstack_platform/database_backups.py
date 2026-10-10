@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
@@ -23,6 +24,7 @@ import psycopg
 from pymongo import MongoClient
 
 from . import durable
+from .contracts import GARAGE_RPC_PORT
 from .controller.storage_contract import canonical_secret_keys, storage_owner
 from .helper.instances import InstanceClient
 from .helper.nomad import update_owned_items, variable_path
@@ -321,7 +323,9 @@ class Context:
             resources,
         )
 
-    def inventory(self, kind: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    def inventory(
+        self, kind: str, database: str | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         from .helper.production import _read_environment
 
         bootstrap = _read_environment(
@@ -333,7 +337,13 @@ class Context:
             )
         )
         password = bootstrap["POSTGRES_PASSWORD" if kind == "postgres" else "MONGO_PASSWORD"]
-        rows = [row for row in self.resources() if row["type"] == kind]
+        rows = [
+            row
+            for row in self.resources()
+            if row["type"] == kind and (database is None or row["providerName"] == database)
+        ]
+        if database is not None and (len(rows) != 1 or rows[0]["instanceId"] is not None):
+            raise ValidationError("migration checkpoint requires one managed shared resource")
         instances = (
             {item["instanceId"]: item for item in self.manager.call("backup-inventory")["items"]}
             if any(row["instanceId"] is not None for row in rows)
@@ -342,6 +352,8 @@ class Context:
         shared_names = self.provider.databases(
             kind, 5432 if kind == "postgres" else 27017, password
         )
+        if database is not None:
+            shared_names = [name for name in shared_names if name == database]
         entries: list[dict[str, Any]] = []
         passwords = {"shared": password}
         entries.extend(
@@ -667,9 +679,14 @@ def add_bytes(archive: tarfile.TarFile, name: str, value: Any) -> None:
 
 
 def emit(
-    context: Context, kind: str, stream: BinaryIO, *, catalog: Path | None = None
+    context: Context,
+    kind: str,
+    stream: BinaryIO,
+    *,
+    catalog: Path | None = None,
+    database: str | None = None,
 ) -> dict[str, Any]:
-    entries, passwords = context.inventory(kind)
+    entries, passwords = context.inventory(kind, database)
     manifest = {
         "format": FORMAT,
         "type": kind,
@@ -698,7 +715,7 @@ def emit(
                     {"bytes": path.stat().st_size, "sha256": digest(path)},
                 )
                 archive.add(path, arcname=entry["id"] + ".dump", recursive=False)
-        final, _ = context.inventory(kind)
+        final, _ = context.inventory(kind, database)
         if entries != final:
             raise ValidationError("database inventory or bindings changed during backup; retry")
     public = {
@@ -907,7 +924,7 @@ def live_context(config: Mapping[str, Any]) -> Context:
     return Context(
         config,
         manager=InstanceClient(
-            f"https://{config['addresses']['storage']}:3903",
+            f"https://{config['addresses']['storage']}:{GARAGE_RPC_PORT}",
             creds["GARAGE_ADMIN_TOKEN"],
             ssl.create_default_context(cafile=ca),
         ),
@@ -918,55 +935,41 @@ def live_context(config: Mapping[str, Any]) -> Context:
     )
 
 
+def receipt_root(config: Mapping[str, Any]) -> Path:
+    return Path(config["paths"]["backups"]) / (str(config["namespace"]) + "-migration-receipts")
+
+
 def fresh_backup(
     root: Path, kind: str, database: str, minutes: int, *, config: Mapping[str, Any]
 ) -> dict[str, Any] | None:
-    for directory in sorted(root.glob("20??????T??????Z"), reverse=True):
-        try:
-            values = dict(
-                line.split("=", 1) for line in (directory / "MANIFEST").read_text().splitlines()
-            )
-            if values.get("format_version") != "4":
-                continue
-            name = "postgres" if kind == "postgres" else "mongodb"
-            catalog = directory / (name + "-catalog.json")
-            sums = dict(
-                (name, checksum)
-                for checksum, name in (
-                    line.split("  ", 1)
-                    for line in (directory / "SHA256SUMS").read_text().splitlines()
-                )
-            )
-            if digest(catalog) != sums[catalog.name] or not (directory / (name + ".age")).is_file():
-                continue
-            value = json.loads(catalog.read_text())
-            if (
-                value.get("format") != FORMAT
-                or value.get("type") != kind
-                or any(value.get(key) != config[key] for key in ("namespace", "projectId"))
-            ):
-                continue
-            ciphertext = directory / (name + ".age")
-            if digest(ciphertext) != sums.get(ciphertext.name):
-                continue
-            age = (datetime.now(UTC) - datetime.fromisoformat(value["createdAt"])).total_seconds()
-            if not 0 <= age <= minutes * 60:
-                continue
-            if any(
-                entry["instanceId"] is None and database in entry["databases"]
-                for entry in value["entries"]
-            ):
-                return {
-                    "verified": True,
-                    "shared": True,
-                    "type": kind,
-                    "database": database,
-                    "backedUpAt": value["createdAt"],
-                    "backup": directory.name,
-                }
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-    return None
+    """Read only operator-written receipts, never ciphertext or the age identity."""
+    from .contracts import OPERATOR_ACCOUNT_UID
+
+    path = root / (kind + "-" + database + ".json")
+    try:
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != OPERATOR_ACCOUNT_UID
+            or stat.S_IMODE(metadata.st_mode) != 0o640
+            or metadata.st_size > 4096
+        ):
+            return None
+        value = json.loads(path.read_text())
+        age = (datetime.now(UTC) - datetime.fromisoformat(value["backedUpAt"])).total_seconds()
+        if (
+            value.get("verified") is not True
+            or value.get("shared") is not True
+            or value.get("type") != kind
+            or value.get("database") != database
+            or any(value.get(key) != config[key] for key in ("namespace", "projectId"))
+            or not 0 <= age <= minutes * 60
+            or not re.fullmatch(r"[a-f0-9]{64}", value.get("payloadSha256", ""))
+        ):
+            return None
+        return dict(value)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def ensure_backup(
@@ -985,11 +988,18 @@ def ensure_backup(
         or not 1 <= minutes <= 1440
     ):
         raise ValidationError("migration backup requirement is invalid")
-    root = Path(config["paths"]["backups"]) / config["namespace"]
+    root = receipt_root(config)
     result = fresh_backup(root, kind, database, minutes, config=config)
     if result is None:
+        # Polkit permits this identity to start only this constrained template.
+        # The unit runs as the operator and keeps the age key and payload private.
         execute(
-            ["/run/current-system/sw/bin/openstack-platform-managed-backup"],
+            [
+                "/run/current-system/sw/bin/systemctl",
+                "--no-ask-password",
+                "start",
+                f"{config['namespace']}-resource-backup@{kind}-{database}.service",
+            ],
             stdout=subprocess.DEVNULL,
         )
         result = fresh_backup(root, kind, database, minutes, config=config)
@@ -998,10 +1008,137 @@ def ensure_backup(
     return result
 
 
+def checkpoint_backup(
+    config: Mapping[str, Any],
+    unit: str,
+    *,
+    context: Context,
+    execute: Callable[..., Any] = command,
+) -> dict[str, Any]:
+    """Operator-only encrypted backup of the one shared database being migrated."""
+    import fcntl
+    import shutil
+
+    if not re.fullmatch(r"(?:postgres|mongo)-p_[a-f0-9]{20}", unit):
+        raise ValidationError("resource backup unit identity is invalid")
+    kind, database = unit.split("-", 1)
+    root = Path(config["paths"]["backups"]) / config["namespace"] / "migration-checkpoints" / unit
+    root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    root.chmod(0o700)
+    receipts = receipt_root(config)
+    # This directory is prepared by root as operator:controller, mode 2750.
+    if not receipts.is_dir():
+        raise ValidationError("resource backup receipt directory is unavailable")
+    age = os.environ.get("AGE", "age")
+    keygen = os.environ.get("AGE_KEYGEN", "age-keygen")
+    identity = os.environ["AGE_KEY"]
+    with (root / ".lock").open("ab") as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with tempfile.TemporaryDirectory(prefix=".staging-", dir=root) as staging:
+                directory = Path(staging)
+                plain = directory / "archive.tar"
+                with plain.open("wb") as stream:
+                    plain.chmod(0o600)
+                    catalog = emit(context, kind, stream, database=database)
+                recipient = (
+                    execute([keygen, "-y", identity], stdout=subprocess.PIPE)
+                    .stdout.decode()
+                    .strip()
+                )
+                encrypted = directory / "archive.age"
+                execute(
+                    [
+                        age,
+                        "--encrypt",
+                        "--recipient",
+                        recipient,
+                        "--output",
+                        str(encrypted),
+                        str(plain),
+                    ]
+                )
+                encrypted.chmod(0o600)
+                verified = directory / "verified.tar"
+                execute(
+                    [
+                        age,
+                        "--decrypt",
+                        "--identity",
+                        identity,
+                        "--output",
+                        str(verified),
+                        str(encrypted),
+                    ]
+                )
+                with verified.open("rb") as stream:
+                    checked = []
+                    counts = consume(
+                        stream, lambda entry, path: checked.append(entry), config=config
+                    )
+                if counts != {"type": kind, "shared": 1, "isolated": 0}:
+                    raise ValidationError(
+                        "resource checkpoint did not cover exactly its shared database"
+                    )
+                if checked[0]["databases"] != [database] or len(checked[0]["resources"]) != 1:
+                    raise ValidationError("verified checkpoint resource identity did not match")
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+                destination = root / (stamp + ".age")
+                with encrypted.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                encrypted.replace(destination)
+                descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                result = {
+                    "namespace": config["namespace"],
+                    "projectId": config["projectId"],
+                    "verified": True,
+                    "shared": True,
+                    "type": kind,
+                    "database": database,
+                    "backedUpAt": catalog["createdAt"],
+                    "backup": str(destination.relative_to(Path(config["paths"]["backups"]))),
+                    "payloadSha256": digest(destination),
+                }
+                durable.atomic_write(
+                    receipts / (unit + ".json"),
+                    json.dumps(result).encode(),
+                    mode=0o640,
+                    maximum_bytes=4096,
+                )
+                durable.atomic_write(
+                    receipts / (unit + ".status.json"),
+                    b'{"status":"succeeded"}',
+                    mode=0o640,
+                    maximum_bytes=4096,
+                )
+                cutoff = datetime.now(UTC).timestamp() - 14 * 86400
+                for path in root.glob("*.age"):
+                    if path != destination and path.stat().st_mtime < cutoff:
+                        path.unlink()
+                return result
+        except Exception:
+            durable.atomic_write(
+                receipts / (unit + ".status.json"),
+                b'{"status":"failed"}',
+                mode=0o640,
+                maximum_bytes=4096,
+            )
+            raise
+        finally:
+            for path in root.glob(".staging-*"):
+                shutil.rmtree(path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["emit", "restore", "verify", "filter-sql"])
-    parser.add_argument("--type", choices=["postgres", "mongo"], required=True)
+    parser.add_argument("action", choices=["emit", "restore", "verify", "filter-sql", "checkpoint"])
+    parser.add_argument("--type", choices=["postgres", "mongo"])
+    parser.add_argument("--unit")
     parser.add_argument("--catalog", type=Path)
     parser.add_argument(
         "--restore-container", help="Disposable verification container; imports every payload"
@@ -1011,7 +1148,11 @@ def main() -> int:
     args = parser.parse_args()
     try:
         config = json.loads(Path(os.environ["PLATFORM_CONFIG"]).read_text())
-        if args.action == "filter-sql":
+        if args.action != "checkpoint" and args.type is None:
+            raise ValidationError("database type is required")
+        if args.action == "checkpoint":
+            checkpoint_backup(config, args.unit, context=live_context(config))
+        elif args.action == "filter-sql":
             filter_postgres_stream(sys.stdin.buffer, sys.stdout.buffer)
         elif args.action == "emit":
             context = live_context(config)
@@ -1026,8 +1167,6 @@ def main() -> int:
                     "restore requires the offline replacement controller database"
                 )
             metadata = args.controller_database.lstat()
-            import stat
-
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or stat.S_IMODE(metadata.st_mode) != 0o600

@@ -174,6 +174,36 @@ class DatabaseBackupsTests(unittest.TestCase):
             [item["instanceId"] is not None for item in public["entries"]], [False, True]
         )
         self.assertNotIn("app-secret", catalog.read_text())
+        # The gate must not dump other resources or call the instance manager.
+        scoped = io.BytesIO()
+        with mock.patch.object(
+            context.manager, "call", side_effect=AssertionError("unrelated instance")
+        ):
+            selected = backup.emit(context, kind, scoped, database=names[0])
+        self.assertEqual([entry["databases"] for entry in selected["entries"]], [[names[0]]])
+        receipt_dir = backup.receipt_root(self.config)
+        receipt_dir.mkdir(exist_ok=True, parents=True)
+        encrypted_inputs = []
+
+        def crypto(argv, **options):
+            if "--encrypt" in argv:
+                encrypted_inputs.append(Path(argv[-1]).read_bytes())
+            if "--output" in argv:
+                Path(argv[argv.index("--output") + 1]).write_bytes(Path(argv[-1]).read_bytes())
+            return subprocess.CompletedProcess(argv, 0, b"age1recipient", b"")
+
+        with mock.patch.dict("os.environ", {"AGE_KEY": "operator-only.key"}):
+            receipt = backup.checkpoint_backup(
+                self.config, kind + "-" + names[0], context=context, execute=crypto
+            )
+        self.assertTrue(receipt["verified"])
+        self.assertEqual(len(encrypted_inputs), 1)
+        self.assertEqual(
+            backup.consume(io.BytesIO(encrypted_inputs[0]), lambda entry, path: None)["shared"], 1
+        )
+        self.assertNotIn(
+            "app-secret", (receipt_dir / (kind + "-" + names[0] + ".json")).read_text()
+        )
         from openstack_platform.controller import database as db
 
         database_path = self.root / (kind + "-controller.sqlite3")
@@ -250,61 +280,77 @@ class DatabaseBackupsTests(unittest.TestCase):
                 stream, mock.Mock(), config={**self.config, "projectId": str(uuid.uuid4())}
             )
 
-    def test_backup_precondition_takes_missing_backup_and_refuses_stale_or_failed_backup(self):
-        root = Path(self.config["paths"]["backups"]) / self.config["namespace"]
-        directory = root / "20261010T010101Z"
+    def test_backup_gate_uses_operator_receipts_without_opening_private_payloads(self):
+        import os
+
+        root = backup.receipt_root(self.config)
+        root.mkdir(parents=True)
         database = "p_" + "a" * 20
+        receipt = root / ("postgres-" + database + ".json")
+        private = Path(self.config["paths"]["backups"]) / self.config["namespace"]
+        private.mkdir(mode=0o700)
+        original_read = Path.read_text
+
+        def controller_read(path, *args, **options):
+            if path == private or private in path.parents:
+                raise PermissionError("operator-only backup payload/key")
+            return original_read(path, *args, **options)
 
         def publish(argv, **options):
-            directory.mkdir(parents=True, exist_ok=True)
-            (directory / "MANIFEST").write_text("format_version=4\n")
-            catalog = directory / "postgres-catalog.json"
-            catalog.write_text(
+            self.assertEqual(
+                argv,
+                [
+                    "/run/current-system/sw/bin/systemctl",
+                    "--no-ask-password",
+                    "start",
+                    "example-resource-backup@postgres-" + database + ".service",
+                ],
+            )
+            receipt.write_text(
                 json.dumps(
                     {
-                        "format": backup.FORMAT,
-                        "type": "postgres",
                         "namespace": self.config["namespace"],
                         "projectId": self.config["projectId"],
-                        "createdAt": backup.timestamp(),
-                        "entries": [{"instanceId": None, "databases": [database]}],
+                        "type": "postgres",
+                        "database": database,
+                        "shared": True,
+                        "verified": True,
+                        "backedUpAt": backup.timestamp(),
+                        "payloadSha256": "a" * 64,
                     }
                 )
             )
-            (directory / "postgres.age").write_bytes(b"age-encryption.org/v1\nfixture")
-            (directory / "SHA256SUMS").write_text(
-                backup.digest(catalog)
-                + "  "
-                + catalog.name
-                + "\n"
-                + backup.digest(directory / "postgres.age")
-                + "  postgres.age\n"
-            )
+            receipt.chmod(0o640)
 
         execute = mock.Mock(side_effect=publish)
-        self.assertTrue(
-            backup.ensure_backup(self.config, "postgres", database, 60, execute=execute)["verified"]
-        )
-        self.assertEqual(execute.call_count, 1)
-        backup.ensure_backup(self.config, "postgres", database, 60, execute=execute)
-        self.assertEqual(execute.call_count, 1)
-        catalog = directory / "postgres-catalog.json"
-        value = json.loads(catalog.read_text())
-        value["createdAt"] = (datetime.now(UTC) - timedelta(minutes=61)).isoformat()
-        catalog.write_text(json.dumps(value))
-        (directory / "SHA256SUMS").write_text(
-            backup.digest(catalog)
-            + "  "
-            + catalog.name
-            + "\n"
-            + backup.digest(directory / "postgres.age")
-            + "  postgres.age\n"
-        )
-        with self.assertRaises(ValidationError):
-            backup.ensure_backup(self.config, "postgres", database, 60, execute=mock.Mock())
-        execute = mock.Mock(side_effect=RuntimeError("export failed"))
-        with self.assertRaises(RuntimeError):
+        with (
+            mock.patch("openstack_platform.contracts.OPERATOR_ACCOUNT_UID", os.getuid()),
+            mock.patch.object(Path, "read_text", controller_read),
+        ):
+            self.assertTrue(
+                backup.ensure_backup(self.config, "postgres", database, 60, execute=execute)[
+                    "verified"
+                ]
+            )
             backup.ensure_backup(self.config, "postgres", database, 60, execute=execute)
+            self.assertEqual(execute.call_count, 1)
+            value = json.loads(receipt.read_text())
+            value["backedUpAt"] = (datetime.now(UTC) - timedelta(minutes=61)).isoformat()
+            receipt.write_text(json.dumps(value))
+            with self.assertRaises(ValidationError):
+                backup.ensure_backup(self.config, "postgres", database, 60, execute=mock.Mock())
+            with self.assertRaises(RuntimeError):
+                backup.ensure_backup(
+                    self.config,
+                    "postgres",
+                    database,
+                    60,
+                    execute=mock.Mock(side_effect=RuntimeError("export failed")),
+                )
+            receipt.chmod(0o660)
+            self.assertIsNone(
+                backup.fresh_backup(root, "postgres", database, 1440, config=self.config)
+            )
 
     def test_root_role_filter_preserves_copy_data_and_application_sql(self):
         source = self.root / "dump.sql"

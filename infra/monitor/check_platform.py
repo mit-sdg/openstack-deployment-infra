@@ -97,6 +97,12 @@ def main() -> int:
         status_path = BACKUPS / "STATUS.json"
         if status_path.is_file() and json.loads(status_path.read_text()).get("status") == "failed":
             raise RuntimeError("latest managed-data backup failed")
+        receipts = BACKUPS.parent / (NAMESPACE + "-migration-receipts")
+        if any(
+            json.loads(path.read_text()).get("status") == "failed"
+            for path in receipts.glob("*.status.json")
+        ):
+            raise RuntimeError("pre-migration resource backup failed")
         backup_dirs = sorted(path for path in BACKUPS.glob("20??????T??????Z") if path.is_dir())
         if not backup_dirs:
             raise RuntimeError("no encrypted platform backup exists")

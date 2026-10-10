@@ -131,6 +131,7 @@ let
     instances=[call("create",ident,applicationId=owner,type=kind,quotas=limits,allowIps=[],reservations={"databaseBytes":5368709120,"garageBytes":0}) for ident,kind in zip(ids,["postgres","mongo"])]
     credentials=[call("credentials",ident) for ident in ids]
     for ident in ids:
+        subprocess.run(["${pkgs.openssl}/bin/openssl","verify","-CAfile",ca,"-verify_hostname","${platform.internalNames.storage}","${platform.paths.data}/instances/"+ident+"/pki/storage.pem"],check=True)
         unit="${namespace}-database@"+ident+".service"
         result=subprocess.check_output(["systemctl","show",unit,"-p","MemoryMax","-p","MemorySwapMax","-p","CPUWeight","-p","IOWeight","-p","TasksMax","-p","CPUQuotaPerSecUSec"],text=True)
         properties=dict(line.split("=",1) for line in result.splitlines())
@@ -229,6 +230,34 @@ let
     for ident in ids:
         call("remove",ident,deleteData=True)
     print("instance lifecycle, authenticated copy, backup/restore and cgroup caps verified")
+  '';
+  backupReceiptProbe = pkgs.writeText "backup-receipt-probe.py" ''
+    import json, os, sys
+    from pathlib import Path
+    sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
+    from openstack_platform.database_backups import fresh_backup, receipt_root, timestamp
+    config=json.loads(Path("/etc/${namespace}/platform.json").read_text())
+    root=receipt_root(config)
+    database="p_"+"a"*20
+    receipt=root/("postgres-"+database+".json")
+    receipt.write_text(json.dumps({"namespace":config["namespace"],"projectId":config["projectId"],"verified":True,"shared":True,"type":"postgres","database":database,"backedUpAt":timestamp(),"payloadSha256":"a"*64}))
+    os.chown(receipt,${toString constants.accounts.operator.uid},${toString constants.accounts.controller.gid})
+    receipt.chmod(0o640)
+    payload=Path("${backups}/${namespace}/vm-private-payload")
+    payload.write_text("encrypted backup remains private")
+    os.chown(payload,${toString constants.accounts.operator.uid},${toString constants.accounts.operator.gid})
+    payload.chmod(0o600)
+    os.setgroups([${toString constants.accounts.controller.gid}])
+    os.setgid(${toString constants.accounts.controller.gid})
+    os.setuid(${toString constants.accounts.controller.uid})
+    assert fresh_backup(root,"postgres",database,60,config=config)["verified"]
+    for private in (payload,Path("${state}/operator/secrets/backup-age-key.txt")):
+        try:
+            private.read_bytes()
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("controller could read private backup payload/key")
   '';
   imageCompatibilityHash = builtins.hashString "sha256" (
     builtins.toJSON {
@@ -467,6 +496,9 @@ let
               # and source guards without contacting any managed service.
               "${namespace}-platform-backup".serviceConfig.ExecStart =
                 lib.mkForce "${packages.python}/bin/python ${managedBackupCredentialProbe}";
+              # Exercise authorization and the template's real operator identity.
+              "${namespace}-resource-backup@".serviceConfig.ExecStart =
+                lib.mkForce "${pkgs.coreutils}/bin/touch ${backups}/${namespace}/vm-resource-backup-probe-ran";
               "${namespace}-management-identity".serviceConfig = {
                 # Mirror production: the fake class app on loopback plus the
                 # local resolver stubs used for name resolution.
@@ -690,6 +722,11 @@ let
               machine.wait_for_unit("nomad.service")
               machine.wait_for_unit("${namespace}-admin-readiness.service")
               machine.wait_for_unit("${namespace}-controller-readiness.service")
+              machine.succeed("${packages.python}/bin/python ${backupReceiptProbe}")
+              machine.succeed("runuser -u platform-controller -- systemctl --no-ask-password start ${namespace}-resource-backup@postgres-p_aaaaaaaaaaaaaaaaaaaa.service")
+              machine.succeed("test $(stat -c %U ${backups}/${namespace}/vm-resource-backup-probe-ran) = agentops")
+              machine.fail("runuser -u management-broker -- systemctl --no-ask-password start ${namespace}-resource-backup@mongo-p_bbbbbbbbbbbbbbbbbbbb.service")
+              machine.fail("runuser -u platform-controller -- systemctl --no-ask-password start ${namespace}-platform-backup.service")
               machine.succeed("${pkgs.curl}/bin/curl --fail --silent --max-time 5 --cacert /etc/${namespace}/pki/internal-ca.pem --cert /etc/${namespace}/pki/nomad-cli.pem --key /etc/${namespace}/pki/nomad-cli-key.pem https://127.0.0.1:4646/v1/status/leader >/dev/null")
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-controller/project.sock) = platform-controller:controller-api:660")
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-controller/privileged.sock) = platform-controller:platform-admin:660")

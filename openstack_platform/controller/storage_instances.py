@@ -202,7 +202,7 @@ class InstanceMigrationService:
                                 "database": resource.provider_name,
                                 "maxAgeMinutes": self.config.policy.limits.migration_backup_max_age_minutes,
                             },
-                            deadline=deadline,
+                            deadline=time.monotonic() + 3600,
                         )
                         from datetime import UTC, datetime
 
@@ -226,6 +226,11 @@ class InstanceMigrationService:
                                 "fresh shared-resource backup was not confirmed; cutover refused"
                             )
                         backups[resource_id] = dict(result)
+                    # The app remains serving during a resource-scoped backup.
+                    # Its downtime/copy budget starts only after the gate passes.
+                    deadline = time.monotonic() + self.config.policy.limits.migration_app_seconds
+                    db.renew_operation_deadline(self.connection, key, wall_deadline(deadline))
+                    db.renew_operation_deadline(self.connection, master_id, wall_deadline(deadline))
                     db.checkpoint_operation(
                         self.connection,
                         key,
