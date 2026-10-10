@@ -106,6 +106,11 @@ export function ConfigurationForm({
   buildMachine?: ReactNode;
 }) {
   const formId = useId();
+  const session = useQuery({
+    queryKey: ['session'],
+    queryFn: ({ signal }) => api.session(signal),
+    enabled: resources,
+  });
   const environment = useQuery({
     queryKey: ['environment', id],
     queryFn: () => service.environment(id),
@@ -331,6 +336,7 @@ export function ConfigurationForm({
             bindings={settings.configuration.storageBindings}
           />
           <StorageSection
+            admin={session.data?.role === 'admin'}
             service={service}
             identityProvider={identityProvider}
             id={id}

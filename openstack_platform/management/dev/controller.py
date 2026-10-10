@@ -195,6 +195,7 @@ class FakeController:
             ("POST", "/v1/storage/{resource}/verify", self.storage_action),
             ("POST", "/v1/storage/{resource}/rotate", self.storage_action),
             ("GET", "/v1/storage/{resource}", self.storage_resource),
+            ("PUT", "/v1/storage/{resource}/limits", self.storage_limits),
             ("DELETE", "/v1/storage/{resource}", self.storage_delete),
             ("POST", "/v1/applications/{app}/enable", self.running_state),
             ("POST", "/v1/applications/{app}/disable", self.running_state),
@@ -492,6 +493,18 @@ class FakeController:
                     cleanupState="not_required",
                     updatedAt=utc(time.time()),
                 )
+                if "storageLimits" in operation:
+                    limits = operation["storageLimits"]
+                    resource = self.resources[limits["resourceId"]]
+                    if resource["quotas"] != limits["expectedQuotas"]:
+                        operation.update(
+                            status="failed",
+                            phase="validation_failed",
+                            errorCode="INVALID_REQUEST",
+                            safeError="Storage limits changed. Reload them.",
+                        )
+                    else:
+                        resource["quotas"] = limits["quotas"]
                 for resource in self.resources.values():
                     if operation["scope"] == f"app-{resource['applicationId']}":
                         resource.update(lifecycleState="active", lastVerifiedAt=utc(time.time()))
@@ -884,9 +897,41 @@ class FakeController:
             "createdAt": utc(time.time()),
             "updatedAt": utc(time.time()),
             "lastVerifiedAt": None,
-            "quotas": {},
+            "quotas": {"postgresConnections": 10, "measuredTargetBytes": 2147483648}
+            if body["type"] == "postgres"
+            else {"measuredTargetBytes": 2147483648}
+            if body["type"] == "mongo"
+            else {"s3Bytes": 5368709120, "s3Objects": 100000},
+            "usage": {
+                "usedBytes": 1288490188,
+                "objectCount": 12345 if body["type"] == "s3" else None,
+                "currentConnections": 3 if body["type"] == "postgres" else None,
+                "measuredAt": utc(time.time()),
+                "stale": False,
+            },
+            "writeBlock": {"blocked": False, "reason": None, "since": None},
         }
         return self.resource_operation(request, app, "storage.create")
+
+    def storage_limits(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay:
+            return replay
+        resource = self.resources.get(request.path_parameters["resource"])
+        if resource is None:
+            raise HttpError(404, "STORAGE_NOT_FOUND", "Storage does not exist.")
+        from ..broker.storage_limits import quotas
+
+        body = self.body(request, {"quotas", "expectedQuotas"})
+        target = quotas(body["quotas"], resource["type"])
+        expected = quotas(body["expectedQuotas"], resource["type"])
+        response = self.resource_operation(request, resource["applicationId"], "storage.limits.set")
+        self.operations[request.idempotency_key()]["storageLimits"] = {
+            "resourceId": resource["resourceId"],
+            "quotas": target,
+            "expectedQuotas": expected,
+        }
+        return response
 
     def storage_action(self, request: Request) -> Response:
         replay = self.replay(request)

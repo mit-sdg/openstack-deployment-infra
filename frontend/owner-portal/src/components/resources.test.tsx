@@ -34,6 +34,15 @@ const resource: StorageResource = {
   status: 'ready',
   createdAt: '2026-10-01T00:00:00Z',
   verifiedAt: null,
+  quotas: { postgresConnections: 10, measuredTargetBytes: 2147483648 },
+  usage: {
+    usedBytes: null,
+    objectCount: null,
+    currentConnections: null,
+    measuredAt: null,
+    stale: true,
+  },
+  writeBlock: { blocked: false, reason: null, since: null },
   defaultBindings: { url: 'DATABASE_URL', host: 'PGHOST' },
 };
 function wrap(children: React.ReactNode) {

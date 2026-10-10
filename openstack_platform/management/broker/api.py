@@ -29,6 +29,7 @@ from .journal import Journal, intent_model
 from .members import Members, activity
 from .runtime_logs import RuntimeLogs
 from .source_keys import SourceKeys
+from .storage_limits import StorageLimits
 
 RESERVED = {"admin", "api", "auth", "status", "www", "platform", "class"}
 # Apps a user may work on: their own, and those they're a team member of.
@@ -84,6 +85,7 @@ class Broker:
         self.accounts = Accounts(self)
         self.app_management = AppManagement(self)
         self.builder_settings = BuilderSettings(self)
+        self.storage_limits = StorageLimits(self)
         self.runtime_logs = RuntimeLogs(self)
         self.source_keys = SourceKeys(self)
         self.members = Members(self)
@@ -126,6 +128,7 @@ class Broker:
             ("DELETE", "/v1/apps/{app}/environment/{key}", self.mutate_environment),
             ("GET", "/v1/apps/{app}/storage", self.storage),
             ("POST", "/v1/apps/{app}/storage", self.mutate_storage),
+            ("PUT", "/v1/apps/{app}/storage/{resource}/limits", self.storage_limits.change),
             ("POST", "/v1/apps/{app}/storage/{resource}/verify", self.mutate_storage),
             ("POST", "/v1/apps/{app}/storage/{resource}/rotate", self.mutate_storage),
             ("POST", "/v1/apps/{app}/state", self.app_management.state),
@@ -942,7 +945,7 @@ class Broker:
             ).fetchone()
             if row is None:
                 raise HttpError(404, "NOT_FOUND", "Operation not found.")
-            if row["kind"] == "default_builder_size":
+            if row["kind"] in {"default_builder_size", "storage_limits"}:
                 self.accounts.checked_actor(db, _sid)
             app_state = db.execute(
                 "SELECT lifecycle FROM apps WHERE id=?", (row["app_id"],)

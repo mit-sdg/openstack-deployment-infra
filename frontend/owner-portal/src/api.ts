@@ -22,7 +22,22 @@ export const configurationGuidance = {
   postgres: 'PostgreSQL’s DATABASE_URL already includes the password.',
 };
 export type StorageBinding = { resourceId: string; outputs: Record<string, string> };
+export type StorageQuotas = {
+  postgresConnections?: number;
+  measuredTargetBytes?: number;
+  s3Bytes?: number;
+  s3Objects?: number;
+};
 export type StorageResource = {
+  quotas: StorageQuotas;
+  usage: {
+    usedBytes: number | null;
+    objectCount: number | null;
+    currentConnections: number | null;
+    measuredAt: string | null;
+    stale: boolean;
+  };
+  writeBlock: { blocked: boolean; reason: string | null; since: string | null };
   resourceId: string;
   type: 'postgres' | 'mongo' | 's3';
   label: string;
@@ -579,6 +594,18 @@ export function resourceApi(prefix = '/apps') {
       request(`${prefix}/${id}/storage`, intentData, {
         method: 'POST',
         body: { type },
+        key,
+      }),
+    setStorageLimits: (
+      id: string,
+      resource: string,
+      quotas: StorageQuotas,
+      expectedQuotas: StorageQuotas,
+      key: string,
+    ) =>
+      request(`${prefix}/${id}/storage/${resource}/limits`, intentData, {
+        method: 'PUT',
+        body: { quotas, expectedQuotas },
         key,
       }),
     storageAction: async (id: string, resource: string, action: 'verify' | 'rotate', key: string) =>

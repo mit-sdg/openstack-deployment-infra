@@ -29,7 +29,7 @@ Staff and portal admins open the same app pages as owners without joining the te
 
 The optional **Build script** has no default. Leave it empty when the app has no build step. Environment values stay write-only for everyone. See [Deploy an app](for-app-owners.md) for the shared controls.
 
-Staff and admins have no app or concurrency limit. Creating an app for another person uses that owner’s app limit. Every app still accepts one change at a time. Staff and admin app changes appear under their usernames in **Audit log**; their reads go into a separate private read log.
+Staff and admins have no app or concurrency limit. Creating an app for another person uses that owner’s app limit. Every app still accepts one change at a time. Storage limits are editable only by portal admins. Staff and admin app changes appear under their usernames in **Audit log**; their reads go into a separate private read log.
 
 ## Resume a change that needs attention
 

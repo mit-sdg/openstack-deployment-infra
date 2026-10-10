@@ -26,6 +26,7 @@ import {
 } from '../api';
 import { QueryError } from './Feedback';
 import { Operation, OperationList } from './Operation';
+import { StorageUsage, StorageLimitsControl } from './StorageUsage';
 import { Status } from './Status';
 import '../pages/app-pages.css';
 
@@ -182,10 +183,12 @@ export function StorageSection({
   onChange,
   service = api,
   notice,
+  admin = false,
   save,
   identityProvider: providedIdentityProvider = false,
 }: {
   id: string;
+  admin?: boolean;
   service?: ReturnType<typeof resourceApi>;
   /**
    * Show sign-in information with storage changes.
@@ -432,6 +435,15 @@ export function StorageSection({
                     </>
                   }
                 >
+                  <StorageUsage resource={resource} />
+                  {admin && (
+                    <StorageLimitsControl
+                      id={id}
+                      resource={resource}
+                      service={service}
+                      disabled={disabled}
+                    />
+                  )}
                   {!count && (
                     <>
                       <InlineStatus tone="warning">

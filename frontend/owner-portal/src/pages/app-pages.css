@@ -231,3 +231,15 @@
 .app-size-select .ui-select__control {
   text-overflow: ellipsis;
 }
+
+.app-storage-usage,
+.app-storage-limits {
+  margin-block: var(--ui-space-3);
+}
+.app-storage-meter {
+  display: block;
+  width: 100%;
+  height: var(--ui-space-2);
+  margin-block: var(--ui-space-2);
+  accent-color: var(--ui-accent-solid);
+}
