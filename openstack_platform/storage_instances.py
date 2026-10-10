@@ -48,6 +48,7 @@ from .validation import ValidationError, uuid
 ENDPOINT = "/platform/instances"
 PORT_MIN = 30000
 PORT_MAX = 30999
+POSTGRES_SOCKET_DIRECTORY = "/var/run/postgresql"
 Run = Callable[..., Any]
 
 
@@ -130,6 +131,8 @@ def database_command(config: Mapping[str, Any], namespace: str) -> list[str]:
             "ssl_ca_file": f"{pki}/internal-ca.pem",
             "ssl_min_protocol_version": "TLSv1.2",
             "hba_file": f"{pki}/pg_hba.conf",
+            # Images disagree on the default (/run vs /var/run); use the tmpfs.
+            "unix_socket_directories": POSTGRES_SOCKET_DIRECTORY,
         }
         return [
             "postgres",
@@ -1049,7 +1052,7 @@ class Manager:
             "--tmpfs=/tmp:rw,size=64m,nosuid,nodev,noexec",
             # Podman 5.8 accepts mode here, but rejects explicit uid/gid.
             # The sticky directory lets the database UID create its socket.
-            "--tmpfs=/var/run/postgresql:rw,size=16m,mode=1777,nosuid,nodev,noexec",
+            f"--tmpfs={POSTGRES_SOCKET_DIRECTORY}:rw,size=16m,mode=1777,nosuid,nodev,noexec",
             "--security-opt=no-new-privileges",
             "--cap-drop=ALL",
             "--cap-add=CHOWN",
