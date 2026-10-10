@@ -408,6 +408,8 @@ let
 
           virtualisation = {
             memorySize = if role == "storage" then 4096 else 2048;
+            # podman load unpacks the database test images under /var/tmp.
+            diskSize = lib.mkIf (role == "storage") 8192;
             emptyDiskImages = lib.optionals (role == "storage") [ 1048576 ];
             cores = 2;
             qemu.options = lib.optionals (role == "storage") [ "-cpu max" ];
