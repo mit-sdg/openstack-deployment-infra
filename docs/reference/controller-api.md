@@ -234,12 +234,75 @@ Values go to the app's Nomad Variable and are never returned. Each change restar
 | --- | --- | --- | --- |
 | `POST /v1/applications/{id}/storage` | project | yes | Create a resource: `{"type": "postgres" \| "mongo" \| "s3", "name": "..."}`; `name` defaults to `default` |
 | `GET /v1/applications/{id}/storage` | project | no | Paged list of the app's resources |
-| `GET /v1/storage/{id}` | project | no | One resource: type, name, label, lifecycle state, quotas, timestamps |
+| `GET /v1/storage/{id}` | project | no | One resource: type, name, label, lifecycle state, authoritative quotas, cached usage, write blocking, timestamps |
+| `PUT /v1/storage/{id}/limits` | project | yes | Admin-only at the broker; complete `quotas` and `expectedQuotas` objects; async `storage.limits.set` |
 | `PATCH /v1/storage/{id}/label` | project | yes | Change the display label: `{"displayLabel": "..."}`; returns `200` |
 | `POST /v1/storage/{id}/verify` | project | yes | Verify provider identity and health |
 | `POST /v1/storage/{id}/rotate` | project | yes | Issue new scoped credentials, check the app's health with them, then retire the old ones |
 | `DELETE /v1/storage/{id}` | project | yes | Delete the resource: `{"confirmation": "<resource name>", "purge": false}`; `purge: true` empties an S3 bucket first; without it a non-empty bucket is refused. The portal allows this only for a portal admin with a fresh step-up. |
-| `GET /v1/admin/storage` | privileged | no | Paged list of every resource, including provider identifiers |
+| `GET /v1/admin/storage` | privileged | no | Paged list of every resource, including provider identifiers and safe usage errors |
+| `POST /v1/admin/storage/migrate-instances` | privileged | yes | Quiesce, copy, verify, publish isolated endpoints and refresh accepted jobs; never delete shared source data |
+| `POST /v1/admin/storage/repair-postgres` | privileged | yes | Reapply settings and resource connection limits to every current PostgreSQL login; empty body; async `storage.postgres.repair` |
+
+Resource rows hold authoritative quotas; policy supplies the size defaults at creation.
+Postgres and Mongo quota objects contain exactly `sizeBytes`, `connections`,
+`memoryBytes`, and `cpuMillicores`. Defaults are 2 GiB size (policy), 10 app connections,
+512 MiB memory and 500 millicores. Size bounds are 1–500 GiB; connections 1–100;
+memory 512 MiB–8 GiB in whole MiB; CPU 100–4000 millicores. S3 quota objects contain
+`s3Bytes` (1 MiB–500 GiB) and `s3Objects` (1–100,000,000).
+
+Limits requests require complete `quotas` and `expectedQuotas`. The latter is the
+accepted integer snapshot, including historical values outside today's new-resource
+bounds. A stale snapshot fails async validation; re-read and use a new key. Owner/staff
+account authorization is enforced by the broker's admin check, as for default builder
+size. The limits route uses the project socket; the broker has no privileged access.
+Creates/raises can reject with `MEMORY_BUDGET_EXCEEDED`, `CONNECTION_BUDGET_EXCEEDED`
+or `DISK_BUDGET_EXCEEDED`. Reservations include unfinished assignments; a lost response
+does not release capacity. SQLite writer transactions serialize controller admission;
+the host manager independently checks durable instance reservations and disk geometry.
+
+Database resources include `isolation` (`shared` or `instance`) and `hardQuotaBytes`
+(null before migration). An instance's XFS hard quota is 125% of size, rounded up to
+MiB. Each resource has its own container, cgroup, port, credentials, data directory and
+worker allowlist. Legacy shared databases permit soft-size changes and PostgreSQL
+connection reductions; other compute/connection edits require migration and return
+`409 INSTANCE_MIGRATION_REQUIRED`.
+
+`usage` always contains nullable `usedBytes`, `objectCount`, `currentConnections`,
+`instanceMemoryBytes`, `cpuTimeMilliseconds`, and `measuredAt`, plus `stale`.
+CPU time is cumulative and resets when the cgroup restarts. Collection runs every
+300 seconds; samples older than 900 seconds are stale. Failed collection keeps the
+last successful values. Reads use SQLite. PostgreSQL reports database bytes and
+backend count; MongoDB reports logical data+index bytes and no per-user connection
+count; S3 reports bytes and objects. Instance counters are null for shared resources.
+
+`writeBlock` contains `blocked`, `reason` (`size_limit_exceeded` or null), and `since`
+(ISO timestamp or null). MongoDB removes insert/update/create permissions above its
+soft limit and retains find/delete/drop/list/stats. It restores readWrite at or below
+95% of the limit. A limits change reconciles the role promptly. Rotation preserves the
+role and PostgreSQL timeouts. The hard filesystem quota also bounds growth between
+collector samples and when physical allocation exceeds logical size.
+
+Admin storage models additionally expose `instanceId`, `instancePort`,
+`migrationState`, provider identity and safe usage errors. Owner models omit these.
+`GET /v1/admin/status` adds cached `storageHost`: measuredAt/stale, CPU count/load
+averages, memory total/available, volume total/used, per-container memory/availability,
+Postgres/Mongo connection totals, instance connection/availability projections and
+writeBlockedResources. The host metrics channel is authenticated TLS and never runs
+provider observations on resource-read requests.
+
+`POST /v1/admin/storage/migrate-instances` accepts an empty body and Idempotency-Key,
+returns `202` with admin operation polling, and journals `storage.instances.migrate`.
+Run `openstack-platform-storage-migrate` as agentops on the admin VM. Replay its
+printed UUID with `--request-id`; `--timeout` defaults to 900 seconds (1–7200).
+Per-app child journals retain quiescence, verified copies, endpoint publication and
+accepted-job refresh. Old shared data is never deleted by migration. See the
+[migration runbook](../guides/migrate-storage-instances.md).
+
+`openstack-platform-storage-repair` re-applies current PostgreSQL login timeouts and
+resource-row connection limits through the local privileged socket. It prints a UUID
+and waits; `--request-id` resumes, `--timeout` defaults to 300 seconds (1–3600).
+The Nix wrappers pin the socket; raw packaged commands require `--socket PATH`.
 
 ### Operations
 
