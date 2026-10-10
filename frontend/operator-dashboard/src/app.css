@@ -1,3 +1,4 @@
+@import "@openstack-platform/ui/tokens.css";
 @import "@openstack-platform/ui/legacy/tokens.css";
 @import "@openstack-platform/ui/legacy/primitives.css";
 
@@ -2241,4 +2242,32 @@ a:hover {
   stroke: currentColor;
   stroke-width: 1.8;
   stroke-linejoin: round;
+}
+
+.storage-host__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: var(--ui-space-4) 0 0;
+  gap: var(--ui-space-4);
+}
+.storage-host__metrics dt {
+  color: var(--ui-text-muted);
+}
+.storage-host__metrics dd {
+  margin: 0;
+}
+
+.storage-host__body {
+  padding: var(--ui-card-padding);
+}
+
+@media (max-width: 1023px) {
+  .storage-host__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .storage-host__metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

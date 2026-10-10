@@ -95,8 +95,11 @@ function Identifier({
 function Resource({ resource }: { resource: Storage }) {
   const labels: Record<string, [string, (value: number) => string]> = {
     postgresConnections: ["Connections", (value) => numberFormat.format(value)],
-    measuredTargetBytes: ["Size target", formatBytes],
-    s3Bytes: ["Bytes", formatBytes],
+    measuredTargetBytes: [
+      resource.type === "postgres" ? "Size target" : "Size limit",
+      formatBytes,
+    ],
+    s3Bytes: ["Size limit", formatBytes],
     s3Objects: ["Objects", (value) => numberFormat.format(value)],
   };
   const quotas = Object.entries(resource.quotas)
@@ -112,6 +115,46 @@ function Resource({ resource }: { resource: Storage }) {
         </span>
         <Badge status={resource.status} />
       </div>
+      <div className="resource__meta">
+        {resource.usage.measuredAt ? (
+          <>
+            <span>
+              Used{" "}
+              {resource.usage.usedBytes === null
+                ? "—"
+                : `${formatBytes(resource.usage.usedBytes)}${(resource.quotas.s3Bytes ?? resource.quotas.measuredTargetBytes) ? ` of ${formatBytes(resource.quotas.s3Bytes ?? resource.quotas.measuredTargetBytes)}` : ""}`}
+            </span>
+            {resource.usage.objectCount !== null && (
+              <span>
+                {" "}
+                · {numberFormat.format(resource.usage.objectCount)}
+                {resource.quotas.s3Objects !== undefined &&
+                  ` of ${numberFormat.format(resource.quotas.s3Objects)}`}{" "}
+                objects
+              </span>
+            )}
+            {resource.usage.currentConnections !== null && (
+              <span>
+                {" "}
+                · {numberFormat.format(resource.usage.currentConnections)}
+                {resource.quotas.postgresConnections !== undefined &&
+                  ` of ${numberFormat.format(resource.quotas.postgresConnections)}`}{" "}
+                connections
+              </span>
+            )}{" "}
+            · <Time value={resource.usage.measuredAt} prefix="Updated " />
+            {resource.usage.stale && " · Stale"}
+          </>
+        ) : (
+          "Usage not measured yet"
+        )}
+      </div>
+      {resource.writeBlock.blocked && (
+        <div className="resource__meta" role="status">
+          Writes paused: size limit exceeded. Reads and deletes remain
+          available.
+        </div>
+      )}
       <div className="resource__meta">
         {quotas || "No quota recorded"} ·{" "}
         {resource.lastVerifiedAt ? (

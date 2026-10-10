@@ -207,6 +207,14 @@ class Fixture:
                         "displayLabel": None,
                         "lifecycleState": state,
                         "quotas": quotas,
+                        "usage": {
+                            "usedBytes": 1288490188,
+                            "objectCount": 12345 if kind == "s3" else None,
+                            "currentConnections": 3 if kind == "postgres" else None,
+                            "measuredAt": _at(now, minutes=3),
+                            "stale": False,
+                        },
+                        "writeBlock": {"blocked": False, "reason": None, "since": None},
                         "lastVerifiedAt": _at(now, hours=20),
                         "createdAt": _at(now, hours=800),
                         "updatedAt": _at(now, hours=20),
@@ -294,6 +302,25 @@ class Fixture:
             "applications": self._page(applications),
             "deployments": self._page(deployments),
             "storage": self._page(storage),
+            "status": {
+                "status": 200,
+                "body": {
+                    "storageHost": {
+                        "measuredAt": _at(now, minutes=3),
+                        "stale": False,
+                        "cpuCount": 4,
+                        "loadAverage": [0.2, 0.3, 0.4],
+                        "memory": {"totalBytes": 8589934592, "availableBytes": 2147483648},
+                        "dataVolume": {"totalBytes": 536870912000, "usedBytes": 12345678900},
+                        "containers": [
+                            {"name": "postgres", "usedBytes": 1234567890, "limitBytes": 3221225472},
+                            {"name": "mongo", "usedBytes": 2147483648, "limitBytes": 3221225472},
+                        ],
+                        "postgresConnections": {"current": 42, "limit": 400},
+                        "mongoConnections": {"current": 32, "limit": 1000},
+                    }
+                },
+            },
             "operations": self._page(operations),
             "units": {"states": {"controller": "active", "readiness": "active"}},
             "health": self._health(now),

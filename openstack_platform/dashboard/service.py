@@ -32,6 +32,7 @@ CARRIED_SECTIONS: Mapping[str, tuple[str, ...]] = {
     "applications": ("applications",),
     "deployments": ("deployments", "deployments_truncated"),
     "storage": ("storage",),
+    "status": ("storage_host",),
     "operations": ("operations", "operations_truncated"),
 }
 

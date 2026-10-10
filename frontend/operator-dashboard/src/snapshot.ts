@@ -36,7 +36,27 @@ export type Deployment = {
   acceptedAt: string | null;
   lastHealthyAt: string | null;
 };
+export type StorageUsage = {
+  usedBytes: number | null;
+  objectCount: number | null;
+  currentConnections: number | null;
+  measuredAt: string | null;
+  stale: boolean;
+};
+export type StorageHost = {
+  measuredAt: string;
+  stale: boolean;
+  cpuCount: number;
+  loadAverage: number[];
+  memory: { totalBytes: number; availableBytes: number };
+  dataVolume: { totalBytes: number; usedBytes: number };
+  containers: { name: string; usedBytes: number; limitBytes: number }[];
+  postgresConnections: { current: number; limit: number };
+  mongoConnections: { current: number; limit: number };
+};
 export type Storage = {
+  usage: StorageUsage;
+  writeBlock: { blocked: boolean; reason: string | null; since: string | null };
   id: string;
   type: string;
   typeLabel: string;
@@ -135,6 +155,7 @@ export type PendingSnapshot = Base & { state: "pending" };
 export type ReadySnapshot = Base & {
   state: "ready";
   generatedAt: string;
+  storageHost: StorageHost | null;
   summary: {
     tone: Tone;
     headline: string;
