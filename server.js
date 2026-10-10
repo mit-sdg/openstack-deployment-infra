@@ -31,6 +31,15 @@ const mongo = new MongoClient(process.env.MONGODB_URI || "mongodb://invalid", {
 const docs = () => mongo.db().collection("probe_docs");
 
 async function seed() {
+  await seedPostgres().catch((error) => {
+    throw new Error(`postgres: ${error.message}`);
+  });
+  await seedMongo().catch((error) => {
+    throw new Error(`mongo: ${error.message}`);
+  });
+}
+
+async function seedPostgres() {
   await withPostgres(async (client) => {
     await client.query("CREATE TABLE IF NOT EXISTS probe_rows (id integer PRIMARY KEY, value text NOT NULL)");
     const { rows } = await client.query("SELECT count(*)::int AS n FROM probe_rows");
@@ -40,6 +49,9 @@ async function seed() {
       }
     }
   });
+}
+
+async function seedMongo() {
   await mongo.connect();
   if ((await docs().countDocuments()) === 0) {
     await docs().insertMany(Array.from({ length: ROWS }, (_, id) => ({ _id: id, value: `doc-${id}` })));
@@ -125,6 +137,14 @@ http
   })
   .listen(port, "0.0.0.0", () => console.log(`listening on ${port}`));
 
+for (const [name, value] of [["DATABASE_URL", process.env.DATABASE_URL], ["MONGODB_URI", process.env.MONGODB_URI]]) {
+  try {
+    const parsed = new URL(value);
+    console.log(`${name} host=${parsed.hostname} port=${parsed.port} params=${[...parsed.searchParams.keys()].join(",")}`);
+  } catch {
+    console.log(`${name} unparseable or missing`);
+  }
+}
 seed()
   .then(() => {
     ready = true;
