@@ -154,6 +154,26 @@ class Manager:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
+    def sync_root(self) -> None:
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def deleting_record(self, identifier: str) -> Path:
+        return self.root / (identifier + ".deleting.json")
+
+    def cleanup_deleted(self, identifier: str) -> None:
+        trash = self.root / (identifier + ".deleting")
+        if trash.exists():
+            self.command(("rm", "-rf", "--", str(trash)))
+        # Keep the independent port/project reservation until all data is gone,
+        # even when recursive deletion removed config.json before interruption.
+        with self.locked():
+            self.deleting_record(identifier).unlink(missing_ok=True)
+            self.sync_root()
+
     def save(self, value: Mapping[str, Any]) -> None:
         path = self.directory(value["instanceId"])
         path.mkdir(mode=0o700, exist_ok=True)
@@ -383,11 +403,43 @@ class Manager:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
+    def remove(self, identifier: str, args: Mapping[str, Any]) -> dict[str, Any]:
+        if set(args) != {"action", "instanceId", "deleteData"} or args["deleteData"] is not True:
+            raise ValidationError("instance deletion requires explicit deleteData")
+        with self.locked():
+            try:
+                config = self.read(identifier)
+            except FileNotFoundError:
+                config = None
+            if config is not None:
+                config["desiredRunning"] = False
+                self.save(config)
+        # Neither process shutdown nor recursive deletion holds the global lock.
+        # The per-instance lock excludes same-resource mutations throughout.
+        self.command(("systemctl", "disable", "--now", self.unit(identifier)))
+        self.command(("podman", "rm", "--force", "--ignore", f"{self.namespace}-db-{identifier}"))
+        with self.locked():
+            if config is not None:
+                durable.atomic_write(
+                    self.deleting_record(identifier),
+                    json.dumps({"port": config["port"], "projectId": config["projectId"]}).encode(),
+                    mode=0o600,
+                    maximum_bytes=65536,
+                )
+                self.directory(identifier).rename(self.root / (identifier + ".deleting"))
+                self.sync_root()
+            self.firewall()
+        self.cleanup_deleted(identifier)
+        self.command(("systemctl", "revert", self.unit(identifier)))
+        return {"confirmedAbsent": True}
+
     def dispatch(self, args: Mapping[str, Any]) -> dict[str, Any]:
         if args.get("action") == "list":
             return self._dispatch(args)
         identifier = uuid(args.get("instanceId"), field="instance ID")
         with self.instance_locked(identifier):
+            if args.get("action") == "remove":
+                return self.remove(identifier, args)
             if args.get("action") == "copy":
                 from .storage_migration import copy_instance
 
@@ -410,12 +462,10 @@ class Manager:
             "create",
             "start",
             "stop",
-            "remove",
             "limits",
             "observe",
             "credentials",
             "allow",
-            "copy",
             "seal",
             "freeze",
             "reserve",
@@ -438,6 +488,13 @@ class Manager:
                     "reservations",
                 } or args["type"] not in {"postgres", "mongo"}:
                     raise ValidationError("instance create fields are invalid")
+                if (
+                    self.deleting_record(identifier).exists()
+                    or (self.root / (identifier + ".deleting")).exists()
+                ):
+                    raise ValidationError(
+                        "finish instance deletion replay before recreating its identity"
+                    )
                 owner = uuid(args["applicationId"], field="application ID")
                 target = validate_limits(args["quotas"])
                 self.capacity(identifier, target)
@@ -454,6 +511,10 @@ class Manager:
                         )
                 except FileNotFoundError:
                     occupied = {item["port"] for item in self.configs()}
+                    occupied.update(
+                        json.loads(path.read_text())["port"]
+                        for path in self.root.glob("*.deleting.json")
+                    )
                     port = next(
                         (value for value in range(PORT_MIN, PORT_MAX + 1) if value not in occupied),
                         None,
@@ -497,12 +558,6 @@ class Manager:
                 try:
                     config = self.read(identifier)
                 except FileNotFoundError:
-                    if action == "remove" and args.get("deleteData") is True:
-                        trash = self.root / (identifier + ".deleting")
-                        if trash.exists():
-                            self.command(("rm", "-rf", "--", str(trash)))
-                        self.firewall()
-                        return {"confirmedAbsent": True}
                     if action == "credentials":
                         return {"absent": True}
                     raise
@@ -556,23 +611,6 @@ class Manager:
                     config["desiredRunning"] = action == "start"
                     self.save(config)
                     self.command(("systemctl", action, self.unit(identifier)))
-                elif action == "remove":
-                    if (
-                        set(args) != {"action", "instanceId", "deleteData"}
-                        or args["deleteData"] is not True
-                    ):
-                        raise ValidationError("instance deletion requires explicit deleteData")
-                    self.command(("systemctl", "disable", "--now", self.unit(identifier)))
-                    trash = self.root / (identifier + ".deleting")
-                    self.directory(identifier).rename(trash)
-                    descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
-                    try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
-                    self.command(("rm", "-rf", "--", str(trash)))
-                    self.firewall()
-                    return {"confirmedAbsent": True}
                 elif action == "credentials":
                     if set(args) != {"action", "instanceId"}:
                         raise ValidationError("instance credential fields are invalid")
@@ -582,10 +620,6 @@ class Manager:
                             self.directory(identifier) / "admin-password"
                         ).read_text(),
                     }
-                elif action == "copy":
-                    from .storage_migration import copy_instance
-
-                    copy_instance(self, config, args)
                 elif action == "freeze":
                     if set(args) != {"action", "instanceId", "sourceRole"} or args[
                         "sourceRole"

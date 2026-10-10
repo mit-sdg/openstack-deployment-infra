@@ -206,6 +206,36 @@ class InstanceManagerTests(unittest.TestCase):
             any(argv[0] == "xfs_quota" and "project -s" in argv[3] for argv, _ in self.calls)
         )
 
+    def test_interrupted_data_removal_keeps_port_project_reserved_until_replay(self):
+        identifier, original = self.create()
+        actual = self.manager.command
+        failed = False
+
+        def interrupted(argv, **kwargs):
+            nonlocal failed
+            if argv[0] == "rm" and not failed:
+                failed = True
+                Path(argv[-1], "config.json").unlink()
+                raise RuntimeError("recursive deletion interrupted after config removal")
+            return actual(argv, **kwargs)
+
+        self.manager.command = interrupted
+        with self.assertRaises(RuntimeError):
+            self.manager.dispatch(
+                {"action": "remove", "instanceId": identifier, "deleteData": True}
+            )
+        self.assertTrue(self.manager.deleting_record(identifier).exists())
+        _, following = self.create()
+        self.assertNotEqual(original["port"], following["port"])
+        self.assertTrue(
+            self.manager.dispatch(
+                {"action": "remove", "instanceId": identifier, "deleteData": True}
+            )["confirmedAbsent"]
+        )
+        self.assertFalse(self.manager.deleting_record(identifier).exists())
+        _, reused = self.create()
+        self.assertEqual(reused["port"], original["port"])
+
     def test_pending_assignments_keep_capacity_reserved_until_confirmed(self):
         for _ in range(6):
             self.create(limits=quotas(memory=8 * GIB))
@@ -400,13 +430,6 @@ class InstanceControllerTests(unittest.TestCase):
         second = self.add(APP_ID, "mongo")
         application = db.get_application(self.connection, APP_ID)
         # The production renderer supplies scoped Variables and restart semantics.
-        job = (
-            '''job "app-11111111" { meta { candidate_job_sha256 = "'''
-            + "a" * 64
-            + """" candidate_image = "registry/app@sha256:"""
-            + "b" * 64
-            + """" } }"""
-        )
         # Use a real generated job because immutable job identity is a boundary.
         from openstack_platform.controller.application_models import Manifest
         from openstack_platform.controller.nomad_jobs import render_nomad_job
@@ -469,6 +492,18 @@ class InstanceControllerTests(unittest.TestCase):
             self.connection, self.config, self.root, helper_caller=helper
         )
         key = str(uuid.uuid4())
+        self.connection.execute(
+            "UPDATE managed_resources SET postgres_connections=101 WHERE resource_id=?",
+            (first.resource_id,),
+        )
+        with self.assertRaises(ValidationError):
+            service.migrate(request_id=key)
+        self.assertEqual(calls, [])
+        self.assertIsNone(db.get_unfinished_operation(self.connection, "app-" + APP_ID))
+        self.connection.execute(
+            "UPDATE managed_resources SET postgres_connections=10 WHERE resource_id=?",
+            (first.resource_id,),
+        )
         with self.assertRaises(RuntimeError):
             service.migrate(request_id=key)
         self.assertIsNotNone(

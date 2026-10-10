@@ -13,7 +13,10 @@ minutes for small resources. Measure the first app before estimating the rest.
    old directories' physical size. The temporary source project caps are 32 GiB each;
    increase the source reservations and rebuild if existing physical allocation exceeds
    those caps. Raise any resource's soft size before migration if its data plus 384 MiB (PostgreSQL WAL and overhead) or 128 MiB (MongoDB)
-   exceeds the derived hard quota. This check happens before application quiescence.
+   exceeds the derived hard quota. Legacy limits must fit the new instance bounds.
+   A resource over 14 GiB requires raising the 16 GiB archive reservation first,
+   with corresponding disk admission changes; the default margin leaves export
+   overhead. These checks happen before application quiescence.
 2. Grow the data volume and XFS filesystem. The fifty-app default reservation is
    759.5 GiB, so use at least 1 TiB; the 85% warning boundary is then 870.4 GiB.
    The coordinator owns the Cinder resize and inventory update. Confirm the replacement
@@ -26,7 +29,12 @@ minutes for small resources. Measure the first app before estimating the rest.
    storage from the worker and admin groups. Replace the storage host with the new image, retaining shared databases. Verify the
    instance manager and host metrics services, nginx TLS, and both shared sources.
    The manager runs on loopback and authenticates the existing Garage admin bearer.
-4. Install the matching helper release, replace the admin image, and deploy the portal
+4. Establish and verify recurring managed-volume snapshots covering `instances/`,
+   paired with controller/Nomad state backups, before admitting isolated resources.
+   Existing shared-only logical exporters fail closed once the corresponding type
+   has instances; they do not cover new writes. The old managed-data restore flow
+   needs an instance-aware successor before relying on logical disaster recovery.
+   Install the matching helper release, replace the admin image, and deploy the portal
    broker/web pair from the same combined revision. The helper launcher uses its durable
    accepted release; replacing the admin image alone leaves the old helper installed.
    The portal pair consumes the new four-field database quota model and checks admin
@@ -54,12 +62,7 @@ minutes for small resources. Measure the first app before estimating the rest.
    policy bounds before rollout for unusually large copies. Replays skip switched
    resources and completed apps. An interrupted app remains quiesced until its replay
    finishes. Do not manually copy over a sealed target or clear the app reservation.
-7. Establish and verify recurring managed-volume snapshots covering `instances/`,
-   paired with controller/Nomad state backups. Existing shared-only logical exporters
-   fail closed once the corresponding type has isolated instances; they must not be
-   treated as covering new writes. Extend logical export/restore for isolated endpoints
-   before removing the retained sources or relying on the old managed-data restore flow.
-8. Verify `/v1/admin/storage` reports instance isolation, instance IDs/ports and switched
+7. Verify `/v1/admin/storage` reports instance isolation, instance IDs/ports and switched
    migration state for every former shared resource. Verify each app's existing binding
    works, usage samples are fresh, and the operator dashboard shows container caps and
    no unexpected availability/connection alarms. On the storage host, check a unit's
@@ -77,8 +80,8 @@ recover/replay the instance operation or use a verified backup instead.
 
 A follow-up must remove the shared server containers, their frozen databases/users,
 legacy ports and source quota reservations, and verified migration archives. It must
-also complete instance-aware logical backup/restore and update monitoring to stop checking the shared listeners. This rollout deliberately
-retains them; deleting an isolated resource deletes only its new instance data.
+also complete instance-aware logical backup/restore and update monitoring to stop
+checking the shared listeners. This rollout deliberately retains them; deleting an isolated resource deletes only its new instance data.
 
 Order matters: new helpers require the new authenticated manager; new controller/API
 and portal fields ship together; migration requires the new image and helper and

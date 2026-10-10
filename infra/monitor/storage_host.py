@@ -33,7 +33,11 @@ def snapshot(data: Path, names: list[str]) -> dict[str, Any]:
     if instance_root.exists():
         for directory in instance_root.iterdir():
             config = directory / "config.json"
-            if not directory.is_dir() or not config.is_file():
+            if (
+                not directory.is_dir()
+                or directory.name.endswith(".deleting")
+                or not config.is_file()
+            ):
                 continue
             identifier = str(uuid.UUID(directory.name))
             value = json.loads(config.read_text())

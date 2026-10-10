@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .. import runtime
 from ..config import Config
-from ..instance_contract import hard_quota
+from ..instance_contract import GIB, hard_quota, validate_limits
 from ..validation import ValidationError
 from . import application_runtime as app
 from . import database as db
@@ -124,12 +124,17 @@ class InstanceMigrationService:
                         raise ValidationError(
                             "resolve unfinished storage lifecycle before migration"
                         )
+                    validate_limits(quotas(resource))
                     probe = StorageLimitsService(
                         self.connection, self.config, self.directory, helper_caller=self.helper
                     )._call(resource, "usage", deadline)
                     used = probe.get("usage", {})
                     if not isinstance(used, dict) or not isinstance(used.get("usedBytes"), int):
                         raise ValidationError("migration size preflight is unavailable")
+                    if used["usedBytes"] > 14 * GIB:
+                        raise ValidationError(
+                            "increase the 16 GiB migration archive reservation before migrating a resource over 14 GiB"
+                        )
                     if used["usedBytes"] + (
                         384 if resource.resource_type == "postgres" else 128
                     ) * 1024**2 > hard_quota(resource.measured_target_bytes or 0):

@@ -1512,6 +1512,7 @@ def _lazy_storage(action: str) -> Handler:
                     args["applicationSlug"],
                     kind,
                 )
+                client.call("remove", identifier, deleteData=True)
                 return storage_actions._remove_result(kind, update)
         handlers, clients = _storage_handlers(
             action, instance, workload_id=workload_id, application_slug=args["applicationSlug"]
