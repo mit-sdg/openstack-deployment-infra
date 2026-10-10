@@ -811,37 +811,24 @@ class Manager:
                         raise ValidationError("instance limit fields are invalid")
                     target = validate_limits(args["quotas"])
                     if target["sizeBytes"] < config["quotas"]["sizeBytes"]:
-                        self.command(("systemctl", "stop", self.unit(identifier)))
-                        try:
-                            output = self.command(
-                                (
-                                    "du",
-                                    "--summarize",
-                                    "--block-size=1",
-                                    "--",
-                                    str(self.directory(identifier) / "data"),
-                                )
+                        output = self.command(
+                            (
+                                "du",
+                                "--summarize",
+                                "--block-size=1",
+                                "--",
+                                str(self.directory(identifier) / "data"),
                             )
-                            physical = int(output.stdout.split()[0])
-                            margin = (384 if config["type"] == "postgres" else 128) * MIB
-                            if hard_quota(target["sizeBytes"]) < physical + margin:
-                                raise CapacityError(
-                                    "SIZE_BELOW_USAGE",
-                                    "hard quota would fall below physical data plus headroom",
-                                )
-                        except Exception:
-                            if config.get("desiredRunning", True):
-                                self.command(("systemctl", "start", self.unit(identifier)))
-                            raise
-                    try:
-                        self.capacity(identifier, target)
-                        self.reserve_disk(args["reservations"])
-                    except Exception:
-                        if target["sizeBytes"] < config["quotas"]["sizeBytes"] and config.get(
-                            "desiredRunning", True
-                        ):
-                            self.command(("systemctl", "start", self.unit(identifier)))
-                        raise
+                        )
+                        physical = int(output.stdout.split()[0])
+                        margin = (384 if config["type"] == "postgres" else 128) * MIB
+                        if hard_quota(target["sizeBytes"]) < physical + margin:
+                            raise CapacityError(
+                                "SIZE_BELOW_USAGE",
+                                "hard quota would fall below physical data plus headroom",
+                            )
+                    self.capacity(identifier, target)
+                    self.reserve_disk(args["reservations"])
                     changed = config.get("acceptedQuotas") != target
                     old_reserved = config.get("reservedQuotas", config["quotas"])
                     config["reservedQuotas"] = {
@@ -997,6 +984,8 @@ class Manager:
                     (
                         "podman",
                         "exec",
+                        "--user",
+                        "0:0",
                         "--interactive",
                         f"{self.namespace}-db-{config['instanceId']}",
                         "mongosh",
@@ -1046,7 +1035,9 @@ class Manager:
             # These bounded tmpfs mounts are charged to the unit memory cap;
             # database files can grow only inside the XFS project mount.
             "--tmpfs=/tmp:rw,size=64m,nosuid,nodev,noexec",
-            "--tmpfs=/var/run/postgresql:rw,size=16m,uid=999,gid=999,mode=0775",
+            # Podman 5.8 accepts mode here, but rejects explicit uid/gid.
+            # The sticky directory lets the database UID create its socket.
+            "--tmpfs=/var/run/postgresql:rw,size=16m,mode=1777,nosuid,nodev,noexec",
             "--security-opt=no-new-privileges",
             "--cap-drop=ALL",
             "--cap-add=CHOWN",

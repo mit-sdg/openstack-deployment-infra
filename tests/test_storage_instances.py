@@ -176,6 +176,7 @@ class InstanceManagerTests(unittest.TestCase):
         config = self.manager.read(identifier)
         self.assertTrue(config["adminInitialized"])
         bootstrap = next((argv, kw) for argv, kw in self.calls if argv[:2] == ("podman", "exec"))
+        self.assertEqual(bootstrap[0][bootstrap[0].index("--user") + 1], "0:0")
         self.assertEqual(bootstrap[0][bootstrap[0].index("--port") + 1], str(result["port"]))
         password = (self.manager.directory(identifier) / "admin-password").read_text()
         self.assertNotIn(password, " ".join(bootstrap[0]))
@@ -188,6 +189,7 @@ class InstanceManagerTests(unittest.TestCase):
         argv = execute.call_args.args[1]
         self.assertIn("--cgroups=disabled", argv)
         self.assertEqual(argv[argv.index("--entrypoint") + 1], "mongod")
+        self.assertIn("--tmpfs=/var/run/postgresql:rw,size=16m,mode=1777,nosuid,nodev,noexec", argv)
         self.assertFalse(
             any(value.startswith(("MONGO_INITDB", "--memory", "--cgroup-parent")) for value in argv)
         )
@@ -254,6 +256,30 @@ class InstanceManagerTests(unittest.TestCase):
         )
         self.assertTrue(any(argv[:2] == ("systemctl", "start") for argv, _ in self.calls))
         self.assertEqual(self.manager.read(identifier)["acceptedQuotas"]["sizeBytes"], 3 * GIB)
+
+    def test_rejected_quota_reduction_does_not_stop_the_instance(self):
+        identifier, _ = self.create()
+        original = self.manager.command
+
+        def command(argv, **options):
+            if argv[0] == "du":
+                return subprocess.CompletedProcess(argv, 0, str(2 * GIB).encode(), b"")
+            return original(argv, **options)
+
+        self.manager.command = command
+        self.calls.clear()
+        with self.assertRaises(CapacityError) as denied:
+            self.manager.dispatch(
+                {
+                    "action": "limits",
+                    "instanceId": identifier,
+                    "quotas": quotas(size=GIB),
+                    "reservations": {"databaseBytes": 3 * GIB, "garageBytes": 0},
+                }
+            )
+        self.assertEqual(denied.exception.code, "SIZE_BELOW_USAGE")
+        self.assertFalse(any(argv[0] == "systemctl" for argv, _ in self.calls))
+        self.assertEqual(self.manager.read(identifier)["quotas"], quotas())
 
     def test_dns_urls_and_saved_jobs_keep_certificate_name_and_exact_identity(self):
         import hashlib
