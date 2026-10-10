@@ -10,6 +10,19 @@ Measure the throwaway rehearsal before scheduling the class app. Local Nix evalu
 exercise Podman, nftables and the native database tools. No live migration was
 performed by the backend worker.
 
+For the local database regression check, with rootless Podman and idle loopback
+ports 5432, 27017, 30000 and 30001, run:
+
+```bash
+uv run python tests/run_storage_databases.py
+```
+
+It creates and removes four throwaway PostgreSQL 17/MongoDB 8 containers and runs
+native backups/restores, rotation with existing data, block/unblock permissions,
+authenticated migration copy/abort/replay, limits, collector caching, privileged
+repair and deletion. It adapts TLS and host lifecycle for local execution;
+the storage VM test additionally verifies TLS, systemd, cgroups, quotas and firewall.
+
 ## Prepare capacity and releases
 
 Use a reviewed checkout on the operator host. Set these paths to the existing
@@ -306,6 +319,12 @@ and MongoDB write access is reconciled against restored usage and the current si
 limit before worker access opens.
 Mongo backup inventory includes databases with app users and no collections, so a
 new resource or an app that dropped its last collection retains backup coverage.
+PostgreSQL sessions authenticate as the capped login (`session_user`) and use the
+stable NOLOGIN owner (`current_user`) for object creation. Rotation, repair and
+restore reassign older login-owned objects to that owner within the resource's
+database before applying the shared role settings. This keeps tables, functions
+and DDL access available after credential rotation. Run the existing one-time
+PostgreSQL repair after rollout to normalize current resources.
 
 For a single resource, decrypt the provider archive into the native restore CLI:
 
