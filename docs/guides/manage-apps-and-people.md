@@ -1,6 +1,6 @@
 # Manage apps and people
 
-Use the owner portal to manage apps across the class and help people finish blocked changes. Staff and portal admins have the same app controls. Account controls and the audit log require a portal admin.
+Use the owner portal to manage apps across the class and help people finish blocked changes. Staff and portal admins share app controls. Deleting an entire app, account controls and the audit log require a portal admin.
 
 ## Choose a destination
 
@@ -21,7 +21,7 @@ Open **All apps**, search by app name, owner name or username, and select the ap
 Staff and portal admins open the same app pages as owners without joining the team:
 
 - **Overview** shows the current deployment, activity and start, stop and restart controls. Staff and admins also see **Machines**, with the worker and effective build machine.
-- **Settings** holds repository and runtime settings, deploy keys, environment variables, databases and storage. Staff and admins additionally get **Danger zone**, with **Change owner** and storage deletion.
+- **Settings** holds repository and runtime settings, deploy keys, environment variables, databases and storage. Staff and admins additionally get **Danger zone**, with **Change owner** and storage deletion. Only admins see **Delete app**.
 - **Deploy** lets you choose a commit, review it, and deploy. Staff and admins additionally get the deployment method, worker size, and a read-only build machine summary.
 - **Deployments** lists attempts. Open one to see its details and build output.
 - **Logs** shows runtime output and errors.
@@ -62,6 +62,18 @@ Adoption is refused when:
 ### Change an app's owner
 
 On the app's **Settings** page, under **Danger zone**, select **Change owner**, choose the new owner, and select **Change owner**. The portal refuses while the app has a change in progress (`APP_BUSY`), or if someone else changed the owner since you loaded the page (`OWNER_CONFLICT`; reload). If the new owner was a teammate, they're removed from the team list; other teammates stay. The new owner keeps the app even if it puts them over their limit.
+
+### Delete an app (portal admins only)
+
+Deleting an app permanently removes the running app and worker, every database and its data, the S3 bucket and objects, environment variables, the deploy key, and all team members. Recovery is possible only from platform backups and requires the platform team; changes since the backup are lost. The portal cannot currently read the last successful platform backup time. Check it with the platform team before deleting. Deleting the class sign-in app interrupts class sign-in.
+
+1. Open the app's **Settings**, then **Delete app** in **Danger zone**.
+2. Read the removal notice and type the exact app slug. Select **Delete permanently**.
+3. Confirm your password and a fresh authenticator code if you have not re-authenticated in the last five minutes.
+4. Watch the deletion progress in the dialog. If it needs attention, an admin can select **Resume** after re-authentication; it keeps the original controller key and resumes cleanup. Refreshing or closing the page does not cancel an admitted deletion. Find pending deletion in class **Activity**.
+5. When **App deleted** appears, select **Done**. The app disappears from app lists. Its tombstone and operation/audit history remain.
+
+Owners, teammates and staff cannot admit or resume whole-app deletion. Deletion holds the app's busy scope until it settles. No manual removal of storage bindings is needed for this cascade operation.
 
 ### Delete a database or storage
 

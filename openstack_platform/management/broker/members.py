@@ -77,6 +77,7 @@ class Members:
             raise HttpError(400, "INVALID_FIELD", "Enter a username.")
         now = time.time()
         with self.broker.database.connect(write=True) as db:
+            self.broker.check_app_not_deleted(db, app["id"])
             # Usernames are unique per sign-in method; class accounts come first.
             candidates = db.execute(
                 "SELECT id FROM users WHERE enabled=1 AND status='active' AND"
@@ -121,6 +122,7 @@ class Members:
             raise HttpError(403, "OWNER_ONLY", "Only the app’s owner can remove people.")
         now = time.time()
         with self.broker.database.connect(write=True) as db:
+            self.broker.check_app_not_deleted(db, app["id"])
             removed = db.execute(
                 "DELETE FROM app_members WHERE app_id=? AND user_id=?", (app["id"], target)
             ).rowcount
@@ -182,7 +184,12 @@ def activity(broker: Broker, request: Request) -> Response:
         ).fetchall()
     items = [
         {
-            **intent_model(row, diagnostic=user["role"] in {"staff", "admin"}, viewer=user["id"]),
+            **intent_model(
+                row,
+                diagnostic=user["role"] in {"staff", "admin"},
+                viewer=user["id"],
+                admin=user["role"] == "admin",
+            ),
             "appSlug": app["slug"],
             "actor": {"displayName": row["actor_name"], "you": row["user_id"] == user["id"]},
         }

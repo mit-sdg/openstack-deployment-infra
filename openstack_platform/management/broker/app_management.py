@@ -1,6 +1,6 @@
 """Staff and admin app authority over the existing project peer and resource handlers.
 
-Staff and admins have the same app authority, without account-management step-up.
+Shared app actions need staff/admin authority; whole-app deletion needs admin step-up.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ class Authority(NamedTuple):
     """The session behind an app-administration request."""
 
     sid: str
+    delete_app: bool = False
 
 
 class AppManagement:
@@ -98,6 +99,7 @@ class AppManagement:
             ("POST", "/v1/all-apps/adopt", self.adopt),
             ("GET", "/v1/people/eligible-owners", self.owners),
             ("PUT", "/v1/apps/{app}/owner", self.reassign),
+            ("POST", "/v1/apps/{app}/delete", self.delete_application),
             ("DELETE", "/v1/apps/{app}/storage/{resource}", self.delete_storage),
             ("GET", "/v1/apps/{app}/sizes", self.sizes),
             ("GET", "/v1/apps/{app}/resize-plan", self.resize_plan),
@@ -106,7 +108,10 @@ class AppManagement:
         ]
 
     def handle(self, request: Request, handler: Callable[[Request], Response]) -> Response:
-        user, sid = self.broker.accounts.admin(request, kind="staff")
+        delete_app = handler == self.delete_application
+        user, sid = self.broker.accounts.admin(
+            request, kind="admin" if delete_app else "staff", step_up=delete_app
+        )
         allowed = (
             {"q", "limit", "cursor"}
             if request.path == "/v1/people/eligible-owners"
@@ -131,7 +136,7 @@ class AppManagement:
             and request.body is not None
         ):
             raise HttpError(400, "INVALID_REQUEST", "Unexpected request fields.")
-        token = self.context.set(Authority(sid))
+        token = self.context.set(Authority(sid, delete_app))
         stack = ExitStack()
         try:
             if request.method == "GET":
@@ -168,7 +173,12 @@ class AppManagement:
     def check(self, db: sqlite3.Connection) -> None:
         context = self.context.get()
         if context is not None:
-            self.broker.accounts.checked_actor(db, context.sid, kind="staff")
+            self.broker.accounts.checked_actor(
+                db,
+                context.sid,
+                kind="admin" if context.delete_app else "staff",
+                step_up=context.delete_app,
+            )
 
     def record_audit(
         self, db: sqlite3.Connection, actor: str, app: str, kind: str, intent: str, now: float
@@ -468,7 +478,12 @@ class AppManagement:
             for row in rows[:limit]:
                 row["attention"] = [
                     {
-                        **intent_model(item, diagnostic=True, viewer=viewer["id"]),
+                        **intent_model(
+                            item,
+                            diagnostic=True,
+                            viewer=viewer["id"],
+                            admin=viewer["role"] == "admin",
+                        ),
                         "appSlug": row["slug"],
                     }
                     for item in db.execute(
@@ -651,6 +666,7 @@ class AppManagement:
         owner, expected = checked_uuid(body["ownerId"]), checked_uuid(body["expectedOwnerId"])
         with b.database.connect(write=True) as db:
             self.check(db)
+            b.check_app_not_deleted(db, app["id"])
             self.check_owner(db, owner)
             current = db.execute("SELECT user_id FROM apps WHERE id=?", (app["id"],)).fetchone()[0]
             if current != expected:
@@ -710,6 +726,32 @@ class AppManagement:
             "POST",
             f"/v1/applications/{app['id']}/restart",
             {},
+        )
+
+    def delete_application(self, request: Request) -> Response:
+        b = self.broker
+        actor, _sid = b.accounts.admin(request, step_up=True)
+        body = b.mutation_body(request, {"confirmation"})
+        app_id = checked_uuid(request.path_parameters["app"])
+        key = request.idempotency_key()
+        fingerprint = digest(canonical({"path": request.path, "body": body}))
+        # Replay before own(): confirmed deletion makes ordinary app reads return 410.
+        with b.database.connect() as db:
+            self.check(db)
+            prior = b.existing(db, actor["id"], key, fingerprint)
+            if prior is not None:
+                return b.intent_response(prior["id"], actor["id"], 202)
+        actor, app = b.own(request, mutation=True)
+        if body["confirmation"] != app["slug"]:
+            raise HttpError(400, "CONFIRMATION_REQUIRED", "Type the exact application slug.")
+        return self.dispatch(
+            request,
+            actor,
+            app,
+            "app_delete",
+            "POST",
+            f"/v1/applications/{app_id}/delete",
+            body,
         )
 
     def delete_storage(self, request: Request) -> Response:
@@ -775,6 +817,7 @@ class AppManagement:
             self.check(db)
             prior = b.existing(db, actor["id"], key, fingerprint)
             if prior is None:
+                b.check_app_not_deleted(db, app["id"])
                 if kind == "storage_delete":
                     cfg = db.execute(
                         "SELECT configuration FROM configurations WHERE app_id=? AND revision=(SELECT revision FROM apps WHERE id=?)",

@@ -186,6 +186,7 @@ class FakeController:
             ("POST", "/v1/applications/{app}/source/commits", self.source_commits),
             ("POST", "/v1/applications/{app}/source/check", self.source_preflight),
             ("POST", "/v1/applications/{app}/restart", self.restart),
+            ("POST", "/v1/applications/{app}/delete", self.delete_app),
             ("GET", "/v1/operations/{operation}", self.operation),
             ("GET", "/v1/applications/{app}/environment", self.environment),
             ("PUT", "/v1/applications/{app}/environment/{key}", self.environment_write),
@@ -486,6 +487,20 @@ class FakeController:
             and time.time() >= operation["ready"]
             and not (operation["kind"] == "storage.create" and self.pause_storage_creation)
         ):
+            if operation["kind"] == "app.delete":
+                if operation.get("fixtureRecovery"):
+                    operation.update(status="recovery_required", fixtureRecovery=False)
+                    return Response(200, dict(operation))
+                app_id = operation["scope"].removeprefix("app-")
+                self.apps.pop(app_id, None)
+                self.environments.pop(app_id, None)
+                self.source_keys.pop(app_id, None)
+                for resource_id in [
+                    key
+                    for key, resource in self.resources.items()
+                    if resource["applicationId"] == app_id
+                ]:
+                    del self.resources[resource_id]
             if operation["kind"] != "app.deploy":
                 operation.update(
                     status="succeeded",
@@ -972,6 +987,26 @@ class FakeController:
             raise HttpError(400, "INVALID_BODY", "Confirmation mismatch.")
         self.resources.pop(request.path_parameters["resource"])
         return self.resource_operation(request, resource["applicationId"], "storage.remove")
+
+    def delete_app(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay is not None:
+            operation = self.operations[request.idempotency_key()]
+            if operation["status"] == "recovery_required":
+                operation.update(status="running", ready=time.time())
+            return replay
+        app_id = request.path_parameters["app"]
+        application = self.apps.get(app_id)
+        if application is None:
+            raise HttpError(404, "APPLICATION_NOT_FOUND", "Application does not exist.")
+        body = self.body(request, {"confirmation"})
+        if body["confirmation"] != application["slug"]:
+            raise HttpError(400, "INVALID_BODY", "Confirmation mismatch.")
+        response = self.resource_operation(request, app_id, "app.delete")
+        operation = self.operations[request.idempotency_key()]
+        operation["fixtureRecovery"] = self.recovery_next
+        self.recovery_next = False
+        return response
 
     def restart(self, request: Request) -> Response:
         replay = self.replay(request)

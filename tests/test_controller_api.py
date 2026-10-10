@@ -127,13 +127,41 @@ class ControllerAPITests(unittest.TestCase):
         )
         for router, method, path in (
             (project, "GET", "/v1/admin/applications"),
-            (project, "POST", "/v1/applications/00000000-0000-4000-8000-000000000001/delete"),
             (privileged, "GET", "/v1/health"),
             (privileged, "POST", "/v1/applications"),
         ):
             with self.subTest(method=method, path=path), self.assertRaises(HttpError) as raised:
                 router.dispatch(method, path, {}, None)
             self.assertEqual(raised.exception.code, "NOT_FOUND")
+
+    def test_project_delete_dispatch_and_replay_use_project_polling(self) -> None:
+        application = self.create_application().body["applicationId"]
+        project = self.api.router("project")
+        key = str(uuid.uuid4())
+        route = f"/v1/applications/{application}/delete"
+        service = mock.Mock()
+        with mock.patch(
+            "openstack_platform.controller.api.ApplicationService", return_value=service
+        ):
+            response = project.dispatch(
+                "POST", route, self.headers(key), {"confirmation": "demo-app"}
+            )
+            self.api.wait_for_operations()
+            replay = project.dispatch(
+                "POST", route, self.headers(key), {"confirmation": "demo-app"}
+            )
+        self.assertEqual(response.status, 202)
+        self.assertEqual(response.body, replay.body)
+        self.assertEqual(response.body["statusUrl"], f"/v1/operations/{key}")
+        self.assertEqual(project.dispatch("GET", response.body["statusUrl"], {}, None).status, 200)
+        service.delete.assert_called_once_with(application, confirmation="demo-app", request_id=key)
+        with self.assertRaises(HttpError):
+            project.dispatch("POST", route, self.headers(key), {"confirmation": "other"})
+        # Existing operator callers retain the privileged route and polling URL.
+        replay = self.api.router("privileged").dispatch(
+            "POST", route, self.headers(key), {"confirmation": "demo-app"}
+        )
+        self.assertEqual(replay.body["statusUrl"], f"/v1/admin/operations/{key}")
 
     def test_task_restart_is_project_scoped_idempotent_and_busy_guarded(self) -> None:
         application = self.create_application().body["applicationId"]

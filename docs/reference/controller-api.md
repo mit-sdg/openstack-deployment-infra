@@ -10,8 +10,8 @@ The controller has no network listener. It serves two Unix sockets, and each one
 
 | Socket | File owner and mode | Admitted peer (exact UID:GID) | Routes |
 | --- | --- | --- | --- |
-| `/run/<namespace>-controller/project.sock` | `platform-controller:controller-api`, `0660` | `management-broker` (996:983) | Every route that is not privileged |
-| `/run/<namespace>-controller/privileged.sock` | `platform-controller:platform-admin`, `0660` | The operator account `agentops` (1000:1000) | Every `/v1/admin/...` route, plus `POST /v1/applications/{id}/delete` |
+| `/run/<namespace>-controller/project.sock` | `platform-controller:controller-api`, `0660` | `management-broker` (996:983) | Every product route, including confirmed app deletion |
+| `/run/<namespace>-controller/privileged.sock` | `platform-controller:platform-admin`, `0660` | The operator account `agentops` (1000:1000) | Every `/v1/admin/...` route, plus the shared `POST /v1/applications/{id}/delete` |
 
 `<namespace>` is the deployment namespace from the inventory. The fixed account names and IDs come from [`infra/lib/platform_contract.json`](../../infra/lib/platform_contract.json).
 
@@ -91,7 +91,7 @@ A `202` response looks like this, with the same URL in the `Location` header:
 }
 ```
 
-Poll the `statusUrl` until `status` is no longer `running`. Operations started on the project socket are polled with `GET /v1/operations/{id}`; operations started on the privileged socket (including cascade deletion) are polled with `GET /v1/admin/operations/{id}`.
+Poll the `statusUrl` until `status` is no longer `running`. Operations started on the project socket are polled with `GET /v1/operations/{id}`; operations started on the privileged socket (including operator cascade deletion) are polled with `GET /v1/admin/operations/{id}`.
 
 | Field | Meaning |
 | --- | --- |
@@ -186,7 +186,7 @@ Columns: **Socket** is where the route is installed. **Key** shows whether the r
 | `POST /v1/applications/{id}/enable` | project | yes | Start the accepted deployment again |
 | `POST /v1/applications/{id}/disable` | project | yes | Stop the accepted job and its worker; data and history are kept |
 | `POST /v1/applications/{id}/restart` | project | yes | Restart the exact accepted running task in place |
-| `POST /v1/applications/{id}/delete` | privileged | yes | Cascade deletion; body `{"confirmation": "<slug>"}` |
+| `POST /v1/applications/{id}/delete` | project and privileged | yes | Resumable cascade deletion; body `{"confirmation": "<exact slug>"}`. The broker permits only portal admins with a fresh step-up. Poll through the calling socket’s operation route. |
 | `GET /v1/admin/applications` | privileged | no | Paged list of every application, including deleted ones, with sizing |
 
 ### Deployments and logs
@@ -228,6 +228,12 @@ Values go to the app's Nomad Variable and are never returned. Each change restar
 | `DELETE /v1/applications/{id}/environment/{key}` | project | yes | Remove one variable |
 | `POST /v1/applications/{id}/environment/import` | project | yes | Import a strict dotenv document: `{"dotenv": "..."}` |
 
+### Cascade app deletion
+
+`POST /v1/applications/{id}/delete` retains exact-slug confirmation and Idempotency-Key enforcement on both sockets. The project socket admits only the configured management-broker UID:GID; it does not authenticate browser roles. The broker's separate admin-only deletion route checks the live session, CSRF, same-origin metadata and recent re-authentication before admission, and checks admin authority again for dispatch and resume. This is the same process trust boundary as project storage purge; the broker gains no `/v1/admin/...` access.
+
+Deletion stops the workload, purges every app-owned database and S3 bucket (including objects), removes the Nomad environment, deploy key, worker, address reservations and app registry manifests, then tombstones the app. Deployment and operation history remain. Partial failure requires recovery; repeat the original request with the same key to resume from controller checkpoints. Project responses use `/v1/operations/{id}`; privileged responses use `/v1/admin/operations/{id}`, including idempotent replay.
+
 ### Managed storage
 
 | Route | Socket | Key | Purpose |
@@ -239,7 +245,7 @@ Values go to the app's Nomad Variable and are never returned. Each change restar
 | `PATCH /v1/storage/{id}/label` | project | yes | Change the display label: `{"displayLabel": "..."}`; returns `200` |
 | `POST /v1/storage/{id}/verify` | project | yes | Verify provider identity and health |
 | `POST /v1/storage/{id}/rotate` | project | yes | Issue new scoped credentials, check the app's health with them, then retire the old ones |
-| `DELETE /v1/storage/{id}` | project | yes | Delete the resource: `{"confirmation": "<resource name>", "purge": false}`; `purge: true` empties an S3 bucket first; without it a non-empty bucket is refused. The portal allows this only for a portal admin with a fresh step-up. |
+| `DELETE /v1/storage/{id}` | project | yes | Delete the resource: `{"confirmation": "<resource name>", "purge": false}`; `purge: true` empties an S3 bucket first; without it a non-empty bucket is refused. The portal requires staff/admin authority, typed confirmation, and no saved storage bindings. |
 | `GET /v1/admin/storage` | privileged | no | Paged list of every resource, including provider identifiers and safe usage errors |
 | `POST /v1/admin/storage/migrate-instances` | privileged | yes | Quiesce, copy, verify, publish isolated endpoints and refresh accepted jobs; never delete shared source data |
 | `POST /v1/admin/storage/repair-postgres` | privileged | yes | Reapply settings and resource connection limits to every current PostgreSQL login; empty body; async `storage.postgres.repair` |

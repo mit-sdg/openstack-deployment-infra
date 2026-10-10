@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
+import sqlite3
 import sys
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from ..common import canonical, strict_json, utc
@@ -98,6 +100,7 @@ class Journal:
         self.stop_event = threading.Event()
         self.wake = threading.Event()
         self.thread: threading.Thread | None = None
+        self.on_deleted: Callable[[str], None] | None = None
         self.next_app_scan = 0.0
         self.app_scan_cursor: tuple[float, str] | None = None
 
@@ -137,6 +140,17 @@ class Journal:
             self.next_app_scan = time.monotonic() + 5
             self.reconcile_apps()
 
+    @staticmethod
+    def retire_app(db: sqlite3.Connection, app_id: str, now: float) -> None:
+        # Keep the tombstone and audit/intent history; remove app access and cached settings.
+        db.execute("UPDATE apps SET lifecycle='deleted',revision=0 WHERE id=?", (app_id,))
+        for table in ("app_members", "configurations", "observations"):
+            db.execute(f"DELETE FROM {table} WHERE app_id=?", (app_id,))
+        db.execute(
+            "UPDATE intents SET state='failed',safe_error='This application was deleted by an administrator.',updated=?,lease=0 WHERE app_id=? AND kind!='app_delete' AND state IN ('prepared','unknown','blocked')",
+            (now, app_id),
+        )
+
     def observe_deleted(self, app_id: str, *, missing: bool = False) -> bool:
         """Only definitive project-not-found evidence retires a known ready app."""
         with self.database.connect() as db:
@@ -164,15 +178,13 @@ class Journal:
                 "UPDATE apps SET lifecycle='deleted' WHERE id=? AND lifecycle='ready'", (app_id,)
             ).rowcount
             if changed:
-                db.execute("UPDATE observations SET updated=0 WHERE app_id=?", (app_id,))
-                db.execute(
-                    "UPDATE intents SET state='failed',safe_error='This application was deleted by an administrator.',updated=?,lease=0 WHERE app_id=? AND state IN ('prepared','unknown','blocked')",
-                    (now, app_id),
-                )
+                self.retire_app(db, app_id, now)
                 db.execute(
                     "INSERT INTO audit(user_id,app_id,action,created) VALUES(?,?,'app_deleted_by_administrator',?)",
                     (app["user_id"], app_id, now),
                 )
+        if self.on_deleted is not None:
+            self.on_deleted(app_id)
         return True
 
     def reconcile_apps(self) -> None:
@@ -230,7 +242,7 @@ class Journal:
                 return
             if (
                 strict_json(row["body"].encode()).get("_portalAdmin") is True
-                or row["kind"] in {"default_builder_size", "storage_limits"}
+                or row["kind"] in {"default_builder_size", "storage_limits", "app_delete"}
             ) and row["state"] != "accepted":
                 # A reviewed resume grants app authority without changing the
                 # original actor, controller key, or stored request body.
@@ -247,7 +259,7 @@ class Journal:
                     or actor["role"]
                     not in (
                         {"admin"}
-                        if row["kind"] in {"default_builder_size", "storage_limits"}
+                        if row["kind"] in {"default_builder_size", "storage_limits", "app_delete"}
                         else {"staff", "admin"}
                     )
                     or not actor["enabled"]
@@ -395,6 +407,8 @@ class Journal:
                     identifier,
                 ),
             )
+            if intent["kind"] == "app_delete" and state == "succeeded":
+                self.retire_app(db, intent["app_id"], now)
             if intent["kind"] == "create_app":
                 if state == "succeeded":
                     db.execute("UPDATE apps SET lifecycle='ready' WHERE id=?", (intent["app_id"],))
@@ -408,6 +422,17 @@ class Journal:
                     "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
                     (intent["user_id"], intent["app_id"], identifier, state, now),
                 )
+                if intent["kind"] == "app_delete":
+                    from .accounts import audit
+
+                    audit(
+                        db,
+                        intent["user_id"],
+                        None,
+                        "app_delete_" + state,
+                        {"applicationId": intent["app_id"], "intentId": identifier},
+                        now,
+                    )
                 if intent["kind"] == "storage_limits":
                     from .accounts import audit
 
@@ -439,9 +464,12 @@ class Journal:
                         now,
                     )
 
+        if intent["kind"] == "app_delete" and state == "succeeded" and self.on_deleted is not None:
+            self.on_deleted(intent["app_id"])
+
 
 def intent_model(
-    row: Any, *, diagnostic: bool = False, viewer: str | None = None
+    row: Any, *, diagnostic: bool = False, viewer: str | None = None, admin: bool = False
 ) -> dict[str, Any]:
     """A browser view of an intent. A teammate who isn't its actor (viewer) can't
     resubmit it, so they get no retry key."""
@@ -454,6 +482,7 @@ def intent_model(
     )
     can_resume = (
         row["kind"] not in {"env_set", "env_delete"}
+        and (row["kind"] != "app_delete" or admin)
         and row["state"] in {"blocked", "unknown"}
         and (body.get("_portalAdmin") is not True or diagnostic)
     )

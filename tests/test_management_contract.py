@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from typing import Any
 from unittest.mock import patch
 
 from openstack_platform.controller.http import ControllerServer, HttpError
+from openstack_platform.management.broker import bootstrap
 from openstack_platform.management.broker.client import UnixConnection
 from openstack_platform.management.common import canonical, strict_json
 from tests import test_controller_recovery as recovery_fixtures
+from tests import test_management_accounts as account_fixtures
 from tests.test_management import DEFAULT_CONFIGURATION, ManagementCase
 
 
@@ -411,6 +414,42 @@ class RealProjectContractTests(RealProjectCase):
 
 
 class DeletedApplicationContractTests(RealProjectCase):
+    anonymous = account_fixtures.AccountsTests.anonymous
+    begin = account_fixtures.AccountsTests.begin
+    finish = account_fixtures.AccountsTests.finish
+    admin = account_fixtures.AccountsTests.admin
+
+    def test_admin_broker_delete_reaches_real_project_socket_and_replays_after_tombstone(
+        self,
+    ) -> None:
+        self.now = time.time()
+        self.broker.auth.clock = lambda: self.now
+        folder = bootstrap.enrollment_file(self.config).parent
+        folder.mkdir(parents=True, mode=0o2750)
+        folder.chmod(0o2750)
+        self.admin()
+        app = self.create(slug="portal-delete")
+        self.save(app)
+        key = str(uuid.uuid4())
+        path = f"/v1/apps/{app}/delete"
+        body = {"confirmation": "portal-delete"}
+        started = self.call("POST", path, body, "admin", key)
+        self.assertEqual(started.status, 202)
+        self.real.fixture.api.wait_for_operations()
+        intent = started.body["data"]["intentId"]
+        self.broker.journal.dispatch(intent)
+        self.assertEqual(
+            self.call("GET", f"/v1/intents/{intent}", owner="admin").body["data"]["state"],
+            "succeeded",
+        )
+        self.assertEqual(
+            self.call("POST", path, body, "admin", key).body["data"]["intentId"], intent
+        )
+        status, missing, _headers = self.wire(self.real_socket, "GET", f"/v1/applications/{app}")
+        self.assertEqual(status, 404)
+        self.assertEqual(missing["error"]["code"], "APPLICATION_NOT_FOUND")
+        self.assertEqual(self.call("GET", "/v1/apps", owner="alice").body["data"]["items"], [])
+
     def delete_remote(self, app: str, name: str) -> None:
         response = self.real.fixture.api.router("privileged").dispatch(
             "POST",
@@ -446,7 +485,7 @@ class DeletedApplicationContractTests(RealProjectCase):
                 db.execute("SELECT COUNT(*) FROM configurations WHERE app_id=?", (app,)).fetchone()[
                     0
                 ],
-                1,
+                0,
             )
             self.assertEqual(
                 db.execute(
