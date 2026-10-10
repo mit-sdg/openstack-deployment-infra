@@ -922,6 +922,14 @@ class WebTransportTests(ManagementCase):
     def web_request(
         self, path: str, headers: dict[str, str] | None = None
     ) -> http.client.HTTPResponse:
+        # The fixture caps the server at two clients and a handler deregisters just
+        # after its reply, so a new connection can be refused unread (a reset).
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with self.web.client_lock:
+                if not self.web.clients:
+                    break
+            time.sleep(0.005)
         connection = http.client.HTTPConnection("127.0.0.1", self.web.server_port, timeout=2)
         connection.request("GET", path, headers={"Host": "127.0.0.1:18080", **(headers or {})})
         response = connection.getresponse()
