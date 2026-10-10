@@ -93,6 +93,7 @@ const activity = (v: unknown) =>
       'storage_verify',
       'storage_rotate',
       'storage_delete',
+      'storage_limits',
       'app_enable',
       'app_disable',
       'app_restart',

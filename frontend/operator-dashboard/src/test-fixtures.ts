@@ -37,6 +37,7 @@ export function snapshot(
   return {
     schemaVersion: 1,
     state: "ready",
+    storageHost: null,
     platform: {
       name: "Fixture platform",
       domain: "example.invalid",

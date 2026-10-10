@@ -61,7 +61,7 @@ Workers only accept app traffic from the ingress host and can't reach the cloud'
 
 ## Where data lives
 
-Each app can have one PostgreSQL database, one MongoDB database, and one S3 bucket. The owner chooses which environment variable names receive each connection detail. The storage host keeps all of it on one large volume.
+Each app can have one PostgreSQL database, one MongoDB database, and one S3 bucket. The owner chooses which environment variable names receive each connection detail. The storage host keeps all of it on one large volume. The app’s Settings page shows storage limits and cached usage, measured every five minutes. Portal admins can edit each resource’s limits. Migrated databases run in separate instances with memory, CPU and connection caps. Their disk allowance includes 25% above the logical size for database files and overhead. PostgreSQL’s logical size is a reporting target. S3 enforces byte and object quotas. MongoDB pauses writes above its logical data and index size limit, while reads and deletes remain available; writes resume after usage falls to 95% of the limit or less.
 
 Some things are deliberately not kept:
 
@@ -83,7 +83,7 @@ Each account has a role:
 | --- | --- |
 | **Owner** | Create apps up to their quota, manage their own apps, add teammates |
 | **Staff** | Shared app pages for every app without team membership, People and Activity, plus all app management: create for an owner, adopt, reassign, delete storage, deploy with maintenance or resizing; no app limit |
-| **Portal admin** | Everything staff can, plus manage accounts, roles, quotas, and the audit log |
+| **Portal admin** | Everything staff can, plus edit storage limits and manage accounts, roles, quotas, and the audit log |
 
 [Open the owner portal](guides/open-the-portal.md) and [Manage apps and people](guides/manage-apps-and-people.md) cover the details.
 

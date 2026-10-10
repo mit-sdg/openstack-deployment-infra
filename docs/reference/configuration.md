@@ -317,9 +317,10 @@ Setup writes the private app resource policy and backup public key from `config/
 | --- | --- | --- |
 | `standard.workerFlavor` | `PLATFORM_WORKER_FLAVOR` | Standard app worker flavor |
 | `standard.cpuMHz`, `standard.memoryMiB` | `1000`, `2048` | CPU and memory reserved for each app's container |
-| `standard.postgresConnections` | `10` | Connection limit for each app's PostgreSQL database |
-| `standard.postgresMeasuredBytes`, `standard.mongoMeasuredBytes` | 2 GiB each | Size target for each app's PostgreSQL and MongoDB database |
-| `standard.s3Bytes`, `standard.s3Objects` | 5 GiB, `100000` | Quota for each app's S3 bucket |
+| `standard.postgresConnections` | `10` | Initial connection limit for each app's PostgreSQL database |
+| `standard.postgresMeasuredBytes` | 2 GiB | Initial PostgreSQL size reporting target; not enforced |
+| `standard.mongoMeasuredBytes` | 2 GiB | Initial MongoDB logical data and index size limit; pauses writes when exceeded |
+| `standard.s3Bytes`, `standard.s3Objects` | 5 GiB, `100000` | Initial quota for each app's S3 bucket |
 | `runtimeImages.node`, `runtimeImages.bun` | `PLATFORM_NODE_RUNTIME_IMAGE`, `PLATFORM_BUN_RUNTIME_IMAGE` | Default app runtime images |
 | `backupAgeRecipient` | Generated | Public key for `.secrets/setup/backup-age-identity.txt` under the operator root |
 

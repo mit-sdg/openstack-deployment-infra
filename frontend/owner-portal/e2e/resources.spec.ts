@@ -33,6 +33,10 @@ test('owner saves a write-only environment variable and provisions PostgreSQL bi
   await expect(editor).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Verify PostgreSQL' })).toBeEnabled();
 
+  await expect(page.getByRole('progressbar', { name: 'postgres size usage' })).toBeVisible();
+  await expect(page.getByText('Connections: 3 of 10')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Edit .* limits/ })).toHaveCount(0);
+
   // Reload proves the real server persisted both the variable and binding.
   await page.reload();
   await expect(variables).toContainText('API_TOKEN');

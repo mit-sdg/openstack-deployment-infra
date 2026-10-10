@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Mark, ShellFrame, ThemeButton } from "@openstack-platform/ui";
 import { Applications, type Filter } from "./Applications";
+import { StorageHost } from "./StorageHost";
 import { Drawer } from "./Drawer";
 import { Icon, Sprite } from "./Icons";
 import {
@@ -152,6 +153,7 @@ export function App() {
             }}
           />
           <Roles snapshot={ready} />
+          <StorageHost host={ready?.storageHost ?? null} />
           <Applications
             snapshot={ready}
             filter={filter}

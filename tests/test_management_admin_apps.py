@@ -82,6 +82,24 @@ class AdminApplicationTests(ManagementCase):
                 "applicationId": identifier,
                 "type": "postgres",
                 "name": "default",
+                "quotas": {
+                    "connections": 10,
+                    "sizeBytes": 2147483648,
+                    "memoryBytes": 536870912,
+                    "cpuMillicores": 500,
+                },
+                "isolation": "instance",
+                "hardQuotaBytes": 2684354560,
+                "usage": {
+                    "instanceMemoryBytes": None,
+                    "cpuTimeMilliseconds": None,
+                    "usedBytes": None,
+                    "objectCount": None,
+                    "currentConnections": None,
+                    "measuredAt": None,
+                    "stale": True,
+                },
+                "writeBlock": {"blocked": False, "reason": None, "since": None},
                 "lifecycleState": "active",
                 "createdAt": time.time(),
                 "lastVerifiedAt": None,
@@ -174,6 +192,140 @@ class AdminApplicationTests(ManagementCase):
                 ).fetchone()[0],
                 4,
             )
+
+    def test_storage_limits_admin_authority_projection_and_durable_intent(self) -> None:
+        self.staff()
+        created = self.call("POST", self.prefix + "/storage", {"type": "mongo"}, "admin")
+        self.complete(created)
+        resource = self.call("GET", self.prefix + "/storage", owner="admin").body["data"]["items"][
+            0
+        ]
+        identifier = resource["resourceId"]
+        provider = self.fixture.resources[identifier]
+        provider.update(
+            providerId="private-provider",
+            providerName="private-name",
+            usageError="private-error",
+            instanceId=str(uuid.uuid4()),
+            instancePort=54321,
+            migrationState="copying",
+        )
+        provider["usage"]["providerSecret"] = "private-secret"
+        owner = self.call("GET", self.prefix + "/storage", owner="alice").body["data"]["items"][0]
+        self.assertEqual(owner["quotas"], provider["quotas"])
+        self.assertEqual(owner["writeBlock"], provider["writeBlock"])
+        self.assertFalse(
+            {
+                "providerId",
+                "providerName",
+                "usageError",
+                "instanceId",
+                "instancePort",
+                "migrationState",
+            }
+            & owner.keys()
+        )
+        self.assertNotIn("providerSecret", owner["usage"])
+        body = {
+            "quotas": {**owner["quotas"], "sizeBytes": 4294967296},
+            "expectedQuotas": owner["quotas"],
+        }
+        path = self.prefix + f"/storage/{identifier}/limits"
+        calls = len(self.fixture.calls)
+        for headers, code in (
+            ({"x-csrf-token": ""}, "CSRF_REJECTED"),
+            ({"origin": "https://other.example.test"}, "ORIGIN_REJECTED"),
+        ):
+            self.assert_error(
+                code, lambda headers=headers: self.call("PUT", path, body, "admin", headers=headers)
+            )
+        for actor in ("alice", "taylor"):
+            self.assert_error(
+                "ACCESS_DENIED", lambda actor=actor: self.call("PUT", path, body, actor)
+            )
+        self.assertEqual(len(self.fixture.calls), calls)
+        for delta in (
+            {"sizeBytes": 1073741823},
+            {"connections": 101},
+            {"memoryBytes": 1073741825},
+            {"memoryBytes": 8589934593},
+            {"cpuMillicores": 99},
+            {"cpuMillicores": 4001},
+        ):
+            self.assert_error(
+                "INVALID_REQUEST",
+                lambda delta=delta: self.call(
+                    "PUT",
+                    path,
+                    {"quotas": {**body["quotas"], **delta}, "expectedQuotas": owner["quotas"]},
+                    "admin",
+                ),
+            )
+        key = str(uuid.uuid4())
+        response = self.call("PUT", path, body, "admin", key)
+        intent = response.body["data"]["intentId"]
+        self.assertEqual(
+            self.call("PUT", path, body, "admin", key).body["data"]["intentId"], intent
+        )
+        self.assertEqual(self.complete(response)["state"], "succeeded")
+        with self.broker.database.connect() as db:
+            row = db.execute("SELECT * FROM intents WHERE id=?", (intent,)).fetchone()
+            self.assertEqual(row["kind"], "storage_limits")
+            self.assertEqual(strict_json(row["body"].encode())["resourceId"], identifier)
+            self.assertEqual(row["operation_id"], row["controller_key"])
+            actions = [r[0] for r in db.execute("SELECT action FROM admin_audit")]
+        self.assertEqual(actions.count("storage_limits_requested"), 1)
+        self.assertIn("storage_limits_succeeded", actions)
+        self.assertEqual(self.fixture.resources[identifier]["quotas"], body["quotas"])
+        activities = self.call("GET", "/v1/activity", owner="taylor").body["data"]["items"]
+        self.assertEqual(
+            next(item["kind"] for item in activities if item["intentId"] == intent),
+            "storage_limits",
+        )
+        for actor in ("alice", "taylor"):
+            self.assert_error(
+                "ACCESS_DENIED",
+                lambda actor=actor: self.call("POST", f"/v1/intents/{intent}/resume", {}, actor),
+            )
+
+    def test_storage_limits_reject_invalid_values_and_surface_stale_expectation(self) -> None:
+        self.complete(self.call("POST", self.prefix + "/storage", {"type": "s3"}, "admin"))
+        resource = self.call("GET", self.prefix + "/storage", owner="admin").body["data"]["items"][
+            0
+        ]
+        path = self.prefix + f"/storage/{resource['resourceId']}/limits"
+        current = resource["quotas"]
+        before = len([call for call in self.fixture.calls if call[0] == "PUT"])
+        for invalid in (
+            {"s3Bytes": True, "s3Objects": 1},
+            {"s3Bytes": 1048575, "s3Objects": 1},
+            {"s3Bytes": 549755813889, "s3Objects": 1},
+            {"s3Bytes": 1048576.0, "s3Objects": 1},
+            {"s3Bytes": 1048576, "s3Objects": 100000001},
+            {"s3Bytes": 1048576},
+            {**current, "connections": 10},
+        ):
+            self.assert_error(
+                "INVALID_REQUEST",
+                lambda invalid=invalid: self.call(
+                    "PUT", path, {"quotas": invalid, "expectedQuotas": current}, "admin"
+                ),
+            )
+        self.assertEqual(len([call for call in self.fixture.calls if call[0] == "PUT"]), before)
+        response = self.call(
+            "PUT",
+            path,
+            {
+                "quotas": {"s3Bytes": 1048576, "s3Objects": 1},
+                "expectedQuotas": {"s3Bytes": 1048576, "s3Objects": 1},
+            },
+            "admin",
+        )
+        self.assertEqual(response.body["data"]["state"], "accepted")
+        completed = self.complete(response)
+        self.assertEqual(completed["state"], "failed")
+        self.assertTrue(completed["safeError"])
+        self.assertEqual(self.fixture.resources[resource["resourceId"]]["quotas"], current)
 
     def test_only_admins_manage_default_builder_and_its_intents(self) -> None:
         self.staff()

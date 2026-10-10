@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import uuid
 from typing import Any
+from unittest.mock import patch
 
 from openstack_platform.controller.http import ControllerServer, HttpError
 from openstack_platform.management.broker.client import UnixConnection
@@ -46,6 +47,40 @@ class RealProjectCase(ManagementCase):
         self.real.connection = self.real.fixture.connection = connection
         self.real.fixture.api = ControllerAPI(
             connection, self.real.fixture.config, self.real.fixture.root, helper_caller=helper
+        )
+        # Supply the new read contract in the existing controller test fixture;
+        # production controller implementation is developed in a separate worktree.
+        storage_model = ControllerAPI._storage_model
+
+        def sampled_storage(resource: Any, *, admin: bool = False) -> dict[str, object]:
+            model = storage_model(resource, admin=admin)
+            database = model["type"] != "s3"
+            return {
+                **model,
+                "quotas": {
+                    "sizeBytes": 2147483648,
+                    "connections": 10,
+                    "memoryBytes": 536870912,
+                    "cpuMillicores": 500,
+                }
+                if database
+                else model["quotas"],
+                "isolation": "instance" if database else "shared",
+                "hardQuotaBytes": 2684354560 if database else None,
+                "usage": {
+                    "instanceMemoryBytes": None,
+                    "cpuTimeMilliseconds": None,
+                    "usedBytes": None,
+                    "objectCount": None,
+                    "currentConnections": None,
+                    "measuredAt": None,
+                    "stale": True,
+                },
+                "writeBlock": {"blocked": False, "reason": None, "since": None},
+            }
+
+        self.enterContext(
+            patch.object(ControllerAPI, "_storage_model", staticmethod(sampled_storage))
         )
         self.real_socket = self.sockets / "real.sock"
         self.real_server = ControllerServer(

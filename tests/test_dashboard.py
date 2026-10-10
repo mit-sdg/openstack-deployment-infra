@@ -134,6 +134,48 @@ class SourceParsingTests(unittest.TestCase):
             deployment.repository and deployment.repository.startswith("https://github.com/")
         )
         self.assertFalse(hasattr(reads.storage[0], "provider_id"))
+        self.assertEqual(reads.storage[0].usage["usedBytes"], 1288490188)
+        self.assertEqual(reads.storage_host["cpuCount"], 4)
+        self.assertEqual(reads.storage_host["postgresConnections"], {"current": 42, "limit": 400})
+
+    def test_blocked_storage_appears_in_needs_attention_even_on_a_serving_app(self) -> None:
+        payload = fixture("healthy").admin_payload()
+        resource = next(
+            item for item in payload["storage"]["body"]["items"] if item["type"] == "mongo"
+        )
+        resource["writeBlock"] = {"blocked": True, "reason": "size_limit_exceeded", "since": now()}
+        snapshot = model.build_snapshot(evidence(admin_reads(payload)))
+        application = next(
+            item for item in snapshot["applications"] if item["id"] == resource["applicationId"]
+        )
+        self.assertEqual(application["status"]["key"], "serving")
+        issue = next(item for item in snapshot["issues"] if item["target"] == application["id"])
+        self.assertEqual((issue["scope"], issue["tone"]), ("application", "warning"))
+        self.assertIn("MongoDB", issue["summary"])
+        self.assertEqual(snapshot["summary"]["counts"]["applications"]["attention"], 1)
+
+    def test_storage_samples_stay_stale_when_collection_fails_and_host_fields_are_allowlisted(
+        self,
+    ) -> None:
+        payload = fixture("healthy").admin_payload()
+        host = payload["status"]["body"]["storageHost"]
+        host["providerSecret"] = "hidden"
+        resource = payload["storage"]["body"]["items"][0]
+        resource["usage"]["providerSecret"] = "hidden"
+        reads = admin_reads(payload)
+        self.assertNotIn("providerSecret", reads.storage_host)
+        self.assertNotIn("providerSecret", reads.storage[0].usage)
+        cached = model.build_snapshot(evidence(reads, admin_ok=False))
+        self.assertTrue(cached["storageHost"]["stale"])
+        self.assertTrue(
+            next(item for app in cached["applications"] for item in app["storage"])["usage"][
+                "stale"
+            ]
+        )
+        host["cpuCount"] = True
+        invalid = admin_reads(payload)
+        self.assertIsNone(invalid.storage_host)
+        self.assertIn("status", invalid.section_errors)
 
     def test_malformed_records_are_dropped_and_text_is_redacted(self) -> None:
         payload = fixture("mixed").admin_payload()
@@ -290,10 +332,10 @@ class AdminReaderTests(unittest.TestCase):
                 "/v1/admin/applications",
                 "/v1/admin/deployments",
                 "/v1/admin/storage",
+                "/v1/admin/status",
                 "/v1/admin/operations",
             },
         )
-        self.assertNotIn("/v1/admin/status", paths)
         self.assertNotIn("/v1/admin/hosts", paths)
         deployments = output["deployments"]["body"]
         self.assertEqual(deployments["items"], [{"page": 1}, {"page": 2}])

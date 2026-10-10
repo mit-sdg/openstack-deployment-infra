@@ -141,6 +141,39 @@ describe('class pages', () => {
     expect(await screen.findByRole('button', { name: 'Resume' })).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Needs attention' })).toBeVisible();
   });
+  it('accepts storage limits activity from the broker envelope', async () => {
+    const row = {
+      intentId: id,
+      applicationId: id,
+      applicationSlug: 'app',
+      ownerId: id,
+      ownerUsername: 'alice',
+      ownerDisplayName: 'Alice',
+      kind: 'storage_limits',
+      state: 'succeeded',
+      stage: 'settled',
+      cleanupState: 'not_required',
+      createdAt: null,
+      updatedAt: null,
+      statusObservedAt: null,
+      attention: 'none',
+      controllerErrorCode: null,
+      guidance: null,
+      operationId: id,
+      canResume: false,
+      requiresResubmit: false,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { ...empty, items: [row] } }),
+      }),
+    );
+    const response = await classApi.activity();
+    expect(response.items[0]).toEqual(row);
+  });
   it('rejects unknown roles and expanded metadata', async () => {
     for (const item of [
       { ...person, role: 'root' },

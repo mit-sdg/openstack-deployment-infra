@@ -75,6 +75,8 @@ _KIND_LABELS = {
     "storage.verify": "Storage verification",
     "storage.rotate": "Credential rotation",
     "storage.remove": "Storage removal",
+    "storage.limits.set": "Storage limits change",
+    "storage.postgres.repair": "PostgreSQL settings repair",
     "infra.image.set": "Image selection",
     "infra.image.prune.plan": "Image prune plan",
     "infra.image.prune.apply": "Image prune",
@@ -117,6 +119,7 @@ CONTROLLER_SECTIONS = (
     "applications",
     "deployments",
     "storage",
+    "status",
     "operations",
 )
 # Sections whose failure leaves product records stale.
@@ -563,8 +566,11 @@ def _deployment_model(record: DeploymentRecord) -> dict[str, Any]:
     }
 
 
-def _storage_model(record: StorageRecord) -> dict[str, Any]:
+def _storage_model(record: StorageRecord, now: str, *, stale: bool) -> dict[str, Any]:
     label, tone = _RESOURCE_STATES[record.lifecycle_state]
+    usage = dict(record.usage)
+    age = _age_seconds(usage.get("measuredAt"), now)
+    usage["stale"] = usage.get("stale") is True or stale or age is None or age > 900
     return {
         "id": record.resource_id,
         "type": record.resource_type,
@@ -573,6 +579,8 @@ def _storage_model(record: StorageRecord) -> dict[str, Any]:
         "label": record.display_label,
         "status": _status(record.lifecycle_state, label, tone),
         "quotas": dict(record.quotas),
+        "usage": usage,
+        "writeBlock": dict(record.write_block),
         "lastVerifiedAt": record.last_verified_at,
     }
 
@@ -653,7 +661,14 @@ def _applications(
                     "cpuMHz": application.cpu_mhz,
                     "memoryMiB": application.memory_mib,
                 },
-                "storage": [_storage_model(item) for item in resources],
+                "storage": [
+                    _storage_model(
+                        item,
+                        evidence.generated_at,
+                        stale=not evidence.admin.ok or "storage" in reads.section_errors,
+                    )
+                    for item in resources
+                ],
                 "createdAt": application.created_at,
                 "updatedAt": application.updated_at,
                 "deletedAt": application.deleted_at,
@@ -809,6 +824,18 @@ def _issues(
                     }
                 )
     for application in applications:
+        for resource in application["storage"]:
+            if resource["writeBlock"].get("blocked") is True:
+                issues.append(
+                    {
+                        "tone": "warning",
+                        "scope": "application",
+                        "target": application["id"],
+                        "subject": application["slug"],
+                        "summary": f"{resource['typeLabel']} writes paused",
+                        "detail": "Size limit exceeded. Reads and deletes remain available; deleting enough data restores writes automatically.",
+                    }
+                )
         status = application["status"]
         if status["tone"] not in {"critical", "warning"}:
             continue
@@ -964,7 +991,15 @@ def _summary(
             "applications": {
                 "total": len(visible),
                 "serving": sum(1 for item in visible if item["status"]["key"] == "serving"),
-                "attention": tone_counts["critical"] + tone_counts["warning"],
+                "attention": sum(
+                    1
+                    for item in visible
+                    if item["status"]["tone"] in {"critical", "warning"}
+                    or any(
+                        resource["writeBlock"].get("blocked") is True
+                        for resource in item["storage"]
+                    )
+                ),
                 "changing": tone_counts["info"],
                 "stopped": sum(1 for item in visible if item["status"]["key"] == "stopped"),
             },
@@ -1050,6 +1085,22 @@ def _platform(evidence: Evidence) -> dict[str, Any]:
     }
 
 
+def _host_model(evidence: Evidence) -> dict[str, Any] | None:
+    reads = evidence.admin.value
+    if reads is None or reads.storage_host is None:
+        return None
+    host = dict(reads.storage_host)
+    age = _age_seconds(host.get("measuredAt"), evidence.generated_at)
+    host["stale"] = (
+        host.get("stale") is True
+        or age is None
+        or age > 900
+        or not evidence.admin.ok
+        or "status" in reads.section_errors
+    )
+    return host
+
+
 def build_snapshot(evidence: Evidence) -> dict[str, Any]:
     """Project one complete, JSON-serializable dashboard snapshot."""
     reads = evidence.admin.value
@@ -1096,6 +1147,7 @@ def build_snapshot(evidence: Evidence) -> dict[str, Any]:
         "summary": _summary(evidence, roles, applications, operations, issues, checks),
         "issues": issues,
         "roles": roles,
+        "storageHost": _host_model(evidence),
         "applications": applications,
         "operations": [*active, *recent],
         "operationsTruncated": reads is not None and reads.operations_truncated,
