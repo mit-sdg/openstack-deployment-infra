@@ -14,6 +14,7 @@ GARAGE_VERIFY_SCRIPT=${GARAGE_VERIFY_SCRIPT:-$SCRIPT_DIR/verify_garage_backup.py
 SERVICE_CHECK_PYTHON=${SERVICE_CHECK_PYTHON:-$PLATFORM_ROOT/tools/service-check-venv/bin/python}
 EMIT_SCRIPT=${EMIT_SCRIPT:-$PLATFORM_ROOT/persistent/platform/infra/backup/emit_logical_backup.sh}
 RETENTION_DAYS=${RETENTION_DAYS:-14}
+RETENTION_MINIMUM_KEPT=${RETENTION_MINIMUM_KEPT:-3}
 DATABASE_BACKUP_COMMAND=${DATABASE_BACKUP_COMMAND:-openstack-platform-storage-backup}
 
 umask 077
@@ -98,8 +99,15 @@ finally: os.close(fd)
 PYPARENT
 trap - EXIT
 write_status succeeded
-find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '20??????T??????Z' \
-  -mtime "+$RETENTION_DAYS" -exec rm -rf -- {} +
+# Prune by age, but never the newest RETENTION_MINIMUM_KEPT sets: like the
+# controller and portal backups, a long backup outage keeps a restore point.
+mapfile -t sets < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d \
+  -name '20??????T??????Z' -printf '%f\n' | sort)
+if (( ${#sets[@]} > RETENTION_MINIMUM_KEPT )); then
+  for name in "${sets[@]:0:${#sets[@]}-RETENTION_MINIMUM_KEPT}"; do
+    find "$BACKUP_ROOT/$name" -maxdepth 0 -mtime "+$RETENTION_DAYS" -exec rm -rf -- {} +
+  done
+fi
 if [[ -d $BACKUP_ROOT/migration-checkpoints ]]; then
   find "$BACKUP_ROOT/migration-checkpoints" -mindepth 2 -maxdepth 2 -type f -name '*.age' \
     -mtime "+$RETENTION_DAYS" -delete

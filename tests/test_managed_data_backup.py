@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -101,6 +102,17 @@ fi
         result = self.run_script("restore_managed_data.sh", "--yes", str(evidence))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("managed-data-restore=verified", result.stdout)
+
+    def test_pruning_removes_old_sets_but_keeps_the_newest_three(self) -> None:
+        old = time.time() - 30 * 86400
+        names = [f"2026090{day}T000000Z" for day in range(1, 5)]
+        for name in names:
+            (self.backups / name).mkdir(parents=True)
+            os.utime(self.backups / name, (old, old))
+        self.backup()
+        kept = sorted(path.name for path in self.backups.glob("20*T*Z"))
+        self.assertEqual(len(kept), 3)
+        self.assertEqual(kept[:2], names[2:])
 
     def test_legacy_set_checksums_images_but_skips_import_and_rejects_missing_data(self) -> None:
         evidence = self.backup()
