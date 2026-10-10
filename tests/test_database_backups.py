@@ -58,6 +58,7 @@ class DatabaseBackupsTests(unittest.TestCase):
             command=self.command,
             units=self.root / (name + "-units"),
             mongo_connect=mock.MagicMock(),
+            postgres_connect=mock.MagicMock(),
         )
 
     def test_transition_bundle_restores_each_database_into_fresh_instance_and_replays(self):

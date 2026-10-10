@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from pymongo import MongoClient
 from pymongo.errors import OperationFailure, PyMongoError
 
@@ -55,6 +56,10 @@ PORT_MIN = 30000
 PORT_MAX = 30999
 POSTGRES_SOCKET_DIRECTORY = "/var/run/postgresql"
 Run = Callable[..., Any]
+
+
+class InstanceNotReadyError(RuntimeError):
+    """Applied limits remain reserved until an authenticated readiness replay."""
 
 
 _COPY_CANCEL: ContextVar[Callable[[], bool] | None] = ContextVar("copy_cancel", default=None)
@@ -242,6 +247,7 @@ class Manager:
         units: Path = Path("/run/systemd/system"),
         memory_budget: int = TRANSITION_MEMORY_BUDGET,
         mongo_connect: Callable[..., Any] = MongoClient,
+        postgres_connect: Callable[..., Any] = psycopg.connect,
     ):
         self.platform = platform
         self.namespace = str(platform["namespace"])
@@ -250,6 +256,7 @@ class Manager:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.command = command
         self.mongo_connect = mongo_connect
+        self.postgres_connect = postgres_connect
         self.units = units
         self.memory_budget = memory_budget
         self.copies: dict[str, tuple[threading.Event, threading.Event, Callable[[], bool]]] = {}
@@ -541,6 +548,8 @@ class Manager:
             )
         )
         if config.get("desiredRunning", True):
+            config["readinessPending"] = True
+            self.save(config)  # A lost restart/reply must replay its readiness gate.
             self.command(("systemctl", "restart" if restart else "start", self.unit(identifier)))
 
     def firewall(self) -> None:
@@ -752,6 +761,17 @@ class Manager:
                 config = self.read(identifier)
                 if config["type"] == "mongo":
                     self.bootstrap_mongo(config)
+            config = self.read(identifier)
+            if (
+                args.get("action") in {"create", "restore-create", "start", "limits"}
+                and config.get("desiredRunning", True)
+                and config.get("readinessPending")
+            ):
+                self.wait_ready(config, disconnected=disconnected)
+                with self.locked():
+                    config = self.read(identifier)
+                    config["readinessPending"] = False
+                    self.save(config)
             return result
 
     def _dispatch(self, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -960,7 +980,11 @@ class Manager:
                     if set(args) != {"action", "instanceId"}:
                         raise ValidationError("instance lifecycle fields are invalid")
                     config["desiredRunning"] = action == "start"
+                    if action == "start":
+                        config["readinessPending"] = True
                     self.save(config)
+                    if action == "start":
+                        self.firewall()
                     self.command(("systemctl", action, self.unit(identifier)))
                 elif action == "credentials":
                     if set(args) != {"action", "instanceId"}:
@@ -1123,6 +1147,66 @@ class Manager:
             self.save(config)
             self.firewall()
 
+    def wait_ready(
+        self, config: dict[str, Any], *, disconnected: Callable[[], bool] = lambda: False
+    ) -> None:
+        """Probe a new authenticated TLS connection after final firewall assignment.
+
+        systemd's simple unit becomes active before the DB accepts connections.
+        Wait outside the global manager lock so other applications keep serving.
+        """
+        password = (self.directory(config["instanceId"]) / "admin-password").read_text()
+        host = self.platform["internalNames"]["storage"]
+        ca = f"/etc/{self.namespace}/pki/internal-ca.pem"
+        deadline = time.monotonic() + 60
+        while True:
+            if disconnected():
+                raise InstanceNotReadyError("instance readiness caller disconnected")
+            try:
+                if config["type"] == "postgres":
+                    with self.postgres_connect(
+                        host=host,
+                        port=config["port"],
+                        dbname="platform",
+                        user="platform_admin",
+                        password=password,
+                        sslmode="verify-full",
+                        sslrootcert=ca,
+                        connect_timeout=2,
+                        options="-c statement_timeout=2000",
+                        autocommit=True,
+                    ) as connection:
+                        connection.execute("SELECT 1").fetchone()
+                else:
+                    with self.mongo_connect(
+                        host,
+                        config["port"],
+                        username="platform_admin",
+                        password=password,
+                        authSource="admin",
+                        tls=True,
+                        tlsCAFile=ca,
+                        directConnection=True,
+                        maxPoolSize=1,
+                        serverSelectionTimeoutMS=2000,
+                        connectTimeoutMS=1000,
+                        socketTimeoutMS=2000,
+                    ) as client:
+                        client.admin.command("ping", maxTimeMS=2000)
+                return
+            except (psycopg.Error, PyMongoError, OSError) as error:
+                if time.monotonic() >= deadline:
+                    logging.warning(
+                        "instance readiness failed instance=%s engine=%s reason=%s",
+                        config["instanceId"],
+                        config["type"],
+                        type(error).__name__,
+                    )
+                    raise InstanceNotReadyError(
+                        "instance database did not become reachable"
+                    ) from None
+                time.sleep(0.1)
+
     def launch(self, identifier: str) -> None:
         config = self.read(identifier)
         directory = self.directory(identifier)
@@ -1245,7 +1329,9 @@ def http_handler(manager: Manager, token: str) -> type[BaseHTTPRequestHandler]:
             except Exception as error:
                 result = {
                     "error": {
-                        "code": "INSTANCE_OPERATION_FAILED",
+                        "code": "INSTANCE_NOT_READY"
+                        if isinstance(error, InstanceNotReadyError)
+                        else "INSTANCE_OPERATION_FAILED",
                         "summary": "instance operation requires reconciliation",
                     }
                 }

@@ -39,6 +39,7 @@ class InstanceClient:
                 else 120
                 if action
                 in {
+                    "start",
                     "create",
                     "restore-create",
                     "limits",
@@ -60,6 +61,7 @@ class InstanceClient:
                 "DISK_BUDGET_EXCEEDED",
                 "INVALID_INSTANCE_REQUEST",
                 "INSTANCE_OPERATION_FAILED",
+                "INSTANCE_NOT_READY",
                 "SIZE_BELOW_USAGE",
                 "MIGRATION_ALREADY_PUBLISHED",
                 "INSTANCE_COPY_IN_PROGRESS",

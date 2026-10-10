@@ -118,6 +118,18 @@ let
     from openstack_platform.helper import storage
     ca="/etc/${namespace}/pki/internal-ca.pem"
     host="${platform.internalNames.storage}"
+    def diagnose(exception_type, exception, traceback):
+        import faulthandler
+        print("storage probe failed uid="+str(__import__("os").geteuid())+" host="+host,file=sys.stderr,flush=True)
+        faulthandler.dump_traceback(file=sys.stderr,all_threads=True)
+        subprocess.run(["nft","list","table","inet","${namespace}".replace("-","_")+"_instances"],check=False)
+        subprocess.run(["ss","-tnp"],check=False)
+        try:
+            subprocess.run(["getent","hosts",host],check=False,timeout=5)
+        except subprocess.TimeoutExpired:
+            print("storage probe DNS lookup timed out",file=sys.stderr,flush=True)
+        sys.__excepthook__(exception_type,exception,traceback)
+    sys.excepthook=diagnose
     import urllib.parse
     class Heartbeats(ServerHeartbeatListener):
         def started(self, event):
@@ -125,6 +137,10 @@ let
         def succeeded(self, event):
             pass
         def failed(self, event):
+            # Closing a successful client cancels its streaming monitor; this
+            # event does not indicate a failed application connection.
+            if type(event.reply).__name__ == "_OperationCancelled":
+                return
             print("Mongo heartbeat failed endpoint="+repr(event.connection_id)+" duration="+str(event.duration)+" reason="+str(event.reply)[:1000],file=sys.stderr,flush=True)
     def connect_app_mongo(*, uri):
         parsed=urllib.parse.urlsplit(uri)
@@ -179,6 +195,11 @@ let
         assert subprocess.run(["fallocate","-l","4G",probe],capture_output=True).returncode != 0
         Path(probe).unlink(missing_ok=True)
         call("start",ident)
+        # The manager response now guarantees a new authenticated TLS session,
+        # rather than relying on systemd's simple-unit active state.
+        if ident == ids[1]:
+            with MongoClient(host,credentials[1]["port"],username="platform_admin",password=credentials[1]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000,connectTimeoutMS=1000) as restarted:
+                assert restarted.admin.command("ping")["ok"] == 1
     # Driver server-selection retries provide a bounded startup wait.
     from openstack_platform.helper.instances import connect_ready
     pg=connect_ready(lambda: psycopg.connect(host=host,port=credentials[0]["port"],dbname="platform",user="platform_admin",password=credentials[0]["adminPassword"],sslmode="verify-full",sslrootcert=ca,connect_timeout=2,autocommit=True))
@@ -192,15 +213,7 @@ let
     mongo=MongoClient(host,credentials[1]["port"],username="platform_admin",password=credentials[1]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000)
     connect_ready(lambda: mongo.admin.command("ping"))
     scoped=storage.mongo_create(mongo,application_id=owner,host=host,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()))
-    try:
-        storage.mongo_verify(connect_app_mongo,scoped,host=host)
-    except Exception:
-        import faulthandler
-        print("Mongo verify failed uid="+str(os.geteuid())+" host="+host+" port="+str(credentials[1]["port"])+" addresses="+repr(socket.getaddrinfo(host,credentials[1]["port"])),file=sys.stderr,flush=True)
-        faulthandler.dump_traceback(file=sys.stderr,all_threads=True)
-        subprocess.run(["nft","list","table","inet","${namespace}".replace("-","_")+"_instances"],check=False)
-        subprocess.run(["ss","-tn"],check=False)
-        raise
+    storage.mongo_verify(connect_app_mongo,scoped,host=host)
     options=mongo.admin.command("getCmdLineOpts")["parsed"]
     assert options["net"]["maxIncomingConnections"] == 20
     assert options["storage"]["wiredTiger"]["engineConfig"]["cacheSizeGB"] == 0.25

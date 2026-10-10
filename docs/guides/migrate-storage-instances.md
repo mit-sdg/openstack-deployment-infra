@@ -22,6 +22,12 @@ native backups/restores, rotation with existing data, block/unblock permissions,
 authenticated migration copy/abort/replay, limits, collector caching, privileged
 repair and deletion. It adapts TLS and host lifecycle for local execution;
 the storage VM test additionally verifies TLS, systemd, cgroups, quotas and firewall.
+Instance create/start and running-instance limit changes return after a new
+authenticated TLS connection succeeds through the final firewall rules. A pending
+readiness checkpoint survives an interrupted reply; retrying unchanged limits
+finishes the probe without restarting again. `INSTANCE_NOT_READY` is a 503 response
+and retains the applied reservations for replay. The manager probes outside its
+global lock, so another application's operations can continue during startup.
 
 ## Prepare capacity and releases
 

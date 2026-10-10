@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
@@ -24,6 +25,7 @@ from openstack_platform.controller.storage_instances import InstanceMigrationSer
 from openstack_platform.helper.nomad import SecretItems, VariableSnapshot, WorkloadVariables
 from openstack_platform.instance_contract import GIB, MIB, CapacityError
 from openstack_platform.storage_instances import (
+    InstanceNotReadyError,
     Manager,
     database_command,
     http_handler,
@@ -76,6 +78,7 @@ class InstanceManagerTests(unittest.TestCase):
             units=self.root / "units",
             memory_budget=50 * GIB,
             mongo_connect=mock.MagicMock(),
+            postgres_connect=mock.MagicMock(),
         )
         self.geometry = mock.patch(
             "openstack_platform.storage_instances.os.statvfs",
@@ -110,6 +113,82 @@ class InstanceManagerTests(unittest.TestCase):
         self.assertEqual(reader.recv(128), b"next request")
         writer.close()
         self.assertTrue(peer_disconnected(reader))
+
+    def test_start_and_limit_replay_wait_for_final_rules_without_global_lock(self):
+        identifier, _ = self.create("mongo")
+        self.manager.dispatch({"action": "stop", "instanceId": identifier})
+        attempts = []
+        unavailable = True
+
+        def connect(*args, **kwargs):
+            # The provider boundary is probed only after firewall/start, with
+            # strict DNS identity and while another app can take the host lock.
+            with (self.manager.root / "manager.lock").open("a+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertTrue(self.manager.read(identifier)["adminInitialized"])
+            latest = next(
+                values["input"].decode()
+                for argv, values in reversed(self.calls)
+                if argv[0] == "nft"
+            )
+            self.assertNotIn("meta skuid != 0", latest)
+            self.assertEqual(args, ("storage.example.internal", 30000))
+            self.assertNotIn("tlsAllowInvalidHostnames", kwargs)
+            attempts.append(args)
+            if unavailable:
+                raise ConnectionFailure("TLS handshake still unavailable")
+            return mock.MagicMock()
+
+        self.manager.mongo_connect = connect
+        with mock.patch("openstack_platform.storage_instances.time.monotonic", side_effect=[0, 61]):
+            with self.assertRaises(InstanceNotReadyError):
+                self.manager.dispatch({"action": "start", "instanceId": identifier})
+        self.assertTrue(self.manager.read(identifier)["readinessPending"])
+        unavailable = False
+        self.manager.dispatch({"action": "start", "instanceId": identifier})
+        self.assertFalse(self.manager.read(identifier)["readinessPending"])
+        limit_args = {
+            "action": "limits",
+            "instanceId": identifier,
+            "quotas": quotas(connections=20),
+            "reservations": {"databaseBytes": 5 * GIB, "garageBytes": 0},
+        }
+        unavailable = True
+        with mock.patch("openstack_platform.storage_instances.time.monotonic", side_effect=[0, 61]):
+            with self.assertRaises(InstanceNotReadyError):
+                self.manager.dispatch(limit_args)
+        self.assertEqual(self.manager.read(identifier)["acceptedQuotas"]["connections"], 20)
+        previous_calls = len(self.calls)
+        unavailable = False
+        # No new assignment/restart is needed, but the persisted gate is replayed.
+        self.manager.dispatch(limit_args)
+        self.assertFalse(
+            any(argv[:2] == ("systemctl", "restart") for argv, _ in self.calls[previous_calls:])
+        )
+        self.assertFalse(self.manager.read(identifier)["readinessPending"])
+        self.assertEqual(len(attempts), 4)
+
+    def test_pending_readiness_does_not_prevent_abort_or_network_revocation(self):
+        identifier, _ = self.create("mongo")
+        config = self.manager.read(identifier)
+        config["readinessPending"] = True
+        self.manager.save(config)
+        self.manager.mongo_connect = mock.Mock(side_effect=AssertionError("database unavailable"))
+        self.manager.dispatch(
+            {
+                "action": "allow",
+                "instanceId": identifier,
+                "applicationId": APP_ID,
+                "addresses": [],
+                "mode": "replace",
+            }
+        )
+        self.manager.dispatch(
+            {"action": "abort-copy", "instanceId": identifier, "operationId": str(uuid.uuid4())}
+        )
+        self.assertEqual(self.manager.read(identifier)["allowIps"], [])
+        self.assertEqual(self.manager.read(identifier)["migrationState"], "aborted")
+        self.manager.mongo_connect.assert_not_called()
 
     def test_database_tools_have_no_prompt_and_bounded_concurrent_output(self):
         program = self.root / "pg_restore"
@@ -220,7 +299,7 @@ class InstanceManagerTests(unittest.TestCase):
         )
 
     def test_mongo_bootstrap_uses_allocated_port_and_restart_inherits_unit_caps(self):
-        clients = [mock.MagicMock() for _ in range(4)]
+        clients = [mock.MagicMock() for _ in range(5)]
         for client in clients:
             client.__enter__.return_value = client
         clients[0].admin.command.side_effect = OperationFailure("authentication failed", code=18)
@@ -251,7 +330,7 @@ class InstanceManagerTests(unittest.TestCase):
         self.assertTrue(config["adminInitialized"])
         self.assertEqual(bootstrap_gates, [True, False])
         password = (self.manager.directory(identifier) / "admin-password").read_text()
-        for call in factory.call_args_list:
+        for call in factory.call_args_list[:-1]:
             self.assertEqual(call.kwargs["host"], "127.0.0.1")
             self.assertEqual(call.kwargs["port"], result["port"])
             self.assertTrue(call.kwargs["tls"])
@@ -259,7 +338,11 @@ class InstanceManagerTests(unittest.TestCase):
         clients[1].admin.command.assert_called_once_with(
             "createUser", "platform_admin", pwd=password, roles=[{"role": "root", "db": "admin"}]
         )
-        clients[-1].admin.command.assert_called_once_with("ping")
+        self.assertEqual(
+            factory.call_args_list[-1].args, ("storage.example.internal", result["port"])
+        )
+        self.assertNotIn("tlsAllowInvalidHostnames", factory.call_args_list[-1].kwargs)
+        clients[-1].admin.command.assert_called_once_with("ping", maxTimeMS=2000)
         self.assertFalse(any(argv[:2] == ("podman", "exec") for argv, _ in self.calls))
         with mock.patch(
             "openstack_platform.storage_instances.os.execvp", side_effect=SystemExit
@@ -275,6 +358,8 @@ class InstanceManagerTests(unittest.TestCase):
         )
         self.calls.clear()
         calls = factory.call_count
+        factory.side_effect = None
+        factory.return_value = clients[-1]
         self.manager.dispatch(
             {
                 "action": "create",
@@ -287,7 +372,7 @@ class InstanceManagerTests(unittest.TestCase):
             }
         )
         self.assertFalse(any(argv[:2] == ("podman", "exec") for argv, _ in self.calls))
-        self.assertEqual(factory.call_count, calls)
+        self.assertEqual(factory.call_count, calls + 1)  # Ready again; bootstrap stays sealed.
         self.assertFalse(
             any(argv[0] == "xfs_quota" and "project -s" in argv[3] for argv, _ in self.calls)
         )
