@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import sqlite3
 import time
@@ -350,7 +349,7 @@ class StorageLimitsService:
         with db.transaction(self.connection):
             self.connection.execute(
                 "UPDATE deployment_attempts SET nomad_job=?,nomad_job_sha256=?,nomad_version=? WHERE deployment_id=?",
-                (job, hashlib.sha256(job.encode()).hexdigest(), version, deployment.deployment_id),
+                (job, app.nomad_candidate_identity(job)[0], version, deployment.deployment_id),
             )
 
     def repair_postgres(self, *, request_id: str) -> None:
