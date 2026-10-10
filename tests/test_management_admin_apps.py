@@ -327,6 +327,71 @@ class AdminApplicationTests(ManagementCase):
         self.assertTrue(completed["safeError"])
         self.assertEqual(self.fixture.resources[resource["resourceId"]]["quotas"], current)
 
+    def test_storage_limits_accepts_historical_expected_connections_but_bounds_new_targets(
+        self,
+    ) -> None:
+        self.complete(self.call("POST", self.prefix + "/storage", {"type": "postgres"}, "admin"))
+        resource = self.call("GET", self.prefix + "/storage", owner="admin").body["data"]["items"][
+            0
+        ]
+        historical = {**resource["quotas"], "connections": 400}
+        self.fixture.resources[resource["resourceId"]]["quotas"] = historical
+        target = {**historical, "connections": 100}
+        response = self.call(
+            "PUT",
+            self.prefix + f"/storage/{resource['resourceId']}/limits",
+            {"quotas": target, "expectedQuotas": historical},
+            "admin",
+        )
+        self.assertEqual(self.complete(response)["state"], "succeeded")
+        self.assertEqual(self.fixture.resources[resource["resourceId"]]["quotas"], target)
+
+    def test_storage_limits_manager_refusal_keeps_diagnostic_and_retries_same_key(self) -> None:
+        self.complete(self.call("POST", self.prefix + "/storage", {"type": "mongo"}, "admin"))
+        resource = self.call("GET", self.prefix + "/storage", owner="admin").body["data"]["items"][
+            0
+        ]
+        path = self.prefix + f"/storage/{resource['resourceId']}/limits"
+        original = self.broker.client.request
+        keys = []
+
+        def unavailable(method, target, body=None, key=None):
+            if method == "PUT" and target.endswith("/limits"):
+                keys.append(key)
+                return 503, {
+                    "error": {
+                        "code": "INSTANCE_MANAGER_UNAVAILABLE",
+                        "summary": "unsafe-provider-detail",
+                        "retryable": True,
+                    }
+                }
+            return original(method, target, body, key)
+
+        with patch.object(self.broker.client, "request", side_effect=unavailable):
+            response = self.call(
+                "PUT",
+                path,
+                {
+                    "quotas": {**resource["quotas"], "sizeBytes": 4294967296},
+                    "expectedQuotas": resource["quotas"],
+                },
+                "admin",
+            )
+        intent = response.body["data"]
+        self.assertEqual(intent["state"], "unknown")
+        self.assertEqual(intent["controllerErrorCode"], "INSTANCE_MANAGER_UNAVAILABLE")
+        self.assertNotIn("unsafe-provider-detail", canonical(intent))
+        owner = self.call("GET", f"/v1/intents/{intent['intentId']}", owner="alice").body["data"]
+        self.assertNotIn("controllerErrorCode", owner)
+        self.broker.journal.dispatch(intent["intentId"])
+        self.assertEqual(self.complete(response)["state"], "succeeded")
+        with self.broker.database.connect() as db:
+            row = db.execute(
+                "SELECT controller_key FROM intents WHERE id=?", (intent["intentId"],)
+            ).fetchone()
+        self.assertEqual(keys, [row[0]])
+        self.assertEqual(self.fixture.operations[row[0]]["status"], "succeeded")
+
     def test_only_admins_manage_default_builder_and_its_intents(self) -> None:
         self.staff()
         path = "/v1/settings/default-builder-size"

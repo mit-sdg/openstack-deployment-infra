@@ -13,8 +13,16 @@ import {
 } from '@openstack-platform/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRef, useState } from 'react';
-import { api, resourceApi, type Intent, type StorageQuotas, type StorageResource } from '../api';
+import {
+  ApiError,
+  api,
+  resourceApi,
+  type Intent,
+  type StorageQuotas,
+  type StorageResource,
+} from '../api';
 import { Status } from './Status';
+import { storageLimitFailure } from './storageLimitsErrors';
 
 const numbers = new Intl.NumberFormat('en-US');
 const bytes = (value: number) =>
@@ -134,8 +142,8 @@ export function StorageUsage({ resource }: { resource: StorageResource }) {
       </Grid>
       {resource.type !== 's3' && resource.isolation === 'shared' && (
         <Hint>
-          This database is awaiting its move to a separate instance. Ask an admin before changing
-          memory or CPU limits.
+          Memory and CPU limits apply when this database moves to its own instance. Ask an operator
+          to move it before increasing its connection limit.
         </Hint>
       )}
       <div className="ui-text-subtle ui-text-sm">
@@ -203,7 +211,13 @@ export function StorageLimitsForm({
         pending.current.key,
       );
     },
+    onMutate: () => setIntent(null),
+    onError: (error) => {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500)
+        pending.current = null;
+    },
     onSuccess: (result) => {
+      if (['succeeded', 'failed'].includes(result.state)) pending.current = null;
       setIntent(result);
       void client.invalidateQueries({ queryKey: ['storage', id] });
       void client.invalidateQueries({ queryKey: ['intents'] });
@@ -225,6 +239,18 @@ export function StorageLimitsForm({
   });
   const result = observation.data ?? intent;
   const busy = mutation.isPending || (!!result && !['succeeded', 'failed'].includes(result.state));
+  const refusalCode =
+    mutation.error instanceof ApiError
+      ? mutation.error.code
+      : result && ['failed', 'blocked', 'unknown'].includes(result.state)
+        ? result.controllerErrorCode
+        : null;
+  const refusal = storageLimitFailure(
+    refusalCode,
+    resource,
+    result?.state === 'unknown' && !mutation.error,
+  );
+  const failure = refusal ?? mutation.error ?? observation.error ?? result?.safeError;
   const prefix = `limits-${resource.resourceId}`;
   return (
     <form
@@ -345,7 +371,7 @@ export function StorageLimitsForm({
                   max={8192}
                   step={1}
                   value={memory}
-                  disabled={busy || resource.isolation === 'shared'}
+                  disabled={busy}
                   onChange={(event) => setMemory(event.target.value)}
                 />
               </Field>
@@ -356,7 +382,7 @@ export function StorageLimitsForm({
                   max={4}
                   step={0.001}
                   value={cpu}
-                  disabled={busy || resource.isolation === 'shared'}
+                  disabled={busy}
                   onChange={(event) => setCpu(event.target.value)}
                 />
               </Field>
@@ -367,13 +393,10 @@ export function StorageLimitsForm({
           1 GB = 1,024 MB. Allowed size: {resource.type === 's3' ? '1 MB' : '1 GB'} to 500 GB.{' '}
           {resource.type === 'postgres' && 'The size target is not enforced.'}
         </Hint>
-        {(!!mutation.error || !!observation.error) && (
-          <ErrorAlert error={mutation.error ?? observation.error} />
-        )}
+        <ErrorAlert error={failure} />
         {result && (
           <>
             <Status state={result.state} />
-            {result.safeError && <InlineStatus tone="danger">{result.safeError}</InlineStatus>}
             {result.state === 'succeeded' && (
               <InlineStatus tone="success">Limits saved.</InlineStatus>
             )}
