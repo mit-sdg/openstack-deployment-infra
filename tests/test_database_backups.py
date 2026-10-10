@@ -363,6 +363,24 @@ class DatabaseBackupsTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), source.read_bytes().split(b"\n", 1)[1])
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)
 
+    def test_database_is_created_by_the_restore_root_and_owned_by_its_owner(self):
+        # pg_dump --use-set-session-authorization creates the database as its
+        # NOLOGIN owner, which a fresh instance refuses (real PostgreSQL 17).
+        source = self.root / "dump.sql"
+        source.write_bytes(
+            b"SET SESSION AUTHORIZATION 'o_x';\nDROP DATABASE IF EXISTS p_x;\n"
+            b"CREATE DATABASE p_x WITH TEMPLATE = template0;\n\\connect p_x\n"
+            b"SET SESSION AUTHORIZATION 'o_x';\nCREATE TABLE t (a int);\n"
+        )
+        target = self.root / "restore.sql"
+        backup.filter_postgres(source, target)
+        self.assertEqual(
+            target.read_bytes(),
+            b"DROP DATABASE IF EXISTS p_x;\nCREATE DATABASE p_x WITH TEMPLATE = template0;\n"
+            b'ALTER DATABASE "p_x" OWNER TO "o_x";\n\\connect p_x\n'
+            b"SET SESSION AUTHORIZATION 'o_x';\nCREATE TABLE t (a int);\n",
+        )
+
     def test_native_restore_replaces_target_data_and_reapplies_current_limits(self):
         database = "p_" + "a" * 20
         login = "u_" + "a" * 20 + "_abcdef12"

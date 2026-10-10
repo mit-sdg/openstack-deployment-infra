@@ -37,6 +37,8 @@ DATABASE = re.compile(r"p_[a-f0-9]{20}")
 ROOT_ROLE = re.compile(
     rb'^(?:DROP ROLE IF EXISTS|CREATE ROLE|ALTER ROLE) "?platform_admin"?(?:[ ;])'
 )
+SESSION_AUTHORIZATION = re.compile(rb"^SET SESSION AUTHORIZATION '([a-z0-9_]+)';$")
+CREATE_DATABASE = re.compile(rb'^CREATE DATABASE "?([a-z0-9_]+)"? WITH ')
 
 
 def timestamp() -> str:
@@ -339,13 +341,27 @@ def filter_postgres_stream(incoming: BinaryIO, outgoing: BinaryIO) -> None:
     """Preserve the replacement root; copy data without buffering giant rows."""
     import shutil
 
+    owner: bytes | None = None
     for line in incoming:
         if line.startswith(b"\\connect "):
             outgoing.write(line)
             shutil.copyfileobj(incoming, outgoing, 1024**2)
             return
-        if not ROOT_ROLE.match(line):
-            outgoing.write(line)
+        # pg_dump --use-set-session-authorization creates the database as its
+        # NOLOGIN owner, which cannot CREATE DATABASE. Create it as the restore
+        # root instead, then hand ownership back explicitly.
+        session = SESSION_AUTHORIZATION.match(line)
+        if session:
+            owner = session.group(1)
+            continue
+        if ROOT_ROLE.match(line):
+            continue
+        outgoing.write(line)
+        database = CREATE_DATABASE.match(line)
+        if database and owner is not None:
+            outgoing.write(
+                b'ALTER DATABASE "' + database.group(1) + b'" OWNER TO "' + owner + b'";\n'
+            )
 
 
 def filter_postgres(source: Path, target: Path) -> None:
