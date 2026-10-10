@@ -29,6 +29,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from pymongo import MongoClient
+from pymongo.errors import OperationFailure, PyMongoError
+
 from . import durable
 from .instance_contract import (
     CONNECTION_BUDGET,
@@ -197,6 +200,7 @@ class Manager:
         command: Run = run,
         units: Path = Path("/run/systemd/system"),
         memory_budget: int = TRANSITION_MEMORY_BUDGET,
+        mongo_connect: Callable[..., Any] = MongoClient,
     ):
         self.platform = platform
         self.namespace = str(platform["namespace"])
@@ -204,6 +208,7 @@ class Manager:
         self.root = self.data / "instances"
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.command = command
+        self.mongo_connect = mongo_connect
         self.units = units
         self.memory_budget = memory_budget
         self.copies: dict[str, tuple[threading.Event, threading.Event, Callable[[], bool]]] = {}
@@ -563,7 +568,8 @@ class Manager:
         # Neither process shutdown nor recursive deletion holds the global lock.
         # The per-instance lock excludes same-resource mutations throughout.
         self.command(("systemctl", "disable", "--now", self.unit(identifier)))
-        self.command(("podman", "rm", "--force", "--ignore", f"{self.namespace}-db-{identifier}"))
+        # ExecStopPost removes the container in the database unit, outside this
+        # manager's strict filesystem namespace. Explicit deletion owns data.
         with self.locked():
             if config is not None:
                 durable.atomic_write(
@@ -1009,51 +1015,59 @@ class Manager:
         if config.get("adminInitialized"):
             return
         password = (self.directory(config["instanceId"]) / "admin-password").read_text()
-        # stdin keeps the password out of argv, logs and container metadata.
-        script = (
-            "const a=db.getSiblingDB('admin'); const p=" + json.dumps(password) + ";"
-            "let ok=false; try {ok=!!a.auth('platform_admin',p);} catch(e) {}"
-            "if(!ok) a.createUser({user:'platform_admin',pwd:p,roles:[{role:'root',db:'admin'}]});"
-            "if(!a.auth('platform_admin',p)) throw Error('admin authentication failed');"
+        options = dict(
+            host="127.0.0.1",
+            port=config["port"],
+            tls=True,
+            tlsCAFile=f"/etc/{self.namespace}/pki/internal-ca.pem",
+            # The leaf names the inventory host, not localhost. Only this fixed
+            # loopback bootstrap relaxes hostname matching; CA validation stays.
+            tlsAllowInvalidHostnames=True,
+            serverSelectionTimeoutMS=1000,
+            connectTimeoutMS=1000,
+            socketTimeoutMS=5000,
         )
+
+        def authenticate() -> bool:
+            try:
+                with self.mongo_connect(
+                    **options, username="platform_admin", password=password, authSource="admin"
+                ) as client:
+                    client.admin.command("ping")
+                return True
+            except OperationFailure as error:
+                if error.code != 18:
+                    raise
+                return False
+
         deadline = time.monotonic() + 60
         logged_failure = False
         while True:
             try:
-                self.command(
-                    (
-                        "podman",
-                        "exec",
-                        "--user",
-                        "0:0",
-                        "--env",
-                        "HOME=/tmp",
-                        "--interactive",
-                        f"{self.namespace}-db-{config['instanceId']}",
-                        "mongosh",
-                        "--quiet",
-                        "--norc",
-                        "--host",
-                        "127.0.0.1",
-                        "--port",
-                        str(config["port"]),
-                        "--tls",
-                        "--tlsAllowInvalidHostnames",
-                        "--tlsCAFile",
-                        f"/run/{self.namespace}-pki/internal-ca.pem",
-                    ),
-                    input=script.encode(),
-                    timeout=10,
-                )
+                if not authenticate():
+                    # The root manager's loopback socket passes the bootstrap
+                    # nft rule. No password enters argv, scripts or a shell.
+                    with self.mongo_connect(**options) as client:
+                        try:
+                            client.admin.command(
+                                "createUser",
+                                "platform_admin",
+                                pwd=password,
+                                roles=[{"role": "root", "db": "admin"}],
+                            )
+                        except OperationFailure as error:
+                            if error.code != 51003:  # Replay after a lost create reply.
+                                raise
+                    if not authenticate():
+                        raise OperationFailure("bootstrap authentication failed", code=18)
                 break
-            except subprocess.CalledProcessError as error:
+            except PyMongoError as error:
                 expired = time.monotonic() >= deadline
                 if not logged_failure or expired:
                     logging.warning(
-                        "Mongo bootstrap instance=%s exit=%d reason=%s",
+                        "Mongo bootstrap instance=%s reason=%s",
                         config["instanceId"],
-                        error.returncode,
-                        command_failure_reason(error),
+                        type(error).__name__,
                     )
                     logged_failure = True
                 if expired:

@@ -449,7 +449,6 @@ let
             tag = "latest";
             contents = [
               mongodbPkgs.mongodb-ce
-              pkgs.mongosh
               pkgs.coreutils
               dbNss
             ];

@@ -387,6 +387,9 @@ in
         wantedBy = [ ];
         serviceConfig = {
           ExecStart = "${packages.controllerPackage}/bin/openstack-platform-storage-manager --config /etc/${namespace}/platform.json --run-instance %i";
+          # --rm normally removes it; also clean up after a killed Podman CLI.
+          # The fixed name retains bind-mounted data and never deletes a volume.
+          ExecStopPost = "${pkgs.podman}/bin/podman rm --force --ignore ${namespace}-db-%i";
           Slice = "${namespace}-databases.slice";
           Restart = "always";
           # 5 seconds avoids a tight OOM/crash restart loop; only this DB restarts.
@@ -419,7 +422,6 @@ in
         ];
         # pg_dump 17 matches the pinned PostgreSQL 17.11 source image.
         path = [
-          pkgs.podman
           pkgs.systemd
           pkgs.nftables
           pkgs.xfsprogs
@@ -438,11 +440,6 @@ in
             data
             "/run/systemd"
             "/etc/systemd/system"
-            "/run/libpod"
-            "-/run/containers"
-            "-/run/crun"
-            "-/run/runc"
-            "-/var/lib/containers"
           ];
           RestrictAddressFamilies = [
             "AF_UNIX"

@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from pymongo.errors import ConnectionFailure, OperationFailure
+
 from openstack_platform.controller import database as db
 from openstack_platform.controller.api import ControllerAPI
 from openstack_platform.controller.http import HttpError
@@ -64,6 +66,7 @@ class InstanceManagerTests(unittest.TestCase):
             command=command,
             units=self.root / "units",
             memory_budget=50 * GIB,
+            mongo_connect=mock.MagicMock(),
         )
         self.geometry = mock.patch(
             "openstack_platform.storage_instances.os.statvfs",
@@ -174,17 +177,31 @@ class InstanceManagerTests(unittest.TestCase):
         )
 
     def test_mongo_bootstrap_uses_allocated_port_and_restart_inherits_unit_caps(self):
-        identifier, result = self.create("mongo")
+        clients = [mock.MagicMock() for _ in range(4)]
+        for client in clients:
+            client.__enter__.return_value = client
+        clients[0].admin.command.side_effect = OperationFailure("authentication failed", code=18)
+        clients[2].admin.command.side_effect = ConnectionFailure("lost authentication reply")
+        factory = mock.Mock(side_effect=clients)
+        self.manager.mongo_connect = factory
+        with (
+            mock.patch("openstack_platform.storage_instances.time.sleep"),
+            self.assertLogs(level="WARNING"),
+        ):
+            identifier, result = self.create("mongo")
         config = self.manager.read(identifier)
         self.assertTrue(config["adminInitialized"])
-        bootstrap = next((argv, kw) for argv, kw in self.calls if argv[:2] == ("podman", "exec"))
-        self.assertEqual(bootstrap[0][bootstrap[0].index("--user") + 1], "0:0")
-        self.assertIn("HOME=/tmp", bootstrap[0])
-        self.assertIn("--norc", bootstrap[0])
-        self.assertEqual(bootstrap[0][bootstrap[0].index("--port") + 1], str(result["port"]))
         password = (self.manager.directory(identifier) / "admin-password").read_text()
-        self.assertNotIn(password, " ".join(bootstrap[0]))
-        self.assertIn(password.encode(), bootstrap[1]["input"])
+        for call in factory.call_args_list:
+            self.assertEqual(call.kwargs["host"], "127.0.0.1")
+            self.assertEqual(call.kwargs["port"], result["port"])
+            self.assertTrue(call.kwargs["tls"])
+        self.assertEqual(factory.call_args_list[-1].kwargs["password"], password)
+        clients[1].admin.command.assert_called_once_with(
+            "createUser", "platform_admin", pwd=password, roles=[{"role": "root", "db": "admin"}]
+        )
+        clients[-1].admin.command.assert_called_once_with("ping")
+        self.assertFalse(any(argv[:2] == ("podman", "exec") for argv, _ in self.calls))
         with mock.patch(
             "openstack_platform.storage_instances.os.execvp", side_effect=SystemExit
         ) as execute:
@@ -198,6 +215,7 @@ class InstanceManagerTests(unittest.TestCase):
             any(value.startswith(("MONGO_INITDB", "--memory", "--cgroup-parent")) for value in argv)
         )
         self.calls.clear()
+        calls = factory.call_count
         self.manager.dispatch(
             {
                 "action": "create",
@@ -210,6 +228,7 @@ class InstanceManagerTests(unittest.TestCase):
             }
         )
         self.assertFalse(any(argv[:2] == ("podman", "exec") for argv, _ in self.calls))
+        self.assertEqual(factory.call_count, calls)
         self.assertFalse(
             any(argv[0] == "xfs_quota" and "project -s" in argv[3] for argv, _ in self.calls)
         )
