@@ -110,19 +110,29 @@ let
     server.serve_forever()
   '';
   storageInstanceProbe = pkgs.writeText "storage-instance-probe.py" ''
-    import json, ssl, subprocess, sys, urllib.error, urllib.request, uuid
+    import json, socket, ssl, subprocess, sys, urllib.error, urllib.request, uuid
     sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
     import psycopg
     from pymongo import MongoClient
+    from pymongo.monitoring import ServerHeartbeatListener
     from openstack_platform.helper import storage
     ca="/etc/${namespace}/pki/internal-ca.pem"
     host="${platform.internalNames.storage}"
     import urllib.parse
+    class Heartbeats(ServerHeartbeatListener):
+        def started(self, event):
+            pass
+        def succeeded(self, event):
+            pass
+        def failed(self, event):
+            print("Mongo heartbeat failed endpoint="+repr(event.connection_id)+" duration="+str(event.duration)+" reason="+str(event.reply)[:1000],file=sys.stderr,flush=True)
     def connect_app_mongo(*, uri):
         parsed=urllib.parse.urlsplit(uri)
         query=[(k,v) for k,v in urllib.parse.parse_qsl(parsed.query) if k.lower() != "tlscafile"]
         safe_uri=urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query)))
-        return MongoClient(safe_uri,tlsCAFile=ca,serverSelectionTimeoutMS=5000)
+        # Retain the strict selection deadline. Bound individual connects so
+        # monitor errors become visible before server selection times out.
+        return MongoClient(safe_uri,tlsCAFile=ca,serverSelectionTimeoutMS=5000,connectTimeoutMS=2000,event_listeners=[Heartbeats()])
     context=ssl.create_default_context(cafile=ca)
     def call(action, instance, **values):
         body=json.dumps({"action":action,"instanceId":instance,**values}).encode()
@@ -182,10 +192,29 @@ let
     mongo=MongoClient(host,credentials[1]["port"],username="platform_admin",password=credentials[1]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000)
     connect_ready(lambda: mongo.admin.command("ping"))
     scoped=storage.mongo_create(mongo,application_id=owner,host=host,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()))
-    storage.mongo_verify(connect_app_mongo,scoped,host=host)
+    try:
+        storage.mongo_verify(connect_app_mongo,scoped,host=host)
+    except Exception:
+        import faulthandler
+        print("Mongo verify failed uid="+str(os.geteuid())+" host="+host+" port="+str(credentials[1]["port"])+" addresses="+repr(socket.getaddrinfo(host,credentials[1]["port"])),file=sys.stderr,flush=True)
+        faulthandler.dump_traceback(file=sys.stderr,all_threads=True)
+        subprocess.run(["nft","list","table","inet","${namespace}".replace("-","_")+"_instances"],check=False)
+        subprocess.run(["ss","-tn"],check=False)
+        raise
     options=mongo.admin.command("getCmdLineOpts")["parsed"]
     assert options["net"]["maxIncomingConnections"] == 20
     assert options["storage"]["wiredTiger"]["engineConfig"]["cacheSizeGB"] == 0.25
+    # Exercise repeated atomic rule replacements while a real client exchanges
+    # authenticated traffic. Worker revocation still applies to existing flows.
+    from concurrent.futures import ThreadPoolExecutor
+    def pings():
+        for _ in range(100):
+            mongo.admin.command("ping")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        traffic=pool.submit(pings)
+        for index in range(8):
+            call("allow",ids[1],applicationId=owner,addresses=["127.0.0.2"] if index % 2 else [],mode="replace")
+        traffic.result()
     mongo.close()
     # Use the same native exporters/importers as nightly backup, through the
     # authenticated manager's root credentials and certificate DNS name.
@@ -193,6 +222,7 @@ let
     import socket, tempfile, urllib.parse
     assert socket.gethostbyname(host) == "127.0.0.1"
     native=Native(host,ca)
+    from openstack_platform.controller.storage_contract import canonicalize_environment
     with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca,autocommit=True) as app_pg:
         app_pg.execute("CREATE TABLE backup_probe(value integer)")
         app_pg.execute("INSERT INTO backup_probe VALUES (42)")
@@ -223,21 +253,51 @@ let
     app_mongo.close()
     with tempfile.TemporaryDirectory(dir="${platform.paths.data}") as temporary:
         for index,kind in enumerate(["postgres","mongo"]):
-            entry={"type":kind,"port":credentials[index]["port"],"databases":[postgres.provider_name if index==0 else dbname]}
+            credential=postgres if index==0 else scoped
+            entry={"type":kind,"port":credentials[index]["port"],"databases":[credential.provider_name],"resources":[{"name":"default","providerName":credential.provider_name,"bindings":dict(canonicalize_environment(kind,"default",credential.environment)),"writeBlock":{"blocked":False}}]}
             payload=Path(temporary)/kind
             native.dump(entry,credentials[index]["adminPassword"],payload)
             # Explicit delete/recreate models an entirely lost isolated instance.
             call("remove",ids[index],deleteData=True)
-            call("restore-create",ids[index],applicationId=owner,type=kind,quotas=limits,port=entry["port"],allowIps=[],reservations={"databaseBytes":6442450944,"garageBytes":0})
+            entry["quotas"]={**limits,"connections":20}
+            call("restore-create",ids[index],applicationId=owner,type=kind,quotas=entry["quotas"],port=entry["port"],allowIps=[],reservations={"databaseBytes":6442450944,"garageBytes":0})
             call("restore-begin",ids[index],backupSha256=digest(payload))
             replacement=call("credentials",ids[index])
             native.restore(entry,replacement["adminPassword"],payload)
             call("restore-finish",ids[index],migrationState=None)
+            credentials[index]=replacement
     with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca) as app_pg:
         assert app_pg.execute("SELECT value FROM backup_probe").fetchone()[0] == 42
+        assert app_pg.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname=current_user").fetchone()[0] == 20
     app_mongo=connect_app_mongo(uri=scoped.environment["MONGODB_URI"])
     assert app_mongo[dbname].backup_probe.find_one()["value"] == 42
     app_mongo.close()
+    # Exercise real provider limits/usage, with only the Nomad Variable boundary
+    # in memory. Both instance restarts must retain authenticated app access.
+    from openstack_platform.helper.storage_limits import resource_action
+    from openstack_platform.helper.nomad import SecretItems, VariableSnapshot
+    class Variables:
+        def __init__(self, kind, credential):
+            self.items=dict(canonicalize_environment(kind,"default",credential.environment))
+        def read_variable(self, path):
+            return VariableSnapshot(path,1,SecretItems(self.items))
+        def compare_and_set(self, path, index, items):
+            self.items=dict(items); return 2
+    storage._PORT_CONTEXT.set((credentials[0]["port"],credentials[1]["port"]))
+    for index,kind in enumerate(["postgres","mongo"]):
+        changed={**limits,"connections":12}
+        call("limits",ids[index],quotas=changed,reservations={"databaseBytes":6442450944,"garageBytes":0})
+        if kind=="postgres":
+            admin=connect_ready(lambda: psycopg.connect(host=host,port=credentials[index]["port"],dbname="platform",user="platform_admin",password=credentials[index]["adminPassword"],sslmode="verify-full",sslrootcert=ca,autocommit=True,connect_timeout=2))
+            assert admin.execute("SHOW max_connections").fetchone()[0] == "17"
+        else:
+            admin=MongoClient(host,credentials[index]["port"],username="platform_admin",password=credentials[index]["adminPassword"],authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000,connectTimeoutMS=2000)
+            connect_ready(lambda: admin.admin.command("ping"))
+            assert admin.admin.command("getCmdLineOpts")["parsed"]["net"]["maxIncomingConnections"] == 22
+        credential=postgres if index==0 else scoped
+        result=resource_action({"applicationId":owner,"applicationSlug":"vm-instance","resourceName":"default","providerId":credential.provider_id,"providerName":credential.provider_name,"quotas":changed,"operationId":str(uuid.uuid4()),"recover":False},resource_type=kind,mutate=True,admin=admin,nomad=Variables(kind,credential),host=host,endpoint="unused")
+        assert result["applied"] and result["usage"]["usedBytes"] > 0
+        admin.close()
     # Rehearse the real manager copy through nginx, including an admin-owned
     # extension comment and an app function that rejects admin restore sessions.
     source_secret=Path("/etc/${namespace}/secrets/postgres-password")
@@ -258,11 +318,46 @@ let
         source_app.execute("CREATE FUNCTION public.restore_guard() RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$ BEGIN IF session_user='platform_admin' THEN RAISE EXCEPTION 'admin restore session'; END IF; RETURN true; END $$")
         source_app.execute("CREATE TABLE public.guarded(value integer CHECK(public.restore_guard()))")
         source_app.execute("INSERT INTO public.guarded VALUES(42)")
+        source_app.execute("CREATE SCHEMA pgdata")
+        source_app.execute("CREATE TABLE pgdata.items(value integer)")
+        source_app.execute("INSERT INTO pgdata.items VALUES(84)")
+    with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca,autocommit=True) as target:
+        target.execute("CREATE SCHEMA pgdata")
+        target.execute("CREATE TABLE pgdata.stale(value integer)")
     call("copy",ids[0],database=postgres.provider_name,seconds=120,operationId=str(uuid.uuid4()),applicationLogin=postgres.credential_name,applicationPassword=postgres.environment["PGPASSWORD"])
     with psycopg.connect(host=host,port=credentials[0]["port"],dbname=postgres.provider_name,user=postgres.credential_name,password=postgres.environment["PGPASSWORD"],sslmode="verify-full",sslrootcert=ca) as target:
         assert target.execute("SELECT value FROM public.guarded").fetchone()[0] == 42
+        assert target.execute("SELECT value FROM pgdata.items").fetchone()[0] == 84
+        assert target.execute("SELECT to_regclass('pgdata.stale')").fetchone()[0] is None
         assert target.execute("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='guarded'").fetchone()[0] == "o_"+postgres.provider_name[2:]
     subprocess.run(["podman","rm","-f","vm-shared-postgres"],check=True,stdout=subprocess.DEVNULL)
+    # Mongo copy must also remove namespaces left by an interrupted attempt,
+    # while preserving the target's pre-created app user and soft-block role.
+    mongo_secret=source_secret.with_name("mongodb-password")
+    mongo_secret.write_text("vm-shared-mongo-password"); mongo_secret.chmod(0o400)
+    mongo_data=Path("${platform.paths.data}/mongodb")
+    mongo_data.mkdir(exist_ok=True); os.chown(mongo_data,999,999)
+    subprocess.run(["podman","run","-d","--name","vm-shared-mongo","--network=host","--cgroups=disabled","--read-only","--user=999:999","--entrypoint=mongod","--tmpfs=/tmp:rw,size=64m,mode=1777","--volume",str(mongo_data)+":/data/db","--volume","${platform.paths.data}/instances/"+ids[1]+"/pki:/run/${namespace}-pki:ro",fixture["containers"]["mongodb"],*database_command({"type":"mongo","port":27017,"quotas":limits},"${namespace}")[1:]],check=True,stdout=subprocess.DEVNULL)
+    anonymous=MongoClient(host,27017,tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=2000,connectTimeoutMS=2000)
+    connect_ready(lambda: anonymous.admin.command("ping"))
+    anonymous.admin.command("createUser","platform_admin",pwd="vm-shared-mongo-password",roles=[{"role":"root","db":"admin"}])
+    anonymous.close()
+    source_mongo=MongoClient(host,27017,username="platform_admin",password="vm-shared-mongo-password",authSource="admin",tls=True,tlsCAFile=ca,serverSelectionTimeoutMS=5000,connectTimeoutMS=2000)
+    parsed=urllib.parse.urlsplit(scoped.environment["MONGODB_URI"])
+    storage._PORT_CONTEXT.set((credentials[0]["port"],27017))
+    source_credential=storage.mongo_create(source_mongo,application_id=owner,host=host,measured_target_bytes=2147483648,generation="abcdef12",operation_id=str(uuid.uuid4()),password_factory=lambda:urllib.parse.unquote(parsed.password))
+    source_mongo[dbname].copied.insert_one({"value":84})
+    source_mongo[dbname].copied.create_index("value")
+    source_mongo.close()
+    target_mongo=connect_app_mongo(uri=scoped.environment["MONGODB_URI"])
+    target_mongo[dbname].stale.insert_one({"value":0}); target_mongo.close()
+    call("copy",ids[1],database=dbname,seconds=120,operationId=str(uuid.uuid4()),applicationLogin=scoped.credential_name,applicationPassword=urllib.parse.unquote(parsed.password))
+    target_mongo=connect_app_mongo(uri=scoped.environment["MONGODB_URI"])
+    assert target_mongo[dbname].copied.find_one()["value"] == 84
+    assert "stale" not in target_mongo[dbname].list_collection_names()
+    assert "value_1" in target_mongo[dbname].copied.index_information()
+    target_mongo.close()
+    subprocess.run(["podman","rm","-f","vm-shared-mongo"],check=True,stdout=subprocess.DEVNULL)
     for ident in ids:
         call("remove",ident,deleteData=True)
     print("instance lifecycle, authenticated copy, backup/restore and cgroup caps verified")
