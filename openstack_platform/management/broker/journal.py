@@ -341,6 +341,17 @@ class Journal:
                     if result.get("operationId") != intent["controller_key"]:
                         raise ControllerUnavailable("mismatched operation identity")
                     operation_id, state = result["operationId"], "accepted"
+                elif (
+                    status == 503
+                    and intent["kind"] == "storage_limits"
+                    and isinstance(result.get("error"), dict)
+                    and result["error"].get("code") == "INSTANCE_MANAGER_UNAVAILABLE"
+                ):
+                    operation = {"controllerErrorCode": "INSTANCE_MANAGER_UNAVAILABLE"}
+                    state, error = (
+                        "unknown",
+                        "The storage service is temporarily unavailable. This change will retry automatically.",
+                    )
                 elif status in {400, 404, 409, 413, 415, 422}:
                     detail = result.get("error")
                     code = controller_error_code(

@@ -507,8 +507,8 @@ class FakeController:
                         resource["quotas"] = limits["quotas"]
                         if resource["type"] != "s3":
                             resource["hardQuotaBytes"] = (
-                                (limits["quotas"]["sizeBytes"] * 5 + 4 * 1048576 - 1)
-                                // (4 * 1048576)
+                                (limits["quotas"]["sizeBytes"] * 3 + 2 * 1048576 - 1)
+                                // (2 * 1048576)
                             ) * 1048576
                 for resource in self.resources.values():
                     if operation["scope"] == f"app-{resource['applicationId']}":
@@ -920,7 +920,7 @@ class FakeController:
                 "stale": False,
             },
             "isolation": "instance" if body["type"] != "s3" else "shared",
-            "hardQuotaBytes": 2684354560 if body["type"] != "s3" else None,
+            "hardQuotaBytes": 3221225472 if body["type"] != "s3" else None,
             "writeBlock": {"blocked": False, "reason": None, "since": None},
         }
         return self.resource_operation(request, app, "storage.create")
@@ -936,7 +936,7 @@ class FakeController:
 
         body = self.body(request, {"quotas", "expectedQuotas"})
         target = quotas(body["quotas"], resource["type"])
-        expected = quotas(body["expectedQuotas"], resource["type"])
+        expected = quotas(body["expectedQuotas"], resource["type"], expected=True)
         response = self.resource_operation(request, resource["applicationId"], "storage.limits.set")
         self.operations[request.idempotency_key()]["storageLimits"] = {
             "resourceId": resource["resourceId"],

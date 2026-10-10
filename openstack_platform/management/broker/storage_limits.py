@@ -30,15 +30,13 @@ QUOTA_FIELDS = {
 }
 
 
-def quotas(value: object, resource_type: str) -> dict[str, Any]:
+def quotas(value: object, resource_type: str, *, expected: bool = False) -> dict[str, Any]:
     result = object_body(value, QUOTA_FIELDS[resource_type])
     for key, number in result.items():
         low, high = QUOTA_BOUNDS[key]
-        if (
-            type(number) is not int
-            or not low <= number <= high
-            or key == "memoryBytes"
-            and number % 1048576
+        if type(number) is not int or (
+            not expected
+            and (not low <= number <= high or key == "memoryBytes" and number % 1048576)
         ):
             raise HttpError(
                 400, "INVALID_REQUEST", "Choose storage limits within the allowed range."
@@ -74,7 +72,10 @@ class StorageLimits:
                 )
                 if resource is None:
                     raise HttpError(404, "NOT_FOUND", "Storage not found for this app.")
-                body = {name: quotas(value, resource["type"]) for name, value in body.items()}
+                body = {
+                    name: quotas(value, resource["type"], expected=name == "expectedQuotas")
+                    for name, value in body.items()
+                }
                 operation_quota(b, db, actor["id"], app["id"])
                 identifier = b.record(
                     db,
