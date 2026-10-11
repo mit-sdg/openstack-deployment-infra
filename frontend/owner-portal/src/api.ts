@@ -13,7 +13,7 @@ export type SourceReadOptions = {
 export const configurationGuidance = {
   root: 'The repository root must contain package.json.',
   versions:
-    'Choose the version in package.json: engines.node or engines.bun, or "packageManager": "bun@1.3.4". Without one, builds use the platform default.',
+    'Choose the version in package.json: engines.node or engines.bun, or "packageManager": "bun@1.4.0". Without one, builds use the platform default.',
   locks:
     'Each package directory must contain its runtime lockfile: package-lock.json for Node.js, bun.lock or bun.lockb for Bun.',
   scripts: 'Build and start scripts come from the root package.json.',

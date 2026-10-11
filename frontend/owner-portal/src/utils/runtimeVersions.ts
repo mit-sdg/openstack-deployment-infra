@@ -314,7 +314,7 @@ export async function runtimeRequest(
     const version = parseVersion(wanted);
     if (!version)
       throw new RuntimeVersionError(
-        `packageManager${quoted(manager)} must name an exact Bun version, like bun@1.3.4.`,
+        `packageManager${quoted(manager)} must name an exact Bun version, like bun@1.4.0.`,
       );
     const key: Key = [...version, 1];
     return checked({
