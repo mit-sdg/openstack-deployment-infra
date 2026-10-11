@@ -51,10 +51,10 @@ SQLite and deploy-key sets have an encrypted file, plus `.sha256` and `.manifest
 | --- | --- |
 | Hosted controller, deploy keys, owner portal | Every complete set from the last 14 days, and always the newest three, however old. Pruned after each backup. |
 | Operator state | The newest 14 sets |
-| Managed data | Age-based pruning after each successful backup: timestamp directories with `mtime` older than the `find -mtime +14` threshold. The script has no newest-three floor. |
+| Managed data | Every set from the last 14 days, and always the newest three, however old. Pruned after each successful backup. |
 | Off-site bundles | Never pruned by the platform. Set retention on your storage provider. |
 
-The intended retention policy is 14 days plus the newest three sets. Hosted-controller and portal pruning implement both rules; `infra/backup/run_platform_backup.sh` currently implements only age-based pruning for managed data. Do not rely on it preserving three old managed-data sets. Migration checkpoint archives also receive age-based pruning. Copy sets you need to keep longer off site.
+Migration checkpoint archives are pruned by age only (14 days). Copy sets you need to keep longer off site.
 
 <details>
 <summary>Retention details for the hosted-controller and portal sets</summary>
