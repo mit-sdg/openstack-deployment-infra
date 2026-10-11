@@ -141,7 +141,7 @@ To choose a version, add one of these to your repository. The first one found wi
 | Runtime | Where | Examples |
 | --- | --- | --- |
 | Node.js | `engines.node` in the root `package.json`, then a root `.nvmrc`, then `.node-version` | `">=22 <23"`, `"22.x"`, `v22.11.0`, `lts/*` |
-| Bun | `"packageManager"` in the root `package.json` (exact version only), then `engines.bun`, then a root `.bun-version` | `"bun@1.3.4"`, `">=1.2"` |
+| Bun | `"packageManager"` in the root `package.json` (exact version only), then `engines.bun`, then a root `.bun-version` | `"bun@1.4.0"`, `">=1.2"` |
 
 Builds choose the newest matching official release, preferring long-term support (LTS) for Node.js ranges. Ranges can change between builds; exact versions stay fixed. The deployment page shows the version used. Node.js before 20 and Bun before 1.1 aren't supported. Commit checks catch invalid requests; builds also fail if no official release matches.
 
