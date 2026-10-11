@@ -1,36 +1,6 @@
 # Open the owner portal to your class
 
-As the operator, use this guide to open the owner portal at `https://<domain>`, create the first portal admin, and check student sign-in. Complete [Deploy the platform](deploy-the-platform.md) first.
-
-## How the portal works
-
-The portal runs on the admin host as three services:
-
-- `management-web` serves the website on port 8080, reached through ingress. It keeps no state.
-- `management-broker` stores accounts, sessions, app ownership, limits, and audit records in SQLite on the admin state volume. It has no network access and talks to the controller through `/run/<namespace>-controller/project.sock`.
-- `management-identity` exchanges sign-in codes with Commons. It's the only portal service with outbound network access.
-
-You install a matched pair: the broker release (including identity) and the web release. A root activation unit switches releases only when both halves match.
-
-### How people sign in
-
-[Commons](../README.md#glossary) is a separate class website. **Sign in with your class account** sends the browser there for approval. Commons returns a single-use code, which the identity service exchanges for the person's identity. The portal never sees Commons passwords. First sign-in creates an owner account with default limits.
-
-Local accounts live only in the portal. A portal admin sends a setup link, and the person chooses a password. The broker stores a salted scrypt password hash. Owners and staff can add an authenticator app (TOTP).
-
-Portal admins must be local accounts with an authenticator app. Commons accounts can be owners or staff. The operator prints the first admin's setup link on the admin host, so no initial password sits in configuration.
-
-Sessions are stored on the server:
-
-| Role | Session ends after | Or after being idle for |
-| --- | --- | --- |
-| Owner | 8 hours | 30 minutes |
-| Staff | 1 hour | 10 minutes |
-| Portal admin | 1 hour | 15 minutes |
-
-Owner times default to `absoluteSeconds` and `idleSeconds` in the inventory (step 2). Shorter owner times also shorten staff and admin sessions. Sessions keep the role assigned at sign-in; role changes, disabling an account, and credential resets end its sessions.
-
-Commons password changes, account archival, and revoked approval don't end existing portal sessions. To cut off access, use **Disable account**. **Sign out everywhere** ends sessions but allows the person to sign in again. See [Manage accounts](manage-apps-and-people.md#help-a-person).
+As the operator, use this guide to open 6.1040 Apps at `https://<domain>`, create the first portal admin, and check student sign-in. Complete [Deploy the platform](deploy-the-platform.md) first. See [the glossary](../README.md#glossary) for platform and sign-in terms.
 
 ## Before you start
 
@@ -68,7 +38,7 @@ Setup creates the inventory with the portal turned off. Add an `ownerPortal` sec
   "commonsOrigin": "https://class.example.edu",
   "identityEgressCidrs": [],
   "classLabel": "class account",
-  "portalName": "Example Course Apps",
+  "portalName": "6.1040 Apps",
   "appLimit": 2,
   "concurrencyLimit": 1,
   "absoluteSeconds": 28800,
@@ -109,9 +79,9 @@ Install the broker, then the web component. The second install requests activati
 1. In your repository checkout on the operator host, set the release you're installing. `EVIDENCE` is the directory the release build wrote, containing `broker-<commit>.tar`, `web-<commit>.tar`, `release-manifest.json`, `management-artifacts.json`, their `.sig` files, and the SBOM and provenance files.
 
    ```bash
-   COMMIT=<FULL_COMMIT>
-   EVIDENCE=<PATH_TO_RELEASE_DIRECTORY>
-   TRUST_ROOT=<PATH_TO_RELEASE_TRUST_ROOT_PEM>
+   COMMIT='<FULL_COMMIT>'
+   EVIDENCE='<PATH_TO_RELEASE_DIRECTORY>'
+   TRUST_ROOT='<PATH_TO_RELEASE_TRUST_ROOT_PEM>'
    IDENTITY_SHA256="$(uv run python -c 'import sys; from openstack_platform.config import load_platform, platform_config_identity; print(platform_config_identity(load_platform(sys.argv[1])))' "$PLATFORM_CONFIG")"
    ```
 
@@ -166,11 +136,11 @@ Install the broker, then the web component. The second install requests activati
 
    You should see two paths under `management-broker-releases/releases/` and `management-web-releases/releases/` whose names start with your commit, `Result=success`, three lines of `active`, and a JSON response that includes `"providerLabel"`.
 
-If the active paths didn't change, read the activation unit's journal from the recovery console (`recovery sudo journalctl -u <namespace>-management-activate.service -n 100 --no-pager`). Fix the cause it names (a mismatched pair, missing evidence, wrong ownership or mode, or an incompatible schema) and install again. The previous pair keeps serving in the meantime.
+If the active paths didn't change, read the activation unit's journal from the recovery console (`recovery sudo journalctl -u <namespace>-management-activate.service -n 100 --no-pager`). Fix the cause it names (a mismatched pair, missing evidence, wrong ownership or mode, or an incompatible schema) and install again. A validation failure leaves the previous active pair selected. If activation selected the new pair but a service failed to start, inspect that service's journal too.
 
 ## 4. Turn on portal backups
 
-The broker database holds accounts, roles, ownership, and audit records. `<namespace>-management-broker-backup.timer` encrypts it daily around 02:30 UTC to your backup age recipient. Without the recipient file on the admin host, backups are skipped even though systemd reports success.
+The broker database holds accounts, roles, ownership, and audit records. `<namespace>-management-broker-backup.timer` encrypts it daily at 02:30 UTC, with up to 15 minutes of random delay, to your backup age recipient. Without the recipient file on the admin host, backups are skipped even though systemd reports success.
 
 1. Run this on the operator host. It reads `backupAgeRecipient` from the installed operator policy and writes the recipient file on the admin host over SSH. Both `/srv/openstack-platform` paths before the pipe are on the operator host:
 
@@ -207,7 +177,7 @@ Print a single-use setup link on the admin host. It expires after 24 hours; a ne
 2. On the admin host, set `STATE` to the inventory's `paths.adminState` (the value of `$PLATFORM_ADMIN_STATE` on the operator host), then run the setup command from the active broker release, so it matches the running broker:
 
    ```bash
-   STATE=<ADMIN_STATE_PATH>
+   STATE='<ADMIN_STATE_PATH>'
    BROKER_RELEASE=$(readlink -f "$STATE/management-active/current/broker")
    /run/current-system/sw/bin/management-python3.14 -I -B \
      "$BROKER_RELEASE/runtime/openstack_platform/management/entry.py" bootstrap \
@@ -231,7 +201,7 @@ As the portal admin, open **People**:
 
 - **Staff with local accounts.** Select **Create account**, set **Role** to **Staff**, and send the **Setup link** privately. It works once and expires in 72 hours. The portal sends no email.
 - **Staff who use Commons.** Ask them to sign in once, so their account exists. Then open their account, set **Role** to **Staff**, and select **Change role**.
-- **Limits.** Owners get `appLimit` and `concurrencyLimit` from the inventory. To give one owner more or less, open their account and change **My apps** or **Changes at a time** under **Limits**.
+- **Limits.** Owners get `appLimit` and `concurrencyLimit` from the inventory. To give one owner more or less, open their account and change **Apps** or **Changes at a time** under **Limits**.
 
 Creating accounts and changing roles ask for your password and a fresh authenticator code, unless you confirmed them in the last five minutes. [Manage apps and people](manage-apps-and-people.md) covers roles, limits, and the rest of the account tools.
 
@@ -252,13 +222,43 @@ If sign-in doesn't finish, the portal returns to the sign-in page with a message
 | This account is disabled or archived. Contact staff if you think this is a mistake. | The portal account is disabled. | A portal admin enables it in **People**. |
 | Too many attempts. Wait a minute, then try again. | The address made too many sign-in attempts in a minute. | Wait a minute. For a class behind one shared address, raise `anonymousStartsPerMinute`. |
 
+## How the portal works
+
+The portal runs on the admin host as three services:
+
+- `management-web` serves the website on port 8080, reached through ingress. It stores no accounts or app data.
+- `management-broker` stores accounts, sessions, app ownership, limits, and audit records in SQLite on the admin state volume. It has no TCP access and talks to the controller through `/run/<namespace>-controller/project.sock`.
+- `management-identity` exchanges sign-in codes with Commons. It is the portal service allowed to contact Commons over the network.
+
+You install a matched pair: the broker release (including identity) and the web release. A root activation unit switches releases only when both halves match.
+
+### How people sign in
+
+[Commons](../README.md#glossary) is a separate class website. **Sign in with your class account** sends the browser there for approval. Commons returns a single-use code, which the identity service exchanges for the person's identity. The portal never sees Commons passwords. First sign-in creates an owner account with default limits.
+
+Local accounts live only in the portal. A portal admin sends a setup link, and the person chooses a password. The broker stores a salted scrypt password hash. Owners and staff can add an authenticator app (TOTP).
+
+Portal admins must be local accounts with an authenticator app. Commons accounts can be owners or staff. The operator prints the first admin's setup link on the admin host, so no initial password sits in configuration.
+
+Sessions are stored on the server:
+
+| Role | Session ends after | Or after being idle for |
+| --- | --- | --- |
+| Owner | 8 hours | 30 minutes |
+| Staff | 1 hour | 10 minutes |
+| Portal admin | 1 hour | 15 minutes |
+
+The table shows the defaults. Owner session lengths come from `absoluteSeconds` and `idleSeconds` in the inventory (step 2). Shorter owner times also shorten staff and admin sessions. Sessions keep the role assigned at sign-in; role changes, disabling an account, and credential resets end its sessions.
+
+Commons password changes, account archival, and revoked approval don't end existing portal sessions. To cut off access, use **Disable account**. **Sign out everywhere** ends sessions but allows the person to sign in again. See [Manage accounts](manage-apps-and-people.md#help-a-person).
+
 ## Portal startup and controller restarts
 
 You don't need to start or restart the portal by hand:
 
 - At boot, the portal services start as soon as an active pair exists.
 - The broker starts only after `<namespace>-controller-readiness.service` confirms the controller answers. Restarting the controller restarts the broker and then the web service after it.
-- If the broker or web process exits, systemd restarts it after two seconds.
+- If the broker or web process fails, systemd restarts it after two seconds.
 - The broker wants the identity service but doesn't depend on it. If `management-identity` fails, Commons sign-in stops working, while existing sessions and local sign-in keep working.
 
 ## Recover a lost portal admin
@@ -280,23 +280,25 @@ The new settings take effect when the new pair activates.
 
 ## Roll back to a retained portal pair
 
-Retained releases let you return to an earlier pair without reinstalling. The command verifies signatures, files, ownership, and inventory snapshots, smoke-tests both releases, and requests activation. The pair returns with its own portal settings.
+Retained releases let you return to an earlier pair without reinstalling. The command verifies signatures, files, ownership, and inventory snapshots. It smoke-tests both releases, then requests activation. The pair returns with its own portal settings.
 
-Before you start, pause changes and take fresh broker and controller backups ([Backups and recovery](backups-and-recovery.md#verify-backups-and-schedules)). Review the pair's sign-in settings and database migration evidence. The command requires compatible retained and active release descriptors (currently schema 3, protocol 3, controller API 1); it can't inspect the private broker database as the operator. An incompatible database needs a reviewed forward repair or verified offline restore. A restore ends sessions and may require reconciling controller and ownership records from different backup times.
+Before you start, pause changes and take fresh broker and controller backups ([Backups and recovery](backups-and-recovery.md#verify-backups-and-schedules)). Review the pair's sign-in settings and database migration evidence.
+
+The command requires compatible retained and active release descriptors: schema 3, protocol 3, and controller API 1. It can't inspect the private broker database as the operator. An incompatible database needs a reviewed forward repair or verified offline restore. A restore ends sessions and may require reconciling controller and ownership records from different backup times.
 
 1. On the admin host (`ssh -F "$SSH_CONFIG" platform-admin`), list the retained releases. Each name is `<commit>-<pair>-<inventory>`.
 
    ```bash
-   STATE=<ADMIN_STATE_PATH>
-   NS=<NAMESPACE>
+   STATE='<ADMIN_STATE_PATH>'
+   NS='<NAMESPACE>'
    ls "$STATE/management-broker-releases/releases" "$STATE/management-web-releases/releases"
    ```
 
 2. Request the pair you want, using the full directory names:
 
    ```bash
-   BROKER_RELEASE=<BROKER_RELEASE_DIRECTORY_NAME>
-   WEB_RELEASE=<WEB_RELEASE_DIRECTORY_NAME>
+   BROKER_RELEASE='<BROKER_RELEASE_DIRECTORY_NAME>'
+   WEB_RELEASE='<WEB_RELEASE_DIRECTORY_NAME>'
    openstack-platform-management-reactivate \
      --platform-config "/etc/$NS/platform.json" \
      --broker-release "$BROKER_RELEASE" --web-release "$WEB_RELEASE"

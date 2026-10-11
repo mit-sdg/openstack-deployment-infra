@@ -43,6 +43,8 @@ Builds, VM tests, and uploads produce **candidates**. Acceptance requires live r
 | `worker` | Nomad/Docker identity, no SSH, constrained allocation, metadata blocked, privileged containers refused, ingress-only access, digest-pinned registry pull, reboot recovery, job/server/port deletion |
 | Persistent roles | Services/readiness in a disposable scope; [live acceptance](releases-and-upgrades.md#run-disposable-live-acceptance) exercises replacement |
 
+The main-branch CI publisher verifies all five role artifacts before any upload, then uploads the roles concurrently. It checks provider SHA-256 or SHA-512 when available. Without a provider multihash, it checks Glance's MD5 and exact stored size and reports `content_verification=provider-md5-size`. The publisher does not download images back.
+
 ### Two selection records
 
 Keep these independent records in step:
@@ -84,20 +86,23 @@ Neither updates the other or changes a running machine.
 
 ## Roll out new role images
 
-For a release changing all five images:
+For a release changing all five images, use this order. Keep app changes paused through step 6.
 
-1. Confirm publication and live tests; record exact IDs.
-2. [Install the matching operator release](releases-and-upgrades.md#install-operator-and-helper).
-3. Run the new admin image's [root-path preflight](#preflight-controller-paths-before-an-admin-image-upgrade).
-4. [Replace admin](#replace-the-admin-host), including matching helper, all five hosted selections, and seed refresh.
-5. [Replace storage](#replace-the-storage-host).
-6. [Replace ingress](#replace-the-ingress-host).
-7. Record worker/builder selections in operator state for listing and prune protection:
+1. Confirm publication and live acceptance. Record exact image IDs. Finish in-flight operations, then take controller, operator-state, and portal broker backups.
+2. Run the candidate admin image's [root-path preflight](#preflight-controller-paths-before-an-admin-image-upgrade), select it with `infra image set admin <NEW_ADMIN_IMAGE_UUID>`, and run `infra replace admin --yes`.
+3. Deploy the matching helper with `deploy/releases/deploy_helper_release.sh <FULL_SOURCE_COMMIT>` and the signed evidence variables shown in [Replace the admin host](#replace-the-admin-host).
+4. [Update all five hosted image selections](#update-hosted-role-image-selections). Each request supplies the expected current ID; wait for `succeeded` before the next role.
+5. Refresh the retained seed and restart the controller as described in [Replace the admin host](#replace-the-admin-host).
+6. Install the matching portal pair (broker and web), then the operator release with `deploy/releases/install_release.py --mode operator` and the arguments below. Verify selections and health before resuming app changes.
+7. [Replace storage](#replace-the-storage-host), then [replace ingress](#replace-the-ingress-host) if these hosts need the new images. Take the required backup and restore evidence before storage replacement.
+8. Record worker/builder selections in operator state for listing and prune protection:
 
    ```bash
    $PLATFORM_CLI infra image set worker <NEW_WORKER_IMAGE_UUID>
    $PLATFORM_CLI infra image set builder <NEW_BUILDER_IMAGE_UUID>
    ```
+
+Admin replacement briefly interrupts the portal and controller. Existing apps keep serving through their workers and ingress. Storage replacement interrupts database and S3 access; ingress replacement interrupts public routing.
 
 Existing workers retain their boot image. Replacement deployments, resizes, and fresh enables use the new selection; worker reuse keeps the existing OS.
 
@@ -245,7 +250,7 @@ Controller code is baked into admin's image; operator/helper releases alone don'
 
 Commit-specific image names are baked into inventory. Admin seeds hosted selections from `<adminState>/operator/image-selections.json` on its retained volume. Seeding preserves records and refuses unexplained differences. Keep the old seed until selections move so interrupted steps and automatic rollback can boot.
 
-1. Pause app changes; finish in-flight operations or record them and retain their images. Take [backups](#before-you-replace). Protect a copy of the unchanged seed; all five records must match hosted selections. Resolve unexplained mismatches without database edits.
+1. Pause app changes and finish in-flight operations. Take [backups](#before-you-replace). Protect a copy of the unchanged seed; all five records must match hosted selections. Resolve unexplained mismatches without database edits.
 2. Run the candidate's [preflight](#preflight-controller-paths-before-an-admin-image-upgrade); require `root-path-preflight=ok refusals=0`.
 3. Replace from the operator host:
 
@@ -270,7 +275,17 @@ Commit-specific image names are baked into inventory. Admin seeds hosted selecti
 
    Expect `active` twice.
 
-5. [Install the same commit's helper release](releases-and-upgrades.md#install-operator-and-helper). It lives on the retained volume, so image replacement doesn't update it.
+5. Deploy the same commit's helper from the clean release checkout on the operator host. Set the evidence paths to your verified private files:
+
+   ```bash
+   commit=$(git rev-parse HEAD)
+   export PLATFORM_RELEASE_MANIFEST=/private/releases/"$commit"/release-manifest.json
+   export PLATFORM_RELEASE_SIGNATURE=/private/releases/"$commit"/release-manifest.sig
+   export PLATFORM_RELEASE_TRUST_ROOT=/private/release-trust-root.pem
+   deploy/releases/deploy_helper_release.sh "$commit"
+   ```
+
+   Expect `helper-release=<commit>:verified`. The helper lives on the retained volume, so image replacement does not update it.
 6. [Move all five hosted selections](#update-hosted-role-image-selections) using reviewed new/current IDs. Require `succeeded` for each. Ingress/storage aren't replaced by this step. Completed changes provide seed evidence, so the old seed still works if interrupted.
 7. Refresh the seed as the operator on admin, in step 6's shell. The script verifies all roles against baked image names before replacing the file:
 
@@ -314,7 +329,22 @@ Commit-specific image names are baked into inventory. Admin seeds hosted selecti
 
    The prepare unit runs once and exits: require `Result=success`, then both services `active`.
 
-9. Re-read hosted selections; confirm `infra list` shows admin's new image, then resume app changes. Operator state remains separate.
+9. Install the matching [portal broker and web releases](releases-and-upgrades.md#install-a-matched-pair) if the portal is installed. Install both before reopening it.
+10. Install the operator release last, from the same clean release checkout on the operator host:
+
+    ```bash
+    /srv/openstack-platform/runtime/python3.14 deploy/releases/install_release.py \
+      --mode operator --source "$PWD" --commit "$commit" \
+      --release-manifest "$PLATFORM_RELEASE_MANIFEST" \
+      --release-signature "$PLATFORM_RELEASE_SIGNATURE" \
+      --release-trust-root "$PLATFORM_RELEASE_TRUST_ROOT" \
+      --python /srv/openstack-platform/runtime/python3.14 \
+      --uv /srv/openstack-platform/bin/uv \
+      --install-user-units --enable-backup-timer
+    ```
+
+    Expect `installed=operator commit=<commit> release=<path>`.
+11. Re-read hosted selections and `infra list`; confirm admin's new image and active controller/readiness units. Remount any off-site export filesystem on the replacement admin host. Run the [health checks](run-the-platform.md#check-health), then resume app changes. Operator state remains separate.
 
 The controller database is retained. If a premature seed refresh blocks startup, restore the protected seed file, not another database.
 
@@ -429,12 +459,11 @@ ssh -F "$SSH_CONFIG" -o User=ubuntu \
 
 ## Storage binding names on older admin images
 
-Before commit `0cbe47a`, controller fingerprint validation rejected PostgreSQL `password` and S3 `secret_access_key` bindings with HTTP 400 before admission. Current portal releases bind every output, including `secret_access_key` to `AWS_SECRET_ACCESS_KEY`, and need a newer controller.
+If a storage request is rejected with HTTP 400 for PostgreSQL `password` or S3 `secret_access_key` bindings, the controller may not match the portal release.
 
-1. Replace admin with a newer image through the approved procedure; merging/building isn't deployment.
-2. Install the portal release afterward.
+Check the controller image and portal release against the signed release evidence. [Replace admin](#replace-the-admin-host) with the matching image, then install the matching portal pair. PostgreSQL `DATABASE_URL` already contains the password.
 
-Fingerprints are unchanged: retry admitted/in-flight operations with their original body and ID. Pre-admission rejection has nothing to resume; resubmit, or start a new portal deployment. Never change configuration under the old key. PostgreSQL `DATABASE_URL` already includes the password.
+An HTTP 400 before admission has no operation to resume. Resubmit after correcting the release mismatch. An admitted operation must retain its original body and request ID; do not change bindings under the old key.
 
 ## Prune old images
 

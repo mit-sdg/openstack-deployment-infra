@@ -1,14 +1,15 @@
 # Deploy and manage apps from the command line
 
-Use this guide to deploy, roll back, resize, or recover apps through the controller. You need a deployed platform and access to the operator host.
+Use this guide to deploy, roll back, resize, or recover apps through the controller. You need a deployed platform and access to the operator host. See [the glossary](../README.md#glossary) for platform terms and size units.
 
-### Common tasks
+## Common tasks
 
 | Task | Start here |
 | --- | --- |
 | Deploy | [Shell setup](#set-up-your-shell) → [Select an app](#declare-an-app-or-select-an-existing-one) → [Configuration](#prepare-the-deployment-configuration) → [Deployment path](#choose-a-deployment-path) → [Verify](#poll-and-verify-acceptance) |
 | Recover | [Logs, retries, and rollback](#diagnose-resume-or-roll-back) |
 | Stop or start | [Enable, disable, or restart](#enable-disable-or-restart-an-app) |
+| Delete permanently | [Delete an app](#delete-an-app) |
 | Change VM size | [Size an app](#size-an-app) |
 | Keep an address | [Fixed IPv4](#keep-a-workers-primary-fixed-ipv4) or [Outbound IPv4](#reserve-a-stable-outbound-ipv4) |
 
@@ -16,7 +17,7 @@ Use this guide to deploy, roll back, resize, or recover apps through the control
 
 Use the command line for staff-maintained apps, portal outages, worker reuse, rollback without rebuilding, standalone resizing, and IP reservations. Apps need a GitHub repository, Node.js or Bun, a lockfile, and package scripts; Dockerfiles and arbitrary VM workloads aren't supported.
 
-A command-line app appears in the portal only after a portal admin adopts it. Adoption requires an accepted deployment; see [Manage apps and people](manage-apps-and-people.md).
+A command-line app appears in the portal only after staff or a portal admin adopts it. Adoption requires an accepted deployment; see [Manage apps and people](manage-apps-and-people.md).
 
 ### How the command line reaches the controller
 
@@ -24,22 +25,35 @@ The controller has no network API. It checks each caller's Linux identity (`SO_P
 
 | Socket | Caller and routes | Operator access |
 | --- | --- | --- |
-| `privileged.sock` | Operator account; `/v1/admin/` reads, deployments, sizing, rollback, IP reservations, polling, plus app deletion | `curl` through the pinned `platform-admin` SSH alias |
-| `project.sock` | `management-broker`; app declaration, storage, environment, deploy keys, logs, enable/disable/restart | Recovery SSH identity, then `sudo -u management-broker` |
+| `privileged.sock` | Operator account; `/v1/admin/` reads, deployments, sizing, rollback, IP reservations and polling; also `POST /v1/applications/{id}/delete` | `curl` through the pinned `platform-admin` SSH alias |
+| `project.sock` | `management-broker`; app declaration, deployment, storage, environment, deploy keys, logs, enable/disable/restart and deletion | Recovery SSH identity, then `sudo -u management-broker` |
 
 See the [controller API reference](../reference/controller-api.md) for route contracts.
 
 ### What a deployment does
 
-The controller validates and records the request, builds the exact commit with rootless BuildKit on a single-use builder, pushes the OCI image to the registry, and deletes the builder. It then creates or validates a worker, starts the Nomad job, and checks scheduler health, the app's health path, and public routing before accepting it and cleaning up the predecessor.
+The controller records the request and builds the exact commit on a temporary builder VM. Rootless BuildKit creates an OCI container image and pushes it to the platform registry. The controller then deletes the builder.
+
+Each app has a dedicated worker VM. The controller creates a worker or validates the existing one, then starts the app through Nomad, the container scheduler. It checks the allocation, the app's health path, and public routing before accepting the deployment and removing the predecessor.
 
 A failed candidate is removed. Rolling deployments keep the accepted version serving; maintenance deployments have a cutover outage.
 
 ### How requests behave
 
-Save each keyed request body with its lowercase UUID `Idempotency-Key`. Replaying both returns or resumes the operation; changing the body gives `409 IDEMPOTENCY_CONFLICT`. Unfinished foreground app operations block new work with `409 OPERATION_CONFLICT`, naming the blocking `operationId`. Accepted finishing work retries automatically and permits compatible changes; conflicting requests return `409 POST_ACCEPTANCE_CONFLICT`. See [App changes are blocked with wait until recovery](troubleshooting.md#app-changes-are-blocked-with-wait-until-recovery).
+Save each keyed request body with its `Idempotency-Key`, a lowercase UUID that identifies the request. Replaying the body and key returns or resumes that operation. Changing the body gives `409 IDEMPOTENCY_CONFLICT`.
 
-App declaration returns `201`. Infrastructure changes return `202` with `operationId` and `statusUrl`; admission isn't success. A deployment's ID, operation ID, and key are the same UUID. Poll for `running`, `succeeded`, `failed`, or `recovery_required`, along with `phase`, `safeError`, `errorCode`, and `cleanupState`. `recovery_required` means the outcome is uncertain: fix the dependency and replay the request.
+Unfinished foreground app operations block new work with `409 OPERATION_CONFLICT`, naming the blocking `operationId`. Accepted finishing work retries automatically and permits compatible changes. Conflicting requests return `409 POST_ACCEPTANCE_CONFLICT`. See [App changes are blocked with wait until recovery](troubleshooting.md#app-changes-are-blocked-with-wait-until-recovery).
+
+App declaration returns HTTP `201`. Infrastructure changes return HTTP `202` with `operationId` and `statusUrl`; admission isn't success. A deployment's ID, operation ID, and key are the same UUID.
+
+Poll the operation and read its `phase`, `safeError`, `errorCode`, and `cleanupState`:
+
+| Status | Meaning |
+| --- | --- |
+| `running` | Work is in progress. Keep polling. |
+| `succeeded` | The operation finished. Verify the app. |
+| `failed` | The attempt ended. Correct the cause and use a new key. |
+| `recovery_required` | The outcome is uncertain. Fix the named dependency and replay the original body and key. |
 
 Errors contain `code`, `summary`, `correlationId`, and `retryable` under `error`, plus a blocking `operationId` when applicable. They omit secrets and provider output.
 
@@ -246,7 +260,7 @@ Adjust it to the app, then set `CONFIGURATION_REVISION=1` or increment the accep
 | `build.buildScript` | Root `package.json` script, run once from root after installation; `null` skips building. Names use letters, digits, `:._-`, at most 128 characters. |
 | `build.startScript` | Root script starting the server; same name rules. |
 | `runtime.port` | Integer 1–65535, injected as `PORT`. |
-| `runtime.healthPath` | Starts with `/`, no query or fragment, at most 256 characters; returns 2xx without redirects. |
+| `runtime.healthPath` | Starts with `/`, no query or fragment, at most 256 characters; returns 2xx without redirects and at most 4 KiB of response body. |
 | `storageBindings` | At most 32; every active storage resource must be bound. |
 
 Root `package.json` must be a regular file of at most 64 KiB containing the configured scripts. Keep persistent data in managed storage: the container filesystem is read-only and worker disks are replaceable.
@@ -273,7 +287,9 @@ The [parser](../../openstack_platform/runtime_versions.py) accepts a subset of n
 
 ### Add managed storage
 
-Create storage before deploying, then bind its outputs. Credentials enter the runtime, never configuration.
+Create storage before deploying, then bind its outputs to the environment names your app reads. Credentials enter the runtime, never configuration. Every active resource needs a binding before deployment.
+
+PostgreSQL and MongoDB each run as a separate database server on the storage host, with CPU, memory, connection, and disk caps. S3 uses one shared Garage service; each app gets a bucket with byte and object quotas and a key limited to that bucket. Workers are disposable, so keep persistent data in these services.
 
 ```bash
 STORAGE_TYPE=postgres   # postgres, mongo, or s3
@@ -292,7 +308,7 @@ jq --arg id "$RESOURCE_ID" \
   configuration.json > configuration.next && mv configuration.next configuration.json
 ```
 
-This binds PostgreSQL `url` to `DATABASE_URL`; adjust `outputs` for other types. Target names must be unique and unreserved.
+This example creates PostgreSQL and binds `url` to `DATABASE_URL`. If you choose `mongo` or `s3`, change the final `outputs` map to the matching outputs below. Target names must be unique and unreserved.
 
 | Type | Outputs | Conventional variables |
 | --- | --- | --- |
@@ -301,6 +317,10 @@ This binds PostgreSQL `url` to `DATABASE_URL`; adjust `outputs` for other types.
 | `s3` | `endpoint`, `public_endpoint`, `region`, `access_key_id`, `secret_access_key`, `bucket` | `AWS_ENDPOINT_URL_S3`, `S3_PUBLIC_ENDPOINT`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET` |
 
 S3 `public_endpoint` is `https://s3.<domain>` for browser presigned URLs. See [the storage contract](../../openstack_platform/controller/storage_contract.py).
+
+Storage reads report `quotas`, `usage`, `writeBlock`, `isolation`, and `hardQuotaBytes`. Usage includes its measurement time and a stale flag. PostgreSQL's size target reports usage without pausing writes. MongoDB pauses writes above its size limit; reads and deletes continue, and writes resume at or below 95%. Each database's hard XFS disk quota is 150% of its size target or limit, rounded up to a whole MiB, including database files and overhead.
+
+Portal admins can [edit storage limits](manage-apps-and-people.md#edit-storage-limits-portal-admins-only). Changing an instance's connection or memory limit restarts that database instance. Shared resources must first be migrated before connection caps can be raised.
 
 ### Set environment variables
 
@@ -426,10 +446,27 @@ jq -e --arg commit "$COMMIT" '.status == "succeeded" and .repositoryCommit == $c
 jq '{runtime, imageDigest, configurationSha256}' accepted-deployment.json
 URL=$(jq -er .url after-app.json)
 HEALTH_PATH=$(jq -er .configuration.runtime.healthPath accepted-deployment.json)
-curl --fail --silent --show-error "$URL$HEALTH_PATH"
+HTTP_STATUS=$(curl --fail --silent --show-error --dump-header health-headers.txt \
+  --output health-body.txt --write-out '%{http_code}' "$URL$HEALTH_PATH")
+python3 - "$DEPLOYMENT_ID" "$HTTP_STATUS" <<'PY'
+import sys
+from pathlib import Path
+assert sys.argv[2].startswith("2"), "health response is not HTTP 2xx"
+headers = {}
+for line in Path("health-headers.txt").read_text().splitlines():
+    name, separator, value = line.partition(":")
+    if separator:
+        headers[name.lower()] = value.strip()
+assert headers.get("x-platform-deployment") == sys.argv[1], "wrong deployment marker"
+assert Path("health-body.txt").stat().st_size <= 4096, "health response exceeds 4 KiB"
+print("HTTP 2xx, accepted deployment marker, and health body verified")
+PY
+cat health-body.txt
 ```
 
-Both `jq` checks must print `true`; `curl` prints the health response. Test representative features, compare sizing, configuration, and storage with your baseline, check platform health and completed `cleanupState`. Verify retained fixed `address` and `portId` are attached to the accepted worker; test required outbound addressing or SMTP from the app. Replacement discards old worker files; managed data stays in storage.
+Both `jq` checks must print `true`. The health checks must confirm HTTP 2xx, a matching `X-Platform-Deployment` marker, and a response body within 4 KiB. A wrong marker means the public route has not been verified for this deployment. Read app status and platform health before treating it as live.
+
+Test representative features. Compare sizing, configuration, and storage with your baseline, and check that `cleanupState` is `confirmed`. Verify that any retained fixed `address` and `portId` are attached to the accepted worker. Test required outbound addressing or SMTP from the app. Replacement discards old worker files; managed data stays in storage.
 
 ## Diagnose, resume, or roll back
 
@@ -545,9 +582,32 @@ wait_for "$(jq -er .operationId "$ACTION-submitted.json")"
 | `enable` | Boots the accepted deployment on a worker at pinned sizing; needs an accepted deployment |
 | `restart` | Restarts container in place without rebooting VM |
 
+## Delete an app
+
+Prefer the portal's [admin-only Delete app](manage-apps-and-people.md#delete-an-app-portal-admins-only) for an adopted app. The portal requires recent re-authentication and the exact app slug. Staff, owners, and teammates cannot delete the whole app through the portal.
+
+Operators can submit the same controller deletion on `privileged.sock`. This permanently removes the workload, worker, database instances and data, bucket and objects, environment variables, and deploy key. The broker removes members when it observes the deletion. The slug stays reserved. Recovery requires platform backups; changes since those backups are lost.
+
+1. Check the app ID and slug in `app_record`, resolve unfinished app operations, and check current controller, broker, and managed-data backups. If this is the class sign-in app, deletion interrupts Commons sign-in.
+2. Save and submit the exact slug confirmation:
+
+```bash
+jq -n --arg slug "$SLUG" '{confirmation: $slug}' > delete-app.json
+newkey > delete-app.key
+admin -H 'Content-Type: application/json' -H "Idempotency-Key: $(<delete-app.key)" \
+  --data-binary @- "http://localhost/v1/applications/$APP_ID/delete" \
+  < delete-app.json > delete-app-submitted.json
+DELETE_ID=$(jq -er .operationId delete-app-submitted.json)
+wait_for "$DELETE_ID"
+```
+
+3. Require `succeeded` and `cleanupState: "confirmed"` in the operation record. Check that the app disappears from active portal lists. The deletion operation remains readable through `/v1/admin/operations/{id}`.
+
+Closing the shell does not cancel an admitted deletion. For `recovery_required` or a lost response, replay `delete-app.json` with `delete-app.key` unchanged and poll the same operation. There is no undo endpoint.
+
 ## Size an app
 
-New apps use the policy flavor; operators can pin custom sizing per app.
+A flavor is an OpenStack VM size. New apps use the policy flavor; operators can select a different flavor per app. The worker's total RAM includes system overhead, so the app's memory limit is smaller.
 
 ### Plan and resize
 
@@ -579,7 +639,14 @@ Success shows updated `workerFlavor`, `cpuMHz`, and `memoryMiB`. Every deploymen
 <details>
 <summary>How the CPU and memory allocation is computed</summary>
 
-From registered capacity, reserve the largest of 10% rounded up, 200 MHz CPU/512 MiB RAM, or Nomad's reserve. With a size plan, also clamp memory to the flavor's RAM minus the system reserve. Leave another 32 MiB of memory headroom, then round down to a 128 MiB step (minimum 64 MiB). Reserve half the available CPU budget, rounded down to 100 MHz (minimum 100 MHz). This headroom accommodates small memory changes and different hypervisor CPU clocks when an allocation is reused.
+Compute the allocation from the worker's measured Nomad capacity:
+
+1. Subtract the largest reserve for each resource: 10% rounded up, the minimum (200 MHz CPU or 512 MiB RAM), or Nomad's reserve.
+2. With a size plan, cap the remaining memory at the flavor's RAM minus the system reserve.
+3. Leave another 32 MiB of memory, then round down to a 128 MiB step, with a minimum of 64 MiB.
+4. Set the CPU share to half the remaining CPU budget, rounded down to 100 MHz, with a minimum of 100 MHz.
+
+The extra headroom accommodates small memory changes and different hypervisor CPU clocks when reusing an allocation.
 
 `memoryMiB` is a hard container limit. `cpuMHz` is a soft scheduling share: the app can use all of its dedicated worker's vCPUs. Flavors below 576 MiB RAM and nodes below pinned allocations fail; headroom does not permit exceeding measured capacity.
 
@@ -595,7 +662,7 @@ Include a post-declaration plan (`deploymentId: null`) in the [replacement reque
 
 ### Sizing failures and retries
 
-Plan or confirmation mismatch creates no VM; review a fresh plan and key. Health failure preserves the worker and size; investigate before retrying. Uncertain work needs the original body and key.
+Plan or confirmation mismatch creates no VM; review a fresh plan and key. A failed resize candidate leaves the accepted worker and sizing unchanged; investigate before retrying. Uncertain work needs the original body and key.
 
 ## Retry application and storage operations
 

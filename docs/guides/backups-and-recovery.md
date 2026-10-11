@@ -1,6 +1,8 @@
 # Backups and recovery
 
-For operators, these five backup sets protect different parts of the platform. All are stored on the admin host's backup volume (`$PLATFORM_BACKUPS`); operator state is backed up on the operator host first. Two private age keys decrypt them:
+Use this guide to check backups, restore platform state, and rehearse complete-loss recovery. It is for operators with access to the admin recovery console and the escrowed backup keys. Start with [Verify backups and schedules](#verify-backups-and-schedules) before any risky change.
+
+These five sets protect different parts of the platform. They live on the admin host's backup volume (`$PLATFORM_BACKUPS`); operator state is snapshotted on the operator host first:
 
 | Backup set | What it protects | Location on admin host | How often it runs (UTC) | Which key decrypts it |
 | --- | --- | --- | --- | --- |
@@ -10,7 +12,7 @@ For operators, these five backup sets protect different parts of the platform. A
 | Operator state | The operator CLI database: role image selections and infrastructure operations | `$PLATFORM_BACKUPS/controller` (uploaded from operator host) | Daily at 02:45 (plus up to 30 min), operator user timer | Controller escrow identity |
 | Managed data | Every app's PostgreSQL, MongoDB, and S3 data, including S3 keys, bucket quotas, and grants | `$PLATFORM_BACKUPS/<namespace>/<timestamp>/` | Daily at 03:15 (plus up to 30 min) | Managed-data identity |
 
-Once configured, off-site export copies the newest sets to external storage daily at 05:00 UTC, plus up to 30 minutes. See [Export recovery evidence off site](#export-recovery-evidence-off-site).
+**Production status (2026-10-10):** off-site export is not configured, so `offsite_recovery` fails. Local backups do not protect against loss of the OpenStack project. Once configured, off-site export copies the newest sets to external storage daily at 05:00 UTC, plus up to 30 minutes. See [Export recovery evidence off site](#export-recovery-evidence-off-site).
 
 Before you start:
 
@@ -19,7 +21,7 @@ Before you start:
 
 ## How backups work
 
-Restore each set separately: controller records can't replace app data, or vice versa. Backup payloads are encrypted with age; SQLite snapshots and deploy-key archives are staged privately before encryption. A failed instance dump fails the entire managed-data set and is visible to backup health via STATUS.json. Retention/pruning and offsite export cover the same complete set. Checksums and manifests remain readable. An age *identity* is a private key; a *recipient* is its public key.
+Restore each set separately: controller records can't replace app data, or vice versa. Backup payloads are encrypted with age; SQLite snapshots and deploy-key archives are staged privately before encryption. A failed instance dump fails the entire managed-data set. The job records the failure in `STATUS.json`; backup health reads that status. Off-site export copies complete sets only. Checksums and manifests remain readable. An age *identity* is a private key; a *recipient* is its public key.
 
 ### The two keys
 
@@ -39,7 +41,7 @@ SQLite and deploy-key sets have an encrypted file, plus `.sha256` and `.manifest
 
 ### What is not backed up
 
-- **App container images.** Managed-data sets leave them out. After a full restore, you rebuild each app from its accepted commit. See [Rebuild app images after a full restore](#rebuild-app-images-after-a-full-restore).
+- **App container images.** The registry on the storage data volume is not backed up. Managed-data sets leave its images out. After a full restore, you rebuild each app from its accepted commit. See [Rebuild app images after a full restore](#rebuild-app-images-after-a-full-restore).
 - **Runtime environment values.** Nomad's encrypted variables aren't backed up; controller records keep only names. Escrow values you can't regenerate. Managed-data sets contain S3 keys, but don't restore Nomad variables.
 - **Running infrastructure.** Backups don't recreate servers, volumes, workers, or Nomad state.
 
@@ -49,10 +51,10 @@ SQLite and deploy-key sets have an encrypted file, plus `.sha256` and `.manifest
 | --- | --- |
 | Hosted controller, deploy keys, owner portal | Every complete set from the last 14 days, and always the newest three, however old. Pruned after each backup. |
 | Operator state | The newest 14 sets |
-| Managed data | Sets from the last 14 days. Pruned after each backup. |
+| Managed data | Age-based pruning after each successful backup: timestamp directories with `mtime` older than the `find -mtime +14` threshold. The script has no newest-three floor. |
 | Off-site bundles | Never pruned by the platform. Set retention on your storage provider. |
 
-Copy anything you need for longer than two weeks off site.
+The intended retention policy is 14 days plus the newest three sets. Hosted-controller and portal pruning implement both rules; `infra/backup/run_platform_backup.sh` currently implements only age-based pruning for managed data. Do not rely on it preserving three old managed-data sets. Migration checkpoint archives also receive age-based pruning. Copy sets you need to keep longer off site.
 
 <details>
 <summary>Retention details for the hosted-controller and portal sets</summary>
@@ -134,22 +136,13 @@ Do this weekly, before any risky change, and after any host replacement.
    Managed data, run on the admin host as `agentops`:
 
    ```bash
-   managed_backup="$(
-     ssh -F "$SSH_CONFIG" platform-admin -- env \
-       PLATFORM_CONFIG="/etc/$PLATFORM_NAMESPACE/platform.json" \
-       AGE="$PLATFORM_ROOT/bin/age" \
-       AGE_KEYGEN="$PLATFORM_ROOT/bin/age-keygen" \
-       AGE_KEY="$PLATFORM_ROOT/persistent/secrets/backup-age-key.txt" \
-       EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_logical_backup.sh" \
-       SERVICE_CHECK_PYTHON=python3 \
-       GARAGE_EMIT_SCRIPT="$PLATFORM_ROOT/infra/backup/emit_garage_backup.py" \
-       "$PLATFORM_ROOT/infra/backup/run_platform_backup.sh"
-   )"
+   ssh -F "$SSH_CONFIG" platform-admin -- mountpoint "$PLATFORM_BACKUPS"
+   managed_backup="$(ssh -F "$SSH_CONFIG" platform-admin -- openstack-platform-managed-backup)"
    printf '%s\n' "$managed_backup"
    grep -Eq '^platform backup complete: .+$' <<<"$managed_backup"
    ```
 
-   Expect `postgres backup verified`, `mongodb backup verified`, `garage backup verified`, then `platform backup complete: <directory>`. Garage adds read-only backup grants as needed; any unreadable bucket fails the backup.
+   The installed wrapper supplies the resolved Nix inventory, native tools, encryption key, and exporter paths. Expect `postgres backup verified`, `mongodb backup verified`, `garage backup verified`, then `platform backup complete: <directory>`. Garage adds read-only backup grants as needed; any unreadable bucket fails the backup.
 
    Hosted controller and deploy keys (**root**):
 
@@ -184,7 +177,7 @@ Do this weekly, before any risky change, and after any host replacement.
      <<<"$restore_check"
    ```
 
-   The script restores databases into temporary containers and checks the S3 archive against Garage's bucket list. It cleans up containers on exit and writes `RESTORE-MANIFEST` only on success. Expect `latest platform restore=verified evidence=<directory>/RESTORE-MANIFEST`.
+   The script imports every database payload into temporary containers and checks the S3 archive against Garage's bucket list. It does not test live instance creation, worker access, or S3 object writes; use the full drill for those. It cleans up containers on exit and writes `RESTORE-MANIFEST` only on success. Expect `latest platform restore=verified evidence=<directory>/RESTORE-MANIFEST`.
 
 If any step fails, see [A backup failed or is missing](troubleshooting.md#a-backup-failed-or-is-missing).
 
@@ -201,7 +194,7 @@ The off-site destination must be:
 - on a different device from the backup volume;
 - protected by your provider's versioning, object lock, or write-once retention.
 
-Mount it yourself before each export, and re-create the mount after admin replacement.
+Arrange the mount before export and keep it available for the daily timer. Re-create the mount after every admin replacement. Installing the JSON configuration does not mount the filesystem.
 
 1. With the destination mounted on the admin host, record its identity:
 
@@ -335,12 +328,14 @@ Decrypt on the operator host; keep the controller escrow key off admin.
      platform-admin:/home/agentops/hosted-controller-source-keys.tar
    ```
 
-5. Stop the controller, its backup, and the portal's path units (**root**). Active portal path units can restart the portal, which would pull the controller back up:
+5. Stop the controller, its backup, and portal activation/path units (**root**). Active portal path units can restart the portal, which would pull the controller back up:
 
    ```bash
    recovery sudo systemctl stop \
+     "$PLATFORM_NAMESPACE-management-activate.path" \
      "$PLATFORM_NAMESPACE-management-broker.path" \
      "$PLATFORM_NAMESPACE-management-web.path" \
+     "$PLATFORM_NAMESPACE-management-activate.service" \
      "$PLATFORM_NAMESPACE-hosted-controller-backup.timer" \
      "$PLATFORM_NAMESPACE-hosted-controller-backup.service" \
      "$PLATFORM_NAMESPACE-controller.service"
@@ -389,7 +384,8 @@ Decrypt on the operator host; keep the controller escrow key off admin.
      "$PLATFORM_NAMESPACE-controller.service" \
      "$PLATFORM_NAMESPACE-hosted-controller-backup.timer" \
      "$PLATFORM_NAMESPACE-management-broker.path" \
-     "$PLATFORM_NAMESPACE-management-web.path"
+     "$PLATFORM_NAMESPACE-management-web.path" \
+     "$PLATFORM_NAMESPACE-management-activate.path"
    ```
 
 9. Verify, then take a fresh backup:
@@ -412,6 +408,8 @@ Decrypt on the operator host; keep the controller escrow key off admin.
     ```
 
 The database commits before deploy keys. If key installation fails, keep the controller stopped, leave staged inputs in place, and repeat step 7 before restarting.
+
+If validation refuses the controller restore, leave the controller stopped and correct the stated input or identity problem before retrying. If restart fails, inspect the controller prepare/readiness journals through the recovery console. Do not reopen portal changes until readiness passes.
 
 Older backups lack a deploy-key archive and leave existing keys alone. After complete loss, create replacement keys in each private app's portal settings and add them on GitHub.
 
@@ -523,6 +521,8 @@ This replaces the portal database with the selected backup.
 
    Both services print `active`. Sign in to the portal with a fresh authenticator code.
 
+If restore validation fails, keep portal units stopped, correct the staged input, and retry. If startup fails, inspect the broker and identity journals before reopening the portal.
+
 After a portal restore:
 
 - The broker creates a new private signing key on startup. An environment-variable edit retried with a request key from before the restore is refused with `IDEMPOTENCY_CONFLICT`; submit the edit again as a new request.
@@ -597,6 +597,8 @@ Before you start, finish or recover any unfinished infrastructure operation; the
 
    Start the dashboard again too, if you use it.
 
+If validation fails, the operator database has not been replaced. Correct the reported identity, schema, lock, or unfinished-operation problem and retry. If later commands reject a future schema, install compatible code; selecting old code does not downgrade the database.
+
 ### Rehearse it without touching live state
 
 To prove a backup and its identity work, restore into a private, empty directory instead. The option must come first:
@@ -618,35 +620,53 @@ Run the non-destructive check in [Verify backups and schedules](#verify-backups-
 
 Managed-data restore writes to the services in your platform config. Use empty replacement services, usually through the [complete-loss drill](#drill-a-complete-loss-recovery).
 
-Before running, confirm the config's storage address points to isolated, empty replacement services. Check that `AGE_KEY` is a direct file, mode `0600`.
+Before you start:
+
+- Run from a reviewed repository checkout on a host laid out like the replacement admin host. The matching admin image supplies PostgreSQL 17 clients, MongoDB tools, age, Podman, and `openstack-platform-storage-backup`.
+- Have the managed-data identity as a direct mode-0600 file (`AGE_KEY`) and the verified backup set.
+- Have authenticated instance-manager access, storage-bootstrap and Nomad credentials, and the CA under the replacement config's `paths.root`. Format-4 restore uses `secrets/nomad-cli/internal-ca.pem` there; `CA_FILE` overrides only the older shared-database restore path.
+- Provide one private offline hosted-controller database for all format-4 database restores and for S3 restores that contain buckets. Set `DATABASE_RESTORE_CONTROLLER_DATABASE` and `GARAGE_RESTORE_CONTROLLER_DATABASE` to that same direct, current-user-owned mode-0600 file. It must have no `-wal` or `-shm` sidecars.
+
+The script defaults to `bin/age` and `secrets/storage-bootstrap.env` under `paths.root`; the secrets file must be mode `0600`. `AGE` and `SECRETS_FILE` override those paths. Set `SERVICE_CHECK_PYTHON` to an installed Python interpreter with boto3; the example uses the admin image's `python3`.
+
+Keep the controller and its backup stopped throughout recovery. Database restore remaps isolated endpoints in the offline controller copy. Garage recreates bucket IDs and commits their mappings into the same copy after checking original names and IDs. Install that updated copy through [hosted-controller restore](#restore-the-hosted-controller) before restarting the controller.
+
+Before running, confirm the config's storage address and certificate DNS name both resolve to isolated, empty replacement services. Check that `AGE_KEY` is a direct file, mode `0600`.
 
 > [!WARNING]
-> This drops and recreates database contents and restores S3 buckets. Never target healthy or non-empty services. A later failure can leave earlier services restored; keep targets isolated until verification passes.
+> This replaces database contents and restores S3 buckets. Begin with isolated, empty replacement services. A failure can leave earlier services restored; retry only the same verified set against those isolated targets. Keep targets isolated until verification passes.
 
 To run it on its own:
 
 ```bash
 PLATFORM_CONFIG=/private/replacement-platform.json \
 AGE_KEY=/escrow/managed-age-identity.txt \
+SERVICE_CHECK_PYTHON=python3 \
+DATABASE_RESTORE_CONTROLLER_DATABASE=/private/replacement/hosted-controller/platform.sqlite3 \
 GARAGE_RESTORE_CONTROLLER_DATABASE=/private/replacement/hosted-controller/platform.sqlite3 \
   infra/backup/restore_managed_data.sh --yes /mnt/recovered/<bundle>/managed-data
 ```
 
-It prints `managed-data-restore=verified source=<set>` when done.
-
-What you need:
-
-- The managed-data identity as a mode `0600` file (`AGE_KEY`).
-- A host laid out like the admin host, such as a replacement admin host. The script finds its tools and credentials under the config's `paths.root`: `bin/age`, `secrets/storage-bootstrap.env` (mode `0600`), and `secrets/nomad-cli/internal-ca.pem`. Override them with the `AGE`, `SECRETS_FILE`, and `CA_FILE` variables, and set `SERVICE_CHECK_PYTHON` to a Python 3 interpreter. The matching admin image supplies PostgreSQL 17 clients, MongoDB tools, age, Podman and `openstack-platform-storage-backup`. It needs the authenticated instance manager, storage-bootstrap/Nomad credentials and a private offline controller database. Shared-resource payloads restore into isolated instances too.
-- A replacement hosted-controller database (`GARAGE_RESTORE_CONTROLLER_DATABASE`) whenever the set contains S3 buckets: a private, current-user-owned, mode `0600` copy with no `-wal` or `-shm` files next to it. Garage gives restored buckets new IDs, and the restore writes the new IDs into this database in one transaction after checking each bucket's original name and ID. Keep the controller and its backup stopped, and install the updated database with the [hosted-controller restore](#restore-the-hosted-controller) afterwards.
+Success prints `managed-data-restore=verified source=<set>`. If it fails, keep the controller and target apps stopped. Inspect the reported error, correct credentials or capacity, and replay the same verified set. Earlier database or bucket restores may already have completed; do not switch apps back to stale sources.
 
 S3 restore brings back each app's keys with their original IDs and secrets, recreates the apps' read and write grants, and restores the objects. The backup key gets write access only during the restore, and every bucket it touched goes back to read-only before success is reported. If taking that write access away fails, deny write and owner access for the backup key yourself before reopening services.
 
 Keep the set until verification passes. S3 catalog format 1 lacks app keys and grants, so bucket restore is refused until they're recovered separately. Managed-data format 2 contains `registry.age`; restore skips it. Rebuild images instead.
 
+Per-resource restore uses `openstack-platform-storage-backup restore --type postgres|mongo`
+with repeatable `--resource UUID`, a private offline `--controller-database PATH`, and
+`--catalog PATH` pointing to the other provider's verified catalog to reserve its ports.
+The managed-data restore wrapper supplies both catalogs automatically. Restore
+provisions missing isolated instances, reuses recorded ports and current caps, restores
+data/users, updates canonical/candidate owned bindings and controller identity, and
+verifies current worker IPs before reopening access. Identical completed payload replay
+skips destructive import. Keep the app/controller stopped until state installation
+and verification finish. For capacity, encrypted metadata, source backup gating and
+rehearsal commands, see [Migrate storage instances](migrate-storage-instances.md).
+
 ## Drill a complete-loss recovery
 
-Run a drill at least once a term to test recovery from an off-site bundle and both escrowed identities.
+Run a drill at least once a term to test recovery from an off-site bundle and both escrowed identities. Run these commands from a reviewed repository checkout on the restore-capable host.
 
 The drill script, `infra/backup/full_loss_recovery_drill.sh`, has two modes:
 
@@ -662,7 +682,7 @@ What you need:
 - The bundle, copied back from off-site storage to a local path.
 - An absolute work directory that doesn't exist yet.
 - Both identities and a replacement platform config, each a direct file owned by you with mode `0600`.
-- A replacement config with the same project, namespace, names, addresses, ports, volumes, paths, and domain. Image and release choices may differ. Isolate drill services while preserving that identity.
+- A replacement config that passes the restored databases' deployment identity checks. The retained inventory includes project, namespace, names, addresses, ports, volumes, paths, and domain; image choices may differ. In a full drill, both the storage address and storage certificate DNS name must reach isolated replacement services. The restore tools use both.
 - For `--full`: empty PostgreSQL, MongoDB, and Garage targets and a [restore-capable host](#check-and-restore-managed-data). The bundle needs both controller databases, three managed-data archives, an image selection, and an app with an accepted deployment. Include S3 objects and app grants to exercise their recovery. Format-4 full drills compare restored-instance counts with each catalog's managed inventory. An engine with no managed resources records `no-managed-resources`; every present engine must restore all its resources before `isolatedDatabases` evidence is recorded. CI also exercises both engines with sample data.
 - The tools the script calls, on your `PATH` or named with these variables:
 
@@ -694,7 +714,7 @@ Before the full drill, confirm verify-only passed, the work directory is absent,
 > The full drill restores data into the configured services. Never point it at live production services.
 
 ```bash
-infra/backup/full_loss_recovery_drill.sh --full \
+SERVICE_CHECK_PYTHON=python3 infra/backup/full_loss_recovery_drill.sh --full \
   /mnt/recovered/$PLATFORM_NAMESPACE-YYYYMMDDTHHMMSSZ \
   /srv/full-loss-drill \
   /escrow/controller-age-identity.txt \
@@ -702,6 +722,8 @@ infra/backup/full_loss_recovery_drill.sh --full \
   /private/replacement-platform.json
 test -f /srv/full-loss-drill/DRILL-EVIDENCE.json
 ```
+
+If the drill fails, no successful `DRILL-EVIDENCE.json` is committed. Keep targets isolated, inspect the failing step, and retain the work directory for diagnosis. A new drill needs a new absent work directory and empty replacement targets.
 
 It prints a `restore=verified` line for each controller database, `managed-data-restore=verified source=<set>`, and finally `full-loss-drill=verified evidence=/srv/full-loss-drill/DRILL-EVIDENCE.json`. Evidence records the bundle, restored counts, deploy keys, and portal/session recovery. Keep it with the bundle.
 
@@ -767,14 +789,3 @@ Some things to expect:
 - [Hosts and images](hosts-and-images.md)
 - [Security](../security.md)
 - [Internals](../reference/internals.md)
-
-Per-resource restore uses `openstack-platform-storage-backup restore --type postgres|mongo`
-with repeatable `--resource UUID`, a private offline `--controller-database PATH`, and
-`--catalog PATH` pointing to the other provider's verified catalog to reserve its ports.
-The managed-data restore wrapper supplies both catalogs automatically. Restore
-provisions missing isolated instances, reuses recorded ports and current caps, restores
-data/users, updates canonical/candidate owned bindings and controller identity, and
-verifies current worker IPs before reopening access. Identical completed payload replay
-skips destructive import. Keep the app/controller stopped until state installation
-and verification finish. For capacity, encrypted metadata, source backup gating and
-rehearsal commands, see [Migrate storage instances](migrate-storage-instances.md).

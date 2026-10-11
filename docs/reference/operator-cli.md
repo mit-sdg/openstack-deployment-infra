@@ -8,7 +8,7 @@ The command list comes from the argument parser in [`openstack_platform/operator
 
 `openstack-platform` manages infrastructure: greenfield setup, platform status, the operator dashboard, role images, the three persistent hosts, and backup and restore of its own state.
 
-It has no application, deployment, environment, or managed-storage mutation commands. App owners, staff, and portal admins change apps through the [owner portal](../guides/manage-apps-and-people.md). An operator who needs to act on an app directly uses the [controller API](controller-api.md), as shown in [Deploy apps from the command line](../guides/deploy-apps-from-the-command-line.md). `status` only shows aggregate app and storage counts.
+It has no application, deployment, environment, or managed-storage mutation commands. App owners, staff, and portal admins change apps through the [owner portal](../guides/manage-apps-and-people.md). An operator who needs to act on an app directly uses the [controller API](controller-api.md), as shown in [Deploy apps from the command line](../guides/deploy-apps-from-the-command-line.md). `status` shows aggregate app and storage counts and live health counts.
 
 ## How you run it
 
@@ -27,7 +27,7 @@ The launcher pins the inventory, state directory, and policy to their installed 
 
 ## Global options
 
-These options go before the command. The installed launcher sets all three for you.
+These options go before the command. The installed launcher sets all three for you. `-h` or `--help` prints help for the selected command; the top-level parser refuses abbreviated long options.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -62,7 +62,7 @@ In the synopses below, `ROLE` is one of `admin`, `ingress`, or `storage` for `in
 ### setup check
 
 ```text
-openstack-platform setup check --env-file PATH [--cloudflare-token-file PATH] [--json]
+openstack-platform setup check --env-file PATH [--cloudflare-token-file PATH] [--workspace PATH] [--json]
 ```
 
 Authenticates to OpenStack with the protected setup file, resolves the project, network, flavors, and volume type, checks quotas, fixed addresses, reserved names, local tools, ingress settings, and release evidence, and prints a plan. It only reads from OpenStack: it creates no workspace, credentials, images, or cloud resources.
@@ -71,7 +71,8 @@ Authenticates to OpenStack with the protected setup file, resolves the project, 
 | --- | --- |
 | `--env-file PATH` | Required. The protected setup file ([configuration reference](configuration.md)) |
 | `--cloudflare-token-file PATH` | A Cloudflare Tunnel token file; requires `PLATFORM_INGRESS_MODE=tunnel` |
-| `--json` | Print the plan as JSON instead of text |
+| `--json` | Print the plan as JSON instead of text; refused with `--apply` |
+| `--workspace PATH` | Parsed, but unused by a read-only check; default `/srv/openstack-platform/setup` |
 
 The text output starts with `setup-check=ready` or `setup-check=failed` and ends with `no resources or credentials were created`. The command exits with an error when the plan is not ready (name collisions, an occupied fixed address, or insufficient or unknown quota). Running `setup` with neither `check` nor `--apply` also performs this check.
 
@@ -90,7 +91,7 @@ Creates a complete deployment: inventory and secrets, security groups and fixed 
 | `--cloudflare-token-file PATH` | Configure Cloudflare Tunnel on the ingress host; without it, public ingress is left pending |
 | `--apply` | Required to make changes; cannot be combined with `check` |
 
-On success the output ends with `setup=complete project=<name> project-id=<uuid>`, the inventory path, and `public-ingress=cloudflare-configured` or `public-ingress=pending external provider configuration`. Setup is resumable: after a failure, fix the named problem and rerun the identical command with the same workspace. See [Deploy the platform](../guides/deploy-the-platform.md).
+On success the output ends with `setup=complete project=<name> project-id=<uuid>`, the inventory path, and `public-ingress=cloudflare-configured` or `public-ingress=pending external provider configuration`. In direct mode, it prints `public-ingress=direct-provider-configured`. Setup is resumable: after a failure, fix the named problem and rerun the identical command with the same workspace. See [Deploy the platform](../guides/deploy-the-platform.md).
 
 ## Status and dashboard
 
@@ -104,7 +105,7 @@ Prints one table row:
 
 ```text
 STATE    INFRA  APPS  STORAGE  LIVE  UNAVAILABLE  UNHEALTHY
-healthy  5      3     4        3     0            0
+healthy  5      3     4        10    0            0
 ```
 
 | Column | Source |
@@ -112,7 +113,7 @@ healthy  5      3     4        3     0            0
 | `STATE` | `healthy` or `degraded` |
 | `INFRA` | Roles with a selected image in operator state (5 when complete) |
 | `APPS`, `STORAGE` | Counts of apps and managed storage resources in the hosted controller |
-| `LIVE`, `UNAVAILABLE`, `UNHEALTHY` | Live observations from the hosted controller |
+| `LIVE`, `UNAVAILABLE`, `UNHEALTHY` | Available, unavailable and unhealthy observations across persistent hosts, apps and storage; a builder is included while a build is unfinished |
 
 `status` reads `GET /v1/admin/status` on the controller's privileged socket through the `platform-admin` SSH alias. If the controller cannot be reached, the command fails as unavailable (exit code 4) rather than falling back to local records. `STATE` is `degraded` when any role has no selected image, any observation is unavailable or unhealthy, or any operation is unfinished in either the operator or the hosted controller state.
 
@@ -157,8 +158,8 @@ Verifies an operator-state backup and atomically replaces `STATE_DIRECTORY/platf
 
 | Option | Meaning |
 | --- | --- |
-| `BACKUP` | The `platform-<timestamp>.sqlite3.age` ciphertext |
-| `--age-identity IDENTITY` | The escrowed age identity that decrypts it |
+| `BACKUP` | Age-v1 ciphertext (such as `platform-<timestamp>.sqlite3.age`) or plaintext SQLite backup; direct operator-owned mode-`0600` file, at most 1 GiB |
+| `--age-identity IDENTITY` | Required for ciphertext, unnecessary for plaintext; direct operator-owned mode-`0600` identity file, at most 65536 bytes |
 | `--yes` | Required; confirms replacement |
 
 Stop the operator's backup timer and every other operator command first; restore refuses to run while another command holds the state lock. On success it prints `restore=verified schema-version=<n> integrity=ok`.
@@ -228,7 +229,7 @@ Change the power state of one persistent host and wait for the result: `stop` wa
 ### infra replace
 
 ```text
-openstack-platform infra replace ROLE [--yes] [--cloudflare-tunnel-token-file PATH]
+openstack-platform infra replace ROLE [--yes] [--cloudflare-tunnel-token-file PATH] [--user-data PATH]
 ```
 
 Replaces a persistent host with a new server built from the role's selected image (set it first with `infra image set`) and the inventory's `flavors.<role>`. The target flavor is resolved and checked before the old host is stopped; edit it in the operator inventory to resize the host on its next replacement. The old server is stopped but kept, the fixed port and data volumes move to the new server, and the old server is deleted only after the new one passes its identity and readiness checks. If the new server fails, the old one is restored with its original flavor. A quota refusal also restores the old host without deleting resources when the provider confirms no candidate exists. This interrupts the role; it is not zero-downtime.
@@ -236,7 +237,8 @@ Replaces a persistent host with a new server built from the role's selected imag
 | Option | Meaning |
 | --- | --- |
 | `--yes` | Skip the confirmation prompt |
-| `--cloudflare-tunnel-token-file PATH` | Ingress only: the tunnel token for a fresh ingress replacement. Ignored, with a notice, when resuming a recorded replacement. |
+| `--cloudflare-tunnel-token-file PATH` | Ingress only: required for a fresh ingress replacement. Ignored, with a notice, when resuming a recorded replacement. Refused for admin or storage. |
+| `--user-data PATH` | Parsed but hidden from help. Supplies a cloud-init user-data file for admin or storage; overrides are refused for ingress. |
 
 On success it prints a JSON observation with the operation ID, the old and new server IDs, and the selected image. When flavors differ, the confirmation prompt names the change and the observation includes `"flavor": {"from": "<old flavor>", "to": "<new flavor>"}`. Recovery uses the recorded target flavor ID. If the command stops partway, run it again: an attempt that had not been accepted rolls back to the old host (start a fresh replacement afterwards), and an accepted one finishes its cleanup. See [Replace a persistent host](../guides/hosts-and-images.md#replace-a-persistent-host).
 
@@ -251,7 +253,7 @@ Commands that change infrastructure record an operation in the operator state an
 | Code | Meaning |
 | --- | --- |
 | `0` | Success |
-| `1` | The operation failed safely; read the error |
+| `1` | Operation, setup, restore or helper failure; read the error and recorded state |
 | `2` | Usage or validation error |
 | `3` | Conflict: a lock is busy, another operation is unfinished, drift was detected, or recovery is required |
 | `4` | A dependency (the admin host, the controller, or the helper) is unavailable |
@@ -265,21 +267,14 @@ These launchers are installed alongside `openstack-platform`. The guides linked 
 
 | Command | Where it runs | Purpose |
 | --- | --- | --- |
-| `/srv/openstack-platform/bin/openstack-platform-restore` | Operator host, as the operator | Offline restore of operator state into the installed state directory. `--replacement-state-directory DIR`, given first, restores into an absent `platform.sqlite3` inside a private (`0700`) drill directory instead. Then `BACKUP [--age-identity IDENTITY] --yes`. See [Backups and recovery](../guides/backups-and-recovery.md). |
-| `/srv/openstack-platform/bin/openstack-platform-install-config` | Operator host, as the operator | Install a new inventory and policy atomically: `--platform PATH --policy PATH`. See [Releases and upgrades](../guides/releases-and-upgrades.md). |
+| `/srv/openstack-platform/bin/openstack-platform-restore` | Operator host, as the operator | Offline restore of operator state into the installed state directory. `--replacement-state-directory DIR`, given first, restores into an absent `platform.sqlite3` inside a private (`0700`), operator-owned, absolute drill directory instead. Then `BACKUP [--age-identity IDENTITY] --yes`. It also accepts the raw restore options listed below. See [Backups and recovery](../guides/backups-and-recovery.md). |
+| `/srv/openstack-platform/bin/openstack-platform-install-config` | Operator host, as the operator | Validate both files, then replace each file atomically: `--platform PATH --policy PATH`. The installed launcher pins `/srv/openstack-platform/config` and `/srv/openstack-platform/state` and refuses destination overrides. The raw installer script also accepts `--config-root DIR` and `--state-root DIR`; both must be absolute and default to those installed paths. The two replacements are sequential; a failure can leave only the inventory updated. See [Releases and upgrades](../guides/releases-and-upgrades.md). |
 | `/srv/openstack-platform/bin/platform-openstack` | Operator host | Protected wrapper that runs the OpenStack client with the deployment's credentials |
-| `openstack-platform-hosted-controller-restore` | Admin host, root on the recovery console | Restore the hosted controller database (and deploy keys). See [Backups and recovery](../guides/backups-and-recovery.md). |
-| `openstack-platform-management-broker-restore` | Admin host, root on the recovery console | Restore the owner portal broker database |
-| `openstack-platform-management-reactivate` | Admin host, as the operator | Request activation of a retained portal release pair. See [Releases and upgrades](../guides/releases-and-upgrades.md). |
+| `openstack-platform-hosted-controller-restore` | Admin host, root on the recovery console | `--yes [--replace-current-recovery-required-operation OPERATION_UUID]`. Restore the hosted controller database (and deploy keys). The emergency option names the exact unfinished recovery operation to replace. See [Backups and recovery](../guides/backups-and-recovery.md). |
+| `openstack-platform-management-broker-restore` | Admin host, root on the recovery console | `--yes`; restore the portal broker database from the staged recovery input. |
+| `openstack-platform-management-reactivate` | Admin host, as the operator | `--platform-config PATH --broker-release NAME --web-release NAME [--allow-unsigned-production] [--allow-unsigned-development]`. Request activation of a retained portal release pair. The installed wrapper refuses unsigned development on the production admin host; the two unsigned modes are mutually exclusive. See [Releases and upgrades](../guides/releases-and-upgrades.md). |
 
-## Related
-
-- [Run the platform](../guides/run-the-platform.md)
-- [Hosts and images](../guides/hosts-and-images.md)
-- [Backups and recovery](../guides/backups-and-recovery.md)
-- [Controller API](controller-api.md)
-- [Internals](internals.md)
-
+The packaged `openstack-platform-restore` / `openstack-platform-controller-restore` parser requires `BACKUP --destination PATH --platform-config PATH --yes`. Optional flags are `--age-identity PATH`, `--source-keys-archive PATH`, `--source-keys-directory PATH`, and `--replace-current-recovery-required-operation OPERATION_UUID`. Source-key archive and directory must be supplied together. The emergency option permits replacement only when all current unfinished state belongs to the named recovery-required operation. The installed operator restore launcher supplies destination and inventory itself and refuses overrides; `openstack-platform restore` has only the smaller option set in [restore](#restore).
 
 ## PostgreSQL rollout repair
 
@@ -288,7 +283,7 @@ admin VM. Run it as agentops after the storage host replacement, admin image and
 matching helper release, and portal pair are installed. It calls the local privileged
 controller socket, prints a request UUID, and waits for the controller operation.
 
-```sh
+```bash
 openstack-platform-storage-repair
 # Reconcile an interrupted run using its printed UUID:
 openstack-platform-storage-repair --request-id UUID
@@ -301,3 +296,30 @@ idempotent; retrying an interrupted request resumes from completed resources.
 `--timeout` defaults to 300 seconds and accepts 1–3600 seconds. The raw packaged
 entrypoint requires `--socket PATH`; the Nix wrapper supplies the deployment's
 privileged socket.
+
+## Storage instance migration
+
+`openstack-platform-storage-migrate` is a separate command on the admin VM. Run it as `agentops`. It migrates selected shared database resources to isolated servers, or aborts selected migrations before endpoint publication. It retains the shared source data. See [Migrate storage instances](../guides/migrate-storage-instances.md) for prerequisites and recovery.
+
+```text
+openstack-platform-storage-migrate [--application UUID ...] [--request-id UUID] [--timeout SECONDS] [--abort]
+openstack-platform-storage-repair [--request-id UUID] [--timeout SECONDS]
+```
+
+| Option | Migration | PostgreSQL repair |
+| --- | --- | --- |
+| `--socket PATH` | Required absolute Unix socket path in the packaged command; installed Nix wrapper supplies the privileged socket. | Same. |
+| `--request-id UUID` | Canonical lowercase UUID; generated when omitted. Replay the printed UUID with the same selection and action. | Same; replay the printed UUID. |
+| `--application UUID` | Repeatable; canonical lowercase app UUIDs. Duplicates are removed and the selection is sorted. Without it, all shared resources are selected. The API accepts at most 50 selected apps. | Not accepted. |
+| `--timeout SECONDS` | Integer 1–7200, default `7200`; whole submission-and-polling deadline. | Integer 1–3600, default `300`. |
+| `--abort` | Call `/v1/admin/storage/abort-migration` instead of the migration route. Refused after publication; replay the migration to finish it. | Not accepted. |
+
+Both commands print the request ID before submission and poll the privileged operation route. A completed operation exits `0`; submission, polling or operation failure exits `1`; argparse usage errors exit `2`. After an interrupted run, use its printed ID to resume. An invalid request ID is rejected before it can be printed.
+
+## Related
+
+- [Run the platform](../guides/run-the-platform.md)
+- [Hosts and images](../guides/hosts-and-images.md)
+- [Backups and recovery](../guides/backups-and-recovery.md)
+- [Controller API](controller-api.md)
+- [Internals](internals.md)

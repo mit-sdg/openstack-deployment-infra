@@ -5,7 +5,7 @@ Find each tracked file and its purpose here. For runtime relationships, read the
 Files are grouped by directory, not by runtime call graph.
 
 > [!NOTE]
-> `tests/test_documentation.py` requires every tracked file exactly once and checks that listed paths exist. Update this page with file additions, renames, or deletions.
+> Keep every tracked file listed exactly once with a path in backticks followed by an em dash and a short description. Update this page with file additions, renames, or deletions.
 
 ## Repository root
 
@@ -58,6 +58,7 @@ The documentation. Start at the [documentation home](../README.md).
 - `docs/guides/deploy-the-platform.md` — new platform setup and verification.
 - `docs/guides/run-the-platform.md` — operator variables, health checks, dashboard, and teardown.
 - `docs/guides/backups-and-recovery.md` — backup sets, off-site export, restores, and recovery drills.
+- `docs/guides/migrate-storage-instances.md` — shared database migration, checkpoint backups, replay, and abort.
 - `docs/guides/troubleshooting.md` — symptoms, fixes, and recovery rules.
 - `docs/guides/deploy-apps-from-the-command-line.md` — controller requests, rollback, sizing, retries, and IPv4 reservations.
 - `docs/guides/open-the-portal.md` — portal installation, first admin, sign-in, staff, and quotas.
@@ -184,13 +185,14 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 #### Components
 
 - `frontend/owner-portal/src/components/DeleteApp.tsx` — admin-only app deletion confirmation, step-up, intent progress and result.
+- `frontend/owner-portal/src/components/DeleteApp.test.tsx` — app deletion confirmation, re-authentication, and replay tests.
 - `frontend/owner-portal/src/components/AccountControls.tsx` — admin-only account creation, roles, limits, access and recovery controls on People.
 - `frontend/owner-portal/src/components/DeploymentStatus.tsx` — deployment status joined with the original change and shared Resume action.
 - `frontend/owner-portal/src/components/ClassRecords.tsx` — shared pagers, loading states and class activity adapters.
 - `frontend/owner-portal/src/components/AppManagement.tsx` — elevated ownership and storage controls on shared Settings.
 - `frontend/owner-portal/src/components/AppFrame.tsx` — app header, state, URL, and tabs.
 - `frontend/owner-portal/src/components/AttentionActivity.test.tsx` — tests for the attention list: who sees it, the original actor, and Resume.
-- `frontend/owner-portal/src/components/AttentionActivity.tsx` — an app's activity that needs attention (blocked or unknown), with who started each and a Resume button, for owners, staff, and admins.
+- `frontend/owner-portal/src/components/AttentionActivity.tsx` — blocked or unknown app changes, actors, and Resume controls.
 - `frontend/owner-portal/src/components/BoundaryText.tsx` — re-exports the shared `BoundaryText`.
 - `frontend/owner-portal/src/components/BuilderSize.tsx` — staff and admin Settings card for per-app build machine selection, reset, and progress.
 - `frontend/owner-portal/src/components/Machines.tsx` — staff/admin Overview worker capacity and effective build machine, with sizing links.
@@ -200,7 +202,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/components/DeploymentRow.tsx` — deployment list row.
 - `frontend/owner-portal/src/components/EnvironmentSection.tsx` — write-only environment editor and progress.
 - `frontend/owner-portal/src/components/Feedback.tsx` — load-error messages and retryable `QueryError`, using shared presentation components directly.
-- `frontend/owner-portal/src/components/LogViewer.tsx` — runtime output and error logs for owner/admin pages.
+- `frontend/owner-portal/src/components/LogViewer.tsx` — authorized runtime stdout and stderr viewer.
 - `frontend/owner-portal/src/components/TimestampedLog.tsx` — local-time log columns, timestamp toggles, and UTC copy/download exports.
 - `frontend/owner-portal/src/components/TimestampedLog.test.tsx` — timestamp parsing, legacy rendering, toggles, and log exports.
 - `frontend/owner-portal/src/components/Mark.tsx` — re-exports the shared `Mark`.
@@ -211,6 +213,9 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/components/StartupRecord.tsx` — failed startup summary, events, and output.
 - `frontend/owner-portal/src/components/Status.tsx` — consistent state labels, tones, and badge rules.
 - `frontend/owner-portal/src/components/StorageSection.tsx` — storage creation, bindings, checks, and credential rotation.
+- `frontend/owner-portal/src/components/StorageUsage.tsx` — storage usage, limits, write blocks, and limit editing.
+- `frontend/owner-portal/src/components/StorageUsage.test.tsx` — storage usage display and limit editing tests.
+- `frontend/owner-portal/src/components/storageLimitsErrors.ts` — storage limit error messages.
 - `frontend/owner-portal/src/components/TeamSection.tsx` — team table with add, remove, and leave actions.
 - `frontend/owner-portal/src/components/ThemeButton.tsx` — theme toggle with the portal's storage key.
 
@@ -234,7 +239,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/App.test.tsx` — settings, conflicts, status, API decoding, CSRF, and runtime actions.
 - `frontend/owner-portal/src/Sizing.test.tsx` — worker plan forwarding, size summaries, owner boundaries, and builder controls.
 - `frontend/owner-portal/src/ClassPages.test.tsx` — task navigation, shared Resume, metadata validation and account step-up tests.
-- `frontend/owner-portal/src/Routing.test.tsx` — nested routes and redirects from old staff links.
+- `frontend/owner-portal/src/Routing.test.tsx` — shared app routes, role gates, and rejected retired routes.
 - `frontend/owner-portal/src/Shell.test.tsx` — branding, role navigation, and app list tests.
 - `frontend/owner-portal/src/components/CommitChecks.test.tsx` — commit problems, versions, unreadable sources, and rate limits.
 - `frontend/owner-portal/src/components/LogViewer.test.tsx` — log streams, refresh, and unavailable states.
@@ -273,6 +278,8 @@ The read-only [dashboard](../guides/run-the-platform.md) ships in `openstack_pla
 - `frontend/operator-dashboard/src/Drawer.tsx` — read-only details, storage evidence, and copy buttons.
 - `frontend/operator-dashboard/src/Icons.tsx` — dashboard SVG icons and status shapes.
 - `frontend/operator-dashboard/src/Sections.tsx` — overview, attention, roles, operations, checks, and sources.
+- `frontend/operator-dashboard/src/StorageHost.tsx` — storage host capacity, alarms, containers, and database instances.
+- `frontend/operator-dashboard/src/StorageHost.test.tsx` — storage host display and incomplete evidence tests.
 - `frontend/operator-dashboard/src/api.ts` — same-origin snapshot reads and guarded refresh requests.
 - `frontend/operator-dashboard/src/app.css` — dashboard layout and print styles using shared tokens.
 - `frontend/operator-dashboard/src/polling.ts` — single-flight polling, ETags, visibility, and refresh state.
@@ -314,6 +321,7 @@ Internal scripts and payloads called by setup, operators, helpers, systemd, and 
 
 - `infra/lib/health_alert_config.py` — reads and validates the non-secret health alert settings in the inventory (shell-side copy).
 - `infra/lib/health_alerts.py` — health alert state machine: consecutive-failure threshold, repeat interval, recovery message, and state kept on the admin volume.
+- `infra/lib/storage_health.py` — fixed storage capacity and availability alarm thresholds.
 - `infra/lib/http.py` — bounded monitoring and backup HTTP/JSON helpers.
 - `infra/lib/owner_portal_config.py` — copied portal validator for infrastructure scripts.
 - `infra/lib/platform-config.sh` — allowlisted shell projection of inventory.
@@ -326,7 +334,8 @@ Internal scripts and payloads called by setup, operators, helpers, systemd, and 
 
 - `infra/monitor/check_platform.py` — secret-free control-plane health snapshot.
 - `infra/monitor/check_services.py` — authenticated admin service checks without printing credentials.
-- `infra/monitor/send_health_alert.py` — private webhook sender: takes the URL on stdin, posts over verified HTTPS with no redirects, and never logs the URL.
+- `infra/monitor/storage_host.py` — authenticated storage host metrics collector.
+- `infra/monitor/send_health_alert.py` — bounded private HTTPS webhook sender receiving its URL on stdin.
 - `infra/monitor/test_health_alert.py` — sends an operator test alert without changing alert state.
 - `infra/nomad/bootstrap_acl.sh` — Nomad ACL bootstrap and protected scoped token files.
 
@@ -364,7 +373,7 @@ NixOS definitions for the five role images, the packages they contain, and the V
 - `nix/roles/admin.nix` — Nomad, controller/helper, portal, monitoring, backups, and state mounts.
 - `nix/roles/builder.nix` — rootless BuildKit, restricted SSH, blocked metadata, and expiry.
 - `nix/roles/ingress.nix` — Traefik, tunnel/direct listeners, routes, and trusted forwarders.
-- `nix/roles/storage.nix` — databases, Garage, registry, TLS, firewall, and data mount.
+- `nix/roles/storage.nix` — database instances, Garage, registry, quotas, TLS, firewall, and data mount.
 - `nix/roles/worker.nix` — Nomad client, Docker, isolation, registry trust, and no SSH.
 - `nix/tests/default.nix` — role VM tests with inventory, certificates, and service fixtures.
 
@@ -398,6 +407,7 @@ Installed commands (`pyproject.toml`) and shared code. The controller owns produ
 ### Backups and recovery
 
 - `openstack_platform/backup_retention.py` — controller/portal backup pruning by age and count, manifest first.
+- `openstack_platform/database_backups.py` — database dump bundles, checkpoint backups, verification, and restore.
 - `openstack_platform/recovery_bundle.py` — append-only off-site bundle export, verification, import, and scheduling.
 - `openstack_platform/restore.py` — offline validation and atomic controller database replacement.
 
@@ -405,8 +415,11 @@ Installed commands (`pyproject.toml`) and shared code. The controller owns produ
 
 - `openstack_platform/__init__.py` — package description and helper protocol version.
 - `openstack_platform/contracts.py` — typed shared contract access.
+- `openstack_platform/instance_contract.py` — database limits, host budgets, and disk reservation formulas.
+- `openstack_platform/storage_instances.py` — root-owned database manager, cgroups, quotas, firewall, and containers.
+- `openstack_platform/storage_migration.py` — native database copy, verification, source freezing, and sealing.
 - `openstack_platform/durable.py` — file replacement with `fsync` and no link following.
-- `openstack_platform/health_alert_config.py` — reads and validates the non-secret health alert settings in the inventory (packaged copy).
+- `openstack_platform/health_alert_config.py` — packaged non-secret health alert configuration validation.
 - `openstack_platform/runtime.py` — private directories, locks, bounded I/O, redaction, and diagnostics.
 - `openstack_platform/log_timestamps.py` — bounded timestamped build-log byte sink for admin recording.
 - `openstack_platform/runtime_versions.py` — repository runtime requests, supported semver, and build runtime validation.
@@ -429,7 +442,7 @@ The admin-host controller owns app state in SQLite. See the [controller API](con
 - `openstack_platform/controller/application_models.py` — immutable storage, configuration, and recipe value objects.
 - `openstack_platform/controller/application_service.py` — app creation, start, stop, and deletion.
 - `openstack_platform/controller/application_runtime.py` — source, recipes, builds, workers, health, cleanup, and retention.
-- `openstack_platform/controller/log_timestamps.cjs` — runtime-native container entrypoint with byte-safe timestamps and process-group signal forwarding.
+- `openstack_platform/controller/log_timestamps.cjs` — container log timestamps and process-group signal forwarding.
 - `openstack_platform/controller/deployment_config.py` — typed configuration parsing and checkout validation.
 - `openstack_platform/controller/deployment_reads.py` — allowlisted deployment configuration and source reads.
 - `openstack_platform/controller/deployment_service.py` — deployment build, cutover, acceptance, and recovery.
@@ -439,16 +452,21 @@ The admin-host controller owns app state in SQLite. See the [controller API](con
 - `openstack_platform/controller/sizing.py` — worker size plans, capacity budgets, and service reserves.
 - `openstack_platform/controller/nomad_jobs.py` — job rendering, placement checks, and route identity validation.
 - `openstack_platform/controller/environment_service.py` — write-only environment variable changes.
-- `openstack_platform/controller/finishing_retries.py` — durable, bounded retries of finishing work (removing the previous version) after a deployment goes live.
+- `openstack_platform/controller/finishing_retries.py` — durable retry schedules for accepted operation cleanup.
 - `openstack_platform/controller/storage.py` — managed storage state machine and helper calls.
 - `openstack_platform/controller/storage_contract.py` — storage ownership, secret keys, and environment mappings.
 - `openstack_platform/controller/storage_service.py` — managed storage request validation and execution.
+- `openstack_platform/controller/storage_capacity.py` — database and S3 admission reservations and worker identities.
+- `openstack_platform/controller/storage_instances.py` — journaled shared-to-instance migration and abort orchestration.
+- `openstack_platform/controller/storage_limits.py` — resource limits, cached usage, collection, and PostgreSQL repair.
+- `openstack_platform/controller/storage_migrate.py` — privileged instance migration and abort command.
+- `openstack_platform/controller/storage_repair.py` — privileged PostgreSQL repair command and operation polling.
 - `openstack_platform/controller/log_service.py` — bounded runtime and saved build log reads.
 - `openstack_platform/controller/image_service.py` — role image selection and worker/builder provisioning snapshots.
 - `openstack_platform/controller/seed_images.py` — initial selections preserving newer records after admin replacement.
 - `openstack_platform/controller/fixed_ip_service.py` — journaled retained primary port reservations.
 - `openstack_platform/controller/public_ip_service.py` — journaled outbound IPv4 reservations, handovers, and releases.
-- `openstack_platform/controller/hosted_backup.py` — encrypted committed controller database backups.
+- `openstack_platform/controller/hosted_backup.py` — encrypted controller database backups and offline restore.
 - `openstack_platform/controller/source_key_backup.py` — deploy key backups and offline restore staging.
 
 ### Helper
@@ -466,6 +484,9 @@ The unprivileged admin-host helper accepts only `actions-v1.txt` actions.
 - `openstack_platform/helper/registry_artifact.py` — read-only registry manifest and layer checks.
 - `openstack_platform/helper/runtime_images.py` — matching official `-slim` runtime images pinned by digest.
 - `openstack_platform/helper/storage.py` — PostgreSQL, MongoDB, Garage operations, and credentials.
+- `openstack_platform/helper/instance_migration.py` — shared database migration, endpoint publication, and abort actions.
+- `openstack_platform/helper/instances.py` — authenticated instance manager client and worker allowlist actions.
+- `openstack_platform/helper/storage_limits.py` — provider usage, limits, MongoDB write blocking, and host metrics.
 
 ### Operator dashboard
 
@@ -477,8 +498,8 @@ Run with `openstack-platform dashboard`. Committed `static/` output comes from `
 - `openstack_platform/dashboard/server.py` — private Unix HTTP server, asset allowlist, headers, and CLI.
 - `openstack_platform/dashboard/service.py` — single-flight refresh, last good data, route history, and snapshots.
 - `openstack_platform/dashboard/sources.py` — fixed admin reader, strict parsers, and public probes.
-- `openstack_platform/dashboard/static/assets/index-DrkvrrYi.js` — generated dashboard JavaScript bundle.
-- `openstack_platform/dashboard/static/assets/style-D_0t2pU2.css` — generated dashboard stylesheet.
+- `openstack_platform/dashboard/static/assets/index-BlHGUqlf.js` — generated dashboard JavaScript bundle.
+- `openstack_platform/dashboard/static/assets/style-FWcOnd9o.css` — generated dashboard stylesheet.
 - `openstack_platform/dashboard/static/favicon.svg` — generated dashboard browser icon.
 - `openstack_platform/dashboard/static/index.html` — generated HTML with external scripts and stylesheet.
 - `openstack_platform/dashboard/static/theme.js` — generated shared theme script.
@@ -496,11 +517,11 @@ The admin-host portal services (`management-web`, `management-broker`, `manageme
 
 #### Broker
 
-The broker authorizes portal actions and owns accounts, sessions, ownership, quotas, and audit. Only the broker calls the controller.
+The broker authorizes portal actions and owns accounts, sessions, ownership, quotas, and audit. The broker is the controller’s only project peer.
 
 - `openstack_platform/management/broker/__init__.py` — package marker for the broker.
 - `openstack_platform/management/broker/main.py` — production broker entry point without development imports.
-- `openstack_platform/management/broker/app_management.py` — shared app authority, catalog filters, sizing, adoption, ownership and storage deletion.
+- `openstack_platform/management/broker/app_management.py` — shared app authority, catalog, sizing, ownership, and deletion.
 - `openstack_platform/management/broker/sizing.py` — closed flavor projections, cached capacity enrichment, and controller sizing reads.
 - `openstack_platform/management/broker/builder_settings.py` — admin-only default builder size reads and durable audited changes.
 - `openstack_platform/management/broker/class_reads.py` — bounded audited People and Activity projections.
@@ -515,6 +536,7 @@ The broker authorizes portal actions and owns accounts, sessions, ownership, quo
 - `openstack_platform/management/broker/accounts.py` — admin accounts, step-up, setup/reset links, and audit.
 - `openstack_platform/management/broker/members.py` — app teams and activity feeds.
 - `openstack_platform/management/broker/resources.py` — environment and storage routes with secret-free results.
+- `openstack_platform/management/broker/storage_limits.py` — authorized resource limit edits and usage projections.
 - `openstack_platform/management/broker/runtime_logs.py` — authorized runtime logs with bounded shared reads.
 - `openstack_platform/management/broker/source_keys.py` — audited public deploy key routes and serialized access checks.
 - `openstack_platform/management/broker/staff_policy.py` — staff metadata limits and URL checks.
@@ -564,6 +586,8 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 - `tests/fixtures/retained_openstack.py` — offline stand-in for the OpenStack CLI and Nomad, so real helper and shell code runs unchanged.
 - `tests/product_fixtures.py` — builders for accepted app and deployment state.
 - `tests/repository_fixtures.py` — creates clean temporary Git repositories for tests that need a committed checkout.
+- `tests/run_parallel.py` — isolated parallel unittest module runner.
+- `tests/run_storage_databases.py` — real PostgreSQL and MongoDB migration, quota, and restore checks.
 - `tests/collect_owner_portal_artifacts.py` — collects the size-limited, credential-free portal test artifacts CI uploads on failure.
 - `tests/install_ci_apt_packages.sh` — installs fixed CI packages with retries and a time limit.
 - `tests/smoke_generated_recipes.sh` — generates, builds, starts, and health-checks the Node.js and Bun recipes with rootless Podman.
@@ -584,6 +608,8 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 - `tests/test_helper_worker_capacity.py` — worker capacity reads against the pinned Nomad API fields, deadlines, and failures.
 - `tests/test_platform_services.py` — app, deployment, environment, storage, and log services, including helper failures.
 - `tests/test_platform_storage.py` — the controller's storage state machine and the helper's PostgreSQL, MongoDB, and Garage operations.
+- `tests/test_storage_instances.py` — database instance manager, isolation, and migration tests.
+- `tests/test_storage_limits.py` — storage limits, capacity admission, collection, and write blocking tests.
 - `tests/test_platform_foundation_nomad.py` — Nomad Variable merges and compare-and-set limited to owned keys.
 
 ### Builds and deployments
@@ -650,6 +676,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 
 - `tests/test_garage_backup.py` — Garage backups: read-only grants, complete coverage, bounded archives, and recovery.
 - `tests/test_managed_data_backup.py` — managed-data backups and compatibility with older restores.
+- `tests/test_database_backups.py` — logical database bundles, checkpoints, verification, and restore tests.
 - `tests/test_full_loss_recovery_drill.py` — the full-loss recovery drill in full and check-only modes.
 - `tests/test_platform_restore.py` — offline controller restore: validation, permissions, and atomic replacement.
 - `tests/test_recovery_bundle.py` — off-site bundles: export, import, manifest limits, mount checks, scheduling, and receipts.
@@ -667,6 +694,6 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 
 ### Repository checks
 
-- `tests/test_documentation.py` — documentation checks: the set of pages, links and section anchors, images, required facts, no production domain or retired names, and this map against `git ls-files`.
+- `tests/test_documentation.py` — local documentation link and heading-anchor checks.
 - `tests/test_hardening_properties.py` — generated cases for durable writes, parsers, state boundaries, idempotency, and secret redaction.
 - `tests/test_health_alerts.py` — health alert thresholds, repeats, recovery, message formatting without secrets, HTTPS-only URLs, timeouts, and delivery failures not affecting health.

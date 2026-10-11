@@ -1,13 +1,13 @@
 # Development
 
-Set up a contributor environment, run CI checks, and try the owner portal and operator dashboard locally. These commands need no OpenStack credentials and provision no infrastructure. For a live platform, follow [Deploy the platform](guides/deploy-the-platform.md).
+This page helps contributors set up the repository, preview the portal or dashboard, and run the relevant CI checks. The local workflows need no OpenStack credentials and create no cloud resources. To operate a live deployment, use [Run the platform](guides/run-the-platform.md).
 
 ## What you need
 
 | Tool | Version | Used for |
 | --- | --- | --- |
 | Linux on x86_64 | | Everything. Nix outputs target `x86_64-linux`, and the local portal uses Linux-only features (Unix sockets, `memfd`). |
-| [uv](https://docs.astral.sh/uv/) | any recent release (CI pins 0.12.2) | The Python environment and every Python command |
+| uv | CI pins 0.12.2 | The locked Python environment and Python commands |
 | Python | 3.14.x | Required by `pyproject.toml`. uv uses or installs it. |
 | Node.js and npm | Node 24.19.0, npm 11.17.0 | The frontend workspace (`frontend/package.json` pins both) |
 | Nix with flakes | | Optional: Nix evaluation, formatting, VM tests, and image builds |
@@ -47,6 +47,14 @@ To change Python dependencies, edit `pyproject.toml`, run `uv lock`, and commit 
 
 If you use Nix, `nix develop` opens a shell with `deadnix`, `jq`, `nixfmt-rfc-style`, `python3`, `shellcheck`, and `statix`. It doesn't include uv or Node.js.
 
+Choose a first workflow after setup:
+
+- **Portal UI or sign-in:** [Start the portal](#start-the-portal), then [Verify the portal](#verify-the-portal).
+- **Dashboard UI:** [Preview the operator dashboard](#preview-the-operator-dashboard), then [Change the dashboard UI](#change-the-dashboard-ui).
+- **Python or infrastructure code:** run the relevant [Python test module](#python-tests), then the static and role checks below.
+
+If setup fails, check the tool versions against the table and run commands from the repository root. For harness startup errors, follow [Reset or upgrade local state](#reset-or-upgrade-local-state) and the startup checks under [Start the portal](#start-the-portal).
+
 ## Run the checks
 
 Run the pull-request CI jobs locally with these commands.
@@ -54,12 +62,11 @@ Run the pull-request CI jobs locally with these commands.
 | CI job | What it checks | Local section |
 | --- | --- | --- |
 | Static checks | Python formatting, lint, types, dead code, tests, shell scripts, example configuration | [Python tests](#python-tests), [Python static checks](#python-static-checks), [Shell checks](#shell-checks), [Configuration and entry point checks](#configuration-and-entry-point-checks) |
-| Owner portal frontend and HTTPS smoke | Portal format, types, unit tests, build, Playwright smoke, management release evidence | [Verify the portal](#verify-the-portal) |
-| Frontend workspace and committed dashboard freshness | All frontend packages, both builds, committed dashboard output, dashboard Playwright smoke | [Frontend checks](#frontend-checks) |
+| Frontend checks, HTTPS smoke and dashboard freshness | All frontend packages, both builds, committed dashboard output, both browser suites, management release evidence | [Frontend checks](#frontend-checks), [Verify the portal](#verify-the-portal) |
 | Build, start, and health-check generated Bun and Node recipes | Real app builds from generated recipes | [Generated recipe smoke test](#generated-recipe-smoke-test) |
 | Nix evaluation and formatting, packaged binaries, role VM tests, image builds | Nix configurations, packages, and the five role images | [Nix checks](#nix-checks) |
 
-Image publication and live acceptance run only on `main` or by manual dispatch. See [Releases and upgrades](guides/releases-and-upgrades.md).
+Production image publication runs on `main` when the publication gate admits it. Development publication and disposable live acceptance use manual dispatch; live acceptance also requires `LIVE_ACCEPTANCE_ENABLED`. See [Releases and upgrades](guides/releases-and-upgrades.md).
 
 ### Python tests
 
@@ -72,7 +79,7 @@ uv run python tests/run_parallel.py --jobs 4
 The runner uses one isolated process per module and reports failures in full. CI uses four workers. While iterating, run one module or class:
 
 ```bash
-uv run python -m unittest tests.test_documentation -v
+uv run python -m unittest tests.test_documentation tests.test_application_deployment_docs -v
 uv run python -m unittest tests.test_management_releases.ManagementReleaseTests -v
 ```
 
@@ -88,10 +95,8 @@ Some tests require a tool or explicit opt-in:
 
 | Test | Runs when |
 | --- | --- |
-| Dashboard wheel build (`tests/test_dashboard.py`) | `uv` is on `PATH` |
-| Fixed IP curl transport (`tests/test_fixed_ip.py`) | `curl` is on `PATH` |
 | Private repository keys (`tests/test_private_repositories.py`) | `ssh-keygen` is on `PATH` |
-| Release smoke (`tests/test_packaging_release.py`) | Python is 3.14 |
+| Release smoke (`tests/test_packaging_release.py`) | Python is 3.14 and `uv` is on `PATH` |
 | OpenStack SDK projection (`tests/test_neutron_sdk_projection.py`) | The OpenStack SDK and client are importable. The Nix `package-smoke` check runs it. |
 | Real Node build of portal archives (`tests/test_management_releases.py`) | `OWNER_PORTAL_RELEASE_INTEGRATION=1` |
 
@@ -137,10 +142,10 @@ Expect `platform-config=valid` and `release-smoke=helper:ok`. CI also parses the
 ### Documentation tests
 
 ```bash
-uv run python -m unittest tests.test_documentation -v
+uv run python -m unittest tests.test_documentation tests.test_application_deployment_docs -v
 ```
 
-Tests check relative links, forbid the production domain and retired commands, and require each tracked file exactly once in the [repository map](reference/repository-map.md). Update the map whenever you add, rename, or delete a file.
+The documentation test checks relative links and heading anchors. The application deployment tests parse the command-line guide's Bash examples and validate its JSON configuration with the real parser. Update the [repository map](reference/repository-map.md) whenever you add, rename, or delete a file.
 
 ### Frontend checks
 
@@ -290,7 +295,7 @@ Output contains HTML, JavaScript, CSS, and SVG, without source maps, a Vite mani
    cd ..
    ```
 
-   On a fresh machine, add `--with-deps` to install the system libraries too (CI does).
+   On a fresh machine, add `--with-deps` if Chromium's system libraries are missing. CI first tries to launch Chromium, then installs those libraries if needed.
 
 2. Run the tests:
 
@@ -302,7 +307,7 @@ Playwright starts previews on ports 8480–8484. Tests cover polling, ETags, ref
 
 ## Run the local owner portal
 
-The local [owner portal](how-it-works.md) harness substitutes for Commons and the controller. Use it for UI work, sign-in and roles, and browser tests.
+The local [owner portal](how-it-works.md) harness substitutes for Commons and the controller. Use it for UI work, sign-in and roles, and browser tests. The student-facing product is called **6.1040 Apps**; this page calls its website the portal.
 
 ### How the harness works
 
@@ -358,6 +363,8 @@ Key details for debugging:
 
 Press Ctrl-C in the harness terminal to stop everything.
 
+If startup reports missing assets, rerun the portal build. If a port is occupied, choose distinct `--port` and `--provider-port` values and a fresh `--state` directory. Schema or origin errors require a fresh state directory; see [Reset or upgrade local state](#reset-or-upgrade-local-state).
+
 ### Fixture accounts
 
 These are public test values, not real class credentials.
@@ -373,7 +380,7 @@ Fake Commons codes work once, expire after 60 seconds, and are bound to the port
 
 Commons accounts can be app owners or staff, but never portal admins. A portal admin is always a local account (see the next section).
 
-The unowned `operator-class-fixture` and `operator-class-fixture-mobile` apps have larger sizing and a retained address for practicing admin adoption.
+The unowned `operator-class-fixture` and `operator-class-fixture-mobile` apps have larger sizing and a retained address for practicing staff or admin adoption.
 
 ### Things to try
 
@@ -454,7 +461,7 @@ To start over, stop the harness and delete its state directory:
 rm -rf .tmp/owner-portal-accounts
 ```
 
-Unknown schemas, mismatched migration checksums, and changed origins are refused. Use a fresh `--state` directory rather than editing the database. Older username-based Commons accounts are not reassigned to Commons user IDs.
+Unknown schemas, mismatched migration checksums, and changed origins are refused. Use a fresh `--state` directory rather than editing the database.
 
 ## Verify the portal
 
@@ -496,11 +503,13 @@ Playwright resets `.tmp/e-accounts-<mode>` before each run. Ports are 9543 (HTTP
 
 | Spec | Covers |
 | --- | --- |
-| `e2e/owner-flow.spec.ts` | Two owners signing in through the fake Commons, isolation between them, configuration, deploy and review, build output, recovery after a lost response, sign-out, and CSP, at desktop and phone widths in light and dark |
-| `e2e/resources.spec.ts` | Environment variables, renamed PostgreSQL bindings, the variable names a deploy injects, and credential rotation |
-| `e2e/staff-flow.spec.ts` | Bootstrapping a portal admin with an authenticator, inviting local staff, owner and staff boundaries, adopting a seeded operator app, staff creating, adopting, reassigning, deploying, choosing grouped worker sizes and app build machines, and deleting storage without step-up, with admin-only default build machine, account-management boundaries, and the audit log |
+| `e2e/owner-flow.spec.ts` | Commons sign-in, app creation, private deploy key, deployment, build and runtime output, sign-out |
+| `e2e/resources.spec.ts` | Write-only environment values, PostgreSQL bindings, usage display, persisted settings, and names injected on deploy, at 390px width |
+| `e2e/staff-flow.spec.ts` | Staff access to an owner's app, build-machine editing, People and Activity, and refusal of admin audit-log access, in dark mode |
 
-Traces and video are off; screenshots go to `.tmp/owner-portal-playwright/screenshots/`. The staff/admin sizing spec also saves deploy, app build machine, and platform settings screenshots at desktop and 390px widths in light and dark mode under `/tmp/staff-admin-ui-shots/`. The same spec saves All apps with conditional attention and Overview Machines with default and app-specific build machines in both layouts and themes under `/tmp/attention-size-shots/`. On failure, `tests/collect_owner_portal_artifacts.py` collects fixture screenshots and sanitized diagnostics (method, path, status, error code), limited to 2 MiB per file and 20 MiB total. CI uploads no traces, videos, headers, query strings, or response bodies.
+All three specs use helpers that reject browser errors, CSP violations, and unexpected hosts. These smoke tests cover the listed flows; Python tests cover the wider broker permissions and recovery behavior.
+
+Traces, video, and automatic screenshots are off. Failed tests write bounded diagnostics under `.tmp/owner-portal-playwright/diagnostics/`. CI runs `tests/collect_owner_portal_artifacts.py`, which accepts allowlisted fixture screenshots when present and sanitizes diagnostics to method, path, status, and error code. Its limits are 2 MiB per file and 20 MiB total. It excludes headers, query strings, and response bodies.
 
 ### Build portal release archives locally
 
