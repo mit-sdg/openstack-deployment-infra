@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid as uuid_module
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -295,18 +296,26 @@ class PublicIPService:
         self.state_directory = state_directory
 
     def plan(self, application_id: str, network_id: str) -> dict[str, Any]:
+        return self.prepare_plan(application_id, network_id)()
+
+    def prepare_plan(self, application_id: str, network_id: str) -> Callable[[], dict[str, Any]]:
+        """Capture app existence before probing without a read transaction."""
         if (
             db.get_application(self.connection, uuid(application_id, field="application UUID"))
             is None
         ):
             raise ValidationError("application does not exist")
-        provider = floating_ip.Provider(
-            self.config.platform, deadline=operation_deadline(self.config)
-        )
-        return {
-            "applicationId": application_id,
-            **provider.plan(uuid(network_id, field="external network UUID")),
-        }
+
+        def probe() -> dict[str, Any]:
+            provider = floating_ip.Provider(
+                self.config.platform, deadline=operation_deadline(self.config)
+            )
+            return {
+                "applicationId": application_id,
+                **provider.plan(uuid(network_id, field="external network UUID")),
+            }
+
+        return probe
 
     def mutate(
         self,

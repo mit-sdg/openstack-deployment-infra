@@ -326,6 +326,14 @@ These metrics are cached. Check their observation time and the health snapshot's
 
 Shared PostgreSQL and MongoDB servers can still hold sealed fallback copies after migration. New resources use instances. [Migrate storage instances](migrate-storage-instances.md) covers shared resources that still need migration before raising connection limits.
 
+### S3 creation reports `BACKUP_KEY_MISSING` or requires recovery
+
+**Likely cause:** the helper cannot read the persisted Garage backup access-key ID, that exact key is absent, or candidate cleanup could not prove absence.
+
+Check that `<paths.root>/secrets/garage-backup.env` on admin contains a nonempty `GARAGE_BACKUP_ACCESS_KEY`, then inspect that exact ID in Garage's key inventory. Keep the secret access key out of logs and shared diagnostics. Multiple keys named `platform-backup` are allowed; the helper uses the persisted ID. Restore the matching backup credentials or follow [Backups and recovery](backups-and-recovery.md) to initialize the backup key before retrying creation.
+
+For a recovery-required create, inspect the helper diagnostic and exact operation-owned bucket and app-key IDs. A deleted bucket alone does not prove complete cleanup. Confirm app-key absence too, and replay the original request and idempotency key after resolving the recorded uncertainty. Do not delete resources solely by their display name.
+
 ## Backups and restores
 
 ### A backup failed or is missing

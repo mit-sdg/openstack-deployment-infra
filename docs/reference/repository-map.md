@@ -604,6 +604,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 - `tests/test_legacy_controller_migration.py` — rejecting legacy markers and importing legacy app, storage, and deployment state.
 - `tests/test_hosted_controller_backup.py` — controller database backups: encryption, evidence, permissions, cleanup, and retention.
 - `tests/test_helper_application_actions.py` — helper Nomad actions: deploy, ownership, health, promotion, environment, logs, and removal.
+- `tests/test_helper_garage.py` — persisted backup-key ID wiring, duplicate display names, missing setup state, and production HTTP rollback/absence checks.
 - `tests/test_helper_registry_artifact.py` — registry image checks: missing content, tampered digests, and secret-safe results.
 - `tests/test_helper_worker_capacity.py` — worker capacity reads against the pinned Nomad API fields, deadlines, and failures.
 - `tests/test_platform_services.py` — app, deployment, environment, storage, and log services, including helper failures.

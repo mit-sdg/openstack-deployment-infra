@@ -196,7 +196,9 @@ Compatible environment changes, storage verify/rotate, and restart retain foregr
 
 Helper failures write a bounded controller journal line with the fixed action, error class, and an allowlisted error code. Unknown codes are redacted. Exception messages, request arguments, environment values, credentials, stderr, response bodies, and tracebacks are omitted; `safeError` remains a separate user-safe summary.
 
-Most synchronous handlers share the API lock. Polling, health, app reads, environment-name and storage reads, runtime logs, deploy-key reads, and GitHub checks skip it and use private snapshots. Slow locked requests such as `GET /v1/admin/status` do not block them. App reads close their snapshot before helper/public probes; identical app and deployment rows share a probe and reuse it for two seconds.
+Mutating handlers and operation admission share the API lock, including synchronous deploy-key and storage-label writes. Read-only handlers skip it: app and deployment records, logs, environment names, storage, flavor and builder settings, sizing and rollback plans, address reads and plans, and all administrator reads. Database inputs come from short transactions on private query-only connections. The snapshot closes before provider, helper, network, or file probes; app-scoped read plans keep their existing app locks during validation. No read handler uses the shared writer. Identical app and deployment rows share a live app probe and reuse it for two seconds.
+
+`GET /v1/admin/status` captures accepted state, unfinished operations, cached storage usage, and storage-host metrics in one snapshot, then runs live infrastructure and app probes outside the API lock. `GET /v1/admin/hosts` follows the same capture/probe boundary. Status observers and projections perform no database writes; the usage collector owns updates to cached metrics.
 
 Live app health combines the helper’s `app.health` Nomad allocation evidence with a public request to the accepted deployment’s health path. The public response must carry its `X-Platform-Deployment` route marker. Disabled apps report `stopped` without probes; missing evidence or transport failures report `unknown`.
 
@@ -579,7 +581,9 @@ See the [migration runbook](../guides/migrate-storage-instances.md) for selectio
 
 ## S3 and Garage
 
-One shared Garage service runs on storage. Each S3 resource owns a bucket and an access key limited to that bucket. Byte and object quotas apply per bucket. New keys, quotas, grants, and deletion are verified against the recorded bucket identity.
+One shared Garage service runs on storage. Each S3 resource owns a bucket and an access key limited to that bucket. Byte and object quotas apply per bucket. New keys, quotas, grants, and deletion are verified against the recorded bucket identity. S3 creation reads `GARAGE_BACKUP_ACCESS_KEY` from `<paths.root>/secrets/garage-backup.env` on admin and grants read-only backup access to that exact key ID, after verifying it exists. Key display names can repeat. A missing file, access-key field, or provider key fails with `BACKUP_KEY_MISSING` before bucket or app-key creation.
+
+Failed S3 creation verifies the exact candidate bucket, alias, app key, endpoint, and empty contents before cleanup. The production Garage client preserves HTTP status so a deleted bucket's 404 proves absence and cleanup proceeds to the app key. Key ownership is rechecked immediately before deletion. Unconfirmed cleanup reports which bucket or key still needs verification and remains recoverable.
 
 | Capacity or fairness limit | Value |
 | --- | --- |
@@ -664,7 +668,7 @@ The operator dashboard (`openstack-platform dashboard`) runs as the operator, se
 - The `infra list` projection from operator state, with a bounded provider lookup.
 - Credential-free HTTPS probes of public ingress and of each enabled app's health path, verifying each deployment's `X-Platform-Deployment` marker (or app ID).
 
-The reader includes `/v1/admin/status`, which runs live observations under the API lock. It does not call `/v1/admin/hosts`. Failed sources keep their last good records with age labels. It serves static assets and `GET /api/snapshot`; `POST /api/refresh` wakes a refresh at most every 10 seconds and requires a same-origin custom header. It changes no platform state.
+The reader includes `/v1/admin/status`, which captures database inputs in a private snapshot and runs live observations after closing it, outside the API lock. It does not call `/v1/admin/hosts`. Failed sources keep their last good records with age labels. It serves static assets and `GET /api/snapshot`; `POST /api/refresh` wakes a refresh at most every 10 seconds and requires a same-origin custom header. It changes no platform state.
 
 ## Greenfield setup flow
 

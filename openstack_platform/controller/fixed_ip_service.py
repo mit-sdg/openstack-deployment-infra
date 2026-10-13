@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid as uuid_module
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -387,10 +388,18 @@ class FixedIPService:
     def read(self, application_id: str) -> dict[str, Any]:
         deadline = operation_deadline(self.config)
         with runtime.lock(self.state_directory, f"app-{application_id}", deadline=deadline):
-            record = get(self.connection, application_id)
-            result = model(self.connection, application_id)
-            if record is None or record["phase"] != "reserved":
-                return result
+            return self.prepare_read(application_id, deadline=deadline)()
+
+    def prepare_read(self, application_id: str, *, deadline: float) -> Callable[[], dict[str, Any]]:
+        """Capture retained-port evidence under the app lock before probing."""
+        record = get(self.connection, application_id)
+        result = model(self.connection, application_id)
+        if record is None or record["phase"] != "reserved":
+            return lambda: result
+        current = db.get_application(self.connection, application_id)
+        assert current is not None
+
+        def probe() -> dict[str, Any]:
             provider = fixed_ip.Provider(self.config.platform, deadline=deadline)
             value = provider.show(record["port_id"])
             device = value.get("device_id")
@@ -399,8 +408,6 @@ class FixedIPService:
             provider.check(value, record, device_id=device)
             if device:
                 slot = uuid(record["worker_slot_id"], field="retained worker slot UUID")
-                current = db.get_application(self.connection, application_id)
-                assert current is not None
                 server = provider.json(("server", "show", uuid(device, field="worker server UUID")))
                 prefix = openstack._metadata_prefix(self.config.platform)
                 expected = {
@@ -439,16 +446,32 @@ class FixedIPService:
                 "attachment": "attached" if device else "detached",
             }
 
+        return probe
+
     def plan(
         self, application_id: str, network_id: str, subnet_id: str, address: str
     ) -> dict[str, Any]:
+        return self.prepare_plan(application_id, network_id, subnet_id, address)()
+
+    def prepare_plan(
+        self, application_id: str, network_id: str, subnet_id: str, address: str
+    ) -> Callable[[], dict[str, Any]]:
+        """Capture app existence before probing without a read transaction."""
         if (
             db.get_application(self.connection, uuid(application_id, field="application UUID"))
             is None
         ):
             raise ValidationError("application does not exist")
-        provider = fixed_ip.Provider(self.config.platform, deadline=operation_deadline(self.config))
-        return dict(applicationId=application_id, **provider.plan(network_id, subnet_id, address))
+
+        def probe() -> dict[str, Any]:
+            provider = fixed_ip.Provider(
+                self.config.platform, deadline=operation_deadline(self.config)
+            )
+            return dict(
+                applicationId=application_id, **provider.plan(network_id, subnet_id, address)
+            )
+
+        return probe
 
     def mutate(
         self,

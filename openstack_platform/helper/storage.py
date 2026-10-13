@@ -33,6 +33,7 @@ from ..controller.storage_contract import (
     retired_secret_keys,
     storage_owner,
 )
+from ..runtime import HttpStatusFailure
 from ..validation import ValidationError, resource_name, slug, uuid
 from .main import Handler, HelperActionError
 from .nomad import (
@@ -1147,18 +1148,23 @@ def _s3_bucket_name(application_id: str, application_slug: str, prefix: str) -> 
 
 def _retire_owned_s3_key(admin: Any, *, key_id: str, expected_name: str) -> None:
     record = _s3_key_record(admin, key_id)
-    if record is not None and record.get("name") != expected_name:
+    if record is None:
+        return
+    if record.get("name") != expected_name:
         raise _recovery_required("s3", "cleanup", "inspect the operation-owned access-key name")
     admin.request("/DeleteKey", {}, {"id": key_id})
     if _s3_key_present(admin, key_id):
         raise _recovery_required("s3", "cleanup", "confirm operation-owned access-key absence")
 
 
-def _s3_grant_backup_read(admin: Any, bucket_id: str) -> None:
-    key_id = _s3_key_by_name(admin, "platform-backup")
-    if key_id is None:
+def _require_s3_backup_key(admin: Any, key_id: str | None) -> str:
+    if not key_id or _s3_key_record(admin, key_id) is None:
         raise HelperActionError("BACKUP_KEY_MISSING", "Garage backup key must be initialized")
-    values = {"bucketId": bucket_id, "accessKeyId": key_id}
+    return key_id
+
+
+def _s3_grant_backup_read(admin: Any, bucket_id: str, key_id: str) -> None:
+    values = {"bucketId": bucket_id, "accessKeyId": _require_s3_backup_key(admin, key_id)}
     # Garage AllowBucketKey merges grants; false does not revoke a prior grant.
     admin.request(
         "/DenyBucketKey",
@@ -1180,6 +1186,7 @@ def s3_create(
     bytes_quota: int,
     objects_quota: int,
     generation: str,
+    backup_access_key: str | None,
     scoped_client: Callable[..., Any] | None = None,
 ) -> ProviderCredential:
     _positive(bytes_quota, "s3Bytes")
@@ -1187,6 +1194,8 @@ def s3_create(
     identifier = uuid(application_id, field="applicationId")
     application_slug = slug(application_slug)
     bucket = _s3_bucket_name(identifier, application_slug, prefix)
+    # Missing setup state is actionable and must fail before creating anything.
+    backup_key = _require_s3_backup_key(admin, backup_access_key)
     bucket_info = key_info = None
     key_name: str | None = None
     try:
@@ -1234,7 +1243,7 @@ def s3_create(
                 "permissions": {"read": True, "write": True, "owner": False},
             },
         )
-        _s3_grant_backup_read(admin, bucket_info["id"])
+        _s3_grant_backup_read(admin, bucket_info["id"], backup_key)
         info = _s3_bucket_info(admin, provider_id=bucket_info["id"])
         if info is None:
             raise HelperActionError(
@@ -1283,6 +1292,12 @@ def s3_create(
                     expected_key_name=key_name,
                     expected_endpoint=endpoint,
                 )
+            except HelperActionError as cleanup_error:
+                if cleanup_error.code == "RECOVERY_REQUIRED":
+                    raise
+                raise _recovery_required(
+                    "s3", "create", "confirm operation-owned bucket, data, and access-key cleanup"
+                ) from None
             except Exception:
                 raise _recovery_required(
                     "s3", "create", "confirm operation-owned bucket, data, and access-key cleanup"
@@ -1494,7 +1509,9 @@ def _s3_bucket_info(admin: Any, *, provider_id: str) -> Mapping[str, Any] | None
     try:
         response = admin.request("/GetBucketInfo", None, {"id": provider_id})
     except Exception as error:
-        status = getattr(error, "code", None)
+        status = (
+            error.status if isinstance(error, HttpStatusFailure) else getattr(error, "code", None)
+        )
         if status == 404 or error.__class__.__name__ in {"NotFound", "NoSuchBucket"}:
             return None
         raise
@@ -1600,12 +1617,6 @@ def _s3_bucket_has_objects(
             close()
 
 
-def _require_s3_key_identity(admin: Any, *, key_id: str, expected_name: str) -> None:
-    record = _s3_key_record(admin, key_id)
-    if record is None or record.get("name") != expected_name:
-        raise _recovery_required("s3", "create", "inspect the operation-owned access-key name")
-
-
 def _s3_remove_created(
     admin: Any,
     scoped_client: Callable[..., Any],
@@ -1615,6 +1626,9 @@ def _s3_remove_created(
     expected_endpoint: str,
 ) -> None:
     """Delete a create candidate only after marker, empty-state, and absence checks."""
+    key = _s3_key_record(admin, credential.credential_name)
+    if key is not None and key.get("name") != expected_key_name:
+        raise _recovery_required("s3", "create", "inspect the operation-owned access-key name")
     info = _s3_bucket_info(admin, provider_id=credential.provider_id)
     if info is not None:
         _require_s3_bucket_identity(
@@ -1631,12 +1645,9 @@ def _s3_remove_created(
         admin.request("/DeleteBucket", {}, {"id": credential.provider_id})
         if not s3_absent(admin, provider_id=credential.provider_id):
             raise _recovery_required("s3", "create", "confirm operation-owned bucket absence")
-    _require_s3_key_identity(
-        admin, key_id=credential.credential_name, expected_name=expected_key_name
-    )
-    admin.request("/DeleteKey", {}, {"id": credential.credential_name})
-    if _s3_key_present(admin, credential.credential_name):
-        raise _recovery_required("s3", "create", "confirm operation-owned access-key absence")
+    # Recheck ownership immediately before key deletion; an absent key is
+    # already clean and a renamed/replaced identity must remain untouched.
+    _retire_owned_s3_key(admin, key_id=credential.credential_name, expected_name=expected_key_name)
 
 
 def _s3_bucket_id(admin: Any, provider_name: str) -> str | None:
@@ -2249,6 +2260,7 @@ def s3_create_handler(
     nomad: VariableClient,
     prefix: str,
     endpoint: str,
+    backup_access_key: str | None,
     observe_evidence: EvidenceObserver,
 ) -> Mapping[str, Any]:
     _operation_id, recovering, generation = _operation_args(
@@ -2336,6 +2348,7 @@ def s3_create_handler(
         bytes_quota=_positive(args["s3Bytes"], "s3Bytes"),
         objects_quota=_positive(args["s3Objects"], "s3Objects"),
         generation=generation,
+        backup_access_key=backup_access_key,
         scoped_client=scoped_client,
     )
     try:
@@ -3206,6 +3219,7 @@ def handlers(
     mongo_admin: Any,
     mongo_connect: Callable[..., Any],
     garage_admin: Any,
+    backup_access_key: str | None,
     s3_connect: Callable[..., Any],
     nomad: VariableClient,
     storage_host: str,
@@ -3289,6 +3303,7 @@ def handlers(
         ),
         "storage.s3.create": lambda args: s3_create_handler(
             args,
+            backup_access_key=backup_access_key,
             admin=garage_admin,
             scoped_client=s3_connect,
             nomad=nomad,

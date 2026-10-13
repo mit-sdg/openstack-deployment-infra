@@ -791,8 +791,30 @@ def _validate_storage_bindings(
     manifest: app.Manifest,
     deadline: float,
 ) -> None:
+    _prepare_storage_binding_validation(
+        connection,
+        config,
+        helper_caller=helper_caller,
+        application_id=application_id,
+        application_slug=application_slug,
+        manifest=manifest,
+        deadline=deadline,
+    )()
+
+
+def _prepare_storage_binding_validation(
+    connection: sqlite3.Connection,
+    config: Config,
+    *,
+    helper_caller: HelperCaller,
+    application_id: str,
+    application_slug: str,
+    manifest: app.Manifest,
+    deadline: float,
+) -> Callable[[], None]:
+    """Validate accepted bindings, then check helper evidence after the DB read."""
     if not manifest.storage_bindings:
-        return
+        return lambda: None
     resources = {
         (item.resource_type, item.resource_name): item
         for item in db.list_managed_resources(connection, application_id=application_id)
@@ -819,25 +841,31 @@ def _validate_storage_bindings(
             if output not in DERIVED_OUTPUTS[binding.resource_type]:
                 required_keys.add(canonical_secret_key(binding.resource_type, binding.name, output))
             targets.add(target)
-    observed = app.list_environment(
-        application_slug,
-        timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
-        helper_caller=lambda action, values, **_bounds: helper_caller(
-            config, action, values, deadline=deadline
-        ),
-    )
-    names = observed.get("keys")
-    if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
-        raise app.ApplicationError("helper returned invalid environment-key evidence")
-    present = set(names)
-    missing = sorted(required_keys - present)
-    if missing:
-        raise ValidationError("storage binding outputs are missing from the application variable")
-    conflicts = sorted(targets & present)
-    if conflicts:
-        raise ValidationError(
-            f"storage binding target {conflicts[0]!r} conflicts with an existing environment key"
+
+    def probe() -> None:
+        observed = app.list_environment(
+            application_slug,
+            timeout_seconds=_remaining(deadline, config.policy.limits.helper_seconds),
+            helper_caller=lambda action, values, **_bounds: helper_caller(
+                config, action, values, deadline=deadline
+            ),
         )
+        names = observed.get("keys")
+        if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
+            raise app.ApplicationError("helper returned invalid environment-key evidence")
+        present = set(names)
+        missing = sorted(required_keys - present)
+        if missing:
+            raise ValidationError(
+                "storage binding outputs are missing from the application variable"
+            )
+        conflicts = sorted(targets & present)
+        if conflicts:
+            raise ValidationError(
+                f"storage binding target {conflicts[0]!r} conflicts with an existing environment key"
+            )
+
+    return probe
 
 
 def _cleanup_deployment(
@@ -1600,7 +1628,8 @@ class DeploymentService:
         self.state_directory = state_directory
         from .fixed_ip_service import worker_helper
 
-        self.helper_caller = worker_helper(connection, logged_helper(helper_caller))
+        self._read_helper_caller = logged_helper(helper_caller)
+        self.helper_caller = worker_helper(connection, self._read_helper_caller)
 
     def recover_operation(
         self,
@@ -1627,10 +1656,15 @@ class DeploymentService:
     def _rollback_preflight(
         self, application_id: str, attempt: db.DeploymentAttempt, *, deadline: float
     ) -> None:
+        self._prepare_rollback_preflight(application_id, attempt, deadline=deadline)()
+
+    def _prepare_rollback_preflight(
+        self, application_id: str, attempt: db.DeploymentAttempt, *, deadline: float
+    ) -> Callable[[], None]:
         application = db.get_application(self.connection, application_id)
         assert application is not None and attempt.configuration is not None
         manifest = _configuration_manifest(self.connection, application_id, attempt.configuration)
-        _validate_storage_bindings(
+        validate_bindings = _prepare_storage_binding_validation(
             self.connection,
             self.config,
             helper_caller=self.helper_caller,
@@ -1642,18 +1676,23 @@ class DeploymentService:
         expected_prefix = f"{self.config.platform.get('addresses.storage')}:{REGISTRY_PORT}/projects/{application.slug}/app@"
         if attempt.image_digest is None or not attempt.image_digest.startswith(expected_prefix):
             raise ValidationError("rollback artifact is outside the application repository")
-        observed = self.helper_caller(
-            self.config,
-            "app.manifest.verify",
-            {"slug": application.slug, "image": attempt.image_digest},
-            deadline=deadline,
-        )
-        if (
-            observed.get("slug") != application.slug
-            or observed.get("image") != attempt.image_digest
-            or observed.get("available") is not True
-        ):
-            raise ValidationError("retained rollback artifact is unavailable")
+
+        def probe() -> None:
+            validate_bindings()
+            observed = self.helper_caller(
+                self.config,
+                "app.manifest.verify",
+                {"slug": application.slug, "image": attempt.image_digest},
+                deadline=deadline,
+            )
+            if (
+                observed.get("slug") != application.slug
+                or observed.get("image") != attempt.image_digest
+                or observed.get("available") is not True
+            ):
+                raise ValidationError("retained rollback artifact is unavailable")
+
+        return probe
 
     def rollback_plan(
         self, application_id: str, deployment_id: str, *, reuse_worker: bool = False
@@ -1663,28 +1702,46 @@ class DeploymentService:
         plan_seconds = 120 if reuse_worker else 30
         deadline = time.monotonic() + min(plan_seconds, self.config.policy.limits.process_seconds)
         with runtime.lock(self.state_directory, f"app-{application_id}", deadline=deadline):
-            unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
-            if unfinished is not None:
-                raise db.UnfinishedOperationError(
-                    unfinished.scope, unfinished.operation_id, unfinished.kind
-                )
-            plan = rollback.plan(
-                self.connection, application_id, deployment_id, reuse_worker=reuse_worker
+            return self.prepare_rollback_plan(
+                application_id, deployment_id, reuse_worker=reuse_worker, deadline=deadline
+            )()
+
+    def prepare_rollback_plan(
+        self, application_id: str, deployment_id: str, *, reuse_worker: bool, deadline: float
+    ) -> Callable[[], dict[str, Any]]:
+        """Capture rollback inputs under the app lock, then probe independently."""
+        unfinished = db.get_unfinished_operation(self.connection, f"app-{application_id}")
+        if unfinished is not None:
+            raise db.UnfinishedOperationError(
+                unfinished.scope, unfinished.operation_id, unfinished.kind
             )
-            if reuse_worker:
-                worker_reuse.observe(
-                    self.connection,
-                    self.config,
-                    application_id,
-                    helper_caller=self.helper_caller,
-                    deadline=deadline,
-                )
-            self._rollback_preflight(
+        plan = rollback.plan(
+            self.connection, application_id, deployment_id, reuse_worker=reuse_worker
+        )
+        observe_worker = (
+            worker_reuse.prepare_observe(
+                self.connection,
+                self.config,
                 application_id,
-                rollback.target(self.connection, application_id, deployment_id),
+                helper_caller=self._read_helper_caller,
                 deadline=deadline,
             )
+            if reuse_worker
+            else None
+        )
+        preflight = self._prepare_rollback_preflight(
+            application_id,
+            rollback.target(self.connection, application_id, deployment_id),
+            deadline=deadline,
+        )
+
+        def probe() -> dict[str, Any]:
+            if observe_worker is not None:
+                observe_worker()
+            preflight()
             return plan
+
+        return probe
 
     def rollback(
         self, application_id: str, plan: dict[str, Any], *, confirmation: str, request_id: str
