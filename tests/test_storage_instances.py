@@ -103,6 +103,30 @@ class InstanceManagerTests(unittest.TestCase):
         )
         return identifier, result
 
+    def test_s3_disk_reservation_needs_no_instance(self):
+        # S3 creates and limit changes reserve Garage disk under the bucket's
+        # resource ID, which never has an instance config.
+        bucket = str(uuid.uuid4())
+        reservations = {"databaseBytes": 0, "garageBytes": 3 * GIB}
+        self.assertEqual(
+            self.manager.dispatch(
+                {"action": "reserve", "instanceId": bucket, "reservations": reservations}
+            ),
+            {"reserved": True},
+        )
+        budget = json.loads((self.manager.root / "disk-budget.json").read_text())
+        self.assertEqual(budget["garageBytes"], 19 * GIB)
+        self.assertEqual(self.manager.dispatch({"action": "list"})["items"], [])
+        with self.assertRaises(CapacityError) as raised:
+            self.manager.dispatch(
+                {
+                    "action": "reserve",
+                    "instanceId": bucket,
+                    "reservations": {"databaseBytes": 0, "garageBytes": 2048 * GIB},
+                }
+            )
+        self.assertEqual(raised.exception.code, "DISK_BUDGET_EXCEEDED")
+
     def test_idle_timeout_socket_is_connected_until_peer_closes(self):
         reader, writer = socket.socketpair()
         self.addCleanup(reader.close)

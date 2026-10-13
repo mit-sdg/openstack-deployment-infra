@@ -651,7 +651,9 @@ class Manager:
             if set(args) != {"action"}:
                 raise ValidationError("instance ping fields are invalid")
             return {"available": True}
-        if args.get("action") in {"list", "backup-inventory"}:
+        if args.get("action") in {"list", "backup-inventory", "reserve"}:
+            # A disk reservation names any managed resource, an S3 bucket
+            # included, so it has no instance to lock, read or wait for.
             return self._dispatch(args)
         identifier = uuid(args.get("instanceId"), field="instance ID")
         with self.copy_lock:
