@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from ..config import Config
@@ -59,6 +59,26 @@ def observe(
     deadline: float,
 ) -> dict[str, Any]:
     """Pin actual image/placement and recheck capacity before any process stop."""
+    return prepare_observe(
+        connection,
+        config,
+        application_id,
+        expected=expected,
+        helper_caller=helper_caller,
+        deadline=deadline,
+    )()
+
+
+def prepare_observe(
+    connection: sqlite3.Connection,
+    config: Config,
+    application_id: str,
+    *,
+    expected: dict[str, Any] | None = None,
+    helper_caller: HelperCaller,
+    deadline: float,
+) -> Callable[[], dict[str, Any]]:
+    """Capture exact accepted identity before an independent capacity probe."""
     selected = identity(connection, application_id)
     if expected is not None and any(expected.get(key) != value for key, value in selected.items()):
         raise app.ApplicationError("reused worker identity or allocation drifted")
@@ -71,29 +91,40 @@ def observe(
         # callers cannot supply a readiness bypass or nominate a new worker.
         "acceptedServerId": selected["server_id"],
     }
-    # Capacity already includes the exact provider observation. Keep one fresh
-    # snapshot, rather than repeating the entire provider lookup in two helpers.
-    worker = helper_caller(config, "app.worker.capacity", arguments, deadline=deadline)
-    fields = {
-        "serverId": "server_id",
-        "serverName": "server_name",
-        "portId": "port_id",
-        "portName": "port_name",
-        "flavorName": "flavor",
-    }
-    if (
-        worker.get("ready") is not True
-        or worker.get("absent") is True
-        or any(worker.get(key) != selected[field] for key, field in fields.items())
-    ):
-        raise app.ApplicationError("exact reused worker readiness or identity was not confirmed")
-    selected["image_id"] = uuid(worker.get("imageId"), field="reused worker image UUID")
-    if expected is not None and selected != expected:
-        raise app.ApplicationError("reused worker image drifted")
-    cpu, memory = sizing.worker_budget(worker, selected["server_id"], selected["flavor"])
-    if selected["cpu_mhz"] > cpu or selected["memory_mib"] > memory:
-        raise app.ApplicationError("pinned allocation exceeds reused worker capacity after reserve")
-    return selected
+    retained = fixed_ip_service.get(connection, application_id)
+    if retained is not None:
+        arguments["retainedPort"] = fixed_ip_service.helper_identity(retained)
+
+    def probe() -> dict[str, Any]:
+        # Capacity already includes the exact provider observation. Keep one fresh
+        # snapshot, rather than repeating the entire provider lookup in two helpers.
+        worker = helper_caller(config, "app.worker.capacity", arguments, deadline=deadline)
+        fields = {
+            "serverId": "server_id",
+            "serverName": "server_name",
+            "portId": "port_id",
+            "portName": "port_name",
+            "flavorName": "flavor",
+        }
+        if (
+            worker.get("ready") is not True
+            or worker.get("absent") is True
+            or any(worker.get(key) != selected[field] for key, field in fields.items())
+        ):
+            raise app.ApplicationError(
+                "exact reused worker readiness or identity was not confirmed"
+            )
+        selected["image_id"] = uuid(worker.get("imageId"), field="reused worker image UUID")
+        if expected is not None and selected != expected:
+            raise app.ApplicationError("reused worker image drifted")
+        cpu, memory = sizing.worker_budget(worker, selected["server_id"], selected["flavor"])
+        if selected["cpu_mhz"] > cpu or selected["memory_mib"] > memory:
+            raise app.ApplicationError(
+                "pinned allocation exceeds reused worker capacity after reserve"
+            )
+        return selected
+
+    return probe
 
 
 def direct_route(refs: Mapping[str, Any]) -> bool:

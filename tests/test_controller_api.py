@@ -6,10 +6,11 @@ import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import remote
+from openstack_platform import openstack, remote
 from openstack_platform.config import (
     Config,
     Limits,
@@ -27,7 +28,7 @@ class ControllerAPITests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.connection = db.connect(self.root / "platform.sqlite3")
+        self.connection = db.connect(self.root / "platform.sqlite3", check_same_thread=False)
         db.migrate(self.connection)
         platform = PlatformConfig(
             "project",
@@ -676,6 +677,172 @@ class ControllerAPITests(unittest.TestCase):
             with self.assertRaises(HttpError) as missing:
                 self.dispatch("GET", path)
             self.assertEqual(missing.exception.code, code)
+
+    def test_all_dashboard_and_app_reads_skip_the_writer_lock_and_close_snapshots(self) -> None:
+        from tests.product_fixtures import accept_deployment
+
+        application = self.create_application().body["applicationId"]
+        attempt = accept_deployment(
+            self.connection,
+            application_id=application,
+            source_commit="a" * 40,
+            recipe_hash="b" * 64,
+            image_digest="registry/app@sha256:" + "c" * 64,
+            nomad_job='{"Job": {"ID": "demo-app"}}',
+            nomad_version=1,
+            build_log_path="build.log",
+        )
+        db.begin_operation(
+            self.connection,
+            operation_id=attempt.deployment_id,
+            kind="app.deploy",
+            scope=f"app-{application}",
+            phase="build",
+            deadline_at=db.utc_now(),
+        )
+        flavor = openstack.Flavor(
+            "00000000-0000-4000-8000-000000000099", "builder-small", 2, 2048, 20
+        )
+        snapshots = []
+        probe_snapshots = []
+        snapshot = self.api._snapshot
+
+        @contextmanager
+        def tracked_snapshot():
+            with snapshot() as connection:
+                self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
+                snapshots.append(connection)
+                try:
+                    yield connection
+                finally:
+                    snapshots.remove(connection)
+
+        def probe(value):
+            # Observer failures become unavailable projections; retain evidence
+            # even when the observation layer contains this assertion.
+            probe_snapshots.append(len(snapshots))
+            self.assertEqual(snapshots, [], "a slow probe retained a read transaction")
+            return value
+
+        def helper(_config, action, values, *, deadline=None):
+            probe(None)
+            if action == "app.build.logs":
+                return {"exists": True, "text": "building\n", "nextOffset": 9, "state": "running"}
+            raise AssertionError(action)
+
+        self.api.logs.helper_caller = helper
+        reads = [
+            "/v1/flavors",
+            "/v1/settings/default-builder-size",
+            "/v1/admin/settings/default-builder-size",
+            f"/v1/applications/{application}/builder-size",
+            f"/v1/applications/{application}/deployments",
+            f"/v1/deployments/{attempt.deployment_id}",
+            f"/v1/deployments/{attempt.deployment_id}/build-log",
+            f"/v1/deployments/{attempt.deployment_id}/startup-log",
+            f"/v1/applications/{application}/resize-plan?flavor=builder-small",
+            f"/v1/admin/applications/{application}/resize-plan?flavor=builder-small",
+            f"/v1/admin/applications/{application}/fixed-ip",
+            f"/v1/admin/applications/{application}/public-ip",
+            "/v1/admin/status",
+            "/v1/admin/hosts",
+            "/v1/admin/capabilities",
+            "/v1/admin/images",
+            "/v1/admin/applications",
+            "/v1/admin/deployments",
+            "/v1/admin/storage",
+            "/v1/admin/operations",
+        ]
+        with (
+            mock.patch.object(self.api, "_snapshot", side_effect=tracked_snapshot),
+            mock.patch(
+                "openstack_platform.controller.api.openstack.observe_flavors",
+                side_effect=lambda *_: probe([flavor]),
+            ),
+            mock.patch(
+                "openstack_platform.controller.api.openstack.observe_flavor_capacity",
+                side_effect=lambda *_args, **_kwargs: probe(flavor),
+            ),
+            mock.patch(
+                "openstack_platform.controller.status.openstack.list_persistent_hosts",
+                side_effect=lambda *_args, **_kwargs: probe([]),
+            ),
+            mock.patch(
+                "openstack_platform.controller.status.app.check_public_health",
+                side_effect=lambda *_args, **_kwargs: probe(True),
+            ),
+        ):
+            # Use a different thread for reads: an RLock would let this thread
+            # reenter and conceal a regression. Deny every shared-writer query.
+            self.connection.set_authorizer(lambda *_: 1)
+            self.api._lock.acquire()
+            pool = ThreadPoolExecutor(max_workers=1)
+            try:
+                for path in reads:
+                    with self.subTest(path=path):
+                        response = pool.submit(self.dispatch, "GET", path).result(timeout=2)
+                        self.assertEqual(response.status, 200)
+            finally:
+                self.api._lock.release()
+                pool.shutdown(wait=True)
+                self.connection.set_authorizer(None)
+        self.assertEqual(snapshots, [])
+        self.assertTrue(probe_snapshots)
+        self.assertEqual(set(probe_snapshots), {0})
+
+    def test_blocked_admin_probe_does_not_block_deployments_or_mutation_admission(self) -> None:
+        application = self.create_application().body["applicationId"]
+        started, release = threading.Event(), threading.Event()
+
+        def provider(*_args, **_kwargs):
+            started.set()
+            self.assertTrue(release.wait(5), "test did not release the provider")
+            return []
+
+        with mock.patch(
+            "openstack_platform.controller.status.openstack.list_persistent_hosts",
+            side_effect=provider,
+        ):
+            pool = ThreadPoolExecutor(max_workers=3)
+            slow = pool.submit(self.dispatch, "GET", "/v1/admin/status")
+            try:
+                self.assertTrue(started.wait(2))
+                history = pool.submit(
+                    self.dispatch, "GET", f"/v1/applications/{application}/deployments"
+                )
+                self.assertEqual(history.result(timeout=2).status, 200)
+                mutation = pool.submit(
+                    self.dispatch,
+                    "POST",
+                    "/v1/applications",
+                    {"slug": "another-app"},
+                    self.headers(str(uuid.uuid4())),
+                )
+                self.assertEqual(mutation.result(timeout=2).status, 201)
+            finally:
+                release.set()
+                pool.shutdown(wait=True)
+            self.assertEqual(slow.result().status, 200)
+            self.assertEqual(slow.result().body["accepted"]["applications"], 1)
+
+    def test_application_mutations_still_wait_for_the_api_lock(self) -> None:
+        started = threading.Event()
+
+        def mutate():
+            started.set()
+            return self.create_application()
+
+        self.api._lock.acquire()
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(mutate)
+            self.assertTrue(started.wait(2))
+            with self.assertRaises(TimeoutError):
+                future.result(timeout=0.1)
+        finally:
+            self.api._lock.release()
+            pool.shutdown(wait=True)
+        self.assertEqual(future.result().status, 201)
 
     def test_operation_read_omits_refs_and_admin_pagination_is_bounded(self) -> None:
         self.create_application()

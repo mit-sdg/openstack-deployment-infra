@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -126,7 +127,10 @@ class LogService:
 
     def startup(self, application_identifier: str, deployment_id: str) -> dict[str, Any] | None:
         """The removed candidate's startup record, if one was captured."""
-        application = self._application(application_identifier)
+        return self.startup_for(self._application(application_identifier), deployment_id)
+
+    def startup_for(self, application: db.Application, deployment_id: str) -> dict[str, Any] | None:
+        """Read an already-resolved app's startup file without touching SQLite."""
         path = startup_log_path(self.state_directory, application.application_id, deployment_id)
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -152,6 +156,19 @@ class LogService:
         lines: int,
         offset: int | None = None,
     ) -> tuple[BuildAttempt, LogChunk]:
+        return self.prepare_build(
+            application_identifier, build_id=build_id, lines=lines, offset=offset
+        )()
+
+    def prepare_build(
+        self,
+        application_identifier: str,
+        *,
+        build_id: str,
+        lines: int,
+        offset: int | None = None,
+    ) -> Callable[[], tuple[BuildAttempt, LogChunk]]:
+        """Capture build metadata, then read the helper/file after the snapshot closes."""
         application = self._application(application_identifier)
         operations = db.list_application_deploy_operations(
             self.connection,
@@ -175,52 +192,56 @@ class LogService:
             if isinstance(operation.refs.get("source_commit"), str)
             else None,
         )
-        result = self.helper_caller(
-            self.config,
-            "app.build.logs",
-            {
-                "slug": application.slug,
-                "buildId": operation.operation_id,
-                "lines": lines,
-                "offset": offset,
-            },
-            deadline=operation_deadline(self.config),
-        )
-        if result.get("exists") is True:
-            text = result.get("text")
-            next_offset = result.get("nextOffset")
-            state = result.get("state")
-            if (
-                not isinstance(text, str)
-                or isinstance(next_offset, bool)
-                or not isinstance(next_offset, int)
-                or not isinstance(state, str)
-                or state not in {"running", "complete", "failed", "unknown"}
-            ):
-                raise app.ApplicationError("helper returned invalid build log evidence")
-            return attempt, LogChunk(
-                text,
-                state,
-                next_offset,
-                bool(result.get("truncated")),
+
+        def probe() -> tuple[BuildAttempt, LogChunk]:
+            result = self.helper_caller(
+                self.config,
+                "app.build.logs",
+                {
+                    "slug": application.slug,
+                    "buildId": operation.operation_id,
+                    "lines": lines,
+                    "offset": offset,
+                },
+                deadline=operation_deadline(self.config),
             )
-        if offset is not None:
-            raise ValidationError("live build log is unavailable for this historical attempt")
-        stored = operation.refs.get("build_log_path")
-        if not isinstance(stored, str):
-            raise ValidationError("build attempt has no captured output")
-        root = self.state_directory.resolve(strict=True)
-        path = (self.state_directory / stored).resolve(strict=True)
-        if not path.is_relative_to(root) or not path.is_file():
-            raise ValidationError("build log path is invalid")
-        text = tail_file(
-            path,
-            lines=lines,
-            maximum_bytes=self.config.policy.limits.build_log_bytes,
-        )
-        return attempt, LogChunk(
-            text + ("\n" if text else ""),
-            "complete",
-            path.stat().st_size,
-            False,
-        )
+            if result.get("exists") is True:
+                text = result.get("text")
+                next_offset = result.get("nextOffset")
+                state = result.get("state")
+                if (
+                    not isinstance(text, str)
+                    or isinstance(next_offset, bool)
+                    or not isinstance(next_offset, int)
+                    or not isinstance(state, str)
+                    or state not in {"running", "complete", "failed", "unknown"}
+                ):
+                    raise app.ApplicationError("helper returned invalid build log evidence")
+                return attempt, LogChunk(
+                    text,
+                    state,
+                    next_offset,
+                    bool(result.get("truncated")),
+                )
+            if offset is not None:
+                raise ValidationError("live build log is unavailable for this historical attempt")
+            stored = operation.refs.get("build_log_path")
+            if not isinstance(stored, str):
+                raise ValidationError("build attempt has no captured output")
+            root = self.state_directory.resolve(strict=True)
+            path = (self.state_directory / stored).resolve(strict=True)
+            if not path.is_relative_to(root) or not path.is_file():
+                raise ValidationError("build log path is invalid")
+            text = tail_file(
+                path,
+                lines=lines,
+                maximum_bytes=self.config.policy.limits.build_log_bytes,
+            )
+            return attempt, LogChunk(
+                text + ("\n" if text else ""),
+                "complete",
+                path.stat().st_size,
+                False,
+            )
+
+        return probe

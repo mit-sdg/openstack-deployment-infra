@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from .. import openstack, remote
+from .. import openstack, remote, runtime
 from ..config import Config
 from ..instance_contract import CapacityError, hard_quota
 from ..runtime import safe_summary
@@ -383,15 +383,10 @@ class ControllerAPI:
 
     def _safe(self, handler: Callable[[Request], Response]) -> Callable[[Request], Response]:
         def call(request: Request) -> Response:
-            # A slow provider observation must not block operation polling or
-            # liveness. Polling uses its own connection, never the shared writer.
-            # Slow external reads of one app (Nomad logs, deploy-key git reads)
-            # also skip the lock: they read the database through their own
-            # snapshot and must not stall deploys and status reads behind them.
-            # So do the app page's database-only reads (environment names,
-            # storage): queued behind slow locked work, they would time out.
-            # The app status read probes the helper and public route for up to
-            # helperSeconds, so it holds neither the lock nor its snapshot then.
+            # Read-only handlers use private query-only snapshots, never the
+            # shared writer or API lock. Close snapshots before slow provider,
+            # helper, network, or file reads wherever possible. Mutations and
+            # operation admission retain the lock, including synchronous writes.
             independent = handler in (
                 self._get_operation,
                 self._health,
@@ -404,6 +399,27 @@ class ControllerAPI:
                 self._get_environment,
                 self._list_storage,
                 self._get_storage,
+                self._flavors,
+                self._builder_settings,
+                self._application_builder_size,
+                self._resize_plan,
+                self._rollback_plan,
+                self._list_deployments,
+                self._get_deployment,
+                self._build_log,
+                self._startup_log,
+                self._capabilities,
+                self._get_fixed_ip,
+                self._plan_fixed_ip,
+                self._get_public_ip,
+                self._plan_public_ip,
+                self._admin_status,
+                self._admin_hosts,
+                self._admin_images,
+                self._admin_applications,
+                self._admin_deployments,
+                self._admin_storage,
+                self._admin_operations,
             )
             with nullcontext() if independent else self._lock:
                 try:
@@ -547,9 +563,12 @@ class ControllerAPI:
             raise HttpError(404, "STORAGE_NOT_FOUND", "managed storage does not exist")
         return resource
 
-    def _attempt(self, identifier: str) -> db.DeploymentAttempt:
+    def _attempt(
+        self, identifier: str, connection: sqlite3.Connection | None = None
+    ) -> db.DeploymentAttempt:
         attempt = db.get_deployment_attempt(
-            self.connection, uuid(identifier, field="deployment ID")
+            self.connection if connection is None else connection,
+            uuid(identifier, field="deployment ID"),
         )
         if attempt is None:
             raise HttpError(404, "DEPLOYMENT_NOT_FOUND", "deployment does not exist")
@@ -853,9 +872,9 @@ class ControllerAPI:
         self._no_query(request)
         if request.body is not None:
             raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
-        flavor = openstack.observe_flavor_capacity(
-            self.config.platform, builder_settings.default_flavor(self.connection, self.config)
-        )
+        with self._snapshot() as connection:
+            reference = builder_settings.default_flavor(connection, self.config)
+        flavor = openstack.observe_flavor_capacity(self.config.platform, reference)
         return Response(200, {"flavor": sizing.flavor_projection(flavor)})
 
     def _select_builder_size(self, request: Request) -> Response:
@@ -878,11 +897,11 @@ class ControllerAPI:
         self._no_query(request)
         if request.body is not None:
             raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
-        application_id = self._application(self._path_uuid(request)).application_id
-        selected = db.get_application_builder_flavor(self.connection, application_id)
-        default = openstack.observe_flavor_capacity(
-            self.config.platform, builder_settings.default_flavor(self.connection, self.config)
-        )
+        with self._snapshot() as connection:
+            application_id = self._application(self._path_uuid(request), connection).application_id
+            selected = db.get_application_builder_flavor(connection, application_id)
+            reference = builder_settings.default_flavor(connection, self.config)
+        default = openstack.observe_flavor_capacity(self.config.platform, reference)
         flavor = (
             default
             if selected is None
@@ -925,13 +944,12 @@ class ControllerAPI:
             raise HttpError(
                 400, "INVALID_QUERY", "supply exactly one flavor query field and no body"
             )
-        application = self._application(self._path_uuid(request))
-        return Response(
-            200,
-            sizing.plan(
-                self.connection, self.config, application.application_id, request.query["flavor"][0]
-            ),
-        )
+        with self._snapshot() as connection:
+            application = self._application(self._path_uuid(request), connection)
+            probe = sizing.prepare_plan(
+                connection, self.config, application.application_id, request.query["flavor"][0]
+            )
+        return Response(200, probe())
 
     def _resize(self, request: Request) -> Response:
         self._no_query(request)
@@ -971,17 +989,23 @@ class ControllerAPI:
                 "INVALID_QUERY",
                 "supply deploymentId and optional boolean reuseWorker, with no body",
             )
-        application = self._application(self._path_uuid(request))
-        return Response(
-            200,
-            DeploymentService(
-                self.connection, self.config, self.state_directory, helper_caller=self.helper_caller
-            ).rollback_plan(
-                application.application_id,
-                request.query["deploymentId"][0],
-                reuse_worker=request.query.get("reuseWorker") == ("true",),
-            ),
+        application_id = self._path_uuid(request)
+        reuse_worker = request.query.get("reuseWorker") == ("true",)
+        deadline = time.monotonic() + min(
+            120 if reuse_worker else 30, self.config.policy.limits.process_seconds
         )
+        with runtime.lock(self.state_directory, f"app-{application_id}", deadline=deadline):
+            with self._snapshot() as connection:
+                application = self._application(application_id, connection)
+                probe = DeploymentService(
+                    connection, self.config, self.state_directory, helper_caller=self.helper_caller
+                ).prepare_rollback_plan(
+                    application.application_id,
+                    request.query["deploymentId"][0],
+                    reuse_worker=reuse_worker,
+                    deadline=deadline,
+                )
+            return Response(200, probe())
 
     def _rollback(self, request: Request) -> Response:
         self._no_query(request)
@@ -1070,26 +1094,33 @@ class ControllerAPI:
         )
 
     def _list_deployments(self, request: Request) -> Response:
-        application = self._application(self._path_uuid(request))
-        items = [
-            self._deployment_model(item)
-            for item in db.list_deployment_attempts(self.connection, application.application_id)
-        ]
+        with self._snapshot() as connection:
+            application = self._application(self._path_uuid(request), connection)
+            items = [
+                self._deployment_model(item, connection)
+                for item in db.list_deployment_attempts(connection, application.application_id)
+            ]
         return Response(200, self._page(request, items, "deploymentId"))
 
     def _get_deployment(self, request: Request) -> Response:
         self._no_query(request)
-        return Response(200, self._deployment_model(self._attempt(self._path_uuid(request))))
+        with self._snapshot() as connection:
+            result = self._deployment_model(
+                self._attempt(self._path_uuid(request), connection), connection
+            )
+        return Response(200, result)
 
     def _build_log(self, request: Request) -> Response:
-        attempt = self._attempt(self._path_uuid(request))
         lines, offset = self._log_query(request, allow_offset=True)
-        build, chunk = self.logs.build(
-            attempt.application_id,
-            build_id=attempt.deployment_id,
-            lines=lines,
-            offset=offset,
-        )
+        with self._snapshot() as connection:
+            attempt = self._attempt(self._path_uuid(request), connection)
+            logs = LogService(
+                connection, self.config, self.state_directory, helper_caller=self.logs.helper_caller
+            )
+            probe = logs.prepare_build(
+                attempt.application_id, build_id=attempt.deployment_id, lines=lines, offset=offset
+            )
+        build, chunk = probe()
         return Response(
             200,
             {
@@ -1300,8 +1331,10 @@ class ControllerAPI:
 
     def _startup_log(self, request: Request) -> Response:
         self._no_query(request)
-        attempt = self._attempt(self._path_uuid(request))
-        record = self.logs.startup(attempt.application_id, attempt.deployment_id)
+        with self._snapshot() as connection:
+            attempt = self._attempt(self._path_uuid(request), connection)
+            application = self._application(attempt.application_id, connection)
+        record = self.logs.startup_for(application, attempt.deployment_id)
         return Response(
             200,
             {
@@ -1658,13 +1691,15 @@ class ControllerAPI:
         self._no_query(request)
         if request.body is not None:
             raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
-        application = self._application(self._path_uuid(request))
-        return Response(
-            200,
-            FixedIPService(self.connection, self.config, self.state_directory).read(
-                application.application_id
-            ),
-        )
+        application_id = self._path_uuid(request)
+        deadline = operation_deadline(self.config)
+        with runtime.lock(self.state_directory, f"app-{application_id}", deadline=deadline):
+            with self._snapshot() as connection:
+                application = self._application(application_id, connection)
+                probe = FixedIPService(connection, self.config, self.state_directory).prepare_read(
+                    application.application_id, deadline=deadline
+                )
+            return Response(200, probe())
 
     def _plan_fixed_ip(self, request: Request) -> Response:
         from .fixed_ip_service import FixedIPService
@@ -1672,13 +1707,12 @@ class ControllerAPI:
         self._no_query(request)
         fields = {"networkId", "subnetId", "address"}
         body = self._body(request, allowed=fields, required=fields)
-        application = self._application(self._path_uuid(request))
-        return Response(
-            200,
-            FixedIPService(self.connection, self.config, self.state_directory).plan(
+        with self._snapshot() as connection:
+            application = self._application(self._path_uuid(request), connection)
+            probe = FixedIPService(connection, self.config, self.state_directory).prepare_plan(
                 application.application_id, body["networkId"], body["subnetId"], body["address"]
-            ),
-        )
+            )
+        return Response(200, probe())
 
     def _mutate_fixed_ip(self, request: Request) -> Response:
         from ..fixed_ip import ipv4
@@ -1720,20 +1754,23 @@ class ControllerAPI:
         from .public_ip_service import model
 
         self._no_query(request)
-        application = self._application(self._path_uuid(request))
-        return Response(200, model(self.connection, application.application_id))
+        with self._snapshot() as connection:
+            application = self._application(self._path_uuid(request), connection)
+            result = model(connection, application.application_id)
+        return Response(200, result)
 
     def _plan_public_ip(self, request: Request) -> Response:
         from .public_ip_service import PublicIPService
 
         self._no_query(request)
         body = self._body(request, allowed={"externalNetworkId"}, required={"externalNetworkId"})
-        application = self._application(self._path_uuid(request))
-        result = PublicIPService(self.connection, self.config, self.state_directory).plan(
-            application.application_id,
-            uuid(body["externalNetworkId"], field="external network UUID"),
-        )
-        return Response(200, result)
+        with self._snapshot() as connection:
+            application = self._application(self._path_uuid(request), connection)
+            probe = PublicIPService(connection, self.config, self.state_directory).prepare_plan(
+                application.application_id,
+                uuid(body["externalNetworkId"], field="external network UUID"),
+            )
+        return Response(200, probe())
 
     def _mutate_public_ip(self, request: Request) -> Response:
         from .public_ip_service import PublicIPService
@@ -1772,32 +1809,43 @@ class ControllerAPI:
 
     def _admin_status(self, request: Request) -> Response:
         self._no_query(request)
-        observers = status.live_observers(
-            self.connection,
-            self.config,
-            helper_caller=self.observer_helper,
-        )
+        with self._snapshot() as connection:
+            observers = status.live_observers(
+                connection, self.config, helper_caller=self.observer_helper
+            )
+            infrastructure = status.infra_list(connection)
+            applications = status.app_list(connection)
+            resources = status.storage_list(
+                connection, observe=status.cached_storage_observer(connection)
+            )
+            operations = status.incomplete_operations(connection)
+            host = storage_limits.host_model(connection)
+        for item in infrastructure:
+            item["live"] = status.infra_live(str(item["role"]), observe=observers.infrastructure)
+        for item in applications:
+            item["live"] = status.app_live(
+                str(item["applicationId"]), observe=observers.application
+            )
         return Response(
             200,
             {
-                **status.status_show(
-                    self.connection,
-                    observe_infrastructure=observers.infrastructure,
-                    observe_application=observers.application,
-                    observe_storage=status.cached_storage_observer(self.connection),
-                ),
-                "storageHost": storage_limits.host_model(self.connection),
+                **status.status_summary(infrastructure, applications, resources, operations),
+                "storageHost": host,
             },
         )
 
     def _admin_hosts(self, request: Request) -> Response:
         self._no_query(request)
-        observe = status.infrastructure_observer(
-            self.config.platform,
-            self.connection,
-            timeout_seconds=self.config.policy.limits.process_seconds,
-        )
-        return Response(200, {"items": status.infra_list(self.connection, observe=observe)})
+        with self._snapshot() as connection:
+            observe = status.infrastructure_observer(
+                self.config.platform,
+                connection,
+                timeout_seconds=self.config.policy.limits.process_seconds,
+            )
+            items = status.infra_list(connection)
+        for item in items:
+            item["live"] = status.infra_live(str(item["role"]), observe=observe)
+        return Response(200, {"items": items})
 
     def _select_hosted_image(self, request: Request) -> Response:
         self._no_query(request)
@@ -1818,6 +1866,8 @@ class ControllerAPI:
 
     def _admin_images(self, request: Request) -> Response:
         self._no_query(request)
+        with self._snapshot() as connection:
+            selections = db.list_image_selections(connection)
         return Response(
             200,
             {
@@ -1830,95 +1880,100 @@ class ControllerAPI:
                         "compatibilityHash": item.compatibility_hash,
                         "selectedAt": item.selected_at,
                     }
-                    for item in db.list_image_selections(self.connection)
+                    for item in selections
                 ]
             },
         )
 
     def _admin_applications(self, request: Request) -> Response:
-        # Include tombstones for diagnosis without exposing worker/provider data.
-        rows = self.connection.execute(
-            "SELECT application.application_id, application.slug, "
-            "application.desired_running, application.url, application.created_at, "
-            "application.worker_flavor, application.scheduler_cpu_mhz, application.scheduler_memory_mib, "
-            "application.updated_at, tombstone.deleted_at, accepted.deployment_id AS active_deployment_id "
-            "FROM applications AS application LEFT JOIN application_slug_tombstones "
-            "AS tombstone USING (slug) LEFT JOIN active_deployments AS accepted "
-            "ON accepted.application_id = application.application_id "
-            "ORDER BY application.slug, application.application_id"
-        ).fetchall()
-        items = [
-            {
-                "applicationId": row["application_id"],
-                "slug": row["slug"],
-                "enabled": bool(row["desired_running"]),
-                "activeDeploymentId": row["active_deployment_id"],
-                "sizing": {
-                    "workerFlavor": row["worker_flavor"],
-                    "cpuMHz": row["scheduler_cpu_mhz"],
-                    "memoryMiB": row["scheduler_memory_mib"],
-                },
-                "url": row["url"],
-                "createdAt": row["created_at"],
-                "updatedAt": row["updated_at"],
-                "deletedAt": row["deleted_at"],
-            }
-            for row in rows
-        ]
+        with self._snapshot() as connection:
+            # Include tombstones for diagnosis without exposing worker/provider data.
+            rows = connection.execute(
+                "SELECT application.application_id, application.slug, "
+                "application.desired_running, application.url, application.created_at, "
+                "application.worker_flavor, application.scheduler_cpu_mhz, application.scheduler_memory_mib, "
+                "application.updated_at, tombstone.deleted_at, accepted.deployment_id AS active_deployment_id "
+                "FROM applications AS application LEFT JOIN application_slug_tombstones "
+                "AS tombstone USING (slug) LEFT JOIN active_deployments AS accepted "
+                "ON accepted.application_id = application.application_id "
+                "ORDER BY application.slug, application.application_id"
+            ).fetchall()
+            items = [
+                {
+                    "applicationId": row["application_id"],
+                    "slug": row["slug"],
+                    "enabled": bool(row["desired_running"]),
+                    "activeDeploymentId": row["active_deployment_id"],
+                    "sizing": {
+                        "workerFlavor": row["worker_flavor"],
+                        "cpuMHz": row["scheduler_cpu_mhz"],
+                        "memoryMiB": row["scheduler_memory_mib"],
+                    },
+                    "url": row["url"],
+                    "createdAt": row["created_at"],
+                    "updatedAt": row["updated_at"],
+                    "deletedAt": row["deleted_at"],
+                }
+                for row in rows
+            ]
         return Response(200, self._page(request, items, "applicationId"))
 
     def _admin_deployments(self, request: Request) -> Response:
-        rows = self.connection.execute(
-            "SELECT deployment_id FROM deployment_attempts "
-            "ORDER BY requested_at DESC, deployment_id DESC"
-        ).fetchall()
-        attempts = [
-            attempt
-            for row in rows
-            if (attempt := db.get_deployment_attempt(self.connection, row["deployment_id"]))
-            is not None
-        ]
+        with self._snapshot() as connection:
+            rows = connection.execute(
+                "SELECT deployment_id FROM deployment_attempts "
+                "ORDER BY requested_at DESC, deployment_id DESC"
+            ).fetchall()
+            attempts = [
+                attempt
+                for row in rows
+                if (attempt := db.get_deployment_attempt(connection, row["deployment_id"]))
+                is not None
+            ]
+            items = [self._deployment_model(item, connection) for item in attempts]
         return Response(
             200,
             self._page(
                 request,
-                [self._deployment_model(item) for item in attempts],
+                items,
                 "deploymentId",
             ),
         )
 
     def _admin_storage(self, request: Request) -> Response:
-        items = [
-            self._storage_model(item, admin=True)
-            for item in db.list_managed_resources(self.connection)
-        ]
+        with self._snapshot() as connection:
+            items = [
+                self._storage_model(item, admin=True)
+                for item in db.list_managed_resources(connection)
+            ]
         return Response(200, self._page(request, items, "resourceId"))
 
     def _admin_operations(self, request: Request) -> Response:
-        rows = self.connection.execute(
-            "SELECT operation_id FROM operations ORDER BY updated_at DESC, operation_id DESC"
-        ).fetchall()
-        operations = [
-            operation
-            for row in rows
-            if (operation := db.get_operation(self.connection, row["operation_id"])) is not None
-        ]
-        known = {item.operation_id for item in operations}
-        queued = [
-            item
-            for item in db.list_operation_dispatches(self.connection)
-            if item.operation_id not in known
-        ]
-        items = [
-            self._operation_model(
-                item, db.get_operation_dispatch(self.connection, item.operation_id)
+        with self._snapshot() as connection:
+            rows = connection.execute(
+                "SELECT operation_id FROM operations ORDER BY updated_at DESC, operation_id DESC"
+            ).fetchall()
+            operations = [
+                operation
+                for row in rows
+                if (operation := db.get_operation(connection, row["operation_id"])) is not None
+            ]
+            known = {item.operation_id for item in operations}
+            queued = [
+                item
+                for item in db.list_operation_dispatches(connection)
+                if item.operation_id not in known
+            ]
+            items = [
+                self._operation_model(
+                    item, db.get_operation_dispatch(connection, item.operation_id)
+                )
+                for item in operations
+            ]
+            items.extend(self._dispatch_model(item) for item in queued)
+            items.sort(
+                key=lambda item: (str(item["updatedAt"]), str(item["operationId"])), reverse=True
             )
-            for item in operations
-        ]
-        items.extend(self._dispatch_model(item) for item in queued)
-        items.sort(
-            key=lambda item: (str(item["updatedAt"]), str(item["operationId"])), reverse=True
-        )
         return Response(
             200,
             self._page(request, items, "operationId"),
@@ -1941,7 +1996,9 @@ class ControllerAPI:
             "updatedAt": application.updated_at,
         }
 
-    def _deployment_model(self, attempt: db.DeploymentAttempt) -> dict[str, object]:
+    def _deployment_model(
+        self, attempt: db.DeploymentAttempt, connection: sqlite3.Connection
+    ) -> dict[str, object]:
         return {
             "deploymentId": attempt.deployment_id,
             "applicationId": attempt.application_id,
@@ -1952,11 +2009,11 @@ class ControllerAPI:
             "configurationRevision": attempt.configuration_revision,
             "configuration": configuration_snapshot(attempt),
             "configurationSha256": attempt.configuration_sha256,
-            "sourceRepository": source_repository(self.connection, attempt),
+            "sourceRepository": source_repository(connection, attempt),
             "environmentRevision": attempt.environment_revision,
             "recipeHash": attempt.recipe_hash,
             "imageDigest": attempt.image_digest,
-            "runtime": db.deployment_runtime(self.connection, attempt.deployment_id),
+            "runtime": db.deployment_runtime(connection, attempt.deployment_id),
             "nomadVersion": attempt.nomad_version,
             "safeError": attempt.safe_error,
             "cleanupState": attempt.cleanup_state,

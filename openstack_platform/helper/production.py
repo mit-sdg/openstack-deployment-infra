@@ -44,6 +44,7 @@ from ..controller.nomad_jobs import deployment_worker_ids
 from ..log_timestamps import TimestampedBuildLog
 from ..runtime import (
     CommandFailure,
+    HttpStatusFailure,
     bounded_http,
     child_environment,
     ensure_private_directory,
@@ -989,6 +990,10 @@ class _GarageAdmin:
                 response_limit=1_048_576,
                 ssl_context=self.context,
             )
+        except HttpStatusFailure:
+            # Preserve status for exact-ID absence checks after deletion. The
+            # transport bounds the body and the exception message omits it.
+            raise
         except RuntimeError as error:
             raise RuntimeError("Garage request failed") from error
         try:
@@ -1027,6 +1032,18 @@ def _storage_handlers(
         host = platform.get("internalNames.storage")
     ca = str(_nomad_secrets(runtime) / "internal-ca.pem")
     secrets = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
+    backup_access_key = None
+    if resource_type == "s3" and operation == "create":
+        try:
+            backup_access_key = _read_environment(runtime.root / "secrets/garage-backup.env").get(
+                "GARAGE_BACKUP_ACCESS_KEY"
+            )
+        except HelperActionError:
+            raise HelperActionError(
+                "BACKUP_KEY_MISSING", "Garage backup key must be initialized"
+            ) from None
+        if not backup_access_key:
+            raise HelperActionError("BACKUP_KEY_MISSING", "Garage backup key must be initialized")
     if instance is not None:
         if resource_type == "postgres":
             secrets["POSTGRES_PASSWORD"] = instance["adminPassword"]
@@ -1233,6 +1250,7 @@ def _storage_handlers(
             mongo_admin=mongo,
             mongo_connect=mongo_connect,
             garage_admin=garage,
+            backup_access_key=backup_access_key,
             s3_connect=s3_connect,
             nomad=nomad,
             storage_host=host,

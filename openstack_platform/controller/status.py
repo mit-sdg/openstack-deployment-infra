@@ -265,24 +265,27 @@ def infrastructure_observer(
     through application/Nomad observations; the latter is projected only from
     a durable unfinished build operation.
     """
-    hosts: dict[str, openstack.PersistentHost] = {}
+    # Capture durable builder inputs now, but defer all provider I/O until
+    # the caller has closed its database snapshot. Reuse one lookup per reader.
+    hosts: dict[str, openstack.PersistentHost] | None = None
     provider_available = True
-    try:
-        hosts = {
-            host.role: host
-            for host in openstack.list_persistent_hosts(
-                platform,
-                timeout_seconds=timeout_seconds,
-                command_runner=command_runner,
-            )
-        }
-    except Exception:
-        provider_available = False
 
     unfinished = incomplete_operations(connection)
     builders = [item for item in unfinished if item["builder"]]
 
     def observe(role: str) -> InfrastructureObservation:
+        nonlocal hosts, provider_available
+        if hosts is None:
+            try:
+                hosts = {
+                    host.role: host
+                    for host in openstack.list_persistent_hosts(
+                        platform, timeout_seconds=timeout_seconds, command_runner=command_runner
+                    )
+                }
+            except Exception:
+                hosts = {}
+                provider_available = False
         if role in openstack.PERSISTENT_ROLES:
             if not provider_available or role not in hosts:
                 raise RuntimeError("infrastructure observation unavailable")
@@ -538,6 +541,11 @@ def incomplete_operations(connection: sqlite3.Connection) -> list[dict[str, obje
     return result
 
 
+def infra_live(role: str, *, observe: InfrastructureObserver | None = None) -> dict[str, object]:
+    """Project live role health after releasing the accepted database view."""
+    return _infra_observation(role, observe)
+
+
 def infra_list(
     connection: sqlite3.Connection,
     *,
@@ -738,6 +746,16 @@ def status_show(
     applications = app_list(connection, observe=observe_application)
     resources = storage_list(connection, observe=observe_storage)
     operations = incomplete_operations(connection)
+    return status_summary(infrastructure, applications, resources, operations)
+
+
+def status_summary(
+    infrastructure: list[dict[str, object]],
+    applications: list[dict[str, object]],
+    resources: list[dict[str, object]],
+    operations: list[dict[str, object]],
+) -> dict[str, object]:
+    """Aggregate captured accepted projections and independent observations."""
     # Before the helper release and before any application exists, only the
     # three persistent foundation hosts are expected live dependencies.  A
     # disposable builder is expected only while its durable build operation is
