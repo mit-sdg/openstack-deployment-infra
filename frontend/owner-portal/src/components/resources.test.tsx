@@ -49,6 +49,20 @@ const resource: StorageResource = {
   hardQuotaBytes: 2684354560,
   defaultBindings: { url: 'DATABASE_URL', host: 'PGHOST' },
 };
+const s3Resource: StorageResource = {
+  ...resource,
+  resourceId: 'bucket',
+  type: 's3',
+  label: 'S3 storage',
+  defaultBindings: {
+    endpoint: 'S3_ENDPOINT',
+    public_endpoint: 'S3_PUBLIC_ENDPOINT',
+    region: 'S3_REGION',
+    access_key_id: 'S3_ACCESS_KEY_ID',
+    secret_access_key: 'S3_SECRET_ACCESS_KEY',
+    bucket: 'S3_BUCKET',
+  },
+};
 function wrap(children: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
@@ -66,6 +80,91 @@ function mocks() {
   vi.spyOn(api, 'storage').mockResolvedValue({ items: [resource], intents: [] });
 }
 describe('owner resources', () => {
+  it.each(['Use default S3 storage variables', 'Choose S3 storage variable names'])(
+    'saves explicit S3 names through %s',
+    async (action) => {
+      mocks();
+      vi.mocked(api.storage).mockResolvedValue({ items: [s3Resource], intents: [] });
+      const save = vi.fn().mockResolvedValue(undefined);
+      wrap(<StorageSection id="app" bindings={[]} onChange={vi.fn()} save={save} />);
+      fireEvent.click(await screen.findByRole('button', { name: action }));
+      if (action.startsWith('Choose')) {
+        for (const [output, name] of Object.entries(s3Resource.defaultBindings))
+          expect(screen.getByLabelText(`${output} → environment name`)).toHaveValue(name);
+        expect(screen.getByRole('dialog')).toHaveTextContent('Bun’s S3 client reads automatically');
+        fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+      }
+      await waitFor(() =>
+        expect(save).toHaveBeenCalledWith([
+          { resourceId: 'bucket', outputs: s3Resource.defaultBindings },
+        ]),
+      );
+    },
+  );
+  it('keeps saved S3 names until an explicit reset is saved', async () => {
+    mocks();
+    vi.mocked(api.storage).mockResolvedValue({ items: [s3Resource], intents: [] });
+    const outputs = {
+      endpoint: 'AWS_ENDPOINT_URL_S3',
+      region: 'AWS_REGION',
+      access_key_id: 'AWS_ACCESS_KEY_ID',
+      secret_access_key: 'AWS_SECRET_ACCESS_KEY',
+      bucket: 'S3_BUCKET',
+    };
+    const save = vi.fn().mockResolvedValue(undefined);
+    wrap(
+      <StorageSection
+        id="app"
+        bindings={[{ resourceId: 'bucket', outputs }]}
+        onChange={vi.fn()}
+        save={save}
+      />,
+    );
+    const edit = await screen.findByRole('button', { name: 'Edit S3 storage variables' });
+    fireEvent.click(edit);
+    for (const [output, name] of Object.entries(outputs))
+      expect(screen.getByLabelText(`${output} → environment name`)).toHaveValue(name);
+    expect(
+      screen.getByRole('button', { name: 'Add public_endpoint as S3_PUBLIC_ENDPOINT' }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+    await waitFor(() => expect(save).toHaveBeenLastCalledWith([{ resourceId: 'bucket', outputs }]));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    save.mockClear();
+    fireEvent.click(edit);
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to defaults' }));
+    for (const [output, name] of Object.entries(s3Resource.defaultBindings))
+      expect(screen.getByLabelText(`${output} → environment name`)).toHaveValue(name);
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(edit);
+    expect(screen.getByLabelText('endpoint → environment name')).toHaveValue('AWS_ENDPOINT_URL_S3');
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to defaults' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith([
+        { resourceId: 'bucket', outputs: s3Resource.defaultBindings },
+      ]),
+    );
+  });
+  it('removes the binding when all S3 outputs are removed', async () => {
+    mocks();
+    vi.mocked(api.storage).mockResolvedValue({ items: [s3Resource], intents: [] });
+    const save = vi.fn().mockResolvedValue(undefined);
+    wrap(
+      <StorageSection
+        id="app"
+        bindings={[{ resourceId: 'bucket', outputs: s3Resource.defaultBindings }]}
+        onChange={vi.fn()}
+        save={save}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit S3 storage variables' }));
+    for (const output of Object.keys(s3Resource.defaultBindings))
+      fireEvent.click(screen.getByRole('button', { name: `Remove ${output}` }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith([]));
+  });
   it('rejects reserved, invalid, duplicate and colliding binding names', () => {
     for (const name of ['PORT', 'NODE_EXTRA_CA_CERTS', 'STORAGE__SECRET', 'lower', 'A'.repeat(129)])
       expect(validateEnvName(name)).not.toBeNull();
@@ -411,7 +510,7 @@ describe('owner resources', () => {
           label: 'S3',
           isolation: 'instance',
           hardQuotaBytes: 2684354560,
-          defaultBindings: { secret_access_key: 'AWS_SECRET_ACCESS_KEY' },
+          defaultBindings: { secret_access_key: 'S3_SECRET_ACCESS_KEY' },
         },
       ],
       intents: [],
@@ -432,7 +531,7 @@ describe('owner resources', () => {
       await screen.findByRole('button', { name: 'Choose S3 storage variable names' }),
     );
     expect(screen.getByLabelText('secret_access_key → environment name')).toHaveValue(
-      'AWS_SECRET_ACCESS_KEY',
+      'S3_SECRET_ACCESS_KEY',
     );
     fireEvent.click(screen.getByRole('button', { name: 'Save variables' }));
     expect(await screen.findByText('2 variables')).toBeVisible();

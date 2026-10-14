@@ -104,6 +104,16 @@ class DeploymentConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "missing or inactive"):
             parsed.manifest({})
 
+    def test_every_saved_binding_requires_explicit_output_names(self) -> None:
+        for binding in (
+            {"resourceId": RESOURCE_ID},
+            {"resourceId": RESOURCE_ID, "outputs": {}},
+            {"resourceId": RESOURCE_ID, "outputs": None},
+            {"resourceId": RESOURCE_ID, "outputs": {"endpoint": ""}},
+        ):
+            with self.subTest(binding=binding), self.assertRaises(ValidationError):
+                parse_configuration(configuration() | {"storageBindings": [binding]})
+
     def test_exact_checkout_requires_supported_locks_and_configured_scripts(self) -> None:
         parsed = parse_configuration(configuration() | {"storageBindings": []})
         with tempfile.TemporaryDirectory() as directory:

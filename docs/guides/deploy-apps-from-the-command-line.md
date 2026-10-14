@@ -314,7 +314,9 @@ This example creates PostgreSQL and binds `url` to `DATABASE_URL`. If you choose
 | --- | --- | --- |
 | `postgres` | `url`, `host`, `port`, `database`, `user`, `password`, `sslmode`, `sslrootcert` | `DATABASE_URL`, `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGSSLMODE`, `PGSSLROOTCERT` |
 | `mongo` | `uri` | `MONGODB_URI` |
-| `s3` | `endpoint`, `public_endpoint`, `region`, `access_key_id`, `secret_access_key`, `bucket` | `AWS_ENDPOINT_URL_S3`, `S3_PUBLIC_ENDPOINT`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET` |
+| `s3` | `endpoint`, `public_endpoint`, `region`, `access_key_id`, `secret_access_key`, `bucket` | `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET` |
+
+Every storage binding must save an explicit, non-empty `outputs` mapping. Saved names are used unchanged on later deploys; the defaults are suggestions for new bindings.
 
 S3 `public_endpoint` is `https://s3.<domain>` for browser presigned URLs. See [the storage contract](../../openstack_platform/controller/storage_contract.py).
 

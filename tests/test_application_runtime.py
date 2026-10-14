@@ -647,6 +647,48 @@ class DeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "exact job"):
             nomad_candidate_identity(job.replace("memory = 2048", "memory = 2047"))
 
+    def test_job_renders_saved_s3_names_without_applying_current_defaults(self) -> None:
+        outputs = {
+            "endpoint": "AWS_ENDPOINT_URL_S3",
+            "region": "AWS_REGION",
+            "access_key_id": "AWS_ACCESS_KEY_ID",
+            "secret_access_key": "AWS_SECRET_ACCESS_KEY",
+            "bucket": "S3_BUCKET",
+            "public_endpoint": "BROWSER_ENDPOINT",
+        }
+        configuration = parse_configuration(
+            {
+                "schemaVersion": 1,
+                "build": {
+                    "runtime": "bun",
+                    "packages": ["."],
+                    "buildScript": None,
+                    "startScript": "start",
+                },
+                "runtime": {"port": 3000, "healthPath": "/health"},
+                "storageBindings": [{"resourceId": APP_ID, "outputs": outputs}],
+            }
+        )
+        saved = parse_configuration(configuration.canonical_json())
+        job = render_nomad_job(
+            application_id=APP_ID,
+            application_slug="demo-app",
+            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
+            manifest=saved.manifest({APP_ID: ("s3", "default")}),
+            platform=self.platform(),
+            cpu_mhz=1000,
+            memory_mib=2048,
+            source_commit=COMMIT,
+            recipe_hash="c" * 64,
+        )
+        for output, target in outputs.items():
+            if output != "public_endpoint":
+                self.assertIn(f'index . "STORAGE__S3__DEFAULT__{output.upper()}"', job)
+                self.assertIn(f"{target}={{{{ $value | toJSON }}}}", job)
+        self.assertIn('BROWSER_ENDPOINT = "https://s3.apps.example.com"', job)
+        for name in ("S3_ENDPOINT", "S3_REGION", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
+            self.assertNotIn(f"\n{name}=", job)
+
         candidate_job = render_nomad_job(
             application_id=APP_ID,
             application_slug="demo-app",
