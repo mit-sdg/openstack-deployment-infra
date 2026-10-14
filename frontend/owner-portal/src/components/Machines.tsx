@@ -53,7 +53,7 @@ export function Machines({ app }: { app: AppRecord }) {
               <Cluster gap={3}>
                 {builder.isPending ? (
                   <Skeleton />
-                ) : builder.error ? (
+                ) : builder.data === undefined ? (
                   <QueryError query={builder} what="the build machine" />
                 ) : (
                   <span>

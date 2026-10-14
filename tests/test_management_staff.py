@@ -7,13 +7,18 @@ import dataclasses
 import sqlite3
 import threading
 import time
+import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from openstack_platform.controller.http import HttpError
 from openstack_platform.management.broker.accounts import security_change
-from openstack_platform.management.broker.class_reads import ReadLimits
+from openstack_platform.management.broker.class_reads import (
+    PERSON_READS_IN_FLIGHT,
+    TOTAL_READS_IN_FLIGHT,
+    ReadLimits,
+)
 from openstack_platform.management.broker.database import (
     MIGRATION_2,
     SCHEMA_V1,
@@ -239,3 +244,52 @@ class StaffTests(ManagementCase):
         ):
             self.assertIsNone(public_url(url))
         self.assertEqual(public_url("https://example.com/repo"), "https://example.com/repo")
+
+
+class ReadLimitTests(unittest.TestCase):
+    def test_person_and_global_caps_allow_pages_and_release_after_failure(self) -> None:
+        limits = ReadLimits(burst=40, rate=4)
+        with contextlib.ExitStack() as held:
+            for _ in range(PERSON_READS_IN_FLIGHT):
+                held.enter_context(limits.reserve("person", "address", 100))
+            with self.assertRaises(HttpError) as failure:
+                with limits.reserve("person", "address", 100):
+                    self.fail("per-person cap was not enforced")
+            self.assertEqual(failure.exception.status, 429)
+            for index in range(TOTAL_READS_IN_FLIGHT - PERSON_READS_IN_FLIGHT):
+                held.enter_context(limits.reserve(f"other-{index}", f"address-{index}", 100))
+            with self.assertRaises(HttpError):
+                with limits.reserve("excess", "new-address", 100):
+                    self.fail("global cap was not enforced")
+        self.assertEqual(limits.active, 0)
+        with self.assertRaisesRegex(RuntimeError, "handler failed"):
+            with limits.reserve("person", "address", 100):
+                raise RuntimeError("handler failed")
+        self.assertEqual(limits.active, 0)
+        self.assertEqual(limits.users["person"].active, 0)
+
+    def test_person_tokens_still_limit_sustained_reads_and_refill(self) -> None:
+        limits = ReadLimits(burst=40, rate=4)
+        for _ in range(40):
+            with limits.reserve("person", "address", 100):
+                pass
+        with self.assertRaises(HttpError) as failure:
+            with limits.reserve("person", "address", 100):
+                self.fail("token bucket was not enforced")
+        self.assertEqual((failure.exception.status, failure.exception.code), (429, "RATE_LIMITED"))
+        with limits.reserve("person", "address", 100.25):
+            pass
+        with self.assertRaises(HttpError):
+            with limits.reserve("person", "address", 100.25):
+                self.fail("refill exceeded four tokens per second")
+
+    def test_address_bucket_limits_reads_across_people(self) -> None:
+        limits = ReadLimits(burst=40, rate=4)
+        for index in range(80):
+            with limits.reserve(f"person-{index % 3}", "address", 100):
+                pass
+        with self.assertRaises(HttpError):
+            with limits.reserve("new-person", "address", 100):
+                self.fail("address token bucket was not enforced")
+        with limits.reserve("new-person", "address", 100.125):
+            pass

@@ -117,7 +117,8 @@ class Journal:
     def run(self) -> None:
         while not self.stop_event.is_set():
             try:
-                self.reconcile()
+                with self.client.background_reads():
+                    self.reconcile()
             except Exception as error:
                 report_exception(error)
             self.wake.wait(0.25)

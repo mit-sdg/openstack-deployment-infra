@@ -11,7 +11,8 @@ export function AttentionActivity({ id }: { id: string }) {
     queryFn: () => api.attention(id),
     refetchInterval: 5000,
   });
-  if (activity.error) return <QueryError query={activity} what="activity that needs attention" />;
+  if (activity.error && activity.data === undefined)
+    return <QueryError query={activity} what="activity that needs attention" />;
   if (!activity.data?.length) return null;
   return (
     <Section title="Needs attention" flush>

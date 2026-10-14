@@ -240,7 +240,7 @@ export function DeployPage({ id }: { id: string }) {
             <SectionSkeleton title rows={6} />
           </Grid>
         </PageSkeleton>
-      ) : settings.error ? (
+      ) : settings.data === undefined ? (
         <QueryError query={settings} what="your settings" />
       ) : settings.data.revision === 0 ? (
         <div className="ui-card">

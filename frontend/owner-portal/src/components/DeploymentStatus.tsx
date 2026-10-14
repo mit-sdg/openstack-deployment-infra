@@ -19,7 +19,7 @@ export function DeploymentStatus({
     refetchInterval: 5000,
   });
   const intent = attention.data?.find((item) => item.operationId === deployment);
-  if (attention.error)
+  if (attention.error && attention.data === undefined)
     return (
       <>
         <Status state={state} />

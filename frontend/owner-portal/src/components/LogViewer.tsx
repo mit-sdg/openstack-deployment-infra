@@ -65,7 +65,7 @@ export function LogViewer({
       />
       {log.isPending ? (
         <LoadingRows />
-      ) : log.error ? (
+      ) : log.data === undefined ? (
         <LoadError onRetry={() => void log.refetch()} retrying={log.isFetching}>
           {log.error instanceof ApiError && explained.has(log.error.code)
             ? log.error.message

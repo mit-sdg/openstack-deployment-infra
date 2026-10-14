@@ -1,10 +1,12 @@
-import { createApp, expect, signIn, test } from './helpers';
+import { createApp, expect, saveSettings, signIn, test } from './helpers';
 
 test.use({ colorScheme: 'dark' });
 
 test('staff finds an owner app and opens its settings, people and activity', async ({ page }) => {
+  test.slow();
   await signIn(page, 'bob');
   const id = await createApp(page, 'staff-review');
+  await saveSettings(page);
   const ownerId = (await (await page.request.get('/api/v1/session')).json()).data.user.id;
   await page.getByRole('button', { name: /^Account: / }).click();
   await page.getByRole('button', { name: 'Sign out' }).click();
@@ -21,6 +23,16 @@ test('staff finds an owner app and opens its settings, people and activity', asy
     .getByRole('link', { name: 'Settings' })
     .click();
   await expect(page.getByLabel('Repository URL')).toBeVisible();
+  for (let reload = 0; reload < 10; reload++) {
+    await page.reload();
+    await expect(page.getByRole('navigation', { name: 'App pages' })).toBeVisible();
+    await expect(page.getByLabel('Repository URL')).toHaveValue(
+      'https://github.com/example/student-app',
+    );
+    await expect(page.getByLabel('Build machine', { exact: true })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0);
+    await expect(page.getByText(/Couldn't load/)).toHaveCount(0);
+  }
   const builder = page.getByLabel('Build machine', { exact: true });
   await builder.selectOption('200');
   await page.getByRole('button', { name: 'Save', exact: true }).click();

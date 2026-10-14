@@ -143,6 +143,8 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/hooks/useClassReads.tsx` — class read polling, hidden-tab pause, idle expiry and sequential refresh.
 - `frontend/owner-portal/src/classApi.ts` — typed, cancellable People and Activity metadata reads.
 - `frontend/owner-portal/src/appManagementApi.ts` — typed class app catalog, adoption, ownership, storage deletion and app deletion requests.
+- `frontend/owner-portal/src/queryPolicy.ts` — transient query retries, server retry hints, and mutation retry defaults.
+- `frontend/owner-portal/src/queryPolicy.test.ts` — retry bounds, backoff, HTTP and network classification, and browser read capacity tests.
 - `frontend/owner-portal/src/main.tsx` — React root and in-memory query cache.
 - `frontend/owner-portal/src/App.tsx` — sign-in, setup, task destinations and shared app routes.
 - `frontend/owner-portal/src/api.ts` — typed requests, response checks, settings validation, and CSRF retries.
@@ -190,6 +192,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 - `frontend/owner-portal/src/components/DeploymentStatus.tsx` — deployment status joined with the original change and shared Resume action.
 - `frontend/owner-portal/src/components/ClassRecords.tsx` — shared pagers, loading states and class activity adapters.
 - `frontend/owner-portal/src/components/AppManagement.tsx` — elevated ownership and storage controls on shared Settings.
+- `frontend/owner-portal/src/components/AppFrame.test.tsx` — initial load errors and preservation of loaded app and class data after failed refetches.
 - `frontend/owner-portal/src/components/AppFrame.tsx` — app header, state, URL, and tabs.
 - `frontend/owner-portal/src/components/AttentionActivity.test.tsx` — tests for the attention list: who sees it, the original actor, and Resume.
 - `frontend/owner-portal/src/components/AttentionActivity.tsx` — blocked or unknown app changes, actors, and Resume controls.
@@ -639,6 +642,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 - `tests/test_management_accounts.py` — local credentials, one-time setup links, roles, and portal admin account actions.
 - `tests/test_management_admin_apps.py` — staff and portal admin app authority, admin-only actions, adoption, audit, and secrecy.
 - `tests/test_management_backup.py` — broker backups, retention, off-site compatibility, restore guards, and the full-loss drill.
+- `tests/test_management_client.py` — page-sized controller capacity, foreground reservation, failure cleanup, and controller default consistency.
 - `tests/test_management_contract.py` — the broker against the real controller project router and the fake controller.
 - `tests/test_management_dev.py` — the local harness: socket paths in deep checkouts, private directories, and cleanup after a failed start.
 - `tests/test_management_identity.py` — the Commons Connect redeem contract, TLS and peer limits, failures, and schema upgrades.

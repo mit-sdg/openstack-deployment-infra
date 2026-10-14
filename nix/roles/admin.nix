@@ -745,7 +745,7 @@ in
         "--privileged-socket ${controllerPrivilegedSocket}"
         "--privileged-socket-group ${platformAdminAccount.name}"
         "--privileged-peer ${toString operatorAccount.uid}:${toString operatorAccount.gid}"
-        "--max-connections-per-peer 8"
+        "--max-connections-per-peer 32"
       ];
       Restart = "on-failure";
       RestartSec = 2;

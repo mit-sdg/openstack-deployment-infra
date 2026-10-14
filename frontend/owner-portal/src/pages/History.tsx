@@ -100,7 +100,7 @@ export function HistoryPage({ id }: { id: string }) {
         <PageSkeleton label="Loading deployments…">
           <SectionSkeleton variant="table" columns={4} rows={3} />
         </PageSkeleton>
-      ) : history.error ? (
+      ) : history.data === undefined ? (
         <QueryError query={history} what="deployments" />
       ) : history.data.items.length ? (
         <>

@@ -143,7 +143,7 @@ export function TeamSection({
     >
       {team.isPending ? (
         <LoadingRows rows={2} />
-      ) : team.error ? (
+      ) : team.data === undefined ? (
         <QueryError query={team} what="the team" />
       ) : (
         <>

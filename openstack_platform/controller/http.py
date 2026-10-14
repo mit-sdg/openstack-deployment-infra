@@ -106,12 +106,16 @@ PeerCredentialsReader = Callable[[socket.socket], tuple[int, int]]
 _BaseRequest = socket.socket | tuple[bytes, socket.socket]
 
 
+# Leave headroom above the broker's 24 connections for readiness and retiring sockets.
+DEFAULT_MAX_CONNECTIONS_PER_PEER = 32
+
+
 @dataclass(frozen=True, slots=True)
 class PeerPolicy:
     """Exact Linux process identities permitted to use one controller socket."""
 
     allowed: frozenset[tuple[int, int]]
-    max_connections_per_peer: int = 8
+    max_connections_per_peer: int = DEFAULT_MAX_CONNECTIONS_PER_PEER
 
     def __post_init__(self) -> None:
         if not self.allowed or any(uid < 0 or gid < 0 for uid, gid in self.allowed):

@@ -21,7 +21,7 @@ from ..installation import (
 )
 from . import database as db
 from .api import ControllerAPI
-from .http import ControllerServer, PeerPolicy
+from .http import DEFAULT_MAX_CONNECTIONS_PER_PEER, ControllerServer, PeerPolicy
 from .storage_limits import FAST_COLLECT_SECONDS, StorageLimitsService
 
 _DEFAULT_PLATFORM = Path(os.environ.get("PLATFORM_CONFIG", str(DEFAULT_CONTROLLER_INVENTORY)))
@@ -56,7 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="UID:GID",
         help="exact SO_PEERCRED identity allowed on the privileged socket (repeatable)",
     )
-    parser.add_argument("--max-connections-per-peer", type=int, default=8)
+    parser.add_argument(
+        "--max-connections-per-peer", type=int, default=DEFAULT_MAX_CONNECTIONS_PER_PEER
+    )
     return parser
 
 

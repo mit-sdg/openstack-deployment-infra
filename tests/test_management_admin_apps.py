@@ -120,6 +120,50 @@ class AdminApplicationTests(ManagementCase):
         )
         return identifier
 
+    def test_page_sized_concurrent_reads_succeed_but_sustained_reads_are_limited(self) -> None:
+        self.staff()
+        for actor in ("admin", "taylor"):
+            with self.subTest(actor=actor):
+                gate = threading.Barrier(10)
+                entered = threading.local()
+                original = self.broker.client.request
+
+                def concurrent(
+                    method: str,
+                    path: str,
+                    *args: Any,
+                    _entered: threading.local = entered,
+                    _gate: threading.Barrier = gate,
+                    _request: Any = original,
+                    **kwargs: Any,
+                ) -> Any:
+                    if not getattr(_entered, "page_read", False):
+                        _entered.page_read = True
+                        _gate.wait(timeout=5)
+                    return _request(method, path, *args, **kwargs)
+
+                with patch.object(self.broker.client, "request", side_effect=concurrent):
+                    with ThreadPoolExecutor(max_workers=10) as pool:
+                        reads = [
+                            pool.submit(
+                                self.call, "GET", self.prefix + "/configuration", owner=actor
+                            )
+                            for _ in range(10)
+                        ]
+                        self.assertEqual(
+                            [read.result(timeout=6).status for read in reads], [200] * 10
+                        )
+                for _ in range(30):
+                    self.assertEqual(
+                        self.call("GET", self.prefix + "/configuration", owner=actor).status, 200
+                    )
+                with self.assertRaises(HttpError) as denied:
+                    self.call("GET", self.prefix + "/configuration", owner=actor)
+                self.assertEqual(
+                    (denied.exception.status, denied.exception.code), (429, "RATE_LIMITED")
+                )
+                self.assertTrue(denied.exception.retryable)
+
     def test_catalog_refreshes_stale_observations_without_waiting_and_single_flight(self) -> None:
         started, release = threading.Event(), threading.Event()
         with self.broker.database.connect(write=True) as db:
@@ -128,6 +172,7 @@ class AdminApplicationTests(ManagementCase):
         reads: list[str] = []
 
         def slow(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+            self.assertTrue(self.broker.client.background.get())
             reads.append(path)
             started.set()
             if not release.wait(5):
