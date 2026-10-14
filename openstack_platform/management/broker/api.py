@@ -13,7 +13,14 @@ from urllib.parse import urlencode, urlsplit
 from ...controller.deployment_config import branch_name, parse_configuration
 from ...controller.http import HttpError, Request, Response, Router
 from ...runtime_versions import RUNTIME_NAMES, parse_version
-from ...validation import ValidationError, commit, oci_digest_pin, repository_url, slug
+from ...validation import (
+    ValidationError,
+    commit,
+    flavor_reference,
+    oci_digest_pin,
+    repository_url,
+    slug,
+)
 from ...validation import uuid as checked_uuid
 from ..common import canonical, digest, object_body, strict_json, utc
 from ..config import Config
@@ -262,7 +269,7 @@ class Broker:
         return Response(200, {"data": {"ready": True, "protocolVersion": 3}})
 
     def own(
-        self, request: Request, *, mutation: bool = False
+        self, request: Request, *, mutation: bool = False, observe_deletion: bool = True
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         admin = self.app_management.context.get() is not None
         user, _sid = self.auth.authenticate(
@@ -283,7 +290,9 @@ class Broker:
                 "admin" if admin else "owner" if app["user_id"] == user["id"] else "member"
             )
         if app["lifecycle"] == "deleted" or (
-            (mutation or not request.query) and self.journal.observe_deleted(app["id"])
+            observe_deletion
+            and (mutation or not request.query)
+            and self.journal.observe_deleted(app["id"])
         ):
             raise HttpError(
                 410, "APPLICATION_DELETED", "This application was deleted by an administrator."
@@ -373,7 +382,14 @@ class Broker:
             "truncated": more,
         }
 
-    def app_model(self, app: dict[str, Any], *, cache_seconds: int = 2) -> dict[str, Any]:
+    def app_model(
+        self,
+        app: dict[str, Any],
+        *,
+        cache_seconds: int = 2,
+        cached_only: bool = False,
+        admin: bool = False,
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "applicationId": app["id"],
             "slug": app["slug"],
@@ -386,18 +402,31 @@ class Broker:
             "health": None,
             "stale": True,
             "observedAt": None,
+            "observationAgeSeconds": None,
+            "refreshing": False,
+            "configurationChanged": False,
         }
         with self.database.connect() as db:
             cached = db.execute(
                 "SELECT * FROM observations WHERE app_id=?", (app["id"],)
             ).fetchone()
+            generation = tuple(
+                db.execute(
+                    "SELECT COUNT(*),COALESCE(MAX(updated),0) FROM intents WHERE app_id=?",
+                    (app["id"],),
+                ).fetchone()
+            )
+        app["observation_updated"] = None if cached is None else cached["updated"]
+        metadata: dict[str, Any] = {}
         if cached is not None:
-            result.update(strict_json(cached["body"].encode()))
+            body = strict_json(cached["body"].encode())
+            metadata = body.pop("_metadata", {})
+            result.update(body)
             result.update(savedRevision=app["revision"], lifecycleState=app["lifecycle"])
-            if time.time() - cached["updated"] < cache_seconds:
-                return result
-            result["stale"] = True
-        if app["lifecycle"] == "ready":
+            age = max(0, time.time() - cached["updated"]) if cached["updated"] > 0 else None
+            result["observationAgeSeconds"] = age
+            result["stale"] = age is None or age >= cache_seconds
+        if not cached_only and result["stale"] and app["lifecycle"] == "ready":
             try:
                 status, observed = self.client.request("GET", f"/v1/applications/{app['id']}")
                 detail = observed.get("error")
@@ -459,19 +488,75 @@ class Broker:
                         "observedAt": utc(time.time()),
                     }
                 )
+                metadata = {
+                    "requiresMaintenance": observed.get("requiresMaintenance") is True,
+                    "sizing": self.app_sizing(observed.get("sizing")),
+                }
+                if admin or self.client.background.get():
+                    metadata["sizing"] = self.flavor_cache.enrich(metadata["sizing"])
+                if active:
+                    status, deployed = self.client.request("GET", f"/v1/deployments/{active}")
+                    if status != 200 or deployed.get("applicationId") != app["id"]:
+                        raise ControllerUnavailable("invalid deployment observation")
+                    metadata["deploymentRevision"] = deployed.get("configurationRevision")
                 with self.database.connect(write=True) as db:
-                    db.execute(
-                        "INSERT INTO observations SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM apps WHERE id=? AND lifecycle='ready') ON CONFLICT(app_id) DO UPDATE SET body=excluded.body,updated=excluded.updated",
-                        (app["id"], canonical(result), time.time(), app["id"]),
+                    current_generation = tuple(
+                        db.execute(
+                            "SELECT COUNT(*),COALESCE(MAX(updated),0) FROM intents WHERE app_id=?",
+                            (app["id"],),
+                        ).fetchone()
                     )
+                    # A probe started before admission or completion must not
+                    # undo the mutation's invalidation, including the first cache fill.
+                    if current_generation == generation:
+                        written = db.execute(
+                            "INSERT INTO observations SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM apps WHERE id=? AND lifecycle='ready' AND revision=?) ON CONFLICT(app_id) DO UPDATE SET body=excluded.body,updated=excluded.updated",
+                            (
+                                app["id"],
+                                canonical({**result, "_metadata": metadata}),
+                                time.time(),
+                                app["id"],
+                                app["revision"],
+                            ),
+                        ).rowcount
+                        result["stale"] = not written
+                    else:
+                        result["stale"] = True
+                    result["observationAgeSeconds"] = 0 if not result["stale"] else None
             except (ControllerUnavailable, ValidationError):
-                pass
+                result["stale"] = True
+        if result["activeDeploymentId"]:
+            result["configurationChanged"] = metadata.get("deploymentRevision") != app["revision"]
+            with self.database.connect() as db:
+                rotated = db.execute(
+                    "SELECT MAX(updated) FROM intents WHERE app_id=? AND kind='storage_rotate' AND state='succeeded'",
+                    (app["id"],),
+                ).fetchone()[0]
+            accepted_at = (result["acceptedDeployment"] or {}).get("acceptedAt")
+            if rotated and accepted_at and str(utc(rotated)) > str(accepted_at):
+                result["configurationChanged"] = True
+        if admin:
+            result.update(
+                requiresMaintenance=metadata.get("requiresMaintenance", False),
+                sizing=metadata.get("sizing"),
+            )
         return result
+
+    @staticmethod
+    def app_sizing(value: object) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        reference = flavor_reference(value.get("workerFlavor"))
+        if any(
+            type(value.get(key)) is not int or not 0 <= value[key] <= 2**31 - 1
+            for key in ("cpuMHz", "memoryMiB")
+        ):
+            raise ControllerUnavailable("invalid app sizing")
+        return {"workerFlavor": reference, **{key: value[key] for key in ("cpuMHz", "memoryMiB")}}
 
     def apps(self, request: Request) -> Response:
         user, _sid = self.auth.authenticate(request)
         page = self.owned_page(request, user["id"], "apps")
-        self.journal.reconcile_page(page["items"])
         owners = self.owner_names(
             [item["user_id"] for item in page["items"] if item["user_id"] != user["id"]]
         )
@@ -479,13 +564,16 @@ class Broker:
         for item in page["items"]:
             if item["lifecycle"] == "deleted":
                 continue
-            model = self.app_model(item)
+            model = self.app_model(item, cached_only=True, cache_seconds=600)
             if model["lifecycleState"] == "deleted":
                 continue
             model["access"] = "owner" if item["user_id"] == user["id"] else "member"
             if model["access"] == "member":
                 model["ownerDisplayName"] = owners.get(item["user_id"])
             models.append(model)
+        refreshing = self.app_management.refresh_observations(page["items"])
+        for model in models:
+            model["refreshing"] = model["applicationId"] in refreshing
         page["items"] = models
         return Response(200, {"data": {**page, "quota": self.quota(user["id"])}})
 
@@ -552,8 +640,30 @@ class Broker:
             }
 
     def app(self, request: Request) -> Response:
-        _user, app = self.own(request)
-        model = self.app_model(app)
+        # The app observation itself detects deletion; avoid a synchronous
+        # metadata probe before deciding whether a display cache is usable.
+        _user, app = self.own(request, observe_deletion=False)
+        with self.database.connect() as db:
+            operating = (
+                db.execute(
+                    "SELECT 1 FROM intents WHERE app_id=? AND state IN ('prepared','unknown','accepted') LIMIT 1",
+                    (app["id"],),
+                ).fetchone()
+                is not None
+            )
+        elevated = app["access"] == "admin"
+        model = self.app_model(app, cached_only=True, admin=elevated)
+        age = model["observationAgeSeconds"]
+        if not operating and age is not None and age <= 30:
+            model["refreshing"] = app["id"] in self.app_management.refresh_observations(
+                [app], cache_seconds=2
+            )
+        else:
+            model = self.app_model(app, cache_seconds=0, admin=elevated)
+        if model["lifecycleState"] == "deleted":
+            raise HttpError(
+                410, "APPLICATION_DELETED", "This application was deleted by an administrator."
+            )
         model["access"] = app["access"]
         if app["access"] in {"member", "admin"}:
             model["ownerDisplayName"] = self.owner_names([app["user_id"]]).get(app["user_id"])
@@ -564,30 +674,7 @@ class Broker:
                     "SELECT username FROM users WHERE id=?", (app["user_id"],)
                 ).fetchone()
             model["ownerUsername"] = profile(owner["username"], 32)
-            current = self.app_management.observed(app["id"])
-            model["requiresMaintenance"] = current.get("requiresMaintenance") is True
-            model["sizing"] = self.flavor_cache.enrich(current.get("sizing"))
         model["identityProvider"] = self.app_management.identity(model)
-        model["configurationChanged"] = False
-        if model["activeDeploymentId"]:
-            try:
-                status, deployed = self.client.request(
-                    "GET", f"/v1/deployments/{model['activeDeploymentId']}"
-                )
-                if status == 200 and deployed.get("applicationId") == app["id"]:
-                    model["configurationChanged"] = (
-                        deployed.get("configurationRevision") != app["revision"]
-                    )
-                    accepted_at = deployed.get("acceptedAt")
-                    with self.database.connect() as db:
-                        rotated = db.execute(
-                            "SELECT MAX(updated) FROM intents WHERE app_id=? AND kind='storage_rotate' AND state='succeeded'",
-                            (app["id"],),
-                        ).fetchone()[0]
-                    if rotated and accepted_at and str(utc(rotated)) > str(utc(accepted_at)):
-                        model["configurationChanged"] = True
-            except ControllerUnavailable:
-                model["stale"] = True
         return Response(200, {"data": model})
 
     def existing(self, db: sqlite3.Connection, user: str, key: str, fingerprint: str) -> Any:
@@ -657,6 +744,7 @@ class Broker:
             (user, app, identifier, kind, now),
         )
         if app is not None:
+            db.execute("UPDATE observations SET updated=0 WHERE app_id=?", (app,))
             self.app_management.record_audit(db, user, app, kind, identifier, now)
         return identifier
 

@@ -20,6 +20,8 @@ const app: AppRecord = {
   health: null,
   stale: false,
   observedAt: null,
+  observationAgeSeconds: null,
+  refreshing: false,
   url: null,
 };
 

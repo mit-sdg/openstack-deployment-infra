@@ -208,16 +208,6 @@ class Journal:
             self.observe_deleted(row["id"])
         self.app_scan_cursor = (rows[-1]["created"], rows[-1]["id"]) if len(rows) == 4 else None
 
-    def reconcile_page(self, rows: list[dict[str, Any]]) -> None:
-        # Cheap metadata reads, not health/provider observations; bound work per
-        # list read and let the round-robin background scan settle other pages.
-        started = time.monotonic()
-        for row in rows[:4]:
-            if time.monotonic() - started >= 2:
-                break
-            if row.get("lifecycle") == "ready" and self.observe_deleted(row["id"]):
-                row["lifecycle"] = "deleted"
-
     def dispatch(self, identifier: str, *, secret_body: object = None) -> None:
         now = time.time()
         with self.database.connect(write=True) as db:
@@ -408,6 +398,9 @@ class Journal:
                     identifier,
                 ),
             )
+            # Every observed mutation outcome invalidates display evidence,
+            # including admission and operation progress, not just terminal transitions.
+            db.execute("UPDATE observations SET updated=0 WHERE app_id=?", (intent["app_id"],))
             if intent["kind"] == "app_delete" and state == "succeeded":
                 self.retire_app(db, intent["app_id"], now)
             if intent["kind"] == "create_app":
@@ -418,7 +411,6 @@ class Journal:
                         "UPDATE apps SET lifecycle='rejected' WHERE id=?", (intent["app_id"],)
                     )
             if state in {"succeeded", "failed", "blocked"} and state != intent["state"]:
-                db.execute("UPDATE observations SET updated=0 WHERE app_id=?", (intent["app_id"],))
                 db.execute(
                     "INSERT INTO audit(user_id,app_id,intent_id,action,created) VALUES(?,?,?,?,?)",
                     (intent["user_id"], intent["app_id"], identifier, state, now),

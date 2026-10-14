@@ -34,6 +34,8 @@ const app: AppRecord = {
   health: { allocationHealthy: true, routeHealthy: true, schedulerState: 'running' },
   stale: false,
   observedAt: null,
+  observationAgeSeconds: null,
+  refreshing: false,
 };
 function mockApps(items: AppRecord[], used = items.length, limit: number | null = 2) {
   vi.spyOn(api, 'apps').mockResolvedValue({

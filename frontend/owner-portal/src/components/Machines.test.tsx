@@ -20,6 +20,8 @@ const app: AppRecord = {
   health: null,
   stale: false,
   observedAt: null,
+  observationAgeSeconds: null,
+  refreshing: false,
   sizing: { workerFlavor: 'xl.4core', cpuMHz: 7916, memoryMiB: 14395, vcpus: 4, ram_mib: 16384 },
 };
 function show(record = app, useDefault = true) {

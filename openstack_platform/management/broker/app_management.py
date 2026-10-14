@@ -61,7 +61,9 @@ class AppManagement:
             self.refresh_closed = True
         self.refresh_pool.shutdown(wait=True, cancel_futures=True)
 
-    def refresh_observations(self, rows: list[dict[str, Any]]) -> set[str]:
+    def refresh_observations(
+        self, rows: list[dict[str, Any]], *, cache_seconds: int = 30
+    ) -> set[str]:
         """Queue only this page's stale observations; bound pending work across requests."""
         now = time.time()
         with self.refresh_lock:
@@ -70,20 +72,20 @@ class AppManagement:
                     self.refresh_closed
                     or row["lifecycle"] != "ready"
                     or row["observation_updated"] is not None
-                    and now - row["observation_updated"] < 30
+                    and now - row["observation_updated"] < cache_seconds
                     or row["id"] in self.refreshing
                     or len(self.refreshing) >= 100
                 ):
                     continue
                 self.refreshing.add(row["id"])
-                self.refresh_pool.submit(self.refresh_observation, row)
+                self.refresh_pool.submit(self.refresh_observation, row, cache_seconds)
             return self.refreshing.intersection(row["id"] for row in rows)
 
-    def refresh_observation(self, row: dict[str, Any]) -> None:
+    def refresh_observation(self, row: dict[str, Any], cache_seconds: int) -> None:
         try:
             # Recheck the cache in case a detail read refreshed it while queued.
             with self.broker.client.background_reads():
-                self.broker.app_model(row, cache_seconds=30)
+                self.broker.app_model(row, cache_seconds=cache_seconds)
         except Exception as error:
             # Never turn a background read failure into a list failure or log app data.
             print(f"app observation refresh failed: {type(error).__name__}", file=sys.stderr)

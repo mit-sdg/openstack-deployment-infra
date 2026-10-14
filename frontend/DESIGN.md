@@ -238,7 +238,7 @@ One word per state, everywhere. Pages pass a state key to the portal `Status` co
 
 | Thing | States, as key (label) |
 | --- | --- |
-| App | `creating` (Creating), `rejected` (Not created), `not_deployed` (Not deployed), `stopped` (Stopped), `healthy` (Healthy), `unhealthy` (Unhealthy), `unknown` (Unknown) |
+| App | `creating` (Creating), `rejected` (Not created), `not_deployed` (Not deployed), `stopped` (Stopped), `healthy` (Healthy), `unhealthy` (Unhealthy), `unknown` (Unknown), `checking` (Checking while a stale observation refreshes) |
 | Deployment | `queued` (Queued), `building` (Building), `deploying` (Deploying), `running` (Running), `live` (Live), `succeeded` (Succeeded), `failed` (Failed), `recovery_required` (Needs attention), `rolled_back` (Rolled back) |
 | Activity | `prepared` (Queued), `accepted` (In progress), `succeeded` (Succeeded), `failed` (Failed), `blocked` (Needs attention), `unknown` (Unknown) |
 | Account | `active` (Active), `pending` (Setup pending), `disabled` (Disabled) |
@@ -248,7 +248,7 @@ One word per state, everywhere. Pages pass a state key to the portal `Status` co
 
 1. lifecycle: Creating, Not created
 2. first deploy: Not deployed
-3. runtime: Stopped, Healthy, Unhealthy, or Unknown when the data is stale
+3. runtime: Stopped, Healthy, Unhealthy, or Unknown when the data is stale; Checking while stale or missing observations refresh
 
 App lists, app headers, and details all use it. "Ready" is a lifecycle detail and is never shown for an app.
 

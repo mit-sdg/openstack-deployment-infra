@@ -69,7 +69,10 @@ class StaffTests(ManagementCase):
         self.assertEqual(owner["quota"]["apps"], {"limit": None, "used": 1, "reserved": 0})
         owner = self.call("GET", f"/v1/people/{self.bob}", owner="alice").body["data"]
         self.assertEqual(owner["quota"]["apps"], {"limit": 5, "used": 0, "reserved": 0})
-        apps = self.call("GET", "/v1/all-apps", owner="alice").body["data"]["items"]
+        with patch.object(self.broker.app_management.refresh_pool, "submit") as refresh:
+            apps = self.call("GET", "/v1/all-apps", owner="alice").body["data"]["items"]
+        refresh.assert_called_once()
+        self.assertTrue(apps[0]["refreshing"])
         self.assertEqual(apps[0]["slug"], "student-app")
         self.call("GET", "/v1/activity", owner="alice")
         self.assertEqual(self.fixture.calls[calls:], [])

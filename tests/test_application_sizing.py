@@ -476,6 +476,8 @@ class ApplicationSizingTests(unittest.TestCase):
     def test_stale_tampered_and_provider_drifted_plans_mutate_nothing(self):
         self.deploy()
         plan = self.plan()
+        # A warmed display entry cannot authorize a deployment after provider drift.
+        self.assertEqual(self.api._flavors_cache.flavor(XL.name), XL)
         tampered = copy.deepcopy(plan)
         tampered["flavor"]["ram_mib"] += 1
         self.calls.clear()
@@ -485,6 +487,7 @@ class ApplicationSizingTests(unittest.TestCase):
         with mock.patch.object(
             openstack, "observe_flavor_capacity", return_value=replace(XL, disk_gib=80)
         ):
+            self.assertEqual(self.api._flavors_cache.flavor(XL.name), XL)
             _, rejected = self.resize(plan)
         self.assertEqual(rejected.status, "failed")
         self.assertEqual(self.calls, [])
