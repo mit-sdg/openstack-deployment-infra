@@ -718,11 +718,12 @@ in
       Type = "notify";
       NotifyAccess = "main";
       User = operatorAccount.name;
-      Group = operatorAccount.name;
-      SupplementaryGroups = [ controllerSocketGroup ];
+      # systemd reapplies RuntimeDirectory ownership for each service command.
+      # Keep the controller's traversal group in the unit itself.
+      Group = controllerSocketGroup;
+      SupplementaryGroups = [ operatorAccount.name ];
       RuntimeDirectory = "${namespace}-provider";
       RuntimeDirectoryMode = "0750";
-      ExecStartPre = "+${pkgs.coreutils}/bin/chgrp ${controllerSocketGroup} /run/${namespace}-provider";
       ExecStart = lib.concatStringsSep " " [
         "${packages.controllerPackage}/bin/openstack-platform-provider"
         "--socket ${providerSocket}"

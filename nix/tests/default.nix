@@ -935,6 +935,7 @@ let
               machine.fail("runuser -u management-web -- cat /etc/${namespace}/pki/nomad-cli-key.pem")
               machine.fail("runuser -u management-web -- cat /run/credentials/nomad.service/nomad-gossip-key")
               machine.wait_for_unit("${namespace}-provider.service")
+              machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-provider) = agentops:controller-api:750")
               machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-provider/provider.sock) = agentops:controller-api:660")
               # The malformed action proves socket readiness/allowlisting without
               # authenticating to an external endpoint. Exact peers may reach it;

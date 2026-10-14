@@ -8,14 +8,14 @@ This reference records the call-site survey, transport contract, and first-stage
 
 On admin, `nix/lib/controller-paths.nix` already makes `openstack.env` operator-owned and controller-group-readable (`0640`), and the controller runs with that group. The helper runs as its caller; it is not a separate privileged credential holder. The existing VM test explicitly checks that `platform-controller` can read this file and `nomad` cannot. The new provider runs as the existing operator, `agentops`. No account, credential-file permission, controller group membership, or portal authority changes.
 
-The admin socket is `/run/<namespace>-provider/provider.sock`, owned by `agentops:controller-api`, mode `0660`, in a mode-`0750` operator-owned directory. Before reading any bytes, the service checks Linux `SO_PEERCRED` for exactly:
+The admin socket is `/run/<namespace>-provider/provider.sock`, owned by `agentops:controller-api`, mode `0660`, in an `agentops:controller-api`, mode-`0750` directory. The provider unit uses `controller-api` as its primary group so systemd preserves that traversal group when it manages the runtime directory. Before reading any bytes, the service checks Linux `SO_PEERCRED` for exactly:
 
 | Caller | UID | Primary GID |
 | --- | --- | --- |
 | Operator tools and health service | Contract operator UID | Contract operator GID |
 | Controller and its helper children | Contract controller UID | Contract controller-socket GID (`controller-api`) |
 
-The broker also belongs to `controller-api`; its different UID is refused. Web, identity, Nomad, worker, and builder accounts receive no access. Python clients also verify the daemon UID. Root preparation creates the runtime directory and sets its group; it does not authenticate to OpenStack.
+The broker also belongs to `controller-api`; its different UID is refused. Web, identity, Nomad, worker, and builder accounts receive no access. Python clients also verify the daemon UID. Systemd creates the runtime directory with the provider unit’s user/group; it does not authenticate to OpenStack.
 
 On the operator host, the user service runs as the same account that owns `/srv/openstack-platform/.secrets/openstack.env`. Its socket is `STATE_DIRECTORY/run/provider.sock`, mode `0600`, with the user's exact UID:GID as its sole peer. Releases carry software only. Setup and CI publication keep a session for their process lifetime under their existing account; concurrent publisher children share a private temporary socket that is removed afterward.
 
