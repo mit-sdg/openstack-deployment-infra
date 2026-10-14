@@ -77,7 +77,9 @@ Through the portal, you can add one PostgreSQL database, one MongoDB database, a
 | --- | --- |
 | PostgreSQL | `DATABASE_URL` (complete, with password and TLS settings), `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGSSLMODE`, `PGSSLROOTCERT` |
 | MongoDB | `MONGODB_URI` |
-| S3 | `AWS_ENDPOINT_URL_S3`, `S3_PUBLIC_ENDPOINT`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET` |
+| S3 | `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET` |
+
+Saved variable names stay as you chose them. **Reset to defaults** in the variables dialog replaces them with the names in this table when you save.
 
 Connections use TLS, and your app already trusts the platform certificates. **Verify** checks that the storage works. **Rotate credentials** replaces the credentials and restarts a running app to check them. Databases are backed up every night.
 
@@ -96,7 +98,7 @@ Each database runs on its own database server. S3 uses a shared service with a s
 <details>
 <summary>Using S3 from your app</summary>
 
-Use `AWS_ENDPOINT_URL_S3` for server requests and `S3_PUBLIC_ENDPOINT` (`https://s3.example.edu`) for signed browser upload or download links. [Bun's S3 client](https://bun.sh/docs/runtime/s3#credentials) reads the default credentials, region, and bucket variables. Pass the endpoint explicitly, or name the server endpoint `S3_ENDPOINT` through **Choose names**.
+Use `S3_ENDPOINT` for server requests and `S3_PUBLIC_ENDPOINT` (`https://s3.example.edu`) for signed browser upload or download links. [Bun's S3 client](https://bun.sh/docs/runtime/s3#credentials) reads `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_REGION`, `S3_ENDPOINT`, and `S3_BUCKET` automatically, with AWS variable fallbacks. AWS SDK clients need the endpoint, region, and credentials passed explicitly from these variables; pass the bucket to each request.
 
 For browser links, the AWS SDK client needs `forcePathStyle: true`. The platform handles CORS (permission for browser requests from your app's pages); no bucket CORS setup is needed.
 
@@ -108,7 +110,13 @@ const url = Bun.s3.presign(key, {
 // AWS SDK: a hostname endpoint needs path-style addressing
 import { S3Client } from "@aws-sdk/client-s3";
 const signer = new S3Client({
-  endpoint: process.env.S3_PUBLIC_ENDPOINT, forcePathStyle: true
+  endpoint: process.env.S3_PUBLIC_ENDPOINT,
+  region: process.env.S3_REGION,
+  credentials: {
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY
+  },
+  forcePathStyle: true
 });
 ```
 

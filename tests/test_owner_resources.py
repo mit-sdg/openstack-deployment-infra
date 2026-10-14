@@ -192,7 +192,7 @@ class OwnerResourceContractTests(contracts.RealProjectCase):
 
     def test_default_bindings_for_every_type_are_admitted_by_real_project_router(self):
         from openstack_platform.controller.storage_contract import (
-            OUTPUT_ENVIRONMENT_KEYS,
+            DEFAULT_BINDINGS,
             RESOURCE_OUTPUTS,
         )
 
@@ -203,9 +203,7 @@ class OwnerResourceContractTests(contracts.RealProjectCase):
                     "data"
                 ]["items"]
                 resource = next(item for item in resources if item["type"] == resource_type)
-                self.assertEqual(
-                    resource["defaultBindings"], dict(OUTPUT_ENVIRONMENT_KEYS[resource_type])
-                )
+                self.assertEqual(resource["defaultBindings"], dict(DEFAULT_BINDINGS[resource_type]))
                 self.assertEqual(
                     set(resource["defaultBindings"]), set(RESOURCE_OUTPUTS[resource_type])
                 )
@@ -230,6 +228,10 @@ class OwnerResourceContractTests(contracts.RealProjectCase):
                 )
                 original = self.broker.client.request
                 admissions = []
+                saved = self.call(
+                    "GET", f"/v1/apps/{self.app_id}/configuration", owner="alice"
+                ).body["data"]["configuration"]
+                self.assertEqual(saved["storageBindings"], configuration["storageBindings"])
 
                 def observed(
                     method, path, *args, original=original, admissions=admissions, **kwargs
@@ -250,9 +252,38 @@ class OwnerResourceContractTests(contracts.RealProjectCase):
                 self.assertEqual(result["state"], "accepted")
                 self.finish(result)
 
+    def test_saved_s3_output_names_survive_new_defaults_and_deployment(self):
+        resource = self.storage_create("s3")
+        outputs = {
+            "endpoint": "AWS_ENDPOINT_URL_S3",
+            "region": "AWS_REGION",
+            "access_key_id": "AWS_ACCESS_KEY_ID",
+            "secret_access_key": "AWS_SECRET_ACCESS_KEY",
+            "bucket": "S3_BUCKET",
+            "public_endpoint": "BROWSER_S3_ENDPOINT",
+        }
+        bindings = [{"resourceId": resource["resourceId"], "outputs": outputs}]
+        self.save_bindings(bindings)
+        saved = self.call("GET", f"/v1/apps/{self.app_id}/configuration", owner="alice").body[
+            "data"
+        ]["configuration"]
+        self.assertEqual(saved["storageBindings"], bindings)
+        self.assertNotEqual(outputs, resource["defaultBindings"])
+        intent = self.call(
+            "POST",
+            f"/v1/apps/{self.app_id}/deployments",
+            {"commit": "a" * 40, "configurationRevision": 1},
+            "alice",
+        ).body["data"]
+        self.finish(intent)
+        attempt = controller_db.get_deployment_attempt(self.real.connection, intent["operationId"])
+        self.assertIsNotNone(attempt)
+        self.assertEqual(dict(attempt.configuration.storage_bindings[0].outputs), outputs)
+
     def test_binding_validation_outputs_names_collisions_foreign_and_injectivity(self):
         resource = self.storage_create()
         for outputs, expected in (
+            ({}, "INVALID_CONFIGURATION"),
             ({"unknown": "TOKEN"}, "INVALID_BINDING"),
             ({"url": "lower"}, "INVALID_CONFIGURATION"),
             ({"url": "PORT"}, "INVALID_CONFIGURATION"),

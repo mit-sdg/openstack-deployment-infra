@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from ...controller.deployment_config import parse_configuration
 from ...controller.http import HttpError, Request, Response
 from ...controller.storage_contract import (
-    OUTPUT_ENVIRONMENT_KEYS,
+    DEFAULT_BINDINGS,
     RESERVED_ENVIRONMENT_KEYS,
     RESERVED_ENVIRONMENT_PREFIX,
     RESOURCE_OUTPUTS,
@@ -197,7 +197,7 @@ def storage_resources(self: Broker, app_id: str) -> list[dict[str, Any]]:
                     }.get(item["lifecycleState"], item["lifecycleState"]),
                     "createdAt": utc(item.get("createdAt")),
                     "verifiedAt": utc(item.get("lastVerifiedAt")),
-                    "defaultBindings": dict(OUTPUT_ENVIRONMENT_KEYS[item["type"]]),
+                    "defaultBindings": dict(DEFAULT_BINDINGS[item["type"]]),
                     "quotas": {
                         key: item["quotas"][key]
                         for key in item["quotas"]

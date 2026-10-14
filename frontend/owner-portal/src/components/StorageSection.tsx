@@ -168,8 +168,10 @@ function BindingsDialog({
       )}
       {'public_endpoint' in resource.defaultBindings && (
         <Hint>
-          Use the private endpoint from your server. Sign browser upload and download links with the
-          public endpoint; browsers on your app’s pages can use them directly.
+          The defaults use S3_* names, which Bun’s S3 client reads automatically. For AWS SDK
+          clients, pass the endpoint, region, and credentials explicitly. Use the private endpoint
+          from your server. Sign browser upload and download links with the public endpoint;
+          browsers on your app’s pages can use them directly.
         </Hint>
       )}
       <ErrorAlert error={error} />

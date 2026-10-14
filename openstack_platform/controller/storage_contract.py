@@ -78,7 +78,9 @@ ENVIRONMENT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         ),
     }
 )
-OUTPUT_ENVIRONMENT_KEYS: Mapping[str, Mapping[str, str]] = MappingProxyType(
+# Internal translation between provider environment keys and stored outputs.
+# App variable names are chosen independently through DEFAULT_BINDINGS.
+_PROVIDER_ENVIRONMENT_KEYS: Mapping[str, Mapping[str, str]] = MappingProxyType(
     {
         "postgres": MappingProxyType(
             dict(zip(RESOURCE_OUTPUTS["postgres"], ENVIRONMENT_KEYS["postgres"], strict=True))
@@ -87,10 +89,25 @@ OUTPUT_ENVIRONMENT_KEYS: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "s3": MappingProxyType(
             {
                 "endpoint": "AWS_ENDPOINT_URL_S3",
-                "public_endpoint": "S3_PUBLIC_ENDPOINT",
                 "region": "AWS_REGION",
                 "access_key_id": "AWS_ACCESS_KEY_ID",
                 "secret_access_key": "AWS_SECRET_ACCESS_KEY",
+                "bucket": "S3_BUCKET",
+            }
+        ),
+    }
+)
+DEFAULT_BINDINGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        "postgres": _PROVIDER_ENVIRONMENT_KEYS["postgres"],
+        "mongo": _PROVIDER_ENVIRONMENT_KEYS["mongo"],
+        "s3": MappingProxyType(
+            {
+                "endpoint": "S3_ENDPOINT",
+                "public_endpoint": "S3_PUBLIC_ENDPOINT",
+                "region": "S3_REGION",
+                "access_key_id": "S3_ACCESS_KEY_ID",
+                "secret_access_key": "S3_SECRET_ACCESS_KEY",
                 "bucket": "S3_BUCKET",
             }
         ),
@@ -155,7 +172,7 @@ def _stored_mapping(resource_type: str) -> dict[str, str]:
     outputs = stored_outputs(resource_type)
     return {
         output: key
-        for output, key in OUTPUT_ENVIRONMENT_KEYS[resource_type].items()
+        for output, key in _PROVIDER_ENVIRONMENT_KEYS[resource_type].items()
         if output in outputs
     }
 
