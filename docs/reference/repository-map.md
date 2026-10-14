@@ -42,6 +42,7 @@ Tools that install and select releases on the operator host and the admin host. 
 - `deploy/releases/migrate_legacy_controller.py` — imports an authenticated legacy snapshot into the current schema.
 - `deploy/releases/release_smoke.py` — checks entry points and helper actions before release selection.
 - `deploy/releases/setup_operator_bridge.py` — generates and validates the pinned SSH and OpenStack bridge.
+- `deploy/releases/systemd/openstack-platform-provider.service` — operator user service for the persistent read session.
 - `deploy/releases/systemd/openstack-platform-backup.service` — user service for off-host operator state backup.
 - `deploy/releases/systemd/openstack-platform-backup.timer` — daily operator backup timer.
 
@@ -69,6 +70,7 @@ The documentation. Start at the [documentation home](../README.md).
 - `docs/reference/configuration.md` — setup and inventory settings.
 - `docs/reference/internals.md` — components, state, lifecycles, portal internals, and failure rules.
 - `docs/reference/controller-api.md` — controller transport and routes.
+- `docs/reference/openstack-provider.md` — call-site survey, credential custody, read-session protocol, rollout and mutation follow-up.
 - `docs/reference/operator-cli.md` — every `openstack-platform` command.
 - `docs/reference/repository-map.md` — every tracked file and its purpose.
 
@@ -393,6 +395,12 @@ Installed commands (`pyproject.toml`) and shared code. The controller owns produ
 - `openstack_platform/installation.py` — fixed installed command paths.
 - `openstack_platform/remote.py` — version 1 helper protocol and pinned local/SSH transport.
 - `openstack_platform/openstack.py` — bounded image, power, and persistent-host replacement operations.
+- `openstack_platform/provider.py` — direct socket read runner and fixed shell projections.
+- `openstack_platform/provider_protocol.py` — closed action allowlist, bounds and safe errors.
+- `openstack_platform/provider_api.py` — persistent Keystone authentication and bounded REST reads.
+- `openstack_platform/provider_service.py` — local peer-checked read service and systemd readiness.
+- `openstack_platform/provider_command.py` — fixed read launcher and existing mutation-wrapper dispatch.
+- `openstack_platform/provider_local.py` — setup sessions and temporary publication socket lifetime.
 - `openstack_platform/fixed_ip.py` — retained worker primary ports, capability checks, and ownership validation.
 - `openstack_platform/floating_ip.py` — project-scoped floating IPv4 operations and ownership checks.
 - `openstack_platform/host_keys.py` — console/keyscan evidence checks and atomic SSH key pinning.
@@ -588,6 +596,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 - `tests/fixtures/openstack/glance_quota_formatter_outputs.json` — recorded Glance quota outputs, including unknown and unlimited values.
 - `tests/fixtures/openstack/neutron_security_group_tenant_only.json` — a sanitized older Neutron response that names the owner only as a tenant.
 - `tests/fixtures/openstack/provider_uuid_outputs.json` — compact and canonical UUID forms printed by different OpenStack tools.
+- `tests/fixtures/openstack_http.py` — loopback Keystone, Nova, Glance, Neutron and Cinder fixture.
 - `tests/fixtures/retained_openstack.py` — offline stand-in for the OpenStack CLI and Nomad, so real helper and shell code runs unchanged.
 - `tests/product_fixtures.py` — builders for accepted app and deployment state.
 - `tests/repository_fixtures.py` — creates clean temporary Git repositories for tests that need a committed checkout.
@@ -666,6 +675,8 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 - `tests/test_operator_integration.py` — operator commands and the helper protocol against fake dependencies.
 - `tests/test_operator_live_health.py` — operator status from the hosted controller, and tunnel readiness.
 - `tests/test_platform_setup.py` — setup: environment parsing, preflight, inventory generation, controller gates, resume, and the CLI.
+- `tests/test_provider.py` — authentication, API, socket, bounds, concurrency and TLS evidence.
+- `tests/benchmark_provider.py` — local-only CLI startup versus persistent-session benchmark.
 - `tests/test_platform_openstack.py` — image selection and pruning, and persistent host power, replacement, and recovery.
 - `tests/test_platform_host_keys.py` — console fingerprints, keyscan, known-hosts matching, drift, and atomic pinning.
 - `tests/test_host_user_data.py` — protected input checks and cloud-init rendering for each role.

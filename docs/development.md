@@ -102,6 +102,8 @@ Some tests require a tool or explicit opt-in:
 
 ### Python static checks
 
+Provider authentication and socket tests use only a loopback fake cloud. Run `uv run python -m unittest tests.test_provider -v`; the [provider reference](reference/openstack-provider.md#local-evidence) gives the local startup benchmark.
+
 ```bash
 uv lock --check
 uv run ruff format --check openstack_platform deploy/releases infra tests

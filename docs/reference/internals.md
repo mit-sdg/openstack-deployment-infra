@@ -668,7 +668,7 @@ For rollout order and commands, use [Releases and upgrades](../guides/releases-a
 
 `openstack-platform` owns setup, infrastructure status, image selection and pruning, persistent-host lifecycle, operator-state backup, and offline restore. It has no app, deployment, environment, or managed-storage mutation commands. The dedicated `openstack-platform-storage-repair` command on the admin VM reapplies PostgreSQL login settings through the privileged controller socket. The operator CLI’s SQLite state is separate from the hosted controller.
 
-The generated `platform-admin` alias in `/srv/openstack-platform/.secrets/ssh/config` pins the admin address, `agentops`, the identity (`IdentitiesOnly yes`), and an ed25519 host key in a private known-hosts file with strict checking. Agent and port forwarding are disabled. Provider calls use the protected `platform-openstack` wrapper; releases carry no cloud credentials.
+The generated `platform-admin` alias in `/srv/openstack-platform/.secrets/ssh/config` pins the admin address, `agentops`, the identity (`IdentitiesOnly yes`), and an ed25519 host key in a private known-hosts file with strict checking. Agent and port forwarding are disabled. Provider reads use the persistent session and peer-checked Unix socket described in [OpenStack provider reads](openstack-provider.md). The protected `platform-openstack` launcher sends shell reads to that socket; mutations retain the protected credential wrapper. Releases carry no cloud credentials.
 
 `openstack-platform status` combines accepted state with live observations and reports available, unavailable, and unhealthy counts. Its app health comes from the hosted controller’s Nomad and public-route checks.
 
