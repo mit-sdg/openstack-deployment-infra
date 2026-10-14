@@ -95,7 +95,7 @@ export function Dashboard() {
         <SectionSkeleton title variant="list" density="compact" rows={4} />
       </PageSkeleton>
     );
-  if (apps.error)
+  if (apps.data === undefined)
     return (
       <Page>
         <PageHeader title="My apps" />

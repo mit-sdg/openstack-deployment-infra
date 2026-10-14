@@ -60,7 +60,6 @@ export function RepositoryAccess({
   const key = useQuery({
     queryKey: ['source-key', id],
     queryFn: () => service.sourceKey(id),
-    retry: false,
   });
   const create = useMutation({
     mutationFn: (replace: boolean) => service.createSourceKey(id, replace),
@@ -99,7 +98,7 @@ export function RepositoryAccess({
     >
       {key.isPending ? (
         <LoadingRows rows={2} />
-      ) : key.error ? (
+      ) : key.data === undefined ? (
         <ErrorAlert error={key.error} />
       ) : !key.data.present ? (
         <>

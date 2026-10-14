@@ -222,7 +222,6 @@ export function OwnerPicker({
     queryKey: ['admin', 'owner-search', query],
     queryFn: () => appManagementApi.owners(query),
     enabled: !!query,
-    retry: false,
   });
   const [chosen, setChosen] = useState<AppOwner | null>(null);
   const items = results.data?.items ?? [];
@@ -246,7 +245,7 @@ export function OwnerPicker({
       {query &&
         (results.isPending ? (
           <LoadingRows rows={2} label="Searching…" />
-        ) : results.error ? (
+        ) : results.error && results.data === undefined ? (
           <ErrorAlert error={results.error} focus={false} />
         ) : items.length ? (
           <Fieldset legend="Matching accounts">

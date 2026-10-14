@@ -85,7 +85,7 @@ export function AppFrame({
           </a>
         )}
       </PageHeader>
-      {app.error ? (
+      {app.error && app.data === undefined ? (
         <QueryError query={app} what="this app" />
       ) : (
         <>

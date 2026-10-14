@@ -99,12 +99,11 @@ export function Enrollment() {
     window.history.replaceState(null, '', window.location.pathname);
   }, []);
   // Shared with the shell, which shows the platform name from it.
-  const options = useQuery({ ...authOptionsQuery, retry: false });
+  const options = useQuery(authOptionsQuery);
   const info = useQuery({
     queryKey: ['enrollment-info'],
     enabled: !!options.data && !!token,
     queryFn: () => post('/auth/token-info', { token, csrfToken: options.data!.csrfToken }),
-    retry: false,
   });
   const begin = useMutation({
     mutationFn: async () => {

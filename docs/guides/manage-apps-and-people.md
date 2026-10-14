@@ -25,6 +25,8 @@ An app appears after it is created in the portal or adopted. Its slug is the per
 
 The **Status** column shows blocked or unknown changes below the app state. Hover over the app state to see when it was last checked. The list refreshes automatically; observations older than ten minutes show **Unknown** while a new check runs.
 
+The portal automatically retries brief load failures. If a refresh fails after a page has loaded, it keeps showing the last loaded data. A load error with **Retry** appears only when there is no data to show.
+
 Staff and portal admins open the same app pages as owners without joining the team:
 
 - **Overview** shows the current deployment, activity and start, stop and restart controls. Staff and admins also see **Machines**, with the worker and effective build machine.

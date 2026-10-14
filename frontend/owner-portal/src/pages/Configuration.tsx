@@ -45,7 +45,7 @@ export function ConfigurationPage({ id }: { id: string }) {
           <SectionSkeleton title variant="list" rows={2} />
           <SectionSkeleton title variant="list" rows={3} />
         </PageSkeleton>
-      ) : query.error ? (
+      ) : query.data === undefined ? (
         <QueryError query={query} what="your settings" />
       ) : (
         <>

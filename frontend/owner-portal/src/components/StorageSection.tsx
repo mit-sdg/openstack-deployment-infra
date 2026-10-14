@@ -318,7 +318,7 @@ export function StorageSection({
       )}
       {storage.isPending ? (
         <LoadingRows rows={3} />
-      ) : storage.error ? (
+      ) : storage.data === undefined ? (
         <div className="app-block">
           <QueryError query={storage} what="your databases and storage" />
         </div>

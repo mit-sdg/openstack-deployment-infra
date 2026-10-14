@@ -91,7 +91,7 @@ export function DeploymentPage({ id, deployment }: { id: string; deployment: str
           <SectionSkeleton title rows={3} />
           <SectionSkeleton title rows={4} />
         </PageSkeleton>
-      ) : attempt.error ? (
+      ) : attempt.data === undefined ? (
         <QueryError query={attempt} what="this deployment" />
       ) : (
         <>

@@ -53,7 +53,7 @@ export function AccountControls({ id }: { id: string }) {
       <Section title="Account controls" aria-label="Account controls">
         {account.isPending ? (
           <SectionSkeleton rows={3} />
-        ) : account.error ? (
+        ) : account.data === undefined ? (
           <QueryError query={account} what="this account" />
         ) : (
           <ManageAccount

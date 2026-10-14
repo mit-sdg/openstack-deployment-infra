@@ -25,6 +25,11 @@ if TYPE_CHECKING:
     from .api import Broker
 
 
+# App pages fan out 6–10 reads; leave room per person and for several staff pages.
+PERSON_READS_IN_FLIGHT = 12
+TOTAL_READS_IN_FLIGHT = 64
+
+
 @dataclass
 class Bucket:
     tokens: float
@@ -35,8 +40,8 @@ class Bucket:
 class ReadLimits:
     """Token buckets per person and network address, plus active-read caps.
 
-    burst/rate are a person's reads at once and per second; an address gets twice
-    that. Staff use the defaults; admin app pages read more per view.
+    burst/rate are a person's token budget and refill per second; an address
+    gets twice that. App pages have a larger token budget than class metadata.
     """
 
     def __init__(self, burst: int = 10, rate: float = 1) -> None:
@@ -87,7 +92,12 @@ class ReadLimits:
             ):
                 item.tokens = min(maximum, item.tokens + max(0, now - item.updated) * rate)
                 item.updated = now
-            if person.tokens < 1 or network.tokens < 1 or person.active >= 2 or self.active >= 8:
+            if (
+                person.tokens < 1
+                or network.tokens < 1
+                or person.active >= PERSON_READS_IN_FLIGHT
+                or self.active >= TOTAL_READS_IN_FLIGHT
+            ):
                 raise HttpError(
                     429, "RATE_LIMITED", "Staff reads are temporarily limited.", retryable=True
                 )

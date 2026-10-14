@@ -24,9 +24,10 @@ export function QueryError({
   query,
   what,
 }: {
-  query: { error: unknown; refetch: () => unknown; isFetching: boolean };
+  query: { data?: unknown; error: unknown; refetch: () => unknown; isFetching: boolean };
   what: string;
 }) {
+  if (query.data !== undefined) return null;
   return (
     <LoadError onRetry={() => void query.refetch()} retrying={query.isFetching}>
       {loadErrorMessage(query.error, what)}

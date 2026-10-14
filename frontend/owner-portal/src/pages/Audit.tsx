@@ -117,7 +117,6 @@ export function AdminAuditPage() {
   const audit = useQuery({
     queryKey: ['admin-audit', cursor],
     queryFn: () => adminApi.audit(cursor),
-    retry: false,
   });
   const target = (row: AdminAudit) => (
     <Person id={row.targetId} username={row.targetUsername} displayName={row.targetDisplayName} />

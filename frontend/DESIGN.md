@@ -197,6 +197,7 @@ The package also exports older primitives (`ThemeButton`, `StatusBadge`, `Legacy
 
 - **Empty states** say what will appear and offer the next action. Show only one create action on a page.
 - **Loading** uses skeletons that mirror the loaded layout, never "Loading…" text, so nothing jumps. Wrap them in `PageSkeleton` (it announces the label). Inside, compose `PageHeaderSkeleton` (with `meta` and `actions` like the real header) and one `SectionSkeleton` per section (`variant` `table`, `list`, or `body`, with the real row count and density). See `pages/Dashboard.tsx`.
+- **Failed refetches keep loaded data.** Only show page or section load errors when its query has no data; a brief refresh failure must not replace a loaded page.
 - **Load errors keep the page's shape.** Render the normal `Page` and `PageHeader`, then `QueryError` (portal) for the failed query, or `LoadError` (shared) with your own message. It says what failed and what to do ("Couldn't load your apps. Try again in a minute.") and offers Retry. It is announced but not focused, so no focus ring appears on load. A section whose query fails renders the same component inside the section.
 
 ### Feedback

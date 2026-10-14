@@ -52,8 +52,7 @@ class AppManagement:
         # Authority is request-local, including concurrent Unix-server threads.
         # An app administration page reads about eight things per view
         # (details, settings, variables, storage, logs, deploy key, team), so
-        # it gets a larger budget than the staff metadata views; reads still
-        # run two at a time.
+        # it gets a larger token budget than the staff metadata views.
         self.read_limits = ReadLimits(burst=40, rate=4)
         self.context: ContextVar[Authority | None] = ContextVar("admin_app_actor", default=None)
 
@@ -83,7 +82,8 @@ class AppManagement:
     def refresh_observation(self, row: dict[str, Any]) -> None:
         try:
             # Recheck the cache in case a detail read refreshed it while queued.
-            self.broker.app_model(row, cache_seconds=30)
+            with self.broker.client.background_reads():
+                self.broker.app_model(row, cache_seconds=30)
         except Exception as error:
             # Never turn a background read failure into a list failure or log app data.
             print(f"app observation refresh failed: {type(error).__name__}", file=sys.stderr)

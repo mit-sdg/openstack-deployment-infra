@@ -505,7 +505,7 @@ Playwright resets `.tmp/e-accounts-<mode>` before each run. Ports are 9543 (HTTP
 | --- | --- |
 | `e2e/owner-flow.spec.ts` | Commons sign-in, app creation, private deploy key, deployment, build and runtime output, sign-out |
 | `e2e/resources.spec.ts` | Write-only environment values, PostgreSQL bindings, usage display, persisted settings, and names injected on deploy, at 390px width |
-| `e2e/staff-flow.spec.ts` | Staff access to an owner's app, build-machine editing, People and Activity, and refusal of admin audit-log access, in dark mode |
+| `e2e/staff-flow.spec.ts` | Staff access to an owner's app, ten Settings reloads without load errors, build-machine editing, People and Activity, and refusal of admin audit-log access, in dark mode |
 
 All three specs use helpers that reject browser errors, CSP violations, and unexpected hosts. These smoke tests cover the listed flows; Python tests cover the wider broker permissions and recovery behavior.
 

@@ -38,10 +38,8 @@ export function useActive(role?: Session['role']) {
 export const LIST = 30000;
 export const DETAIL = 15000;
 
-// The broker allows two active staff reads per account and one controller
-// observation at a time. So each page has one head query that polls and
-// refetches on focus; related reads start once the one before has settled
-// (`enabled`) and refetch one after another when the head updates (useFollow).
+// Each page polls through one head query. Related reads settle in sequence
+// on refresh to keep background traffic within the metadata token budget.
 export function useRead<T>(
   key: (string | undefined)[],
   read: (signal: AbortSignal) => Promise<T>,
@@ -53,7 +51,6 @@ export function useRead<T>(
     queryFn: ({ signal }) => read(signal),
     enabled: active && enabled,
     staleTime,
-    retry: false,
     refetchOnWindowFocus: poll > 0,
     refetchInterval: (query) =>
       !active || !poll || query.state.errorUpdateCount >= 3

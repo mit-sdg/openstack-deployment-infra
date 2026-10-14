@@ -243,11 +243,30 @@ export class ApiError extends Error {
     public status: number,
     public code: string,
     message: string,
-    public retryAfterSeconds = 30,
+    public retryAfterSeconds = 0,
+    public retryable = false,
   ) {
     super(message);
   }
 }
+export class NetworkError extends Error {}
+
+/** Retry-After takes precedence over the JSON retry hint. */
+function retryAfterSeconds(response: Response, error: Record<string, unknown>) {
+  const header = response.headers.get('Retry-After');
+  if (header) {
+    const seconds = /^\d+$/.test(header)
+      ? Number(header)
+      : (Date.parse(header) - Date.now()) / 1000;
+    if (Number.isFinite(seconds)) return Math.max(0, seconds);
+  }
+  return typeof error.retryAfterSeconds === 'number' &&
+    Number.isFinite(error.retryAfterSeconds) &&
+    error.retryAfterSeconds > 0
+    ? error.retryAfterSeconds
+    : 0;
+}
+
 let csrf = '';
 let elevatedSession = false;
 let credentialEpoch = 0;
@@ -303,11 +322,13 @@ export function pageData<T>(value: unknown, decode: (item: unknown) => T): Page<
     truncated: data.truncated,
   };
 }
-// Keep metadata panels inside the broker's two-active-reads account bound.
+// Match the broker's per-person cap while allowing a whole app page to load.
+const CLASS_READS_IN_FLIGHT = 12;
 let classReads = 0;
 const classReadWaiters: (() => void)[] = [];
 async function classReadSlot() {
-  if (classReads >= 2) await new Promise<void>((resolve) => classReadWaiters.push(resolve));
+  if (classReads >= CLASS_READS_IN_FLIGHT)
+    await new Promise<void>((resolve) => classReadWaiters.push(resolve));
   else classReads++;
   return () => {
     const next = classReadWaiters.shift();
@@ -358,14 +379,25 @@ export async function request<T>(
           }
         : {}),
     });
+  } catch (error) {
+    if (error instanceof TypeError)
+      throw new NetworkError('The service could not be reached.', { cause: error });
+    throw error;
   } finally {
     release();
   }
   if (response.status === 204) return undefined as T;
-  const payload = record(await response.json());
   if (epoch !== credentialEpoch) throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
   if (!response.ok) {
-    const error = record(payload.error);
+    // Proxies can send HTML or an empty body for gateway failures.
+    let error: Record<string, unknown> = {};
+    try {
+      error = record(record(await response.json()).error);
+    } catch {
+      // Preserve the HTTP status even when the error envelope is unavailable.
+    }
+    if (epoch !== credentialEpoch)
+      throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
     if (
       (options || staff) &&
       !refreshed &&
@@ -383,13 +415,20 @@ export async function request<T>(
       response.status,
       typeof error.code === 'string' ? error.code : 'UNAVAILABLE',
       typeof error.summary === 'string' ? error.summary : 'The service is unavailable.',
-      typeof error.retryAfterSeconds === 'number' &&
-        error.retryAfterSeconds > 0 &&
-        error.retryAfterSeconds <= 300
-        ? error.retryAfterSeconds
-        : 30,
+      retryAfterSeconds(response, error),
+      error.retryable === true,
     );
   }
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch (error) {
+    if (error instanceof TypeError)
+      throw new NetworkError('The response could not be read.', { cause: error });
+    throw error;
+  }
+  const payload = record(value);
+  if (epoch !== credentialEpoch) throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
   return decode(payload.data);
 }
 export const api = {

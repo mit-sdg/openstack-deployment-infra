@@ -47,7 +47,7 @@ export function Loaded<T>({
   children: (data: T) => ReactNode;
 }) {
   if (query.isPending) return <LoadingRows rows={rows} />;
-  if (query.error)
+  if (query.data === undefined)
     return (
       <div className="ui-section__body">
         <QueryError query={query} what={what} />

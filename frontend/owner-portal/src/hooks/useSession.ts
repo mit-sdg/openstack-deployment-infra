@@ -11,7 +11,6 @@ export function useSession() {
     queryKey: ['session'],
     queryFn: ({ signal }) => api.session(signal),
     enabled: !signIn,
-    retry: false,
   });
   const logout = useMutation({
     mutationFn: api.logout,

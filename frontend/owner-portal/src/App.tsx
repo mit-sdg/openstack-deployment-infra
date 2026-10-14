@@ -62,7 +62,7 @@ export function App() {
           <SignIn />
         ) : session.isPending ? (
           <PageSkeleton />
-        ) : session.error ? (
+        ) : session.data === undefined ? (
           <Page>
             <QueryError query={session} what="your account" />
           </Page>

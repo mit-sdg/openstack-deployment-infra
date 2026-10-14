@@ -88,7 +88,7 @@ export function BuilderSizeControl({ id }: { id: string }) {
     >
       {current.isPending ? (
         <Skeleton variant="block" />
-      ) : current.error ? (
+      ) : current.data === undefined ? (
         <QueryError query={current} what="the build machine" />
       ) : (
         <>

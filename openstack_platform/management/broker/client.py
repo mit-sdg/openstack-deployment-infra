@@ -5,10 +5,18 @@ from __future__ import annotations
 import http.client
 import socket
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 from ..common import canonical, strict_json
+
+# Two page-sized bursts fit while background reads occupy at most four slots.
+PROJECT_CONNECTION_CAPACITY = 24
+BACKGROUND_CONNECTION_CAPACITY = 4
 
 
 class ControllerUnavailable(RuntimeError):
@@ -27,11 +35,41 @@ class UnixConnection(http.client.HTTPConnection):
 
 
 class ProjectClient:
-    def __init__(self, path: Path, timeout: float = 5.0, capacity: int = 4) -> None:
+    def __init__(
+        self, path: Path, timeout: float = 5.0, capacity: int = PROJECT_CONNECTION_CAPACITY
+    ) -> None:
         self.path, self.timeout = path, timeout
         if not 1 <= capacity <= 128:
             raise ValueError("invalid local connection capacity")
         self.capacity = threading.BoundedSemaphore(capacity)
+        self.background_capacity = threading.BoundedSemaphore(
+            min(BACKGROUND_CONNECTION_CAPACITY, capacity - 1)
+        )
+        self.background: ContextVar[bool] = ContextVar("project_background", default=False)
+
+    @contextmanager
+    def background_reads(self) -> Iterator[None]:
+        """Bound background work before it competes for the shared connection slots."""
+        token = self.background.set(True)
+        try:
+            yield
+        finally:
+            self.background.reset(token)
+
+    @contextmanager
+    def request_slot(self) -> Iterator[None]:
+        deadline = time.monotonic() + self.timeout
+        with ExitStack() as stack:
+            slots = (
+                [self.background_capacity, self.capacity]
+                if self.background.get()
+                else [self.capacity]
+            )
+            for slot in slots:
+                if not slot.acquire(timeout=max(0, deadline - time.monotonic())):
+                    raise ControllerUnavailable("local connection capacity")
+                stack.callback(slot.release)
+            yield
 
     def request(
         self,
@@ -50,42 +88,39 @@ class ProjectClient:
             or "\n" in path
         ):
             raise ValueError("invalid project request")
-        if not self.capacity.acquire(timeout=self.timeout):
-            raise ControllerUnavailable("local connection capacity")
         timeout = self.timeout if timeout_seconds is None else timeout_seconds
         if not 0 < timeout <= 35:
-            self.capacity.release()
             raise ValueError("invalid project timeout")
-        connection = UnixConnection(self.path, timeout)
-        try:
-            supplied = {"Content-Type": "application/json", **(headers or {})}
-            if key:
-                supplied["Idempotency-Key"] = key
-            connection.request(
-                method,
-                path,
-                body=None if body is None else canonical(body).encode(),
-                headers=supplied,
-            )
-            response = connection.getresponse()
-            length = response.getheader("Content-Length")
-            if (
-                response.getheader("Transfer-Encoding")
-                or length is None
-                or not length.isdigit()
-                or int(length) > 1_048_576
-                or response.getheader("Content-Type") != "application/json"
-            ):
-                raise ControllerUnavailable("invalid controller framing")
-            raw = response.read(int(length) + 1)
-            if len(raw) != int(length):
-                raise ControllerUnavailable("incomplete controller response")
-            value = strict_json(raw)
-            if not isinstance(value, dict):
-                raise ControllerUnavailable("invalid controller result")
-            return response.status, value
-        except (OSError, ValueError, http.client.HTTPException) as error:
-            raise ControllerUnavailable("controller request outcome unknown") from error
-        finally:
-            connection.close()
-            self.capacity.release()
+        with self.request_slot():
+            connection = UnixConnection(self.path, timeout)
+            try:
+                supplied = {"Content-Type": "application/json", **(headers or {})}
+                if key:
+                    supplied["Idempotency-Key"] = key
+                connection.request(
+                    method,
+                    path,
+                    body=None if body is None else canonical(body).encode(),
+                    headers=supplied,
+                )
+                response = connection.getresponse()
+                length = response.getheader("Content-Length")
+                if (
+                    response.getheader("Transfer-Encoding")
+                    or length is None
+                    or not length.isdigit()
+                    or int(length) > 1_048_576
+                    or response.getheader("Content-Type") != "application/json"
+                ):
+                    raise ControllerUnavailable("invalid controller framing")
+                raw = response.read(int(length) + 1)
+                if len(raw) != int(length):
+                    raise ControllerUnavailable("incomplete controller response")
+                value = strict_json(raw)
+                if not isinstance(value, dict):
+                    raise ControllerUnavailable("invalid controller result")
+                return response.status, value
+            except (OSError, ValueError, http.client.HTTPException) as error:
+                raise ControllerUnavailable("controller request outcome unknown") from error
+            finally:
+                connection.close()

@@ -140,7 +140,7 @@ export function PersonPage({ id, admin }: { id: string; admin: boolean }) {
         <SectionSkeleton title variant="table" rows={3} />
       </PageSkeleton>
     );
-  if (person.error)
+  if (person.data === undefined)
     return (
       <Page>
         <PageHeader title="Person" back={back} />

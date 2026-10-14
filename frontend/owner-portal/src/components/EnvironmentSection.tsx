@@ -82,7 +82,7 @@ export function EnvironmentSection({
     <Section title="Environment variables" flush>
       {environment.isPending ? (
         <LoadingRows rows={2} />
-      ) : environment.error ? (
+      ) : environment.data === undefined ? (
         <div className="app-block">
           <QueryError query={environment} what="your environment variables" />
         </div>
