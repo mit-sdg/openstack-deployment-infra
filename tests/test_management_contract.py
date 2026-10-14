@@ -467,13 +467,18 @@ class DeletedApplicationContractTests(RealProjectCase):
         self.assertEqual(status, 404)
         self.assertEqual(missing["error"]["code"], "APPLICATION_NOT_FOUND")
 
-    def test_operator_deletion_is_retired_by_owner_read_and_preserves_history(self) -> None:
+    def test_operator_deletion_is_retired_in_background_and_preserves_history(self) -> None:
         app = self.create(slug="retire-on-read")
         self.save(app)
         self.assertEqual(
             self.call("GET", "/v1/session", owner="alice").body["data"]["quota"]["apps"]["used"], 1
         )
         self.delete_remote(app, "retire-on-read")
+        cached = self.call("GET", "/v1/apps", owner="alice").body["data"]
+        self.assertEqual([row["applicationId"] for row in cached["items"]], [app])
+        self.assertTrue(cached["items"][0]["refreshing"])
+        # Join the background observation before checking its durable retirement.
+        self.broker.app_management.close()
         listing = self.call("GET", "/v1/apps", owner="alice").body["data"]
         self.assertEqual(listing["items"], [])
         self.assertEqual(listing["quota"]["apps"]["used"], 0)

@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { Link } from 'wouter';
 import { api, type AppRecord } from '../api';
-import { ownerAppState } from '../utils/presentation';
+import { appRefetchInterval, ownerAppState } from '../utils/presentation';
 import { BoundaryText } from './BoundaryText';
 import { QueryError } from './Feedback';
 import { Alert } from '@openstack-platform/ui';
@@ -38,7 +38,7 @@ export function AppFrame({
   const app = useQuery({
     queryKey: ['app', id],
     queryFn: () => api.app(id),
-    refetchInterval: 5000,
+    refetchInterval: (query) => appRefetchInterval(query.state.data),
   });
   const destination = useAppDestination(id);
   const current = active;

@@ -29,7 +29,14 @@ export function deploymentRuntime(deployment: Pick<Deployment, 'configuration' |
  * "Ready" is a lifecycle detail and is never shown for an app.
  */
 export type AppState =
-  'creating' | 'rejected' | 'not_deployed' | 'stopped' | 'healthy' | 'unhealthy' | 'unknown';
+  | 'creating'
+  | 'rejected'
+  | 'not_deployed'
+  | 'stopped'
+  | 'healthy'
+  | 'unhealthy'
+  | 'unknown'
+  | 'checking';
 export function appState(app: {
   lifecycle: string;
   deployed: boolean;
@@ -44,10 +51,15 @@ export function appState(app: {
   if (app.stale) return 'unknown';
   return app.health;
 }
+/** Poll cached reads promptly until the background observation settles. */
+export function appRefetchInterval(app: AppRecord | undefined) {
+  return app?.refreshing ? 1500 : 5000;
+}
+
 /** appState for an owner or admin app record. */
 export function ownerAppState(app: AppRecord): AppState {
   const { routeHealthy, allocationHealthy } = app.health ?? {};
-  return appState({
+  const state = appState({
     lifecycle: app.lifecycleState,
     deployed: !!app.acceptedDeployment,
     running: app.desiredRunning,
@@ -59,6 +71,11 @@ export function ownerAppState(app: AppRecord): AppState {
           ? 'unhealthy'
           : 'unknown',
   });
+  return app.lifecycleState === 'ready' &&
+    app.refreshing &&
+    (state === 'unknown' || app.stale || !app.observedAt)
+    ? 'checking'
+    : state;
 }
 
 /** @deprecated Use ownerAppState, which also covers lifecycle and first deploy. */

@@ -161,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             for server in servers
         ]
         try:
+            api.start_flavor_cache()
             for thread in threads:
                 thread.start()
             stopping.wait()

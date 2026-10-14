@@ -24,6 +24,10 @@ import { Status } from '../components/Status';
 import { useOwnerIntents } from '../hooks/useIntentPolling';
 import { ownerAppState, short } from '../utils/presentation';
 
+export function appsRefetchInterval(items: AppRecord[] | undefined) {
+  return items?.some((app) => app.refreshing) ? 1500 : 5000;
+}
+
 const columns: Column<AppRecord>[] = [
   {
     key: 'name',
@@ -84,7 +88,11 @@ const columns: Column<AppRecord>[] = [
 ];
 
 export function Dashboard() {
-  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 5000 });
+  const apps = useQuery({
+    queryKey: ['apps'],
+    queryFn: api.apps,
+    refetchInterval: (query) => appsRefetchInterval(query.state.data?.items),
+  });
   const intents = useOwnerIntents();
   const [, navigate] = useLocation();
   if (apps.isPending)

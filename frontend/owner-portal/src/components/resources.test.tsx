@@ -311,6 +311,8 @@ describe('owner resources', () => {
       health: null,
       stale: false,
       observedAt: null,
+      observationAgeSeconds: null,
+      refreshing: false,
     });
     vi.spyOn(api, 'settings').mockResolvedValue({
       revision: 7,
@@ -556,6 +558,8 @@ describe('owner resources', () => {
       health: null,
       stale: false,
       observedAt: null,
+      observationAgeSeconds: null,
+      refreshing: false,
     });
     vi.spyOn(api, 'settings').mockResolvedValue({
       revision: 1,
