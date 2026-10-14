@@ -1369,6 +1369,20 @@ def pin_builder_host_key(
     return path
 
 
+def _builder_refused(error: ApplicationError) -> bool:
+    """Whether the builder program ran to completion and exited with a refusal.
+
+    SSH 255, timeouts, malformed success metadata and lost responses are
+    unknown outcomes, not deterministic build rejection.
+    """
+    failure = error.__cause__
+    return (
+        isinstance(failure, CommandFailure)
+        and failure.result is not None
+        and 1 <= failure.result.returncode < 255
+    )
+
+
 def execute_builder_build(
     observation: BuilderObservation,
     source_directory: str | Path,
@@ -1429,14 +1443,21 @@ def execute_builder_build(
         ),
         identity,
     )
-    received = _provider_result(
-        command_runner,
-        receive_argv,
-        timeout_seconds=receive_timeout,
-        stdin=archive,
-        stderr_limit=65_536,
-        inherit_env=("HOME", "USER", "SSH_AUTH_SOCK"),
-    )
+    try:
+        received = _provider_result(
+            command_runner,
+            receive_argv,
+            timeout_seconds=receive_timeout,
+            stdin=archive,
+            stderr_limit=65_536,
+            inherit_env=("HOME", "USER", "SSH_AUTH_SOCK"),
+        )
+    except ApplicationError as error:
+        # The builder refuses an archive it cannot extract safely. Retrying
+        # the same commit refuses it again, so this is a rejected build.
+        if _builder_refused(error):
+            raise BuildRejected("builder refused the application source") from None
+        raise
     receipt = _json_object(received.stdout, field_name="builder archive receipt")
     if receipt != {"buildId": observation.build_id, "sha256": archive_sha}:
         raise ApplicationError("builder did not verify the transferred source archive")
@@ -1470,14 +1491,7 @@ def execute_builder_build(
             stderr_sink=build_log_sink,
         )
     except ApplicationError as error:
-        failure = error.__cause__
-        # SSH 255, timeouts, malformed success metadata and lost responses are
-        # unknown outcomes, not deterministic build rejection.
-        if (
-            isinstance(failure, CommandFailure)
-            and failure.result is not None
-            and 1 <= failure.result.returncode < 255
-        ):
+        if _builder_refused(error):
             raise BuildRejected("builder command rejected the application build") from None
         raise
     parse_build_metadata(result.stdout)
