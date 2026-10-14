@@ -1,0 +1,19 @@
+[Unit]
+Description=Persistent OpenStack platform read session
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=@BIN_ROOT@/openstack-platform-provider
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

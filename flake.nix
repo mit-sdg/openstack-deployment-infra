@@ -85,6 +85,8 @@
             PLATFORM_REQUIRE_OPENSTACK_PROJECTION=1 \
               PLATFORM_NEUTRON_PROJECTION_FIXTURE=${./tests/fixtures/openstack/neutron_security_group_tenant_only.json} \
               ${rolePackages.python}/bin/python ${./tests/test_neutron_sdk_projection.py}
+            ${rolePackages.controllerPackage}/bin/openstack-platform-provider --help >/dev/null
+            ${rolePackages.controllerPackage}/bin/openstack-platform-provider-command --help >/dev/null
             ${rolePackages.releaseInstaller}/bin/openstack-platform-install-release --help >/dev/null
             touch "$out"
           '';

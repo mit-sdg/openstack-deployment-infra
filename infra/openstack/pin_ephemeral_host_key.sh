@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-OSC=${OSC:-openstack}
+OSC=${OSC:-platform-openstack}
 SERVER_NAME=${1:?usage: pin_ephemeral_host_key.sh SERVER_NAME IP KNOWN_HOSTS}
 IP=${2:?usage: pin_ephemeral_host_key.sh SERVER_NAME IP KNOWN_HOSTS}
 KNOWN_HOSTS=${3:?usage: pin_ephemeral_host_key.sh SERVER_NAME IP KNOWN_HOSTS}

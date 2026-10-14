@@ -8,7 +8,7 @@ load_platform_config
 # shellcheck source=persistent-host.sh
 source "$SCRIPT_DIR/persistent-host.sh"
 
-OSC=${OSC:-openstack}
+OSC=${OSC:-platform-openstack}
 TEMPLATE=${TEMPLATE:-$SCRIPT_DIR/../cloud-init-nixos/storage.yaml}
 OPERATOR_PUBLIC_KEY=${OPERATOR_PUBLIC_KEY:?set OPERATOR_PUBLIC_KEY to the operator public-key path}
 STORAGE_SECRETS_FILE=${STORAGE_SECRETS_FILE:?set STORAGE_SECRETS_FILE to the storage bootstrap secret path}

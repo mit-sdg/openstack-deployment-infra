@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CONFIG_HELPER="$SCRIPT_DIR/../lib/platform_config.py"
 CONTRACT="$SCRIPT_DIR/../lib/platform_contract.json"
-OSC=${OSC:-openstack}
+OSC=${OSC:-platform-openstack}
 
 usage() {
   echo "usage: $0 ROLE QCOW2_FILE NIX_OUTPUT PATH_INFO_JSON" >&2

@@ -216,3 +216,51 @@ def start_cli(path, executable, *, execute=command):
         thread.join()
 
     return close
+
+
+def start_reads(path, socket_path):
+    """Serve the real read protocol against the retained-resource state double."""
+    import os
+
+    from openstack_platform.provider_protocol import ProviderError
+    from openstack_platform.provider_service import Server
+
+    class ReadAPI:
+        def execute(self, action, params, _deadline):
+            if action == "identity":
+                argv = ["token", "issue"]
+            elif action == "console":
+                argv = [
+                    "console",
+                    "log",
+                    "show",
+                    "--lines",
+                    str(params["lines"]),
+                    params["reference"],
+                ]
+            else:
+                kind, verb = action.split(".")
+                argv = [*kind.replace("_", " ").split(), verb]
+                if "reference" in params:
+                    argv.append(params["reference"])
+                flags = {"project_id": "--project", "name": "--name", "device_id": "--server"}
+                for key, value in params.items():
+                    if key != "reference":
+                        argv.extend((flags[key], value))
+            try:
+                command(path, argv)
+            except CommandResponse as response:
+                if response.status:
+                    raise ProviderError() from None
+                return response.output if action == "console" else json.loads(response.output)
+
+    server = Server(str(socket_path), ReadAPI(), frozenset({(os.geteuid(), os.getegid())}))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def close():
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    return close

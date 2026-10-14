@@ -20,7 +20,6 @@ import stat
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -28,7 +27,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar, cast
 
-from . import host_keys, remote, runtime
+from . import host_keys, provider, remote, runtime
 from .config import PlatformConfig, load_platform
 from .contracts import IMAGE_ROLES as IMAGE_ROLES
 from .contracts import PERSISTENT_ROLES as PERSISTENT_ROLES
@@ -36,10 +35,8 @@ from .validation import ValidationError, commit, flavor_reference, openstack_uui
 
 _METADATA_VERSION = "1"
 _IMAGE_INVENTORY_LIMIT = 500
-_IMAGE_DETAIL_CONCURRENCY = 8
-_IMAGE_DETAIL_OUTPUT_LIMIT = 32_768
-# The installed launcher forces this to the protected authenticated wrapper.
-# The fallback preserves explicit library and test use outside that launcher.
+# The installed launcher pins the mutation credential wrapper. Reads use the
+# provider socket directly; this executable is only an identity in injected tests.
 _DEFAULT_OPENSTACK_EXECUTABLE = os.environ.get("PLATFORM_OPENSTACK_COMMAND", "openstack")
 _OS_ENV = (
     "OS_AUTH_TYPE",
@@ -388,6 +385,8 @@ def _run(
         )
     else:
         timeout_seconds = _timeout_value(timeout_seconds, operation="command")
+    if command_runner is runtime.run and provider.is_read(arguments):
+        command_runner = provider.run
     try:
         result = command_runner(
             (executable, *arguments),
@@ -563,51 +562,6 @@ def _image_from_show(platform: PlatformConfig, document: Mapping[str, Any]) -> I
     )
 
 
-def _long_image_row_is_complete(row: Mapping[str, Any]) -> bool:
-    missing = object()
-    return all(
-        _field(row, *names, default=missing) is not missing
-        for names in (("owner", "owner_id", "project"), ("created_at", "created"), ("properties",))
-    )
-
-
-def _show_image_for_inventory(
-    image_id: str,
-    *,
-    deadline: float,
-    command_runner: Runner,
-    executable: str,
-) -> Mapping[str, Any]:
-    shown = _json_command(
-        (
-            "image",
-            "show",
-            image_id,
-            "--column",
-            "id",
-            "--column",
-            "name",
-            "--column",
-            "status",
-            "--column",
-            "created_at",
-            "--column",
-            "owner",
-            "--column",
-            "properties",
-        ),
-        timeout_seconds=_deadline_remaining(deadline, operation="image observation"),
-        command_runner=command_runner,
-        executable=executable,
-        stdout_limit=_IMAGE_DETAIL_OUTPUT_LIMIT,
-    )
-    if not isinstance(shown, Mapping):
-        raise OpenStackError("OpenStack image projection was not an object")
-    if _provider_uuid(_field(shown, "id"), field="image UUID") != image_id:
-        raise OpenStackError("OpenStack image identity changed during observation")
-    return shown
-
-
 def _list_images_verified(
     platform: PlatformConfig,
     *,
@@ -615,13 +569,7 @@ def _list_images_verified(
     command_runner: Runner,
     executable: str,
 ) -> list[Image]:
-    """Read one long inventory, with a fixed-width detail fallback for older OSCs.
-
-    Current python-openstackclient releases omit creation time and properties
-    from ``image list --long``. When those fields are absent, detail reads run
-    in at most eight concurrent slots under the same deadline. The 500-row
-    ceiling and 32-KiB detail limit bound fallback provider output to 16 MiB.
-    """
+    """Read complete Glance metadata once under the operation deadline."""
     deadline = _active_deadline(operation="image observation")
     listed = _json_command(
         ("image", "list", "--private", "--long"),
@@ -634,53 +582,10 @@ def _list_images_verified(
     if len(listed) > _IMAGE_INVENTORY_LIMIT:
         raise OpenStackError("OpenStack image inventory exceeds its 500-image safety limit")
 
-    documents: list[Mapping[str, Any] | None] = []
-    detail_ids: list[tuple[int, str]] = []
-    for row in listed:
-        if not isinstance(row, Mapping):
-            raise OpenStackError("OpenStack image list contained a malformed row")
-        image_id = _provider_uuid(_field(row, "id"), field="image UUID")
-        if _long_image_row_is_complete(row):
-            documents.append(row)
-        else:
-            detail_ids.append((len(documents), image_id))
-            documents.append(None)
-
-    if detail_ids:
-        with ThreadPoolExecutor(
-            max_workers=_IMAGE_DETAIL_CONCURRENCY, thread_name_prefix="openstack-image"
-        ) as executor:
-            pending = {
-                executor.submit(
-                    contextvars.copy_context().run,
-                    _show_image_for_inventory,
-                    image_id,
-                    deadline=deadline,
-                    command_runner=command_runner,
-                    executable=executable,
-                ): (index, image_id)
-                for index, image_id in detail_ids
-            }
-            try:
-                for future in as_completed(
-                    pending,
-                    timeout=_deadline_remaining(deadline, operation="image observation"),
-                ):
-                    index, _image_id = pending[future]
-                    documents[index] = future.result()
-            except TimeoutError as error:
-                for future in pending:
-                    future.cancel()
-                raise OpenStackError("OpenStack image observation exceeded its deadline") from error
-            except Exception:
-                for future in pending:
-                    future.cancel()
-                raise
-
     images: list[Image] = []
-    for document in documents:
-        if document is None:
-            raise OpenStackError("OpenStack image observation was incomplete")
+    for document in listed:
+        if not isinstance(document, Mapping):
+            raise OpenStackError("OpenStack image list contained a malformed row")
         image = _image_from_show(platform, document)
         if image.platform_metadata_present:
             images.append(image)

@@ -20,6 +20,15 @@ let
     app = "https://${platform.domain}";
     code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
   };
+  providerPeerProbe = pkgs.writeText "provider-peer-probe.py" ''
+    import json
+    import socket
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(2)
+        connection.connect("/run/${namespace}-provider/provider.sock")
+        connection.sendall(json.dumps({"version": 1, "action": "server.delete", "params": {}, "timeout": 1}).encode() + b"\n")
+        assert json.loads(connection.recv(1024))["code"] == "invalid"
+  '';
   managementIdentityBootstrap = pkgs.writeText "management-identity-bootstrap.py" ''
     import sys
     sys.path.insert(0, "${packages.controllerPackage}/${pkgs.python314.sitePackages}")
@@ -771,6 +780,13 @@ let
                     chown agentops:agentops ${state}/operator/secrets/$credential
                     chmod 0600 ${state}/operator/secrets/$credential
                   done
+                  cat > ${state}/operator/secrets/openstack.env <<'EOF'
+                  OS_AUTH_URL=https://identity.invalid/v3
+                  OS_USERNAME=fixture
+                  OS_PASSWORD=fixture
+                  OS_PROJECT_NAME=${platform.project}
+                  OS_PROJECT_ID=${platform.projectId}
+                  EOF
                   printf 'REGISTRY_BUILDER_PASSWORD=controller-secret\n' \
                     > ${state}/operator/secrets/storage-bootstrap.env
                   printf 'ssh-ed25519 vm-test\n' \
@@ -789,6 +805,10 @@ let
                       ${state}/operator/secrets/provisioning-pki/$name-key.pem
                   done
                 '';
+              };
+              "${namespace}-provider" = {
+                after = [ "${namespace}-controller-test-fixture.service" ];
+                requires = [ "${namespace}-controller-test-fixture.service" ];
               };
               "${namespace}-controller" = {
                 after = [ "${namespace}-controller-test-fixture.service" ];
@@ -914,6 +934,14 @@ let
               machine.succeed("runuser -u management-web -- sh -c 'for name in openstack.env nomad-tokens.env storage-bootstrap.env builder_operator_ed25519 backup-age-key.txt; do test ! -r ${state}/operator/secrets/\"$name\" || exit 1; done'")
               machine.fail("runuser -u management-web -- cat /etc/${namespace}/pki/nomad-cli-key.pem")
               machine.fail("runuser -u management-web -- cat /run/credentials/nomad.service/nomad-gossip-key")
+              machine.wait_for_unit("${namespace}-provider.service")
+              machine.succeed("test $(stat -c %U:%G:%a /run/${namespace}-provider/provider.sock) = agentops:controller-api:660")
+              # The malformed action proves socket readiness/allowlisting without
+              # authenticating to an external endpoint. Exact peers may reach it;
+              # broker is refused despite membership of controller-api.
+              machine.succeed("runuser -u agentops -- ${packages.platformPython}/bin/python ${providerPeerProbe}")
+              machine.succeed("runuser -u platform-controller -g controller-api -- ${packages.platformPython}/bin/python ${providerPeerProbe}")
+              machine.fail("runuser -u management-broker -- ${packages.platformPython}/bin/python ${providerPeerProbe}")
               machine.succeed("runuser -u platform-controller -- cat ${state}/operator/secrets/openstack.env >/dev/null")
               machine.fail("runuser -u nomad -- cat ${state}/operator/secrets/openstack.env")
               # Run the real managed-backup unit with a local credential consumer.

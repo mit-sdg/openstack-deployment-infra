@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -55,6 +56,14 @@ class ImagePipelineTests(unittest.TestCase):
             "PLATFORM_ALLOW_UNSIGNED_PRODUCTION": release.UNSIGNED_PRODUCTION_ACKNOWLEDGEMENT,
             "PLATFORM_ENVIRONMENT": "production",
         }
+        self.values.update(
+            {
+                "OS_AUTH_URL": "https://identity.example.invalid/v3",
+                "OS_USERNAME": "fixture",
+                "OS_PASSWORD": "fixture",
+                "OSC": sys.executable,
+            }
+        )
         self.context = pipeline.publication_context(self.values)
         inventory = load_platform(self.platform)
         self.evidence_context = {
@@ -361,17 +370,15 @@ class ImagePipelineTests(unittest.TestCase):
                 },
             }
 
-        def download(arguments, **_kwargs):
-            self.assertEqual(arguments[1:3], ("image", "save"))
-            role = next(role for role, image_id in ids.items() if image_id == arguments[-1])
-            Path(arguments[arguments.index("--file") + 1]).write_bytes(
-                (self.root / role / f"{role}.qcow2").read_bytes()
-            )
-            return ""
+        def download(reference, stream, **_kwargs):
+            role = next(role for role, image_id in ids.items() if image_id == reference)
+            stream.write((self.root / role / f"{role}.qcow2").read_bytes())
 
+        api = mock.Mock()
+        api.download_image.side_effect = download
         with (
             mock.patch.object(setup, "_json_command", side_effect=provider),
-            mock.patch.object(setup, "_command", side_effect=download),
+            mock.patch.object(setup.provider_local, "session", return_value=api),
             mock.patch.object(
                 setup, "_build_nix_output", return_value=Path("/nix/store/smoke")
             ) as build,

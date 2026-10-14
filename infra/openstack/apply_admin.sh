@@ -8,7 +8,7 @@ load_platform_config
 # shellcheck source=persistent-host.sh
 source "$SCRIPT_DIR/persistent-host.sh"
 
-OSC=${OSC:-openstack}
+OSC=${OSC:-platform-openstack}
 TEMPLATE=${TEMPLATE:-$SCRIPT_DIR/../cloud-init-nixos/admin.yaml}
 ADMIN_PUBLIC_KEY=${ADMIN_PUBLIC_KEY:?set ADMIN_PUBLIC_KEY to the admin public-key path}
 OPERATOR_PUBLIC_KEY=${OPERATOR_PUBLIC_KEY:?set OPERATOR_PUBLIC_KEY to the operator public-key path}
