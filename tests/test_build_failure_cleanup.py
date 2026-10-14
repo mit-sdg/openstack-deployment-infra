@@ -81,6 +81,71 @@ class BuildFailureCleanupTests(unittest.TestCase):
             self.assertEqual(isinstance(caught.exception, app.BuildRejected), code in (1, 2))
             self.assertNotIn("private-failure-output", str(caught.exception))
 
+    def test_completed_archive_refusal_is_a_rejected_build(self):
+        known_hosts = self.root / "known-hosts"
+        known_hosts.write_text("fixture")
+        known_hosts.chmod(0o600)
+        for code in (1, 255, None):
+            failure = app.ApplicationError("withheld")
+            failure.__cause__ = CommandFailure(
+                "withheld",
+                None
+                if code is None
+                else CommandResult(("fixed",), code, b"", b"private-failure-output", False, False),
+            )
+            with (
+                mock.patch.object(
+                    app, "_builder_identity", return_value=str(self.root / "identity")
+                ),
+                mock.patch.object(app, "create_build_archive", return_value=(b"archive", "a" * 64)),
+                mock.patch.object(app, "_provider_result", side_effect=[failure]) as remote,
+            ):
+                with self.assertRaises(app.ApplicationError) as caught:
+                    app.execute_builder_build(
+                        self.observation,
+                        self.root,
+                        mock.Mock(),
+                        "registry.example/projects/demo-app/app",
+                        known_hosts,
+                        self.root / "identity",
+                        source_limit=1024,
+                        build_log_limit=1024,
+                        timeout_seconds=30,
+                        connect_timeout_seconds=5,
+                    )
+            remote.assert_called_once()
+            self.assertEqual(isinstance(caught.exception, app.BuildRejected), code == 1)
+            self.assertNotIn("private-failure-output", str(caught.exception))
+
+    def test_builder_accepts_symlinks_that_stay_inside_their_build_root(self):
+        builder = importlib.import_module("infra.openstack.builder_execute")
+
+        def link(name, target):
+            member = builder.tarfile.TarInfo(name)
+            member.type = builder.tarfile.SYMTYPE
+            member.linkname = target
+            return member
+
+        for name, target in (
+            ("source/node_modules/.bin/prettier", "../prettier/bin/prettier.cjs"),
+            ("source/app/current", "../shared/../app/v2"),
+            ("source/readme", "docs/README.md"),
+        ):
+            with self.subTest(target=target):
+                builder.safe_member(link(name, target))
+        for name, target in (
+            ("source/escape", "../recipe/Dockerfile"),
+            ("source/a/escape", "../../.."),
+            ("source/root", ".."),
+            ("source/absolute", "/etc/passwd"),
+            ("source/empty", ""),
+        ):
+            with (
+                self.subTest(target=target),
+                self.assertRaisesRegex(ValueError, "symlink target is unsafe"),
+            ):
+                builder.safe_member(link(name, target))
+
     def test_rejection_intent_survives_uncertain_builder_cleanup(self):
         for cleanup_error in (None, app.ApplicationError("cleanup unavailable")):
             with (

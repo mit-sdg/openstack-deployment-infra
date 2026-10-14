@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import select
 import shutil
@@ -47,8 +48,17 @@ def safe_member(member: tarfile.TarInfo) -> None:
     if not (member.isdir() or member.isfile() or member.issym()):
         raise ValueError("archive contains an unsupported member")
     if member.issym():
+        # Checked-in package trees use relative links such as
+        # node_modules/.bin/tool -> ../tool/bin/tool.js. A link may climb
+        # only as far as its own build root; extraction's data filter then
+        # rechecks the real path.
         target = PurePosixPath(member.linkname)
-        if target.is_absolute() or ".." in target.parts:
+        resolved = posixpath.normpath(posixpath.join(path.parent.as_posix(), member.linkname))
+        if (
+            target.is_absolute()
+            or not target.parts
+            or PurePosixPath(resolved).parts[:1] != path.parts[:1]
+        ):
             raise ValueError("archive symlink target is unsafe")
 
 
