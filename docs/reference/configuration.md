@@ -357,7 +357,7 @@ Setup writes the private app resource policy and backup public key from `config/
 | --- | --- |
 | Setup workspace | `/srv/openstack-platform/setup/config/platform-policy.json` |
 | Operator | `/srv/openstack-platform/state/policy.json` |
-| Admin host (operator staging copy) | `<paths.root>/persistent/policy.json` |
+| Admin host (operator staging copy) | `<paths.adminState>/operator/policy.json`, owned by the operator account, mode `0600` |
 | Admin host (active controller policy) | `<paths.adminState>/controller/policy.json`, owned by `platform-controller` |
 
 All top-level fields except `limits` are required. Both `standard` and `runtimeImages` require every listed field. Unknown fields and duplicate JSON keys are refused. Values shown under **Setup value** come from the template or setup; the loader does not supply defaults for required fields.
@@ -379,6 +379,8 @@ All top-level fields except `limits` are required. Both `standard` and `runtimeI
 Every integer rejects booleans. Fresh-worker deployments replace the initial CPU and memory allocation with the measured [allocation budget](../guides/deploy-apps-from-the-command-line.md#plan-and-resize). Storage admission also checks host capacity; loader ranges alone do not guarantee that a resource can be created. See [managed-storage limits](controller-api.md#managed-storage).
 
 Operator copies must be operator-owned with no group or other access. Setup writes mode `0600`; the installed CLI requires that exact mode.
+
+To change policy, edit and install the operator policy with `deploy/releases/install_operator_config.py`, run `deploy/releases/deploy_helper_release.sh` from the clean release checkout, then restart the controller. The helper rollout validates a snapshot with `openstack_platform.config.load_policy` and atomically installs it to the admin staging copy with mode `0600`. It prints `policy=synced sha256=<hash>` or `policy=unchanged`, without policy contents. Invalid policy leaves the admin copy unchanged. On controller restart, the prepare unit copies the admin staging policy into controller state. Existing apps and resources keep their recorded sizes; changed defaults apply to new apps and resources. See [Change operator policy](../guides/releases-and-upgrades.md#change-operator-policy) for commands and verification.
 
 <details>
 <summary>Optional <code>limits</code> block</summary>

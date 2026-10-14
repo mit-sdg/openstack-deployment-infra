@@ -41,6 +41,7 @@ inventory_filename=${installation_values[1]}
 ssh_alias=${installation_values[2]}
 readonly operator_root inventory_filename ssh_alias
 ssh_config=$operator_root/.secrets/ssh/config
+operator_policy=$operator_root/state/policy.json
 default_platform_config=$operator_root/config/$inventory_filename
 platform_config=${PLATFORM_CONFIG:-$default_platform_config}
 readonly ssh_config default_platform_config platform_config
@@ -212,6 +213,8 @@ remote_evidence="$incoming/evidence-$commit"
 remote_manifest="$remote_evidence/release-manifest.json"
 remote_signature="$remote_evidence/release-manifest.sig"
 remote_trust_root="$remote_evidence/release-trust-root.pem"
+remote_policy="$incoming/${commit}.policy.json"
+admin_policy="$admin_state/operator/policy.json"
 
 # The live admin inventory is image/configuration state. Verify it in place;
 # deployment never copies the operator host's private config into /etc.
@@ -313,15 +316,52 @@ PY
 
 archive=$(mktemp "${TMPDIR:-/tmp}/platform-helper.XXXXXX.tar")
 installer=$(mktemp "${TMPDIR:-/tmp}/platform-installer.XXXXXX.py")
+policy=$(mktemp "${TMPDIR:-/tmp}/platform-policy.XXXXXX.json")
 uploaded=false
 cleanup() {
-  rm -f -- "$archive" "$installer"
+  rm -f -- "$archive" "$installer" "$policy"
   if [[ $uploaded == true ]]; then
-    ssh -F "$ssh_config" "$ssh_alias" -- rm -rf -- "$remote_archive" "$remote_installer" "$remote_evidence" \
+    ssh -F "$ssh_config" "$ssh_alias" -- rm -rf -- "$remote_archive" "$remote_installer" "$remote_evidence" "$remote_policy" \
       >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
+
+# Validate a private snapshot, so the bytes uploaded cannot change after validation.
+policy_sha256=$(python3 - "$root" "$operator_policy" "$policy" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from openstack_platform.config import load_policy
+from openstack_platform.validation import ValidationError
+
+try:
+    descriptor = os.open(sys.argv[2], os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 1_048_576
+        ):
+            raise ValidationError("invalid policy file metadata")
+        raw = stream.read(1_048_577)
+        if len(raw) > 1_048_576:
+            raise ValidationError("policy exceeds size limit")
+    snapshot = Path(sys.argv[3])
+    snapshot.write_bytes(raw)
+    load_policy(snapshot)
+except (OSError, ValidationError):
+    # Loader errors can contain untrusted JSON keys; never print policy values.
+    raise SystemExit("operator policy failed validation; admin policy was not changed") from None
+print(hashlib.sha256(raw).hexdigest())
+PY
+)
 
 git -C "$root" archive --format=tar --output="$archive" "$commit"
 archive_sha256=$(python3 - "$archive" <<'PY'
@@ -396,4 +436,50 @@ assert document == {
     "error": {"code": "INVALID_REQUEST", "message": "helper request is invalid"},
 }
 print(f"helper-release={commit}:verified")
+PY
+
+# Install only after the helper release has been verified. The admin's prepare
+# unit copies this operator-owned policy into controller state on restart.
+scp -F "$ssh_config" -- "$policy" "${ssh_alias}:$remote_policy"
+ssh -F "$ssh_config" "$ssh_alias" -- "$admin_python" - \
+  "$remote_policy" "$admin_policy" "$policy_sha256" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+source, destination = map(Path, sys.argv[1:3])
+raw = source.read_bytes()
+if hashlib.sha256(raw).hexdigest() != sys.argv[3]:
+    raise SystemExit("policy transfer checksum mismatch; admin policy was not changed")
+if destination.exists() or destination.is_symlink():
+    metadata = destination.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise SystemExit("admin policy ownership or mode is invalid")
+    if destination.read_bytes() == raw:
+        print("policy=unchanged")
+        raise SystemExit(0)
+
+descriptor, temporary = tempfile.mkstemp(prefix=".policy-", dir=destination.parent)
+try:
+    with os.fdopen(descriptor, "wb") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(raw)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, destination)
+    directory = os.open(destination.parent, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    Path(temporary).unlink(missing_ok=True)
+print(f"policy=synced sha256={sys.argv[3]}")
 PY

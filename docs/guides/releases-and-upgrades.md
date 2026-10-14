@@ -110,7 +110,7 @@ Keep changes paused through the final checks. The observed production admin repl
    deploy/releases/deploy_helper_release.sh "$commit"
    ```
 
-   **Success:** `helper-release=<commit>:verified`. The script validates the live inventory and tests the installed launcher with an invalid request. **Failure:** correct the reported evidence, inventory, ownership, or runtime problem and rerun the same command. A failure before selection leaves the old helper selected; a failed probe after selection can leave the new helper selected. Keep changes paused until the verified result appears; do not edit retained release files.
+   **Success:** `helper-release=<commit>:verified` and `policy=synced sha256=<hash>` or `policy=unchanged`. The script validates the live inventory, tests the installed launcher with an invalid request, and syncs the validated operator policy to admin. The controller picks up that policy at the restart in step 4. **Failure:** correct the reported evidence, inventory, policy, ownership, or runtime problem and rerun the same command. Invalid policy leaves the admin policy unchanged. A failure before selection leaves the old helper selected; a failed probe or policy sync after selection can leave the new helper selected. Keep changes paused until both verified helper and policy results appear; do not edit retained release files.
 
 3. **Move all five hosted image selections.** On admin, read `GET /v1/admin/images` and record each current ID. For each role in `admin`, `ingress`, `storage`, `worker`, `builder`, run this sequence with that role's reviewed new/current IDs:
 
@@ -672,6 +672,32 @@ private_repo=/private/path/deployment-config
 ```
 
 You should see `operator-config=installed`. The inventory lands at `/srv/openstack-platform/config/platform.json` and the policy at `/srv/openstack-platform/state/policy.json`.
+
+### Change operator policy
+
+For an existing platform, edit the private policy source and run the installer above. Then sync it to admin and restart the controller; installation on the operator host alone does not update the controller. Existing apps and resources keep their recorded sizes. Changed defaults apply to new apps and resources.
+
+From the clean checkout of the reviewed release, with its verified release evidence exported as in [Roll out a release](#roll-out-a-release), run on the operator host:
+
+```bash
+commit=$(git rev-parse HEAD)
+deploy/releases/deploy_helper_release.sh "$commit"
+```
+
+Require a successful exit, `helper-release=<commit>:verified`, and either `policy=synced sha256=<hash>` or `policy=unchanged`. The script validates a private snapshot with the controller's policy loader before uploading it. It atomically replaces `<paths.adminState>/operator/policy.json` on admin with mode `0600`, or leaves an identical file untouched. It does not print policy contents. A validation failure leaves the admin copy unchanged; correct the policy, reinstall it, and rerun the helper rollout before restarting.
+
+Using the shell variables and `recovery` function from [Run the platform](run-the-platform.md#set-up-your-shell), restart and verify:
+
+```bash
+recovery sudo systemctl restart "$PLATFORM_NAMESPACE-controller.service"
+recovery sudo systemctl restart "$PLATFORM_NAMESPACE-controller-readiness.service"
+recovery sudo systemctl show -p Result "$PLATFORM_NAMESPACE-controller-prepare.service"
+ssh -F "$SSH_CONFIG" platform-admin -- systemctl is-active \
+  "$PLATFORM_NAMESPACE-controller.service" \
+  "$PLATFORM_NAMESPACE-controller-readiness.service"
+```
+
+Require `Result=success` and both services `active`. The prepare unit copies the staged policy into controller state on startup. If preparation or readiness fails, inspect the unit journals and correct the reported problem before resuming app changes.
 
 ### Generate the operator bridge
 

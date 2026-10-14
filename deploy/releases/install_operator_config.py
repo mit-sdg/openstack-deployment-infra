@@ -180,6 +180,7 @@ def install(
     _atomic_write(state_root / "policy.json", policy_raw)
 
     print("operator-config=installed")
+    print("Admin picks up policy on the next deploy_helper_release.sh plus controller restart.")
     return 0
 
 
