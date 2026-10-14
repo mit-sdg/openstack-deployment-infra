@@ -140,8 +140,9 @@ class BuildFailureCleanupTests(unittest.TestCase):
             ("source/absolute", "/etc/passwd"),
             ("source/empty", ""),
         ):
-            with self.subTest(target=target), self.assertRaisesRegex(
-                ValueError, "symlink target is unsafe"
+            with (
+                self.subTest(target=target),
+                self.assertRaisesRegex(ValueError, "symlink target is unsafe"),
             ):
                 builder.safe_member(link(name, target))
 
