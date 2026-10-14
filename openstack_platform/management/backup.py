@@ -140,15 +140,16 @@ def restore_database(source: Path, destination: Path, *, identity: str | None = 
         restored = sqlite3.connect(replacement)
         try:
             original.backup(restored)
-            validate_database(restored, identity)
+            version, _ = validate_database(restored, identity)
             restored.execute("PRAGMA foreign_keys=ON")
             with restored:
-                restored.execute("DELETE FROM csrf_tokens")
+                if version < 4:
+                    restored.execute("DELETE FROM csrf_tokens")
                 restored.execute("DELETE FROM sessions")
-                if validate_database(restored)[0] == 1:
+                if version == 1:
                     restored.execute("DELETE FROM flows")
                     restored.execute("DELETE FROM replays")
-                if validate_database(restored)[0] == 3:
+                if version >= 3:
                     now = time.time()
                     restored.execute("DELETE FROM account_tokens")
                     restored.execute("DELETE FROM enrollments")

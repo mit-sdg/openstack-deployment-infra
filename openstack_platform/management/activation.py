@@ -24,7 +24,7 @@ COMPATIBILITY = {
     "brokerProtocolVersion": 3,
     "webProtocolVersion": 3,
     "authProtocolVersion": 3,
-    "brokerSchemaVersion": 3,
+    "brokerSchemaVersion": 4,
     "controllerApiVersion": 1,
 }
 

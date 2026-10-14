@@ -270,10 +270,25 @@ function retryAfterSeconds(response: Response, error: Record<string, unknown>) {
 let csrf = '';
 let elevatedSession = false;
 let credentialEpoch = 0;
+let csrfRefresh: { epoch: number; pending: Promise<Session> } | undefined;
 export function clearCredentials() {
   csrf = '';
   elevatedSession = false;
   credentialEpoch++;
+  csrfRefresh = undefined;
+}
+
+async function refreshCsrfSession() {
+  let refresh = csrfRefresh;
+  if (!refresh || refresh.epoch !== credentialEpoch) {
+    refresh = { epoch: credentialEpoch, pending: api.session() };
+    csrfRefresh = refresh;
+  }
+  try {
+    await refresh.pending;
+  } finally {
+    if (csrfRefresh === refresh) csrfRefresh = undefined;
+  }
 }
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -404,7 +419,11 @@ export async function request<T>(
       response.status === 403 &&
       error.code === 'CSRF_REJECTED'
     ) {
-      await api.session();
+      // The broker rejects CSRF before mutation effects. Preserve body/key and
+      // allow exactly one replay, sharing recovery across simultaneous reads.
+      await refreshCsrfSession();
+      if (epoch !== credentialEpoch)
+        throw new ApiError(401, 'SESSION_EXPIRED', 'Sign in to continue.');
       return request(path, decode, options, true, signal);
     }
     if (response.status === 401 || error.code === 'ACCOUNT_DISABLED') {

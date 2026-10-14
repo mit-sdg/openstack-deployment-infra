@@ -312,7 +312,7 @@ class ClassReads:
                 with self.broker.database.connect(write=True) as db:
                     now = self.broker.auth.clock()
                     self.broker.auth.session_row(db, sid, now, "staff")
-                    self.broker.auth.check_csrf(db, request, sid, now)
+                    self.broker.auth.check_csrf(request, sid)
                     db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
                 result = handler(request)
                 if len(canonical({"data": result}).encode()) > RESPONSE_BYTES:

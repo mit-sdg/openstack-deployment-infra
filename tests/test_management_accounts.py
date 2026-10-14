@@ -477,7 +477,7 @@ class AccountsTests(ManagementCase):
             self.assertEqual(
                 {row[0] for row in db.execute("SELECT role FROM users")}, {"admin", "staff"}
             )
-            for table in ("sessions", "csrf_tokens", "account_tokens", "enrollments"):
+            for table in ("sessions", "account_tokens", "enrollments"):
                 self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM used_tokens").fetchone()[0], 1)
             self.assertEqual(

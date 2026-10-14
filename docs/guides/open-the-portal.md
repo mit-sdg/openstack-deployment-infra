@@ -284,7 +284,7 @@ Retained releases let you return to an earlier pair without reinstalling. The co
 
 Before you start, pause changes and take fresh broker and controller backups ([Backups and recovery](backups-and-recovery.md#verify-backups-and-schedules)). Review the pair's sign-in settings and database migration evidence.
 
-The command requires compatible retained and active release descriptors: schema 3, protocol 3, and controller API 1. It can't inspect the private broker database as the operator. An incompatible database needs a reviewed forward repair or verified offline restore. A restore ends sessions and may require reconciling controller and ownership records from different backup times.
+The command requires compatible retained and active release descriptors: schema 4, protocol 3, and controller API 1. It can't inspect the private broker database as the operator. An incompatible database needs a reviewed forward repair or verified offline restore. A restore ends sessions and may require reconciling controller and ownership records from different backup times.
 
 1. On the admin host (`ssh -F "$SSH_CONFIG" platform-admin`), list the retained releases. Each name is `<commit>-<pair>-<inventory>`.
 
