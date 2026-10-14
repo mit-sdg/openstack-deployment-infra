@@ -55,7 +55,7 @@ ALTER TABLE sessions DROP COLUMN kid;
 UPDATE metadata SET version=2;
 """
 SCHEMA = SCHEMA_V1
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATION_3 = """
 DELETE FROM csrf_tokens;
@@ -118,6 +118,11 @@ CREATE INDEX intent_app_page ON intents(app_id,created DESC,id DESC);
 UPDATE metadata SET version=3;
 """
 
+MIGRATION_4 = """
+DROP TABLE csrf_tokens;
+UPDATE metadata SET version=4;
+"""
+
 
 # An app's team members. Like observations, the table is additive and outside
 # the numbered schema: a release without teams ignores it, so members simply
@@ -157,7 +162,7 @@ class Database:
                 db.executescript("BEGIN IMMEDIATE;" + SCHEMA_V1)
                 db.execute("INSERT INTO metadata VALUES(1,?)", (identity,))
             row = db.execute("SELECT * FROM metadata").fetchone()
-            if row is None or row["version"] not in (1, 2, 3) or row["identity"] != identity:
+            if row is None or row["version"] not in (1, 2, 3, 4) or row["identity"] != identity:
                 raise ValueError("unsupported management schema or deployment identity")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS observations (app_id TEXT PRIMARY KEY REFERENCES apps(id), body TEXT NOT NULL, updated REAL NOT NULL)"
@@ -194,6 +199,14 @@ class Database:
                 db.execute("INSERT INTO schema_migrations VALUES(3,?)", (digest(MIGRATION_3),))
             third = db.execute("SELECT checksum FROM schema_migrations WHERE version=3").fetchone()
             if third is None or third[0] != digest(MIGRATION_3):
+                raise ValueError("management migration checksum mismatch")
+            if row["version"] < 4:
+                for statement in MIGRATION_4.split(";"):
+                    if statement.strip():
+                        db.execute(statement)
+                db.execute("INSERT INTO schema_migrations VALUES(4,?)", (digest(MIGRATION_4),))
+            fourth = db.execute("SELECT checksum FROM schema_migrations WHERE version=4").fetchone()
+            if fourth is None or fourth[0] != digest(MIGRATION_4):
                 raise ValueError("management migration checksum mismatch")
 
     @contextmanager
@@ -237,7 +250,7 @@ def validate_database(
     rows = connection.execute("SELECT version,identity FROM metadata").fetchall()
     if (
         len(rows) != 1
-        or rows[0][0] not in (1, 2, 3)
+        or rows[0][0] not in (1, 2, 3, 4)
         or (identity is not None and rows[0][1] != identity)
     ):
         raise ValueError("broker schema or identity mismatch")
@@ -252,16 +265,21 @@ def validate_database(
         ).fetchone()
         if second is None or second[0] != digest(MIGRATION_2):
             raise ValueError("broker migration checksum mismatch")
-    if rows[0][0] == 3:
+    if rows[0][0] >= 3:
         third = connection.execute(
             "SELECT checksum FROM schema_migrations WHERE version=3"
         ).fetchone()
         if third is None or third[0] != digest(MIGRATION_3):
             raise ValueError("broker migration checksum mismatch")
+    if rows[0][0] >= 4:
+        fourth = connection.execute(
+            "SELECT checksum FROM schema_migrations WHERE version=4"
+        ).fetchone()
+        if fourth is None or fourth[0] != digest(MIGRATION_4):
+            raise ValueError("broker migration checksum mismatch")
     required = {
         "users",
         "sessions",
-        "csrf_tokens",
         "apps",
         "configurations",
         "intents",
@@ -269,7 +287,9 @@ def validate_database(
         "observations",
         "quotas",
     }
-    if rows[0][0] == 3:
+    if rows[0][0] < 4:
+        required.add("csrf_tokens")
+    if rows[0][0] >= 3:
         required |= {
             "local_accounts",
             "authentication_failures",

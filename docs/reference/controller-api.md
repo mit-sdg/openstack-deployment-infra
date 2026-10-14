@@ -375,6 +375,8 @@ A builder is a temporary machine used only to build an app's image. These settin
 
 Each size has `flavor_id`, `name`, `vcpus`, `ram_mib`, and `disk_gib`. Flavor references accept names or opaque IDs. Selections store the observed name so builder creation can check both the selected image and flavor. A changed expected selection fails without changing the setting; read it again and use a new request key. A recorded selection interrupted after writing can be resumed with the original body and key.
 
+Flavor lists and builder-size reads reuse controller observations for up to ten minutes, with single-flight lookups per reference and for the catalog. Failed observations share a five-second cooldown. Selecting a builder size and creating or validating worker sizing plans always read fresh provider capacity; deployment and resource checks also remain fresh.
+
 ### Retained addresses
 
 These routes manage optional, app-owned network addresses. [Deploy apps from the command line](../guides/deploy-apps-from-the-command-line.md) explains when to use them.

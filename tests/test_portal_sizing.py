@@ -76,6 +76,48 @@ class PortalSizingTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "EXTERNAL_OPERATION_FAILED")
         self.assertNotIn("SENTINEL", raised.exception.summary)
 
+    def test_builder_and_catalog_display_reads_reuse_observations(self) -> None:
+        path = f"/v1/applications/{self.app_id}/builder-size"
+        db.put_application_builder_flavor(self.connection, self.app_id, LARGE.name)
+        with (
+            mock.patch.object(
+                openstack, "observe_flavor_capacity", side_effect=self.flavor
+            ) as observe,
+            mock.patch.object(openstack, "observe_flavors", return_value=(SMALL, LARGE)) as catalog,
+        ):
+            for _read in range(10):
+                self.project.dispatch("GET", path, {}, None)
+                self.project.dispatch("GET", "/v1/settings/default-builder-size", {}, None)
+                self.admin.dispatch("GET", "/v1/admin/settings/default-builder-size", {}, None)
+                self.project.dispatch("GET", "/v1/flavors", {}, None)
+            self.assertEqual(observe.call_count, 2)
+            self.assertEqual(catalog.call_count, 1)
+
+    def test_builder_selection_and_resize_plans_probe_fresh_after_warming_reads(self) -> None:
+        path = f"/v1/applications/{self.app_id}/builder-size"
+        self.project.dispatch("GET", path, {}, None)
+        self.project.dispatch("GET", "/v1/flavors", {}, None)
+        with mock.patch.object(openstack, "observe_flavor_capacity", return_value=TINY) as observe:
+            _response, operation = self.put(path, {"flavor": SMALL.name, "expectedFlavor": None})
+            self.assertEqual(operation.status, "failed")
+            _response, operation = self.put(
+                "/v1/settings/default-builder-size",
+                {
+                    "flavor": SMALL.name,
+                    "expectedFlavor": SMALL.name,
+                },
+            )
+            self.assertEqual(operation.status, "failed")
+            self.assertEqual(observe.call_count, 2)
+            with self.assertRaises(HttpError):
+                self.project.dispatch(
+                    "GET",
+                    f"/v1/applications/{self.app_id}/resize-plan?flavor={SMALL.name}",
+                    {},
+                    None,
+                )
+            self.assertEqual(observe.call_count, 3)
+
     def test_default_uses_inventory_then_changes_through_both_sockets(self) -> None:
         path = "/v1/settings/default-builder-size"
         self.assertEqual(

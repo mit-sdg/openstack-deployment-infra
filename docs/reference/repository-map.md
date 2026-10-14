@@ -240,6 +240,7 @@ The portal serves app owners, staff, and admins. Portal API calls go through its
 #### Unit tests
 
 - `frontend/owner-portal/src/App.test.tsx` — settings, conflicts, status, API decoding, CSRF, and runtime actions.
+- `frontend/owner-portal/src/api.test.ts` — one-time CSRF recovery for queries and mutations, shared refreshes, and credential changes.
 - `frontend/owner-portal/src/Sizing.test.tsx` — worker plan forwarding, size summaries, owner boundaries, and builder controls.
 - `frontend/owner-portal/src/ClassPages.test.tsx` — task navigation, shared Resume, metadata validation and account step-up tests.
 - `frontend/owner-portal/src/Routing.test.tsx` — shared app routes, role gates, and rejected retired routes.
@@ -437,6 +438,7 @@ The admin-host controller owns app state in SQLite. See the [controller API](con
 - `openstack_platform/controller/main.py` — controller startup and composition.
 - `openstack_platform/controller/api.py` — routes, services, helper transport, and socket authority split.
 - `openstack_platform/controller/builder_settings.py` — effective per-app builder sizes and audited default and override selections.
+- `openstack_platform/controller/flavor_cache.py` — bounded single-flight flavor display observations and short failure cooldowns.
 - `openstack_platform/controller/http.py` — bounded Unix HTTP/1.1 server with peer checks.
 - `openstack_platform/controller/database.py` — SQLite schema, migrations, identity, journals, and state operations.
 - `openstack_platform/controller/async_operations.py` — bounded worker pool serializing changes per app.
@@ -600,6 +602,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 
 - `tests/test_controller_api.py` — route wiring, the socket split, responses, idempotency, lock-free reads, and service integration.
 - `tests/test_controller_database.py` — schema, migrations, identity, journals, state changes, and database recovery.
+- `tests/test_controller_flavor_cache.py` — flavor and catalog cache hits, expiry, failure recovery, concurrent reads, and bounded storage.
 - `tests/test_controller_http.py` — Unix socket HTTP parsing, deadlines, keep-alive, peer checks, overload, and shutdown.
 - `tests/test_controller_images.py` — image selection compare-and-set, provider checks, recovery, and pinned provisioning.
 - `tests/test_controller_recovery.py` — storage recovery, rejected builds, crash and retry, and lock waits.
@@ -644,6 +647,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 - `tests/test_management_backup.py` — broker backups, retention, off-site compatibility, restore guards, and the full-loss drill.
 - `tests/test_management_client.py` — page-sized controller capacity, foreground reservation, failure cleanup, and controller default consistency.
 - `tests/test_management_contract.py` — the broker against the real controller project router and the fake controller.
+- `tests/test_management_csrf.py` — stable tokens across tabs, session revocation and expiry, pre-write rejection, and schema-4 migration.
 - `tests/test_management_dev.py` — the local harness: socket paths in deep checkouts, private directories, and cleanup after a failed start.
 - `tests/test_management_identity.py` — the Commons Connect redeem contract, TLS and peer limits, failures, and schema upgrades.
 - `tests/test_management_login_admission.py` — guessing budgets across accounts and browsers, recognized devices, and reserved capacity.

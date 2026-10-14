@@ -43,6 +43,7 @@ from .deployment_service import (
     DeploymentService,
 )
 from .environment_service import EnvironmentMutationRequest, EnvironmentService
+from .flavor_cache import FlavorCache
 from .http import HttpError, Request, Response, Router
 from .image_service import IMAGE_SELECTION_KIND, ImageSelectionService, hosted_role
 from .log_service import LogService
@@ -250,6 +251,7 @@ class ControllerAPI:
         self.helper_caller = helper_caller
         self.observer_helper = logged_helper(observer_helper, config_shaped=False)
         self._live = _SingleFlight(_LIVE_REUSE_SECONDS)
+        self._flavors_cache = FlavorCache(config.platform)
         self.applications = ApplicationService(
             connection, config, state_directory, helper_caller=helper_caller
         )
@@ -862,7 +864,7 @@ class ControllerAPI:
             {
                 "items": [
                     sizing.flavor_projection(item)
-                    for item in openstack.observe_flavors(self.config.platform)
+                    for item in self._flavors_cache.flavors()
                     if item.ram_mib - sizing.reserve(item.ram_mib, sizing.MEMORY_RESERVE_MIB) >= 64
                 ]
             },
@@ -874,7 +876,7 @@ class ControllerAPI:
             raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
         with self._snapshot() as connection:
             reference = builder_settings.default_flavor(connection, self.config)
-        flavor = openstack.observe_flavor_capacity(self.config.platform, reference)
+        flavor = self._flavors_cache.flavor(reference)
         return Response(200, {"flavor": sizing.flavor_projection(flavor)})
 
     def _select_builder_size(self, request: Request) -> Response:
@@ -901,12 +903,8 @@ class ControllerAPI:
             application_id = self._application(self._path_uuid(request), connection).application_id
             selected = db.get_application_builder_flavor(connection, application_id)
             reference = builder_settings.default_flavor(connection, self.config)
-        default = openstack.observe_flavor_capacity(self.config.platform, reference)
-        flavor = (
-            default
-            if selected is None
-            else openstack.observe_flavor_capacity(self.config.platform, selected)
-        )
+        default = self._flavors_cache.flavor(reference)
+        flavor = default if selected is None else self._flavors_cache.flavor(selected)
         return Response(
             200,
             {

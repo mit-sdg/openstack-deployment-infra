@@ -226,7 +226,7 @@ class StaffTests(ManagementCase):
             db.commit()
         migrated = Database(dataclasses.replace(self.config, state_directory=path))
         with migrated.connect() as db:
-            self.assertEqual(validate_database(db)[0], 3)
+            self.assertEqual(validate_database(db)[0], 4)
             self.assertEqual(
                 db.execute("SELECT role,generation FROM users").fetchone()[:], ("owner", 1)
             )

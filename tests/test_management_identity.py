@@ -302,7 +302,7 @@ class IdentityTests(ManagementCase):
         path.chmod(0o600)
         migrated = Database(dataclasses.replace(self.config, state_directory=old))
         with migrated.connect() as connection:
-            self.assertEqual(connection.execute("SELECT version FROM metadata").fetchone()[0], 3)
+            self.assertEqual(connection.execute("SELECT version FROM metadata").fetchone()[0], 4)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
             self.assertEqual(
                 connection.execute("SELECT id FROM users").fetchone()[0], "legacy-user"

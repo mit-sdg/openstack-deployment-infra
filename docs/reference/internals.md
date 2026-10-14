@@ -266,6 +266,10 @@ The `__Host-portal-session` cookie contains an opaque token (HttpOnly, Secure, S
 
 Mutations require the exact portal `Origin` and the session's CSRF token; admin and staff reads also require the CSRF token and same-origin metadata. Anonymous forms (local login, enrollment) use an HMAC CSRF token bound to a Strict `__Host-portal-anonymous` cookie. Logout, local revocation, expiry, and restore end sessions. Password changes, archiving, or withdrawn approval in Commons do not end portal sessions that already exist.
 
+`GET /v1/session` returns the same CSRF token for the session's lifetime. The broker derives it with HMAC-SHA-256 using its private `anonymous.key`, the separate `session-csrf` purpose, portal origin, and session digest. Tokens are unguessable and compared in constant time after validating the session. Repeated page loads, focus changes, and reads from other tabs cannot evict a token. Session rotation changes the token; logout, idle/absolute expiry, and security-generation revocation invalidate it with the session. Broker schema 4 removes the unused `csrf_tokens` table without discarding sessions.
+
+On `403 CSRF_REJECTED`, the portal shares a session refresh across concurrent failures and retries each request once. Queries keep their cancellation signal; mutations keep the same body and idempotency key. Broker CSRF validation precedes mutation writes and controller dispatch. A second rejection or failed refresh surfaces the error, and a credential change prevents replay into a different session.
+
 #### Local accounts, roles, and admin enrollment
 
 Local accounts use issuer `local`, an immutable UUID subject, and a unique lowercase username. They store salted password hashes and private TOTP state.
@@ -417,6 +421,8 @@ The project peer can list closed OpenStack flavor capacity projections and fetch
 Nomad’s CPU allocation is a soft share: the app can use all worker vCPUs. Memory is a hard limit. Enable and worker reuse validate the accepted allocation against measured capacity; resume keeps the checkpointed allocation. A selected worker size replaces the VM. A retained primary address requires maintenance cutover after the build.
 
 Staff/admin app details enrich `sizing` with optional `vcpus` and `ram_mib`, matched by worker flavor name or ID from `/v1/flavors`. The broker shares the expensive flavor read across requests with a ten-minute, single-flight cache; failures omit enrichment and share a 30-second retry cooldown. The worker size choices use the same cache.
+
+The controller also caches OpenStack flavor observations for display reads: `/v1/flavors`, the default builder size, and app builder sizes (on either socket). Each flavor reference has one shared in-flight lookup and a ten-minute lifetime measured from completion; the flavor catalog has its own shared entry. The controller holds at most 128 reference entries and one catalog entry, evicts completed entries by least recent use, and shares failed lookups for five seconds before retrying. Follower waits are bounded to 20 seconds; provider calls retain their 30-second deadline. Builder selection, sizing-plan creation/validation, deployment, and provider resource validation bypass this cache and observe fresh capacity.
 
 Overview’s Machines section separates total machine RAM from the app's hard memory limit and states that the app can use all worker vCPUs. Nomad CPU is a soft share, with no CPU hard limit. Without enrichment, the portal shows the flavor and memory limit. Deploy's size review shows an upper bound for memory until the worker's capacity is measured.
 

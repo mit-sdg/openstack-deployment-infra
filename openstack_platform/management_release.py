@@ -21,7 +21,7 @@ COMPATIBILITY = {
     "brokerProtocolVersion": 3,
     "webProtocolVersion": 3,
     "authProtocolVersion": 3,
-    "brokerSchemaVersion": 3,
+    "brokerSchemaVersion": 4,
     "controllerApiVersion": 1,
 }
 BASE = (
@@ -226,7 +226,7 @@ def generate(
         for name in source
     ):
         raise ValueError("source archive contains signing material or harness state")
-    requirements = {"python": "3.14", "identityTls": "system-ca", "schemaVersion": 3}
+    requirements = {"python": "3.14", "identityTls": "system-ca", "schemaVersion": 4}
     artifacts = {}
     for mode in ("broker", "web"):
         files = {

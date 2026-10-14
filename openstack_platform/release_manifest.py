@@ -225,7 +225,7 @@ def component_set(
         "authProtocolVersion": 3,
         "brokerProtocolVersion": 3,
         "webProtocolVersion": 3,
-        "brokerSchemaVersion": 3,
+        "brokerSchemaVersion": 4,
         "controllerApiVersion": 1,
         "artifactEvidenceFormat": "openstack-platform-management-artifacts-v1",
         "build": ui_build,

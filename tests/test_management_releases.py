@@ -307,7 +307,7 @@ class ManagementReleaseTests(unittest.TestCase):
         descriptor = broker / "evidence/management-artifacts.json"
         raw = descriptor.read_bytes()
         value = json.loads(raw)
-        value["compatibility"]["brokerSchemaVersion"] = 4
+        value["compatibility"]["brokerSchemaVersion"] = 5
         descriptor.chmod(0o640)
         descriptor.write_text(json.dumps(value))
         descriptor.chmod(0o440)

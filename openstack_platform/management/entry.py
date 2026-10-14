@@ -45,7 +45,7 @@ def main() -> None:
     if requirement != {
         "python": "3.14",
         "identityTls": "system-ca",
-        "schemaVersion": 3,
+        "schemaVersion": 4,
     } or sys.version_info[:2] != (3, 14):
         raise ValueError("management runtime or schema requirements differ")
     if args.mode == "identity":
@@ -78,7 +78,7 @@ def main() -> None:
                         dataclasses.replace(config, state_directory=Path(directory))
                     )
                     with database.connect() as connection:
-                        if connection.execute("SELECT version FROM metadata").fetchone()[0] != 3:
+                        if connection.execute("SELECT version FROM metadata").fetchone()[0] != 4:
                             raise ValueError("management schema differs")
             elif args.assets is None or not (args.assets / "index.html").is_file():
                 raise ValueError("web assets are missing")

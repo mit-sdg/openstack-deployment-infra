@@ -472,14 +472,16 @@ class Auth:
             raise HttpError(403, "ACCESS_DENIED", "This session cannot access this view.")
         return dict(row)
 
-    @staticmethod
-    def check_csrf(db: sqlite3.Connection, request: Request, sid: str, now: float) -> None:
+    def session_csrf(self, sid: str) -> str:
+        """Reproduce one unguessable token for the lifetime of an opaque session."""
+        return self.anonymous.mac("session-csrf", sid)
+
+    def check_csrf(self, request: Request, sid: str) -> None:
+        # Callers validate the session first, including expiry and revocation.
         csrf = request.headers.get("x-csrf-token", "")
-        found = db.execute(
-            "SELECT 1 FROM csrf_tokens WHERE token=? AND session=? AND expires>?",
-            (digest(csrf), sid, now),
-        ).fetchone()
-        if found is None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", csrf) or not hmac.compare_digest(
+            self.session_csrf(sid), csrf
+        ):
             raise HttpError(403, "CSRF_REJECTED", "Refresh this page before trying again.")
 
     def authenticate(
@@ -498,7 +500,7 @@ class Auth:
             if mutation:
                 self.portal_origin(request)
             if mutation or csrf:
-                self.check_csrf(db, request, sid, now)
+                self.check_csrf(request, sid)
             if touch:
                 db.execute("UPDATE sessions SET last_used=? WHERE token=?", (now, sid))
             return user, sid
@@ -506,17 +508,6 @@ class Auth:
     def bootstrap(self, request: Request) -> Response:
         self.read_origin(request)
         user, sid = self.authenticate(request)
-        token, now = opaque(), self.clock()
-        with self.database.connect(write=True) as db:
-            db.execute("DELETE FROM csrf_tokens WHERE expires<=?", (now,))
-            db.execute(
-                "INSERT INTO csrf_tokens VALUES(?,?,?,?)",
-                (digest(token), sid, min(now + 1800, user["expires"]), now),
-            )
-            db.execute(
-                "DELETE FROM csrf_tokens WHERE session=? AND token NOT IN (SELECT token FROM csrf_tokens WHERE session=? ORDER BY created DESC,token LIMIT 10)",
-                (sid, sid),
-            )
         return Response(
             200,
             {
@@ -526,7 +517,7 @@ class Auth:
                         "username": user["username"],
                         "displayName": user["display_name"],
                     },
-                    "csrfToken": token,
+                    "csrfToken": self.session_csrf(sid),
                     "expiresAt": utc(user["expires"]),
                     "role": user["kind"],
                     "stepUpExpiresAt": utc(user["reauthenticated_at"] + 300)
