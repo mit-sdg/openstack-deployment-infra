@@ -312,6 +312,10 @@ class ReleaseInstallerTests(unittest.TestCase):
             """,
         )
         self._write(repository, "openstack_platform/__init__.py", "")
+        for name in ("config.py", "contracts.py", "validation.py"):
+            shutil.copy2(
+                ROOT / "openstack_platform" / name, repository / "openstack_platform" / name
+            )
         shutil.copy2(
             ROOT / "openstack_platform/release_manifest.py",
             repository / "openstack_platform/release_manifest.py",
@@ -448,6 +452,10 @@ class ReleaseInstallerTests(unittest.TestCase):
             .replace(
                 "ssh_config=$operator_root/.secrets/ssh/config",
                 f"ssh_config={self.root / 'fixture-ssh-config'}",
+            )
+            .replace(
+                "operator_policy=$operator_root/state/policy.json",
+                f"operator_policy={self.root / 'operator-policy.json'}",
             )
             .replace("/run/current-system/sw/bin/python3.14", sys.executable)
             .replace("/nix/store", str(fixture_store))
@@ -773,7 +781,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(current.resolve(), selected)
         self.assertEqual((selected / ".complete").read_text(), f"{commit}\n")
 
-    def test_helper_deployment_bootstraps_an_empty_configured_admin(self) -> None:
+    def _helper_deployment_fixture(self) -> tuple[Path, str, dict[str, str], Path, Path]:
         repository, commit = self._repository()
         ssh_config = self.root / "fixture-ssh-config"
         ssh_config.write_text("fixture\n", encoding="utf-8")
@@ -787,6 +795,9 @@ class ReleaseInstallerTests(unittest.TestCase):
         document["paths"]["adminState"] = str(admin_state)
         platform.write_text(json.dumps(document), encoding="utf-8")
         platform.chmod(0o600)
+        policy = self.root / "operator-policy.json"
+        shutil.copy2(ROOT / "config/platform-policy.example.json", policy)
+        policy.chmod(0o600)
         helper_config_root = admin / "etc"
         live_platform = helper_config_root / document["namespace"] / "platform.json"
         live_platform.parent.mkdir(parents=True)
@@ -853,7 +864,12 @@ class ReleaseInstallerTests(unittest.TestCase):
         environment["PLATFORM_ALLOW_UNSIGNED_DEVELOPMENT"] = (
             release_manifest.UNSIGNED_ACKNOWLEDGEMENT
         )
-        result = subprocess.run(
+        return repository, commit, environment, admin_root, admin_state
+
+    def _deploy_helper(
+        self, repository: Path, commit: str, environment: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [repository / "deploy/releases/deploy_helper_release.sh", commit],
             cwd=repository,
             env=environment,
@@ -861,17 +877,95 @@ class ReleaseInstallerTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def test_helper_deployment_bootstraps_an_empty_configured_admin(self) -> None:
+        repository, commit, environment, admin_root, admin_state = self._helper_deployment_fixture()
+        result = self._deploy_helper(repository, commit, environment)
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
         release = admin_state / "operator/helper-releases/releases" / commit
         launcher = admin_root / "bin/openstack-platform-helper"
-        self.assertEqual(result.stdout.splitlines()[-1], f"helper-release={commit}:verified")
+        self.assertIn(f"helper-release={commit}:verified", result.stdout.splitlines())
         self.assertEqual((admin_state / "operator/helper-releases/current").resolve(), release)
         self.assertEqual(launcher.resolve(), release / "bin/openstack-platform-helper")
         launcher_text = launcher.resolve().read_text(encoding="utf-8")
-        self.assertIn(f"platform_config={live_platform}", launcher_text)
+        self.assertIn(
+            f"platform_config={environment['PLATFORM_HELPER_CONFIG_ROOT']}/app-platform/platform.json",
+            launcher_text,
+        )
         self.assertEqual((release / ".complete").read_text(), f"{commit}\n")
         self.assertEqual(list((admin_state / "operator/helper-releases/incoming").iterdir()), [])
+        policy = self.root / "operator-policy.json"
+        installed_policy = admin_state / "operator/policy.json"
+        self.assertEqual(installed_policy.read_bytes(), policy.read_bytes())
+        self.assertEqual(stat.S_IMODE(installed_policy.stat().st_mode), 0o600)
+        self.assertEqual(installed_policy.stat().st_uid, os.geteuid())
+        checksum = hashlib.sha256(policy.read_bytes()).hexdigest()
+        self.assertIn(f"policy=synced sha256={checksum}", result.stdout.splitlines())
+        self.assertNotIn(
+            json.loads(policy.read_text())["backupAgeRecipient"], result.stdout + result.stderr
+        )
+
+    def test_helper_deployment_syncs_changed_policy_and_leaves_unchanged_policy_alone(self) -> None:
+        repository, commit, environment, _admin_root, admin_state = (
+            self._helper_deployment_fixture()
+        )
+        installed_policy = admin_state / "operator/policy.json"
+        installed_policy.parent.mkdir(parents=True)
+        installed_policy.write_text("previous policy\n")
+        installed_policy.chmod(0o600)
+        previous_inode = installed_policy.stat().st_ino
+
+        first = self._deploy_helper(repository, commit, environment)
+        self.assertEqual(first.returncode, 0, msg=first.stdout + first.stderr)
+        self.assertEqual(
+            installed_policy.read_bytes(), (self.root / "operator-policy.json").read_bytes()
+        )
+        self.assertNotEqual(installed_policy.stat().st_ino, previous_inode)
+        self.assertIn("policy=synced sha256=", first.stdout)
+        metadata = installed_policy.stat()
+
+        second = self._deploy_helper(repository, commit, environment)
+        self.assertEqual(second.returncode, 0, msg=second.stdout + second.stderr)
+        self.assertIn("policy=unchanged", second.stdout.splitlines())
+        self.assertEqual(installed_policy.stat().st_ino, metadata.st_ino)
+        self.assertEqual(installed_policy.stat().st_mtime_ns, metadata.st_mtime_ns)
+        self.assertEqual(stat.S_IMODE(installed_policy.stat().st_mode), 0o600)
+        self.assertEqual(list(installed_policy.parent.glob(".policy-*")), [])
+
+    def test_helper_deployment_rejects_invalid_policy_without_touching_admin_copy(self) -> None:
+        repository, commit, environment, _admin_root, admin_state = (
+            self._helper_deployment_fixture()
+        )
+        installed_policy = admin_state / "operator/policy.json"
+        installed_policy.parent.mkdir(parents=True)
+        original = (ROOT / "config/platform-policy.example.json").read_bytes()
+        installed_policy.write_bytes(original)
+        installed_policy.chmod(0o600)
+        metadata = installed_policy.stat()
+        policy = self.root / "operator-policy.json"
+        document = json.loads(original)
+        document["standard"]["memoryMiB"] = 0
+        unknown = json.loads(original)
+        unknown["private-policy-value"] = "must not appear"
+        for label, raw in (
+            ("malformed JSON", b'{"private-policy-value":'),
+            ("invalid memory", json.dumps(document).encode()),
+            ("unknown key", json.dumps(unknown).encode()),
+            ("duplicate key", original.replace(b'"standard":', b'"standard": {}, "standard":')),
+        ):
+            with self.subTest(policy=label):
+                policy.write_bytes(raw)
+                result = self._deploy_helper(repository, commit, environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("operator policy failed validation", result.stderr)
+                self.assertNotIn("private-policy-value", result.stdout + result.stderr)
+                self.assertNotIn("policy=synced", result.stdout)
+                self.assertEqual(installed_policy.read_bytes(), original)
+                self.assertEqual(installed_policy.stat().st_ino, metadata.st_ino)
+                self.assertEqual(installed_policy.stat().st_mtime_ns, metadata.st_mtime_ns)
+                self.assertEqual(stat.S_IMODE(installed_policy.stat().st_mode), 0o600)
+                self.assertFalse((admin_state / "operator/helper-releases").exists())
 
     def test_helper_deployment_refuses_mismatched_live_config_before_upload(self) -> None:
         repository, commit = self._repository()
@@ -1002,8 +1096,12 @@ class OperatorConfigInstallerTests(unittest.TestCase):
         self.policy.write_text(json.dumps(policy))
         second = self._run()
 
-        self.assertEqual(first.stdout, "operator-config=installed\n")
-        self.assertEqual(second.stdout, "operator-config=installed\n")
+        expected_output = (
+            "operator-config=installed\n"
+            "Admin picks up policy on the next deploy_helper_release.sh plus controller restart.\n"
+        )
+        self.assertEqual(first.stdout, expected_output)
+        self.assertEqual(second.stdout, expected_output)
         self.assertNotIn("Updated Platform", second.stdout + second.stderr)
         self.assertNotEqual(before, installed_platform.stat().st_ino)
         self.assertNotEqual(policy_before, installed_policy.stat().st_ino)
