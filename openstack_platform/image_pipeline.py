@@ -580,8 +580,14 @@ def publish(repository: Path, root: Path, platform: Path, values: dict[str, str]
     # Roles have distinct names/IDs and no publication dependencies. Keep the
     # all-role verification barrier above and wait for every upload on failure.
     # Capture each role's output so concurrent subprocesses cannot interleave it.
+    from . import provider_local
+
     failures = set()
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with (
+        provider_local.publication(child, child.get("OSC", "openstack")) as provider_environment,
+        ThreadPoolExecutor(max_workers=5) as executor,
+    ):
+        child = provider_environment
         futures = {}
         for role in release.ROLES:
             print(f"[{role}] publication started", flush=True)

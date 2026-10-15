@@ -342,7 +342,7 @@ let
     ${pkgs.util-linux}/bin/runuser -u ${controllerUser} -- ${pkgs.coreutils}/bin/rm -f -- "$input" "$keys"
   '';
 
-  openstackClient = pkgs.writeShellScriptBin "platform-openstack" ''
+  openstackMutation = pkgs.writeShellScriptBin "platform-openstack-mutate" ''
     set -euo pipefail
     set -a
     source ${root}/secrets/openstack.env
@@ -350,6 +350,12 @@ let
     export OS_USER_DOMAIN_NAME="''${OS_USER_DOMAIN_NAME:-Default}"
     export OS_PROJECT_DOMAIN_NAME="''${OS_PROJECT_DOMAIN_NAME:-Default}"
     exec ${packages.python}/bin/openstack "$@"
+  '';
+  providerSocket = "/run/${namespace}-provider/provider.sock";
+  openstackClient = pkgs.writeShellScriptBin "platform-openstack" ''
+    exec ${packages.controllerPackage}/bin/openstack-platform-provider-command \
+      --socket ${providerSocket} --provider-uid ${toString operatorAccount.uid} \
+      --mutation-command ${openstackMutation}/bin/platform-openstack-mutate -- "$@"
   '';
   nomadCli = pkgs.writeShellScriptBin "${namespace}-nomad" ''
     set -euo pipefail
@@ -367,7 +373,7 @@ let
     set +a
     exec env \
       PLATFORM_CONFIG=/etc/${namespace}/platform.json \
-      OSC=${packages.python}/bin/openstack \
+      OSC=${openstackClient}/bin/platform-openstack \
       IMAGE_NAME="''${IMAGE_NAME:-${platform.images.worker}}" \
       FLAVOR_NAME="''${FLAVOR_NAME:-${platform.flavors.worker}}" \
       NOMAD="''${NOMAD:-${nomadCli}/bin/${namespace}-nomad}" \
@@ -387,7 +393,7 @@ let
     set +a
     exec env \
       PLATFORM_CONFIG=/etc/${namespace}/platform.json \
-      OSC=${packages.python}/bin/openstack \
+      OSC=${openstackClient}/bin/platform-openstack \
       ${infra}/openstack/pin_ephemeral_host_key.sh "$@"
   '';
   builderCli = pkgs.writeShellScriptBin "${namespace}-builder" ''
@@ -397,7 +403,7 @@ let
     set +a
     exec env \
       PLATFORM_CONFIG=/etc/${namespace}/platform.json \
-      OSC=${packages.python}/bin/openstack \
+      OSC=${openstackClient}/bin/platform-openstack \
       IMAGE_NAME="''${IMAGE_NAME:-${platform.images.builder}}" \
       FLAVOR_NAME="''${FLAVOR_NAME:-${platform.flavors.builder}}" \
       TEMPLATE=${infra}/cloud-init-nixos/builder.yaml \
@@ -697,14 +703,69 @@ in
     };
   };
 
-  systemd.services."${namespace}-controller" = {
-    description = "Local ${platform.displayName} application controller";
+  systemd.services."${namespace}-provider" = {
+    description = "Persistent ${platform.displayName} OpenStack read session";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
     after = [
       "network-online.target"
+      "${namespace}-controller-prepare.service"
+      stateMountUnit
+    ];
+    requires = [ stateMountUnit ];
+    unitConfig.ConditionPathExists = "${operatorRoot}/secrets/openstack.env";
+    serviceConfig = {
+      Type = "notify";
+      NotifyAccess = "main";
+      User = operatorAccount.name;
+      # systemd reapplies RuntimeDirectory ownership for each service command.
+      # Keep the controller's traversal group in the unit itself.
+      Group = controllerSocketGroup;
+      SupplementaryGroups = [ operatorAccount.name ];
+      RuntimeDirectory = "${namespace}-provider";
+      RuntimeDirectoryMode = "0750";
+      ExecStart = lib.concatStringsSep " " [
+        "${packages.controllerPackage}/bin/openstack-platform-provider"
+        "--socket ${providerSocket}"
+        "--credentials ${operatorRoot}/secrets/openstack.env"
+        "--peer ${toString operatorAccount.uid}:${toString operatorAccount.gid}"
+        "--peer ${toString controllerAccount.uid}:${toString controllerSocketAccount.gid}"
+        "--socket-group ${toString controllerSocketAccount.gid}"
+      ];
+      Restart = "on-failure";
+      RestartSec = 2;
+      TimeoutStopSec = 5;
+      UMask = "0077";
+      LimitCORE = 0;
+      NoNewPrivileges = true;
+      CapabilityBoundingSet = "";
+      PrivateTmp = true;
+      PrivateDevices = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      RestrictAddressFamilies = [
+        "AF_UNIX"
+        "AF_INET"
+        "AF_INET6"
+      ];
+      ReadWritePaths = [ "/run/${namespace}-provider" ];
+      MemoryMax = "256M";
+      TasksMax = 64;
+    };
+  };
+
+  systemd.services."${namespace}-controller" = {
+    description = "Local ${platform.displayName} application controller";
+    wantedBy = [ "multi-user.target" ];
+    wants = [
+      "network-online.target"
+      "${namespace}-provider.service"
+    ];
+    after = [
+      "network-online.target"
       "nomad.service"
       "${namespace}-controller-prepare.service"
+      "${namespace}-provider.service"
       stateMountUnit
     ];
     requires = [
@@ -719,6 +780,8 @@ in
     ];
     environment = {
       PLATFORM_OPENSTACK_COMMAND = "${openstackClient}/bin/platform-openstack";
+      PLATFORM_PROVIDER_SOCKET = providerSocket;
+      PLATFORM_PROVIDER_UID = toString operatorAccount.uid;
       PYTHONDONTWRITEBYTECODE = "1";
     };
     serviceConfig = {

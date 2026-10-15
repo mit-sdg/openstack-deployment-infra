@@ -86,6 +86,8 @@ Neither updates the other or changes a running machine.
 
 ## Roll out new role images
 
+For the first release introducing persistent OpenStack reads, follow the [provider rollout](../reference/openstack-provider.md#rollout-and-rollback) before read-dependent replacement commands.
+
 For a release changing all five images, use this order. Keep app changes paused through step 6.
 
 1. Confirm publication and live acceptance. Record exact image IDs. Finish in-flight operations, then take controller, operator-state, and portal broker backups.

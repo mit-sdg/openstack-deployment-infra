@@ -476,6 +476,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ needs.publication-context.outputs.commit_sha }}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.12.2"
+
       - name: Record protected publication enablement
         env:
           ENABLED: ${{ vars.OPENSTACK_PUBLISH_ENABLED }}
@@ -580,7 +584,7 @@ jobs:
         run: |
           set -euo pipefail
           for name in OS_AUTH_URL OS_PASSWORD OS_PROJECT_ID OS_USERNAME; do test -n "${!name}"; done
-          python3 -m openstack_platform.image_pipeline \
+          uv run --frozen --no-dev python -m openstack_platform.image_pipeline \
             --root "$RUNNER_TEMP/production-images" --platform "$PLATFORM_CONFIG" publish
       - name: Remove private inventory and public trust root
         if: always()
@@ -861,6 +865,10 @@ jobs:
         with:
           python-version: "3.14"
 
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.12.2"
+
       - name: Install publication and smoke-test tools
         run: |
           tests/install_ci_apt_packages.sh \
@@ -994,7 +1002,8 @@ jobs:
             esac
           done <<< "$verification"
           tests/smoke_openstack_image.sh "$role" "$qcow"
-          infra/openstack/publish_nixos_image.sh "$role" "$qcow" "$output" "$path_info"
+          uv run --frozen --no-dev python -m openstack_platform.provider_local -- \
+            infra/openstack/publish_nixos_image.sh "$role" "$qcow" "$output" "$path_info"
 
       - name: Remove private deployment configuration
         if: always()

@@ -8,7 +8,7 @@ load_platform_config
 # shellcheck source=persistent-host.sh
 source "$SCRIPT_DIR/persistent-host.sh"
 
-OSC=${OSC:-openstack}
+OSC=${OSC:-platform-openstack}
 TEMPLATE=${TEMPLATE:-$SCRIPT_DIR/../cloud-init-nixos/storage.yaml}
 OPERATOR_PUBLIC_KEY=${OPERATOR_PUBLIC_KEY:?set OPERATOR_PUBLIC_KEY to the operator public-key path}
 STORAGE_SECRETS_FILE=${STORAGE_SECRETS_FILE:?set STORAGE_SECRETS_FILE to the storage bootstrap secret path}
@@ -40,7 +40,7 @@ image_id=$(resolve_persistent_image_id "$IMAGE_NAME")
 flavor_id=$(resolve_persistent_flavor_id "$FLAVOR_NAME")
 persistent_host_metadata_args storage "$image_id" "$flavor_id"
 server_id=$(resolve_persistent_server_id "$SERVER_NAME")
-if ! "$OSC" volume show "$VOLUME_NAME" >/dev/null 2>&1; then
+if ! persistent_volume_exists "$VOLUME_NAME"; then
   [[ -z $server_id ]] || {
     echo "$VOLUME_NAME is missing while the configured server already exists" >&2
     exit 1

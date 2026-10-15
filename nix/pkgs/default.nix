@@ -144,6 +144,9 @@ let
     dependencies = with pkgs.python314Packages; [
       bcrypt
       boto3
+      keystoneauth1
+      requests
+      urllib3
       psycopg
       pymongo
     ];

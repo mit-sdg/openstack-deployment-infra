@@ -6,7 +6,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/../lib/platform-config.sh"
 load_platform_config
 
-OSC=${OSC:-openstack}
+OSC=${OSC:-platform-openstack}
 TEMPLATE=${TEMPLATE:-$SCRIPT_DIR/../cloud-init-nixos/worker.yaml}
 PKI_DIR=${PKI_DIR:?set PKI_DIR to the internal PKI directory}
 STORAGE_SECRETS_FILE=${STORAGE_SECRETS_FILE:?set STORAGE_SECRETS_FILE to the storage bootstrap secret path}

@@ -10,11 +10,16 @@ requires-python = ">=3.14,<3.15"
 dependencies = [
   "bcrypt==5.0.0",
   "boto3>=1.42,<2",
+  "keystoneauth1>=5.12,<6",
   "psycopg[binary]>=3.3,<4",
   "pymongo>=4.16,<5",
+  "requests>=2.32,<3",
+  "urllib3>=2.2,<3",
 ]
 
 [project.scripts]
+openstack-platform-provider = "openstack_platform.provider_service:main"
+openstack-platform-provider-command = "openstack_platform.provider_command:main"
 openstack-platform = "openstack_platform.operator:main"
 openstack-platform-helper = "openstack_platform.helper.main:main"
 openstack-platform-storage-backup = "openstack_platform.database_backups:main"
@@ -39,6 +44,7 @@ dev = [
   "cryptography==50.0.0",
   "mypy==1.19.1",
   "ruff==0.15.4",
+  "types-requests>=2.33.0.20261006",
   "vulture==2.15.0",
 ]
 

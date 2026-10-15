@@ -63,6 +63,17 @@ print(parsed)
 ' "$flavor_name" <<<"$payload"
 }
 
+# Exit status 0 when the named volume exists and 1 when it does not. A failed
+# read stops the script rather than looking like a missing volume.
+persistent_volume_exists() {
+  local volume_name=$1 ids
+  ids=$("$OSC" volume list --name "$volume_name" -f value -c ID) || {
+    echo "could not read volume $volume_name" >&2
+    exit 1
+  }
+  [[ -n $ids ]]
+}
+
 resolve_persistent_volume_id() {
   local volume_name=$1 expected_size=$2 expected_type=$3 payload
   payload=$("$OSC" volume show "$volume_name" -f json -c id -c name -c size -c type)

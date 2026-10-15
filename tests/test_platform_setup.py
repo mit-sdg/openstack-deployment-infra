@@ -287,6 +287,14 @@ class SetupPreflightTests(unittest.TestCase):
             ),
             mock.patch.object(setup, "_command", side_effect=identity_read),
             mock.patch.object(setup, "_json_command", side_effect=spy),
+            mock.patch.object(
+                setup,
+                "_glance_usage",
+                return_value={
+                    "usage": {"image_count": 1, "image_size": 1024**3},
+                    "limits": {"image_count": 100, "image_size": 100 * 1024**3},
+                },
+            ),
         ):
             for name, spy_function in mutation_spies.items():
                 spy_function.side_effect = AssertionError(name)
@@ -397,111 +405,41 @@ class SetupPreflightTests(unittest.TestCase):
         self.assertFalse(plan["ready"])
         self.assertFalse(plan["resolved"]["fixedAddresses"]["ingress"]["available"])
 
-    def test_glance_quota_refuses_non_https_endpoint_before_token_use(self) -> None:
+    def test_glance_quota_uses_the_session_without_exporting_a_token(self) -> None:
+        api = mock.Mock()
+        api.execute.return_value = {"limits": {}, "usage": {}}
         with (
-            mock.patch.object(
-                setup,
-                "_json_command",
-                return_value={
-                    "endpoints": [
-                        {
-                            "interface": "public",
-                            "region": "RegionOne",
-                            "url": "http://images.example.test/v2",
-                        }
-                    ]
-                },
-            ),
+            mock.patch.object(setup.provider_local, "session", return_value=api),
             mock.patch.object(setup, "_command") as command,
-            self.assertRaisesRegex(setup.SetupError, "uses HTTP"),
         ):
-            setup._glance_usage(Path("openstack"), self.resolved)
+            result = setup._glance_usage(Path("openstack"), self.resolved)
+        self.assertEqual(result, {"limits": {}, "usage": {}})
+        self.assertEqual(api.execute.call_args.args[:2], ("image.usage", {}))
         command.assert_not_called()
 
-    def test_glance_quota_allows_http_only_after_exact_acknowledgement(self) -> None:
-        self.resolved.values["PLATFORM_ALLOW_HTTP_GLANCE"] = (
-            "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
-        )
-        try:
-            with (
-                mock.patch.object(
-                    setup,
-                    "_json_command",
-                    return_value={
-                        "endpoints": [
-                            {
-                                "interface": "public",
-                                "region": "RegionOne",
-                                "url": "http://images.example.test/v2",
-                            },
-                            {
-                                "interface": "public",
-                                "region": "RegionOne",
-                                "url": "http://images.example.test/v2",
-                            },
-                        ]
-                    },
-                ),
-                mock.patch.object(
-                    setup,
-                    "_command",
-                    side_effect=(
-                        "opaque-token",
-                        json.dumps({"limits": {}, "usage": {}}),
-                    ),
-                ) as command,
-                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
-            ):
-                result = setup._glance_usage(Path("openstack"), self.resolved)
-        finally:
-            self.resolved.values.pop("PLATFORM_ALLOW_HTTP_GLANCE")
-        self.assertEqual(result, {"limits": {}, "usage": {}})
-        self.assertEqual(command.call_count, 2)
+    def test_glance_provider_details_are_withheld(self) -> None:
+        api = mock.Mock()
+        api.execute.side_effect = setup.provider.ProviderError("configuration")
+        with (
+            mock.patch.object(setup.provider_local, "session", return_value=api),
+            self.assertRaisesRegex(setup.SetupError, "provider details were withheld"),
+        ):
+            setup._glance_usage(Path("openstack"), self.resolved)
 
-    def test_legacy_glance_quota_404_requires_a_separate_exact_acknowledgement(self) -> None:
-        self.resolved.values["PLATFORM_ALLOW_HTTP_GLANCE"] = (
-            "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
-        )
-        catalog = {
-            "endpoints": [
-                {
-                    "interface": "public",
-                    "region": "RegionOne",
-                    "url": "http://images.example.test/v2",
-                }
-            ]
-        }
-        failure = setup.SetupError(
-            "setup command failed (curl): curl: (22) The requested URL returned error: 404"
-        )
-        try:
-            with (
-                mock.patch.object(setup, "_json_command", return_value=catalog),
-                mock.patch.object(setup, "_command", side_effect=("opaque-token", failure)),
-                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
-                self.assertRaisesRegex(setup.SetupError, "quota usage endpoint"),
-            ):
+    def test_glance_quota_404_requires_its_explicit_acknowledgement(self) -> None:
+        api = mock.Mock()
+        api.execute.side_effect = setup.provider.ProviderError("http", 404)
+        with mock.patch.object(setup.provider_local, "session", return_value=api):
+            with self.assertRaisesRegex(setup.SetupError, "quota usage endpoint"):
                 setup._glance_usage(Path("openstack"), self.resolved)
-
             self.resolved.values["PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA"] = (
                 "I_UNDERSTAND_GLANCE_QUOTA_IS_UNVERIFIED"
             )
-            with (
-                mock.patch.object(setup, "_json_command", return_value=catalog),
-                mock.patch.object(setup, "_command", side_effect=("opaque-token", failure)),
-                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/curl"),
-            ):
+            try:
                 usage = setup._glance_usage(Path("openstack"), self.resolved)
-            self.assertEqual(usage, {"_platform_glance_quota_unavailable": True})
-            with mock.patch.object(setup, "_glance_usage", return_value=usage):
-                quotas = setup._glance_quota_deltas(
-                    Path("openstack"), self.resolved, self.verified_release()[1]
-                )
-            self.assertTrue(setup._quotas_ready(quotas))
-            self.assertEqual(quotas["image_count"]["verification"], "unverified-legacy-provider")
-        finally:
-            self.resolved.values.pop("PLATFORM_ALLOW_HTTP_GLANCE", None)
-            self.resolved.values.pop("PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA", None)
+            finally:
+                self.resolved.values.pop("PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA")
+        self.assertEqual(usage, {"_platform_glance_quota_unavailable": True})
 
     def test_glance_unknown_and_shortfall_are_not_ready(self) -> None:
         fixture = json.loads(

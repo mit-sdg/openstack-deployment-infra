@@ -22,7 +22,7 @@ from openstack_platform.controller.http import HttpError
 from openstack_platform.helper import production
 from openstack_platform.validation import ValidationError
 from tests import test_application_sizing as fixtures
-from tests.fixtures.retained_openstack import start_cli
+from tests.fixtures.retained_openstack import start_cli, start_reads
 
 ROOT = Path(__file__).resolve().parents[1]
 NETWORK, SUBNET, GROUP = (f"00000000-0000-4000-8000-{n:012d}" for n in (1, 2, 3))
@@ -53,6 +53,8 @@ class RetainedFixedIPTests(unittest.TestCase):
         self.executable = self.root / "fake-openstack"
         self.state_path = self.root / "cloud.json"
         self.addCleanup(start_cli(self.state_path, self.executable))
+        read_socket = self.root / "provider.sock"
+        self.addCleanup(start_reads(self.state_path, read_socket))
         self.state_path.write_text(
             json.dumps(
                 dict(
@@ -115,6 +117,8 @@ class RetainedFixedIPTests(unittest.TestCase):
                 os.environ,
                 dict(
                     OSC=str(self.executable),
+                    PLATFORM_PROVIDER_SOCKET=str(read_socket),
+                    PLATFORM_PROVIDER_UID=str(os.geteuid()),
                     PLATFORM_CONFIG=str(ROOT / "config/platform.example.json"),
                     OS_PROJECT_NAME=platform.project_name,
                     PKI_DIR=str(pki),

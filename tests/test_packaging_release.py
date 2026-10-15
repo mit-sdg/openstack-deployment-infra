@@ -288,6 +288,18 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.openstack_command = self.root / "protected-openstack"
         self.openstack_command.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
         self.openstack_command.chmod(0o700)
+        fixture_bin = self.root / "fixture-bin"
+        fixture_bin.mkdir()
+        (fixture_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n")
+        (fixture_bin / "systemctl").chmod(0o700)
+        path_patch = mock.patch.dict(
+            os.environ, {"PATH": str(fixture_bin) + ":" + os.environ["PATH"]}
+        )
+        path_patch.start()
+        self.addCleanup(path_patch.stop)
+        mutation = Path(str(self.openstack_command) + "-mutate")
+        mutation.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        mutation.chmod(0o700)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()

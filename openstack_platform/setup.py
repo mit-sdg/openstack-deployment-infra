@@ -20,14 +20,14 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
-from urllib.parse import urlsplit
 from uuid import UUID
 
-from . import durable
+from . import durable, provider, provider_local
 from . import openstack as platform_openstack
 from .config import load_platform, load_policy
 from .contracts import IMAGE_ROLES, OPERATOR_SSH_ALIAS, PERSISTENT_ROLES
@@ -43,7 +43,6 @@ from .release_manifest import (
 _ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 _SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,30}[a-z0-9]")
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
-_HTTP_GLANCE_ACKNOWLEDGEMENT = "I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP"
 _UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT = "I_UNDERSTAND_GLANCE_QUOTA_IS_UNVERIFIED"
 _GLANCE_QUOTA_UNAVAILABLE = "_platform_glance_quota_unavailable"
 
@@ -172,6 +171,14 @@ def _command(
     timeout: int = 7_200,
 ) -> str:
     encoded = tuple(str(item) for item in argv)
+    if provider.is_read(encoded[1:]):
+        try:
+            output = provider_local.read(encoded[1:], environment, timeout_seconds=timeout).decode(
+                "utf-8"
+            )
+        except provider.ProviderError:
+            raise SetupError("OpenStack command failed; provider details were withheld") from None
+        return output if capture else ""
     try:
         result = subprocess.run(
             encoded,
@@ -819,8 +826,9 @@ def _write_openstack_wrapper(
         "set +a\n"
         f'exec {shlex.quote(str(openstack))} "$@"\n'
     )
-    if paths.openstack_wrapper.exists() or paths.openstack_wrapper.is_symlink():
-        metadata = paths.openstack_wrapper.lstat()
+    mutation_wrapper = Path(str(paths.openstack_wrapper) + "-mutate")
+    if mutation_wrapper.exists() or mutation_wrapper.is_symlink():
+        metadata = mutation_wrapper.lstat()
         if (
             not stat.S_ISREG(metadata.st_mode)
             or stat.S_ISLNK(metadata.st_mode)
@@ -830,8 +838,28 @@ def _write_openstack_wrapper(
             _fail("existing generated OpenStack wrapper is unsafe")
         # Durable replacement requires the destination's installation mode.
         # Normalize the executable post-install mode before replacing it.
+        mutation_wrapper.chmod(0o600)
+    _atomic_private_write(mutation_wrapper, wrapper)
+    mutation_wrapper.chmod(0o700)
+    frontend = (
+        "#!/bin/sh\nset -eu\nexec "
+        + shlex.quote(sys.executable)
+        + " -m openstack_platform.provider_command"
+        + ' --socket "$PLATFORM_PROVIDER_SOCKET" --provider-uid "$(id -u)"'
+        + " --mutation-command "
+        + shlex.quote(str(mutation_wrapper))
+        + ' -- "$@"\n'
+    )
+    if paths.openstack_wrapper.exists():
+        metadata = paths.openstack_wrapper.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            _fail("existing provider launcher is unsafe")
         paths.openstack_wrapper.chmod(0o600)
-    _atomic_private_write(paths.openstack_wrapper, wrapper)
+    _atomic_private_write(paths.openstack_wrapper, frontend)
     paths.openstack_wrapper.chmod(0o700)
 
 
@@ -898,14 +926,17 @@ def _existing_image_id(
         descriptor, temporary_name = tempfile.mkstemp(
             prefix="setup-existing-image-", suffix=".qcow2"
         )
-        os.close(descriptor)
         downloaded = Path(temporary_name)
-        downloaded.unlink()
         try:
-            _command(
-                (wrapper, "image", "save", "--file", downloaded, image_id),
-                environment=environment,
-            )
+            with os.fdopen(descriptor, "wb") as stream:
+                try:
+                    provider_local.session(environment).download_image(
+                        image_id, stream, deadline=time.monotonic() + 7200
+                    )
+                except provider.ProviderError:
+                    raise SetupError(
+                        "image download failed; provider details were withheld"
+                    ) from None
             digest = hashlib.sha256()
             with downloaded.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -1463,7 +1494,6 @@ def _paths(repository: Path, workspace: Path) -> SetupPaths:
 
 _TOOLCHAIN = (
     "nix",
-    "openstack",
     "git",
     "ssh",
     "ssh-keygen",
@@ -1910,92 +1940,27 @@ def _glance_metric(
 
 def _glance_usage(openstack: Path, resolved: ResolvedSetup) -> Mapping[str, object]:
     """Read Glance's authoritative, non-mutating project usage endpoint."""
-    interface = resolved.provider_environment.get("OS_INTERFACE", "public")
-    catalog = _json_command(
-        (openstack, "catalog", "show", "image", "-f", "json"),
-        environment=resolved.provider_environment,
-    )
-    endpoints = _field(catalog, "endpoints") if isinstance(catalog, dict) else None
-    if not isinstance(endpoints, list) or any(not isinstance(row, dict) for row in endpoints):
-        _fail("OpenStack Glance endpoint inventory is malformed")
-    region = resolved.provider_environment.get("OS_REGION_NAME")
-    # Some older service catalogs repeat the same endpoint record under
-    # different IDs. Require one unique URL rather than one catalog row.
-    urls = sorted(
-        {
-            str(_field(row, "URL", "url"))
-            for row in endpoints
-            if _field(row, "interface") == interface
-            and (not region or _field(row, "region") == region)
-        }
-    )
-    if len(urls) != 1:
-        _fail("OpenStack Glance endpoint must resolve exactly once")
-    parsed = urlsplit(urls[0])
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        _fail("OpenStack Glance endpoint URL is malformed")
-    if parsed.scheme == "http" and (
-        resolved.values.get("PLATFORM_ALLOW_HTTP_GLANCE") != _HTTP_GLANCE_ACKNOWLEDGEMENT
-    ):
-        _fail(
-            "OpenStack Glance endpoint uses HTTP; set PLATFORM_ALLOW_HTTP_GLANCE="
-            f"{_HTTP_GLANCE_ACKNOWLEDGEMENT} to acknowledge token transport explicitly"
-        )
-    endpoint = urls[0].rstrip("/")
-    url = endpoint + "/info/usage" if endpoint.endswith("/v2") else endpoint + "/v2/info/usage"
-    token = _command(
-        (openstack, "token", "issue", "-f", "value", "-c", "id"),
-        environment=resolved.provider_environment,
-        capture=True,
-    ).strip()
-    if not token or len(token) > 8192 or "\n" in token or "\r" in token:
-        _fail("OpenStack authentication token is malformed")
-    curl = shutil.which("curl")
-    if curl is None:
-        _fail("curl is required to query Glance quota")
     try:
-        raw = _command(
-            (
-                curl,
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "30",
-                "--header",
-                "@-",
-                url,
-            ),
-            environment=resolved.provider_environment,
-            capture=True,
-            stdin=f"X-Auth-Token: {token}\n".encode(),
-            timeout=40,
+        api = provider_local.session(
+            {
+                **resolved.provider_environment,
+                "PLATFORM_ALLOW_HTTP_GLANCE": resolved.values.get("PLATFORM_ALLOW_HTTP_GLANCE", ""),
+            }
         )
-    except SetupError as error:
-        if "curl: (22)" not in str(error) or "404" not in str(error):
-            raise
+        rows = api.execute("image.usage", {}, time.monotonic() + 30)
+    except provider.ProviderError as error:
+        if error.status != 404:
+            raise SetupError(
+                "OpenStack Glance quota unavailable; provider details were withheld"
+            ) from None
         if (
             resolved.values.get("PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA")
             != _UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT
         ):
             _fail(
-                "OpenStack Glance has no quota usage endpoint; set "
-                "PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA="
-                f"{_UNAVAILABLE_GLANCE_QUOTA_ACKNOWLEDGEMENT} to accept an unverified "
-                "legacy-provider quota gate explicitly"
+                "OpenStack Glance has no quota usage endpoint; explicit unavailable-quota acknowledgement is required"
             )
         return {_GLANCE_QUOTA_UNAVAILABLE: True}
-    try:
-        rows = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise SetupError("Glance returned malformed quota JSON") from error
     if not isinstance(rows, dict):
         _fail("OpenStack Glance quota response is malformed")
     return rows
@@ -2094,11 +2059,8 @@ def _setup_check(
     if not toolchain["ready"]:
         detail = ", ".join(toolchain["missing"]) or str(toolchain["host"])
         _fail("required local setup toolchain is unavailable: " + detail)
-    openstack_command = shutil.which("openstack")
-    if openstack_command is None:
-        _fail(
-            "openstack is required for non-mutating setup check (the apply path builds it with Nix)"
-        )
+    # Read projections run in-process; preflight needs no OSC executable.
+    openstack_command = "openstack-api"
     if cloudflare_token is not None:
         _direct_private_file(cloudflare_token, field="Cloudflare tunnel token")
     repository = _repository_root()
@@ -2353,32 +2315,36 @@ def run_setup(
     # Use the provider-authentication projection so compact project IDs remain
     # exactly as supplied even though the persisted inventory is canonical.
     _write_openstack_wrapper(paths, provider_environment, openstack)
-    child = _script_environment(provider_environment, paths, python_store)
-    _command(
-        (repository / "infra/pki/generate_internal_pki.sh", paths.pki),
-        environment=child,
-        cwd=repository,
-    )
-    _apply_foundation(paths, child, python_store)
-    image_ids = _build_and_publish_images(
-        paths,
-        document,
-        provider_environment,
-        python_store,
-        commit,
-        artifact_manifest,
-        Path(values["PLATFORM_ARTIFACT_MANIFEST"]),
-    )
-    pending = _bootstrap_roles(
-        paths,
-        document,
-        provider_environment,
-        python_store,
-        age_store,
-        cloudflare_token,
-        commit,
-        image_ids,
-    )
+    with provider_local.publication(
+        provider_environment, str(Path(str(paths.openstack_wrapper) + "-mutate"))
+    ) as scoped_environment:
+        provider_environment = scoped_environment
+        child = _script_environment(provider_environment, paths, python_store)
+        _command(
+            (repository / "infra/pki/generate_internal_pki.sh", paths.pki),
+            environment=child,
+            cwd=repository,
+        )
+        _apply_foundation(paths, child, python_store)
+        image_ids = _build_and_publish_images(
+            paths,
+            document,
+            provider_environment,
+            python_store,
+            commit,
+            artifact_manifest,
+            Path(values["PLATFORM_ARTIFACT_MANIFEST"]),
+        )
+        pending = _bootstrap_roles(
+            paths,
+            document,
+            provider_environment,
+            python_store,
+            age_store,
+            cloudflare_token,
+            commit,
+            image_ids,
+        )
     print(
         f"setup=complete project={project.project_name} project-id={project.project_id}",
         file=output,

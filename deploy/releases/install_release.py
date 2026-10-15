@@ -329,6 +329,8 @@ case "$(stat -c %a -- "$openstack_command")" in
   *) echo "protected OpenStack command mode is invalid" >&2; exit 78 ;;
 esac
 export PLATFORM_OPENSTACK_COMMAND="$openstack_command"
+export PLATFORM_PROVIDER_SOCKET="$state_directory/run/provider.sock"
+export PLATFORM_PROVIDER_UID="$(id -u)"
 export PLATFORM_CONFIG="$platform_config"
 # The release owns these three paths. Accept the exact paths used by packaged
 # systemd units, but reject every attempt to substitute another value.
@@ -766,7 +768,11 @@ def _install_user_units(
         "@CONFIG_ROOT@": str(config_root),
         "@STATE_ROOT@": str(state_root),
     }
-    for name in ("openstack-platform-backup.service", "openstack-platform-backup.timer"):
+    for name in (
+        "openstack-platform-backup.service",
+        "openstack-platform-backup.timer",
+        "openstack-platform-provider.service",
+    ):
         source_path = unit_source / name
         if not source_path.is_file():
             _fail(f"release is missing {name}")
@@ -1324,6 +1330,9 @@ def install(args: argparse.Namespace) -> Path:
         _ensure_directory(state_root / "logs", 0o700)
         _verify_operator_configuration(config_root, state_root)
         _verify_protected_executable(openstack_command, label="protected OpenStack command")
+        _verify_protected_executable(
+            Path(str(openstack_command) + "-mutate"), label="protected OpenStack mutation command"
+        )
     else:
         if (
             requested_platform_config is None
@@ -1455,6 +1464,37 @@ def install(args: argparse.Namespace) -> Path:
                 bin_root / "openstack-platform-restore",
             )
 
+        if mode == "operator":
+            assert state_root is not None and openstack_command is not None
+            provider_python = release_root / "current/.venv/bin/python"
+            provider_socket = state_root / "run/provider.sock"
+            _write_text(
+                bin_root / "openstack-platform-provider",
+                "#!/bin/sh\nset -eu\nexec "
+                + shlex.quote(str(provider_python))
+                + " -P -m openstack_platform.provider_service"
+                + "  --socket "
+                + shlex.quote(str(provider_socket))
+                + " --credentials "
+                + shlex.quote(str(bin_root.parent / ".secrets/openstack.env"))
+                + ' --peer "$(id -u):$(id -g)"\n',
+                0o700,
+            )
+            wrapper_mode = stat.S_IMODE(openstack_command.lstat().st_mode)
+            _write_text(
+                openstack_command,
+                "#!/bin/sh\nset -eu\nexec "
+                + shlex.quote(str(provider_python))
+                + " -P -m openstack_platform.provider_command"
+                + " --socket "
+                + shlex.quote(str(provider_socket))
+                + ' --provider-uid "$(id -u)"'
+                + " --mutation-command "
+                + shlex.quote(str(openstack_command) + "-mutate")
+                + ' -- "$@"\n',
+                wrapper_mode,
+            )
+
         if mode == "operator" and cast(bool, args.install_user_units):
             unit_directory = cast(Path | None, args.user_unit_dir) or (
                 Path.home() / ".config/systemd/user"
@@ -1467,8 +1507,10 @@ def install(args: argparse.Namespace) -> Path:
                 config_root=config_root,
                 state_root=state_root,
             )
+            _run(("systemctl", "--user", "daemon-reload"))
+            _run(("systemctl", "--user", "enable", "openstack-platform-provider.service"))
+            _run(("systemctl", "--user", "restart", "openstack-platform-provider.service"))
             if cast(bool, args.enable_backup_timer):
-                _run(("systemctl", "--user", "daemon-reload"))
                 _run(
                     (
                         "systemctl",
