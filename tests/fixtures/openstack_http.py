@@ -29,6 +29,10 @@ class Cloud:
         self.unauthorized = 0
         self.trickle = False
         self.slow_headers = False
+        # The class cloud's Nova: Mitaka-era, newest microversion 2.25.
+        self.nova_version = "2.25"
+        self.nova_echo = None
+        self.nova_requests = []
         self.port = 0
         self.scheme = "http"
         self.records = {
@@ -186,6 +190,26 @@ def serve(cloud=None, *, tls_context=None):
             if cloud.unauthorized:
                 cloud.unauthorized -= 1
                 return 401, {"message": "PRIVATE provider error"}, {}
+            if path == "/v2.1/":
+                return (
+                    200,
+                    {
+                        "version": {
+                            "id": "v2.1",
+                            "version": cloud.nova_version,
+                            "min_version": "2.1",
+                            "status": "CURRENT",
+                        }
+                    },
+                    {},
+                )
+            if path.startswith("/v2.1/"):
+                # Like Nova before 2.27, only the legacy header selects a version.
+                requested = self.headers.get("X-OpenStack-Nova-API-Version", "2.1")
+                cloud.nova_requests.append(requested)
+                newest = tuple(int(part) for part in cloud.nova_version.split("."))
+                if tuple(int(part) for part in requested.split(".")) > newest:
+                    return 406, {"message": "PRIVATE unsupported version"}, {}
             if path in cloud.responses:
                 response = cloud.responses[path]
                 return (
@@ -217,7 +241,20 @@ def serve(cloud=None, *, tls_context=None):
                     {},
                 )
             if path.endswith("/limits"):
-                return 200, {"limits": {"absolute": {"totalCoresUsed": 2}}}, {}
+                return (
+                    200,
+                    {
+                        "limits": {
+                            "absolute": {
+                                "totalCoresUsed": 2,
+                                "maxTotalRAMSize": 4096,
+                                "totalRAMUsed": 1024,
+                                "totalSecurityGroupsUsed": 1,
+                            }
+                        }
+                    },
+                    {},
+                )
             if "/quotas/" in path:
                 return 200, {"quota": {"floatingip": 5, "port": 50}}, {}
             if "/os-quota-sets/" in path:
@@ -274,6 +311,12 @@ def serve(cloud=None, *, tls_context=None):
 
         def respond(self):
             status, document, headers = self.handle_request()
+            if urlsplit(self.path).path.startswith("/v2.1/"):
+                headers = {
+                    **headers,
+                    "X-OpenStack-Nova-API-Version": cloud.nova_echo
+                    or self.headers.get("X-OpenStack-Nova-API-Version", "2.1"),
+                }
             payload = document if isinstance(document, bytes) else json.dumps(document).encode()
             if cloud.slow_headers and self.command == "GET":
                 try:

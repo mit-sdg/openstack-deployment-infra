@@ -282,9 +282,10 @@ class API:
         self.verify: bool | str = environment.get("OS_CACERT") or True
         self.auth_lock = threading.Lock()
         self.condition = threading.Condition()
-        self.available = [
-            BoundedHTTP(allow_http=allow_http or self.allow_http_glance) for _ in range(8)
-        ]
+        self.compute_versions: dict[str, str] = {}
+        # Service URLs come from the catalog, as with the OpenStack CLI, and
+        # may be HTTP; the auth URL above must be HTTPS outside tests.
+        self.available = [BoundedHTTP(allow_http=True) for _ in range(8)]
         # Keystone may include provider bodies in DEBUG messages. Disable its
         # HTTP loggers even if a caller configures the root logger for debugging.
         logging.getLogger("keystoneauth").disabled = True
@@ -339,10 +340,7 @@ class API:
                 }
                 if len(urls) != 1:
                     raise ProviderError("configuration")
-                endpoint = endpoint_url(
-                    urls.pop(),
-                    allow_http=self.allow_http or (service == "image" and self.allow_http_glance),
-                )
+                endpoint = endpoint_url(urls.pop(), allow_http=True)
                 if service in {"image", "network"}:
                     version = "v2" if service == "image" else "v2.0"
                     if not endpoint.endswith("/" + version):
@@ -369,9 +367,18 @@ class API:
             access, endpoint = self.credentials(session, deadline, service)
             assert endpoint is not None
             headers = {"X-Auth-Token": access.auth_token}
-            # Nova 2.46 retains the authoritative flavor ID and volume deletion flags.
+            version = None
             if service == "compute":
-                headers["OpenStack-API-Version"] = "compute 2.46"
+                version = self.compute_version(session, deadline, access, endpoint)
+                if version is None:
+                    if attempt == 0:
+                        self.invalidate(access, deadline)
+                        continue
+                    raise ProviderError("http", 401)
+                # Nova before 2.27 reads only the legacy header and silently
+                # serves 2.1 for anything else, so send both.
+                headers["X-OpenStack-Nova-API-Version"] = version
+                headers["OpenStack-API-Version"] = f"compute {version}"
             response = session.request(
                 endpoint + "/" + path,
                 "POST" if body is not None else "GET",
@@ -389,8 +396,58 @@ class API:
                 continue
             if response.status_code != 200:
                 raise ProviderError("http", response.status_code)
+            if version is not None and (
+                response.headers.get("X-OpenStack-Nova-API-Version") != version
+            ):
+                raise ProviderError("malformed")
             return response.json()
         raise ProviderError()
+
+    def compute_version(
+        self, session: ks_session.Session, deadline: float, access: Any, endpoint: str
+    ) -> str | None:
+        """Negotiate one Nova microversion from 2.3 up to 2.46, or None for a rejected token.
+
+        2.3 adds delete_on_termination to attached volumes; 2.47 replaces the
+        server flavor ID with an embedded description. Within that range the
+        server, flavor, keypair, limit and quota reads keep one shape.
+        """
+        root = (
+            re.sub(r"/[^/]+$", "", endpoint)
+            if re.search(r"/v2(?:\.1)?/[^/]+$", endpoint)
+            else endpoint
+        )
+        with self.condition:
+            cached = self.compute_versions.get(root)
+        if cached is not None:
+            return cached
+        response = session.request(
+            root + "/",
+            "GET",
+            authenticated=False,
+            headers={"X-Auth-Token": access.auth_token},
+            raise_exc=False,
+            redirect=False,
+            connect_retries=0,
+            status_code_retries=0,
+        )
+        if response.status_code == 401:
+            return None
+        if response.status_code != 200:
+            raise ProviderError("http", response.status_code)
+        try:
+            document = response.json()["version"]
+            newest = tuple(int(part) for part in document["version"].split("."))
+            oldest = tuple(int(part) for part in document["min_version"].split("."))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise ProviderError("configuration") from None
+        chosen = min(newest, (2, 46))
+        if len(chosen) != 2 or chosen < (2, 3) or oldest > chosen:
+            raise ProviderError("configuration")
+        version = f"{chosen[0]}.{chosen[1]}"
+        with self.condition:
+            self.compute_versions[root] = version
+        return version
 
     def invalidate(self, access: Any, deadline: float) -> None:
         if not self.auth_lock.acquire(timeout=remaining(deadline)):
@@ -554,6 +611,15 @@ class API:
                         ]
                     }
                 if action == "image.usage":
+                    # Setup's quota read has always required an explicit
+                    # acknowledgement before sending a token to HTTP Glance.
+                    _, endpoint = self.credentials(session, deadline, "image")
+                    if (
+                        endpoint is None
+                        or endpoint.startswith("http://")
+                        and not (self.allow_http or self.allow_http_glance)
+                    ):
+                        raise ProviderError("configuration")
                     return self.request(session, deadline, "image", "info/usage")
                 if action in {"console", "attachments"}:
                     try:
@@ -586,15 +652,18 @@ class API:
                         result.update(
                             self.request(session, deadline, service, "limits")["limits"]["absolute"]
                         )
-                    return [
-                        {
-                            "Name": re.sub(r"(?<!^)(?=[A-Z])", "_", key)
-                            .lower()
-                            .replace("total_instances_used", "instances_used"),
-                            "Value": value,
-                        }
+                    names = {
+                        re.sub(
+                            r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", key
+                        ).lower(): (value)
                         for key, value in result.items()
-                    ]
+                    }
+                    # The CLI also reports these counters under the short
+                    # names setup's quota fallback reads.
+                    for short in ("instances_used", "security_groups_used"):
+                        if f"total_{short}" in names:
+                            names[short] = names[f"total_{short}"]
+                    return [{"Name": key, "Value": value} for key, value in names.items()]
                 if action == "quota":
                     access, _ = self.credentials(session, deadline, None)
                     project = quote(text(access.project_id), safe="")

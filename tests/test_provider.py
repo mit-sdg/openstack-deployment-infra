@@ -40,6 +40,26 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.cloud.calls[("GET", "/v2.1/flavors/small")], 6)
         self.assertEqual(self.cloud.auth_body["auth"]["scope"]["project"]["id"], PROJECT)
 
+    def test_nova_microversion_is_negotiated_and_verified(self):
+        self.assertEqual(self.read("flavor.show", {"reference": "small"})["ram"], 4096)
+        self.assertEqual(self.cloud.nova_requests, ["2.25"])
+        self.assertEqual(self.cloud.calls[("GET", "/v2.1/")], 1)
+        self.read("flavor.show", {"reference": "small"})
+        self.assertEqual(self.cloud.calls[("GET", "/v2.1/")], 1)
+        self.cloud.nova_version = "2.90"
+        self.api = API(self.cloud.environment, allow_http=True)
+        self.read("flavor.show", {"reference": "small"})
+        self.assertEqual(self.cloud.nova_requests[-1], "2.46")
+        self.cloud.nova_echo = "2.1"
+        with self.assertRaises(ProviderError):
+            self.read("flavor.show", {"reference": "small"})
+        self.cloud.nova_echo = None
+        for newest in ("2.1", "2.2"):
+            self.cloud.nova_version = newest
+            self.api = API(self.cloud.environment, allow_http=True)
+            with self.assertRaises(ProviderError):
+                self.read("flavor.show", {"reference": "small"})
+
     def test_refresh_before_expiry_and_revocation(self):
         self.cloud.token_lifetime = 30
         self.read("identity")
@@ -125,7 +145,16 @@ class ProviderTests(unittest.TestCase):
         quota = self.read("quota", {"network": True})
         self.assertIn({"Resource": "floating_ips", "Limit": 5}, quota)
         self.assertEqual(self.read("quota", {"usage": True})["cores"], {"in_use": 2, "limit": 20})
-        self.assertEqual(self.read("limits"), [{"Name": "total_cores_used", "Value": 2}])
+        self.assertEqual(
+            {row["Name"]: row["Value"] for row in self.read("limits")},
+            {
+                "total_cores_used": 2,
+                "max_total_ram_size": 4096,
+                "total_ram_used": 1024,
+                "total_security_groups_used": 1,
+                "security_groups_used": 1,
+            },
+        )
         self.read("console", {"reference": SERVER, "lines": None})
         self.assertEqual(self.cloud.console_body, {"os-getConsoleOutput": {}})
         self.assertIsNone(provider.parse(("console", "log", "show", SERVER)).params["lines"])
@@ -256,6 +285,16 @@ class ProviderTests(unittest.TestCase):
             API(self.cloud.environment)
         with self.assertRaises(ProviderError):
             API({**self.cloud.environment, "OS_INSECURE": "true"}, allow_http=True)
+
+    def test_http_catalog_endpoints_are_followed_like_the_cli(self):
+        api = API(self.cloud.environment, allow_http=True)
+        # The fixture's auth transport is loopback HTTP; production auth
+        # construction independently enforces HTTPS. Exercise catalog policy.
+        api.allow_http = False
+        self.assertEqual(
+            api.execute("flavor.show", {"reference": "small"}, time.monotonic() + 2)["ram"],
+            4096,
+        )
 
     def test_glance_http_requires_exact_acknowledgement(self):
         for acknowledgement, accepted in (
