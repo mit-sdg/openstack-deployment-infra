@@ -269,7 +269,11 @@ def _sync_operator_environment(*, source: Path, release: Path, python: Path, uv:
         ),
         env=sync_environment,
     )
-    return _check_runtime(environment / "bin/python")
+    # Check the interpreter, but return the environment's own path: resolving
+    # its symlink yields the base interpreter without the release packages.
+    runtime = environment / "bin/python"
+    _check_runtime(runtime)
+    return runtime
 
 
 def _launcher(
