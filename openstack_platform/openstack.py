@@ -2455,6 +2455,26 @@ def _restore_stopped_host_power(
         return
 
 
+# Nova applies port and volume attachment changes after its API call returns,
+# so an observation is polled briefly rather than read once. The CLI's
+# start-up time used to hide this; persistent provider reads answer at once.
+_SETTLE_SECONDS = 60.0
+_SETTLE_INTERVAL_SECONDS = 2.0
+
+
+def _settled(verified: Callable[[], bool]) -> bool:
+    deadline = _monotonic() + _SETTLE_SECONDS
+    active = _ACTIVE_DEADLINE.get()
+    if active is not None:
+        deadline = min(deadline, active)
+    while not verified():
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_SETTLE_INTERVAL_SECONDS, remaining))
+    return True
+
+
 def _mutate_and_verify(
     arguments: Sequence[str],
     verified: Callable[[], bool],
@@ -2473,10 +2493,10 @@ def _mutate_and_verify(
             executable=executable,
         )
     except OpenStackError:
-        if verified():
+        if _settled(verified):
             return
         raise RecoveryRequired(message, refs=refs) from None
-    if not verified():
+    if not _settled(verified):
         raise RecoveryRequired(message, refs=refs)
 
 

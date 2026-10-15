@@ -965,6 +965,65 @@ else:
         )
         self.assertTrue(all("delete_on_termination=false" in value for value in block_devices))
 
+    def test_replacement_waits_for_nova_to_finish_detaching_the_fixed_port(self) -> None:
+        class DelayedDetachCloud(FakeCloud):
+            # Nova clears the port's device a little after the API call returns.
+            pending = 0
+
+            def __call__(self, argv, **kwargs):
+                args = tuple(argv[1:])
+                if args[:3] == ("server", "remove", "port"):
+                    response = super().__call__(argv, **kwargs)
+                    self.port_device, self.pending = self.server["id"], 3
+                    return response
+                if args[:2] == ("port", "show") and self.pending:
+                    self.pending -= 1
+                    if not self.pending:
+                        self.port_device = ""
+                return super().__call__(argv, **kwargs)
+
+        cloud = DelayedDetachCloud(
+            self.platform,
+            [canonical_image(self.platform, IMAGE_1, role="admin")],
+            role="admin",
+        )
+        with (
+            protected_user_data() as user_data_path,
+            mock.patch.object(openstack.host_keys, "pin_verified_admin_host_key"),
+            mock.patch.object(openstack.time, "sleep") as sleep,
+        ):
+            replaced = openstack.replace_host(
+                self.platform,
+                "admin",
+                selected_image_id=IMAGE_1,
+                selected_compatibility_hash=openstack.image_compatibility_hash(self.platform),
+                operation_id=OPERATION,
+                user_data_path=user_data_path,
+                checkpoint=lambda *_: None,
+                health_check=self.role_health,
+                command_runner=cloud,
+            )
+        self.assertTrue(replaced.accepted)
+        self.assertGreaterEqual(sleep.call_count, 2)
+
+    def test_unsettled_mutation_is_still_ambiguous(self) -> None:
+        with (
+            mock.patch.object(openstack, "_SETTLE_SECONDS", 0.05),
+            mock.patch.object(openstack.time, "sleep"),
+            self.assertRaisesRegex(openstack.RecoveryRequired, "never settled"),
+        ):
+            openstack._mutate_and_verify(
+                ("server", "remove", "port", "server", "port"),
+                lambda: False,
+                message="never settled",
+                refs={},
+                timeout_seconds=5,
+                command_runner=lambda argv, **_: CommandResult(
+                    tuple(argv), 0, b"", b"", False, False
+                ),
+                executable="openstack",
+            )
+
     def test_unknown_replacement_flavor_fails_before_stopping_the_old_host(self) -> None:
         cloud = FakeCloud(self.platform, [canonical_image(self.platform, IMAGE_1, role="ingress")])
         cloud.flavors.clear()
