@@ -605,6 +605,22 @@ class ReleaseInstallerTests(unittest.TestCase):
             text=True,
         )
 
+    def test_operator_runtime_is_the_release_environment(self) -> None:
+        source = self.root / "environment-source"
+        source.mkdir()
+        (source / "pyproject.toml").write_text("")
+        (source / "uv.lock").write_text("")
+        release = self.root / "environment-release"
+        environment_python = release / ".venv/bin/python"
+        environment_python.parent.mkdir(parents=True)
+        environment_python.symlink_to(sys.executable)
+        with mock.patch.object(INSTALLER_MODULE, "_run"):
+            runtime = INSTALLER_MODULE._sync_operator_environment(
+                source=source, release=release, python=Path(sys.executable), uv=Path(UV)
+            )
+        # The smoke must import the release with its packages, as the launcher does.
+        self.assertEqual(runtime, environment_python)
+
     def test_operator_install_is_commit_addressed_and_idempotent(self) -> None:
         repository, commit = self._repository()
         first = self._install(repository, commit, "operator", install_units=True)
