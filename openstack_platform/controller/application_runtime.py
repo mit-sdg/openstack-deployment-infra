@@ -173,6 +173,10 @@ class BuildRejected(ApplicationError):
     """A completed builder command rejected the build; cleanup is not implied."""
 
 
+class SourceRejected(ValidationError):
+    """A commit's files the build can't use; the message is for the owner."""
+
+
 class DeploymentFailed(ApplicationError):
     def __init__(
         self,
@@ -411,22 +415,57 @@ def parse_dotenv(payload: bytes | str, *, maximum_bytes: int = 262_144) -> dict[
     return result
 
 
+def _display_path(root: Path, path: Path) -> str:
+    """A checkout path as the owner would recognize it, safe for one log line."""
+    name = "".join(
+        character if character.isprintable() else "?"
+        for character in path.relative_to(root).as_posix()
+    )
+    return name if len(name) <= 80 else name[:77] + "..."
+
+
+def _megabytes(size: int) -> str:
+    return f"{size / 1_048_576:.1f} MB"
+
+
 def _source_size(root: Path, maximum_bytes: int) -> int:
+    root = root.resolve(strict=True)
     total = 0
+    largest: list[tuple[int, Path]] = []
     for directory, names, files in os.walk(root, followlinks=False):
         for name in [*names, *files]:
             path = Path(directory) / name
             metadata = path.lstat()
             if stat.S_ISLNK(metadata.st_mode):
-                total += len(os.readlink(path).encode())
+                target = os.readlink(path)
+                if os.path.isabs(target) or not (path.parent / target).resolve(
+                    strict=False
+                ).is_relative_to(root):
+                    raise SourceRejected(
+                        f"{_display_path(root, path)} is a link to a file outside the "
+                        "repository. Commit the file itself instead of a link."
+                    )
+                total += len(target.encode())
             elif stat.S_ISREG(metadata.st_mode):
                 total += metadata.st_size
+                largest = sorted([*largest, (metadata.st_size, path)], reverse=True)[:3]
             elif stat.S_ISDIR(metadata.st_mode):
                 continue
             else:
-                raise ValidationError("source contains an unsupported special file")
-            if total > maximum_bytes:
-                raise ValidationError(f"source exceeds its {maximum_bytes}-byte limit")
+                raise SourceRejected(
+                    f"{_display_path(root, path)} is not a regular file, folder or link, "
+                    "so it can't be deployed. Remove it from the repository."
+                )
+    if total > maximum_bytes:
+        named = ", ".join(
+            f"{_display_path(root, path)} ({_megabytes(size)})" for size, path in largest
+        )
+        raise SourceRejected(
+            f"This commit's files add up to {_megabytes(total)}, more than the "
+            f"{maximum_bytes / 1_048_576:.0f} MB a deploy can take. The largest are {named}. "
+            "Remove big files such as videos or datasets from the repository, push, "
+            "and deploy the new commit."
+        )
     return total
 
 
@@ -623,6 +662,12 @@ def check_github_checkout(
         return checkout_checks(settings, source)
 
 
+_SUBMODULES = (
+    "This repository uses Git submodules, which a deploy can't fetch. "
+    "Commit those files to the repository directly."
+)
+
+
 def acquire_github_commit(
     repository: str,
     source_commit: str,
@@ -758,7 +803,7 @@ def acquire_github_commit(
             except ValueError as error:
                 raise ValidationError("Git index evidence was malformed") from error
             if mode == b"160000":
-                raise ValidationError("source repositories with gitlinks are not supported")
+                raise SourceRejected(_SUBMODULES)
             if mode not in {b"100644", b"100755", b"120000"} or stage != b"0":
                 raise ValidationError("source Git index contains an unsupported entry mode")
             if not re.fullmatch(rb"[0-9a-f]{40,64}", object_id):
@@ -775,7 +820,7 @@ def acquire_github_commit(
             raise ApplicationError("checked out source did not match the requested commit")
         for path in root.rglob("*"):
             if path.name == ".gitmodules":
-                raise ValidationError("source repositories with .gitmodules are not supported")
+                raise SourceRejected(_SUBMODULES)
         shutil.rmtree(root / ".git")
         _source_size(root, maximum_bytes)
         return root
