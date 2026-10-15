@@ -218,6 +218,93 @@ class BuildFailureCleanupTests(unittest.TestCase):
         self.assertNotIn("private source details", str(caught.exception))
         builder.assert_not_called()
 
+    def _build_arguments(self, start_script="start"):
+        return {
+            "buildId": BUILD,
+            "slug": "demo-app",
+            "repository": "https://github.com/example/app",
+            "requestedRef": "main",
+            "commit": "a" * 40,
+            "configurationRevision": 1,
+            "configuration": {
+                "schemaVersion": 1,
+                "build": {
+                    "runtime": "node",
+                    "packages": ["."],
+                    "buildScript": None,
+                    "startScript": start_script,
+                },
+                "runtime": {"port": 8080, "healthPath": "/"},
+                "storageBindings": [],
+            },
+            "builderImageId": IMAGE,
+            "builderFlavor": "builder-small",
+            "runtimeImages": {
+                "node": "registry.example/node@sha256:" + "a" * 64,
+                "bun": "registry.example/bun@sha256:" + "b" * 64,
+            },
+            "sourceLimit": 1024,
+            "buildLogLimit": 4096,
+            "connectSeconds": 5,
+            "deadlineAt": "2030-01-01T00:00:00Z",
+        }
+
+    def _build_log(self):
+        return (self.root / "controller/build-logs/demo-app" / f"{BUILD}.log").read_text()
+
+    def test_oversized_source_names_its_largest_files(self):
+        source = self.root / "oversized"
+        (source / "media").mkdir(parents=True)
+        (source / "media/demo.mp4").write_bytes(b"x" * 3_000_000)
+        (source / "package.json").write_text("{}")
+        with self.assertRaises(app.SourceRejected) as caught:
+            app._source_size(source, 2_097_152)
+        message = str(caught.exception)
+        self.assertIn("2.9 MB, more than the 2 MB a deploy can take", message)
+        self.assertIn("media/demo.mp4 (2.9 MB)", message)
+        self.assertEqual(app._source_size(source, 52_428_800), 3_000_002)
+
+    def test_links_out_of_the_repository_are_named(self):
+        source = self.root / "linked"
+        source.mkdir()
+        (source / "inside.txt").write_text("ok")
+        (source / "kept").symlink_to("inside.txt")
+        app._source_size(source, 1024)
+        (source / "escape").symlink_to("../outside.txt")
+        with self.assertRaisesRegex(app.SourceRejected, "^escape is a link to a file outside"):
+            app._source_size(source, 1024)
+
+    def test_rejected_source_explains_itself_in_the_build_log(self):
+        rejection = app.SourceRejected("This commit's files add up to 54.0 MB.")
+        with (
+            mock.patch.object(production, "helper_runtime", return_value=self.runtime),
+            mock.patch.object(app, "acquire_github_commit", side_effect=rejection),
+            mock.patch.object(app, "build_with_disposable_builder") as builder,
+        ):
+            with self.assertRaises(HelperActionError) as caught:
+                production._build_application(self._build_arguments())
+        self.assertEqual(caught.exception.code, "BUILD_REJECTED")
+        self.assertIn("This commit's files add up to 54.0 MB.", self._build_log())
+        builder.assert_not_called()
+
+    def test_checkout_problems_are_written_in_the_owners_words(self):
+        def checkout(_repository, _commit, destination, **_kwargs):
+            destination.mkdir()
+            (destination / "package.json").write_text('{"scripts": {"dev": "node app.js"}}')
+            (destination / "package-lock.json").write_text("{}")
+            return destination
+
+        with (
+            mock.patch.object(production, "helper_runtime", return_value=self.runtime),
+            mock.patch.object(app, "acquire_github_commit", side_effect=checkout),
+            mock.patch.object(app, "build_with_disposable_builder") as builder,
+        ):
+            with self.assertRaises(HelperActionError) as caught:
+                production._build_application(self._build_arguments())
+        self.assertEqual(caught.exception.code, "BUILD_REJECTED")
+        self.assertIn('package.json has no "start" script.', self._build_log())
+        builder.assert_not_called()
+
     def test_cleanup_confirms_both_builder_and_build_artifact(self):
         absent = app.BuilderObservation(
             BUILD, None, "builder", None, "port", None, None, None, False

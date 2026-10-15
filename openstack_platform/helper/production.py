@@ -39,7 +39,12 @@ from ..contracts import (
 )
 from ..controller import application_runtime as application
 from ..controller.application_models import Manifest
-from ..controller.deployment_config import branch_name, parse_configuration, validate_checkout
+from ..controller.deployment_config import (
+    branch_name,
+    checkout_checks,
+    parse_configuration,
+    validate_checkout,
+)
 from ..controller.nomad_jobs import deployment_worker_ids
 from ..log_timestamps import TimestampedBuildLog
 from ..runtime import (
@@ -546,15 +551,19 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                         build_log.flush()
 
                 def fetch(ssh_key: Path | None = None) -> None:
-                    application.acquire_github_commit(
-                        args["repository"],
-                        args["commit"],
-                        source,
-                        maximum_bytes=source_limit,
-                        timeout_seconds=300,
-                        deadline=operation_deadline,
-                        ssh_key=ssh_key,
-                    )
+                    try:
+                        application.acquire_github_commit(
+                            args["repository"],
+                            args["commit"],
+                            source,
+                            maximum_bytes=source_limit,
+                            timeout_seconds=300,
+                            deadline=operation_deadline,
+                            ssh_key=ssh_key,
+                        )
+                    except application.SourceRejected as error:
+                        note(f"{error}\n")
+                        raise
 
                 # Public repositories need no key. A private one fails over
                 # HTTPS quickly, then the app's deploy key is tried over SSH.
@@ -597,6 +606,16 @@ def _build_application(args: Mapping[str, Any]) -> Mapping[str, Any]:
                     raise HelperActionError(
                         "RUNTIME_UNAVAILABLE", "runtime versions could not be looked up"
                     ) from None
+                except ValidationError:
+                    # The commit checks word the same rules for the owner.
+                    try:
+                        checks = checkout_checks(configuration, source)
+                    except (OSError, ValidationError):
+                        checks = []
+                    for check in checks:
+                        if check["state"] == "problem":
+                            note(f"{check['problem']}\n")
+                    raise
                 note(f"{resolved.describe()}\n")
                 streamed_log_limit = max(0, build_log_limit - build_log.tell())
                 manifest = Manifest(

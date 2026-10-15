@@ -133,7 +133,7 @@ class SourceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "source"
-            with self.assertRaisesRegex(ValidationError, "gitmodules"):
+            with self.assertRaisesRegex(app_module.SourceRejected, "uses Git submodules"):
                 acquire_github_commit(
                     "https://github.com/example/public-app",
                     COMMIT,
@@ -160,7 +160,7 @@ class SourceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "source"
-            with self.assertRaisesRegex(ValidationError, "gitlinks"):
+            with self.assertRaisesRegex(app_module.SourceRejected, "uses Git submodules"):
                 acquire_github_commit(
                     "https://github.com/example/public-app",
                     COMMIT,
