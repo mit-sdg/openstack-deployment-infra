@@ -1472,9 +1472,16 @@ def install(args: argparse.Namespace) -> Path:
             assert state_root is not None and openstack_command is not None
             provider_python = release_root / "current/.venv/bin/python"
             provider_socket = state_root / "run/provider.sock"
+            # The environment is synced without the project, so the release
+            # source supplies openstack_platform, as in the operator launcher.
+            provider_prelude = (
+                "#!/bin/sh\nset -eu\nexport PYTHONDONTWRITEBYTECODE=1\nexport PYTHONPATH="
+                + shlex.quote(str(release_root / "current/source"))
+                + "\nexec "
+            )
             _write_text(
                 bin_root / "openstack-platform-provider",
-                "#!/bin/sh\nset -eu\nexec "
+                provider_prelude
                 + shlex.quote(str(provider_python))
                 + " -P -m openstack_platform.provider_service"
                 + "  --socket "
@@ -1487,7 +1494,7 @@ def install(args: argparse.Namespace) -> Path:
             wrapper_mode = stat.S_IMODE(openstack_command.lstat().st_mode)
             _write_text(
                 openstack_command,
-                "#!/bin/sh\nset -eu\nexec "
+                provider_prelude
                 + shlex.quote(str(provider_python))
                 + " -P -m openstack_platform.provider_command"
                 + " --socket "
