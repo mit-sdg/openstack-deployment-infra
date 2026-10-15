@@ -60,6 +60,13 @@ class ProviderTests(unittest.TestCase):
             with self.assertRaises(ProviderError):
                 self.read("flavor.show", {"reference": "small"})
 
+    def test_slow_response_may_use_the_whole_deadline(self):
+        self.read("flavor.show", {"reference": "small"})
+        self.cloud.delay["/v2.1/flavors/small"] = 5.5
+        self.assertEqual(self.read("flavor.show", {"reference": "small"}, seconds=10)["ram"], 4096)
+        with self.assertRaises(ProviderError):
+            self.read("flavor.show", {"reference": "small"}, seconds=2)
+
     def test_refresh_before_expiry_and_revocation(self):
         self.cloud.token_lifetime = 30
         self.read("identity")
@@ -552,28 +559,36 @@ class SocketTests(ProviderTests):
                             ],
                             "invalid",
                         )
+                    # Admin re-applies the same owner and mode on every controller
+                    # start; that changes ctime, not the credentials.
+                    credentials.chmod(0o600)
+                    os.utime(credentials)
+
+                    def identity_code():
+                        with socket.socket(socket.AF_UNIX) as connection:
+                            connection.connect(read_path)
+                            connection.sendall(
+                                b'{"version":1,"action":"identity","params":{},"timeout":1}\n'
+                            )
+                            return json.loads(
+                                provider.receive(connection, 512, time.monotonic() + 3)
+                            )["code"]
+
+                    self.assertNotEqual(identity_code(), "configuration")
                     credentials.write_text(
                         credentials.read_text().replace(
                             "OS_PASSWORD=fixture", "OS_PASSWORD=rotated", 1
                         )
                         + "# changed\n"
                     )
-                    with socket.socket(socket.AF_UNIX) as connection:
-                        connection.connect(read_path)
-                        connection.sendall(
-                            b'{"version":1,"action":"identity","params":{},"timeout":1}\n'
-                        )
-                        self.assertEqual(
-                            json.loads(provider.receive(connection, 512, time.monotonic() + 2))[
-                                "code"
-                            ],
-                            "configuration",
-                        )
+                    self.assertEqual(identity_code(), "configuration")
+                    # It exits for the service manager to restart it with them.
+                    self.assertEqual(process.wait(timeout=5), 1)
                 finally:
                     process.terminate()
                     stdout, stderr = process.communicate(timeout=5)
-                self.assertEqual(process.returncode, 0)
-                self.assertEqual((stdout, stderr), (b"", b""))
+                self.assertEqual(stdout, b"")
+                self.assertIn(b"credentials changed", stderr)
                 self.assertFalse(Path(read_path).exists())
 
     def test_owned_credentials_and_socket_paths(self):

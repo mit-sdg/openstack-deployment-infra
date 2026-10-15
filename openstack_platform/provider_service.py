@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -60,17 +61,28 @@ def load_credentials(path: Path) -> dict[str, str]:
         os.close(descriptor)
 
 
-def credential_identity(path: Path) -> tuple[int, ...]:
-    metadata = path.lstat()
+def credential_identity(path: Path) -> tuple[object, ...]:
+    """The file and its content, ignoring timestamps.
+
+    Admin's controller-prepare re-applies the same owner and mode on every
+    controller start, which changes ctime but not the credentials.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_RESPONSE:
+            raise ProviderError("configuration")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            digest = hashlib.sha256(stream.read(MAX_RESPONSE + 1)).hexdigest()
+    finally:
+        os.close(descriptor)
     return (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_uid,
         metadata.st_gid,
         metadata.st_mode,
-        metadata.st_size,
-        metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
+        digest,
     )
 
 
@@ -188,13 +200,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ProviderError("configuration")
         identity = credential_identity(args.credentials)
         values = load_credentials(args.credentials)
+        changed = threading.Event()
+        running: list[Server] = []
 
         def check_credentials() -> None:
             try:
-                if credential_identity(args.credentials) != identity:
-                    raise ProviderError("configuration")
-            except OSError:
-                raise ProviderError("configuration") from None
+                if credential_identity(args.credentials) == identity:
+                    return
+            except (OSError, ProviderError):
+                pass
+            # Refuse this read, then exit non-zero so the service manager
+            # restarts with the current credentials.
+            if not changed.is_set():
+                changed.set()
+                for server in running:
+                    threading.Thread(target=server.shutdown, daemon=True).start()
+            raise ProviderError("configuration")
 
         check_credentials()
         api = API(values, check_credentials=check_credentials)
@@ -204,6 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             ensure_private_directory(parent)
         with Server(args.socket, api, peers, group=args.socket_group) as server:
+            running.append(server)
 
             def stop(_signal: int, _frame: Any) -> None:
                 threading.Thread(target=server.shutdown, daemon=True).start()
@@ -217,6 +239,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             signal.signal(signal.SIGTERM, stop)
             signal.signal(signal.SIGINT, stop)
             server.serve_forever(poll_interval=0.1)
+        if changed.is_set():
+            print("OpenStack credentials changed; restarting provider", file=sys.stderr)
+            return 1
         return 0
     except Exception:
         print(

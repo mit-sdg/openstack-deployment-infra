@@ -40,7 +40,7 @@ image_id=$(resolve_persistent_image_id "$IMAGE_NAME")
 flavor_id=$(resolve_persistent_flavor_id "$FLAVOR_NAME")
 persistent_host_metadata_args storage "$image_id" "$flavor_id"
 server_id=$(resolve_persistent_server_id "$SERVER_NAME")
-if ! "$OSC" volume show "$VOLUME_NAME" >/dev/null 2>&1; then
+if ! persistent_volume_exists "$VOLUME_NAME"; then
   [[ -z $server_id ]] || {
     echo "$VOLUME_NAME is missing while the configured server already exists" >&2
     exit 1

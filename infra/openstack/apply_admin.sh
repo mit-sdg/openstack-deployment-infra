@@ -45,7 +45,7 @@ image_id=$(resolve_persistent_image_id "$IMAGE_NAME")
 flavor_id=$(resolve_persistent_flavor_id "$FLAVOR_NAME")
 persistent_host_metadata_args admin "$image_id" "$flavor_id"
 server_id=$(resolve_persistent_server_id "$SERVER_NAME")
-if ! "$OSC" volume show "$VOLUME_NAME" >/dev/null 2>&1; then
+if ! persistent_volume_exists "$VOLUME_NAME"; then
   [[ -z $server_id ]] || {
     echo "$VOLUME_NAME is missing while the configured server already exists" >&2
     exit 1
@@ -71,7 +71,7 @@ done
 case "$volume_status" in available|in-use) ;; *) echo "timed out waiting for $VOLUME_NAME" >&2; exit 1 ;; esac
 volume_id=$(resolve_persistent_volume_id "$VOLUME_NAME" "$VOLUME_SIZE" "$VOLUME_TYPE")
 
-if ! "$OSC" volume show "$BACKUP_VOLUME_NAME" >/dev/null 2>&1; then
+if ! persistent_volume_exists "$BACKUP_VOLUME_NAME"; then
   [[ -z $server_id ]] || {
     echo "$BACKUP_VOLUME_NAME is missing while the configured server already exists" >&2
     exit 1

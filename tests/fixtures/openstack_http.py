@@ -29,7 +29,7 @@ class Cloud:
         self.unauthorized = 0
         self.trickle = False
         self.slow_headers = False
-        # The class cloud's Nova: Mitaka-era, newest microversion 2.25.
+        # An older Nova whose newest microversion is 2.25.
         self.nova_version = "2.25"
         self.nova_echo = None
         self.nova_requests = []

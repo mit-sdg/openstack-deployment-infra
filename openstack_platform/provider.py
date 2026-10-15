@@ -223,7 +223,7 @@ def call(
         raise ProviderError() from None
 
 
-def _field(row: Mapping[str, Any], column: str) -> Any:
+def _field(row: Mapping[str, Any], column: str, *, strict: bool = False) -> Any:
     key = column.lower().replace(" ", "_")
     aliases = {"device": "device", "image": "image", "volume_id": "volumeId"}
     if key == "id" and "volumeId" in row:
@@ -238,7 +238,12 @@ def _field(row: Mapping[str, Any], column: str) -> Any:
                     raise ProviderError("malformed")
                 return identifier
             return value
-    raise ProviderError("malformed")
+    # Like the CLI, a selected attribute the cloud omits (for example Glance
+    # multihash on older releases) is null; callers validate what they need.
+    # Identity never has a token column to select.
+    if strict:
+        raise ProviderError("malformed")
+    return None
 
 
 def render(read: Read, result: Any) -> bytes:
@@ -247,7 +252,10 @@ def render(read: Read, result: Any) -> bytes:
     if read.columns:
 
         def select(row: Mapping[str, Any]) -> dict[str, Any]:
-            return {column: _field(row, column) for column in read.columns}
+            return {
+                column: _field(row, column, strict=read.action == "identity")
+                for column in read.columns
+            }
 
         result = [select(row) for row in result] if isinstance(result, list) else select(result)
     elif read.action.endswith(".list"):

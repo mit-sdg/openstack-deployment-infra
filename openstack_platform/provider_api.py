@@ -24,6 +24,7 @@ from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.util.connection import allowed_gai_family
 
 from .provider_protocol import (
+    FILTERS,
     MAX_RESPONSE,
     MAX_ROWS,
     RESOURCES,
@@ -177,9 +178,10 @@ class BoundedHTTP(requests.Session):
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         endpoint_url(url.split("?", 1)[0], allow_http=self.allow_http)
-        kwargs.update(
-            timeout=min(5.0, remaining(self.deadline)), allow_redirects=False, stream=True
-        )
+        # Connecting is quick or broken; the response may take the caller's
+        # whole remaining budget (console output goes over RPC to the host).
+        seconds = remaining(self.deadline)
+        kwargs.update(timeout=(min(5.0, seconds), seconds), allow_redirects=False, stream=True)
         _transport_context.deadline = self.deadline
         _transport_context.timers = []
         response = None
@@ -283,6 +285,7 @@ class API:
         self.auth_lock = threading.Lock()
         self.condition = threading.Condition()
         self.compute_versions: dict[str, str] = {}
+        self.flavor_names: dict[str, str] = {}
         # Service URLs come from the catalog, as with the OpenStack CLI, and
         # may be HTTP; the auth URL above must be HTTPS outside tests.
         self.available = [BoundedHTTP(allow_http=True) for _ in range(8)]
@@ -403,6 +406,37 @@ class API:
             return response.json()
         raise ProviderError()
 
+    def name_flavors(
+        self, session: ks_session.Session, deadline: float, servers: list[dict[str, Any]]
+    ) -> None:
+        """Add original_name to each server flavor, as Nova 2.47+ and the CLI report it.
+
+        Below 2.47 a server's flavor is only its ID. Flavor IDs are immutable,
+        so names are cached; a deleted flavor keeps its ID without a name.
+        """
+        for server in servers:
+            flavor = server.get("flavor")
+            if not isinstance(flavor, dict) or "original_name" in flavor:
+                continue
+            identifier = flavor.get("id")
+            if not isinstance(identifier, str) or not identifier:
+                raise ProviderError("malformed")
+            with self.condition:
+                name = self.flavor_names.get(identifier)
+            if name is None:
+                try:
+                    document = self.request(
+                        session, deadline, "compute", "flavors/" + quote(identifier, safe="")
+                    )
+                except ProviderError as error:
+                    if error.status == 404:
+                        continue
+                    raise
+                name = text(document["flavor"]["name"])
+                with self.condition:
+                    self.flavor_names[identifier] = name
+            server["flavor"] = {**flavor, "original_name": name}
+
     def compute_version(
         self, session: ks_session.Session, deadline: float, access: Any, endpoint: str
     ) -> str | None:
@@ -512,7 +546,9 @@ class API:
         if kind in {"server", "flavor", "volume"}:
             path += "/detail"
         params = dict(filters)
-        params["limit"] = str(MAX_ROWS + 1)
+        # A Nova server record can carry up to 64 KiB of base64 user data, so
+        # server pages stay small enough for one bounded response.
+        params["limit"] = str(10 if kind == "server" else MAX_ROWS + 1)
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         total = 0
@@ -523,6 +559,9 @@ class API:
                 raise ProviderError("malformed")
             if kind == "keypair":
                 batch = [row["keypair"] for row in batch]
+            if kind == "server":
+                for row in batch:
+                    row.pop(_SERVER_USER_DATA, None)
             total += len(json.dumps(batch).encode())
             if len(rows) + len(batch) > MAX_ROWS or total > MAX_RESPONSE:
                 raise ProviderError("size")
@@ -574,9 +613,11 @@ class API:
     def named(
         self, session: ks_session.Session, deadline: float, kind: str, reference: str
     ) -> dict[str, Any]:
+        # Nova's name filter is a regular expression, so keep the exact match.
+        filters = {"name": reference} if "name" in FILTERS.get(kind, ()) else {}
         matches = [
             row
-            for row in self.inventory(session, deadline, kind, {})
+            for row in self.inventory(session, deadline, kind, filters)
             if row.get("name") == reference
         ]
         if len(matches) != 1:
@@ -669,13 +710,25 @@ class API:
                     project = quote(text(access.project_id), safe="")
                     result = {}
                     if not params.get("network"):
-                        for service in ("compute", "volumev3"):
-                            path = f"os-quota-sets/{project}" + (
-                                "/detail" if params.get("usage") else ""
-                            )
-                            result.update(
-                                self.request(session, deadline, service, path)["quota_set"]
-                            )
+                        usage = bool(params.get("usage"))
+                        # Nova has a /detail route; Cinder takes ?usage=True.
+                        result.update(
+                            self.request(
+                                session,
+                                deadline,
+                                "compute",
+                                f"os-quota-sets/{project}" + ("/detail" if usage else ""),
+                            )["quota_set"]
+                        )
+                        result.update(
+                            self.request(
+                                session,
+                                deadline,
+                                "volumev3",
+                                f"os-quota-sets/{project}",
+                                params={"usage": "True"} if usage else None,
+                            )["quota_set"]
+                        )
                     path = f"quotas/{project}" + ("/details" if params.get("usage") else "")
                     network = self.request(session, deadline, "network", path)["quota"]
                     aliases = {
@@ -692,14 +745,15 @@ class API:
                         else [{"Resource": key, "Limit": value} for key, value in result.items()]
                     )
                 kind, verb = action.split(".")
-                if verb == "list":
-                    return [
-                        project_resource(kind, row)
-                        for row in self.inventory(session, deadline, kind, params)
-                    ]
-                return project_resource(
-                    kind, self.show(session, deadline, kind, params["reference"])
+                rows = (
+                    self.inventory(session, deadline, kind, params)
+                    if verb == "list"
+                    else [self.show(session, deadline, kind, params["reference"])]
                 )
+                projected = [project_resource(kind, row) for row in rows]
+                if kind == "server":
+                    self.name_flavors(session, deadline, projected)
+                return projected if verb == "list" else projected[0]
         except ProviderError:
             raise
         except Exception:
@@ -710,6 +764,9 @@ def text_output(value: object) -> str:
     if not isinstance(value, str):
         raise ProviderError("malformed")
     return value
+
+
+_SERVER_USER_DATA = "OS-EXT-SRV-ATTR:user_data"
 
 
 def project_resource(kind: str, row: dict[str, Any]) -> dict[str, Any]:
@@ -740,9 +797,14 @@ def project_resource(kind: str, row: dict[str, Any]) -> dict[str, Any]:
             "os_hash_algo",
             "os_hash_value",
         }
+        # As in the CLI, custom properties appear once, under properties.
+        result = {key: value for key, value in row.items() if key in standard}
         result["properties"] = {key: value for key, value in row.items() if key not in standard}
     elif kind == "server":
-        result["properties"] = row.get("metadata")
+        # The CLI reports metadata as properties. Boot user data is secret
+        # bootstrap material that no read needs.
+        result["properties"] = result.pop("metadata", None)
+        result.pop(_SERVER_USER_DATA, None)
         if "os-extended-volumes:volumes_attached" in row:
             result["volumes_attached"] = row["os-extended-volumes:volumes_attached"]
         addresses = row.get("addresses")
@@ -761,6 +823,10 @@ def project_resource(kind: str, row: dict[str, Any]) -> dict[str, Any]:
     }:
         if "project_id" not in row and "tenant_id" in row:
             result["project_id"] = row["tenant_id"]
+        # The CLI reports Neutron ownership once, as project_id.
+        result.pop("tenant_id", None)
+    if kind == "port" and "security_groups" in row:
+        result["security_group_ids"] = result.pop("security_groups")
     if kind == "volume":
         result["type"] = row.get("volume_type")
     if kind == "security_group_rule":

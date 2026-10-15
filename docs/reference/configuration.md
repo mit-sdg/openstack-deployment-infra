@@ -177,7 +177,7 @@ Older image services require these exact acknowledgements:
 
 | Variable | Exact value | When you need it | Effect |
 | --- | --- | --- | --- |
-| `PLATFORM_ALLOW_HTTP_GLANCE` | `I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP` | The image service endpoint in your cloud's catalog uses `http://` | Allows token transmission over HTTP for quota reads. HTTPS verification and redirect restrictions remain. |
+| `PLATFORM_ALLOW_HTTP_GLANCE` | `I_UNDERSTAND_GLANCE_CREDENTIALS_USE_HTTP` | The image service endpoint in your cloud's catalog uses `http://` | Allows setup's image quota read to send a token over HTTP. Other reads follow the catalog like the OpenStack CLI. |
 | `PLATFORM_ALLOW_UNAVAILABLE_GLANCE_QUOTA` | `I_UNDERSTAND_GLANCE_QUOTA_IS_UNVERIFIED` | Glance answers `404` for its quota usage endpoint | Reports image quotas as `unverified-legacy-provider`. Confirm capacity for five images yourself. |
 
 ## Cloudflare tunnel token file
