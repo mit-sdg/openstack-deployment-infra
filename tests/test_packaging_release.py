@@ -638,6 +638,15 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertTrue((retained / "release.sbom.json").is_file())
         self.assertTrue((retained / "release.provenance.json").is_file())
         self.assertEqual(launcher.resolve(), release / "bin/openstack-platform")
+        # The read launcher and provider daemon import the release source,
+        # which the environment does not install.
+        for path in (
+            self.openstack_command,
+            self.root / "operator-install/bin/openstack-platform-provider",
+        ):
+            text = path.read_text()
+            self.assertIn(f"export PYTHONPATH={release_root / 'current/source'}\n", text)
+            self.assertTrue((release_root / "current/source/openstack_platform").is_dir())
         restore_launcher = self.root / "operator-install/bin/openstack-platform-restore"
         self.assertEqual(restore_launcher.resolve(), release / "bin/openstack-platform-restore")
         restore_text = restore_launcher.resolve().read_text()
