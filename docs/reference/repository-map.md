@@ -611,7 +611,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 
 - `tests/test_controller_api.py` — route wiring, the socket split, responses, idempotency, lock-free reads, and service integration.
 - `tests/test_controller_database.py` — schema, migrations, identity, journals, state changes, and database recovery.
-- `tests/test_controller_flavor_cache.py` — flavor and catalog cache hits, expiry, failure recovery, concurrent reads, and bounded storage.
+- `tests/test_controller_flavor_cache.py` — flavor and catalog prewarming, refresh-ahead, stale reads, backoff, concurrent reads, and bounded work.
 - `tests/test_controller_http.py` — Unix socket HTTP parsing, deadlines, keep-alive, peer checks, overload, and shutdown.
 - `tests/test_controller_images.py` — image selection compare-and-set, provider checks, recovery, and pinned provisioning.
 - `tests/test_controller_recovery.py` — storage recovery, rejected builds, crash and retry, and lock waits.
@@ -650,6 +650,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 
 ### Owner portal
 
+- `tests/test_management_observations.py` — cached app reads, bounded background refresh, authority, mutation invalidation, and probe races.
 - `tests/test_management.py` — broker sign-in, ownership and limit races, change recovery, and the web and Unix transports.
 - `tests/test_management_accounts.py` — local credentials, one-time setup links, roles, and portal admin account actions.
 - `tests/test_management_admin_apps.py` — staff and portal admin app authority, admin-only actions, adoption, audit, and secrecy.

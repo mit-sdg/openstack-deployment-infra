@@ -108,6 +108,8 @@ export type AppRecord = {
   } | null;
   stale: boolean;
   observedAt: string | null;
+  observationAgeSeconds: number | null;
+  refreshing: boolean;
 };
 export type Intent = {
   intentId: string;
@@ -308,6 +310,7 @@ const appData = (v: unknown) =>
     savedRevision: 'number',
     desiredRunning: 'boolean',
     stale: 'boolean',
+    refreshing: 'boolean',
   }) as AppRecord;
 export const intentData = (v: unknown) => {
   const data = fields(v, { intentId: 'string', kind: 'string', state: 'string' });

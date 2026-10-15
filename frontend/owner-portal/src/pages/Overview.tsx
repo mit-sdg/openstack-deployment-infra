@@ -26,7 +26,7 @@ import { AttentionActivity } from '../components/AttentionActivity';
 import { Operation, OperationList } from '../components/Operation';
 import { useIntentPolling } from '../hooks/useIntentPolling';
 import { Status } from '../components/Status';
-import { ownerAppState, short } from '../utils/presentation';
+import { appRefetchInterval, ownerAppState, short } from '../utils/presentation';
 
 function Running({ app }: { app: AppRecord }) {
   const deployed = app.acceptedDeployment!;
@@ -153,7 +153,7 @@ export function Overview({ id }: { id: string }) {
   const app = useQuery({
     queryKey: ['app', id],
     queryFn: () => api.app(id),
-    refetchInterval: 5000,
+    refetchInterval: (query) => appRefetchInterval(query.state.data),
   });
   const history = useQuery({
     queryKey: ['history', id],

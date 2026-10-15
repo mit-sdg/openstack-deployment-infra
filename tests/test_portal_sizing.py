@@ -93,6 +93,19 @@ class PortalSizingTests(unittest.TestCase):
             self.assertEqual(observe.call_count, 2)
             self.assertEqual(catalog.call_count, 1)
 
+    def test_controller_prewarm_captures_default_app_builders_and_workers(self) -> None:
+        db.put_default_builder_flavor(self.connection, SMALL.name)
+        db.put_application_builder_flavor(self.connection, self.app_id, LARGE.name)
+        references = self.api._flavor_references()
+        self.assertIn(SMALL.name, references)
+        self.assertIn(LARGE.name, references)
+        self.assertIn(db.get_application(self.connection, self.app_id).worker_flavor, references)
+        # The entry point starts maintenance explicitly, so construction in
+        # tests and command utilities does not initiate provider calls.
+        with mock.patch.object(self.api._flavors_cache, "start") as start:
+            self.api.start_flavor_cache()
+        self.assertEqual(tuple(start.call_args.args[0]()), references)
+
     def test_builder_selection_and_resize_plans_probe_fresh_after_warming_reads(self) -> None:
         path = f"/v1/applications/{self.app_id}/builder-size"
         self.project.dispatch("GET", path, {}, None)

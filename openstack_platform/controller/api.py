@@ -290,7 +290,21 @@ class ControllerAPI:
                 deadline=deadline,
             )
 
+    def start_flavor_cache(self) -> None:
+        self._flavors_cache.start(self._flavor_references)
+
+    def _flavor_references(self) -> tuple[str, ...]:
+        # Capture metadata on a private connection; no provider call pins SQLite.
+        with self._snapshot() as connection:
+            default = builder_settings.default_flavor(connection, self.config)
+            rows = connection.execute(
+                "SELECT builder_flavor AS flavor FROM applications WHERE builder_flavor IS NOT NULL "
+                "UNION SELECT worker_flavor AS flavor FROM applications LIMIT 127"
+            ).fetchall()
+        return tuple(dict.fromkeys([default, *(row["flavor"] for row in rows)]))
+
     def close(self) -> None:
+        self._flavors_cache.close()
         self.executor.close()
 
     def wait_for_operations(self) -> None:

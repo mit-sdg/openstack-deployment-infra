@@ -164,6 +164,26 @@ class AdminApplicationTests(ManagementCase):
                 )
                 self.assertTrue(denied.exception.retryable)
 
+    def test_admin_main_read_uses_cached_health_sizing_and_settings_metadata(self) -> None:
+        self.fixture.delay = 0
+        deployed = self.complete(
+            self.call(
+                "POST",
+                self.prefix + "/deployments",
+                {"configurationRevision": 1, "commit": "a" * 40},
+                "admin",
+            )
+        )
+        first = self.call("GET", self.prefix, owner="admin").body["data"]
+        self.assertEqual(first["activeDeploymentId"], deployed["operationId"])
+        self.assertIsNotNone(first["sizing"])
+        self.assertFalse(first["configurationChanged"])
+        with patch.object(self.broker.client, "request") as read:
+            cached = self.call("GET", self.prefix, owner="admin").body["data"]
+        read.assert_not_called()
+        self.assertEqual(cached["sizing"], first["sizing"])
+        self.assertNotIn("_metadata", cached)
+
     def test_catalog_refreshes_stale_observations_without_waiting_and_single_flight(self) -> None:
         started, release = threading.Event(), threading.Event()
         with self.broker.database.connect(write=True) as db:
