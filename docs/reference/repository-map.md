@@ -308,7 +308,7 @@ Internal scripts and payloads called by setup, operators, helpers, systemd, and 
 - `infra/backup/emit_logical_backup.sh` — logical PostgreSQL, MongoDB, or Garage backup streams.
 - `infra/backup/full_loss_recovery_drill.sh` — checks or runs full-loss recovery using escrowed keys.
 - `infra/backup/garage_catalog.py` — Garage inventories, catalogs, read-only grants, and bucket ID remapping.
-- `infra/backup/init_garage_backup_key.py` — creates and saves the read-only Garage backup key.
+- `infra/backup/init_garage_backup_key.py` — creates and saves the read-only Garage backup key, and publishes its ID for the controller.
 - `infra/backup/restore_garage_backup.py` — restores objects, keys, and grants with archive-path checks.
 - `infra/backup/restore_managed_data.sh` — destructively restores a verified set into replacement services.
 - `infra/backup/run_platform_backup.sh` — encrypted managed-data backups and evidence.

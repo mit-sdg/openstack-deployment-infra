@@ -34,7 +34,7 @@ class GarageProductionTests(unittest.TestCase):
         (self.root / "secrets/storage-bootstrap.env").write_text(
             "GARAGE_ADMIN_TOKEN=fixture-token\n"
         )
-        self.backup_file = self.root / "secrets/garage-backup.env"
+        self.backup_file = self.root / "secrets/garage-backup-key-id.env"
         self.events: list[str] = []
         self.garage = Garage(self.events)
         self.garage.absent = True
@@ -76,9 +76,7 @@ class GarageProductionTests(unittest.TestCase):
             return production._storage_handlers("storage.s3.create", application_slug="demo-app")[0]
 
     def test_persisted_id_grants_only_the_real_backup_key_despite_duplicate_names(self) -> None:
-        self.backup_file.write_text(
-            "GARAGE_BACKUP_ACCESS_KEY=backup-key\nGARAGE_BACKUP_SECRET_KEY=unused\n"
-        )
+        self.backup_file.write_text("GARAGE_BACKUP_ACCESS_KEY=backup-key\n")
         self.garage.keys["orphan-backup"] = "platform-backup"
         original = self.garage.request
 
@@ -125,7 +123,7 @@ class GarageProductionTests(unittest.TestCase):
         )
 
     def test_missing_file_or_access_key_field_reports_backup_key_missing(self) -> None:
-        for contents in (None, "GARAGE_BACKUP_SECRET_KEY=unused\n", "GARAGE_BACKUP_ACCESS_KEY=\n"):
+        for contents in (None, "\n", "GARAGE_BACKUP_ACCESS_KEY=\n"):
             with self.subTest(contents=contents):
                 if contents is not None:
                     self.backup_file.write_text(contents)

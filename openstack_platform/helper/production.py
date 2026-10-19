@@ -1053,10 +1053,12 @@ def _storage_handlers(
     secrets = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
     backup_access_key = None
     if resource_type == "s3" and operation == "create":
+        # The backup secret stays private to the operator; the controller reads
+        # only the key ID that init_garage_backup_key.py publishes beside it.
         try:
-            backup_access_key = _read_environment(runtime.root / "secrets/garage-backup.env").get(
-                "GARAGE_BACKUP_ACCESS_KEY"
-            )
+            backup_access_key = _read_environment(
+                runtime.root / "secrets/garage-backup-key-id.env"
+            ).get("GARAGE_BACKUP_ACCESS_KEY")
         except HelperActionError:
             raise HelperActionError(
                 "BACKUP_KEY_MISSING", "Garage backup key must be initialized"
