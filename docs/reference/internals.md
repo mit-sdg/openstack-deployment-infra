@@ -508,12 +508,23 @@ Traefik routes public hostnames to the portal, app workers, and Garage. The HTTP
 | --- | --- |
 | `<domain>` | Admin `management-web` on port 8080 |
 | `<app>.<domain>` | The app’s healthy Nomad worker service |
+| `<app>.<domain>` with no live route | The ingress page explaining why (below) |
 | `s3.<domain>` | Garage on storage, over HTTPS verified against the internal CA |
 | `/healthz` | Traefik health check |
 
 The S3 proxy preserves `Host` so presigned URLs remain valid. Admin’s firewall and `management-web` each restrict port 8080 to the ingress address. The internal CA authenticates platform services. Private keys and deployment credentials arrive after image construction and stay out of source and the Nix store.
 
-Implementation: [`ingress.nix`](../../nix/roles/ingress.nix), [`admin.nix`](../../nix/roles/admin.nix), and [`nomad_jobs.py`](../../openstack_platform/controller/nomad_jobs.py).
+An app's router exists only while its Nomad service is healthy. During a maintenance deploy, a restart, or a crash loop, a lowest-priority catch-all router sends the app's host to `<namespace>-app-unavailable` on the ingress instead of returning Traefik's bare 404. It runs as the `traefik` user with Traefik's read-only Nomad token and looks up the exact jobs `<app>` and `<app>-candidate` over Nomad's HTTP API, caching each answer for five seconds:
+
+| Nomad state | Response |
+| --- | --- |
+| A job is meant to run | 503 with `Retry-After: 30`: the app is updating and should be back within a few minutes |
+| No job, or only stopped jobs | 404: no app is running at this address |
+| Nomad can't be reached | 503: the app isn't available right now |
+
+Browsers get a page that checks the address every few seconds and reloads once the response no longer carries `X-Platform-Unavailable`; other clients get JSON such as `{"error": "APP_STARTING"}`. Responses are `no-store` and never carry the deployment route marker, so health checks and deploy acceptance still see the app as down.
+
+Implementation: [`ingress.nix`](../../nix/roles/ingress.nix), [`admin.nix`](../../nix/roles/admin.nix), [`app_unavailable.py`](../../infra/ingress/app_unavailable.py), and [`nomad_jobs.py`](../../openstack_platform/controller/nomad_jobs.py).
 
 ## Storage instances
 

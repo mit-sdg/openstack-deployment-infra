@@ -322,6 +322,7 @@ Internal scripts and payloads called by setup, operators, helpers, systemd, and 
 - `infra/cloud-init-nixos/ingress.yaml` — ingress first-boot template with optional tunnel token.
 - `infra/cloud-init-nixos/storage.yaml` — storage first-boot template for managed data and registry.
 - `infra/cloud-init-nixos/worker.yaml` — worker first-boot template without SSH access.
+- `infra/ingress/app_unavailable.py` — the ingress page for app addresses with no live route: updating, not running, or unavailable.
 
 ### Shared libraries
 
@@ -630,6 +631,7 @@ Python `unittest` modules grouped by boundary. `tests/run_parallel.py` runs modu
 
 ### Builds and deployments
 
+- `tests/test_app_unavailable.py` — the ingress page's host parsing, Nomad states, cache, and responses.
 - `tests/test_application_runtime.py` — source fetch, recipes, BuildKit, workers, deployment, cleanup, and retention.
 - `tests/test_log_timestamps.py` — Node.js and Bun wrapper streams, partial and long lines, binary bytes, exit and signal behavior, and build recording.
 - `tests/test_application_health_observation.py` — health path and route checks, and stopped apps.
