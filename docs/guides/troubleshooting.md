@@ -471,7 +471,7 @@ Check for these app failures: no `package.json` at the repository root, a missin
    - In the owner portal, the request shows **This application requires controller recovery.** with a **Resume** button. Pressing it sends the same request again.
    - For a request an operator sent to the controller, repeat it with the same method, path, body, and `Idempotency-Key` (the original request UUID). Use the saved body and key as shown in [Resume an interrupted operation](deploy-apps-from-the-command-line.md#resume-an-interrupted-operation).
 
-Don't send a changed request under the old key (the controller treats it as a conflict), and don't clear the operation to free the app. An environment-variable change that ended unknown asks you to enter the value again; that is expected, because values are never stored where the portal can read them back.
+Don't send a changed request under the old key (the controller treats it as a conflict), and don't clear the operation to free the app. An environment-variable change that ended unknown asks you to enter the value again; that is expected, because values are never stored where the portal can read them back. A change that made the app unhealthy doesn't end unknown: the previous values are restored, the change fails with `ENVIRONMENT_UNHEALTHY`, and the app's logs show why it didn't start.
 
 ### App changes are blocked with 'wait until recovery'
 

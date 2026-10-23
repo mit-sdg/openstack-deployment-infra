@@ -98,6 +98,15 @@ class FakeNomad:
         elif "restart" in argv:
             self.allocations[0]["ModifyIndex"] = self.allocations[0].get("ModifyIndex", 0) + 1
             output = b""
+        elif "-force-reschedule" in argv:
+            # Nomad replaces the failed allocation with a new one.
+            self.allocations[0] = {
+                **self.allocations[0],
+                "ID": "alloc-rescheduled",
+                "ClientStatus": "running",
+                "DeploymentStatus": {"Healthy": True},
+            }
+            output = b""
         elif "allocs" in argv:
             output = json.dumps(self.allocations).encode()
         elif "inspect" in argv:
@@ -594,6 +603,21 @@ class ApplicationActionTests(unittest.TestCase):
             )
         self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
         self.assertEqual(self.variables.index, 4)
+
+    def test_environment_change_reschedules_an_app_nomad_stopped_restarting(self) -> None:
+        self.nomad.status["Status"] = "pending"
+        self.nomad.allocations[0]["ClientStatus"] = "failed"
+        self.nomad.allocations[0]["DeploymentStatus"] = {"Healthy": False}
+        result = self.actions["app.env.set"](
+            {"slug": "demo-app", "updates": {"API_KEY": SENTINEL}, "ownership": {}}
+        )
+        self.assertTrue(result["restarted"])
+        commands = [argv for argv, _kwargs in self.nomad.calls]
+        self.assertIn(
+            ("fixed-nomad-wrapper", "job", "eval", "-force-reschedule", "-detach", "demo-app"),
+            commands,
+        )
+        self.assertNotIn(("fixed-nomad-wrapper", "job", "restart", "-yes", "demo-app"), commands)
 
     def test_environment_cannot_change_storage_owned_key(self) -> None:
         with self.assertRaisesRegex(ValidationError, "owned by storage.postgres.default"):

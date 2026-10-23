@@ -50,7 +50,7 @@ Select **Resume** to continue the original request with its original commit, set
 
 Staff and admins can resume ordinary app changes without re-authentication. Owners and teammates can resume ordinary changes on their apps; changes admitted through staff controls require staff or an admin. Only admins can resume storage-limit and default-build-machine changes. Whole-app deletion also requires recent re-authentication. The audit log records staff and admin Resume actions.
 
-An unfinished environment edit requires the person who started it to enter the same value again in **Settings** > **Environment variables**. It has no generic Resume action because values are not stored for replay.
+An unfinished environment edit requires the person who started it to enter the same value again in **Settings** > **Environment variables**. It has no generic Resume action because values are not stored for replay. If the app isn't healthy with a new value, the previous values are restored and the edit fails instead, so the owner can correct the value and save it again.
 
 ## Create, adopt, and move apps
 

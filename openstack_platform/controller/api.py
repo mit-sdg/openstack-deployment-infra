@@ -58,7 +58,10 @@ _MAX_PAGE = 100
 _MAX_LOG_LINES = 1_000
 # Public codes for failures a caller can act on, keyed by the final phase that
 # records them durably.
-_FAILURE_CODES = {"platform_busy": "PLATFORM_BUSY"}
+_FAILURE_CODES = {
+    "platform_busy": "PLATFORM_BUSY",
+    "environment_unhealthy": "ENVIRONMENT_UNHEALTHY",
+}
 # How long a finished live app probe answers further reads of the same
 # accepted state. It matches the broker's owner-page cache, and the
 # projection's checkedAt still says when the probe ran.

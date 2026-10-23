@@ -11,11 +11,13 @@ import sqlite3
 import uuid
 from unittest import mock
 
+from openstack_platform import remote
 from openstack_platform.controller import database as controller_db
 from openstack_platform.controller.http import HttpError
 from openstack_platform.management.backup import restore_database
 from openstack_platform.management.broker.api import DEFAULT_CONFIGURATION, Broker
 from openstack_platform.management.broker.client import ControllerUnavailable
+from openstack_platform.management.broker.journal import ENVIRONMENT_GUIDANCE
 from openstack_platform.management.common import canonical
 from tests import test_management as management
 from tests import test_management_contract as contracts
@@ -342,6 +344,39 @@ class OwnerResourceContractTests(contracts.RealProjectCase):
                 "alice",
             ),
         )
+
+    def test_unhealthy_environment_value_fails_and_the_owner_can_correct_it(self):
+        helper = self.real.fixture.api.helper_caller
+
+        def unhealthy(config, action, values, **kwargs):
+            if action == "app.env.set" and values["updates"].get("PUBLIC_ORIGIN") == "bad":
+                raise remote.HelperError(
+                    "ENVIRONMENT_HEALTH_FAILED",
+                    "environment health failed; prior values were restored from memory",
+                )
+            return helper(config, action, values, **kwargs)
+
+        self.real.fixture.api.helper_caller = unhealthy
+        failed = self.finish(
+            self.call(
+                "PUT",
+                f"/v1/apps/{self.app_id}/environment/PUBLIC_ORIGIN",
+                {"value": "bad"},
+                "alice",
+            ).body["data"]
+        )
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["safeError"], ENVIRONMENT_GUIDANCE)
+        self.assertFalse(failed["requiresResubmit"])
+        corrected = self.finish(
+            self.call(
+                "PUT",
+                f"/v1/apps/{self.app_id}/environment/PUBLIC_ORIGIN",
+                {"value": "https://resource-owner.example.com"},
+                "alice",
+            ).body["data"]
+        )
+        self.assertEqual(corrected["state"], "succeeded")
 
     def test_environment_values_absent_in_responses_database_audit_and_logs(self):
         sentinel = "OWNER_SECRET_SENTINEL_b8f142"
