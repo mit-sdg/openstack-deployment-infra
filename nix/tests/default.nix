@@ -1079,6 +1079,16 @@ let
               machine.wait_until_succeeds(f"{preflight}https://demo.${platform.domain} | tr -d '\\r' | grep -Fix 'access-control-allow-origin: https://demo.${platform.domain}'", timeout=30)
               machine.fail(f"{preflight}https://evil.example | grep -Fi access-control-allow-origin")
               machine.fail(f"{preflight}https://${platform.domain} | grep -Fi access-control-allow-origin")
+              # An app host with no live route gets the explanation page. This VM
+              # has no Nomad, so the app's state is unknown rather than absent.
+              machine.wait_for_unit("${namespace}-app-unavailable.service")
+              unavailable = "${pkgs.curl}/bin/curl --silent --include --max-time 15 --header 'Accept: text/html' http://127.0.0.1/ --header"
+              machine.wait_until_succeeds(f"{unavailable} 'Host: demo.${platform.domain}' | tr -d '\\r' | grep -Fix 'x-platform-unavailable: unknown'", timeout=30)
+              machine.succeed(f"{unavailable} 'Host: demo.${platform.domain}' | grep -F 'reload by itself'")
+              machine.succeed(f"{unavailable} 'Host: demo.${platform.domain}' | head -1 | grep -F ' 503'")
+              # The portal and S3 hosts keep their own routers.
+              machine.fail(f"{unavailable} 'Host: ${platform.domain}' | grep -Fi x-platform-unavailable")
+              machine.fail(f"{unavailable} 'Host: s3.${platform.domain}' | grep -Fi x-platform-unavailable")
               # A hostile client reaching a non-loopback origin address cannot
               # select the management router merely by supplying its Host.
               machine.fail("ip=$(hostname -I | awk '{print $1}'); ${pkgs.curl}/bin/curl --fail --silent --max-time 2 --header 'Host: ${platform.domain}' http://$ip/")

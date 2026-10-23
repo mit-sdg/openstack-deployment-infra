@@ -35,6 +35,8 @@ let
   # the router keeps the browser's Host so those signatures verify.
   publicS3Host = "s3.${platform.domain}";
   appOrigin = "^https://[a-z0-9-]+\\.${lib.escapeRegex platform.domain}$";
+  appHost = "^[a-z0-9-]+\\.${lib.escapeRegex platform.domain}$";
+  appUnavailable = ../../infra/ingress/app_unavailable.py;
   staticIngressRoutes = platform.staticIngressRoutes or { };
   staticIngressRouters = lib.mapAttrs' (
     name: route:
@@ -132,6 +134,14 @@ let
           service = "platform-portal";
           middlewares = [ "platform-security-headers" ];
         };
+        # Below every app router: answers an app host only while that app has
+        # no live route, such as during a maintenance deploy or a restart.
+        app-unavailable = {
+          entryPoints = [ "web" ];
+          rule = "HostRegexp(`${appHost}`)";
+          priority = 1;
+          service = "app-unavailable";
+        };
         platform-s3 = {
           entryPoints = [ "web" ];
           rule = "Host(`${publicS3Host}`)";
@@ -143,6 +153,9 @@ let
       }
       // staticIngressRouters;
       services = {
+        app-unavailable.loadBalancer.servers = [
+          { url = "http://127.0.0.1:${toString constants.ports.appUnavailable}"; }
+        ];
         platform-portal.loadBalancer.servers = [
           { url = "http://${platform.addresses.admin}:${toString constants.ports.managementWeb}"; }
         ];
@@ -240,6 +253,50 @@ in
       LimitNOFILE = 1048576;
     };
   };
+  systemd.services."${namespace}-app-unavailable" = {
+    description = "Explain ${platform.displayName} app addresses that have no live route";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [
+      "network-online.target"
+      "cloud-final.service"
+    ];
+    requires = [ "cloud-final.service" ];
+    environment = {
+      APP_UNAVAILABLE_PORT = toString constants.ports.appUnavailable;
+      PLATFORM_DOMAIN = platform.domain;
+      PLATFORM_NAME = platform.displayName;
+      NOMAD_ADDR = "https://${platform.addresses.admin}:${toString constants.ports.nomadHttp}";
+      NOMAD_CACERT = "${configRoot}/pki/internal-ca.pem";
+      NOMAD_CLIENT_CERT = "/etc/${namespace}/pki/nomad-ingress.pem";
+      NOMAD_CLIENT_KEY = "/etc/${namespace}/pki/nomad-ingress-key.pem";
+    };
+    serviceConfig = {
+      # Traefik's own read-only Nomad identity; no new credential.
+      User = "traefik";
+      Group = "traefik";
+      ExecStartPre = "+${credentialGuard} /etc/${namespace}/secrets/traefik.env";
+      LoadCredential = "traefik.env:/etc/${namespace}/secrets/traefik.env";
+      ExecStart = "${pkgs.python3}/bin/python3 -I -B ${appUnavailable}";
+      Restart = "on-failure";
+      RestartSec = 2;
+      LimitCORE = 0;
+      NoNewPrivileges = true;
+      PrivateDevices = true;
+      PrivateTmp = true;
+      ProtectHome = true;
+      ProtectSystem = "strict";
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectControlGroups = true;
+      RestrictSUIDSGID = true;
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      CapabilityBoundingSet = [ "" ];
+      MemoryMax = "128M";
+    };
+  };
+
   users.groups.traefik = { };
   users.users.traefik = {
     isSystemUser = true;

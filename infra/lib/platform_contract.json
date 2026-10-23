@@ -21,6 +21,7 @@
     "application": 8080,
     "managementWeb": 8080,
     "traefikHealth": 8082,
+    "appUnavailable": 8083,
     "nomadHttp": 4646,
     "nomadRpc": 4647,
     "nomadSerf": 4648,
