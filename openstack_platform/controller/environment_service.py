@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from .. import openstack, runtime
+from .. import openstack, remote, runtime
 from ..config import Config
 from ..validation import ValidationError, env_key, uuid
 from . import application_runtime as app
@@ -294,7 +294,26 @@ class EnvironmentService:
                     cleanup_state="not_required",
                 )
             except Exception as error:
-                db.mark_recovery_required(self.connection, operation_id, error)
+                if (
+                    isinstance(error, remote.HelperError)
+                    and error.code == "ENVIRONMENT_HEALTH_FAILED"
+                ):
+                    # The helper restored the prior values and saw the app healthy
+                    # with them, so the owner can correct the value and save again.
+                    db.checkpoint_operation(
+                        self.connection,
+                        operation_id,
+                        phase="environment_unhealthy",
+                        refs={"key_names": intended_names, "mutation": mutation},
+                    )
+                    db.mark_failed(
+                        self.connection,
+                        operation_id,
+                        "the app was unhealthy with the new environment; prior values were restored",
+                        cleanup_state="confirmed",
+                    )
+                else:
+                    db.mark_recovery_required(self.connection, operation_id, error)
                 raise
         modify_index = result.get("modifyIndex")
         if modify_index is not None and (

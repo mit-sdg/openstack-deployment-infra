@@ -1165,8 +1165,16 @@ def _restart_and_observe_environment(
     sleep: Callable[[float], None],
 ) -> int:
     baseline_tokens = {_allocation_token(item) for item in baseline}
+    # `job restart` only restarts running allocations. Once Nomad has stopped
+    # restarting a crashing app, reschedule it so it starts with these values.
+    running = any(
+        item.get("ClientStatus") == "running" and item.get("DesiredStatus") == "run"
+        for item in baseline
+    )
     command_runner(
-        (*nomad_command, "job", "restart", "-yes", job_id),
+        (*nomad_command, "job", "restart", "-yes", job_id)
+        if running
+        else (*nomad_command, "job", "eval", "-force-reschedule", "-detach", job_id),
         timeout_seconds=timeout_seconds,
         stdout_limit=65_536,
         stderr_limit=65_536,

@@ -26,6 +26,7 @@ def controller_error_code(value: object) -> str | None:
 BUILD_GUIDANCE = "The build couldn't use this commit; its build output says why. Check that the commit is pushed to GitHub (a private repository needs the app's deploy key), that the repository root contains package.json, each package directory contains its runtime lockfile, and build/start scripts are defined in the root package.json."
 HEALTH_GUIDANCE = "Check that the health path returns HTTP 2xx with a body of at most 4 KB; use a small endpoint such as /health rather than a full HTML page."
 BUSY_GUIDANCE = "The platform is busy with maintenance. Try again in a few minutes."
+ENVIRONMENT_GUIDANCE = "Your app wasn't healthy with this change, so the previous values were restored. Check the app's logs for the error, then correct the value and save it again."
 RUNTIME_GUIDANCE = "The build couldn't look up the Node.js or Bun version this commit asks for. Try deploying again in a few minutes."
 
 
@@ -320,6 +321,9 @@ class Journal:
                     error = (
                         "The limits could not be saved. Reload the current limits and try again."
                         if intent["kind"] == "storage_limits"
+                        else ENVIRONMENT_GUIDANCE
+                        if intent["kind"] in {"env_set", "env_delete"}
+                        and code == "ENVIRONMENT_UNHEALTHY"
                         else "The controller rejected this operation. Review its status before retrying."
                     )
                 if state in {"succeeded", "failed"} and result.get("cleanupState") not in {

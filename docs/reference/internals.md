@@ -328,6 +328,8 @@ Whole-app deletion requires an active admin actor at dispatch; staff cannot auth
 
 Environment edits require resubmission by their original actor with the original key and value; generic resume cannot replay them because the journal stores no values.
 
+An environment change restarts the app and checks its health. If the app is unhealthy, the helper restores the previous values and checks the app again. When that recovery is confirmed, the change fails with `ENVIRONMENT_UNHEALTHY` and the app stays free for a corrected edit; only an unconfirmed rollback needs resubmission. `nomad job restart` only restarts running allocations, so when Nomad has stopped restarting a crashing app, the helper reschedules the job with `nomad job eval -force-reschedule` instead.
+
 #### Cached app reads
 
 My apps (`GET /api/v1/apps`) returns the last observation from broker SQLite without controller calls. Ownership and team membership still select the rows for every role. Missing observations and those at least 30 seconds old enter the same bounded refresh pool as All apps, using the broker client's background connection share. Last known health remains usable for ten minutes; older or invalidated health is stale. `observedAt` records the last check, `observationAgeSeconds` gives its age (null when missing or invalidated), and `refreshing` marks queued or running work. The portal polls every 1.5 seconds while any row is refreshing, otherwise every five seconds. Missing or stale health shows Checking while its refresh is pending.

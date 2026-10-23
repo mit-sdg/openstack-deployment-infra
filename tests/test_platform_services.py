@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from openstack_platform import openstack
+from openstack_platform import openstack, remote
 from openstack_platform.config import load
 from openstack_platform.controller import application_runtime as app
 from openstack_platform.controller import database as db
@@ -134,6 +134,71 @@ class ProductServiceTests(unittest.TestCase):
             f"app-{created.application_id}",
         )
         self.assertIsNone(operation)
+
+    def test_environment_change_rolled_back_by_the_helper_fails_without_holding_the_app(
+        self,
+    ) -> None:
+        created = self.declare()
+        service = EnvironmentService(
+            self.connection,
+            self.config,
+            self.root / "service-state",
+            helper_caller=unreachable_helper,
+        )
+        unhealthy = remote.HelperError(
+            "ENVIRONMENT_HEALTH_FAILED",
+            "environment health failed; prior values were restored from memory",
+        )
+        with (
+            mock.patch.object(openstack, "verify_project"),
+            mock.patch.object(app, "set_environment", side_effect=unhealthy),
+        ):
+            with self.assertRaises(remote.HelperError):
+                service.mutate(
+                    EnvironmentMutationRequest(
+                        action="set",
+                        application="demo-app",
+                        updates={"PUBLIC_ORIGIN": "demo-app.apps.example.com"},
+                        request_id="11111111-1111-4111-8111-111111111111",
+                    )
+                )
+        operation = db.get_operation(self.connection, "11111111-1111-4111-8111-111111111111")
+        assert operation is not None
+        self.assertEqual(
+            (operation.status, operation.phase, operation.cleanup_state),
+            ("failed", "environment_unhealthy", "confirmed"),
+        )
+        self.assertIsNone(
+            db.get_unfinished_operation(self.connection, f"app-{created.application_id}")
+        )
+        self.assertEqual(
+            db.list_environment_keys(self.connection, application_id=created.application_id), []
+        )
+
+        # Any other helper failure leaves the outcome uncertain and holds the app.
+        with (
+            mock.patch.object(openstack, "verify_project"),
+            mock.patch.object(
+                app,
+                "set_environment",
+                side_effect=remote.HelperError("ENVIRONMENT_ROLLBACK_FAILED", "rollback failed"),
+            ),
+        ):
+            with self.assertRaises(remote.HelperError):
+                service.mutate(
+                    EnvironmentMutationRequest(
+                        action="set",
+                        application="demo-app",
+                        updates={"PUBLIC_ORIGIN": "https://demo-app.apps.example.com"},
+                        request_id="22222222-2222-4222-8222-222222222222",
+                    )
+                )
+        unfinished = db.get_unfinished_operation(self.connection, f"app-{created.application_id}")
+        assert unfinished is not None
+        self.assertEqual(
+            (unfinished.operation_id, unfinished.status),
+            ("22222222-2222-4222-8222-222222222222", "recovery_required"),
+        )
 
     def test_storage_service_owns_lock_project_check_and_typed_dispatch(self) -> None:
         created = self.declare()
