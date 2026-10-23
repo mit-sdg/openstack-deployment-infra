@@ -99,12 +99,27 @@ def _exact_absence(stderr: object, application_slug: str) -> bool:
     except UnicodeDecodeError:
         return False
     escaped = re.escape(application_slug)
-    return (
+    if (
         re.fullmatch(
             rf"\s*No job(?:\(s\) with prefix or ID| with ID) ['\"]{escaped}['\"] found\s*",
             text,
         )
         is not None
+    ):
+        return True
+    # Nomad prefers an exact ID, so it lists prefix matches only when no job has
+    # that ID: another app's slug can start with this one, such as `kumba` and
+    # `kumbakumba`. Require every listed job to extend the requested ID.
+    listing = re.fullmatch(
+        rf"\s*Prefix ['\"]{escaped}['\"] matched multiple jobs\s*\n\s*ID\s+Type\s+Priority\s+Status\s+Submit Date\s*\n(.+?)\s*",
+        text,
+        flags=re.DOTALL,
+    )
+    if listing is None:
+        return False
+    ids = [line.split()[0] for line in listing.group(1).splitlines() if line.strip()]
+    return len(ids) > 1 and all(
+        job_id != application_slug and job_id.startswith(application_slug) for job_id in ids
     )
 
 
@@ -1375,7 +1390,7 @@ def _environment_handlers(
                     client, application_slug, job_id
                 )
                 rollback_baseline = _allocations(
-                    application_slug,
+                    job_id,
                     command_runner=command_runner,
                     nomad_command=nomad_command,
                     timeout_seconds=timeout_seconds,

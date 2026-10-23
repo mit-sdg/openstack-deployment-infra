@@ -12,6 +12,7 @@ from openstack_platform.controller.application_runtime import (
     render_nomad_job,
 )
 from openstack_platform.helper.application_actions import (
+    _exact_absence,
     _public_health_from_job,
     handlers,
 )
@@ -837,6 +838,34 @@ class ApplicationActionTests(unittest.TestCase):
                 }
             )
         self.assertEqual(len(self.nomad.calls), count)
+
+
+def _ambiguous(*rows: str, prefix: str = "kumba") -> bytes:
+    # Nomad 2.0.5's diagnostic for `job inspect kumba` when only longer IDs exist.
+    lines = [
+        f'Prefix "{prefix}" matched multiple jobs',
+        "",
+        "ID               Type     Priority  Status   Submit Date",
+    ]
+    lines += [f"{row:<16} service  50        running  2026-10-23T03:56:12Z" for row in rows]
+    return ("\n".join(lines) + "\n").encode()
+
+
+class ExactAbsenceTests(unittest.TestCase):
+    def test_other_jobs_sharing_the_prefix_prove_the_exact_job_is_absent(self) -> None:
+        self.assertTrue(_exact_absence(_ambiguous("kumba-candidate", "kumbakumba"), "kumba"))
+        self.assertTrue(_exact_absence(b'No job(s) with prefix or ID "kumba" found\n', "kumba"))
+
+    def test_a_listing_that_could_hide_the_exact_job_is_not_absence(self) -> None:
+        # The requested ID itself, a job that does not extend it, a single row,
+        # a different prefix, or any other error leaves the job's state unknown.
+        self.assertFalse(_exact_absence(_ambiguous("kumba", "kumbakumba"), "kumba"))
+        self.assertFalse(_exact_absence(_ambiguous("kumba-candidate", "other"), "kumba"))
+        self.assertFalse(_exact_absence(_ambiguous("kumbakumba"), "kumba"))
+        self.assertFalse(
+            _exact_absence(_ambiguous("kumba-candidate", "kumbakumba", prefix="kum"), "kumba")
+        )
+        self.assertFalse(_exact_absence(b"Error querying jobs: Permission denied\n", "kumba"))
 
 
 class StopActionTests(unittest.TestCase):
