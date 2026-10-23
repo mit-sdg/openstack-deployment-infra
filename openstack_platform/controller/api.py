@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +63,9 @@ _FAILURE_CODES = {
     "platform_busy": "PLATFORM_BUSY",
     "environment_unhealthy": "ENVIRONMENT_UNHEALTHY",
 }
+# Apps observed at once by the status read. Each costs a helper process and
+# a public request, about a second, so 44 apps took 45 s one at a time.
+_STATUS_PROBE_WORKERS = 8
 # How long a finished live app probe answers further reads of the same
 # accepted state. It matches the broker's owner-page cache, and the
 # projection's checkedAt still says when the probe ran.
@@ -1837,10 +1841,17 @@ class ControllerAPI:
             host = storage_limits.host_model(connection)
         for item in infrastructure:
             item["live"] = status.infra_live(str(item["role"]), observe=observers.infrastructure)
-        for item in applications:
-            item["live"] = status.app_live(
-                str(item["applicationId"]), observe=observers.application
+        with ThreadPoolExecutor(
+            max_workers=_STATUS_PROBE_WORKERS, thread_name_prefix="status-probe"
+        ) as pool:
+            observed = pool.map(
+                lambda item: status.app_live(
+                    str(item["applicationId"]), observe=observers.application
+                ),
+                applications,
             )
+            for item, live in zip(applications, observed, strict=True):
+                item["live"] = live
         return Response(
             200,
             {

@@ -825,6 +825,29 @@ class ControllerAPITests(unittest.TestCase):
             self.assertEqual(slow.result().status, 200)
             self.assertEqual(slow.result().body["accepted"]["applications"], 1)
 
+    def test_admin_status_observes_apps_concurrently(self) -> None:
+        self.create_application()
+        self.dispatch(
+            "POST", "/v1/applications", {"slug": "another-app"}, self.headers(str(uuid.uuid4()))
+        )
+        both = threading.Barrier(2, timeout=2)
+
+        def live(application_id, *, observe=None):
+            # One at a time, the first observation would wait here until timeout.
+            both.wait()
+            return {"available": True, "observedAt": None, "applicationId": application_id}
+
+        with (
+            mock.patch("openstack_platform.controller.status.app_live", side_effect=live),
+            mock.patch(
+                "openstack_platform.controller.status.openstack.list_persistent_hosts",
+                return_value=[],
+            ),
+        ):
+            response = self.dispatch("GET", "/v1/admin/status")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body["accepted"]["applications"], 2)
+
     def test_application_mutations_still_wait_for_the_api_lock(self) -> None:
         started = threading.Event()
 
