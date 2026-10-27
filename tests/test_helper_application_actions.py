@@ -687,10 +687,12 @@ class ApplicationActionTests(unittest.TestCase):
         self.assertEqual(evidence["events"][0]["exitCode"], 1)
         self.assertFalse(evidence["events"][0]["oomKilled"])
         self.assertEqual(evidence["stdout"], "bounded application output\n")
+        self.assertEqual(evidence["checks"], [])
         self.assertEqual(
-            [call[0] for call in self.nomad.calls[-3:]],
+            [call[0] for call in self.nomad.calls[-4:]],
             [
                 ("fixed-nomad-wrapper", "job", "allocs", "-json", "demo-app-candidate"),
+                ("fixed-nomad-wrapper", "alloc", "checks", "-json", "alloc-new"),
                 ("fixed-nomad-wrapper", "alloc", "logs", "-tail", "-n", "50", "alloc-new", "app"),
                 (
                     "fixed-nomad-wrapper",
@@ -706,6 +708,50 @@ class ApplicationActionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self.nomad.calls[-1][1]["stdout_limit"], 65_536)
+
+    def test_startup_records_the_last_health_check_without_internal_addresses(self) -> None:
+        checks = {
+            "79aef7dd": {
+                "Check": "http-ready",
+                "Status": "failure",
+                "StatusCode": 503,
+                "Output": 'nomad: Get "http://10.0.4.17:8080/health": http status 503',
+                "Timestamp": 1793061876,
+            }
+        }
+        original = self.nomad.__class__.__call__
+
+        def runner(argv, **kwargs):
+            if argv[-3:-1] == ("checks", "-json"):
+                self.nomad.calls.append((tuple(argv), dict(kwargs)))
+                return SimpleNamespace(
+                    stdout=json.dumps(checks).encode(),
+                    stderr=b"",
+                    stdout_truncated=False,
+                    returncode=0,
+                )
+            return original(self.nomad, argv, **kwargs)
+
+        actions = handlers(
+            self.variables,
+            command_runner=runner,
+            nomad_command=("fixed-nomad-wrapper",),
+            timeout_seconds=12,
+            response_limit=4096,
+        )
+        evidence = actions["app.startup"]({"slug": "demo-app", "jobId": "demo-app", "lines": 5})
+        self.assertEqual(
+            evidence["checks"],
+            [
+                {
+                    "name": "http-ready",
+                    "status": "failure",
+                    "statusCode": 503,
+                    "output": 'nomad: Get "http://app/health": http status 503',
+                    "time": 1793061876,
+                }
+            ],
+        )
 
     def test_startup_tolerates_missing_jobs_and_logs_and_refuses_other_jobs(self) -> None:
         self.nomad.allocations = []

@@ -228,9 +228,24 @@ def startup_evidence(value: object) -> dict[str, Any] | None:
                 "time": number(event.get("time")),
             }
         )
+    checks: list[dict[str, Any]] = []
+    raw_checks = value.get("checks")
+    for check in raw_checks[:4] if isinstance(raw_checks, list) else []:
+        if not isinstance(check, Mapping):
+            continue
+        checks.append(
+            {
+                "name": str(check.get("name", ""))[:64],
+                "status": str(check.get("status", ""))[:16],
+                "statusCode": number(check.get("statusCode")),
+                "output": str(check.get("output", ""))[:300],
+                "time": number(check.get("time")),
+            }
+        )
     try:
         return {
             "found": True,
+            "checks": checks,
             "clientStatus": str(value.get("clientStatus", ""))[:32],
             "taskState": str(value.get("taskState", ""))[:32],
             "failed": value.get("failed") is True,
@@ -2102,6 +2117,9 @@ def deploy_and_cleanup(
         )
 
     failure: BaseException | None = None
+    # Which side last failed: Nomad's check on the worker, or the public route.
+    scheduler_healthy: bool | None = None
+    public_healthy: bool | None = None
     for observation_number in range(1, attempts + 1):
         # The count cannot account for time spent in helper or route reads.
         # Keep the reserved tail available for the record and exact removal.
@@ -2128,12 +2146,14 @@ def deploy_and_cleanup(
         ):
             failure = ApplicationError("helper returned invalid exact-candidate health evidence")
             break
+        scheduler_healthy = healthy
         if healthy:
             try:
                 publicly_healthy = public_health_check is None or public_health_check()
             except Exception as error:
                 failure = error
                 publicly_healthy = False
+            public_healthy = publicly_healthy
             if publicly_healthy:
                 return DeploymentResult(nomad_version=version, observations=observation_number)
         if terminal:
@@ -2161,6 +2181,8 @@ def deploy_and_cleanup(
         )
     except Exception:
         startup = None
+    if startup is not None:
+        startup["health"] = {"schedulerHealthy": scheduler_healthy, "publicHealthy": public_healthy}
     cleanup_succeeded = False
     cleanup_evidence: dict[str, Any] = {}
     try:

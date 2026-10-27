@@ -372,6 +372,15 @@ class ApplicationSizingTests(unittest.TestCase):
                     "failed": False,
                     "restarts": 0,
                     "events": [],
+                    "checks": [
+                        {
+                            "name": "http-ready",
+                            "status": "failure",
+                            "statusCode": 503,
+                            "output": "nomad: http status 503",
+                            "time": 1793061876,
+                        }
+                    ],
                     "stdout": "waiting for readiness",
                     "stderr": "",
                 }
@@ -409,6 +418,11 @@ class ApplicationSizingTests(unittest.TestCase):
             ).body
             self.assertTrue(record["captured"])
             self.assertEqual(record["startup"]["stdout"], "waiting for readiness")
+            self.assertEqual(record["startup"]["checks"][0]["statusCode"], 503)
+            # Nomad's check never passed, so the public route was never tried.
+            self.assertEqual(
+                record["startup"]["health"], {"schedulerHealthy": False, "publicHealthy": None}
+            )
             clock[0] = 200
             fail_removal[0] = True
             _, operation = self.deploy()

@@ -165,6 +165,11 @@ class StartupLogTests(ManagementCase):
             ("Terminated", 1),
         )
         self.assertNotIn("taskState", record)
+        self.assertEqual(
+            record["checks"][0]["output"], "nomad: dial tcp app: connect: connection refused"
+        )
+        self.assertIsNone(record["checks"][0]["statusCode"])
+        self.assertEqual(record["health"], {"schedulerHealthy": False, "publicHealthy": None})
         self.login("bob")
         self.assert_error("NOT_FOUND", lambda: self.startup(failed, owner="bob"))
         self.assert_error(

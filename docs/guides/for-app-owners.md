@@ -136,7 +136,7 @@ File keys used through the public endpoint can't contain `//` or `..`. Browser u
 ## Watch and control your app
 
 - On **Overview**, check status. **Stop app** removes the worker but keeps storage. **Start app** starts the accepted deployment on a new worker. **Restart app** restarts the container on its current worker.
-- Under **Deployments**, open a deploy for **Build output** or **Why it stopped**. **Deploy this commit again** uses your current settings.
+- Under **Deployments**, open a deploy for **Build output** or **Why it stopped**. If your app started but failed its health check, **Why it stopped** says what the health path returned, such as HTTP 503, a timeout, or a refused connection. **Deploy this commit again** uses your current settings.
 - **Logs** shows up to the last 500 lines of **Output** or **Errors** from your running app.
 - Under **Team**, **Add by username** gives up to 10 teammates access to settings, deployments, variables, storage, and logs. Only the owner, staff, or an admin can add or remove other teammates; a teammate can leave. Teammates need an active, enabled account. Ask class-account users to sign in once first. The app counts only against its owner's app limit. Changes you start count against your own concurrency limit (changes in progress at once).
 

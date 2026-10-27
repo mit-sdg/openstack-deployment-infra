@@ -205,6 +205,18 @@ export type StartupRecord = {
   stdout?: string;
   stderr?: string;
   capturedAt?: string | null;
+  /** The latest result of each Nomad check, such as the health path's. */
+  checks?: StartupCheck[];
+  /** Which side last failed: the check on the app's server, or its public address. */
+  health?: { schedulerHealthy: boolean | null; publicHealthy: boolean | null };
+};
+export type StartupCheck = {
+  name: string;
+  status: string;
+  statusCode: number | null;
+  output: string;
+  /** Unix seconds. */
+  time: number | null;
 };
 /** An app's deploy key for a private repository; only the public half. */
 export type SourceKey =

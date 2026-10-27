@@ -1226,12 +1226,37 @@ class Broker:
                         "oomKilled": event.get("oomKilled") is True,
                     }
                 )
+
+        def number(value: object) -> int | None:
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+        checks = [
+            {
+                "name": str(check.get("name") or "")[:64],
+                "status": str(check.get("status") or "")[:16],
+                "statusCode": number(check.get("statusCode")),
+                "output": str(check.get("output") or "")[:300],
+                "time": number(check.get("time")),
+            }
+            for check in (record.get("checks") or [])[:4]
+            if isinstance(check, dict)
+        ]
+        raw_health = record.get("health")
+        health = {
+            key: value if isinstance(value, bool) else None
+            for key, value in (
+                (key, raw_health.get(key) if isinstance(raw_health, dict) else None)
+                for key in ("schedulerHealthy", "publicHealthy")
+            )
+        }
         restarts = record.get("restarts")
         return Response(
             200,
             {
                 "data": {
                     "captured": True,
+                    "checks": checks,
+                    "health": health,
                     "found": record.get("found") is True,
                     "clientStatus": str(record.get("clientStatus") or "")[:32],
                     "restarts": restarts
