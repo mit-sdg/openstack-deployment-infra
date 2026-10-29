@@ -721,6 +721,16 @@ class FakeController:
                     "stderr": "Error: Cannot find module 'express'\n    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)\n",
                     "stdoutTruncated": False,
                     "stderrTruncated": False,
+                    "checks": [
+                        {
+                            "name": "http-ready",
+                            "status": "failure",
+                            "statusCode": None,
+                            "output": "nomad: dial tcp app: connect: connection refused",
+                            "time": int(time.time()),
+                        }
+                    ],
+                    "health": {"schedulerHealthy": False, "publicHealthy": None},
                     "capturedAt": utc(time.time()),
                 },
             },

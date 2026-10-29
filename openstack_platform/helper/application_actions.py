@@ -779,6 +779,51 @@ def _logs_handler(
 
 STARTUP_TEXT_BYTES = 65_536
 STARTUP_EVENTS = 12
+STARTUP_CHECKS = 4
+# A check's output names the worker's internal address; owners see the rest.
+_ADDRESS = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b")
+
+
+def _startup_checks(
+    allocation_id: str,
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    """The latest result of each Nomad service check, such as the health path's status."""
+    try:
+        completed = command_runner(
+            (*nomad_command, "alloc", "checks", "-json", allocation_id),
+            timeout_seconds=timeout_seconds,
+            stdout_limit=65_536,
+            stderr_limit=65_536,
+            check=True,
+        )
+        value = _parse_json(completed.stdout, field="allocation checks")
+    except (CommandFailure, HelperActionError):
+        return []
+    if not isinstance(value, dict):
+        return []
+    checks: list[dict[str, Any]] = []
+    for item in list(value.values())[:STARTUP_CHECKS]:
+        if not isinstance(item, dict):
+            continue
+        code, checked = item.get("StatusCode"), item.get("Timestamp")
+        checks.append(
+            {
+                "name": str(item.get("Check", ""))[:64],
+                "status": str(item.get("Status", ""))[:16],
+                "statusCode": code
+                if isinstance(code, int) and not isinstance(code, bool)
+                else None,
+                "output": _ADDRESS.sub("app", str(item.get("Output", "")))[:300],
+                "time": checked
+                if isinstance(checked, int) and not isinstance(checked, bool)
+                else None,
+            }
+        )
+    return checks
 
 
 def _startup_event(value: object) -> dict[str, Any] | None:
@@ -870,6 +915,12 @@ def _startup_handler(
             if isinstance(restarts, int) and not isinstance(restarts, bool)
             else 0,
             "events": events,
+            "checks": _startup_checks(
+                allocation_id,
+                command_runner=command_runner,
+                nomad_command=nomad_command,
+                timeout_seconds=timeout_seconds,
+            ),
         }
         for stream in ("stdout", "stderr"):
             argv = [*nomad_command, "alloc", "logs", "-tail", "-n", str(lines)]

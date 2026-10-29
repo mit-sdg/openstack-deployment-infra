@@ -28,6 +28,69 @@ const record = (extra: Partial<StartupRecord>): StartupRecord => ({
 });
 
 describe('why a deployment stopped', () => {
+  it('says what the health check got back', () => {
+    const check = (statusCode: number | null, output: string) => ({
+      name: 'http-ready',
+      status: 'failure',
+      statusCode,
+      output,
+      time: 1793061876,
+    });
+    const running = (extra: Partial<StartupRecord>) =>
+      record({ clientStatus: 'running', ...extra });
+    expect(
+      startupSummary(running({ checks: [check(503, 'nomad: http status 503')] }), configuration),
+    ).toBe(
+      'Your app started, but /health answered HTTP 503 instead of 2xx. If your health check reads the database, the app may not have reached it.',
+    );
+    expect(
+      startupSummary(
+        running({
+          checks: [check(null, 'nomad: Get "http://app/health": context deadline exceeded')],
+        }),
+        configuration,
+      ),
+    ).toBe('Your app started, but /health didn’t answer within 3 seconds.');
+    expect(
+      startupSummary(
+        running({ checks: [check(null, 'dial tcp app: connect: connection refused')] }),
+        configuration,
+      ),
+    ).toBe(
+      'Your app started, but nothing answered on port 3000. It has to listen on that port at host 0.0.0.0.',
+    );
+    expect(
+      startupSummary(
+        running({
+          checks: [{ ...check(200, 'nomad: http ok'), status: 'success' }],
+          health: { schedulerHealthy: true, publicHealthy: false },
+        }),
+        configuration,
+      ),
+    ).toMatch(/passed its health check on its server, but its public address/);
+  });
+
+  it('shows the last health check under the summary', () => {
+    render(
+      <StartupRecordSection
+        record={record({
+          clientStatus: 'running',
+          checks: [
+            {
+              name: 'http-ready',
+              status: 'failure',
+              statusCode: 503,
+              output: 'nomad: http status 503',
+              time: 1793061876,
+            },
+          ],
+        })}
+        configuration={configuration}
+      />,
+    );
+    expect(screen.getByText(/Last health check: nomad: http status 503 \(HTTP 503\)/)).toBeTruthy();
+  });
+
   it('names the cause from the task events', () => {
     expect(startupSummary(record({ found: false }), configuration)).toBe(
       'Your app never got a place to run.',
