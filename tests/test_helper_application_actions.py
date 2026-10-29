@@ -191,6 +191,43 @@ class ApplicationActionTests(unittest.TestCase):
         )
         self.assertEqual(dict(self.variables.items), {"DATABASE_URL": "preserved"})
 
+    def test_removing_a_failed_stable_slot_ignores_the_live_candidate_prefix_match(self) -> None:
+        """The live app runs as <slug>-candidate; the failed new version used <slug>."""
+        original = self.nomad.__class__.__call__
+
+        def runner(argv, **kwargs):
+            if argv[-4:] == ("job", "status", "-json", "demo-app") and "demo-app" in (
+                self.nomad.stopped_jobs
+            ):
+                # After the purge, Nomad resolves the absent ID to its only prefix match.
+                self.nomad.calls.append((tuple(argv), dict(kwargs)))
+                live = {"ID": "demo-app-candidate", "Status": "running", "Version": 3}
+                return SimpleNamespace(
+                    stdout=json.dumps(live).encode(),
+                    stderr=b"",
+                    stdout_truncated=False,
+                    returncode=0,
+                )
+            return original(self.nomad, argv, **kwargs)
+
+        actions = handlers(
+            self.variables,
+            command_runner=runner,
+            nomad_command=("fixed-nomad-wrapper",),
+            timeout_seconds=12,
+            response_limit=4096,
+        )
+        removed = actions["app.remove"](
+            {
+                "slug": "demo-app",
+                "jobId": "demo-app",
+                "candidateJobSha256": CANDIDATE_SHA,
+                "candidateImage": CANDIDATE_IMAGE,
+            }
+        )
+        self.assertTrue(removed["jobAbsent"])
+        self.assertEqual(self.nomad.stopped_jobs, {"demo-app"})
+
     def test_candidate_cleanup_refuses_identity_drift_without_stopping(self) -> None:
         self.nomad.inspection["ID"] = "demo-app-candidate"
         with self.assertRaisesRegex(HelperActionError, "identity did not match"):

@@ -142,6 +142,14 @@ def _status_or_absent(
         value = _parse_json(completed.stdout, field="job status")
         if isinstance(value, dict) and value.get("ID") == application_slug:
             return value
+        # As in _inspected_job: Nomad resolves an absent stable ID to its sole
+        # `-candidate` prefix match, which proves only that the stable job is gone.
+        if (
+            isinstance(value, dict)
+            and not application_slug.endswith("-candidate")
+            and value.get("ID") == f"{application_slug}-candidate"
+        ):
+            return None
         # Nomad 2 emits the allocation status projection as a JSON array for
         # stopped jobs. Environment mutation needs only the running/dead
         # distinction. Every row must belong to the exact job; an empty
