@@ -1100,6 +1100,7 @@ def _deploy_and_accept_application(
         placement_id=placement,
         staged=needs_promotion,
         route_marker=operation_id,
+        route_priority=route_priority,
         force_pull=not direct,
     )
     promoted_job = (

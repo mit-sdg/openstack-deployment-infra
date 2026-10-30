@@ -87,7 +87,13 @@ def render_nomad_job(
     hostname = f"{app_slug}.{platform.domain}"
     preview_hostname = f"{app_slug}-preview.{platform.domain}"
     variable = f"nomad/jobs/{job_id}"
-    routers = [(f"{job_id}-preview", preview_hostname, 100) if staged else (job_id, hostname, 100)]
+    # The live job keeps its own preview router, so a staged candidate's must
+    # outrank it or Traefik may keep sending the preview host to the live app.
+    routers = [
+        (f"{job_id}-preview", preview_hostname, route_priority)
+        if staged
+        else (job_id, hostname, 100)
+    ]
     if promoted:
         routers.append((f"{job_id}-promoted", hostname, route_priority))
     route_tags = "\n".join(

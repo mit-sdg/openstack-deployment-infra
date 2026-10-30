@@ -733,6 +733,28 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("Host(`demo-app.apps.example.com`)", promoted)
         self.assertIn("priority=200", promoted)
 
+        # The live job keeps its preview router at its own priority. A later
+        # staged candidate's preview router must outrank it, or Traefik can
+        # keep sending the preview host to the live app and the check fails.
+        staged_after = render_nomad_job(
+            application_id=APP_ID,
+            application_slug="demo-app",
+            image=f"registry.example/apps/demo-app@sha256:{DIGEST}",
+            manifest=Manifest("node", (".",), None, "start", 3000, "/health"),
+            platform=self.platform(),
+            cpu_mhz=1000,
+            memory_mib=2048,
+            source_commit=COMMIT,
+            recipe_hash="c" * 64,
+            candidate=False,
+            placement_id=marker,
+            staged=True,
+            route_marker=marker,
+            route_priority=300,
+        )
+        self.assertIn("traefik.http.routers.demo-app-preview.priority=300", staged_after)
+        self.assertNotIn("Host(`demo-app.apps.example.com`)", staged_after)
+
         for observed, expected in (({}, False), ({"x-platform-deployment": marker}, True)):
             with self.subTest(headers=observed):
                 self.assertEqual(
