@@ -199,9 +199,13 @@ class ApplicationActionTests(unittest.TestCase):
             if argv[-4:] == ("job", "status", "-json", "demo-app") and "demo-app" in (
                 self.nomad.stopped_jobs
             ):
-                # After the purge, Nomad resolves the absent ID to its only prefix match.
+                # After the purge, Nomad resolves the absent ID to its only prefix match,
+                # answering as one job or, as Nomad 2 does, as an allocation projection.
                 self.nomad.calls.append((tuple(argv), dict(kwargs)))
-                live = {"ID": "demo-app-candidate", "Status": "running", "Version": 3}
+                live = shape(
+                    {"ID": "demo-app-candidate", "Status": "running", "Version": 3},
+                    [{"Allocations": [{"JobID": "demo-app-candidate", "ClientStatus": "running"}]}],
+                )
                 return SimpleNamespace(
                     stdout=json.dumps(live).encode(),
                     stderr=b"",
@@ -210,23 +214,26 @@ class ApplicationActionTests(unittest.TestCase):
                 )
             return original(self.nomad, argv, **kwargs)
 
-        actions = handlers(
-            self.variables,
-            command_runner=runner,
-            nomad_command=("fixed-nomad-wrapper",),
-            timeout_seconds=12,
-            response_limit=4096,
-        )
-        removed = actions["app.remove"](
-            {
-                "slug": "demo-app",
-                "jobId": "demo-app",
-                "candidateJobSha256": CANDIDATE_SHA,
-                "candidateImage": CANDIDATE_IMAGE,
-            }
-        )
-        self.assertTrue(removed["jobAbsent"])
-        self.assertEqual(self.nomad.stopped_jobs, {"demo-app"})
+        for shape in (lambda job, _rows: job, lambda _job, rows: rows):
+            with self.subTest(shape=shape):
+                self.nomad.stopped_jobs.clear()
+                actions = handlers(
+                    self.variables,
+                    command_runner=runner,
+                    nomad_command=("fixed-nomad-wrapper",),
+                    timeout_seconds=12,
+                    response_limit=4096,
+                )
+                removed = actions["app.remove"](
+                    {
+                        "slug": "demo-app",
+                        "jobId": "demo-app",
+                        "candidateJobSha256": CANDIDATE_SHA,
+                        "candidateImage": CANDIDATE_IMAGE,
+                    }
+                )
+                self.assertTrue(removed["jobAbsent"])
+                self.assertEqual(self.nomad.stopped_jobs, {"demo-app"})
 
     def test_candidate_cleanup_refuses_identity_drift_without_stopping(self) -> None:
         self.nomad.inspection["ID"] = "demo-app-candidate"

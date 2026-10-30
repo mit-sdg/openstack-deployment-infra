@@ -182,6 +182,18 @@ def _status_or_absent(
                     for item in allocations
                 )
                 return {"ID": application_slug, "Status": "running" if running else "dead"}
+            # The same `-candidate` resolution, in the array form Nomad 2 uses
+            # for running jobs too: every row belongs to the live candidate.
+            if (
+                isinstance(allocations, list)
+                and allocations
+                and not application_slug.endswith("-candidate")
+                and all(
+                    isinstance(item, dict) and item.get("JobID") == f"{application_slug}-candidate"
+                    for item in allocations
+                )
+            ):
+                return None
         raise HelperActionError("NOMAD_RESPONSE_INVALID", "Nomad returned an unexpected job")
     if completed.returncode != 1 or not _exact_absence(completed.stderr, application_slug):
         raise HelperActionError("NOMAD_UNAVAILABLE", "Nomad job state was unavailable")
