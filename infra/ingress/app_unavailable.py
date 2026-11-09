@@ -3,8 +3,10 @@
 
 Traefik sends a request here only when no app router matches its host: the
 app is being deployed or restarted, it has stopped, or no app has that name.
-The exact Nomad job decides which page a visitor sees. Nomad's HTTP API looks
-up exact job IDs, unlike the CLI's prefix matching.
+The exact Nomad jobs decide which page a visitor sees. Nomad's HTTP API looks
+up exact job IDs, unlike the CLI's prefix matching. A maintenance deploy
+removes the old job before its replacement exists, so during that gap the
+controller leaves a short-lived marker Variable that this page may read.
 """
 
 from __future__ import annotations
@@ -36,6 +38,9 @@ CACHE_ENTRIES = 1024
 LOOKUP_SECONDS = 3.0
 # A burst of requests for random names must not become a burst of Nomad calls.
 LOOKUPS_AT_ONCE = 4
+# A cutover replaces its worker in a few minutes. An older marker was left by
+# one that failed, and the app is simply stopped.
+MARKER_SECONDS = 20 * 60
 
 STYLE = """
 :root{color-scheme:light dark;--bg:#f7f6f3;--card:#fff;--text:#1c1b1a;--muted:#5f5b55;--line:#e3e0da;--accent:#c4501b}
@@ -121,16 +126,50 @@ class NomadJobs:
             raise ValueError("Nomad returned a different job")
         return value
 
+    def updating_since(self, slug: str) -> float | None:
+        """When a maintenance cutover of this app began, if one is marked."""
+        path = f"platform/updating/{slug}"
+        request = urllib.request.Request(
+            f"{self.address}/v1/var/{urllib.parse.quote(path, safe='/')}",
+            headers={"X-Nomad-Token": self.token, "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=LOOKUP_SECONDS, context=self.context
+            ) as response:
+                value = json.loads(response.read(65_536))
+        except urllib.error.HTTPError as error:
+            # 403 means the token has not been granted this path yet.
+            if error.code in (403, 404):
+                return None
+            raise
+        if not isinstance(value, dict) or value.get("Path") != path:
+            raise ValueError("Nomad returned a different Variable")
+        modified = value.get("ModifyTime")
+        if type(modified) is not int:
+            raise ValueError("Nomad Variable has no modify time")
+        return modified / 1e9
 
-def app_state(label: str, read_job: Callable[[str], dict[str, object] | None]) -> str:
-    """STARTING while either deployment job is meant to run, else ABSENT."""
+
+def app_state(
+    label: str,
+    read_job: Callable[[str], dict[str, object] | None],
+    updating_since: Callable[[str], float | None] = lambda _slug: None,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> str:
+    """STARTING while either deployment job is meant to run or a recent
+    cutover marker covers the gap between them, else ABSENT."""
     try:
         jobs = [read_job(job_id) for job_id in job_ids(label)]
+        for job in jobs:
+            if job is not None and job.get("Stop") is not True and job.get("Status") != "dead":
+                return STARTING
+        since = updating_since(job_ids(label)[0])
     except Exception:
         return UNKNOWN
-    for job in jobs:
-        if job is not None and job.get("Stop") is not True and job.get("Status") != "dead":
-            return STARTING
+    if since is not None and clock() - since < MARKER_SECONDS:
+        return STARTING
     return ABSENT
 
 
@@ -278,7 +317,7 @@ def main() -> int:
     context.load_cert_chain(env["NOMAD_CLIENT_CERT"], env["NOMAD_CLIENT_KEY"])
     credential = Path(env["CREDENTIALS_DIRECTORY"]) / "traefik.env"
     jobs = NomadJobs(env["NOMAD_ADDR"], read_token(credential), context)
-    states = StateCache(lambda label: app_state(label, jobs.get))
+    states = StateCache(lambda label: app_state(label, jobs.get, jobs.updating_since))
     domain = env["PLATFORM_DOMAIN"]
     handler = make_handler(domain, env["PLATFORM_NAME"], f"https://{domain}/", states)
     server = ThreadingHTTPServer(("127.0.0.1", int(env["APP_UNAVAILABLE_PORT"])), handler)
