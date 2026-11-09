@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
+import ssl
 import sys
 import threading
 import unittest
+import urllib.error
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "infra"))
 from ingress import app_unavailable as page  # noqa: E402
@@ -45,6 +49,27 @@ class StateTests(unittest.TestCase):
         stopped = {"kumba": {"ID": "kumba", "Status": "dead", "Stop": True}}
         self.assertEqual(page.app_state("kumba", stopped.get), page.ABSENT)
 
+    def test_a_recent_cutover_marker_covers_the_gap_with_no_job(self) -> None:
+        marks = {"kumba": 1000.0}
+        at = lambda now: lambda: now  # noqa: E731
+        state = lambda now: page.app_state("kumba-preview", {}.get, marks.get, clock=at(now))  # noqa: E731
+        self.assertEqual(state(1000.0 + 60), page.STARTING)
+        self.assertEqual(state(1000.0 + page.MARKER_SECONDS + 1), page.ABSENT)
+        self.assertEqual(page.app_state("other", {}.get, marks.get, clock=at(1001.0)), page.ABSENT)
+        stopped = {"kumba": {"ID": "kumba", "Status": "dead", "Stop": True}}
+        self.assertEqual(
+            page.app_state("kumba", stopped.get, marks.get, clock=at(1001.0)), page.STARTING
+        )
+
+    def test_a_running_job_needs_no_marker_and_a_broken_marker_read_is_unknown(self) -> None:
+        jobs = {"kumba": {"ID": "kumba", "Status": "running", "Stop": False}}
+
+        def broken(_slug):
+            raise OSError("Nomad unreachable")
+
+        self.assertEqual(page.app_state("kumba", jobs.get, broken), page.STARTING)
+        self.assertEqual(page.app_state("kumba", {}.get, broken), page.UNKNOWN)
+
     def test_a_failed_lookup_is_unknown_rather_than_absent(self) -> None:
         def broken(_job_id):
             raise OSError("Nomad unreachable")
@@ -69,6 +94,30 @@ class StateTests(unittest.TestCase):
         for index in range(page.CACHE_ENTRIES + 5):
             cache.get(f"app{index}")
         self.assertLessEqual(len(cache._entries), page.CACHE_ENTRIES)
+
+
+class MarkerReadTests(unittest.TestCase):
+    def read(self, outcome):
+        jobs = page.NomadJobs("https://nomad.test:4646", "token", ssl.create_default_context())
+        with mock.patch.object(page.urllib.request, "urlopen", side_effect=[outcome]) as opened:
+            since = jobs.updating_since("kumba")
+        self.assertTrue(
+            opened.call_args.args[0].full_url.endswith("/v1/var/platform/updating/kumba")
+        )
+        return since
+
+    def test_reads_the_marker_time_and_treats_denied_or_missing_as_none(self) -> None:
+        body = {"Path": "platform/updating/kumba", "ModifyTime": 1_700_000_000_500_000_000}
+        self.assertEqual(self.read(io.BytesIO(json.dumps(body).encode())), 1_700_000_000.5)
+        for code in (403, 404):
+            error = urllib.error.HTTPError("https://nomad.test", code, "no", {}, None)
+            self.assertIsNone(self.read(error))
+        error = urllib.error.HTTPError("https://nomad.test", 500, "down", {}, None)
+        with self.assertRaises(urllib.error.HTTPError):
+            self.read(error)
+        other = {"Path": "platform/updating/other", "ModifyTime": 1}
+        with self.assertRaises(ValueError):
+            self.read(io.BytesIO(json.dumps(other).encode()))
 
 
 class HandlerTests(unittest.TestCase):

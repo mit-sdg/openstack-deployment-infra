@@ -7,6 +7,7 @@ operation or changes the accepted deployment pointer.
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import TYPE_CHECKING, Any
 
 from ..config import Config
@@ -15,6 +16,33 @@ from . import database as db
 
 if TYPE_CHECKING:
     from .deployment_service import HelperCaller
+
+# A cosmetic marker must not spend much of the deploy's time budget.
+_MARK_SECONDS = 30.0
+
+
+def mark_updating(
+    config: Config,
+    slug: str,
+    updating: bool,
+    *,
+    helper_caller: HelperCaller,
+    deadline: float,
+) -> None:
+    """Tell the ingress page whether a missing job means a cutover is under way.
+
+    Cosmetic only: failure leaves visitors the "no app" page, so it never
+    blocks or fails the deploy.
+    """
+    try:
+        helper_caller(
+            config,
+            "app.updating",
+            {"slug": slug, "updating": updating},
+            deadline=min(deadline, time.monotonic() + _MARK_SECONDS),
+        )
+    except Exception:
+        pass
 
 
 def stop_predecessor(
@@ -72,6 +100,7 @@ def stop_predecessor(
     # Check provider/helper access and predecessor identity before stopping its
     # process. Worker deletion rechecks ownership after exact job removal.
     reuse = refs.get("reuse_worker") is True
+    mark_updating(config, current.slug, True, helper_caller=helper_caller, deadline=deadline)
     if not reuse:
         observed = helper_caller(
             config,

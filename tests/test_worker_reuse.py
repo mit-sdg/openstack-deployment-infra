@@ -27,6 +27,7 @@ class WorkerReuseTests(unittest.TestCase):
         self.stopped = set()
         self.before = lambda _action, _values: None
         self.after = lambda _action, _values: None
+        self.updating_fails = False
         self.f.api.helper_caller = self.helper
 
     def helper(self, config, action, values, **bounds):
@@ -34,6 +35,11 @@ class WorkerReuseTests(unittest.TestCase):
         if action == "app.build.cleanup":
             self.f.calls.append((action, copy.deepcopy(values)))
             result = {**values, "builderAbsent": True, "artifactAbsent": True}
+        elif action == "app.updating":
+            self.f.calls.append((action, copy.deepcopy(values)))
+            if self.updating_fails:
+                raise app.ApplicationError("Nomad Variable write failed")
+            result = dict(values)
         elif action == "app.stop":
             self.f.calls.append((action, copy.deepcopy(values)))
             job = self.f.jobs.get(values["jobId"])
@@ -157,6 +163,24 @@ class WorkerReuseTests(unittest.TestCase):
         self.success(self.release(key=key)[1])
         self.assertEqual(len(self.f.calls), calls)
         self.no_worker_mutations()
+
+    def test_cutover_marks_the_gap_for_the_ingress_page_and_clears_it_when_accepted(self):
+        self.initial()
+        self.f.body["commit"] = "b" * 40
+        self.success(self.release()[1])
+        actions = [a for a, _ in self.f.calls]
+        marks = [(i, v["updating"]) for i, (a, v) in enumerate(self.f.calls) if a == "app.updating"]
+        self.assertEqual([updating for _, updating in marks], [True, False])
+        self.assertLess(marks[0][0], actions.index("app.stop"))
+        self.assertGreater(marks[1][0], max(i for i, a in enumerate(actions) if a == "app.deploy"))
+        self.assertEqual(self.f.calls[marks[0][0]][1], {"slug": "commons", "updating": True})
+
+    def test_a_failed_marker_never_fails_the_cutover(self):
+        self.initial()
+        self.updating_fails = True
+        self.f.body["commit"] = "b" * 40
+        self.success(self.release()[1])
+        self.assertIn("app.updating", [a for a, _ in self.f.calls])
 
     def test_build_failure_leaves_old_job_and_worker_serving(self):
         self.initial()

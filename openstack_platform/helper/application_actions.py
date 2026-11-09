@@ -1039,6 +1039,59 @@ def _stop_handler(
     return handle
 
 
+def updating_path(application_slug: str) -> str:
+    return f"platform/updating/{slug(application_slug)}"
+
+
+def _updating_handler(
+    *,
+    command_runner: Callable[..., Any],
+    nomad_command: tuple[str, ...],
+    timeout_seconds: float,
+) -> Handler:
+    """Mark or clear a maintenance cutover for the ingress's unavailable page.
+
+    Between removing the old job and creating the candidate, an app has no
+    Nomad job at all, the same as a stopped app. The ingress may read only
+    this non-secret path; the page ignores a marker older than its own limit.
+    """
+
+    def handle(args: Mapping[str, Any]) -> Mapping[str, Any]:
+        _exact_args(args, {"slug", "updating"}, "app.updating")
+        if type(args["updating"]) is not bool:
+            raise ValidationError("updating must be boolean")
+        path = updating_path(args["slug"])
+        if args["updating"]:
+            command_runner(
+                (
+                    *nomad_command,
+                    "var",
+                    "put",
+                    "-force",
+                    "-out",
+                    "none",
+                    path,
+                    f"since={int(time.time())}",
+                ),
+                timeout_seconds=timeout_seconds,
+                stdout_limit=65_536,
+                stderr_limit=65_536,
+                check=True,
+            )
+        else:
+            # Purging an absent Variable fails harmlessly.
+            command_runner(
+                (*nomad_command, "var", "purge", path),
+                timeout_seconds=timeout_seconds,
+                stdout_limit=65_536,
+                stderr_limit=65_536,
+                check=False,
+            )
+        return {"slug": slug(args["slug"]), "updating": args["updating"]}
+
+    return handle
+
+
 def _remove_handler(
     variable_client: VariableClient,
     *,
@@ -1588,6 +1641,11 @@ def handlers(
             nomad_command=command,
             timeout_seconds=timeout_seconds,
             sleep=sleep,
+        ),
+        "app.updating": _updating_handler(
+            command_runner=command_runner,
+            nomad_command=command,
+            timeout_seconds=timeout_seconds,
         ),
         "app.remove": _remove_handler(
             variable_client,

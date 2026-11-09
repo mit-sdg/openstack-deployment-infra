@@ -94,6 +94,7 @@ APP_ACTIONS = (
     "app.source.preflight",
     "app.startup",
     "app.stop",
+    "app.updating",
     "app.worker.capacity",
     "app.worker.create",
     "app.worker.delete",
